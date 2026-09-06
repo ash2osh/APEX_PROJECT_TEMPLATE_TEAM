@@ -99,7 +99,7 @@ database `FREEPDB1`, service `freepdb1`, `SESSION_USER=DEMO`,
    ```
 
    So master application IDs are part of the environment contract. See R1 in
-   §10.
+   §9.
 3. **`.apx` references are symbolic.** The application is identified as
    `app EMPLOYEE-SELF-SERVICE`, pages as `page: 1` / `page: LOGIN`, components
    as `@navigation-menu`, `@universal-theme`.
@@ -167,7 +167,7 @@ The `@/500/...` form embeds the **master application's ID** in tracked source.
 This is safe for the target topology — the project owner confirms the master
 library application is the same application, at the same ID, for every
 developer, including when lists are drawn from several master applications —
-but it constrains promotion. See R1 in §10.
+but it constrains promotion. See R1 in §9.
 
 An earlier hypothesis that APEXlang silently flattened subscriptions into local
 copies was **disproved**: a pre-existing Universal Theme subscription
@@ -234,7 +234,7 @@ targets/masters.json             tracked master/component identity contract
 .env                            ignored saved-connection names and profiles
 .sync-state/                    ignored exact baselines, blobs and journals
 scratch/                        temporary staging only
-migrations/                     immutable SQL, verification and effects files
+migrations/                     immutable SQL and verification files
 database/<schema>/              generated evidence only
 app_context/<alias>/             durable application knowledge
 ```
@@ -383,38 +383,75 @@ to "import first." No command commits or pushes automatically.
 
 ### Files and ordering
 
-A migration consists of three immutable LF/UTF-8 files:
+A migration consists of two immutable LF/UTF-8 files:
 
 ```text
 migrations/20260906T143000__bob__delegation.sql
 migrations/20260906T143000__bob__delegation.verify.sql
-migrations/20260906T143000__bob__delegation.effects.json
 ```
 
-The primary SQL begins with exactly one `-- target: tables|code` header.
-Its effects document includes schema version, dependencies as exact
-{id, bundle_checksum} pairs, and an explicit before/after fingerprint for
-every changed object. Preparation, replay and planning reject changed
-dependency bytes, even before first application.
+**Version 1 has no effects document.** Declared before/after object
+fingerprints were specified and then removed: generating them honestly
+requires replaying the dependency closure into a disposable database, and
+developers in this topology may have no local database and no container
+runtime at all. Requiring them would have blocked a developer from applying
+their own change to the shared development schema — and therefore from
+continuing to build the application that depends on it — until external
+infrastructure produced a file. That cost was not worth the two checks it
+bought. See "What version 1 gives up" below, which states the loss precisely
+so it is a known trade rather than an oversight.
+
+Structured metadata therefore lives in a strictly parsed header block at the
+top of the primary SQL, before any executable statement:
+
+```sql
+-- migration-version: 1
+-- target: tables
+-- depends-on: 20260906T101500__alice__leave-balance sha256:9f2c…
+-- destructive: false
+```
+
+`migration-version`, `target` and `destructive` appear exactly once;
+`depends-on` repeats once per dependency and carries the dependency's exact
+bundle checksum. No other `--` directive is recognised, and an unrecognised
+one refuses rather than being ignored, so a typo cannot silently disable a
+declaration. The header is covered by the bundle checksum, and on first apply
+the resolved target and dependency set are recorded immutably in central
+metadata: a later edit to either is a checksum conflict, so the header cannot
+be quietly re-pointed after the fact.
+
+Writing the header needs no database. `team.py new-migration` scaffolds it and
+`team.py add-dependency <id> --on <id>` fills in a dependency's current
+checksum, both operating offline on the migrations directory alone.
+
 The verification file contains observation-only SELECT assertions returning
 named PASS/FAIL rows, including data effects and compiled-object validity.
 It executes through VERIFY, which owns no application or metadata objects,
 has only required read grants and cannot execute application mutator routines.
 Use a restricted statement/function allowlist; reject DML, DDL, PL/SQL,
 transaction commands, user functions and SQLcl controls in verification members. A zero exit code without completion evidence is
-not a successful verification. Hash a canonical manifest of all three paths
-and file hashes; changing any member after application is a conflict.
+not a successful verification. Hash a canonical manifest of both paths
+and file hashes; changing either member after application is a conflict.
 
 Order a dependency DAG with deterministic ready-node ordering
 `(UTC timestamp, full migration ID)`. Reject cycles, missing dependencies,
 duplicate IDs and dependency checksum mismatch. Timestamps reduce filename
 collisions; they do not prove dependency order or safe late application.
-Effects preconditions protect against applying an older conflicting migration
-after a newer one. Dependents changing the same object declare the dependency.
+Dependents changing the same object declare the dependency, and the declared
+checksum binds the exact bytes depended upon, so editing an unapplied
+dependency invalidates its dependents even when the resulting object would be
+unchanged.
+
+With effects preconditions gone, **the dependency DAG and post-apply
+verification are the only ordering protections**. A migration that assumes an
+earlier one has run must declare it; an undeclared assumption is no longer
+caught before execution, only by its verification failing afterwards. Authors
+must therefore treat `depends-on` as load-bearing rather than documentation,
+and review must check for missing declarations.
 
 Destructive resets belong in `operations/zz_*.sql`, outside migration discovery,
 release payloads and ordinary CI. Destructive forward migrations declare
-`destructive: true` in effects metadata and require a separate, exact
+`-- destructive: true` in the header and require a separate, exact
 target/filename/checksum confirmation. Automated integration/test pipelines
 refuse such work and report a reviewed maintenance requirement; they never
 silently omit it while declaring the release deployed.
@@ -432,16 +469,63 @@ schemas, and verify metadata structure independently of application snapshots. S
 - an exact metadata schema version and project/schema-set identity;
 - a persistent mutex with owner run token and state;
 - immutable migration payload/checksum/target provenance and execution sequence;
-- attempt records: RUNNING, APPLIED, FAILED or UNKNOWN;
-- expected object fingerprints and the migration that established each value.
+- the target and dependency set resolved from each migration's header at first
+  apply, recorded immutably so a later header edit is a detectable conflict;
+- attempt records: RUNNING, APPLIED, FAILED or UNKNOWN.
+
+Version 1 stores **no** expected object fingerprints. Expected schema state has
+exactly one source — the canonical replay evidence under `database/` — rather
+than a second, independently drifting copy in metadata.
 
 Bootstrap is an explicit guarded non-production setup operation, idempotent
 only if the existing metadata structure matches exactly. Normal apply can
 bootstrap when requested with `--bootstrap`; planning/dry-run never writes.
 Absent metadata otherwise produces a specific setup-required error.
 
-Acquire the mutex with one conditional database update and commit, checking
-exactly one affected row before planning any writes. The token persists
+**Acquire without ever waiting on a row lock.** A bare
+`UPDATE ... WHERE owner_token IS NULL` is not acceptable: Oracle evaluates the
+predicate against the reader's snapshot, then blocks on the row lock until the
+holding transaction ends. A client that crashed or stalled before committing
+therefore freezes every subsequent acquirer inside its SQLcl subprocess until
+PMON cleanup or dead-connection detection — an indefinite hang presented as a
+hung command. Acquisition must fail fast instead:
+
+```sql
+DECLARE
+  v_token VARCHAR2(64);
+BEGIN
+  -- NOWAIT converts contention into ORA-00054 rather than an unbounded wait.
+  SELECT owner_token INTO v_token
+    FROM team_migration_mutex
+   WHERE singleton_id = 1
+     FOR UPDATE NOWAIT;
+
+  IF v_token IS NOT NULL THEN
+    RAISE_APPLICATION_ERROR(-20001, 'MUTEX_HELD:' || v_token);
+  END IF;
+
+  UPDATE team_migration_mutex
+     SET owner_token = :run_token, acquired_at = SYSTIMESTAMP
+   WHERE singleton_id = 1;
+  COMMIT;
+END;
+/
+```
+
+The caller distinguishes four outcomes exactly: success; `ORA-00054`
+(another transaction holds the row — an in-flight acquisition or an
+uncommitted crash); `ORA-20001 MUTEX_HELD:<token>` (cleanly held, and the
+token identifies the holder for the §7 blocking message); and `NO_DATA_FOUND`
+(metadata not bootstrapped — a setup-required error, never an acquisition
+failure). Any other error is a hard failure. A wall-clock timeout on the SQLcl
+subprocess is a backstop for network-level stalls, never the primary mechanism,
+and a timeout is never interpreted as "not acquired": it leaves the target
+uncertain and blocked.
+
+The same NOWAIT discipline applies to the Plan 1 app-target mutex.
+
+Having acquired, check exactly one affected row before planning any
+writes. The token persists
 across DDL commits and across tables/code SQLcl processes. All metadata
 transitions compare the token. Do not use a transaction-scoped row lock
 that DDL releases. Do not expire or steal this mutex automatically.
@@ -449,6 +533,38 @@ A crashed runner leaves the target blocked; recovery requires evidence that
 the owning worker has ended, its attempts have been inspected, and the exact
 run token has been selected. Uncertain worker state remains blocked.
 This serializes participating tooling, not manual SQL clients.
+
+**The mutex has no automatic expiry, so it must have a human owner.** On a
+shared development schema a single crashed client blocks every other developer
+until someone clears it. An unowned blocking mechanism is one people route
+around, which is worse than not having it, so the following is part of the
+contract rather than operational advice:
+
+- **A named recovery owner** is recorded in `targets/*.json` for each shared
+  target — a role, not an individual, with at least two people in it. Only that
+  role runs `recover-migration` or `recover-app-lock`.
+- **Blocking must be self-explaining.** Every refusal caused by a held mutex
+  prints the holding run token, the checkout UUID and host that acquired it,
+  the acquisition timestamp and elapsed time, the migration or alias in flight,
+  the attempt state, the recovery owner for that target, and the exact command
+  the owner must run. A message that says only "another runner holds the lock"
+  fails this requirement and is a defect.
+- **The block is announced, not discovered.** Any hold exceeding a configured
+  threshold is surfaced by the integration job as a visible failure naming the
+  holder, so the team learns from CI rather than from a colleague's blocked
+  export.
+- **Recovery is evidence-driven and logged.** The owner records worker-
+  termination evidence, the inspected attempt state and the selected run token;
+  the metadata store retains that record. Clearing a lock never stamps a
+  verified baseline and never marks an attempt applied.
+- **Escalation is bounded.** If the owner cannot establish worker state, the
+  documented path is to rebuild a disposable environment or coordinate a
+  scheduled maintenance window — never to widen mutex privileges, add an
+  expiry, or delete metadata rows.
+
+Automatic expiry remains prohibited: a lease that expires while the original
+worker is mid-DDL produces exactly the concurrent partial application the mutex
+exists to prevent.
 
 Read metadata through the metadata connection; execute a code payload through
 the code connection; verify through VERIFY; record its result through metadata. There
@@ -458,20 +574,46 @@ or rerun it automatically.
 
 ### Apply and failure semantics
 
-Under the mutex, compare the live full supported inventory against expected
-fingerprints before ANY migration, then check its declared before states.
-Commit RUNNING before the payload. Execute its exact staged bytes, capture
-both schema inventories, then run SELECT-only verification through VERIFY and
-capture inventories again. Require precisely the declared effects and no
-structural mutation during verification. Atomically update expected fingerprints
-and mark APPLIED through the metadata owner, then proceed to the next migration.
+Under the mutex, confirm dependencies are satisfied, all known checksums match
+and no attempt is RUNNING or UNKNOWN. Commit RUNNING before the payload.
+Execute its exact staged bytes, capture the schema inventory before and after,
+then run SELECT-only verification through VERIFY. Require no structural
+mutation during verification. Mark APPLIED through the metadata owner, then
+proceed to the next migration.
 
-Never refresh expected state from arbitrary live contents. Generate effects
-from a disposable replay of the migration's dependency closure, review them,
-and verify them again in CI. After a failure, expected state stays unchanged.
-Recovery must inspect actual objects/data against the captured before state
-and declared postconditions; a corrective migration or explicitly selected
+The captured inventories are **recorded as observed history, not compared
+against a declared prediction** — version 1 has no such declaration. They serve
+recovery and audit: after a failure they show exactly what the interrupted
+migration did, which is what a human needs to repair it. Recovery inspects
+actual objects and data against the captured before inventory and the
+verification assertions; a corrective migration or an explicitly selected
 restartable attempt can repair it. No automatic checksum repair or mark-ran.
+
+### What version 1 gives up
+
+Removing declared effects removes two checks, and no other. Stating them
+plainly so the gap is deliberate:
+
+1. **Wrong starting point is not detected before execution.** A migration
+   applied to a schema that is not in the state its author assumed will run
+   rather than refuse. Its verification should then fail, but the SQL has
+   already executed and Oracle has already committed any DDL within it.
+2. **Unintended scope is not detected.** A migration that changes more objects
+   than its author expected is not refused; the before/after inventories record
+   what happened, but nothing compares that against an expectation.
+
+Everything else is retained: the mutex, bundle immutability and checksums, the
+dependency DAG with checksum binding, the attempt state machine, target
+routing, post-apply verification through VERIFY, shared-versus-strict history,
+drift detection against canonical replay evidence, and the fresh and upgrade
+replay gates.
+
+Both lost checks can be restored later by adding an effects document without
+changing anything else, because nothing else was built on top of them.
+Retrofitting predictions onto migrations already applied is the real cost, so
+revisit this before the migration history grows large. Reopen it if
+authors start relying on undeclared ordering assumptions, or if a
+wrong-starting-point incident reaches a strict target.
 
 Oracle DDL commits implicitly; a failed multi-statement migration can leave
 durable partial changes. The unit is a restartable, self-verifying transition,
@@ -484,10 +626,12 @@ recording, and the attempt state models it explicitly.
 
 For developer and shared integration targets, APPLIED records absent from the
 current branch are reported as `foreign_applied`, not treated as proof of
-deleted history. Allow unrelated migrations only if the complete live inventory
-matches central expected state, all local known checksums match, dependencies
-are satisfied and object preconditions hold. Same-object conflicts require
-coordination and updated dependencies. Unknown/failed attempts block all new
+deleted history. Allow unrelated migrations only if all local known checksums
+match, dependencies are satisfied, and no attempt is RUNNING or UNKNOWN.
+Without declared preconditions there is no object-level precondition check, so
+a colleague's unmerged migration touching the same object is **not** detected
+automatically here; same-object conflicts require coordination and updated
+dependency declarations, and review is the control that catches them. Unknown/failed attempts block all new
 work. Integration reports foreign IDs and cannot claim its shared schema is
 exactly HEAD.
 
@@ -513,7 +657,31 @@ views, package specs/bodies, standalone routines, triggers, sequences
 (definition only, excluding current counters), types/bodies, private synonyms
 and object grants. Normalize physical storage, timestamps and environment
 owner mappings through parsed metadata fields, never regex substitutions in
-SQL literals. Unsupported object classes, unresolved owners or unstable
+SQL literals.
+
+**Compilation status is excluded from every fingerprint.** Oracle invalidates
+dependent objects as a side effect of upstream DDL: adding a column to a table
+in `TABLES_SCHEMA` immediately marks dependent views, package specs and bodies,
+and triggers in `CODE_SCHEMA` as `INVALID`, without their definitions changing.
+If `STATUS` contributed to a fingerprint, a migration that altered a table
+would change the fingerprints of objects it never touched, and the very next
+migration would be refused by the precondition check — one migration blocking
+its own successor. Fingerprints therefore hash the canonical object
+definition only. Concretely:
+
+- `STATUS`, `LAST_DDL_TIME` and any other volatile dictionary column are
+  excluded from fingerprint input.
+- Between migrations, the runner performs **targeted** recompilation of
+  objects on the declared dependency chain (`ALTER … COMPILE`), not a
+  schema-wide sweep, so a genuine compilation failure is attributable to the
+  object that caused it rather than masked by a bulk operation.
+- Validity is not thereby ignored: post-apply verification asserts that every
+  object expected to be valid actually compiles. An object that is `INVALID`
+  and **fails** to recompile is a migration failure, reported with its
+  compilation errors.
+- `check-drift` reports invalid objects as **diagnostics**, separately from
+  structural drift. An invalidation with an unchanged definition is expected
+  after upstream DDL and is not by itself drift. Unsupported object classes, unresolved owners or unstable
 normalization fail the replay gate until a reviewed adapter is added.
 ORDS metadata, scheduler jobs, public synonyms and external services require
 separate declared verification; no whole-system equivalence claim is made.
@@ -566,7 +734,44 @@ Project-wide constraints for all three plans:
 - METADATA_SCHEMA is distinct from tables/code; only the controller can mutate
   it. VERIFY is observation-only. Setup privileges are explicit prerequisites.
 
+### Executable content in plans
+
+Removing runnable examples was correct for anything that touches a database:
+documentation must never be a copy-paste path to a live write, and a reader
+must never be able to execute a step by accident. That rule was then applied
+uniformly, which over-corrected — the plans lost the concrete test and function
+bodies for pure, offline logic, where no such hazard exists and where precision
+matters most. Both properties are wanted, so the rule is split by hazard rather
+than by document:
+
+- **Pure offline logic carries runnable code.** Modules that touch no database
+  and no network — reconciliation, tree reading and digests, config parsing,
+  bundle and manifest validation, fingerprint canonicalization, archive
+  serialization — state their exact signatures and include real, runnable
+  tests. These are the components whose subtle cases (missing versus empty,
+  binary bytes, path splitting, ordering) are unrecoverable if specified in
+  prose and got wrong.
+- **Anything reaching a database is a directive, never a transcript.** No plan
+  contains a runnable connect, export, import, apply or deploy command line.
+  Such steps describe required behaviour, guards and evidence, and the
+  implementation supplies the invocation behind the verified adapter.
+  Illustrative SQL appears only where it defines a contract that cannot be
+  stated in prose — the acquisition block in §7 — and is explicitly marked as
+  a contract, not a command to run.
+
+A plan step that cannot be executed without inventing an interface is
+underspecified regardless of which category it falls into.
+
 ## 9. Master subscriptions and qualification boundaries
+
+### R1 — Master application IDs are part of the environment contract
+
+A subscribed shared component records its master as
+`subscription { master: @/<master-app-id>/<identifier> }`, so the master's
+numeric application ID is present in tracked source (§3). Every environment
+hosting an application must therefore host its master library applications at
+the same application IDs. This requirement is referenced from §3 and is the
+reason source ID rewriting is rejected below.
 
 Keep master IDs fixed across environments, with a tracked contract listing
 master app alias/workspace and required component type/symbol. Existence of
@@ -574,7 +779,18 @@ app ID 500 alone is insufficient if it belongs to the wrong app or lacks the
 component. Validate identity and component resolution in the actual target
 workspace before import and linkage after import. Treat built-in theme
 masters explicitly; a workspace-scoped view that cannot see a master is
-inconclusive, not permission to skip it. No source ID rewriting in version 1.
+inconclusive, not permission to skip it.
+
+**No source ID rewriting in version 1.** Rewriting `@/<id>/` references per
+target environment was considered and rejected: it would make tracked bytes
+differ from deployed bytes, defeating the artifact-digest verification that
+§11 depends on, and it introduces a transformation into a pipeline whose
+principal virtue is performing none. The consequence is that fixed master IDs
+across environments are a hard prerequisite, not a preference — record them in
+`targets/masters.json` and reserve them deliberately. Reopen this decision only
+if an environment is encountered where master IDs demonstrably cannot be
+aligned; the replacement would be a build-time rewrite with its own digest,
+never an import-time one.
 
 The experiments in §3 demonstrate round-trip/linkage on one instance. They do
 not establish that a same-numbered master on a different instance resolves
@@ -586,7 +802,32 @@ do not guess undocumented dictionary columns or reservation procedure names.
 Register one checkout UUID per developer target during explicit setup and
 verify that registration through shared metadata before app mutations. A
 second checkout targeting the same app refuses until an explicit transfer
-captures current state and confirms the previous worker has stopped. Use a
+captures current state and confirms the previous worker has stopped.
+
+**The old UUID must never be required from local state.** A developer who
+re-clones, moves machine, adds a worktree or loses `.sync-state` no longer
+holds the previous checkout UUID, while the registry still records it. If
+`--transfer-from` could only be satisfied from local state, that developer
+would be permanently locked out of their own application — a deadlock created
+entirely by the safety mechanism. The registry is authoritative and readable:
+
+- `team.py app-status ALIAS` (also surfaced by `team.py doctor`) reads
+  `TEAM_APP_REGISTRY` through the metadata profile and prints the registered
+  checkout UUID, its host and user, the registration timestamp, and whether an
+  app-target mutex is currently held. This is a read-only operation.
+- `--transfer-from` is then always satisfiable, because its value is
+  discoverable. It remains mandatory and exact: transfer is never implicit.
+- Where no operation is in flight — no held app mutex, no incomplete journal,
+  no uncertain baseline — transfer is **self-service**: capture current
+  database state, record the transfer, rebind. This is the ordinary re-clone
+  case and must not require the recovery owner.
+- Where an operation *is* in flight, or worker liveness cannot be established,
+  transfer escalates to the §7 named recovery owner under the same
+  evidence rules. There is no `--force-takeover`: a flag that skips proof of a
+  stopped worker reintroduces exactly the concurrent-overwrite failure the
+  registry prevents.
+- Every transfer is recorded in metadata with old UUID, new UUID, actor and
+  the capture taken beforehand. Use a
 persistent app-operation mutex keyed by instance/workspace/app ID for every
 cooperating import/deploy; it survives client crashes and has no automatic
 expiry. A file lock alone is not cross-checkout serialization. Plan 1 therefore
@@ -601,6 +842,38 @@ or recover edits never captured before another client overwrote them.
 The solo-template import backport remains a separate scoped change.
 
 ## 10. Delivery and test gates
+
+### Staged adoption and prerequisite ladder
+
+This design asks for real infrastructure: four database principals, a separate
+metadata schema, a disposable CI database and a signing key. Requiring all of
+it before anything works would stall adoption, and the plans are ordered so
+that it is not required. Each plan states exactly what it needs, and each
+delivers standalone value.
+
+| | Plan 1 | Plan 2 | Plan 3 |
+|---|---|---|---|
+| TABLES / CODE / APEX profiles | required | required | required |
+| METADATA schema + controller | required (app mutex, checkout registry) | extended for migrations | extended for deployment |
+| VERIFY observation-only profile | not used | required | required |
+| Disposable CI database | acceptance only, manual | required for replay gate | required |
+| Release signing key | not used | not used | required for production handoff |
+| Graphify | never required — optional throughout | | |
+
+**Plan 1 alone is a coherent deliverable.** It ends with developers exporting
+and importing safely, with content reconciliation, durable recovery and
+cross-checkout serialization. That already removes the silent-deletion failure
+in §1, which is the reason this template exists. A team may run Plan 1 in
+production use for as long as it likes before starting Plan 2.
+
+The METADATA schema is a Plan 1 prerequisite and not deferrable: without it
+there is no cross-checkout mutex, and two clones of the same developer target
+can still overwrite each other. It is small at this stage — three tables — and
+Plan 2 extends the same schema rather than introducing a second controller.
+
+Do not treat the ladder as permission to ship Plan 2 without the disposable
+database. The replay gate is what makes `database/` evidence trustworthy; a
+skipped manual script is not a gate (see below).
 
 Plan 1 implements capture/reconcile/import with state and target verification.
 Plan 2 implements migration bundles, metadata, shared-history planning,
@@ -630,8 +903,9 @@ Bob resolves base/head/mine, commits that result, and imports it. Import checks
 that no additional Builder edits appeared since the saved capture.
 
 A database change starts as SQL plus verification and replay-generated
-effects. The runner checks live fingerprints and dependencies under its mutex,
-applies and verifies through the declared target, and records history centrally.
+its declared dependencies. The runner checks dependencies and known checksums
+under its mutex, applies and verifies through the declared target, captures
+before and after inventories for the record, and records history centrally.
 A colleague's unrelated unmerged migration is reported without blocking Bob;
 a conflicting object precondition or unexplained drift blocks both.
 

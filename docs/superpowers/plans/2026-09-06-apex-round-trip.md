@@ -24,6 +24,13 @@ Do not commit/push unless delivery is authorized. Keep durable recovery in
 The earlier exported-directory deletion, filename-only decision and
 "import first" recovery examples have been removed. Do not restore them.
 
+Follow spec §8 "Executable content in plans": pure offline modules
+(config.py, trees.py, reconcile.py, patch.py, masters.py parsing) carry exact
+signatures and runnable tests; anything reaching a database is a directive
+behind the verified adapter, never a runnable command line. Where a task below
+gives an interface but no test body, write the tests first from the listed
+cases — an unlisted case is not thereby excluded.
+
 ## File responsibilities and shared contracts
 
 | Files to create | Responsibility |
@@ -113,10 +120,24 @@ targets/test.json, scripts/teamlib/config.py, scripts/tests/test_config.py.
   during implementation, preserving all four documents.
 - [ ] Define strict literal .env parsing in Python. Supported keys: PROJECT_NAME,
   TARGET_ROLE, DB_ENVIRONMENT, APEX_APPS; TABLES_SCHEMA, CODE_SCHEMA,
-  APEX_PARSING_SCHEMA, METADATA_SCHEMA; for each TABLES/CODE/APEX/METADATA/VERIFY
-  prefix require SQLCL_CONNECTION, EXPECTED_USER, EXPECTED_CURRENT_SCHEMA,
+  APEX_PARSING_SCHEMA, METADATA_SCHEMA; for each profile prefix require
+  SQLCL_CONNECTION, EXPECTED_USER, EXPECTED_CURRENT_SCHEMA,
   EXPECTED_DB_NAME, EXPECTED_SERVICE, EXPECTED_INSTANCE_ID; additionally
-  APEX_WORKSPACE_ID. EXPECTED_INSTANCE_ID encodes the stable database/container
+  APEX_WORKSPACE_ID.
+- [ ] Split profiles into core and on-demand, and validate them separately.
+  **Core** is TABLES, CODE, APEX and METADATA: required by every command,
+  validated at load. **On-demand** is VERIFY: Plan 1 never uses it, so an
+  absent VERIFY profile must not fail `doctor`, `export-app`, `import-app` or
+  any Plan 1 command. Validate VERIFY only when a command that observes
+  postconditions requests it (Plan 2 `migrate`, `replay`, `check-drift`), and
+  fail then with a specific "VERIFY profile required for <command>" error
+  naming the missing keys. A partially configured VERIFY profile is an error
+  whenever it is present, so a half-filled profile cannot be ignored.
+  Mirror this split in `.env.example`: core keys uncommented, VERIFY keys
+  present but commented with a note that Plan 2 requires them.
+  Test that every Plan 1 command succeeds with no VERIFY keys at all, that a
+  Plan 2 command refuses clearly without them, and that a partial VERIFY
+  profile refuses in both cases. EXPECTED_INSTANCE_ID encodes the stable database/container
   identity obtained through a qualified identity query; all profiles within
   a shared schema set must match it, independent of service aliases. No fallback connection.
 - [ ] Enforce exact known keys, duplicates, empty required values, control
@@ -224,6 +245,48 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 - [ ] Add fixtures for names containing spaces, binary zeroes, LF/CRLF,
   zero-byte-versus-missing, deleted/added Git files, corrupt refs and preserved
   deployment JSON. Confirm corrupted Git reads never become empty trees.
+- [ ] Add these regression tests first. `reconcile` distinguishes a missing
+  path from a zero-byte file, so a Tree that collapses the two silently
+  destroys that distinction one layer down, where it is no longer observable:
+
+```python
+import unittest
+from teamlib.trees import read_export_tree, tree_digest
+
+class TreeSemanticsTests(unittest.TestCase):
+    def test_zero_byte_file_is_present_not_absent(self):
+        tree = read_export_tree(self.fixture("zero-byte"))
+        self.assertIn("pages/p00001-home.apx", tree)
+        self.assertEqual(tree["pages/p00001-home.apx"], b"")
+
+    def test_absent_path_is_not_a_key(self):
+        tree = read_export_tree(self.fixture("zero-byte"))
+        self.assertNotIn("pages/p00002-missing.apx", tree)
+
+    def test_zero_byte_and_absent_digest_differently(self):
+        # The two states must never produce the same manifest digest.
+        self.assertNotEqual(tree_digest({"a": b""}), tree_digest({}))
+
+    def test_binary_bytes_are_exact(self):
+        tree = read_export_tree(self.fixture("binary"))
+        blob = tree["shared-components/static-files/icons/app-icon-32.png"]
+        self.assertEqual(blob[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_binary_is_not_line_ending_normalised(self):
+        # LF normalisation applies to APEXlang only; touching binaries here
+        # corrupts assets in a way no later stage can detect.
+        tree = read_export_tree(self.fixture("binary-with-crlf-bytes"))
+        self.assertIn(b"\r\n", tree["shared-components/static-files/x.png"])
+
+    def test_digest_is_order_independent(self):
+        self.assertEqual(tree_digest({"a": b"1", "b": b"2"}),
+                         tree_digest({"b": b"2", "a": b"1"}))
+
+    def test_digest_separates_path_from_content(self):
+        # A digest concatenating path and bytes without length framing
+        # collides here; this asserts the framing exists.
+        self.assertNotEqual(tree_digest({"ab": b"c"}), tree_digest({"a": b"bc"}))
+```
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_trees.py -v`.
 

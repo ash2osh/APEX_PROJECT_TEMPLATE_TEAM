@@ -4,12 +4,20 @@
 > superpowers:subagent-driven-development when delegation is authorized.
 > Checkboxes are implementation work, not verification already performed.
 
-**Revision:** 2 — replaces timestamp drift and atomic-migration assumptions.
+**Revision:** 3 — removes declared effects; see spec §7 "What version 1 gives up".
 **Goal:** Make shared-schema changes attributable, restartable and reproducible.
-**Architecture:** Immutable SQL/verification/effects bundles describe transitions.
-A separate shared metadata-profile store serializes participating runners and
-records expected object fingerprints. Shared-development history differs from
-strict promotion history; fresh and upgrade replay provide canonical evidence.
+**Architecture:** Immutable two-member SQL/verification bundles describe
+transitions, with target and dependencies declared in a strictly parsed SQL
+header. A separate shared metadata-profile store serializes participating
+runners and records immutable provenance and attempt state. Expected schema
+state has one source: canonical replay evidence. Shared-development history
+differs from strict promotion history; fresh and upgrade replay provide that
+evidence.
+
+**Authoring requires no database.** Header scaffolding and dependency checksum
+filling are offline operations over the migrations directory, because
+developers in this topology may have neither a local database nor a container
+runtime.
 **Tech Stack:** Python 3.10+, qualified SQLcl/Oracle, thin Bash/PowerShell launchers.
 **Spec:** [Team design](../specs/2026-09-06-team-template-design.md), §§4, 7–11.
 **Dependency:** [Plan 1](2026-09-06-apex-round-trip.md), Target, run_sqlcl and
@@ -36,7 +44,8 @@ data assertions and metadata grants must be reviewed before any live apply.
 | scripts/teamlib/migration_store.py; scripts/sql/migration_metadata.sql | versioned metadata and mutex |
 | scripts/teamlib/fingerprints.py; scripts/sql/schema_inventory.sql | supported-object inventory/canonicalization |
 | scripts/teamlib/migrate.py | state machine, target routing and verification |
-| scripts/teamlib/replay.py | disposable preparation, effects generation, replay and adoption |
+| scripts/teamlib/replay.py | disposable preparation, replay, canonical evidence and adoption |
+| scripts/teamlib/authoring.py | offline header scaffolding and dependency checksum filling |
 | scripts/migrate.sh/.ps1; scripts/check_drift.sh/.ps1 | shared CLI launchers |
 | scripts/tests/test_migration_*.py; scripts/tests/live/ | behavioral and Oracle tests |
 | docs/migrations.md; docs/schema-coverage.md | authoring, coverage and recovery contract |
@@ -47,7 +56,8 @@ Public commands added to team.py:
 migration-plan --source DIRECTORY --history FILE --mode shared|strict
 migrate [--source DIRECTORY] [--dry-run] [--bootstrap]
 check-drift
-prepare-migration MIGRATION_ID --replay-env FILE
+new-migration --author NAME --slug SLUG --target tables|code
+add-dependency MIGRATION_ID --on MIGRATION_ID
 replay --source DIRECTORY --replay-env FILE [--previous DIRECTORY]
 snapshot --out DIRECTORY
 adopt-baseline MIGRATION_ID --evidence DIRECTORY
@@ -74,11 +84,10 @@ from dataclasses import dataclass
 class Migration:
     id: str
     stamp: str
-    target: str
-    checksum: str
+    target: str                           # from the SQL header, authoritative
+    checksum: str                         # over both bundle members
     dependencies: tuple[tuple[str, str], ...]  # (ID, exact bundle checksum)
     destructive: bool
-    effects: dict                         # ObjectKey -> before/after digest
 
 @dataclass(frozen=True)
 class Plan:
@@ -93,22 +102,38 @@ class Plan:
 
 - [ ] Discover primary names only with anchored
   `[0-9]{8}T[0-9]{6}__[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*[.]sql`.
-  Validate UTC calendar values. Each has exactly one .verify.sql and
-  .effects.json sibling; orphan members are errors.
-- [ ] Require LF/UTF-8, one exact target header, schema version 1 effects,
-  explicit dependency ID/checksum pairs, destructive boolean and before/after
-  object states. Dependency checksums bind the exact bundles used to generate
-  effects, including dependencies not yet applied.
-  SQLcl control commands CONNECT/CONN, HOST, EXIT, error-policy changes,
-  remote/nested includes and substitution re-enabling are prohibited in
-  migration members. Validate statement boundaries with a qualified lexer;
-  do not inspect comments/string literals with an unanchored grep.
+  Validate UTC calendar values. Each has exactly one .verify.sql sibling and
+  no other sibling members; an orphan .verify.sql, a missing one, or an
+  unexpected third member is an error.
+- [ ] Require LF/UTF-8 and a strictly parsed header block preceding any
+  executable statement, containing exactly one `-- migration-version:`,
+  one `-- target: tables|code`, one `-- destructive: true|false`, and zero or
+  more `-- depends-on: <id> sha256:<hex>`. Reject a missing directive, a
+  duplicate, one appearing after the first statement, and any unrecognised
+  `-- <word>:` directive — silently ignoring an unknown directive would let a
+  typo disable a declaration. Parse the header with the same qualified lexer
+  used for statement boundaries, so a directive inside a string literal or a
+  block comment is not mistaken for a declaration.
+  Dependency checksums bind the exact bundle bytes depended upon, including
+  dependencies not yet applied.
+- [ ] Implement offline authoring helpers in authoring.py: `new-migration`
+  writes a UTC-stamped bundle skeleton with a complete header and an empty
+  verification file; `add-dependency` computes the named dependency's current
+  bundle checksum and inserts or updates its `-- depends-on:` line in place,
+  preserving all other bytes. Both operate on the migrations directory only —
+  no connection, no subprocess. Test that a developer with no database
+  configured at all can author a complete, valid bundle.
+- [ ] Prohibit SQLcl control commands CONNECT/CONN, HOST, EXIT, error-policy
+  changes, remote/nested includes and substitution re-enabling in migration
+  members. Validate statement boundaries with a qualified lexer; do not
+  inspect comments/string literals with an unanchored grep.
 - [ ] Verification members are restricted SELECT assertions returning exactly
   assertion_name and PASS/FAIL. Run them through VERIFY with no mutation grants,
   no application routine execution and an allowed SQL/function grammar. Reject
   DML, DDL, PL/SQL, SQLcl controls and transaction statements in these members.
   Missing/duplicate assertion rows and unknown status refuse. A mutating verify
-  fixture must fail before execution, not create its own expected effects.
+  fixture must be rejected before execution, not allowed to run and then be
+  judged by its own output.
 - [ ] Compute bundle checksum from canonical sorted member path/SHA-256 pairs.
   No normalization after hashing; execute an immutable staged copy of those bytes.
 - [ ] Implement topological ordering with (stamp, full ID) ready-node tie-break.
@@ -118,9 +143,12 @@ class Plan:
   absent APPLIED history is foreign_applied; strict mode rejects it. Canonical
   deletion is enforced separately by CI diff against the protected base.
 - [ ] Test equal-second tie, invalid calendar date, missing/cyclic dependency,
-  verification/effects edits, foreign applied history and incomplete attempts.
-  Edit an unapplied dependency after child effects generation and prove exact
-  checksum mismatch refuses even when its object output would be unchanged.
+  edits to either bundle member, foreign applied history and incomplete
+  attempts. Edit an unapplied dependency after a dependent has declared its
+  checksum and prove the exact mismatch refuses, even when the resulting
+  object would be unchanged. Test an unrecognised `-- foo:` directive, a
+  duplicate `-- target:`, a directive after the first statement, and a
+  `-- depends-on:` appearing inside a string literal.
 
 Example pure test with the defined Plan interface:
 
@@ -222,86 +250,50 @@ has no entry. `snapshot(profiles, out) -> Inventory`;
 - [ ] Test changed/deleted/added objects, invalid packages, grants, distinct
   schemas, same schemas, CRLF, SQL literals containing schema names, sequence
   advancement without definition change and schema-name-neutral replay.
-- [ ] Implement check-drift from expected central inventory with no write.
-  LAST_DDL_TIME appears only in diagnostics. A change before an unrelated
-  migration remains changed; DML requires semantic checks.
+- [ ] Implement check-drift against canonical replay evidence under
+  `database/`, with no write. There is no expected-fingerprint store in
+  metadata; that evidence is the single source of expected state. On a shared
+  development target, differences attributable to known unmerged migrations
+  are reported separately from unexplained drift, and the report says plainly
+  which category each object falls in. LAST_DDL_TIME and compilation status
+  appear only as diagnostics, never as drift on their own. A change made
+  before an unrelated migration remains changed; DML requires semantic
+  checks.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_migration_fingerprints.py -v`.
 
-## Task 4: Effects authoring and existing-schema adoption
+## Task 4: Existing-schema adoption
 
-**Files:** replay.py, test_migration_effects.py, test_migration_adoption.py,
-docs/migrations.md.
+**Files:** replay.py, test_migration_adoption.py, docs/migrations.md.
 
-**Interface:** `prepare_migration(id, source, replay_target) -> Effects`;
-`adopt_baseline(id, evidence, profiles) -> None`.
+**Interface:** `adopt_baseline(id, evidence, profiles) -> None`.
 
-Effects JSON Schema fragment (the complete schema also disallows unknown keys
-and validates ObjectKey names and dependency IDs):
+Revision 3 removed this task's effects-authoring half along with the effects
+document (spec §7). What remains is adoption: establishing a trustworthy
+starting point for a schema that already exists and was not built by
+migrations. There is no `prepare_migration`, no disposable target requirement
+for ordinary authoring, and no candidate-missing-effects authoring role —
+authoring is offline and lives in Task 1's `authoring.py`.
 
-```json
-{
-  "type": "object",
-  "required": ["version", "dependencies", "destructive", "objects"],
-  "properties": {
-    "version": {"const": 1},
-    "dependencies": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["id", "bundle_checksum"],
-        "additionalProperties": false,
-        "properties": {
-          "id": {"type": "string"},
-          "bundle_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-        }
-      },
-      "uniqueItems": true
-    },
-    "destructive": {"type": "boolean"},
-    "objects": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["before", "after"],
-        "additionalProperties": false,
-        "properties": {
-          "before": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-          "after": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
-        }
-      }
-    }
-  },
-  "additionalProperties": false
-}
-```
+Adoption still requires a disposable target, because its whole purpose is to
+prove that a reviewed initial migration reproduces the live schema. That is a
+one-off operation performed by whoever adopts the template, not something a
+developer does to write a migration.
 
-Null means absent; an empty file or empty object definition still has a digest.
-Reject entries where before equals after: effects describe actual changes.
-Reject duplicate dependency IDs even when their checksum fields differ.
-
-- [ ] Provision an empty disposable target, replay dependency closure, snapshot
-  before, apply candidate SQL, snapshot immediately after, run SELECT-only
-  verification through VERIFY, and confirm the inventory is unchanged by
-  verification. Generate the exact changed-object effects. Review and commit the effects
-  with SQL and verification; they are never learned from shared dev after apply.
-- [ ] Preparation runs only on role replay with a provisioned instance token
-  and empty-target proof. It must have an isolated authoring execution path
-  that accepts a candidate missing effects only in that role; ordinary migrate
-  still requires complete bundles.
 - [ ] For initial adoption, generate/review baseline DDL and reference-data
   assertions, prove empty replay, then compare live structural/semantic state
   under the central mutex. Stamp baseline only on exact match; never execute
   CREATE statements over existing business data.
-- [ ] Metadata setup may precede adoption, but expected state remains uninitialized
-  until adoption or verified empty bootstrap. A nonempty schema cannot initialize
-  its expected inventory by silently sampling live objects.
+- [ ] Metadata setup may precede adoption, but until adoption or a verified
+  empty bootstrap the target has no accepted starting point and strict
+  operations refuse. A nonempty schema is never blessed by sampling its live
+  objects into evidence; adoption must prove a reviewed initial migration
+  reproduces it on an empty disposable target.
 - [ ] Test valid adoption, changed live baseline, missing reference data,
   candidate changes outside declared scope and unknown normalization.
   Confirm production adoption is refused.
 
-Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_migration_*tion.py' -v`;
-also run test_migration_effects.py explicitly.
+Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_migration_*tion.py' -v`.
 
 ## Task 5: Apply state machine, verification and uncertainty
 
@@ -324,11 +316,13 @@ foreign_applied, blocked_attempt and verified inventory digest.
   before states, persist RUNNING, execute staged SQL with target routing and
   snapshot immediately after. Verify data/compiled-object postconditions through
   the observation-only VERIFY profile; a payload profile must not run verify SQL.
-- [ ] Capture both profiles after execution. Every observed structural change
-  must equal the declared effects; compare inventories before/after verification
-  and ensure unchanged objects remained unchanged.
-  Commit updated expected inventory, APPLIED history and attempt state in one
-  transaction on the metadata connection. Record sequence under the mutex.
+- [ ] Capture both profiles after execution and record the before/after
+  inventories as observed history for recovery and audit. Version 1 has no
+  declared effects to compare them against, so do not gate on a predicted
+  change set. Do still compare inventories taken before and after verification
+  and refuse if verification itself mutated structure.
+  Commit APPLIED history and attempt state in one transaction on the metadata
+  connection. Record sequence under the mutex.
 - [ ] On known SQL error record FAILED; on timeout/lost acknowledgement record
   UNKNOWN if possible. If recording fails, leave RUNNING. Stop later migrations
   and retain mutex. Never auto-retry a possibly committed payload.
@@ -341,15 +335,17 @@ foreign_applied, blocked_attempt and verified inventory digest.
   Failed immutable source needing correction uses a separately reviewed
   corrective transition with a durable link to the failed attempt.
 - [ ] Test separate-schema routing, rollback-independent DDL partial state,
-  invalid PL/SQL compiled with warning, duplicate runner, edited effects,
-  destructive refusal and partial success. The fake SQLcl test must exercise
+  invalid PL/SQL compiled with warning, duplicate runner, an edited bundle
+  member, destructive refusal and partial success. Include an upstream table
+  change invalidating a dependent package and prove the next migration is not
+  blocked by that invalidation. The fake SQLcl test must exercise
   the public migrate CLI, not just helper parsing.
 
 State sequence to encode:
 
 ```text
 READY -> mutex-owned -> live/preconditions-verified -> RUNNING(committed)
-RUNNING -> payload+postconditions+effects verified -> APPLIED(committed)
+RUNNING -> payload + postconditions verified -> APPLIED(committed)
 RUNNING -> SQL failure -> FAILED; stop and retain ownership
 RUNNING -> unknown worker/result/ack -> UNKNOWN or still RUNNING; stop
 FAILED/UNKNOWN -> reviewed recovery -> verified terminal state
@@ -373,7 +369,8 @@ scripts/tests/live/test_migration_replay.py, database/.gitkeep.
   provision token and supported toolchain. Assert zero application inventory
   before bootstrap; never accept a caller's claim that a shared schema is empty.
 - [ ] Replay complete source in deterministic dependency order. Verify each
-  transition's effects and semantic checks. Snapshot to scratch and compare
+  transition's verification assertions and semantic checks. Snapshot to
+  scratch and compare
   complete canonical manifests with committed evidence, including added files.
   Never call backup_db against the developer working-tree database/ mirror.
 - [ ] When --previous is supplied, create another fresh target, replay previous
@@ -383,7 +380,7 @@ scripts/tests/live/test_migration_replay.py, database/.gitkeep.
   an explicit evidence-update workflow stages that output into database/.
   Its metadata records source commit/digest, normalizer version and coverage.
 - [ ] Test earlier timestamp merged after a later migration, incompatible
-  same-object effects, missing canonical member, untracked extra snapshot file,
+  incompatible same-object changes, missing canonical member, untracked extra snapshot file,
   drift hidden by a later timestamp, absent DB provisioning and unsafe replay target.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_migration_replay.py -v`.
@@ -414,7 +411,7 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** docs/migrations.md, docs/schema-coverage.md,
 scripts/tests/live/test_migration_acceptance.py.
 
-- [ ] Document migration-first authoring, dependency/effects generation,
+- [ ] Document offline migration authoring, dependency declaration,
   adoption, foreign branch history, failed attempts, mutex recovery and
   unsupported scope. Do not promise rollback or detection of every manual write.
 - [ ] Exercise shared schema with Alice's applied unmerged bundle and Bob's

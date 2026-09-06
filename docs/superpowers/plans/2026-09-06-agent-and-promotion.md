@@ -155,8 +155,24 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   disposable resource. A reused/shared target fails empty-target/identity checks.
 - [ ] Implement the provider for the team's chosen isolated runner by qualified
   scripts or image pinned in runner-contract.json; acceptance must execute
-  create/probe/replay/destroy. No provider implementation is presumed present.
-  Missing provisioner/toolchain/connection fails the required job.
+  create/probe/replay/destroy. Missing provisioner/toolchain/connection fails
+  the required job.
+- [ ] **Ship one working reference provisioner**, so the template is adoptable.
+  A contract plus abstract glue with no implementation leaves every adopting
+  team stalled here with no CI at all, which in practice means the required
+  replay gate is skipped and `database/` evidence silently stops being
+  trustworthy — the exact outcome this gate exists to prevent.
+  Provide `ci/provisioners/docker_pdb.sh` implementing the documented argv
+  contract (`create --run-id UUID --out DIR`, `destroy --run-id UUID
+  --instance-token TOKEN`) against a disposable Oracle Free container or a
+  cloned template PDB, emitting the versioned JSON with instance token, replay
+  `.env` path and app/workspace fixtures. Pin its image digest in
+  `runner-contract.json`.
+  Treat it as a **reference**, not a mandate: it must be replaceable by a
+  team's own provisioner without code changes, which is the test of whether
+  the argv contract is actually sufficient. Document its resource
+  requirements and teardown guarantees, and run the same acceptance
+  (`create/probe/replay/destroy`) against it in CI.
 - [ ] Run Plan 2 fresh replay and previous-release upgrade, history immutability
   and canonical evidence comparison, then Plan 1 disposable APEX round-trip
   and master fixtures. Upload sanitized results and failed captures.
@@ -231,7 +247,7 @@ Artifact layout after safe extraction:
 release/
   MANIFEST.json
   apps/<alias>/...                 owned source only, no deployments/
-  migrations/...                  complete immutable three-member bundles
+  migrations/...                  complete immutable two-member bundles
   evidence/schema/...             canonical schema fingerprints
   contracts/masters.json          master and component requirements
   contracts/toolchain.json        qualified versions and manifest format
@@ -253,6 +269,23 @@ release/
   uname/gname, mtime 0, file modes 0644 (0755 only for allowlisted tools),
   directory mode 0755, no compression/PAX/extensions, and standard 10240-byte
   record padding. Reject names/sizes that ustar cannot represent; never truncate.
+- [ ] **Pre-validate ustar path representability before writing any entry.**
+  ustar stores a 100-byte name and an optional 155-byte prefix that must split
+  at a `/`; a path is representable only if such a split exists, which is a
+  stricter condition than "under 255 bytes". Real APEXlang trees approach this:
+  `release/apps/<alias>/shared-components/themes/universal-theme/...` and
+  static-file paths are already ~115 bytes before a long component name, and
+  `tarfile` with `USTAR_FORMAT` raises `ValueError: name is too long` at write
+  time — after partial output, on a release build.
+  Compute the split for every path up front and refuse with a message naming
+  the offending path, its byte length and the best available split point.
+  Add a test over the deepest realistic APEXlang hierarchy, including a
+  path with no valid split point, asserting refusal happens before any bytes
+  are written and that the output path is not left partially populated.
+  If a genuine APEX export is found that cannot be represented, that is an
+  explicit decision point — switch to `PAX_FORMAT` with pinned deterministic
+  headers, re-verifying cross-platform byte identity — not a silent format
+  change and never a truncation.
 - [ ] Verify file hashes AND complete file set before any application. Missing,
   unexpected and changed files all refuse. Reject output-directory reuse.
 - [ ] plan-release compares the destination's exact history (identity, metadata
