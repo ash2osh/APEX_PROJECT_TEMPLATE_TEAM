@@ -78,6 +78,18 @@ own verification, which is unchanged by its existence (see Task 3).
 - [ ] Explicitly route APEX changes to apps/<alias>, SQL intent to migration
   bundles, database evidence to canonical replay, and recovery captures to
   .sync-state. Check app_context before complex app work.
+- [ ] State the shared-application rules (spec §2, §2.1) as agent contract, since
+  an agent inheriting solo-template habits will get every one of them wrong:
+  the daily loop is build/export/commit with **no import step**; an export
+  carries the whole team's current application state, not the agent's own
+  changes, so it must never describe an export diff as "my changes"; `import-app`
+  overwrites what everyone is editing and is never run to "refresh" or "reset"
+  a workspace; and a git branch does not isolate APEX source, so work cannot be
+  parked on a branch by exporting it there.
+- [ ] Require an agent that applies a migration bundle to the shared schema to
+  say, in the same turn, that the bundle must be merged promptly because any
+  colleague's export can now carry a page depending on it (Plan 2). Do not let
+  an agent treat applied-and-unmerged as a finished state.
 - [ ] Require drift inspection before database changes; describe its structural
   coverage and inability to observe uncaptured/transient writes or arbitrary DML.
 - [ ] Document capture/resolve/commit/import and uncertain-attempt recovery.
@@ -141,6 +153,14 @@ choice they're asked to make is "which page title do you want" rather than
   property to different values — this is the only case that produces a
   question. State both values in plain language and, where capture/commit
   metadata identifies them, who made each change.
+- [ ] Frame the two sides correctly for the shared topology (spec §2.1). A
+  conflict here is Git against the shared application, not one developer against
+  another: HEAD is what somebody committed to this branch, and the capture is
+  what the application currently holds, which may include work by several people
+  and is not the operator's own. Never label the capture side "your change" or
+  the HEAD side "their change" — attribute HEAD from commit metadata, and
+  attribute the capture side only as "the shared application", since no
+  per-property author exists for it.
 - [ ] The assistant never selects a value for the developer and never
   synthesizes a merged value on its own; "keep both" requires the developer's
   own supplied text. This is the spec's existing "no automatic line merge"
@@ -278,6 +298,11 @@ substitute an empty previous release.
 - [ ] Verify actual app bytes/linkage and schema drift after deployment.
   Upload per-app and migration evidence; failure blocks the successful build
   status and retains recovery. Cleanup only job-local secrets/temporary files.
+- [ ] This job is where the shared-application coupling surfaces (Plan 2): a page
+  merged ahead of the bundle it depends on reaches integration against a schema
+  built from merged migrations only. Report that failure naming the application,
+  the page and the missing object, so the reviewer sees a missing migration
+  rather than an unexplained deployment error.
 - [ ] Test workflow behavior with a fake provisioner/SQLcl and two queued commits.
   YAML parsing alone is not acceptance.
 
@@ -444,9 +469,15 @@ scripts/tests/test_docs.py, docs/design-review-resolution.md.
   METADATA and observation-only VERIFY), initial app adoption,
   migration-baseline adoption, ordinary Builder/source workflows, recovery,
   branch integration, test promotion and production handoff.
-- [ ] Explain that alias is stable logical identity and environment app IDs
-  differ. Named deploy bindings and profiles must agree; neither can silently
-  override the other.
+- [ ] Explain that alias is stable logical identity and app IDs differ **between
+  environments, not between developers** (spec §2): the team shares one
+  development workspace, application and ID, while integration, test and
+  production give the same application different ones. Named deploy bindings and
+  profiles must agree; neither can silently override the other.
+- [ ] Document the shared-application working agreement as workflow, not caveat:
+  the three-step daily loop, why there is no import step, the team pause an
+  import requires, that exports need no announcement, and that a branch does not
+  isolate APEX source. Include a worked day for two developers.
 - [ ] Explain shared integration contamination, foreign migrations, canonical
   replay and partial-DDL limitations with concrete examples.
 - [ ] Add a review-resolution matrix mapping every original finding to the
@@ -458,7 +489,9 @@ scripts/tests/test_docs.py, docs/design-review-resolution.md.
 
 ## Completion checklist
 
-- [ ] Agent rules are consistent with alias/recovery/migration ownership.
+- [ ] Agent rules are consistent with alias/recovery/migration ownership, and
+  with the shared application: no import in the daily loop, no export described
+  as the agent's own changes, no branch treated as isolating APEX source.
 - [ ] Conflict assistant never writes tracked source or selects a value on the
   developer's behalf; resolve-export independently re-verifies its output.
 - [ ] Required CI actually provisions fresh targets and proves replay/import.

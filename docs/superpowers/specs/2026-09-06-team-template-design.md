@@ -150,6 +150,15 @@ recoverable by anything in this design. APEX page locks are the only protection
 at that layer. Content reconciliation now catches Git-versus-database conflicts,
 not developer-versus-developer ones; §11 states which is which.
 
+**A page can be merged without the migration it depends on.** Because every
+export carries the shared application's current state, a colleague can export and
+merge a page that was built against a column only an unmerged migration creates.
+Page and migration travelled together on one branch when each developer had their
+own application; they no longer do. Plan 2 records where this is caught — fresh
+replay and integration deployment — and why review is the preventive control. It
+is not preventable here, because version 1 does not read APEXlang for SQL
+references.
+
 **What does not change:** content reconciliation remains load-bearing. Its
 primary scenario moves from "a colleague's page is missing from my database" to
 "Git contains source the shared application has not received" — a hand-edited

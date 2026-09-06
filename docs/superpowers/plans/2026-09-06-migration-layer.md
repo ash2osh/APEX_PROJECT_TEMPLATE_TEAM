@@ -35,6 +35,41 @@ The shared schema is not reset for tests. Live tests receive disposable
 targets with explicit provisioning and verified identities. Compiled SQL,
 data assertions and metadata grants must be reviewed before any live apply.
 
+## Interaction with the shared application
+
+Spec §2.1 makes APEX source and migrations behave differently under branching,
+and the difference lands on this plan.
+
+**Migrations stay branch-isolated; the schema they change does not.** A bundle is
+a hand-authored file, so it travels on its branch as expected. Applying it writes
+to the shared development schema, where every developer sees the result at once.
+That asymmetry is already modelled: a colleague's applied but unmerged bundle is
+`foreign_applied` in shared mode and does not block unrelated work.
+
+**A page can now be merged without the migration it depends on.** This has no
+equivalent in the per-developer topology. Alice applies her bundle to the shared
+schema and builds a page against the new column in the shared application. Bob
+exports — his capture contains Alice's page, because the application is shared —
+commits it to his branch and merges. Alice's bundle is still on her branch.
+Integration then deploys a page referencing a column its schema does not have.
+
+Nothing here prevents that: the coupling runs from APEXlang bytes to SQL, and
+version 1 does not parse APEXlang for column references. It is caught, not
+prevented, and this plan states where:
+
+- fresh replay builds integration's schema from merged migrations only, so the
+  missing column is absent there rather than quietly present;
+- deployment verification and post-deploy drift report the failure against a
+  named application and target;
+- review is the preventive control — a bundle merges before or with the first
+  export that depends on it, and whoever applies a bundle to the shared schema
+  owns merging it promptly rather than leaving it applied and unmerged.
+
+Do not answer this by forbidding unmerged bundles on the shared development
+schema. A developer cannot build the page before the column exists, so that rule
+would stop development outright. The applied-but-unmerged window is deliberate;
+what must be short is its duration.
+
 ## File responsibilities
 
 | Files to create | Responsibility |
@@ -445,9 +480,19 @@ scripts/tests/live/test_migration_acceptance.py.
 - [ ] Document offline migration authoring, dependency declaration,
   adoption, foreign branch history, failed attempts, mutex recovery and
   unsupported scope. Do not promise rollback or detection of every manual write.
+  State the shared-application coupling plainly for authors: applying a bundle
+  to the shared schema makes it visible to everyone immediately, any colleague's
+  export can carry a page that depends on it, and merging the bundle promptly is
+  the author's responsibility rather than a review formality.
 - [ ] Exercise shared schema with Alice's applied unmerged bundle and Bob's
   unrelated bundle; both work, a conflicting precondition refuses, and an
   unknown attempt blocks. Verify integration reports foreign IDs explicitly.
+- [ ] Exercise the shared-application coupling above: a page exported from the
+  shared application depends on a column created by a bundle that is still
+  unmerged, and the page merges first. Fresh replay must not contain the column,
+  and the integration deployment must fail with a report naming the application
+  and the missing object rather than deploying a broken page. Record it as a
+  detected-not-prevented case, since review is the preventive control.
 - [ ] Run fresh replay and previous-release upgrade, separate and equal schema
   profiles, two real concurrent runners, partial DDL and lost-log acknowledgement.
 - [ ] Preserve versioned results for Plan 3 CI; mark unavailable live checks
@@ -459,6 +504,8 @@ scripts/tests/live/test_migration_acceptance.py.
 
 - [ ] Every bundle member is immutable and canonical deletions fail CI.
 - [ ] Shared foreign history does not block unrelated work; strict targets refuse it.
+- [ ] A page merged ahead of the bundle it depends on fails the integration gate
+  with a report naming both, rather than deploying.
 - [ ] Metadata ownership, no-steal mutex and uncertain attempts work with split users.
 - [ ] Drift compares structure and cannot be hidden by a later migration timestamp.
 - [ ] Fresh/upgrade replay and existing-schema adoption have live evidence.
