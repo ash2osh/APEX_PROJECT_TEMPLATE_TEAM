@@ -488,14 +488,16 @@
 
     <div class="col">
       <p>
-        Alice and Bob work on the same leave-request app. Each has their own
-        APEX workspace, so each has their own copy of the app with its own
-        number — Alice's is 101, Bob's is 201. They share the work through git.
+        Alice and Bob work on the same leave-request app. They share one APEX
+        workspace and one application — they are both editing the same thing,
+        live, the way most APEX teams work. They share the source through git.
       </p>
       <p>
         The old single-developer tooling exported an app by <strong>replacing
         the whole folder</strong>: delete what's there, drop in what came out of
-        the database. For one person that's fine. For two, here's what happens.
+        the database. That's fine when the database is the only place work
+        exists. It stops being fine the moment git holds something the
+        application doesn't.
       </p>
     </div>
 
@@ -503,15 +505,17 @@
       <div class="tl-step">
         <div class="tl-who">Alice</div>
         <div class="tl-body">
-          Builds a <strong>Cancel request</strong> button on page 6. Exports,
-          commits, pushes. Page 6 is now in git.
+          Fixes a broken condition on page 6 by editing the source file
+          directly, and merges it. The fix is <strong>in git</strong>. Nobody
+          has pushed it into the shared application yet.
         </div>
       </div>
       <div class="tl-step">
         <div class="tl-who">Bob</div>
         <div class="tl-body">
-          Pulls. His folder now contains Alice's page 6. His own
-          <em>workspace</em> — the actual database — has never seen it.
+          Pulls. His folder now contains Alice's fix. The shared
+          <em>application</em> — the database everyone actually edits — has
+          never seen it.
         </div>
       </div>
       <div class="tl-step">
@@ -525,8 +529,8 @@
       <div class="tl-step fatal">
         <div class="tl-who">Result</div>
         <div class="tl-body">
-          The folder is replaced with Bob's database, which has no page 6.
-          <strong>Alice's work is deleted.</strong> Git records it as a
+          The folder is replaced with the application's state, which has no
+          fix. <strong>Alice's fix is deleted.</strong> Git records it as a
           deliberate deletion, so the merge raises no conflict. Nobody is told.
         </div>
       </div>
@@ -564,20 +568,21 @@
 
     <div class="code">
 <pre><span class="c-com">// before — the database decides, files follow</span>
-   database  ──export──▶  files          <span class="c-bad">(replace everything)</span>
+   database  ──export──▶  files            <span class="c-bad">(replace everything)</span>
 
-<span class="c-com">// now — git decides, databases follow</span>
-   files  ──import──▶  your workspace
-   files  ◀──export──  your workspace    <span class="c-good">(merge, never replace)</span></pre>
+<span class="c-com">// now — git decides, the database follows</span>
+   files  ◀──export──  the shared app      <span class="c-good">(merge, never replace)</span>
+   files  ──import──▶  the shared app      <span class="c-warn">(rare, whole team pauses)</span></pre>
     </div>
 
     <div class="col">
       <p>
-        Two supporting details make it work. The folder is named after the app's
+        One supporting detail makes it work. The folder is named after the app's
         <em class="term">alias</em> — <em class="term">employee-self-service</em> —
-        not its number, because the number is different for every developer.
-        And the number lives in a small local file that git ignores, so Alice's
-        101 and Bob's 201 never collide.
+        never its number. You all share one number in development, but test and
+        production give the same application a different one, and the tracked
+        source has to mean the same thing in all three. The number lives in a
+        small local file that git ignores.
       </p>
     </div>
   </section>
@@ -585,24 +590,18 @@
   <!-- ============ THE LOOP ============ -->
   <section>
     <div class="section-mark">The daily loop</div>
-    <h2>Four steps, and the first one is the new habit</h2>
+    <h2>Three steps, and there's no "pull" in them</h2>
 
     <div class="col">
       <p>
-        This is the whole workflow. The only unfamiliar part is step 1: you
-        start from what everyone else has, rather than from whatever your
-        workspace happens to be holding.
+        Because you all edit one shared application, your colleagues' work is
+        already in front of you — it arrived the moment they saved it, not when
+        you ran a command. There is nothing to catch up on, so the daily loop
+        has no import step.
       </p>
     </div>
 
     <div class="loop">
-      <div class="loop-step">
-        <div class="loop-body">
-          <h3>Import — catch your workspace up</h3>
-          <p>Pulls the latest committed version of the app into your own workspace, so you're building on top of your colleagues' work rather than beside it.</p>
-          <div class="code"><pre>team.py import-app employee-self-service</pre></div>
-        </div>
-      </div>
       <div class="loop-step">
         <div class="loop-body">
           <h3>Build — normal APEX work</h3>
@@ -611,8 +610,8 @@
       </div>
       <div class="loop-step">
         <div class="loop-body">
-          <h3>Export — bring your changes back into git</h3>
-          <p>Reads your workspace and <em>merges</em> it into the files. Because a clean export produces identical bytes every time, your diff shows exactly what you changed and nothing else.</p>
+          <h3>Export — bring the app's changes back into git</h3>
+          <p>Reads the shared application and <em>merges</em> it into the files. Because a clean export produces identical bytes every time, your diff shows real changes and nothing else.</p>
           <div class="code"><pre>team.py export-app employee-self-service</pre></div>
         </div>
       </div>
@@ -622,6 +621,34 @@
           <p>If your change needed a database column too, its migration goes in the same commit. One reviewable unit: the page and the column it depends on.</p>
         </div>
       </div>
+    </div>
+
+    <div class="note warn col">
+      <div class="note-label">Two things to know about sharing one app</div>
+      <p>
+        <strong>Your export carries whatever the app currently holds</strong> —
+        including a colleague's half-finished region, committed under your name.
+        Export when the app is in a state you'd be happy to ship, and keep
+        branches short.
+      </p>
+      <p>
+        <strong>Git branches don't isolate APEX work.</strong> The database has
+        no idea what branch you're on, so whatever is in the app lands in
+        whichever branch you export to. Migrations are hand-written files, so
+        those <em>do</em> stay on their branch.
+      </p>
+    </div>
+
+    <div class="note bad col">
+      <div class="note-label">Import is not a daily command</div>
+      <p>
+        <em class="term">import-app</em> overwrites the application
+        <em>everyone</em> is working in — including unexported work belonging to
+        people who didn't run it. It's a coordinated reset, done with the team
+        paused, not a way to refresh your copy. If anyone has unexported work in
+        there, the tool refuses and tells you to export it first. That refusal
+        is the most important one in the whole system.
+      </p>
     </div>
   </section>
 
@@ -637,9 +664,9 @@
         the opening disaster impossible.
       </p>
       <ul class="col" style="margin:0; padding-left:1.15em;">
-        <li><strong>Base</strong> — what the files looked like the last time your workspace was in sync.</li>
-        <li><strong>Theirs</strong> — what's committed right now, including your colleagues' work.</li>
-        <li><strong>Mine</strong> — what just came out of your workspace.</li>
+        <li><strong>Base</strong> — what the files looked like the last time they matched the application.</li>
+        <li><strong>Theirs</strong> — what's committed in git right now, on your branch.</li>
+        <li><strong>Mine</strong> — what just came out of the shared application.</li>
       </ul>
       <p>
         If only one side changed, that side wins. If both changed the same file
@@ -650,10 +677,10 @@
 
     <div class="recon">
       <div class="recon-pick" role="group" aria-label="Choose a scenario">
-        <button class="recon-btn" type="button" data-s="0" aria-pressed="true">Alice adds a page</button>
-        <button class="recon-btn" type="button" data-s="1">Your workspace is stale</button>
+        <button class="recon-btn" type="button" data-s="0" aria-pressed="true">Git has a page the app doesn't</button>
+        <button class="recon-btn" type="button" data-s="1">Git has an edit the app doesn't</button>
         <button class="recon-btn" type="button" data-s="2">You delete a page</button>
-        <button class="recon-btn" type="button" data-s="3">You both edit page 6</button>
+        <button class="recon-btn" type="button" data-s="3">Both git and the app changed it</button>
         <button class="recon-btn" type="button" data-s="4">You add a page</button>
       </div>
       <div class="recon-stage">
@@ -671,7 +698,7 @@
           </div>
           <div class="rc">
             <div class="rc-h">Mine</div>
-            <div class="rc-sub">my workspace</div>
+            <div class="rc-sub">the shared app</div>
             <div class="rc-val" id="rc-mine"></div>
           </div>
         </div>
@@ -685,9 +712,11 @@
     <div class="note col">
       <div class="note-label">The important row</div>
       <p>
-        "Alice adds a page" is the opening disaster. Under the old tooling her
-        page was deleted in silence. Here it simply survives — Bob's stale
-        workspace has no opinion about a file it has never seen, so there is
+        The first two are the opening disaster. Anything that reached git
+        without passing through the shared application — a hotfix, a
+        hand-edited file, a change merged from somewhere else — used to be
+        deleted in silence by the next export. Here it simply survives: the
+        application has no opinion about a file it never held, so there is
         nothing to refuse and nothing to lose.
       </p>
     </div>
@@ -815,9 +844,11 @@ SELECT 'delegated_to exists' AS assertion_name,
         <div class="limit-tag no">Can't stop</div>
         <div class="limit-body">
           <b>Two people editing the same page at the same moment.</b>
-          If you and a colleague both change page 6, git raises an ordinary
-          conflict and a human resolves it. Nothing is lost — but nothing is
-          merged for you either.
+          You share one application, so this is settled inside the App Builder
+          before any file exists: the later save wins and the earlier one is
+          gone. Nothing here can recover it — APEX's own page locks are the
+          only protection. This is the real price of sharing one app, and it's
+          the same price you pay today.
         </div>
       </div>
       <div class="limit">
@@ -892,39 +923,39 @@ SELECT 'delegated_to exists' AS assertion_name,
   (function () {
     var scenarios = [
       {
-        story: "Alice added a brand-new page 7 and committed it. Your workspace has never seen it — you last synced before she pushed.",
+        story: "A new page 7 was added as a file and merged — a hotfix, or work from another environment. It's committed, but nobody has imported it into the shared application yet.",
         base: null, head: "pages/p00007-delegation.apx", mine: null,
         keep: true,
         label: "Kept",
-        text: "Alice's page survives. You never had this file, so your export has no opinion about it — there is nothing to delete."
+        text: "The page survives. The application has never held this file, so your export has no opinion about it — there is nothing to delete."
       },
       {
-        story: "Alice edited page 6 and committed. Your workspace still holds the older version, because you haven't imported since.",
-        base: "page 6 — old", head: "page 6 — Alice's edit", mine: "page 6 — old",
+        story: "Page 6 was fixed by editing the source file directly and committing it. The shared application still holds the version from before the fix.",
+        base: "page 6 — old", head: "page 6 — the fix", mine: "page 6 — old",
         keep: true,
         label: "Kept",
-        text: "Alice's edit survives. Your copy matches the last sync, which means you didn't change it — so hers is the only real change."
+        text: "The fix survives. The application matches the last sync, which means nothing changed there — so git's version is the only real change."
       },
       {
-        story: "You deliberately deleted page 9 in the App Builder. It existed at your last sync and it's still committed.",
+        story: "You deliberately deleted page 9 in the App Builder. It existed at the last sync and it's still committed.",
         base: "page 9", head: "page 9", mine: null,
         keep: true,
         label: "Deleted, as you intended",
-        text: "The file is removed. You had it, you removed it on purpose, and nobody else touched it — so the deletion is real and is applied."
+        text: "The file is removed. It was there, it was removed on purpose, and git holds no competing change — so the deletion is real and is applied."
       },
       {
-        story: "You edited page 6 to add a Cancel button. Alice edited the same page to change its title, and committed first.",
-        base: "page 6 — old", head: "page 6 — Alice's edit", mine: "page 6 — your edit",
+        story: "Page 6 was fixed in the source file and committed. Meanwhile, someone changed the same page in the App Builder.",
+        base: "page 6 — old", head: "page 6 — the fix", mine: "page 6 — Builder edit",
         keep: false,
         label: "Conflict — nothing written",
         text: "Both versions changed from the same starting point, so neither is automatically right. Your export stops, keeps a copy of all three, and asks you to decide. Nothing is lost."
       },
       {
-        story: "You built a new page 12 in your workspace. Nobody else has touched it.",
+        story: "A new page 12 was built in the App Builder. Git has never seen it.",
         base: null, head: null, mine: "pages/p00012-reports.apx",
         keep: true,
         label: "Added",
-        text: "Your new page is added. It's the only change, so it goes straight in."
+        text: "The new page is added. It's the only change, so it goes straight in."
       }
     ];
 

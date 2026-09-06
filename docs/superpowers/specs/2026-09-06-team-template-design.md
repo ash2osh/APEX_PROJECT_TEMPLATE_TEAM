@@ -50,27 +50,103 @@ the `uc-apx` workflow provides `create`/`edit`/`delete` that do exactly that —
 but once committed, those edits are destroyed by the next export, because
 nothing can push a file edit into a database. See §9 for the backport.
 
+**Under the revised topology (§2) the mechanism survives but its trigger
+changes.** With one shared application, developer B's database cannot lack a
+page developer A built in the Builder — it is the same application. The
+wholesale directory swap is still a silent deletion, but what it now deletes is
+source that exists in Git and never reached the shared application: a
+hand-edited file, a hotfix merged from another environment, a branch that never
+received a merge, or the remainder of a partial export. §2.1 states this; the
+guard is unchanged.
+
 ---
 
 ## 2. Target topology
 
-Decided with the project owner:
+Decided with the project owner. **Revised 2026-09-06:** the original topology
+gave each developer their own workspace and their own copy of the application.
+The project owner corrected this — the team shares one workspace and edits one
+application, which is both how they already work and how APEX teams normally
+work. The revision removes per-developer workspace and application provisioning
+entirely, and costs what §2.1 states.
 
 | Dimension | Decision |
 |---|---|
-| APEX environment | **Each developer has their own workspace** on one shared database instance |
-| Schema objects | **One shared schema set** — all workspaces parse into the same `TABLES_SCHEMA` / `CODE_SCHEMA` |
+| APEX environment | **One shared workspace** on one shared database instance |
+| Development application | **One shared application** that every developer edits directly |
+| Schema objects | **One shared schema set** — the workspace parses into the same `TABLES_SCHEMA` / `CODE_SCHEMA` |
 | Integration point | **Git** |
 
-A consequence that constrains everything downstream: **APEX application IDs are
-unique per instance, not per workspace.** Oracle's documentation states the
-application ID must either not exist in the instance, or already belong to the
-target workspace. So on one shared instance each developer's copy of the same
-application necessarily carries a different numeric ID — Alice 101, Bob 201,
-integration 301 — while being the same application.
+**An application ID identifies an application, not a location.** Oracle's
+documentation states the application ID must either not exist in the instance,
+or already belong to the target workspace. With a single workspace the second
+clause distinguishes nothing — every application already belongs to the only
+workspace — so the rule reduces to: an ID that exists is already some
+application. Separate copies of an application therefore require separate IDs
+by construction, and conversely, one shared ID means one application object,
+not one application per person.
 
-The tracked source therefore must not be keyed on the application ID, nor on
-the parsing schema.
+The shared development application has a single ID for the whole team. Distinct
+IDs remain only for downstream targets, which are deployment destinations rather
+than editing surfaces, and for an optional isolated developer copy (§2.1).
+
+The tracked source is still keyed on neither the application ID nor the parsing
+schema. That was required when developer IDs differed; it remains required for
+promotion, where the deployed ID differs from the development ID.
+
+### 2.1 What the shared development application costs
+
+Each consequence below is a change to how the team must work, not a caveat to
+note and forget. None is softened elsewhere in this document.
+
+**Git branches no longer isolate APEX source.** The database has no concept of a
+branch. Whatever the shared application contains at the moment you export lands
+in whatever branch you are on — including a colleague's in-progress Builder work,
+committed under your name. APEX source is therefore developed on trunk: export
+to a short-lived branch off the integration branch and merge it quickly, or
+accept that the branch carries the team's current state. Migrations are authored
+as files by hand and remain genuinely branch-isolated.
+
+**Import is a team-affecting operation, not a daily step.** Importing a commit
+overwrites the application everyone is working in, including uncommitted Builder
+work belonging to people who did not run the command. The daily loop therefore
+has no import step: the database already holds every colleague's work, so there
+is nothing to catch up on. Import becomes a deliberate, coordinated reset or
+recovery operation. The §6 guard — refuse when the current capture differs from
+the verified baseline unless a receipt accounts for the difference — is what
+makes it safe, and is now the single most important refusal in this design
+rather than one guard among several.
+
+**Export must serialize against import.** Export reads the shared application
+while another developer's import may be writing it, which yields a torn capture:
+partly the old application, partly the new one, and internally inconsistent in a
+way no later stage can detect. Export therefore acquires the same shared
+app-target mutex as import for the duration of its capture. Two concurrent
+exports remain safe — both are reads writing to separate local working trees —
+but an export concurrent with an import is not, and must block rather than
+capture.
+
+**Developer-versus-developer conflicts move out of this tooling's reach.** Two
+people editing page 6 at the same time is resolved inside the App Builder by
+last-save-wins, before any file exists, and the overwritten version is not
+recoverable by anything in this design. APEX page locks are the only protection
+at that layer. Content reconciliation now catches Git-versus-database conflicts,
+not developer-versus-developer ones; §11 states which is which.
+
+**What does not change:** content reconciliation remains load-bearing. Its
+primary scenario moves from "a colleague's page is missing from my database" to
+"Git contains source the shared application has not received" — a hand-edited
+file committed by a colleague, a hotfix merged from another environment, a
+branch that never received a merge, or a partial export. A wholesale directory
+replacement still deletes those silently, which is the failure §1 describes.
+
+**Optional isolated developer copy.** Where genuine isolation is needed — a risky
+refactor, a spike, or work on a page someone else is editing — a developer may
+take a private copy of the application under its own ID. The spike in §3 records
+its cost: within one workspace aliases must be unique, so the copy takes a
+different alias, `application.apx` line 1 differs, and that copy's tracked source
+does not round-trip byte-identically. Treat it as an escape hatch requiring
+explicit reconciliation on the way back, not a second supported topology.
 
 ---
 
@@ -138,10 +214,17 @@ After normalising those two values, `diff -r` across the whole tree was clean.
 **The `-id` remap works and the round trip is a fixed point.**
 
 The alias varied only because this spike re-imported into the *same* workspace,
-where aliases must be unique. In the target topology each developer has a
-separate workspace, so the alias is unchanged and **only
-`deployments/default.json` differs — a file this design gitignores. Every
-tracked file therefore round-trips byte-identically.**
+where aliases must be unique. In the revised topology (§2) there is one shared
+application and no second copy, so neither the alias nor the application ID
+changes across a developer round trip and **every tracked file round-trips
+byte-identically.** `deployments/default.json` now holds the same ID for every
+developer and stays gitignored because it carries connection data, not because
+it varies between people.
+
+This spike is also the direct evidence for §2.1's isolated-copy cost: a second
+copy of the application *within the same workspace* must take a different alias,
+so `application.apx` line 1 necessarily differs and that copy alone does not
+round-trip byte-identically.
 
 **S2 — Binary asset round-trip: PASS.** All five PNG static files compared
 byte-identical after the import/export cycle.
@@ -188,11 +271,12 @@ the project owner as a fixture.
 
 ## 4. Architecture and revised decisions
 
-Git owns application source and migration intent. Developer databases are
-editable workspaces; export captures their changes and reconciles them into
-Git. Integration consumes an immutable commit. A shared development schema is
-not proof that the schema matches that commit: unmerged branch migrations may
-already exist there. Disposable CI replay supplies that proof.
+Git owns application source and migration intent. The shared development
+application is the team's editable working copy; export captures its current
+state and reconciles that into Git. Integration consumes an immutable commit.
+A shared development schema is not proof that the schema matches that commit:
+unmerged branch migrations may already exist there. Disposable CI replay
+supplies that proof.
 
 The four layers remain application, reconciliation, migration, and agent
 context/promotion. The shell entry points delegate to one Python implementation
@@ -204,10 +288,13 @@ only through its controller profile. Payloads use tables/code profiles; a
 separate VERIFY profile observes postconditions with read-only privileges.
 These are shared infrastructure principals, not per-developer schemas.
 
-D2: one short-lived feature branch per ticket. Conflicts in a captured page
-are reported by content reconciliation. Direct shared-schema writes are not
-serialized by Git; cooperative migration runners are serialized by a database
-mutex, while out-of-band changes are detected only when observed.
+D2: one short-lived feature branch per ticket, subject to §2.1 — a branch
+isolates migrations but not APEX source, because the shared development
+application has no branch. Conflicts in a captured page are reported by content
+reconciliation. Direct shared-schema writes are not serialized by Git;
+cooperative migration runners are serialized by a database mutex, and export
+shares the app-target mutex with import so a capture cannot straddle a
+concurrent write, while out-of-band changes are detected only when observed.
 
 D3: the resolved commit SHA is canonical for deployment. Integration is
 deploy-only, with an explicit target role verified against an instance and
@@ -248,7 +335,12 @@ coordinated source-and-target changes. Bindings are never inferred from an
 export directory name.
 
 `APEX_APPS=employee-self-service:101,hr-administration:102` remains the local
-alias-to-ID mapping. The APEX profile also names workspace ID, expected user,
+alias-to-ID mapping. Under the revised topology (§2) its values are the same for
+every developer, since they share one workspace and one application per alias; it
+stays local configuration rather than tracked source because it sits in `.env`
+alongside connection names, and because an isolated copy (§2.1) or a downstream
+target legitimately carries different values. The APEX profile also names
+workspace ID — likewise now one shared value — expected user,
 current schema, database name and service; tables/code, metadata and verification
 profiles name their own expected users, current schemas, database names and
 services. A stable database/container identity is also configured and verified;
@@ -319,7 +411,11 @@ by retaining HEAD, so refusal is unnecessary for an unambiguous case.
 1. Verify developer target role, source ownership, app alias and local state.
    Lock the local app operation; refuse staged, unstaged, untracked or ignored
    files overlapping the source ownership set. Deployment bindings are exempt
-   from source cleanliness checks but validated separately.
+   from source cleanliness checks but validated separately. Also acquire the
+   shared app-target mutex for the duration of the capture: the application is
+   shared (§2), so a local lock alone does not prevent another developer's
+   import from writing it mid-read and producing a torn capture. Release it once
+   the capture is persisted; the remaining steps touch only local files.
 2. Export into scratch using a verified read session. Require a complete
    versioned export manifest, expected source classes, application.apx, and
    positive completion evidence. Normalize .apx and hash binary bytes.
@@ -354,9 +450,19 @@ durable recovery. If its digest differs from the verified baseline, allow
 replacement only if it matches a receipt whose reconciled source is present
 in the selected commit, or an explicit resolution receipt binds this capture
 and selected source digest. Otherwise refuse and direct the developer to
-export/reconcile first. Recheck the current capture before the destructive
-step; Builder edits during the operation remain a documented race requiring
-an operational pause.
+export/reconcile first.
+
+**This refusal carries the weight of §2.1.** Because the application is shared,
+the work an unguarded import would destroy belongs to the whole team, not to the
+person running the command, and its owners have no way to know it is about to
+happen. A capture that differs from the baseline means somebody has unexported
+Builder work in the shared application; the refusal is therefore not a
+conservative default that an experienced operator may waive, and no flag
+overrides it. The documented path is to export and commit that work first, which
+is exactly what its owner would have done.
+
+Recheck the current capture before the destructive step; Builder edits during
+the operation remain a documented race requiring an operational pause.
 
 `bootstrap-app <alias>` is only for creating source from an existing app when
 that alias has no tracked source. It captures and writes a candidate source
@@ -802,10 +908,22 @@ positive and wrong/missing-component negative tests before claiming portable
 promotion. Use the APEX skill and qualified SQLcl help for actual APIs;
 do not guess undocumented dictionary columns or reservation procedure names.
 
-Register one checkout UUID per developer target during explicit setup and
-verify that registration through shared metadata before app mutations. A
-second checkout targeting the same app refuses until an explicit transfer
-captures current state and confirms the previous worker has stopped.
+Register each checkout against its target application during explicit setup and
+verify that registration through shared metadata before app mutations.
+
+For the **shared development application** (§2), the registry is a roster, not
+an exclusive claim. Every developer is legitimately bound to the same
+application, so concurrent registrations are expected and are never refused, and
+the exclusive-checkout and transfer rules below do not apply to it. Serialization
+there is the app-target mutex's responsibility alone; the roster exists so a held
+mutex, a recovery and an `app-status` report can name a person and a host rather
+than only a token. Refusing a second checkout of the shared application would
+lock out the entire team after the first developer registered.
+
+The exclusive rules below govern an **optional isolated developer copy** (§2.1),
+which does have a single owner, and any target where one worker must be the only
+writer. There a second checkout refuses until an explicit transfer captures
+current state and confirms the previous worker has stopped.
 
 **The old UUID must never be required from local state.** A developer who
 re-clones, moves machine, adds a worktree or loses `.sync-state` no longer
@@ -838,6 +956,12 @@ implements the small shared metadata bootstrap/app-lock foundation before
 Plan 2 extends that same metadata store for migrations.
 
 Concurrent Builder changes during export/import require a short edit pause.
+Under the revised topology that pause is **team-wide**, not personal: everyone
+editing the shared application must stop for the duration of an import, and the
+announcement is part of the operation rather than a courtesy. This is the main
+operational cost of sharing one application, and it is the reason §2.1 removes
+import from the daily loop — a step run several times a day could not carry this
+requirement.
 Whole-application imports can partially fail. Local recovery journals and
 database captures mitigate loss; they do not provide a database transaction
 or recover edits never captured before another client overwrote them.
@@ -869,10 +993,13 @@ cross-checkout serialization. That already removes the silent-deletion failure
 in §1, which is the reason this template exists. A team may run Plan 1 in
 production use for as long as it likes before starting Plan 2.
 
-The METADATA schema is a Plan 1 prerequisite and not deferrable: without it
-there is no cross-checkout mutex, and two clones of the same developer target
-can still overwrite each other. It is small at this stage — three tables — and
-Plan 2 extends the same schema rather than introducing a second controller.
+The METADATA schema is a Plan 1 prerequisite and not deferrable: without it there
+is no cross-checkout mutex, and any two checkouts of the shared application can
+overwrite each other. The revised topology (§2) strengthens this rather than
+weakening it — every developer targets the same application by design, so the
+mutex is the only serialization that exists, and it now covers export as well as
+import. It is small at this stage — three tables — and Plan 2 extends the same
+schema rather than introducing a second controller.
 
 Do not treat the ladder as permission to ship Plan 2 without the disposable
 database. The replay gate is what makes `database/` evidence trustworthy; a
@@ -891,6 +1018,15 @@ runners, lost acknowledgement, destructive refusal, foreign branch history,
 older migration arrival, persistent drift, wrong subscription identity,
 artifact tampering, and production refusal at every public write entry point.
 
+The revised topology (§2) adds four required cases, each covering a failure that
+exists only because the application is shared: an export attempted while another
+checkout holds the mutex for an import, which must block rather than return a
+torn capture; an import attempted while a second developer's uncaptured Builder
+work is present, which must refuse and name the export that would preserve it;
+several checkouts registering against the same application, all of which must
+succeed; and an export from a branch that never received a merged colleague
+commit, which must preserve the Git-only source rather than delete it.
+
 The required CI database is a disposable verification environment, not a
 schema-per-developer topology change. Provision it explicitly on an isolated
 runner with the qualified toolchain and named connections. Missing resources
@@ -898,12 +1034,22 @@ must fail the required gate; an optional skipped manual script is not CI.
 
 ## 11. Worked development and promotion flow
 
-Alice imports a clean commit into her own workspace, edits page 6, exports,
-reviews and commits. Bob's workspace still has the old page 6; after he pulls,
-his export preserves Alice's content while carrying his page-7 edit. If both
-changed page 6, export retains a recovery bundle and changes no tracked files.
-Bob resolves base/head/mine, commits that result, and imports it. Import checks
-that no additional Builder edits appeared since the saved capture.
+Alice edits page 6 in the shared application, exports, reviews and commits. Bob
+is editing page 7 in that same application, so he already has Alice's page 6 and
+has nothing to import. He exports: reconciliation compares his capture against
+his branch, page 6 matches what Alice committed and passes through, and page 7
+carries his edit. Where his branch holds source the shared application never
+received — a hand-edited file, a hotfix merged from another environment —
+reconciliation preserves it instead of letting the capture delete it.
+
+The conflict case is now Git against database, not Alice against Bob. It arises
+when a path changed in Git since Bob's baseline *and* changed in the application:
+export retains a recovery bundle and changes no tracked files, Bob resolves
+base/head/mine, commits that result, and imports only if the §6 guard confirms
+nobody else's uncaptured work is in the application. Alice and Bob editing page 6
+in the Builder at the same time is not this case and is not reachable by this
+tooling: the later Builder save already overwrote the earlier one inside the
+database, before any export ran (§2.1).
 
 A database change starts as SQL plus verification and replay-generated
 its declared dependencies. The runner checks dependencies and known checksums
