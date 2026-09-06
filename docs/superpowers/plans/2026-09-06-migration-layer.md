@@ -189,22 +189,53 @@ control_store foundation; app and migration mutexes are distinct resources.
   payload_manifest_json, source_commit, applied_sequence, applied_at,
   applied_by, run_token), TEAM_MIGRATION_ATTEMPT(attempt_id, migration_id,
   checksum, state, run_token, worker_identity, started_at, finished_at,
-  diagnostic_digest), TEAM_MIGRATION_OBJECT(object_key, digest, migration_id).
+  diagnostic_digest).
   Define primary/unique keys, state/target checks and NOT NULL contracts.
+  There is no expected-fingerprint table: revision 3 made canonical replay
+  evidence under `database/` the single source of expected schema state, so a
+  `TEAM_MIGRATION_OBJECT` store would be a second copy free to drift from it.
 - [ ] Bootstrap through the write guard, verify existing definitions exactly,
   tolerate only a verified concurrent identical bootstrap, and report partial
   installation as setup-required. Metadata absence is not an empty applied set.
-- [ ] Implement the mutex as a committed conditional update, no timeout stealing.
-  A DDL commit in another connection cannot release this logical lock.
+- [ ] Implement the mutex as a committed transition that never waits on a row
+  lock, with no timeout stealing. A DDL commit in another connection cannot
+  release this logical lock. A bare conditional `UPDATE` is not acceptable:
+  Oracle blocks it on the row lock until the holding transaction ends, so a
+  client that crashed before committing freezes every later acquirer inside
+  its SQLcl subprocess. Use spec §7's acquisition block verbatim:
 
 ```sql
 -- Bind values through the adapter; this is the mutex transition only.
-UPDATE team_migration_mutex
-   SET owner_token = :run_token, acquired_at = SYSTIMESTAMP
- WHERE singleton_id = 1 AND owner_token IS NULL;
--- Assert SQL%ROWCOUNT = 1 in the controlling PL/SQL block, then COMMIT.
--- No payload may start until the caller verifies ownership by SELECT.
+DECLARE
+  v_token VARCHAR2(64);
+BEGIN
+  -- NOWAIT converts contention into ORA-00054 rather than an unbounded wait.
+  SELECT owner_token INTO v_token
+    FROM team_migration_mutex
+   WHERE singleton_id = 1
+     FOR UPDATE NOWAIT;
+
+  IF v_token IS NOT NULL THEN
+    RAISE_APPLICATION_ERROR(-20001, 'MUTEX_HELD:' || v_token);
+  END IF;
+
+  UPDATE team_migration_mutex
+     SET owner_token = :run_token, acquired_at = SYSTIMESTAMP
+   WHERE singleton_id = 1;
+  COMMIT;
+END;
+/
 ```
+
+- [ ] Distinguish exactly four acquisition outcomes and test each: success;
+  `ORA-00054` (another transaction holds the row — in-flight or uncommitted
+  crash); `ORA-20001 MUTEX_HELD:<token>` (cleanly held, token names the holder
+  for the blocking message); `NO_DATA_FOUND` (metadata not bootstrapped — a
+  setup-required error, never an acquisition failure). Any other error is a
+  hard failure. A subprocess wall-clock timeout is a backstop for network
+  stalls only, and is never read as "not acquired": it leaves the target
+  uncertain and blocked. Add a live test with two concurrent runners proving
+  the second fails fast rather than hanging.
 
 - [ ] Every state mutation predicates on the owner token. Release only after
   all workers ended and no unresolved attempt remains. Compare-and-clear the

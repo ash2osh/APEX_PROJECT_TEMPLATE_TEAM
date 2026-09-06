@@ -53,6 +53,7 @@ Public commands (all accept --env as an alternative to PROJECT_ENV_FILE):
 team.py doctor
 team.py setup-state
 team.py register-app ALIAS [--transfer-from CHECKOUT_UUID]
+team.py app-status ALIAS
 team.py recover-app-lock ALIAS --run-token TOKEN --evidence DIRECTORY
 team.py capture-app ALIAS
 team.py bootstrap-app ALIAS
@@ -65,6 +66,10 @@ team.py recover-files OPERATION_ID --action finish|restore
 
 Developer import defaults --ref to HEAD, resolved once before I/O.
 capture-app only captures, never imports or modifies tracked source.
+app-status is read-only. It prints the registered checkout UUID, its host and
+user, the registration timestamp and any held app-target mutex, so the value
+`--transfer-from` needs is always discoverable from the registry rather than
+from local state a re-clone may have lost (spec §9).
 Exit codes: 0 verified success, 2 invalid contract/target, 3 conflict or
 precondition refusal, 4 uncertain/incomplete operation, 5 external-tool failure.
 Print a JSON result containing status, operation_id, changed_paths,
