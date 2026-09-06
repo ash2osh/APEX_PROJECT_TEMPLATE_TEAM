@@ -66,10 +66,14 @@ team.py recover-files OPERATION_ID --action finish|restore
 
 Developer import defaults --ref to HEAD, resolved once before I/O.
 capture-app only captures, never imports or modifies tracked source.
-app-status is read-only. It prints the registered checkout UUID, its host and
-user, the registration timestamp and any held app-target mutex, so the value
-`--transfer-from` needs is always discoverable from the registry rather than
-from local state a re-clone may have lost (spec §9).
+app-status is read-only. It prints every checkout registered against the target
+with its host, user and registration timestamp, plus any held app-target mutex
+and the current import generation. For the shared development application that
+list has many rows and is a roster, not an ownership claim (spec §9). For a
+single-owner target it also makes the value `--transfer-from` needs discoverable
+from the registry rather than from local state a re-clone may have lost.
+`--transfer-from` applies only to single-owner targets and is rejected against
+the shared application.
 Exit codes: 0 verified success, 2 invalid contract/target, 3 conflict or
 precondition refusal, 4 uncertain/incomplete operation, 5 external-tool failure.
 Print a JSON result containing status, operation_id, changed_paths,
@@ -365,15 +369,33 @@ scripts/tests/live/test_app_lock.py.
   versioned TEAM_CONTROL_META, TEAM_APP_REGISTRY and TEAM_APP_MUTEX structures
   only in METADATA_SCHEMA. Partial or incompatible setup refuses. Plan 2 extends
   this shared schema; it does not create a second controller identity.
-- [ ] register-app binds target identity to one checkout UUID. A transfer requires
-  the old UUID, retained fresh capture and proof the old worker ended; unknown
-  liveness blocks. Verify registration before developer app mutation.
+- [ ] register-app records a checkout against a target. For the **shared
+  development application** the registry is a roster (spec §2, §9): multiple
+  concurrent checkouts are expected, every registration succeeds, and
+  `--transfer-from` is neither required nor accepted. Refusing a second checkout
+  here would lock out the whole team after the first developer registered, so a
+  test asserting that refusal would be asserting the bug. Verify registration
+  before developer app mutation, and record host and user so a held mutex and a
+  recovery can name a person.
+- [ ] Keep exclusive-checkout and transfer semantics for a target declared
+  single-owner — an optional isolated developer copy (spec §2.1). There a
+  transfer requires the old UUID, a retained fresh capture and proof the old
+  worker ended; unknown liveness blocks. Drive this from the target's declared
+  ownership mode, not from the command name, so the shared and isolated paths
+  cannot diverge in their guards.
 - [ ] Define acquire_app(target_key, run_token) and release_app(target_key,
   run_token) on control_store.py using committed conditional mutex updates.
   Hold this app-target mutex across import and verification; do not expire or
   steal it. Recovery follows exact-token/no-live-worker rules. Downstream deploy
-  uses the same mutex without developer registration. A second checkout/import
-  process must fail to acquire the same target.
+  uses the same mutex without developer registration. A second concurrent
+  *import* must fail to acquire the same target; a second *checkout* of the
+  shared application must not.
+- [ ] Maintain a monotonic import generation for each target alongside the mutex,
+  incremented when an import completes, so a reader can prove no import
+  intervened during its capture (spec §2.1). Expose it through a single
+  read-only `read_app_sync_state(target_key)` returning generation plus current
+  mutex holder, so export never acquires anything. Test that an import which
+  begins and completes entirely between two reads is still detected.
 - [ ] recover-app-lock requires the selected run token, worker-termination
   evidence and retained current target capture. It may clear ownership only
   after resolving uncertain app state; it cannot stamp a verified baseline
@@ -445,10 +467,19 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 
 **Files:** scripts/teamlib/apex.py, scripts/tests/test_export_app.py.
 **Interfaces:** `capture_app(target) -> Capture` (Capture has tree,
-recovery_id and target); `export_app(target) -> Decision`.
+recovery_id, target and the sync state observed either side of the read);
+`export_app(target) -> Decision`.
 
 - [ ] Implement spec §6 export sequence using Tasks 2–7. Capture first, retain
   before mutation, reconcile contents, journal the patch, verify and receipt.
+- [ ] Bracket the capture with `read_app_sync_state` (Task 5). Refuse before
+  starting if an import holds the mutex. After the read, accept the capture only
+  if the generation is unchanged and no holder appeared; otherwise discard it as
+  possibly torn and retry a bounded number of times before reporting that an
+  import is in progress. **Export never acquires the mutex** — readers that lock
+  can block the team and strand a lock when a developer's export dies, and two
+  concurrent exports are harmless (spec §2.1). A discarded capture has no side
+  effects, so retry is free.
 - [ ] bootstrap-app requires absent tracked alias source, captures the existing
   app and writes a reviewable candidate without database writes. adopt-app
   requires clean committed source and exact re-export equality before baseline.
@@ -458,6 +489,12 @@ recovery_id and target); `export_app(target) -> Decision`.
   SQLcl process: colleague changes, both changes, missing baseline, false-success
   partial export, dirty source, source directory symlink, rebinding, preserved
   deployments and HEAD movement. Assert actual filesystem and exit status.
+- [ ] Test the torn-capture cases with a fake SQLcl that mutates the sync state
+  mid-read: an import already holding the mutex when export starts, an import
+  starting and still running when the capture ends, and an import that begins
+  and completes entirely within the capture window. All three must discard the
+  capture and write no tracked source. Add the negative: two concurrent exports
+  must both succeed and neither may block the other.
 - [ ] Verify a refusal prints the durable capture location and resolution
   command, never an unconditional instruction to import over Builder work.
 
@@ -478,12 +515,27 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   valid capture/resolution receipt matching selected source, or the exact
   --replace-from capture for first alignment. Verify absent-app bootstrap
   explicitly. A generic --force flag is not provided.
+- [ ] Treat the baseline-mismatch refusal as the design's primary guard, not a
+  conservative default (spec §6). The application is shared, so the work it
+  protects belongs to colleagues who do not know the command is running and
+  cannot consent to losing it. The refusal names the paths that differ and the
+  export that would preserve them; no flag waives it.
+- [ ] Increment the target's import generation on completion (Task 5) so a
+  concurrent export can prove whether its capture straddled this import.
+  Increment on the completion path only — a refused or failed import that wrote
+  nothing must not advance it, and one that wrote partially must leave the
+  target uncertain rather than merely bumping a counter.
+- [ ] Print the team-pause requirement before any write: this import overwrites
+  the application everyone is editing, and §9 makes announcing it part of the
+  operation. State the alias, target identity and expected duration.
 - [ ] Validate masters/source, guard write, recheck capture and target, import,
   re-export and verify bytes plus master linkage. Baseline becomes verified
   only after all checks. Preserve old state as uncertain on import failure.
 - [ ] Test uncaptured Builder edit refusal, captured-and-committed edits,
   dirty source, stale receipt, changed app between captures, import error-zero,
   subscription mismatch, interrupted verification and successful stamping.
+  Include a second developer's uncaptured Builder work as the refusal case, and
+  assert the generation does not advance on any refused or failed path.
 - [ ] Demonstrate that every DB write occurs after exact in-session identity
   assertion and no failure path reports a current baseline.
 
@@ -538,9 +590,15 @@ docs/app-recovery.md.
   run all write guards. Never default to the historical docker-demo fixture.
 - [ ] Verify determinism, round-trip, binaries, subscription linkage,
   target remapping, missing/wrong master and full capture/resolve/import flow.
-  Include cross-instance masters, not just two apps on one instance, plus two
-  checkouts attempting the same developer app and payload attempts to mutate
-  isolated metadata. Confirm the second client refuses.
+  Include cross-instance masters, not just two apps on one instance, and payload
+  attempts to mutate isolated metadata.
+- [ ] Verify the shared-application concurrency cases live, against a real
+  application two checkouts both target (spec §2): two checkouts registering
+  must both succeed; two concurrent exports must both succeed; a second
+  concurrent import must fail to acquire the mutex; and an export whose capture
+  straddles a real import must discard rather than commit a torn tree. The
+  refusal expected here is the second *import* and the torn *capture* — never
+  the second checkout, which is the ordinary case.
 - [ ] Capture tool versions and signed-off test evidence; no automatic Git
   staging/commit in test code. Do not classify unrun live cases as passing.
 - [ ] Run all offline/native suites once more and review diffs. Document
@@ -551,6 +609,8 @@ docs/app-recovery.md.
 
 - [ ] Pure reconciliation exhaustive cases and real wrapper filesystem cases pass.
 - [ ] Baseline provenance, receipts and interrupted recovery are tested.
+- [ ] Concurrent checkouts and concurrent exports of the shared application both
+  succeed; concurrent imports and torn captures are refused.
 - [ ] Target/deployment agreement and production write refusal are tested.
 - [ ] All four shell/platform surfaces execute the shared core successfully.
 - [ ] Live qualification evidence exists, including cross-instance subscriptions.

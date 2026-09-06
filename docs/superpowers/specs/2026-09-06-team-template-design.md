@@ -117,14 +117,31 @@ the verified baseline unless a receipt accounts for the difference — is what
 makes it safe, and is now the single most important refusal in this design
 rather than one guard among several.
 
-**Export must serialize against import.** Export reads the shared application
-while another developer's import may be writing it, which yields a torn capture:
-partly the old application, partly the new one, and internally inconsistent in a
-way no later stage can detect. Export therefore acquires the same shared
-app-target mutex as import for the duration of its capture. Two concurrent
-exports remain safe — both are reads writing to separate local working trees —
-but an export concurrent with an import is not, and must block rather than
-capture.
+**Export must detect a concurrent import.** An APEX export is many queries
+issued over time, not one consistent statement, so a capture taken while an
+import is writing the application can be internally inconsistent — some pages
+read before the import committed, some after. Such a capture parses, reconciles
+and commits cleanly, which makes it the worst available failure: wrong bytes in
+Git with no error raised anywhere.
+
+**Export does not take the mutex, and exports never coordinate with each other.**
+Two concurrent exports are genuinely harmless: both are reads, each writing into
+its own local working tree. Making readers acquire a lock would let a crashed or
+abandoned export block the whole team, which is a worse failure than the one it
+prevents. Instead export reads the application's import generation and mutex
+state before its capture and again after. The capture stands only if no import
+held the mutex at either observation and the generation is unchanged; otherwise
+the capture is discarded and retried, and is never reconciled. An import that
+began and finished entirely inside the capture window is caught by the
+generation, and one still running at either end is caught by the mutex state.
+Export therefore blocks nothing and is blocked by nothing, while a torn capture
+cannot reach Git.
+
+**Coordination is a human protocol attached to import, not to export.** The
+team-wide pause in §9 is what actually keeps imports and edits apart; the
+generation check is the backstop for the occasion when someone runs an export
+without having seen the announcement. Neither replaces the other, and a team
+announcing exports to each other is guarding a hazard that does not exist.
 
 **Developer-versus-developer conflicts move out of this tooling's reach.** Two
 people editing page 6 at the same time is resolved inside the App Builder by
@@ -293,8 +310,9 @@ isolates migrations but not APEX source, because the shared development
 application has no branch. Conflicts in a captured page are reported by content
 reconciliation. Direct shared-schema writes are not serialized by Git;
 cooperative migration runners are serialized by a database mutex, and export
-shares the app-target mutex with import so a capture cannot straddle a
-concurrent write, while out-of-band changes are detected only when observed.
+detects rather than locks — it discards a capture that straddled an import
+instead of blocking other developers — while out-of-band changes are detected
+only when observed.
 
 D3: the resolved commit SHA is canonical for deployment. Integration is
 deploy-only, with an explicit target role verified against an instance and
@@ -411,14 +429,16 @@ by retaining HEAD, so refusal is unnecessary for an unambiguous case.
 1. Verify developer target role, source ownership, app alias and local state.
    Lock the local app operation; refuse staged, unstaged, untracked or ignored
    files overlapping the source ownership set. Deployment bindings are exempt
-   from source cleanliness checks but validated separately. Also acquire the
-   shared app-target mutex for the duration of the capture: the application is
-   shared (§2), so a local lock alone does not prevent another developer's
-   import from writing it mid-read and producing a torn capture. Release it once
-   the capture is persisted; the remaining steps touch only local files.
+   from source cleanliness checks but validated separately. Also read the shared
+   application's import generation and mutex state: the application is shared
+   (§2), so a local lock alone does not prevent another developer's import from
+   writing it mid-read. Refuse immediately if an import holds the mutex now.
 2. Export into scratch using a verified read session. Require a complete
    versioned export manifest, expected source classes, application.apx, and
-   positive completion evidence. Normalize .apx and hash binary bytes.
+   positive completion evidence. Normalize .apx and hash binary bytes. Re-read
+   the import generation and mutex state; a changed generation or a mutex held
+   at either observation discards this capture as possibly torn (§2.1). Discard
+   and retry rather than reconciling it — the capture has no side effects.
 3. Persist the capture, base, HEAD manifest, target identity and diagnostics in
    `.sync-state/recovery/<operation-id>/` BEFORE changing any source.
    Recovery is durable local state, never an EXIT-trap scratch directory.
@@ -958,10 +978,18 @@ Plan 2 extends that same metadata store for migrations.
 Concurrent Builder changes during export/import require a short edit pause.
 Under the revised topology that pause is **team-wide**, not personal: everyone
 editing the shared application must stop for the duration of an import, and the
-announcement is part of the operation rather than a courtesy. This is the main
-operational cost of sharing one application, and it is the reason §2.1 removes
-import from the daily loop — a step run several times a day could not carry this
-requirement.
+announcement on the team's agreed channel is part of the operation rather than a
+courtesy. This is the main operational cost of sharing one application, and it
+is the reason §2.1 removes import from the daily loop — a step run several times
+a day could not carry this requirement.
+
+The announcement covers **imports only**. Exports need no announcement and no
+coordination between developers: they are reads into separate local working
+trees, they never block each other, and the §2.1 generation check catches the
+one case that matters — a capture straddling somebody's import — without asking
+anyone to declare anything. A team that announces exports is spending
+coordination on a hazard that does not exist, and habituating itself to ignore
+the announcements that do matter.
 Whole-application imports can partially fail. Local recovery journals and
 database captures mitigate loss; they do not provide a database transaction
 or recover edits never captured before another client overwrote them.
@@ -997,9 +1025,10 @@ The METADATA schema is a Plan 1 prerequisite and not deferrable: without it ther
 is no cross-checkout mutex, and any two checkouts of the shared application can
 overwrite each other. The revised topology (§2) strengthens this rather than
 weakening it — every developer targets the same application by design, so the
-mutex is the only serialization that exists, and it now covers export as well as
-import. It is small at this stage — three tables — and Plan 2 extends the same
-schema rather than introducing a second controller.
+mutex is the only serialization that exists, and export's torn-capture check
+reads the same metadata rather than adding a second mechanism. It is small at
+this stage — three tables — and Plan 2 extends the same schema rather than
+introducing a second controller.
 
 Do not treat the ladder as permission to ship Plan 2 without the disposable
 database. The replay gate is what makes `database/` evidence trustworthy; a
@@ -1019,9 +1048,10 @@ older migration arrival, persistent drift, wrong subscription identity,
 artifact tampering, and production refusal at every public write entry point.
 
 The revised topology (§2) adds four required cases, each covering a failure that
-exists only because the application is shared: an export attempted while another
-checkout holds the mutex for an import, which must block rather than return a
-torn capture; an import attempted while a second developer's uncaptured Builder
+exists only because the application is shared: an export whose capture straddles
+another checkout's import, which must be discarded and retried rather than
+reconciled, in both the import-already-running and import-started-mid-capture
+orderings; an import attempted while a second developer's uncaptured Builder
 work is present, which must refuse and name the export that would preserve it;
 several checkouts registering against the same application, all of which must
 succeed; and an export from a branch that never received a merged colleague
