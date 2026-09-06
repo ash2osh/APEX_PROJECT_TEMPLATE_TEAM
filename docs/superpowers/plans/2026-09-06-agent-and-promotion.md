@@ -36,6 +36,7 @@ through the same adapter and error protocol as developer commands.
 | AGENTS.md; self_improve.md; .agents/rules/; .agents/workflows/team-flow.md | corrected team agent contract |
 | app_context/README.md; .graphifyignore; setup_graphify_apx.py | optional alias-keyed knowledge layer |
 | scripts/teamlib/conflict_assistant.py; docs/conflict-resolution.md | plain-language, property-level conflict explanation and developer Q&A; never auto-resolves |
+| scripts/teamlib/announce.py; docs/import-pause.md | drafted import announcement and all-clear from observed state; import confirmation that never bypasses a guard |
 | scripts/teamlib/deploy.py; scripts/deploy_app.sh/.ps1 | named-target exact-source deployment |
 | scripts/teamlib/release.py; scripts/teamlib/runbook.py | offline artifact, plan and runbook |
 | scripts/teamlib/ci.py; ci/runner-contract.json; docs/ci.md | qualification/provisioning and job entry points |
@@ -48,6 +49,7 @@ Public commands added to team.py:
 
 ```text
 explain-conflict RECOVERY_ID
+announce-import ALIAS --ref COMMIT [--all-clear RESULT_ID]
 deploy-app ALIAS --target TARGET_JSON --ref COMMIT
 build-release --ref TAG_OR_COMMIT --version SEMVER --out DIRECTORY
 verify-release ARCHIVE
@@ -66,6 +68,9 @@ actual target history again and refuses stale/mismatched plans before apply.
 explain-conflict reads only a retained Plan 1 recovery bundle and writes only
 to scratch/; it never touches tracked source and is not part of resolve-export's
 own verification, which is unchanged by its existence (see Task 3).
+announce-import is read-only and produces text for a person to post; it never
+imports, never sends, and its confirmation step is additional to Plan 1's
+refusals rather than a way through them.
 
 ## Task 1: Agent contract and recovery instructions
 
@@ -121,10 +126,18 @@ scripts/tests/test_graphify_corpus.py, app_context/README.md.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_graphify_*.py' -v`.
 
-## Task 3: Conflict-resolution assistant (`explain-conflict`)
+## Task 3: Developer-facing assistants
 
-**Files:** scripts/teamlib/conflict_assistant.py, scripts/tests/test_conflict_assistant.py,
-docs/conflict-resolution.md.
+**Files:** scripts/teamlib/conflict_assistant.py, scripts/teamlib/announce.py,
+scripts/tests/test_conflict_assistant.py, scripts/tests/test_announce.py,
+docs/conflict-resolution.md, docs/import-pause.md.
+
+Two assistants, one posture. Both exist because this template's users are APEX
+developers rather than git users (spec §1), and both are bound by the same rules:
+explain in plain language, ask rather than decide, write nothing tracked, and
+never let an answer from a person substitute for a machine guard.
+
+### `explain-conflict` — resolving a conflict without reading a diff
 
 **Interface:** `explain_conflict(recovery_id) -> ConflictBriefing` — offline,
 reads only the retained Plan 1 recovery bundle (base/head/mine trees, the
@@ -182,6 +195,65 @@ choice they're asked to make is "which page title do you want" rather than
   same resolution supplied by hand.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_conflict_assistant.py -v`.
+
+### `announce-import` — the pause protocol, written for the developer
+
+Spec §9 makes announcing an import part of the operation rather than a courtesy,
+and Plan 1 Task 9 prints the requirement. That is the floor, not the feature: a
+requirement to announce something, given to a developer with no wording and no
+observed state to describe, produces a vague message that its readers ignore. The
+assistant writes the message from what is actually in the application, and asks
+before the write.
+
+**Interface:** `draft_import_announcement(alias, commit) -> Announcement` and
+`draft_all_clear(alias, result) -> str`. Announcement carries the message text,
+the observed state it was written from, and the findings that must appear in it.
+Both are read-only and produce text; neither imports anything.
+
+- [ ] Draft from observed state, never from assumption: the resolved commit, the
+  target's workspace and application identity, the `app-status` roster (spec §9)
+  and a fresh read-only capture compared against the baseline.
+- [ ] The message states which application and target by name and ID, which
+  commit is being imported and how it differs from what is deployed, that
+  everyone must stop editing in the App Builder now and not save, who is running
+  it, and that an all-clear will follow. It must not invent a duration: give a
+  measured expectation where prior runs supply one, otherwise say the duration is
+  unknown. People plan their afternoon around that number.
+- [ ] **Uncaptured work is named, not summarised.** Where the capture differs
+  from the baseline, list the affected pages and components in the message, so
+  the person whose work it is recognises it and exports before the pause instead
+  of discovering the loss afterwards. A message saying only "some uncommitted
+  changes exist" fails this requirement and is a defect.
+- [ ] Draft the all-clear as a separate output after a verified import: what was
+  imported, that editing may resume, and where the recovery bundle is if
+  something looks wrong. A pause with no resume signal leaves the team either
+  idle or drifting back mid-import, which is the state the pause exists to
+  prevent.
+- [ ] The assistant drafts; the developer posts. This tooling has no channel
+  access and must not acquire any. Nothing here sends, schedules or auto-posts.
+
+#### Confirming the import
+
+- [ ] Put the consequences to the developer as a question they must answer, not a
+  banner they scroll past: the application and target by identity, the paths that
+  will change, any uncaptured work found, and whether the announcement has been
+  posted. Proceed only on explicit confirmation.
+- [ ] **Confirmation never substitutes for the §6 baseline refusal.** A developer
+  answering "yes, I announced it" does not unlock an import that Plan 1 refuses
+  because a colleague's uncaptured work is present. The two are independent and
+  the machine check decides. Building confirmation as a route past that guard
+  would reintroduce precisely the loss it prevents, so test explicitly that a
+  fully confirmed import over uncaptured work still refuses.
+- [ ] Where state could not be read — no connection, an unreadable roster, an
+  uncertain baseline — say so and decline to draft a reassuring message. Silence
+  about unknown state reads to a developer as "nothing found".
+- [ ] Test: message contains target identity and named uncaptured paths; absent
+  prior timings produce "unknown" rather than an invented duration; unreadable
+  state produces a refusal rather than a confident draft; confirmation alone does
+  not bypass the baseline guard; all-clear is produced only after a verified
+  import and never after a refusal or an uncertain result.
+
+Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_announce.py -v`.
 
 ## Task 4: Exact-source named deployment
 
@@ -494,6 +566,9 @@ scripts/tests/test_docs.py, docs/design-review-resolution.md.
   as the agent's own changes, no branch treated as isolating APEX source.
 - [ ] Conflict assistant never writes tracked source or selects a value on the
   developer's behalf; resolve-export independently re-verifies its output.
+- [ ] The import announcement names the target and the uncaptured work it found,
+  invents no duration, and is followed by an all-clear only after a verified
+  import. A confirmed import over a colleague's uncaptured work still refuses.
 - [ ] Required CI actually provisions fresh targets and proves replay/import.
 - [ ] Integration deploys an exact SHA and reports shared foreign history.
 - [ ] Releases are deterministic and verified; test promotes the downloaded bytes.

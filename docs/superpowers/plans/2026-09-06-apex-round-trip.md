@@ -527,7 +527,10 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   target uncertain rather than merely bumping a counter.
 - [ ] Print the team-pause requirement before any write: this import overwrites
   the application everyone is editing, and §9 makes announcing it part of the
-  operation. State the alias, target identity and expected duration.
+  operation. State the alias, target identity and expected duration. This is the
+  floor. Plan 3 Task 3 adds `announce-import`, which drafts the message from
+  observed state and confirms with the developer; keep this print correct on its
+  own, because Plan 1 must be usable before Plan 3 exists.
 - [ ] Validate masters/source, guard write, recheck capture and target, import,
   re-export and verify bytes plus master linkage. Baseline becomes verified
   only after all checks. Preserve old state as uncertain on import failure.
