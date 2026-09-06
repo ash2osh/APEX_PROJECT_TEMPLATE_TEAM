@@ -35,6 +35,7 @@ through the same adapter and error protocol as developer commands.
 |---|---|
 | AGENTS.md; self_improve.md; .agents/rules/; .agents/workflows/team-flow.md | corrected team agent contract |
 | app_context/README.md; .graphifyignore; setup_graphify_apx.py | optional alias-keyed knowledge layer |
+| scripts/teamlib/conflict_assistant.py; docs/conflict-resolution.md | plain-language, property-level conflict explanation and developer Q&A; never auto-resolves |
 | scripts/teamlib/deploy.py; scripts/deploy_app.sh/.ps1 | named-target exact-source deployment |
 | scripts/teamlib/release.py; scripts/teamlib/runbook.py | offline artifact, plan and runbook |
 | scripts/teamlib/ci.py; ci/runner-contract.json; docs/ci.md | qualification/provisioning and job entry points |
@@ -46,6 +47,7 @@ through the same adapter and error protocol as developer commands.
 Public commands added to team.py:
 
 ```text
+explain-conflict RECOVERY_ID
 deploy-app ALIAS --target TARGET_JSON --ref COMMIT
 build-release --ref TAG_OR_COMMIT --version SEMVER --out DIRECTORY
 verify-release ARCHIVE
@@ -61,6 +63,9 @@ they do not fetch it or connect. gen-runbook also requires signed test evidence
 and a trust key supplied outside the artifact. apply-release accepts only test/integration
 roles with non-production classification. It verifies the artifact, reads
 actual target history again and refuses stale/mismatched plans before apply.
+explain-conflict reads only a retained Plan 1 recovery bundle and writes only
+to scratch/; it never touches tracked source and is not part of resolve-export's
+own verification, which is unchanged by its existence (see Task 3).
 
 ## Task 1: Agent contract and recovery instructions
 
@@ -104,7 +109,61 @@ scripts/tests/test_graphify_corpus.py, app_context/README.md.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_graphify_*.py' -v`.
 
-## Task 3: Exact-source named deployment
+## Task 3: Conflict-resolution assistant (`explain-conflict`)
+
+**Files:** scripts/teamlib/conflict_assistant.py, scripts/tests/test_conflict_assistant.py,
+docs/conflict-resolution.md.
+
+**Interface:** `explain_conflict(recovery_id) -> ConflictBriefing` — offline,
+reads only the retained Plan 1 recovery bundle (base/head/mine trees, the
+conflict path list and capture/commit author metadata Plan 1 already
+persists). ConflictBriefing enumerates, per conflicted path, the APEXlang
+properties that actually differ and a bounded question set (keep head / keep
+mine / keep both with developer-supplied text / raw diff fallback). It writes
+nothing to tracked source.
+
+Written for the audience spec §1 assumes throughout — APEX developers, not
+git users. A raw three-way text conflict on `.apx` source is not a reasonable
+thing to hand someone who has never resolved one; this task exists so the
+choice they're asked to make is "which page title do you want" rather than
+"resolve this diff3 marker."
+
+- [ ] Depends on Plan 1 Task 10's recovery bundle format and Task 1's
+  corrected agent contract; do not define a second bundle schema here.
+- [ ] Parse each conflicted file's base/head/mine as APEXlang structure, not
+  raw text — diff at the property level (page/region/item/button/
+  subscription). A file the parser cannot confidently handle refuses to
+  reduced-guess; it returns the raw three-way diff instead, never a
+  best-effort structural read.
+- [ ] Distinguish two outcomes per path: (a) the two sides changed *different*
+  properties — report this, but still require developer confirmation before
+  writing anything, never auto-apply; (b) the two sides changed the *same*
+  property to different values — this is the only case that produces a
+  question. State both values in plain language and, where capture/commit
+  metadata identifies them, who made each change.
+- [ ] The assistant never selects a value for the developer and never
+  synthesizes a merged value on its own; "keep both" requires the developer's
+  own supplied text. This is the spec's existing "no automatic line merge"
+  rule (§6) applied at the property level — the assistant narrows what a
+  human has to read, it does not remove the decision from them.
+- [ ] Candidate output is written only under scratch/, one file at a time,
+  only after every question for that path is answered. Never written to
+  tracked source; never invoked automatically from resolve-export or any
+  other command.
+- [ ] Plan 1's `resolve-export` (Task 10) is unchanged by this task: it still
+  requires an explicit `--resolved` path and independently re-verifies
+  conflict-path coverage against the original preimage. The assistant's
+  scratch/ output is one valid way to produce that directory, not a trusted
+  bypass of resolve-export's own checks.
+- [ ] Test: different-property auto-identification, same-property question
+  generation, unparsable-file fallback to raw diff, refusal to write outside
+  scratch/, refusal to proceed with an unanswered path, and that
+  resolve-export applied to the assistant's output is byte-identical to the
+  same resolution supplied by hand.
+
+Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_conflict_assistant.py -v`.
+
+## Task 4: Exact-source named deployment
 
 **Files:** scripts/teamlib/deploy.py, scripts/deploy_app.sh/.ps1,
 scripts/tests/test_deploy.py.
@@ -140,7 +199,7 @@ and recovery location.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_deploy.py -v`.
 
-## Task 4: Required CI database provisioning and replay gate
+## Task 5: Required CI database provisioning and replay gate
 
 **Files:** scripts/teamlib/ci.py, ci/runner-contract.json, docs/ci.md,
 .github/workflows/database-checks.yml, scripts/tests/test_ci_contract.py.
@@ -199,7 +258,7 @@ Initial release with no previous artifact requires an explicit initial-release
 classification and records that upgrade was not applicable; it does not silently
 substitute an empty previous release.
 
-## Task 5: Post-merge integration from canonical source
+## Task 6: Post-merge integration from canonical source
 
 **Files:** .github/workflows/integration.yml, scripts/tests/test_integration_workflow.py.
 
@@ -222,7 +281,7 @@ substitute an empty previous release.
 - [ ] Test workflow behavior with a fake provisioner/SQLcl and two queued commits.
   YAML parsing alone is not acceptance.
 
-## Task 6: Immutable release artifact and target-specific planning
+## Task 7: Immutable release artifact and target-specific planning
 
 **Files:** scripts/teamlib/release.py, scripts/tests/test_release.py,
 scripts/gen_release.sh/.ps1, docs/promotion.md.
@@ -317,7 +376,7 @@ def canonical_digest(value):
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_release.py -v`.
 
-## Task 7: Tag-to-test promotion and offline production handoff
+## Task 8: Tag-to-test promotion and offline production handoff
 
 **Files:** .github/workflows/release.yml, scripts/teamlib/runbook.py,
 scripts/tests/test_release_workflow.py, scripts/tests/test_production_boundary.py,
@@ -376,7 +435,7 @@ docs/promotion.md.
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_production_boundary.py' -v`;
 run test_release_workflow.py for the non-production end-to-end fixture.
 
-## Task 8: User documentation and final acceptance
+## Task 9: User documentation and final acceptance
 
 **Files:** README.md, docs/promotion.md, .agents/workflows/team-flow.md,
 scripts/tests/test_docs.py, docs/design-review-resolution.md.
@@ -400,6 +459,8 @@ scripts/tests/test_docs.py, docs/design-review-resolution.md.
 ## Completion checklist
 
 - [ ] Agent rules are consistent with alias/recovery/migration ownership.
+- [ ] Conflict assistant never writes tracked source or selects a value on the
+  developer's behalf; resolve-export independently re-verifies its output.
 - [ ] Required CI actually provisions fresh targets and proves replay/import.
 - [ ] Integration deploys an exact SHA and reports shared foreign history.
 - [ ] Releases are deterministic and verified; test promotes the downloaded bytes.
