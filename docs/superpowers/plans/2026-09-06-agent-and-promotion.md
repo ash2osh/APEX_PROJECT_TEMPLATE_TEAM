@@ -1,0 +1,374 @@
+# Agents, Integration and Promotion — Implementation Plan (Plan 3 of 3)
+
+> **For agentic workers:** Use superpowers:executing-plans, or
+> superpowers:subagent-driven-development when delegation is authorized.
+> Do not mark a gate complete before its behavioral acceptance tests run.
+
+**Revision:** 2 — actual test promotion, immutable releases and offline production.
+**Goal:** Give agents correct team rules and prove selected source can be built,
+deployed to integration, promoted to test and handed to production safely.
+**Architecture:** CI first proves canonical replay, then deploys an exact commit
+to integration. Release builds export a pinned Git tree and complete migration
+history; target-specific pending plans are external to the immutable artifact.
+Production gets verified bytes plus a human runbook, with no automated apply.
+**Tech Stack:** Python 3.10+ shared core, Bash/PowerShell, qualified SQLcl/APEX,
+GitHub Actions, isolated disposable database runner.
+**Spec:** [Team design](../specs/2026-09-06-team-template-design.md), §§4, 7–11.
+**Dependencies:** [Plan 1](2026-09-06-apex-round-trip.md) and
+[Plan 2](2026-09-06-migration-layer.md).
+
+## Global constraints
+
+Spec §8 applies to every task. Production reads are SELECT-only; all production
+writes, including metadata, adoption, recovery and bootstrap, are refused.
+No CI job receives a production saved connection, wallet or credential.
+Runtime target roles and verified identities enforce deployment boundaries.
+
+Use one Python core and thin shell launchers. Artifact construction, validation,
+pending-plan calculation and runbook generation are offline operations.
+Deployments use protected non-production contexts only. Test SQLcl commands
+through the same adapter and error protocol as developer commands.
+
+## File responsibilities
+
+| Files to create | Responsibility |
+|---|---|
+| AGENTS.md; self_improve.md; .agents/rules/; .agents/workflows/team-flow.md | corrected team agent contract |
+| app_context/README.md; .graphifyignore; setup_graphify_apx.py | optional alias-keyed knowledge layer |
+| scripts/teamlib/deploy.py; scripts/deploy_app.sh/.ps1 | named-target exact-source deployment |
+| scripts/teamlib/release.py; scripts/teamlib/runbook.py | offline artifact, plan and runbook |
+| scripts/teamlib/ci.py; ci/runner-contract.json; docs/ci.md | qualification/provisioning and job entry points |
+| .github/workflows/template-checks.yml; database-checks.yml | offline and required disposable replay gates |
+| .github/workflows/integration.yml; release.yml | merge deployment and tag-to-test promotion |
+| scripts/tests/test_deploy.py; test_release.py; test_production_boundary.py | public-entry-point regression tests |
+| README.md; docs/promotion.md | user workflow, environment setup and recovery |
+
+Public commands added to team.py:
+
+```text
+deploy-app ALIAS --target TARGET_JSON --ref COMMIT
+build-release --ref TAG_OR_COMMIT --version SEMVER --out DIRECTORY
+verify-release ARCHIVE
+plan-release ARCHIVE --history HISTORY_JSON --target TARGET_JSON --out FILE
+apply-release ARCHIVE --target TARGET_JSON --plan PLAN_JSON
+gen-runbook ARCHIVE --history HISTORY_JSON --target TARGET_JSON --test-evidence FILE --signature FILE --trust-key FILE --out FILE
+ci-doctor --contract FILE
+ci-replay --ref COMMIT --previous PREVIOUS_ARTIFACT
+```
+
+plan-release and gen-runbook use history supplied by the environment owner;
+they do not fetch it or connect. gen-runbook also requires signed test evidence
+and a trust key supplied outside the artifact. apply-release accepts only test/integration
+roles with non-production classification. It verifies the artifact, reads
+actual target history again and refuses stale/mismatched plans before apply.
+
+## Task 1: Agent contract and recovery instructions
+
+**Files:** AGENTS.md, self_improve.md, .agents/rules/agent-safety.md,
+.agents/workflows/team-flow.md, docs/app-recovery.md, scripts/tests/test_agent_docs.py.
+
+- [ ] Adapt the solo instruction files, preserving evidence-backed portability
+  lessons. Replace conflicting statements about numeric paths, database mirrors
+  as truth, AI-generated SQL placement and temporary recovery state.
+- [ ] Explicitly route APEX changes to apps/<alias>, SQL intent to migration
+  bundles, database evidence to canonical replay, and recovery captures to
+  .sync-state. Check app_context before complex app work.
+- [ ] Require drift inspection before database changes; describe its structural
+  coverage and inability to observe uncaptured/transient writes or arbitrary DML.
+- [ ] Document capture/resolve/commit/import and uncertain-attempt recovery.
+  No instruction may say a rejected export can be fixed simply by importing
+  over the Builder workspace.
+- [ ] Keep exact connection/profile gates, production SELECT-only rule and
+  no automatic commit/push. Reconcile inherited initialization/uc-apx workflows
+  with new alias and config contracts before including them; omit incompatible
+  copies rather than leaving broken routing links.
+- [ ] Test links and key path/command contracts. No case-colliding agent files.
+
+## Task 2: Optional Graphify and alias-keyed context
+
+**Files:** .graphifyignore, setup_graphify_apx.py, scripts/graphify_*.py,
+scripts/tests/test_graphify_corpus.py, app_context/README.md.
+
+- [ ] Inspect and vendor the tested extractor/setup helpers with their real
+  dependencies and licenses. Do not install or run extraction automatically.
+- [ ] Allowlist apps/, database/ and app_context/. Exclude deployments,
+  .apex tooling metadata, static payloads, logs and all sync/recovery state.
+  Migrations remain execution history; canonical database evidence supplies
+  current object definitions.
+- [ ] Key context by alias and include purpose, data dependencies, subscription
+  master identities, known issues and recovery notes.
+- [ ] Test alias paths, deployment exclusion, binary exclusion, optional absence
+  and cache invalidation for changed APEXlang extractor. Verify local links.
+- [ ] Preserve optional uc-apx opt-in semantics; adding the team template does
+  not imply installation.
+
+Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_graphify_*.py' -v`.
+
+## Task 3: Exact-source named deployment
+
+**Files:** scripts/teamlib/deploy.py, scripts/deploy_app.sh/.ps1,
+scripts/tests/test_deploy.py.
+
+**Interface:** `deploy_app(alias, target, source_tree, source_commit)
+-> DeployReport`; source_tree is immutable materialized bytes, not a live path.
+DeployReport includes commit, target identity, verified tree/subscription digests
+and recovery location.
+
+- [ ] Resolve target JSON and .env explicitly. For integration/test require
+  named deployment binding agreement with the exact profile, workspace, schema,
+  app ID and saved connection. Reject default, traversal and mismatched role.
+- [ ] Stage exact source from a resolved Git commit or verified artifact.
+  Preserve tracked bindings in Git; inject only the selected verified binding
+  into staging. Do not copy local default.json or credentials into the source.
+- [ ] Capture destination before replacement to durable deployment recovery.
+  These downstream workspaces are explicitly replaceable from approved source;
+  they do not use developer .sync-state baseline or capture receipt.
+- [ ] Validate masters and source, guard production, verify in-session identity,
+  import and re-export, verify owned source and subscription linkage.
+  Record deployment evidence only after verification.
+- [ ] Acquire Plan 1 control_store's persistent app-target mutex before capture,
+  hold through import/verification and retain it on unknown results. This protects
+  separate clones and local automated clients as well as CI. Controller access
+  uses METADATA; payloads never receive controller tokens.
+- [ ] Serialize same-target CI jobs. Track last verified commit; refuse a stale
+  ancestor deployment arriving after a newer successful deployment. Require an
+  explicit reviewed non-production rollback workflow for rollback, not a race
+  between queued jobs. Unknown/failed deployment remains visible.
+- [ ] Test binding/profile mismatch, alternate embedded connection, dirty source
+  exclusion, stale commit, wrong master, partial import and verification failure.
+  Prove this path never changes developer baseline state.
+
+Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_deploy.py -v`.
+
+## Task 4: Required CI database provisioning and replay gate
+
+**Files:** scripts/teamlib/ci.py, ci/runner-contract.json, docs/ci.md,
+.github/workflows/database-checks.yml, scripts/tests/test_ci_contract.py.
+
+- [ ] Specify an isolated disposable runner contract: qualified exact SQLcl,
+  JDK/APEX/database versions, Python, provisioner executable and named profiles.
+  CI-doctor validates capabilities and saved connections without exposing secrets.
+- [ ] Provisioner interface is an executable receiving argv
+  `create --run-id UUID --out scratch/ci/UUID`. It returns a versioned JSON
+  file with instance token, explicit replay .env path and app/workspace fixtures.
+  `destroy --run-id UUID --instance-token TOKEN` deletes only that verified
+  disposable resource. A reused/shared target fails empty-target/identity checks.
+- [ ] Implement the provider for the team's chosen isolated runner by qualified
+  scripts or image pinned in runner-contract.json; acceptance must execute
+  create/probe/replay/destroy. No provider implementation is presumed present.
+  Missing provisioner/toolchain/connection fails the required job.
+- [ ] Run Plan 2 fresh replay and previous-release upgrade, history immutability
+  and canonical evidence comparison, then Plan 1 disposable APEX round-trip
+  and master fixtures. Upload sanitized results and failed captures.
+- [ ] Run untrusted PR code only in disposable isolated runners without shared
+  integration credentials. Do not use pull_request_target to execute PR payloads.
+  Destructive migration fixtures are confined to explicitly authorized test
+  instances; deployment defaults still refuse destructive pending work.
+- [ ] Record complete manifests including additions. Never overwrite tracked
+  database/ to measure a replay diff. Qualification and evidence must identify
+  the exact source SHA.
+- [ ] Test missing toolchain, absent provisioning, mismatched token, cleanup
+  failure, nonempty/shared target, malformed output and a deliberately broken
+  migration. None may report PASS/skipped as successful qualification.
+
+The workflow job dependency graph is mandatory:
+
+```text
+offline checks -> provision disposable targets -> fresh replay
+              -> upgrade replay -> APEX round-trip/master cases
+              -> publish qualification evidence -> cleanup exact targets
+```
+
+Initial release with no previous artifact requires an explicit initial-release
+classification and records that upgrade was not applicable; it does not silently
+substitute an empty previous release.
+
+## Task 5: Post-merge integration from canonical source
+
+**Files:** .github/workflows/integration.yml, scripts/tests/test_integration_workflow.py.
+
+- [ ] Trigger on push to main and resolve the event SHA. Require offline checks
+  and qualified database-checks for that exact SHA before deployment.
+- [ ] Use a protected integration environment and concurrency group scoped to
+  project/target with cancel-in-progress false. A queued older SHA must not
+  replace a newer verified deployment.
+- [ ] Provision saved connections in the job's isolated store from protected
+  non-production secrets. .env contains names and expectations only.
+- [ ] Apply migrations using shared mode when integration uses the shared dev
+  schema. Report foreign_applied IDs and enforce central fingerprints; do not
+  pretend the shared schema equals HEAD. Fresh replay supplies canonical proof.
+- [ ] Deploy every tracked application from the selected commit, respecting
+  master-before-subscriber dependencies. Detect cycles/missing managed masters;
+  externally managed masters must already satisfy the contract.
+- [ ] Verify actual app bytes/linkage and schema drift after deployment.
+  Upload per-app and migration evidence; failure blocks the successful build
+  status and retains recovery. Cleanup only job-local secrets/temporary files.
+- [ ] Test workflow behavior with a fake provisioner/SQLcl and two queued commits.
+  YAML parsing alone is not acceptance.
+
+## Task 6: Immutable release artifact and target-specific planning
+
+**Files:** scripts/teamlib/release.py, scripts/tests/test_release.py,
+scripts/gen_release.sh/.ps1, docs/promotion.md.
+
+**Interfaces:** `build_release(repo, ref, version, out) -> Manifest`;
+`verify_release(release_tar) -> Manifest`;
+`plan_release(release_tar, history, target) -> ReleasePlan`.
+
+Canonical distributable: release.tar. Build returns a staging directory plus
+this exact archive. CI uploads/downloads it as an opaque file; the GitHub wrapper
+archive is not the release identity. Test and production verify the same tar
+SHA-256 before safe extraction and complete-manifest verification.
+Every consumer takes the archive file, opens one stable file handle, verifies
+its digest and extracts from those same bytes into a fresh private staging
+directory. It rejects archive mutation, unsafe members and manifest mismatch;
+it never trusts a caller-supplied previously extracted directory. Internal
+replay/deploy APIs receive this verified materialization and its archive digest.
+
+Artifact layout after safe extraction:
+
+```text
+release/
+  MANIFEST.json
+  apps/<alias>/...                 owned source only, no deployments/
+  migrations/...                  complete immutable three-member bundles
+  evidence/schema/...             canonical schema fingerprints
+  contracts/masters.json          master and component requirements
+  contracts/toolchain.json        qualified versions and manifest format
+  tools/...                      versioned offline verification/planning tools
+```
+
+- [ ] Resolve the tag/commit once and read only its Git blobs via an explicit
+  allowlist. Dirty/untracked local files cannot enter the artifact, even when
+  they match filenames. Refuse symlinks, paths escaping root and unsupported
+  modes. Never copy the working directory with cp -r.
+- [ ] Include complete migration history; exclude operations/zz_*, credentials,
+  .env, default/named deployment bindings, sync state, logs and scratch.
+- [ ] Manifest fields: format_version, version, source_commit, source_tree,
+  toolchain, ordered migration IDs/checksums/dependencies, owned app tree
+  digests, master contract digest, sorted payload path/size/SHA-256 entries.
+  The manifest does not hash itself. The SHA-256 of release.tar is the external
+  artifact digest recorded in CI evidence and the protected release record.
+  Serialize sorted POSIX ustar entries with UTF-8 names, uid/gid 0, empty
+  uname/gname, mtime 0, file modes 0644 (0755 only for allowlisted tools),
+  directory mode 0755, no compression/PAX/extensions, and standard 10240-byte
+  record padding. Reject names/sizes that ustar cannot represent; never truncate.
+- [ ] Verify file hashes AND complete file set before any application. Missing,
+  unexpected and changed files all refuse. Reject output-directory reuse.
+- [ ] plan-release compares the destination's exact history (identity, metadata
+  version, sequence and checksums) with artifact history in strict mode,
+  producing pending IDs plus target/history/artifact digests. No DB connection.
+- [ ] apply-release takes --plan, verifies its archive/target/history digests,
+  then rereads history under the migration mutex and recomputes the pending plan.
+  Require exact equality before writes; changed pending work refuses and requires
+  a new plan. Pass the reviewed plan into Plan 2 apply_plan as expected_plan;
+  that comparison and execution share the same held mutex. Credentials and selected binding are injected only into
+  deployment staging.
+- [ ] Add positive build tests from a temporary Git commit, dirty/untracked
+  contamination tests, binary parity, deterministic rebuild, path attacks,
+  historical-already-applied exclusion, tampered history and artifact tampering.
+  Build release.tar on Linux and Windows and compare identical bytes. Test
+  unsupported ustar names and a changed target history after plan generation.
+
+Core hashing recipe shared with bundle manifests:
+
+```python
+import hashlib
+import json
+
+def canonical_digest(value):
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+```
+
+Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_release.py -v`.
+
+## Task 7: Tag-to-test promotion and offline production handoff
+
+**Files:** .github/workflows/release.yml, scripts/teamlib/runbook.py,
+scripts/tests/test_release_workflow.py, scripts/tests/test_production_boundary.py,
+docs/promotion.md.
+
+- [ ] Bind refs/tags/vX.Y.Z exactly to manifest version X.Y.Z. Configure protected
+  immutable tags and a protected append-only release record mapping version to
+  source SHA/archive digest. Refuse mismatched --version, moved/recreated tags
+  and version reuse, even if an output directory does not yet exist. Test all
+  three cases with simulated release records.
+- [ ] Trigger release workflow on semver tags; resolve the tag SHA and require
+  it belongs to reviewed canonical history and has exact-SHA qualification.
+  Build once, upload/retain the immutable artifact and external digest.
+- [ ] In a protected test job, download and verify that artifact, load explicit
+  test bindings, check strict history, apply pending migrations, deploy apps in
+  master dependency order and run structural/data/APEX/subscription checks.
+  Serialize target jobs and refuse outdated deployment.
+- [ ] Emit TEST_EVIDENCE.json with format version, archive SHA-256, source SHA,
+  qualification SHA/toolchain digest, target identity, CI run identity and final
+  successful deployment/schema/data/APEX/subscription results. Sign canonical
+  JSON bytes with the protected CI Ed25519 signing key after all gates pass.
+  Use a qualified pinned cryptography dependency for offline verification;
+  include its installation/version/hash requirements in the toolchain contract.
+  Production receives the same artifact bytes; never rebuild from main.
+- [ ] Implement gen-runbook as offline code taking artifact, owner-supplied
+  history, target contract, TEST_EVIDENCE.json, detached signature and a trusted
+  public key supplied independently of the artifact. Verify signature, archive
+  digest, source SHA, qualification identity and all required PASS results.
+  Missing/failed/untrusted evidence refuses a ready handoff. Test tampering,
+  wrong key, unrelated artifact and failed-result attestations. Output is a
+  human document and pending plan, not a production apply command.
+- [ ] Runbook must state exact source/artifact digest, tool versions, target
+  identity, metadata owner, pending IDs/targets/checksums, master requirements,
+  backup/restore evidence, maintenance/destructive prerequisites, verification
+  queries, app import order, success-before-log uncertainty and recovery.
+- [ ] Include a reviewed manual metadata/attempt recording procedure for the
+  production owner (all log writes through the isolated metadata schema), supported-object
+  expectations and data verification. Never instruct them to blindly replay
+  all migration history or expect DDL rollback.
+- [ ] State that source SQL is trusted reviewed deployment code, not a sandbox.
+  Wrapper tests prove the declared automated entry points reject production;
+  they do not prove arbitrary SQL cannot be run by a human with credentials.
+- [ ] Parameterize fake-SQLcl boundary tests over import, deploy, apply-release,
+  migrate, bootstrap, setup-state, register-app, adopt-baseline, app-lock recovery
+  and recover-migration. With valid
+  production config, assert explicit production refusal and ZERO write
+  launches. Pair every negative with valid non-production positive coverage
+  so a missing file or broken parser cannot masquerade as protection.
+- [ ] For build-release, verify-release, plan-release and gen-runbook, make any
+  process/network/database invocation fail the test. Add malicious alternate
+  deployment connection tests and ensure no artifact carries production secrets.
+- [ ] Test a complete tag/build/download/verify/test/deploy/evidence flow plus
+  tampering, failed migration, wrong master and unavailable target failures.
+  Confirm no production apply job or configuration override exists.
+
+Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_production_boundary.py' -v`;
+run test_release_workflow.py for the non-production end-to-end fixture.
+
+## Task 8: User documentation and final acceptance
+
+**Files:** README.md, docs/promotion.md, .agents/workflows/team-flow.md,
+scripts/tests/test_docs.py, docs/design-review-resolution.md.
+
+- [ ] Document prerequisites, clone setup, exact profiles (including isolated
+  METADATA and observation-only VERIFY), initial app adoption,
+  migration-baseline adoption, ordinary Builder/source workflows, recovery,
+  branch integration, test promotion and production handoff.
+- [ ] Explain that alias is stable logical identity and environment app IDs
+  differ. Named deploy bindings and profiles must agree; neither can silently
+  override the other.
+- [ ] Explain shared integration contamination, foreign migrations, canonical
+  replay and partial-DDL limitations with concrete examples.
+- [ ] Add a review-resolution matrix mapping every original finding to the
+  revised contract, implementation task and acceptance test.
+- [ ] Verify local links, documented CLI --help examples, all offline/native
+  suites, isolated live gates and complete release-to-test acceptance.
+- [ ] Inspect final diff and preserve unrelated files. No implementation claim
+  is made for a checklist item still unchecked.
+
+## Completion checklist
+
+- [ ] Agent rules are consistent with alias/recovery/migration ownership.
+- [ ] Required CI actually provisions fresh targets and proves replay/import.
+- [ ] Integration deploys an exact SHA and reports shared foreign history.
+- [ ] Releases are deterministic and verified; test promotes the downloaded bytes.
+- [ ] Production generation is offline and every automated write surface refuses it.
+- [ ] Human handoff includes pending selection, log ownership and partial-failure recovery.
