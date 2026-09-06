@@ -4,6 +4,9 @@
 **Status:** Revised after design review; implementation and live acceptance gates remain pending
 **Relationship:** Sibling of `APEX_PROJECT_TEMPLATE`, which remains unchanged
 and continues to serve single-developer projects.
+**Plain-language explainer:** [`docs/working-on-apex-together.html`](../../working-on-apex-together.html)
+— the same material for a reader who does not need this level of detail. Keep
+the two in step when a decision here changes.
 
 ---
 

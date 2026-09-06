@@ -1,0 +1,976 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; }
+    img { max-width: 100%; }
+    [hidden] { display: none !important; }
+  </style>
+<title>Working on APEX Together</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --bg:      #eceff0;
+    --surface: #fbfcfc;
+    --sunk:    #e3e8e8;
+    --ink:     #151e1d;
+    --muted:   #586664;
+    --faint:   #7d8b89;
+    --rule:    #d0d9d8;
+    --accent:  #0f6d6b;
+    --accent-soft: #d9ebea;
+    --warn:    #8a5a06;
+    --warn-soft:   #f5e9d2;
+    --bad:     #9c3131;
+    --bad-soft:    #f4dede;
+    --good:    #216b45;
+    --good-soft:   #dcece3;
+
+    --display: "IBM Plex Sans Condensed", "Helvetica Neue", Arial, sans-serif;
+    --body: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    --measure: 64ch;
+    --wide: 78ch;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:      #0d1413;
+      --surface: #141d1c;
+      --sunk:    #0a100f;
+      --ink:     #e2e9e8;
+      --muted:   #93a3a0;
+      --faint:   #6f7f7d;
+      --rule:    #253331;
+      --accent:  #4cc0ba;
+      --accent-soft: #102b2a;
+      --warn:    #d9a441;
+      --warn-soft:   #2c2312;
+      --bad:     #e08585;
+      --bad-soft:    #2e1818;
+      --good:    #6cc79a;
+      --good-soft:   #12271d;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:      #0d1413;
+    --surface: #141d1c;
+    --sunk:    #0a100f;
+    --ink:     #e2e9e8;
+    --muted:   #93a3a0;
+    --faint:   #6f7f7d;
+    --rule:    #253331;
+    --accent:  #4cc0ba;
+    --accent-soft: #102b2a;
+    --warn:    #d9a441;
+    --warn-soft:   #2c2312;
+    --bad:     #e08585;
+    --bad-soft:    #2e1818;
+    --good:    #6cc79a;
+    --good-soft:   #12271d;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: var(--wide);
+    margin: 0 auto;
+    padding: 0 24px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 52px;
+  }
+
+  .col { max-width: var(--measure); }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    padding: 72px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(38px, 7vw, 62px);
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 20px;
+    line-height: 1.5;
+    color: var(--muted);
+    max-width: 52ch;
+    margin: 0;
+  }
+
+  .masthead-rule {
+    height: 3px;
+    background: var(--accent);
+    width: 96px;
+  }
+
+  /* ---------- structure ---------- */
+
+  section { display: flex; flex-direction: column; gap: 18px; }
+
+  h2 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(26px, 3.6vw, 34px);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 20px;
+    letter-spacing: 0.005em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  p { margin: 0; }
+  .col p + p { margin-top: 14px; }
+
+  a { color: var(--accent); }
+
+  strong { font-weight: 600; }
+
+  em.term {
+    font-style: normal;
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--sunk);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  .section-mark {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    border-top: 1px solid var(--rule);
+    padding-top: 10px;
+  }
+
+  /* ---------- code ---------- */
+
+  .code {
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 16px 18px;
+    overflow-x: auto;
+  }
+
+  .code pre {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.62;
+    white-space: pre;
+  }
+
+  .cap {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--faint);
+    letter-spacing: 0.03em;
+  }
+
+  .c-key { color: var(--accent); }
+  .c-com { color: var(--faint); font-style: italic; }
+  .c-bad { color: var(--bad); }
+  .c-good { color: var(--good); }
+  .c-warn { color: var(--warn); }
+
+  /* ---------- callouts ---------- */
+
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 16px 20px;
+    border-radius: 0 6px 6px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .note.bad  { border-left-color: var(--bad);  background: var(--bad-soft); }
+  .note.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+
+  .note-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .note.bad .note-label  { color: var(--bad); }
+  .note.warn .note-label { color: var(--warn); }
+
+  /* ---------- failure timeline ---------- */
+
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+
+  .tl-step {
+    display: grid;
+    grid-template-columns: 62px 1fr;
+    gap: 18px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .tl-step:last-child { border-bottom: 0; }
+  .tl-step.fatal { background: var(--bad-soft); }
+
+  .tl-who {
+    font-family: var(--mono);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--faint);
+    padding-top: 3px;
+  }
+  .tl-step.fatal .tl-who { color: var(--bad); }
+
+  .tl-body { font-size: 16px; line-height: 1.55; }
+
+  /* ---------- loop ---------- */
+
+  .loop { display: flex; flex-direction: column; gap: 14px; counter-reset: step; }
+
+  .loop-step {
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    gap: 18px;
+    align-items: start;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+
+  .loop-step::before {
+    counter-increment: step;
+    content: counter(step);
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--surface);
+    background: var(--accent);
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+  }
+
+  .loop-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .loop-body h3 { font-size: 18px; }
+  .loop-body p { font-size: 16px; line-height: 1.55; color: var(--muted); }
+
+  /* ---------- reconciliation widget ---------- */
+
+  .recon {
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+
+  .recon-pick {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 18px 20px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--sunk);
+  }
+
+  .recon-btn {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.01em;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: 7px 15px;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+  .recon-btn:hover { color: var(--ink); border-color: var(--faint); }
+  .recon-btn[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--surface);
+  }
+  .recon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .recon-stage { padding: 22px 20px; display: flex; flex-direction: column; gap: 18px; }
+
+  .recon-story { font-size: 16px; line-height: 1.55; margin: 0; }
+
+  .recon-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+
+  .rc {
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    padding: 12px 13px;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .rc-h {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .rc-sub { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+
+  .rc-val {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink);
+    word-break: break-word;
+  }
+  .rc-val.none { color: var(--faint); font-style: italic; }
+
+  .recon-out {
+    border-radius: 7px;
+    padding: 15px 17px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid transparent;
+  }
+  .recon-out.keep     { background: var(--good-soft); border-color: var(--good); }
+  .recon-out.conflict { background: var(--warn-soft); border-color: var(--warn); }
+
+  .recon-out-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .recon-out.keep .recon-out-label     { color: var(--good); }
+  .recon-out.conflict .recon-out-label { color: var(--warn); }
+
+  .recon-out-text { font-size: 16px; line-height: 1.5; }
+
+  @media (max-width: 620px) {
+    .recon-grid { grid-template-columns: 1fr; }
+    .tl-step { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  /* ---------- limits table ---------- */
+
+  .limits { display: flex; flex-direction: column; gap: 10px; }
+
+  .limit {
+    display: grid;
+    grid-template-columns: 96px 1fr;
+    gap: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    background: var(--surface);
+    align-items: start;
+  }
+
+  .limit-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 4px;
+    text-align: center;
+  }
+  .limit-tag.no  { background: var(--bad-soft);  color: var(--bad); }
+  .limit-tag.yes { background: var(--good-soft); color: var(--good); }
+
+  .limit-body { font-size: 16px; line-height: 1.55; }
+  .limit-body b { font-weight: 600; }
+
+  @media (max-width: 620px) {
+    .limit { grid-template-columns: 1fr; gap: 8px; }
+    .limit-tag { justify-self: start; }
+  }
+
+  /* ---------- closing ---------- */
+
+  .closer {
+    border-top: 3px solid var(--accent);
+    padding-top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <div class="masthead-rule"></div>
+    <div class="eyebrow">Oracle APEX · team development</div>
+    <h1>Working on APEX Together</h1>
+    <p class="standfirst">
+      How several developers share one APEX application without quietly
+      deleting each other's work — and the handful of things this deliberately
+      does not try to solve.
+    </p>
+  </header>
+
+  <!-- ============ THE PROBLEM ============ -->
+  <section>
+    <div class="section-mark">The problem</div>
+    <h2>One export can erase a colleague's day, and nothing warns you</h2>
+
+    <div class="col">
+      <p>
+        Alice and Bob work on the same leave-request app. Each has their own
+        APEX workspace, so each has their own copy of the app with its own
+        number — Alice's is 101, Bob's is 201. They share the work through git.
+      </p>
+      <p>
+        The old single-developer tooling exported an app by <strong>replacing
+        the whole folder</strong>: delete what's there, drop in what came out of
+        the database. For one person that's fine. For two, here's what happens.
+      </p>
+    </div>
+
+    <div class="timeline">
+      <div class="tl-step">
+        <div class="tl-who">Alice</div>
+        <div class="tl-body">
+          Builds a <strong>Cancel request</strong> button on page 6. Exports,
+          commits, pushes. Page 6 is now in git.
+        </div>
+      </div>
+      <div class="tl-step">
+        <div class="tl-who">Bob</div>
+        <div class="tl-body">
+          Pulls. His folder now contains Alice's page 6. His own
+          <em>workspace</em> — the actual database — has never seen it.
+        </div>
+      </div>
+      <div class="tl-step">
+        <div class="tl-who">Bob</div>
+        <div class="tl-body">
+          Finishes his own work on page 7 and exports. The old guard checks
+          "are there uncommitted changes?" There aren't — he committed. It
+          lets the export through.
+        </div>
+      </div>
+      <div class="tl-step fatal">
+        <div class="tl-who">Result</div>
+        <div class="tl-body">
+          The folder is replaced with Bob's database, which has no page 6.
+          <strong>Alice's work is deleted.</strong> Git records it as a
+          deliberate deletion, so the merge raises no conflict. Nobody is told.
+        </div>
+      </div>
+    </div>
+
+    <div class="note bad col">
+      <div class="note-label">Why this one is nasty</div>
+      <p>
+        Most mistakes announce themselves — a merge conflict, a failed build, a
+        red test. This one looks exactly like Bob intending to delete page 6.
+        Every tool downstream believes him.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ THE FIX ============ -->
+  <section>
+    <div class="section-mark">The idea</div>
+    <h2>Turn the arrow around</h2>
+
+    <div class="col">
+      <p>
+        The old tooling treated <strong>the database as the truth</strong> and
+        the files as a photograph of it. Every rule followed sensibly from that,
+        including "replace the folder", because a photograph is always taken
+        fresh.
+      </p>
+      <p>
+        Working as a team needs the opposite: <strong>git is the truth</strong>,
+        and a database is somewhere you send it. That single flip is why this is
+        a separate template rather than a setting — the two ideas produce
+        contradictory rules and can't live in one repo.
+      </p>
+    </div>
+
+    <div class="code">
+<pre><span class="c-com">// before — the database decides, files follow</span>
+   database  ──export──▶  files          <span class="c-bad">(replace everything)</span>
+
+<span class="c-com">// now — git decides, databases follow</span>
+   files  ──import──▶  your workspace
+   files  ◀──export──  your workspace    <span class="c-good">(merge, never replace)</span></pre>
+    </div>
+
+    <div class="col">
+      <p>
+        Two supporting details make it work. The folder is named after the app's
+        <em class="term">alias</em> — <em class="term">employee-self-service</em> —
+        not its number, because the number is different for every developer.
+        And the number lives in a small local file that git ignores, so Alice's
+        101 and Bob's 201 never collide.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ THE LOOP ============ -->
+  <section>
+    <div class="section-mark">The daily loop</div>
+    <h2>Four steps, and the first one is the new habit</h2>
+
+    <div class="col">
+      <p>
+        This is the whole workflow. The only unfamiliar part is step 1: you
+        start from what everyone else has, rather than from whatever your
+        workspace happens to be holding.
+      </p>
+    </div>
+
+    <div class="loop">
+      <div class="loop-step">
+        <div class="loop-body">
+          <h3>Import — catch your workspace up</h3>
+          <p>Pulls the latest committed version of the app into your own workspace, so you're building on top of your colleagues' work rather than beside it.</p>
+          <div class="code"><pre>team.py import-app employee-self-service</pre></div>
+        </div>
+      </div>
+      <div class="loop-step">
+        <div class="loop-body">
+          <h3>Build — normal APEX work</h3>
+          <p>Open the App Builder and do whatever you were going to do. Nothing about this step changes.</p>
+        </div>
+      </div>
+      <div class="loop-step">
+        <div class="loop-body">
+          <h3>Export — bring your changes back into git</h3>
+          <p>Reads your workspace and <em>merges</em> it into the files. Because a clean export produces identical bytes every time, your diff shows exactly what you changed and nothing else.</p>
+          <div class="code"><pre>team.py export-app employee-self-service</pre></div>
+        </div>
+      </div>
+      <div class="loop-step">
+        <div class="loop-body">
+          <h3>Commit — app and database changes together</h3>
+          <p>If your change needed a database column too, its migration goes in the same commit. One reviewable unit: the page and the column it depends on.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ RECONCILIATION ============ -->
+  <section>
+    <div class="section-mark">The mechanism</div>
+    <h2>How the export decides what to keep</h2>
+
+    <div class="col">
+      <p>
+        Export compares three versions of every file and picks a winner. That's
+        the entire trick, and it's worth understanding because it's what makes
+        the opening disaster impossible.
+      </p>
+      <ul class="col" style="margin:0; padding-left:1.15em;">
+        <li><strong>Base</strong> — what the files looked like the last time your workspace was in sync.</li>
+        <li><strong>Theirs</strong> — what's committed right now, including your colleagues' work.</li>
+        <li><strong>Mine</strong> — what just came out of your workspace.</li>
+      </ul>
+      <p>
+        If only one side changed, that side wins. If both changed the same file
+        differently, nobody wins automatically and you're asked to look. Try the
+        cases:
+      </p>
+    </div>
+
+    <div class="recon">
+      <div class="recon-pick" role="group" aria-label="Choose a scenario">
+        <button class="recon-btn" type="button" data-s="0" aria-pressed="true">Alice adds a page</button>
+        <button class="recon-btn" type="button" data-s="1">Your workspace is stale</button>
+        <button class="recon-btn" type="button" data-s="2">You delete a page</button>
+        <button class="recon-btn" type="button" data-s="3">You both edit page 6</button>
+        <button class="recon-btn" type="button" data-s="4">You add a page</button>
+      </div>
+      <div class="recon-stage">
+        <p class="recon-story" id="rc-story"></p>
+        <div class="recon-grid">
+          <div class="rc">
+            <div class="rc-h">Base</div>
+            <div class="rc-sub">last in sync</div>
+            <div class="rc-val" id="rc-base"></div>
+          </div>
+          <div class="rc">
+            <div class="rc-h">Theirs</div>
+            <div class="rc-sub">committed now</div>
+            <div class="rc-val" id="rc-head"></div>
+          </div>
+          <div class="rc">
+            <div class="rc-h">Mine</div>
+            <div class="rc-sub">my workspace</div>
+            <div class="rc-val" id="rc-mine"></div>
+          </div>
+        </div>
+        <div class="recon-out keep" id="rc-out">
+          <div class="recon-out-label" id="rc-out-label"></div>
+          <div class="recon-out-text" id="rc-out-text"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="note col">
+      <div class="note-label">The important row</div>
+      <p>
+        "Alice adds a page" is the opening disaster. Under the old tooling her
+        page was deleted in silence. Here it simply survives — Bob's stale
+        workspace has no opinion about a file it has never seen, so there is
+        nothing to refuse and nothing to lose.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ MIGRATIONS ============ -->
+  <section>
+    <div class="section-mark">Database changes</div>
+    <h2>Write down the change, not the result</h2>
+
+    <div class="col">
+      <p>
+        The old approach photographed the whole schema after every change. A
+        photograph tells you what <em>is</em>, never what <em>changed</em> — and
+        you can't hand someone a photo of a cake and ask them to bake it. It
+        also can't separate Alice's change from Bob's, because one photo
+        contains both.
+      </p>
+      <p>
+        So a database change is now a small file describing one step. Two files,
+        actually: the change, and how to check it worked.
+      </p>
+    </div>
+
+    <div>
+      <div class="code">
+<pre><span class="c-com">-- migrations/20260906T143000__bob__delegation.sql</span>
+
+<span class="c-key">-- migration-version:</span> 1
+<span class="c-key">-- target:</span> tables
+<span class="c-key">-- depends-on:</span> 20260906T101500__alice__leave-balance sha256:9f2c…
+<span class="c-key">-- destructive:</span> false
+
+ALTER TABLE hr_leave_requests ADD (delegated_to VARCHAR2(100));</pre>
+      </div>
+      <p class="cap" style="margin-top:8px;">The header is checked strictly — an unknown line is refused, never ignored, so a typo can't quietly switch something off.</p>
+    </div>
+
+    <div>
+      <div class="code">
+<pre><span class="c-com">-- …delegation.verify.sql — proof it actually worked</span>
+
+SELECT 'delegated_to exists' AS assertion_name,
+       CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL' END AS status
+  FROM user_tab_columns
+ WHERE table_name  = 'HR_LEAVE_REQUESTS'
+   AND column_name = 'DELEGATED_TO';</pre>
+      </div>
+    </div>
+
+    <div class="col">
+      <h3 style="margin-top:14px;">Why the file name looks like that</h3>
+      <p>
+        <em class="term">20260906T143000__bob__delegation</em> is a timestamp,
+        an author and a description. The timestamp means two people on two
+        branches never pick the same name or fight over the order. The author
+        means you know who to ask.
+      </p>
+      <h3 style="margin-top:14px;">Why <em class="term">depends-on</em> matters</h3>
+      <p>
+        It's the one line doing real work. If your change only makes sense after
+        someone else's, you say so — and you pin their exact file, so if they
+        edit it afterwards, yours is flagged rather than silently running against
+        something different.
+      </p>
+    </div>
+
+    <div class="note warn col">
+      <div class="note-label">Worth knowing</div>
+      <p>
+        Nothing checks for a dependency you <em>forgot</em> to declare. Your
+        verification will fail afterwards, but by then the SQL has run and
+        Oracle has already committed it. Treat that line as real work, and look
+        for it in review.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ DRIFT ============ -->
+  <section>
+    <div class="section-mark">The shared database</div>
+    <h2>When someone changes things by hand</h2>
+
+    <div class="col">
+      <p>
+        You all share one development database, so somebody will eventually
+        recompile a package in SQL Developer at 6pm without writing a migration.
+        There's a command that notices:
+      </p>
+    </div>
+
+    <div class="code">
+<pre>$ team.py check-drift
+
+<span class="c-warn">DRIFT</span>  DEMO.PKG_LEAVE_RULES  (PACKAGE BODY)
+       changed, but no migration accounts for it
+       last modified 2026-09-06 15:22:41</pre>
+    </div>
+
+    <div class="col">
+      <p>
+        Minutes, rather than discovering it months later when a release behaves
+        differently in test. One subtlety it handles for you: changing a table
+        automatically marks every package that uses it as invalid, even though
+        nobody touched those packages. That's normal Oracle behaviour, so it's
+        reported as information and never as drift.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ LIMITS ============ -->
+  <section>
+    <div class="section-mark">Honest limits</div>
+    <h2>What this does not do</h2>
+
+    <div class="col">
+      <p>
+        Every safety mechanism here has an edge. Knowing where it is beats
+        being surprised by it.
+      </p>
+    </div>
+
+    <div class="limits">
+      <div class="limit">
+        <div class="limit-tag no">Can't stop</div>
+        <div class="limit-body">
+          <b>Two people editing the same page at the same moment.</b>
+          If you and a colleague both change page 6, git raises an ordinary
+          conflict and a human resolves it. Nothing is lost — but nothing is
+          merged for you either.
+        </div>
+      </div>
+      <div class="limit">
+        <div class="limit-tag no">Can't stop</div>
+        <div class="limit-body">
+          <b>Two people recompiling the same package at once.</b>
+          That happens inside the shared database, before any file exists. No
+          tool can prevent it. Drift detection finds it quickly instead.
+        </div>
+      </div>
+      <div class="limit">
+        <div class="limit-tag no">Can't stop</div>
+        <div class="limit-body">
+          <b>A half-finished migration.</b>
+          Oracle commits structural changes as it goes, so a migration that
+          fails midway leaves real changes behind. It's recorded as unfinished
+          and a human repairs it; there is no undo button.
+        </div>
+      </div>
+      <div class="limit">
+        <div class="limit-tag yes">Does do</div>
+        <div class="limit-body">
+          <b>Refuse rather than guess.</b>
+          Anything uncertain stops and says so, with the exact command to
+          continue. A stop you can read beats a success you can't trust.
+        </div>
+      </div>
+      <div class="limit">
+        <div class="limit-tag yes">Does do</div>
+        <div class="limit-body">
+          <b>Keep a copy before it touches anything.</b>
+          Every risky step saves the current state first, so an interrupted
+          operation is recoverable rather than a guessing game.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PRODUCTION ============ -->
+  <section>
+    <div class="section-mark">Getting it live</div>
+    <h2>Test is automatic. Production is not.</h2>
+
+    <div class="col">
+      <p>
+        Tagging a release builds one sealed package — the app source and every
+        migration — and stamps it with a fingerprint. That exact package is
+        applied to test automatically and checked.
+      </p>
+      <p>
+        Production receives <strong>the same bytes</strong>, verified against
+        the same fingerprint, plus a written runbook. A person applies it. This
+        repository has no production apply button and no credentials for one,
+        which is a deliberate choice rather than an unfinished feature.
+      </p>
+    </div>
+  </section>
+
+  <footer class="closer col">
+    <h3>Where this stands</h3>
+    <p style="color:var(--muted);">
+      Design and implementation plans are written and reviewed; the tooling
+      itself isn't built yet. The three plans build in order — the daily loop
+      first, then migrations, then release and promotion — and the first one is
+      useful on its own, because it's the one that ends the silent deletions.
+    </p>
+  </footer>
+
+</div>
+
+<script>
+  (function () {
+    var scenarios = [
+      {
+        story: "Alice added a brand-new page 7 and committed it. Your workspace has never seen it — you last synced before she pushed.",
+        base: null, head: "pages/p00007-delegation.apx", mine: null,
+        keep: true,
+        label: "Kept",
+        text: "Alice's page survives. You never had this file, so your export has no opinion about it — there is nothing to delete."
+      },
+      {
+        story: "Alice edited page 6 and committed. Your workspace still holds the older version, because you haven't imported since.",
+        base: "page 6 — old", head: "page 6 — Alice's edit", mine: "page 6 — old",
+        keep: true,
+        label: "Kept",
+        text: "Alice's edit survives. Your copy matches the last sync, which means you didn't change it — so hers is the only real change."
+      },
+      {
+        story: "You deliberately deleted page 9 in the App Builder. It existed at your last sync and it's still committed.",
+        base: "page 9", head: "page 9", mine: null,
+        keep: true,
+        label: "Deleted, as you intended",
+        text: "The file is removed. You had it, you removed it on purpose, and nobody else touched it — so the deletion is real and is applied."
+      },
+      {
+        story: "You edited page 6 to add a Cancel button. Alice edited the same page to change its title, and committed first.",
+        base: "page 6 — old", head: "page 6 — Alice's edit", mine: "page 6 — your edit",
+        keep: false,
+        label: "Conflict — nothing written",
+        text: "Both versions changed from the same starting point, so neither is automatically right. Your export stops, keeps a copy of all three, and asks you to decide. Nothing is lost."
+      },
+      {
+        story: "You built a new page 12 in your workspace. Nobody else has touched it.",
+        base: null, head: null, mine: "pages/p00012-reports.apx",
+        keep: true,
+        label: "Added",
+        text: "Your new page is added. It's the only change, so it goes straight in."
+      }
+    ];
+
+    var els = {
+      story: document.getElementById("rc-story"),
+      base: document.getElementById("rc-base"),
+      head: document.getElementById("rc-head"),
+      mine: document.getElementById("rc-mine"),
+      out: document.getElementById("rc-out"),
+      label: document.getElementById("rc-out-label"),
+      text: document.getElementById("rc-out-text")
+    };
+
+    function put(el, value) {
+      if (value === null) {
+        el.textContent = "not present";
+        el.classList.add("none");
+      } else {
+        el.textContent = value;
+        el.classList.remove("none");
+      }
+    }
+
+    function render(i) {
+      var s = scenarios[i];
+      els.story.textContent = s.story;
+      put(els.base, s.base);
+      put(els.head, s.head);
+      put(els.mine, s.mine);
+      els.out.classList.toggle("keep", s.keep);
+      els.out.classList.toggle("conflict", !s.keep);
+      els.label.textContent = s.label;
+      els.text.textContent = s.text;
+    }
+
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".recon-btn"));
+    buttons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        buttons.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+        btn.setAttribute("aria-pressed", "true");
+        render(parseInt(btn.getAttribute("data-s"), 10));
+      });
+    });
+
+    render(0);
+  })();
+</script>
+</body>
+</html>
