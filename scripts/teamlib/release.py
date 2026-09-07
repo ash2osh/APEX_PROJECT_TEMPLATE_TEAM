@@ -437,8 +437,22 @@ def release_app_order(release_tar: str | Path) -> tuple[str, ...]:
 
 def _plan_from_manifest(manifest: Manifest, history: Mapping[str, Any], target: Mapping[str, Any]) -> ReleasePlan:
     history_data = history.get("history", history) if isinstance(history, Mapping) else {}
+    if not isinstance(history_data, Mapping):
+        raise ReleaseError("target history must contain a mapping")
     errors = []
     pending = []
+    artifact_ids = {str(item.get("id")) for item in manifest.migrations if isinstance(item, Mapping)}
+    for migration_id, entry in history_data.items():
+        if not isinstance(migration_id, str) or not isinstance(entry, Mapping):
+            errors.append(f"malformed target history entry: {migration_id}")
+            continue
+        status = entry.get("status")
+        if status in {"RUNNING", "UNKNOWN", "FAILED"}:
+            errors.append(f"unresolved target migration attempt: {migration_id}")
+        elif status not in {"APPLIED", None, ""}:
+            errors.append(f"unknown target migration history status: {migration_id}")
+        if migration_id not in artifact_ids and status == "APPLIED":
+            errors.append(f"target history contains foreign migration: {migration_id}")
     for migration in manifest.migrations:
         entry = history_data.get(migration["id"]) if isinstance(history_data, Mapping) else None
         if isinstance(entry, Mapping) and entry.get("status") == "APPLIED":
@@ -447,7 +461,7 @@ def _plan_from_manifest(manifest: Manifest, history: Mapping[str, Any], target: 
         else:
             pending.append(migration["id"])
     if errors:
-        raise ReleaseError("; ".join(errors))
+        raise ReleaseError("; ".join(dict.fromkeys(errors)))
     target_digest = hashlib.sha256(_canonical(target)).hexdigest()
     artifact_history_digest = hashlib.sha256(_canonical(manifest.migrations)).hexdigest()
     history_digest = hashlib.sha256(_canonical(history_data)).hexdigest()

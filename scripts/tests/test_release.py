@@ -99,6 +99,16 @@ class ReleaseTests(unittest.TestCase):
         plan = plan_release(manifest.archive_path, {}, {"role": "test", "environment": "test", "instance_id": "TEST"})
         self.assertEqual(plan.pending, ("20260907T100000__alice__one",))
 
+    def test_plan_release_refuses_unresolved_and_foreign_history(self):
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "history-out")
+        target = {"role": "test", "environment": "test", "instance_id": "TEST"}
+        unresolved = {"20260907T100000__alice__one": {"status": "UNKNOWN"}}
+        with self.assertRaisesRegex(ReleaseError, "unresolved"):
+            plan_release(manifest.archive_path, unresolved, target)
+        foreign = {"20260907T090000__bob__old": {"status": "APPLIED", "checksum": "a" * 64}}
+        with self.assertRaisesRegex(ReleaseError, "foreign"):
+            plan_release(manifest.archive_path, foreign, target)
+
     def test_apply_release_executes_only_through_explicit_nonproduction_adapters(self):
         manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "apply-out")
         target = {"role": "test", "environment": "test", "instance_id": "TEST"}
