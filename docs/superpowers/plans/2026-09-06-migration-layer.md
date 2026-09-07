@@ -4,13 +4,14 @@
 > superpowers:subagent-driven-development when delegation is authorized.
 > Checkboxes are implementation work, not verification already performed.
 
-**Revision:** 3 — removes declared effects; see spec §7 "What version 1 gives up".
+**Revision:** 4 — adds observed drift continuity and disposable candidate-app checks; predicted effects remain out of scope.
 **Goal:** Make shared-schema changes attributable, restartable and reproducible.
 **Architecture:** Immutable two-member SQL/verification bundles describe
 transitions, with target and dependencies declared in a strictly parsed SQL
 header. A separate shared metadata-profile store serializes participating
 runners and records immutable provenance and attempt state. Expected schema
-state has one source: canonical replay evidence. Shared-development history
+state has one source: canonical replay evidence. Observed inventory history
+provides a separate continuity check before writes. Shared-development history
 differs from strict promotion history; fresh and upgrade replay provide that
 evidence.
 
@@ -51,19 +52,24 @@ equivalent in the per-developer topology. Alice applies her bundle to the shared
 schema and builds a page against the new column in the shared application. Bob
 exports — his capture contains Alice's page, because the application is shared —
 commits it to his branch and merges. Alice's bundle is still on her branch.
-Integration then deploys a page referencing a column its schema does not have.
+An isolated downstream schema lacks that column; shared integration may
+already contain it and mask the missing migration.
 
-Nothing here prevents that: the coupling runs from APEXlang bytes to SQL, and
-version 1 does not parse APEXlang for column references. It is caught, not
-prevented, and this plan states where:
+Review prevents the merge mistake. The automated backstop runs the candidate
+applications against disposable replay of the selected commit's migrations,
+before shared integration deployment. Integration may share the development
+schema and already contain the unmerged column; it cannot be the oracle for
+this failure. Schema replay or app round-trip equality alone is insufficient.
 
-- fresh replay builds integration's schema from merged migrations only, so the
-  missing column is absent there rather than quietly present;
-- deployment verification and post-deploy drift report the failure against a
-  named application and target;
-- review is the preventive control — a bundle merges before or with the first
-  export that depends on it, and whoever applies a bundle to the shared schema
-  owns merging it promptly rather than leaving it applied and unmerged.
+Plan 3's required candidate-app gate loads the actual selected app source into
+the disposable target, then executes its declared SELECT assertions and page/
+flow smoke checks. The missing-column acceptance fixture must declare a check
+that exercises the dependent page/query and fail with app, page and object
+identity. Coverage is explicit: this is not automatic discovery of all SQL
+references, nor a claim that untested runtime paths are validated. Missing app
+check declarations, missing runner capability or skipped checks fail the gate.
+The bundle must merge before or with the first export depending on it; whoever
+applies it to shared development owns merging it promptly.
 
 Do not answer this by forbidding unmerged bundles on the shared development
 schema. A developer cannot build the page before the column exists, so that rule
@@ -232,7 +238,16 @@ control_store foundation; app and migration mutexes are distinct resources.
   payload_manifest_json, source_commit, applied_sequence, applied_at,
   applied_by, run_token), TEAM_MIGRATION_ATTEMPT(attempt_id, migration_id,
   checksum, state, run_token, worker_identity, started_at, finished_at,
-  diagnostic_digest).
+  diagnostic_digest), TEAM_MIGRATION_INVENTORY(inventory_digest,
+  manifest_json, schema_set_digest, normalizer_version, coverage_version),
+  TEAM_MIGRATION_OBSERVATION(sequence, migration_id, attempt_id,
+  predecessor_sequence, before_digest, after_digest, evidence_digest).
+  Observation sequence 0 records adoption/verified-empty bootstrap with the
+  replay evidence digest; later rows reference immutable inventory manifests,
+  their accepted predecessor, migration/attempt and recovery evidence if any.
+  Export-history includes these manifests and sequence links in its versioned
+  envelope so offline consumers can validate provenance. APPLIED history and
+  its observation become visible in one controller transaction.
   TEAM_MIGRATION_MUTEX carries worker_identity and host directly rather than
   relying on TEAM_MIGRATION_ATTEMPT for them: acquisition happens before
   dependencies are checked and before RUNNING is committed (see Apply and
@@ -240,9 +255,11 @@ control_store foundation; app and migration mutexes are distinct resources.
   with no attempt row yet to look the holder up in. Bind both at acquisition
   so the blocking message spec §7 requires can always name a worker.
   Define primary/unique keys, state/target checks and NOT NULL contracts.
-  There is no expected-fingerprint table: revision 3 made canonical replay
-  evidence under `database/` the single source of expected schema state, so a
-  `TEAM_MIGRATION_OBJECT` store would be a second copy free to drift from it.
+  There is no predicted-effects table. The inventory/observation tables retain
+  actual before/after evidence, distinct from canonical intended definitions
+  in `database/`. Define foreign keys, uniqueness of accepted sequence and
+  immutable rows; missing or mismatched referenced manifests refuse.
+
 - [ ] Bootstrap through the write guard, verify existing definitions exactly,
   tolerate only a verified concurrent identical bootstrap, and report partial
   installation as setup-required. Metadata absence is not an empty applied set.
@@ -359,15 +376,23 @@ has no entry. `snapshot(profiles, out) -> Inventory`;
 - [ ] Test changed/deleted/added objects, invalid packages, grants, distinct
   schemas, same schemas, CRLF, SQL literals containing schema names, sequence
   advancement without definition change and schema-name-neutral replay.
-- [ ] Implement check-drift against canonical replay evidence under
-  `database/`, with no write. There is no expected-fingerprint store in
-  metadata; that evidence is the single source of expected state. On a shared
-  development target, differences attributable to known unmerged migrations
-  are reported separately from unexplained drift, and the report says plainly
-  which category each object falls in. LAST_DDL_TIME and compilation status
-  appear only as diagnostics, never as drift on their own. A change made
-  before an unrelated migration remains changed; DML requires semantic
-  checks.
+- [ ] Implement spec §7's three-part drift report: canonical/live structural
+  differences, accepted-frontier/live unexplained drift, and local/applied
+  history differences. Follow its exact foreign-delta replay attribution rule;
+  absent proof produces attribution_unknown, not guessed migration ownership.
+  Canonical evidence includes per-migration before/after replay inventories.
+  A foreign ID alone never excuses a changed object. LAST_DDL_TIME and validity
+  are diagnostics; unrelated migrations cannot absorb pre-existing drift.
+- [ ] Validate the immutable observation chain from adoption/empty bootstrap:
+  predecessor digests, schema identity, coverage, normalization and APPLIED
+  records must agree. No live snapshot can replace that accepted frontier.
+  Read-only check-drift brackets its reads with mutex/sequence observations,
+  retrying boundedly or reporting unknown if a writer intervenes.
+- [ ] Tests: foreign migration B is attributed only with matching old/new object
+  values; a manual edit before unrelated migration C blocks C without RUNNING;
+  drift after B blocks C; broken/missing provenance fails closed; conflicting
+  foreign deltas or local pending changes produce attribution_unknown; unrelated
+  foreign B remains allowed when live equals the accepted frontier.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_migration_fingerprints.py -v`.
 
@@ -391,12 +416,13 @@ developer does to write a migration.
 
 - [ ] For initial adoption, generate/review baseline DDL and reference-data
   assertions, prove empty replay, then compare live structural/semantic state
-  under the central mutex. Stamp baseline only on exact match; never execute
+  under the central mutex. Record observation sequence 0 bound to replay
+  evidence and live equality. Stamp baseline only on exact match; never execute
   CREATE statements over existing business data.
 - [ ] Metadata setup may precede adoption, but until adoption or a verified
   empty bootstrap the target has no accepted starting point and strict
-  operations refuse. A nonempty schema is never blessed by sampling its live
-  objects into evidence; adoption must prove a reviewed initial migration
+  and shared operations refuse. A nonempty schema is never blessed by sampling
+  its live objects into evidence; adoption must prove a reviewed initial migration
   reproduces it on an empty disposable target.
 - [ ] Test valid adoption, changed live baseline, missing reference data,
   candidate changes outside declared scope and unknown normalization.
@@ -421,21 +447,27 @@ foreign_applied, blocked_attempt and verified inventory digest.
   same mutex. Any difference refuses before RUNNING or payload execution.
 - [ ] Preflight the whole plan, including all destructive flags, dependencies,
   checksum conflicts and unresolved attempts before the first application.
-- [ ] For each migration capture the live inventory, persist RUNNING, execute
-  staged SQL with target routing and snapshot immediately after. There is no
-  precondition gate on that inventory: version 1 declares no expected before
-  state (spec §7), and a shared development schema legitimately holds a
-  colleague's applied-but-unmerged migration, so requiring inventory equality
-  would refuse every apply for the exact reason the design calls normal. Verify
-  data/compiled-object postconditions through the observation-only VERIFY
-  profile; a payload profile must not run verify SQL.
+- [ ] After acquiring the mutex, validate the observation chain and compare
+  current inventory to its accepted frontier before RUNNING. Repeat before
+  every migration. Any structural mismatch refuses as unexplained drift, even
+  if unrelated to the pending migration. A verified foreign migration does not
+  block because its observed transition is already part of that frontier.
+- [ ] Persist the complete validated before inventory and RUNNING with its
+  digest in one controller transaction, then execute exact
+  staged SQL, and snapshot immediately after. There is no author-declared
+  effects prediction; the observed continuity gate does not assert that the
+  author chose the correct dependency assumptions. Verify data/compiled-object
+  postconditions through VERIFY, never through the payload profile.
+
 - [ ] Capture both profiles after execution and record the before/after
   inventories as observed history for recovery and audit. Version 1 has no
   declared effects to compare them against, so do not gate on a predicted
   change set. Do still compare inventories taken before and after verification
   and refuse if verification itself mutated structure.
   Commit APPLIED history and attempt state in one transaction on the metadata
-  connection. Record sequence under the mutex.
+  connection together with the immutable before/after observation and its
+  predecessor sequence. Record sequence under the mutex. An unrelated migration
+  must never establish a new frontier over unexplained pre-existing drift.
 - [ ] On known SQL error record FAILED; on timeout/lost acknowledgement record
   UNKNOWN if possible. If recording fails, leave RUNNING. Stop later migrations
   and retain mutex. Never auto-retry a possibly committed payload.
@@ -446,7 +478,11 @@ foreign_applied, blocked_attempt and verified inventory digest.
   uses exact immutable bytes after a human-reviewed restartability check;
   completion without replay requires structural AND data postconditions.
   Failed immutable source needing correction uses a separately reviewed
-  corrective transition with a durable link to the failed attempt.
+  corrective transition with a durable link to the failed attempt. Recovery
+  retains the mutex and observed partial state; only verified recovery completion
+  adds an accepted observation. Lock clearing alone never advances the frontier.
+  Ordinary apply cannot execute a corrective bundle while an attempt remains
+  unresolved; it must use the selected recovery path.
 - [ ] Test separate-schema routing, rollback-independent DDL partial state,
   invalid PL/SQL compiled with warning, duplicate runner, an edited bundle
   member, destructive refusal and partial success. Include an upstream table
@@ -491,7 +527,10 @@ scripts/tests/live/test_migration_replay.py, database/.gitkeep.
   Check postconditions and compare final structure with fresh replay.
 - [ ] Provide explicit snapshot --out for generating reviewable evidence. Only
   an explicit evidence-update workflow stages that output into database/.
-  Its metadata records source commit/digest, normalizer version and coverage.
+  Its metadata records source commit/digest, normalizer version, coverage,
+  migration IDs/checksums/order and per-migration observed replay manifests.
+  An evidence update must come from verified disposable replay, never a shared
+  live snapshot. This provides the canonical side of drift attribution.
 - [ ] Test earlier timestamp merged after a later migration, incompatible
   same-object changes, missing canonical member, untracked extra snapshot file,
   drift hidden by a later timestamp, absent DB provisioning and unsafe replay target.
@@ -538,12 +577,14 @@ scripts/tests/live/test_migration_acceptance.py.
   states plainly that version 1 has no object-level precondition, so that case
   is closed by review, not by this test. Verify integration reports foreign
   IDs explicitly.
-- [ ] Exercise the shared-application coupling above: a page exported from the
-  shared application depends on a column created by a bundle that is still
-  unmerged, and the page merges first. Fresh replay must not contain the column,
-  and the integration deployment must fail with a report naming the application
-  and the missing object rather than deploying a broken page. Record it as a
-  detected-not-prevented case, since review is the preventive control.
+- [ ] Exercise the shared-application coupling with integration sharing the
+  development schema: its column is already present from an unmerged bundle.
+  Disposable replay must omit that column. Import the selected candidate app
+  there and run the declared dependent-page/query check; it must fail and name
+  the app, page and missing object before integration deployment is permitted.
+  Add the positive case with the migration merged. Do not count round-trip
+  equality or integration's contaminated schema as dependency verification.
+
 - [ ] Run fresh replay and previous-release upgrade, separate and equal schema
   profiles, two real concurrent runners, partial DDL and lost-log acknowledgement.
 - [ ] Preserve versioned results for Plan 3 CI; mark unavailable live checks
@@ -555,8 +596,8 @@ scripts/tests/live/test_migration_acceptance.py.
 
 - [ ] Every bundle member is immutable and canonical deletions fail CI.
 - [ ] Shared foreign history does not block unrelated work; strict targets refuse it.
-- [ ] A page merged ahead of the bundle it depends on fails the integration gate
-  with a report naming both, rather than deploying.
+- [ ] A declared page check catches a missing bundle on disposable replay and
+  blocks integration, including when shared integration already has the column.
 - [ ] Metadata ownership, no-steal mutex and uncertain attempts work with split users.
 - [ ] Drift compares structure and cannot be hidden by a later migration timestamp.
 - [ ] Fresh/upgrade replay and existing-schema adoption have live evidence.

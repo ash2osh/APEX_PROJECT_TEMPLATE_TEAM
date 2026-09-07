@@ -4,7 +4,7 @@
 > superpowers:subagent-driven-development when delegation is authorized.
 > Execute tasks with their tests; checkboxes below describe unfinished work.
 
-**Revision:** 2 — replaces the original runnable examples after design review.
+**Revision:** 3 — separates export checkpoints, receipt absences and physical lock identity.
 **Goal:** Capture Builder changes without silently overwriting Git or local work.
 **Architecture:** One Python core performs target validation, content reconciliation,
 journaled file changes and verified imports. Bash and PowerShell are launchers.
@@ -120,16 +120,27 @@ class Decision:
 @dataclass(frozen=True)
 class Baseline:
     version: int
-    target_key: str
+    state_key: str                        # full local binding identity
     source_commit: str
     tree_digest: str
     blobs: dict[str, str]                  # path -> SHA-256
+
+@dataclass(frozen=True)
+class Checkpoint:
+    version: int
+    state_key: str
+    captured: Tree                        # loaded from verified blob manifests
+    reconciled: Tree
+    original_head: str
+    receipt_id: str
+    anchor_commit: str | None              # bound before next clean export
 ```
 
 ## Task 1: Repository, config and target contracts
 
 **Files:** .gitignore, .gitattributes, .env.example, targets/development.json,
-targets/integration.json, targets/test.json, scripts/teamlib/config.py,
+targets/integration.json, targets/test.json, targets/controllers.json,
+scripts/teamlib/config.py,
 scripts/tests/test_config.py.
 
 - [ ] Inspect parent instructions and existing files; initialize TEAM Git only
@@ -141,23 +152,22 @@ scripts/tests/test_config.py.
   EXPECTED_DB_NAME, EXPECTED_SERVICE, EXPECTED_INSTANCE_ID; additionally
   APEX_WORKSPACE_ID and APP_OWNERSHIP_MODE (`shared` default, or `single` for
   an optional isolated developer copy per spec §2.1).
-- [ ] Split profiles into core and on-demand, and validate them separately.
-  **Core** is TABLES, CODE, APEX and METADATA: required by every command,
-  validated at load. **On-demand** is VERIFY: Plan 1 never uses it, so an
-  absent VERIFY profile must not fail `doctor`, `export-app`, `import-app` or
-  any Plan 1 command. Validate VERIFY only when a command that observes
-  postconditions requests it (Plan 2 `migrate` and `replay`; `check-drift`
-  reads through the tables/code profiles and does not require VERIFY), and
-  fail then with a specific "VERIFY profile required for <command>" error
-  naming the missing keys. A partially configured VERIFY profile is an error
-  whenever it is present, so a half-filled profile cannot be ignored.
-  Mirror this split in `.env.example`: core keys uncommented, VERIFY keys
-  present but commented with a note that Plan 2 requires them.
-  Test that every Plan 1 command succeeds with no VERIFY keys at all, that a
-  Plan 2 command refuses clearly without them, and that a partial VERIFY
-  profile refuses in both cases. EXPECTED_INSTANCE_ID encodes the stable database/container
-  identity obtained through a qualified identity query; all profiles within
-  a shared schema set must match it, independent of service aliases. No fallback connection.
+- [ ] Dispatch offline commands before `.env` loading or database-profile
+  validation. `new-migration`, `add-dependency`, file-based `migration-plan`,
+  `build-release`, `verify-release`, `plan-release`, `gen-runbook` and offline
+  conflict explanation require only their explicit local inputs. They work with
+  no `.env`, even if an unrelated PROJECT_ENV_FILE points to a missing file.
+- [ ] Online Plan 1 commands load TABLES, CODE, APEX and METADATA as their core
+  profile set. VERIFY is optional until a command requests postconditions:
+  Plan 2 migrate/replay require it; check-drift uses tables/code plus metadata.
+  A partially configured VERIFY profile in a loaded `.env` is an error. Mirror
+  this in `.env.example` with VERIFY keys commented. Test offline commands with
+  no configuration, online missing-profile errors, Plan 1 without VERIFY, and
+  partial VERIFY refusal when the configuration is loaded.
+  EXPECTED_INSTANCE_ID encodes the stable database/container identity obtained
+  through a qualified identity query; all profiles within a shared schema set
+  must match it independent of service aliases. No fallback connection.
+
 - [ ] Enforce exact known keys, duplicates, empty required values, control
   characters, alias/path grammar and uppercase Oracle identifier contracts.
   Compare role and environment exactly. Permit equal tables/code profiles.
@@ -255,7 +265,8 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Interfaces:** `read_git_tree(repo, commit, alias) -> dict[str, bytes]`;
 `read_export_tree(path) -> dict[str, bytes]`;
 `tree_digest(tree) -> str`; `assert_source_clean(repo, alias) -> None`;
-`tree_contains(subset: Tree, superset: Tree) -> bool`.
+`tree_contains(subset: Tree, superset: Tree) -> bool`;
+`receipt_satisfied(result: Tree, required_absent: set[str], selected: Tree) -> bool`.
 
 - [ ] Define ownership using a qualified full SQLcl export fixture. Include
   binaries and .apex/apexlang.json; exclude deployments/** and export logs.
@@ -268,12 +279,24 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   source set. Unrelated ignored files outside that set remain untouched.
 - [ ] Digest sorted POSIX paths plus explicit byte lengths and file hashes;
   use the same canonical JSON manifest encoding everywhere.
-- [ ] Implement `tree_contains` as a pure subset check: every path in `subset`
-  must be present in `superset` with identical bytes; extra paths in
-  `superset` are permitted. This is the exact predicate behind spec §6's
-  capture-receipt "contained in" language (Task 9) — containment, not
-  equality, is what lets a commit legitimately carry source the receipt never
-  captured.
+- [ ] Implement `tree_contains` as a pure subset check, but never use it alone
+  to authorize import. `receipt_satisfied` also requires every tombstone absent
+  from selected source. Result paths and tombstones must be disjoint and safe.
+  Spec §6 defines the cumulative required-absence set; preserve it across no-op
+  exports and reject receipts without its versioned evidence.
+
+```python
+def tree_contains(subset, superset):
+    return all(path in superset and superset[path] == value
+               for path, value in subset.items())
+
+def receipt_satisfied(result, required_absent, selected):
+    if set(result) & set(required_absent):
+        raise ValueError("receipt contains contradictory presence/absence")
+    return (tree_contains(result, selected)
+            and not set(required_absent).intersection(selected))
+```
+
 - [ ] Add fixtures for names containing spaces, binary zeroes, LF/CRLF,
   zero-byte-versus-missing, deleted/added Git files, corrupt refs and preserved
   deployment JSON. Confirm corrupted Git reads never become empty trees.
@@ -320,8 +343,8 @@ class TreeSemanticsTests(unittest.TestCase):
         self.assertNotEqual(tree_digest({"ab": b"c"}), tree_digest({"a": b"bc"}))
 
     def test_contains_allows_extra_paths_in_superset(self):
-        # A commit may legitimately carry source a receipt never captured
-        # (spec §6); containment must not demand equality.
+        # The generic subset helper allows extra paths. Import additionally
+        # checks receipt tombstones; this helper alone is insufficient.
         self.assertTrue(tree_contains({"a": b"1"}, {"a": b"1", "b": b"2"}))
 
     def test_contains_rejects_missing_or_changed_path(self):
@@ -334,22 +357,28 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 ## Task 4: Content reconciliation
 
 **Files:** scripts/teamlib/reconcile.py, scripts/tests/test_reconcile.py.
-**Interface:** `reconcile(base: Tree, head: Tree, mine: Tree) -> Decision`.
+**Interface:** `reconcile(base: Tree, head: Tree, mine: Tree,
+source_base: Tree | None = None) -> Decision`. `base` is the previous capture;
+`source_base` is its reconciled result. Omission is only for initial alignment,
+where the two trees are equal. Normal export passes both checkpoint trees.
 
 - [ ] Add the regression tests below and verify module/function failure first.
 - [ ] Implement the complete state table, shared by binary/text files:
 
 ```python
-def reconcile(base, head, mine):
+def reconcile(base, head, mine, source_base=None):
+    if source_base is None:
+        source_base = base
     absent = object()
     output, conflicts = {}, []
-    for path in sorted(set(base) | set(head) | set(mine)):
-        b, h, m = (tree.get(path, absent) for tree in (base, head, mine))
+    for path in sorted(set(base) | set(source_base) | set(head) | set(mine)):
+        b, s, h, m = (tree.get(path, absent)
+                      for tree in (base, source_base, head, mine))
         if m == h:
             selected = m
         elif m == b:
             selected = h
-        elif h == b:
+        elif h == s == b:
             selected = m
         else:
             conflicts.append(path)
@@ -379,23 +408,51 @@ class ReconcileTests(unittest.TestCase):
     def test_modify_delete_conflicts(self):
         self.assertEqual(reconcile({"p": b"old"}, {"p": b"a"}, {}).conflicts,
                          ("p",))
+
+    def test_successive_builder_edit_and_revert(self):
+        a, b, c = ({"p": x} for x in (b"A", b"B", b"C"))
+        first = reconcile(a, a, b)
+        self.assertEqual(first.tree, b)
+        for mine in (c, a):
+            d = reconcile(b, b, mine, source_base=first.tree)
+            self.assertEqual(d.tree, mine)
+            self.assertFalse(d.conflicts)
+
+    def test_checkpoint_keeps_unimported_git_change(self):
+        a, b, c = ({"p": x} for x in (b"A", b"B", b"C"))
+        self.assertEqual(reconcile(a, b, a, source_base=b).tree, b)
+        self.assertEqual(reconcile(a, b, c, source_base=b).conflicts, ("p",))
+
+# Standalone receipt regression tests.
+from teamlib.trees import receipt_satisfied
+
+class ReceiptTests(unittest.TestCase):
+    def test_deletion_cannot_be_resurrected(self):
+        result = {"application.apx": b"app demo"}
+        old = {**result, "pages/p7.apx": b"old page"}
+        self.assertFalse(receipt_satisfied(result, {"pages/p7.apx"}, old))
+        self.assertTrue(receipt_satisfied(result, {"pages/p7.apx"}, result))
+        self.assertTrue(receipt_satisfied(result, {"pages/p7.apx"},
+                                          {**result, "pages/p8.apx": b"new"}))
 ```
 
 - [ ] Exhaustively enumerate one-path states missing, empty, A and B for
-  base/head/mine. Check the specification table for all 64 cases; add
+  base/source_base/head/mine. Check the specification table for all 256 cases; add
   multi-path cases combining a safe edit and conflict.
 - [ ] Assert callers never apply Decision.tree when conflicts is nonempty.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_reconcile.py -v`.
 
-## Task 5: Baselines, durable captures and receipts
+## Task 5: Import baselines, export checkpoints, durable captures and receipts
 
 **Files:** scripts/teamlib/state.py, scripts/teamlib/control_store.py,
 scripts/sql/control_metadata.sql, scripts/tests/test_state.py,
 scripts/tests/live/test_app_lock.py.
-**Interfaces:** `save_capture(target, base, head, mine, diagnostics) -> str`;
+**Interfaces:** `save_capture(target, base, source_base, head, mine, diagnostics) -> str`;
 `load_baseline(target) -> Baseline`;
-`save_verified_baseline(target, commit, tree) -> None`.
+`save_verified_baseline(target, commit, tree) -> None`;
+`save_checkpoint(target, captured, reconciled, original_head, receipt_id) -> None`;
+`load_checkpoint(target, head) -> Checkpoint` (including ancestry validation).
 
 - [ ] Implement setup-state through the metadata write profile. Install exact
   versioned structures only in METADATA_SCHEMA, at the same column-level detail
@@ -447,7 +504,8 @@ scripts/tests/live/test_app_lock.py.
   (config.py, from `APP_OWNERSHIP_MODE`), not from the command name, so the
   shared and isolated paths cannot diverge in their guards.
 - [ ] Define acquire_app(target_key, run_token, checkout_uuid, host,
-  acquired_by_user) and release_app(target_key, run_token) on control_store.py.
+  acquired_by_user) and
+  release_app(target_key, run_token, confirmed_success=False) on control_store.py.
   Acquisition uses spec §7's `SELECT ... FOR UPDATE NOWAIT` transition plus its
   app-target addendum, never a bare conditional `UPDATE`: Oracle blocks a
   conditional update on the row lock until the holding transaction ends, so an
@@ -478,7 +536,7 @@ scripts/tests/live/test_app_lock.py.
   currently hold the row an error, not a silent no-op. Both import_app and
   deploy_app call it immediately before their own destructive payload runs,
   after every pre-check (registration, baseline/receipt comparison) has
-  already passed cleanly. This mirrors Plan 2's "commit RUNNING before the
+  already passed cleanly. Commit this transition before launching payload SQL. This mirrors Plan 2's "commit RUNNING before the
   payload": a crash gives the process no chance to write a failure marker
   afterward, so uncertainty must be the state the instant risk begins, not
   something a handler writes on the way out — without this step, nothing in
@@ -494,7 +552,9 @@ scripts/tests/live/test_app_lock.py.
   with `is_uncertain` still 1, correctly requiring recover-app-lock's review
   before the next attempt; a crash severe enough to skip even that release
   leaves owner_token held too, so the next acquirer sees `MUTEX_HELD` first —
-  either way, nothing proceeds without review. Test all three paths.
+  either way, nothing proceeds without review. Call release only after all
+  payload workers are known to have ended; unknown worker/result state retains
+  ownership. Test clean refusal, ended failure, timeout/live worker and crash.
 - [ ] Maintain a monotonic import generation for each target alongside the
   mutex, incremented by `release_app`'s `confirmed_success=True` path when an
   import completes, **or by recover-app-lock when it clears a held or
@@ -535,10 +595,27 @@ scripts/tests/live/test_app_lock.py.
   blocking requirement, in every refusal caused by a held app-target mutex.
   There is no membership check on who invokes the command — an org role is not
   a database identity — so printing the name is what lets a human enforce it.
+- [ ] Implement `app_lock_key(target)` exactly as spec §5's physical identity
+  tuple. Registry, generation and mutex use only that key. Local state uses a
+  separate `state_key` over full Target identity, including binding digest.
+  Load tracked `targets/controllers.json`, keyed by verified instance_id,
+  naming exactly one METADATA owner per instance. Setup and every app mutation
+  verify the selected controller against this contract; `.env` cannot override
+  it. A controller move requires coordinated migration of registry/lock state,
+  never bootstrap of a parallel empty store. Test two connection names, service aliases, roles and binding digests
+  targeting one app: identical mutex key, different local state keys, one import
+  winner. Different instance/workspace/app IDs produce distinct mutex keys.
 - [ ] Store versioned manifests, immutable blobs and operation records under
-  .sync-state. Derive target keys from canonical Target identity; binding and
-  workspace changes invalidate reuse. Store canonical Git blob provenance,
-  but do not depend on its continued reachability.
+  .sync-state. Binding changes invalidate local baseline/checkpoint/receipt
+  reuse, never physical lock identity. Retain blobs independently of Git.
+- [ ] Journal the captured/reconciled checkpoint pair with the source patch and
+  receipt. Advance only after complete result verification, including no-op
+  exports and explicit resolution; initialize both on verified adoption/import.
+  Follow spec §6's exact-result commit anchoring before reuse. Missing ancestry
+  refuses with retained evidence instead of selecting a stale baseline. Failed
+  patch, uncommitted result and branch rewind tests must not advance/reuse it.
+  Checkpoints are GC roots; checkpoint ancestry refs must remain reachable or
+  operations refuse. An import baseline never advances merely on export.
 - [ ] Store capture receipts as a path/SHA-256 manifest plus its referenced
   content-addressed blobs — the same on-disk shape baselines already use
   (spec §6) for the same reason: deduplicated storage, not a bare digest a
@@ -550,7 +627,10 @@ scripts/tests/live/test_app_lock.py.
   not "successfully written": a zero-change export (Task 8) reconciles
   nothing to disk but still receipts the manifest it confirmed. Resolution
   receipts additionally record conflict paths and resolved digest. These are
-  not database-alignment baselines.
+  not database-alignment baselines. Also persist the sorted required-absence
+  set from spec §6 with every receipt. Tombstones survive no-op captures; only
+  a reconciled re-add removes one. Test deleted-page resurrection, older commits,
+  legitimate new paths, binary/empty paths and corrupted absence evidence.
 - [ ] Atomic-save manifests only after all blobs exist; validate hashes on load.
   An existing baseline becomes uncertain at the start of an import mutation.
 - [ ] Add tests for target rebinding, pruned commit with retained blobs,
@@ -619,7 +699,7 @@ special case for one specific call site — see the bracket bullet below.
 - [ ] Implement spec §6 export sequence using Tasks 2–7. Capture first, retain
   before mutation, reconcile contents, journal the patch, verify and receipt.
 - [ ] Bracket the capture with `read_app_sync_state` (Task 5). Refuse before
-  starting if an import holds the mutex — **unless the caller passes
+  starting if the target is uncertain or an import holds the mutex — **unless the caller passes
   `held_by=` its own held run_token**, in which case a holder matching that
   token is expected, not a competing import, and does not refuse. The rule is
   general, not tied to one call site: **any** operation that already holds
@@ -631,7 +711,10 @@ special case for one specific call site — see the bracket bullet below.
   already acquired the same mutex. A caller with no held mutex of its own —
   an ordinary developer export — passes none and refuses on any holder at
   all. After the read, accept the capture only if the generation is unchanged
-  and no *other* holder appeared; otherwise discard it as possibly torn and
+  and no *other* holder appeared AND neither observation is uncertain. For
+  the importing/deploying worker's internal captures only, uncertainty is
+  permitted while the same `held_by` token remains the owner at both reads;
+  ordinary exports cannot use this exception. Otherwise discard as torn and
   retry a bounded number of times before reporting that an import is in
   progress. **Export never acquires the mutex** — readers that lock can
   block the team and strand a lock when a developer's export dies, and two
@@ -640,6 +723,19 @@ special case for one specific call site — see the bracket bullet below.
   of import_app's and deploy_app's own internal captures deadlocks against
   the lock its caller is itself holding — test each of those call sites
   explicitly, not just one representative case.
+- [ ] Recovery uses a separate evidence-only capture path after establishing
+  worker termination, guarded by a controller recovery claim on the same
+  physical target row. It accepts held/uncertain state only for that selected
+  recovery and never feeds reconciliation, receipts or baseline stamping.
+  Claim by a NOWAIT compare-and-set of the selected owner (including NULL)
+  and generation to a new recovery token after worker-termination proof; keep
+  uncertainty set. Concurrent normal acquisition must see the recovery holder.
+  Retain the claim through capture and atomic clear/generation increment;
+  concurrent recoveries cannot clear a different worker's state.
+- [ ] Test a caught partial import that clears ownership but leaves generation
+  unchanged and uncertainty set, both before export and inside its read window.
+  Neither capture may be reconciled. Test successful owner's post-import
+  capture, evidence-only recovery, wrong-token refusal and concurrent recovery.
 - [ ] Record a capture receipt even when reconciliation changes zero paths
   (spec §6). Test that a no-op export still receipts and that a subsequent
   import of the matching commit is allowed by it. This is the ordinary
@@ -681,13 +777,12 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 - [ ] Resolve the commit, require clean source, materialize exact owned blobs
   and validated binding into scratch.
 - [ ] Capture current app before replacement. Require baseline equality, a
-  valid capture receipt whose reconciled source is contained in the selected
-  commit (`tree_contains`, Task 3) — not necessarily equal to it, since
-  merging a colleague's file after the export must not invalidate the receipt
-  (spec §6) — a resolution receipt
-  binding this exact capture and source digest, or the exact --replace-from
-  capture for first alignment. Verify absent-app bootstrap explicitly. A
-  generic --force flag is not provided.
+  capture receipt satisfied by selected source via `receipt_satisfied` (Task 3),
+  a resolution receipt binding the exact capture and selected source digest, or
+  the exact --replace-from capture for first alignment. Extra selected paths
+  are allowed only when they do not resurrect required-absent paths. Verify
+  absent-app bootstrap explicitly; no generic --force flag.
+
 - [ ] Treat the baseline-mismatch refusal as the design's primary guard, not a
   conservative default (spec §6). The application is shared, so the work it
   protects belongs to colleagues who do not know the command is running and
@@ -715,9 +810,9 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   `capture_app(target, held_by=run_token)` to re-export and verify bytes plus
   master linkage without tripping its own held-mutex refusal. Baseline
   becomes verified, and `release_app` runs with `confirmed_success=True`,
-  only after every one of those checks passes; any failure among them
-  releases without it, which is what leaves the target uncertain — not a
-  separate ad hoc marking step.
+  only after every check passes. A known failure with all workers ended
+  releases without confirmed_success and leaves uncertainty set. Unknown
+  worker/result state retains ownership and uncertainty until reviewed recovery.
 - [ ] Test uncaptured Builder edit refusal, captured-and-committed edits,
   dirty source, stale receipt, changed app between captures, import error-zero,
   subscription mismatch, interrupted verification and successful stamping.

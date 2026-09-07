@@ -1,7 +1,7 @@
 # APEX_PROJECT_TEMPLATE_TEAM — Design
 
 **Date:** 2026-09-06
-**Status:** Revised after design review; implementation and live acceptance gates remain pending
+**Status:** Revised 2026-09-07 after review; implementation and live acceptance gates remain pending
 **Relationship:** Sibling of `APEX_PROJECT_TEMPLATE`, which remains unchanged
 and continues to serve single-developer projects.
 **Plain-language explainer:** [`docs/working-on-apex-together.html`](../../working-on-apex-together.html)
@@ -130,12 +130,13 @@ its own local working tree. Making readers acquire a lock would let a crashed or
 abandoned export block the whole team, which is a worse failure than the one it
 prevents. Instead export reads the application's import generation and mutex
 state before its capture and again after. The capture stands only if no import
-held the mutex at either observation and the generation is unchanged; otherwise
+held the mutex at either observation, neither observation is uncertain, and the
+generation is unchanged; otherwise
 the capture is discarded and retried, and is never reconciled. An import that
 began and finished entirely inside the capture window is caught by the
 generation, and one still running at either end is caught by the mutex state.
-Export therefore blocks nothing and is blocked by nothing, while a torn capture
-cannot reach Git.
+Export holds no shared lock. It refuses while an import or uncertain target
+prevents a trustworthy capture, so a torn capture cannot reach Git.
 
 **Coordination is a human protocol attached to import, not to export.** The
 team-wide pause in §9 is what actually keeps imports and edits apart; the
@@ -154,8 +155,9 @@ not developer-versus-developer ones; §11 states which is which.
 export carries the shared application's current state, a colleague can export and
 merge a page that was built against a column only an unmerged migration creates.
 Page and migration travelled together on one branch when each developer had their
-own application; they no longer do. Plan 2 records where this is caught — fresh
-replay and integration deployment — and why review is the preventive control. It
+own application; they no longer do. Plan 2 records where declared application
+checks catch this — candidate-app verification against disposable replay — and
+why review is the preventive control. It
 is not preventable here, because version 1 does not read APEXlang for SQL
 references.
 
@@ -349,6 +351,7 @@ targets/development.json         tracked recovery-owner role, shared dev target
 targets/integration.json         tracked expected target contract
 targets/test.json                tracked expected target contract
 targets/masters.json             tracked master/component identity contract
+targets/controllers.json         one authoritative metadata owner per instance
 .env                            ignored saved-connection names and profiles
 .sync-state/                    ignored exact baselines, blobs and journals
 scratch/                        temporary staging only
@@ -384,6 +387,19 @@ or mismatch before import. Local default.json is an adapter generated from
 the validated local profile; an existing conflicting file causes refusal.
 Never change it as a side effect of export.
 
+**Physical lock identity is separate from local state identity.** For app
+registry, mutex and generation rows, `target_key` is the canonical SHA-256 of
+`["app-lock-v1", instance_id, workspace_id, app_id]`, using the verified stable
+instance/container identity and integer IDs. Exclude connection name, service
+alias, binding digest, parsing schema, role, project name and checkout UUID.
+Those richer fields still bind local baselines/checkpoints/receipts and invalidate
+unsafe reuse. All cooperating bindings of the same application must use the same
+controller store. Tracked `targets/controllers.json` maps verified instance_id
+to exactly one metadata owner; setup and every app mutation verify the selected
+controller against it and refuse any local override. Moving that owner requires
+coordinated migration of registry/mutex state, never a parallel empty bootstrap.
+Changing a binding cannot create a new lock for an existing application.
+
 Deployment directories, logs, and connection data are outside the
 export-owned source set. Reconciliation and application of an export never
 delete or overwrite them. Maintain a tested allowlist of SQLcl-exported source
@@ -392,18 +408,11 @@ paths cause refusal rather than silent loss or accidental tracking of secrets.
 
 ## 6. Content reconciliation and recoverable imports
 
-**The load-bearing sequence is export, then commit, then import.** Every rule
-below exists to make that sequence safe and to refuse whenever it was skipped.
-A developer who exports immediately before importing always produces a fresh
-capture receipt (see below), and that receipt is what lets import proceed
-regardless of how stale their local baseline is — which in the shared topology
-(§2) is always, since a baseline only advances on verified import and never on
-export. Skip the export and import falls back to comparing the capture against
-that stale baseline, which will disagree and refuse. The refusal in that case
-is doing its job — it is refusing an import that was not preceded by the
-capture that would have proven nothing was lost — not a false alarm to route
-around. Treat export-then-import as the normal single motion of "getting my
-work in," not two independently optional steps.
+The daily sequence is Builder edit, export, review and commit. Import remains
+an occasional coordinated operation. Before an import, export and commit first
+so a receipt can prove that the current Builder state was accounted for. The
+verified import baseline can be stale without preventing ordinary exports:
+export uses a separate reconciliation checkpoint, defined below.
 
 ### Exact state
 
@@ -412,7 +421,7 @@ Store a versioned JSON manifest and SHA-256-addressed source blobs under
 `.sync-state/baselines/`. Its identity contains project ID, alias, instance,
 service, workspace ID, application ID, parsing schema, target role and binding
 digest. It records the source commit as provenance, but reconciliation uses
-the actual blob manifest. Changing PROJECT_ENV_FILE or app ID cannot reuse a
+the actual blob manifests. Changing PROJECT_ENV_FILE or app ID cannot reuse a
 baseline belonging to another target.
 
 Missing baseline means unknown state, not an empty application. Capture the
@@ -421,19 +430,47 @@ explicit bootstrap/import establishes a baseline. Corrupt Git refs, missing
 blobs, incomplete exports, unsupported state versions and uncertain identities
 also fail closed.
 
+### Export checkpoints
+
+Keep two exact trees in each export checkpoint: `captured` (the database tree
+read) and `reconciled` (the resulting source tree). They may differ when Git
+contains source the application has not received. A successful export or
+resolution journals and atomically saves this pair, its receipt, original HEAD
+and binding identity; a failed or interrupted patch cannot advance it. A no-op
+export also saves the pair. Verified import/adoption initializes both trees to
+the verified source; only those operations advance the import baseline.
+
+Before reusing a checkpoint on a later clean export, anchor its exact reconciled
+source tree to a commit reachable from current HEAD and descended from its
+recorded original HEAD. Retain that commit ID. If no such commit exists, refuse
+with the retained capture and instructions to commit or explicitly reconcile;
+never silently fall back to an older import baseline. A checkout/branch move
+that loses this ancestry also requires explicit reconciliation. Keep the two
+trees and ancestry evidence in the recovery bundle so resolution can establish
+a new checkpoint without an import. Missing initial state still uses explicit
+adoption/bootstrap, never an invented empty base.
+
+This permits successive Builder edits A→B→C and an intentional B→A revert after
+B was committed. It also preserves a Git-only edit on repeated exports. If the
+two checkpoint trees already disagree on a path and Builder subsequently changes
+that path, require explicit resolution unless the new Builder bytes equal HEAD.
+The earlier divergence must not disappear just because a checkpoint advanced.
+
 ### Pure decision contract
 
 Each tree maps POSIX relative path to normalized bytes; absence is a distinct
 state and differs from a zero-byte file. Binary files use exact bytes. APEXlang
 is normalized to LF before hashing; no broad text rewriting is allowed.
 
-For each path in the union of base, head and mine:
+Let `base` be the checkpoint's captured tree and `source_base` its reconciled
+tree; on initial alignment they are equal. `head` is current committed source
+and `mine` the new capture. For each path in the union of all four trees:
 
 | Condition, evaluated in order | Reconciled value |
 |---|---|
 | mine equals head | that value |
 | mine equals base | head |
-| head equals base | mine |
+| head equals source_base and source_base equals base | mine |
 | otherwise | explicit conflict; no automatic application |
 
 This includes add/add, modify/delete, delete/modify and binary conflicts.
@@ -450,22 +487,26 @@ by retaining HEAD, so refusal is unnecessary for an unambiguous case.
 ### Export sequence
 
 1. Verify developer target role, source ownership, app alias and local state.
-   Lock the local app operation; refuse staged, unstaged, untracked or ignored
+   Validate checkpoint ancestry and lock the local app operation; refuse staged,
+   unstaged, untracked or ignored
    files overlapping the source ownership set. Deployment bindings are exempt
    from source cleanliness checks but validated separately. Also read the shared
    application's import generation and mutex state: the application is shared
    (§2), so a local lock alone does not prevent another developer's import from
-   writing it mid-read. Refuse immediately if an import holds the mutex now.
+   writing it mid-read. Refuse immediately if the target is uncertain or an
+   import holds the mutex now.
 2. Export into scratch using a verified read session. Require a complete
    versioned export manifest, expected source classes, application.apx, and
    positive completion evidence. Normalize .apx and hash binary bytes. Re-read
    the import generation and mutex state; a changed generation or a mutex held
-   at either observation discards this capture as possibly torn (§2.1). Discard
+   at either observation, or uncertainty at either observation, discards this
+   capture as possibly torn (§2.1). Discard
    and retry rather than reconciling it — the capture has no side effects.
-3. Persist the capture, base, HEAD manifest, target identity and diagnostics in
+3. Persist the capture, both checkpoint trees, HEAD manifest, target identity
+   and diagnostics in
    `.sync-state/recovery/<operation-id>/` BEFORE changing any source.
    Recovery is durable local state, never an EXIT-trap scratch directory.
-4. Resolve HEAD once and load exact base/head/mine. On conflict retain the
+4. Resolve HEAD once and load exact base/source_base/head/mine. On conflict retain the
    bundle, print paths and recovery instructions, and change no source.
 5. Recheck HEAD and source preimage under the operation lock. Apply only the
    calculated changed paths. Journal preimages and intended postimages before
@@ -479,7 +520,8 @@ by retaining HEAD, so refusal is unnecessary for an unambiguous case.
 Export never advances the verified database baseline: reconciliation can
 preserve Git changes not yet present in the database. When export successfully
 places all Builder work into source, also record a capture receipt binding
-that database-export digest to the result tree. This receipt lets a subsequent
+that database-export digest to the result tree and required-absence set, and
+save the export checkpoint described above. This receipt lets a subsequent
 import distinguish captured Builder edits from new uncaptured edits.
 
 A capture that reconciles to zero changed paths still records a receipt. The
@@ -497,14 +539,25 @@ binding. Do not import a changing working directory.
 
 Before every whole-application import, capture the existing database app into
 durable recovery. If its digest differs from the verified baseline, allow
-replacement only if it matches a receipt whose reconciled source is contained
-in the selected commit, or an explicit resolution receipt binds this capture
+replacement only if it matches a receipt satisfied by the selected commit, or
+an explicit resolution receipt binds this capture
 and selected source digest. Otherwise refuse and direct the developer to
 export/reconcile first.
 
+A receipt is satisfied only when every result path has identical bytes in the
+selected commit AND every required-absent path remains absent. Compute required
+absences as `(previous required absences ∪ paths(base) ∪ paths(source_base) ∪
+paths(head) ∪ paths(mine)) − paths(result)`. Persist this sorted set with the
+receipt and carry it across exports; an explicitly reconciled re-add removes
+its tombstone. An older commit restoring a deleted page must refuse even if
+all remaining files match. A selected commit that contradicts either condition
+requires a resolution receipt binding the exact capture and selected source.
+Unknown receipt formats or missing absence evidence fail closed.
+
 The receipt attests that the captured database state was accounted for, so the
 selected commit may legitimately carry additional source the application has
-never received (§2.1); it need not equal the reconciled tree. A strict reading
+never received (§2.1); it need not equal the reconciled tree, but extra paths
+cannot resurrect recorded deletions. A strict reading
 requiring equality would refuse an import whose commit merged a colleague's
 hand-edited file after the export — the case whole-application import exists to
 serve.
@@ -538,7 +591,7 @@ linkage before the baseline is committed atomically. Failure retains recovery
 and marks the target uncertain; the old baseline is not claimed to be current.
 An import timeout is not proof of rollback.
 
-For a conflict, provide base/head/mine and a candidate result directory in the
+For a conflict, provide base/source_base/head/mine and a candidate result directory in the
 bundle. `resolve-export <recovery-id> --resolved <path>` verifies conflict
 coverage, paths and original HEAD/preimage, applies the reviewed result using
 the same journal and records a resolution receipt. The developer commits the
@@ -641,9 +694,11 @@ structure independently of application snapshots. Store:
   apply, recorded immutably so a later header edit is a detectable conflict;
 - attempt records: RUNNING, APPLIED, FAILED or UNKNOWN.
 
-Version 1 stores **no** expected object fingerprints. Expected schema state has
-exactly one source — the canonical replay evidence under `database/` — rather
-than a second, independently drifting copy in metadata.
+Version 1 stores **no predicted migration effects**. Canonical intended schema
+state comes from replay evidence under `database/`. Separately, immutable observed
+before/after inventories in metadata record what accepted operations actually
+changed. They form the provenance chain used by the drift gate below; they are
+not author declarations or a second canonical source definition.
 
 Bootstrap is an explicit guarded non-production setup operation, idempotent
 only if the existing metadata structure matches exactly. Normal apply can
@@ -782,8 +837,10 @@ or rerun it automatically.
 
 ### Apply and failure semantics
 
-Under the mutex, confirm dependencies are satisfied, all known checksums match
-and no attempt is RUNNING or UNKNOWN. Commit RUNNING before the payload.
+Under the mutex, confirm dependencies are satisfied, all known checksums match,
+no attempt is unresolved, and live structure matches the accepted observed
+history frontier defined below. Unexplained structural differences block before
+RUNNING and before payload execution. Commit RUNNING before the payload.
 Execute its exact staged bytes, capture the schema inventory before and after,
 then run SELECT-only verification through VERIFY. Require no structural
 mutation during verification. Mark APPLIED through the metadata owner, then
@@ -802,9 +859,11 @@ restartable attempt can repair it. No automatic checksum repair or mark-ran.
 Removing declared effects removes two checks, and no other. Stating them
 plainly so the gap is deliberate:
 
-1. **Wrong starting point is not detected before execution.** A migration
+1. **Author-assumed starting point is not detected before execution.** A migration
    applied to a schema that is not in the state its author assumed will run
-   rather than refuse. Its verification should then fail, but the SQL has
+   rather than refuse, provided it matches the accepted observed history frontier.
+   Unexplained out-of-band drift still refuses. Its verification should then
+   fail, but the SQL has
    already executed and Oracle has already committed any DDL within it.
 2. **Unintended scope is not detected.** A migration that changes more objects
    than its author expected is not refused; the before/after inventories record
@@ -849,6 +908,39 @@ protected base branch and rejects mutation/removal of canonical migrations.
 Abandoned development migrations remain in the shared log: integrate their
 original intent plus a forward correction, or rebuild a disposable environment;
 do not delete history to make the branch appear clean.
+
+### Drift provenance and the pre-apply gate
+
+Adoption or verified empty bootstrap records an initial observed inventory bound
+to replay evidence, physical schema-set identity, coverage and normalizer version.
+Each APPLIED migration stores complete immutable before/after manifests and a
+predecessor sequence/digest. Its before manifest must equal the previous accepted
+after manifest (or the initial inventory); commit its after manifest together with
+APPLIED history. No runner can replace that frontier with a fresh live snapshot
+without proving the transition. Recovery that accepts a corrective transition
+must retain its before/after evidence and link it into the same chain.
+
+Under the migration mutex, before the first payload and between migrations,
+compare current structure to this frontier. Any addition, removal or changed
+fingerprint is unexplained drift and blocks writes. This is an observed-history
+continuity check, not a prediction of what the next migration should change.
+A foreign APPLIED migration is allowed because its verified transition is already
+in the chain. Missing manifests, broken predecessors, unsupported normalization
+or unresolved attempts produce unknown/refusal, never automatic attribution.
+
+`check-drift` reports three separate comparisons: canonical source versus live;
+accepted observed frontier versus live (unexplained drift); and differences in
+applied migration sets. Attribute a particular canonical/live object difference
+to foreign history only when canonical evidence includes the per-migration replay
+inventories and the live chain can be reproduced from that evidence by applying
+the foreign observed object deltas in sequence. Each delta's old value must match
+before substitution, including absence, and the final value must equal live.
+Track contributing migration IDs per object. If local pending migrations,
+different execution order or overlapping changes prevent that proof, report
+`attribution_unknown` rather than calling the difference foreign or unexplained.
+This classification cannot waive a frontier/live mismatch. A read-only check
+brackets history and inventory reads with the history sequence and mutex state;
+contention or changed sequence yields retry/unknown, not a stable drift verdict.
 
 ### Drift, baselines and replay
 
@@ -936,6 +1028,9 @@ Project-wide constraints for all three plans:
   [Environment]::GetEnvironmentVariable for dynamic environment reads.
 - No case-colliding paths; reject symlinks and unsafe path components.
 - One Python 3.10+ core; Bash and PowerShell 5.1/7 launchers share behavior.
+- Dispatch offline authoring, artifact and history-file commands without loading
+  `.env` or requiring database profiles. Online commands load the profile set
+  required by their operation; an explicitly loaded configuration remains strict.
 - Qualification baseline: APEX 26.1+, SQLcl with verified APEXlang import/export
   capabilities. Pin the exact SQLcl/JDK/APEX tuple after acceptance testing;
   the original proposed SQLcl 26.2+ floor is not an experimentally proven fact.
@@ -1153,9 +1248,10 @@ received — a hand-edited file, a hotfix merged from another environment —
 reconciliation preserves it instead of letting the capture delete it.
 
 The conflict case is now Git against database, not Alice against Bob. It arises
-when a path changed in Git since Bob's baseline *and* changed in the application:
+when a path changed in Git and the application since Bob's checkpoint, or
+Builder changes a path whose checkpoint trees already disagree:
 export retains a recovery bundle and changes no tracked files, Bob resolves
-base/head/mine, commits that result, and imports only if the §6 guard confirms
+base/source_base/head/mine, commits that result, and imports only if the §6 guard confirms
 nobody else's uncaptured work is in the application. Alice and Bob editing page 6
 in the Builder at the same time is not this case and is not reachable by this
 tooling: the later Builder save already overwrote the earlier one inside the
@@ -1170,8 +1266,12 @@ A colleague's migration touching the *same* object is not detected here —
 version 1 declares no object preconditions (§7) — so an explicit `depends-on`
 and review are the controls. Unexplained drift blocks both.
 
-After merge, CI proves fresh/upgrade replay and deploys the selected commit to
-integration. Shared integration reports any foreign migrations explicitly.
+After merge, CI proves fresh/upgrade replay and runs declared checks for the
+candidate applications on the disposable schema before deploying to integration.
+Shared integration may already contain unmerged columns, so it is not the missing-
+migration oracle. Application checks cover declared pages/flows and assertions;
+round-trip byte equality alone does not establish runtime dependency correctness.
+Shared integration reports any foreign migrations explicitly.
 A release tag builds an immutable source artifact, applies its pending set to
 test and verifies APEX round-trip/subscriptions plus schema/data checks.
 Production gets the same canonical release.tar bytes, hashes, verified test

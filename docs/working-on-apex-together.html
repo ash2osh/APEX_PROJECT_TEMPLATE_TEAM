@@ -672,19 +672,28 @@
 
     <div class="col">
       <p>
-        Export compares three versions of every file and picks a winner. That's
-        the entire trick, and it's worth understanding because it's what makes
-        the opening disaster impossible.
+        Export remembers two things from its last successful capture: what the
+        shared application contained and what the reconciled files contained.
+        After you commit those files, the next export compares new changes on
+        both sides against that checkpoint. You can keep editing and exporting
+        without importing between edits, including when you undo an earlier edit.
+      </p>
+      <p>
+        Git-only changes remain protected even when the two checkpoint copies
+        differ. If Builder later changes that same file, the tool asks you to
+        resolve it. Moving to a branch that no longer contains the checkpoint
+        also requires reconciliation; it never quietly uses an older base.
       </p>
       <ul class="col" style="margin:0; padding-left:1.15em;">
-        <li><strong>Base</strong> — what the files looked like the last time they matched the application.</li>
-        <li><strong>Theirs</strong> — what's committed in git right now, on your branch.</li>
-        <li><strong>Mine</strong> — what just came out of the shared application.</li>
+        <li><strong>Base</strong> — the previous checkpoint; the examples below start with its two copies equal.</li>
+        <li><strong>Git</strong> — what's committed on your branch now.</li>
+        <li><strong>Shared app</strong> — what was just captured.</li>
       </ul>
       <p>
-        If only one side changed, that side wins. If both changed the same file
-        differently, nobody wins automatically and you're asked to look. Try the
-        cases:
+        Deleted files are remembered too: an import cannot restore a recorded
+        deletion merely because the remaining files match. Imports and exports
+        also stop on uncertain application state until reviewed recovery.
+        Try the cases below:
       </p>
     </div>
 
@@ -701,16 +710,16 @@
         <div class="recon-grid">
           <div class="rc">
             <div class="rc-h">Base</div>
-            <div class="rc-sub">last in sync</div>
+            <div class="rc-sub">previous checkpoint</div>
             <div class="rc-val" id="rc-base"></div>
           </div>
           <div class="rc">
-            <div class="rc-h">Theirs</div>
+            <div class="rc-h">Git</div>
             <div class="rc-sub">committed now</div>
             <div class="rc-val" id="rc-head"></div>
           </div>
           <div class="rc">
-            <div class="rc-h">Mine</div>
+            <div class="rc-h">Shared app</div>
             <div class="rc-sub">the shared app</div>
             <div class="rc-val" id="rc-mine"></div>
           </div>
@@ -816,7 +825,7 @@ SELECT 'delegated_to exists' AS assertion_name,
     <div class="col">
       <p>
         You all share one development database, so somebody will eventually
-        recompile a package in SQL Developer at 6pm without writing a migration.
+        change a package body in SQL Developer at 6pm without writing a migration.
         There's a command that notices:
       </p>
     </div>
@@ -831,13 +840,36 @@ SELECT 'delegated_to exists' AS assertion_name,
 
     <div class="col">
       <p>
-        Minutes, rather than discovering it months later when a release behaves
-        differently in test. One subtlety it handles for you: changing a table
+        Before applying another migration, the runner checks that the schema
+        still matches the last accepted migration's recorded result. A manual
+        change blocks new writes instead of being absorbed by the next migration.
+        The report compares live structure with canonical replay too. It names
+        an unmerged migration as the explanation only when its recorded changes
+        prove that attribution; otherwise it says the attribution is unknown.
+        One subtlety it handles for you: changing a table
         automatically marks every package that uses it as invalid, even though
         nobody touched those packages. That's normal Oracle behaviour, so it's
         reported as information and never as drift.
       </p>
     </div>
+  </section>
+
+  <section class="col">
+    <h2>Check the application against the merged schema</h2>
+    <p>
+      Integration may share development's database and already contain an
+      unmerged column. CI therefore builds a disposable schema from the selected
+      commit, imports that commit's applications, and runs declared dependency
+      assertions and page checks there before integration deployment. Missing or
+      skipped checks fail the gate. This validates the declared coverage; matching
+      exported files alone cannot prove that every runtime path works.
+    </p>
+    <p>
+      Migration authoring and release inspection work offline without database
+      configuration. Database commands load and verify their required profiles.
+      Different local connection names for the same application still share one
+      physical application lock and its configured metadata owner.
+    </p>
   </section>
 
   <!-- ============ A WORKED DAY ============ -->
@@ -1051,10 +1083,10 @@ SELECT 'delegated_to exists' AS assertion_name,
         base: "page 6 — old", head: "page 6 — the fix", mine: "page 6 — old",
         keep: true,
         label: "Kept",
-        text: "The fix survives. The application matches the last sync, which means nothing changed there — so git's version is the only real change."
+        text: "The fix survives. The application matches the previous checkpoint, which means nothing changed there — so git's version is the only real change."
       },
       {
-        story: "You deliberately deleted page 9 in the App Builder. It existed at the last sync and it's still committed.",
+        story: "You deliberately deleted page 9 in the App Builder. It existed at the previous checkpoint and it's still committed.",
         base: "page 9", head: "page 9", mine: null,
         keep: true,
         label: "Deleted, as you intended",
@@ -1065,7 +1097,7 @@ SELECT 'delegated_to exists' AS assertion_name,
         base: "page 6 — old", head: "page 6 — the fix", mine: "page 6 — Builder edit",
         keep: false,
         label: "Conflict — nothing written",
-        text: "Both versions changed from the same starting point, so neither is automatically right. Your export stops, keeps a copy of all three, and asks you to decide. Nothing is lost."
+        text: "Both versions changed from the same starting point, so neither is automatically right. Your export stops, keeps both checkpoint copies and both current versions, and asks you to decide. Nothing is lost."
       },
       {
         story: "A new page 12 was built in the App Builder. Git has never seen it.",

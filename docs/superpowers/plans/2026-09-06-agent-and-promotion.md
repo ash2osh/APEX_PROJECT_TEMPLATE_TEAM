@@ -4,7 +4,7 @@
 > superpowers:subagent-driven-development when delegation is authorized.
 > Do not mark a gate complete before its behavioral acceptance tests run.
 
-**Revision:** 2 — actual test promotion, immutable releases and offline production.
+**Revision:** 3 — verifies candidate-app dependencies on disposable replay before shared integration.
 **Goal:** Give agents correct team rules and prove selected source can be built,
 deployed to integration, promoted to test and handed to production safely.
 **Architecture:** CI first proves canonical replay, then deploys an exact commit
@@ -141,7 +141,7 @@ never let an answer from a person substitute for a machine guard.
 ### `explain-conflict` — resolving a conflict without reading a diff
 
 **Interface:** `explain_conflict(recovery_id) -> ConflictBriefing` — offline,
-reads only the retained Plan 1 recovery bundle (base/head/mine trees, the
+reads only the retained Plan 1 recovery bundle (base/source_base/head/mine trees, the
 conflict path list and capture/commit author metadata Plan 1 already
 persists). ConflictBriefing enumerates, per conflicted path, the APEXlang
 properties that actually differ and a bounded question set (keep head / keep
@@ -156,11 +156,11 @@ choice they're asked to make is "which page title do you want" rather than
 
 - [ ] Depends on Plan 1 Task 10's recovery bundle format and Task 1's
   corrected agent contract; do not define a second bundle schema here.
-- [ ] Parse each conflicted file's base/head/mine as APEXlang structure, not
-  raw text — diff at the property level (page/region/item/button/
+- [ ] Parse each conflicted file's base/source_base/head/mine as APEXlang structure, not
+  raw text — show any captured/reconciled checkpoint divergence and diff at the property level (page/region/item/button/
   subscription). A file the parser cannot confidently handle refuses to guess;
-  it returns the raw three-way diff instead, never a best-effort structural
-  read.
+  it returns the raw captured/source-checkpoint/HEAD/current-capture comparison
+  instead, never a guessed structural read.
 - [ ] Distinguish two outcomes per path: (a) the two sides changed *different*
   properties — report this, but still require developer confirmation before
   writing anything, never auto-apply; (b) the two sides changed the *same*
@@ -190,7 +190,7 @@ choice they're asked to make is "which page title do you want" rather than
   scratch/ output is one valid way to produce that directory, not a trusted
   bypass of resolve-export's own checks.
 - [ ] Test: different-property auto-identification, same-property question
-  generation, unparsable-file fallback to raw diff, refusal to write outside
+  generation, unparsable-file fallback to raw checkpoint comparison, refusal to write outside
   scratch/, refusal to proceed with an unanswered path, and that
   resolve-export applied to the assistant's output is byte-identical to the
   same resolution supplied by hand.
@@ -282,7 +282,7 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** scripts/teamlib/deploy.py, scripts/deploy_app.sh/.ps1,
 scripts/tests/test_deploy.py.
 
-**Interface:** `deploy_app(target, source_tree, source_commit)
+**Interface:** `deploy_app(target, source_tree, source_commit, replay_proof=None)
 -> DeployReport`; source_tree is immutable materialized bytes, not a live path.
 `target.alias` (Plan 1's `Target`) identifies which archive tree to deploy —
 there is no separate `alias` parameter, since `team.py deploy-app ALIAS
@@ -294,6 +294,11 @@ tree/subscription digests and recovery location.
 - [ ] Resolve target JSON and .env explicitly. For integration/test require
   named deployment binding agreement with the exact profile, workspace, schema,
   app ID and saved connection. Reject default, traversal and mismatched role.
+- [ ] The internal candidate-app caller may use role replay only with an exact
+  provisioner proof binding instance token, run ID and target identity from
+  Task 5. Validate the proof before any capture/write and require its disposable
+  fixture binding. Public deploy-app remains integration/test only and exposes
+  no replay override. Test forged, missing and mismatched proof refusal.
 - [ ] Stage exact source from a resolved Git commit or verified artifact.
   Preserve tracked bindings in Git; inject only the selected verified binding
   into staging. Do not copy local default.json or credentials into the source.
@@ -306,9 +311,9 @@ tree/subscription digests and recovery location.
   same held-mutex carve-out import_app uses, since this path holds the exact
   same mutex — and verify owned source and subscription linkage. Record
   deployment evidence and call `release_app` with `confirmed_success=True`
-  only after verification passes; any earlier failure releases without it,
-  same as import_app, so a crashed or failed deployment also requires
-  recover-app-lock's review before the next attempt.
+  only after verification passes. A known failure with ended workers releases
+  without confirmed_success; an unknown result retains ownership. Both retain
+  uncertainty once payload started and require recover-app-lock review.
 - [ ] Acquire Plan 1 control_store's persistent app-target mutex before capture,
   hold through import/verification and retain it on unknown results. This protects
   separate clones and local automated clients as well as CI. Controller access
@@ -361,7 +366,9 @@ ci/provisioners/docker_pdb.sh, docs/ci.md,
   (`create/probe/replay/destroy`) against it in CI.
 - [ ] Run Plan 2 fresh replay and previous-release upgrade, history immutability
   and canonical evidence comparison, then Plan 1 disposable APEX round-trip
-  and master fixtures. Upload sanitized results and failed captures.
+  and master fixtures. Run the actual selected candidate applications and their
+  declared checks on disposable replay as specified below. Upload sanitized
+  results and failed captures.
 - [ ] Run untrusted PR code only in disposable isolated runners without shared
   integration credentials. Do not use pull_request_target to execute PR payloads.
   Destructive migration fixtures are confined to explicitly authorized test
@@ -373,11 +380,50 @@ ci/provisioners/docker_pdb.sh, docs/ci.md,
   failure, nonempty/shared target, malformed output and a deliberately broken
   migration. None may report PASS/skipped as successful qualification.
 
+### Required candidate-application checks
+
+**Files:** `ci/app-checks/<alias>.json`, `ci/app-checks/<alias>/*.verify.sql`,
+`ci/app-checks/<alias>/flows/*.json`, `scripts/teamlib/app_checks.py`,
+`scripts/tests/test_app_checks.py`, `scripts/tests/live/test_app_checks.py`.
+**Interface:** `verify_candidate_apps(source, replay_target, checks) -> AppCheckReport`.
+
+- [ ] Materialize every actual app from the same selected SHA used for migrations;
+  deploy into that disposable replay target in master order through Task 4
+  with verified replay_proof. The provisioner
+  exposes ORDS/base URL and isolated test-user provisioning as well as SQLcl
+  profiles. Shared development/integration profiles cannot satisfy this gate.
+- [ ] Version 1 declaration schema contains alias, covered page IDs, checks
+  (unique ID, page ID, kind, expected object names) and required fixture IDs.
+  `select` checks reference a tracked .verify.sql member using Plan 2's restricted
+  observation-only grammar and VERIFY profile; checks assert the actual page's
+  required schema/data conditions. `flow` checks reference declarative steps
+  with path, action (`navigate`, `fill`, `click`), selector, optional value or
+  test-secret reference, and expected visible text/URL. Run them through a pinned
+  browser adapter on verified replay/test targets with isolated test fixtures;
+  only disposable replay satisfies source qualification. Test promotion supplies
+  its own fixture identities. No arbitrary script/eval steps or
+  embedded credentials. Record page/flow coverage and source/check digests.
+- [ ] Every shipped app requires at least one SELECT dependency assertion and
+  one authenticated or explicitly public page smoke flow. Changed database
+  dependencies require updated checks in review. Report uncovered paths honestly;
+  these declarations do not automatically discover every dynamic SQL reference.
+- [ ] AppCheckReport contains source SHA, replay identity, app/page/check IDs,
+  declared object names, observed diagnostics and PASS/FAIL/UNKNOWN for each
+  required check. Any missing declaration, fixture, runner capability, result,
+  skipped check or UNKNOWN fails qualification. Do not infer runtime correctness
+  from app export equality or schema fingerprints.
+- [ ] Acceptance fixture: candidate page requires a column absent from selected
+  migrations but present on shared development/integration. Its SELECT assertion
+  and/or exercised page must fail on disposable replay, reporting app, page and
+  column; integration deployment is never launched. Merging the migration makes
+  the same checks pass. Run this on fresh replay and previous-release upgrade.
+
 The workflow job dependency graph is mandatory:
 
 ```text
 offline checks -> provision disposable targets -> fresh replay
               -> upgrade replay -> APEX round-trip/master cases
+              -> candidate-app dependency/page checks
               -> publish qualification evidence -> cleanup exact targets
 ```
 
@@ -397,7 +443,7 @@ substitute an empty previous release.
 - [ ] Provision saved connections in the job's isolated store from protected
   non-production secrets. .env contains names and expectations only.
 - [ ] Apply migrations using shared mode when integration uses the shared dev
-  schema. Report foreign_applied IDs and enforce central fingerprints; do not
+  schema. Report foreign_applied IDs and enforce the observed-history drift gate; do not
   pretend the shared schema equals HEAD. Fresh replay supplies canonical proof.
 - [ ] Deploy every tracked application from the selected commit, respecting
   master-before-subscriber dependencies. Detect cycles/missing managed masters;
@@ -405,11 +451,12 @@ substitute an empty previous release.
 - [ ] Verify actual app bytes/linkage and schema drift after deployment.
   Upload per-app and migration evidence; failure blocks the successful build
   status and retains recovery. Cleanup only job-local secrets/temporary files.
-- [ ] This job is where the shared-application coupling surfaces (Plan 2): a page
-  merged ahead of the bundle it depends on reaches integration against a schema
-  built from merged migrations only. Report that failure naming the application,
-  the page and the missing object, so the reviewer sees a missing migration
-  rather than an unexplained deployment error.
+- [ ] Require Task 5's candidate-app results for this exact SHA before the
+  first integration write. Missing dependencies are tested on disposable replay,
+  not on shared integration, which can already contain unmerged columns. Display
+  failed app/page/check/object identities from that gate in the integration
+  failure report. Shared integration never claims its schema is merged-only.
+
 - [ ] Test workflow behavior with a fake provisioner/SQLcl and two queued commits.
   YAML parsing alone is not acceptance.
 
@@ -443,6 +490,7 @@ release/
   evidence/schema/...             canonical schema fingerprints
   contracts/masters.json          master and component requirements
   contracts/toolchain.json        qualified versions and manifest format
+  checks/apps/...                 candidate app declarations, assertions and flows
   tools/...                      versioned offline verification/planning tools
 ```
 
@@ -454,7 +502,7 @@ release/
   .env, default/named deployment bindings, sync state, logs and scratch.
 - [ ] Manifest fields: format_version, version, source_commit, source_tree,
   toolchain, ordered migration IDs/checksums/dependencies, owned app tree
-  digests, master contract digest, sorted payload path/size/SHA-256 entries.
+  digests, master contract digest, app-check digest, sorted payload path/size/SHA-256 entries.
   The manifest does not hash itself. The SHA-256 of release.tar is the external
   artifact digest recorded in CI evidence and the protected release record.
   Serialize sorted POSIX ustar entries with UTF-8 names, uid/gid 0, empty
@@ -534,11 +582,13 @@ signature, trust_key) -> Runbook`.
   Build once, upload/retain the immutable artifact and external digest.
 - [ ] In a protected test job, download and verify that artifact, load explicit
   test bindings, check strict history, apply pending migrations, deploy apps in
-  master dependency order and run structural/data/APEX/subscription checks.
+  master dependency order and run structural/data/APEX/subscription checks plus
+  the artifact's packaged application checks through the qualified adapter.
   Serialize target jobs and refuse outdated deployment.
 - [ ] Emit TEST_EVIDENCE.json with format version, archive SHA-256, source SHA,
   qualification SHA/toolchain digest, target identity, CI run identity and final
-  successful deployment/schema/data/APEX/subscription results. Sign canonical
+  successful deployment/schema/data/APEX/subscription/application-check results,
+  including disposable replay identity, coverage and check digests. Sign canonical
   JSON bytes with the protected CI Ed25519 signing key after all gates pass.
   Use a qualified pinned cryptography dependency for offline verification;
   include its installation/version/hash requirements in the toolchain contract.
@@ -546,7 +596,7 @@ signature, trust_key) -> Runbook`.
 - [ ] Implement gen-runbook as offline code taking artifact, owner-supplied
   history, target contract, TEST_EVIDENCE.json, detached signature and a trusted
   public key supplied independently of the artifact. Verify signature, archive
-  digest, source SHA, qualification identity and all required PASS results.
+  digest, source SHA, qualification identity, app-check digests/coverage and all required PASS results.
   Missing/failed/untrusted evidence refuses a ready handoff. Test tampering,
   wrong key, unrelated artifact and failed-result attestations. Output is a
   human document and pending plan, not a production apply command.
