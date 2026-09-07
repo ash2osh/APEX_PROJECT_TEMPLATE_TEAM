@@ -391,6 +391,19 @@ paths cause refusal rather than silent loss or accidental tracking of secrets.
 
 ## 6. Content reconciliation and recoverable imports
 
+**The load-bearing sequence is export, then commit, then import.** Every rule
+below exists to make that sequence safe and to refuse whenever it was skipped.
+A developer who exports immediately before importing always produces a fresh
+capture receipt (see below), and that receipt is what lets import proceed
+regardless of how stale their local baseline is — which in the shared topology
+(§2) is always, since a baseline only advances on verified import and never on
+export. Skip the export and import falls back to comparing the capture against
+that stale baseline, which will disagree and refuse. The refusal in that case
+is doing its job — it is refusing an import that was not preceded by the
+capture that would have proven nothing was lost — not a false alarm to route
+around. Treat export-then-import as the normal single motion of "getting my
+work in," not two independently optional steps.
+
 ### Exact state
 
 A baseline is the exact normalized source tree last verified in this target.
