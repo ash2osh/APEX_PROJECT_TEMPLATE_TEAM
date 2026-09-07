@@ -24,6 +24,7 @@ class ReleaseTests(unittest.TestCase):
         (self.repo / "apps" / "checkout" / ".apex").mkdir(parents=True)
         (self.repo / "apps" / "checkout" / "application.apx").write_bytes(b"app\n")
         (self.repo / "apps" / "checkout" / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
+        (self.repo / "apps" / ".gitkeep").write_bytes(b"")
         (self.repo / "migrations").mkdir()
         mid = "20260907T100000__alice__one"
         (self.repo / "migrations" / f"{mid}.sql").write_text("-- migration-version: 1\n-- target: tables\n-- destructive: false\n\nCREATE TABLE T(ID NUMBER);\n", encoding="utf-8")
@@ -59,6 +60,11 @@ class ReleaseTests(unittest.TestCase):
         (self.repo / "apps" / "checkout" / "evil.apx").write_text("untracked", encoding="utf-8")
         manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out")
         self.assertNotIn("evil.apx", manifest.payload_paths)
+
+    def test_apps_placeholder_is_not_packaged_as_an_application(self):
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "placeholder-out")
+        self.assertNotIn("release/apps/.gitkeep", manifest.payload_paths)
+        self.assertEqual(tuple(release_app_trees(manifest.archive_path)), ("checkout",))
 
     def test_unsafe_symlink_in_commit_refuses(self):
         (self.repo / "apps" / "checkout" / "link.apx").symlink_to("/etc/passwd")
