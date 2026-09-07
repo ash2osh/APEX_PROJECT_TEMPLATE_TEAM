@@ -37,7 +37,7 @@ CREATE TABLE TEAM_MIGRATION_ATTEMPT (
     migration_id VARCHAR2(128) NOT NULL,
     checksum VARCHAR2(64) NOT NULL,
     state VARCHAR2(16) NOT NULL,
-    run_token VARCHAR2(64) NOT NULL,
+    run_token VARCHAR2(128) NOT NULL,
     worker_identity VARCHAR2(256) NOT NULL,
     started_at TIMESTAMP WITH TIME ZONE NOT NULL,
     finished_at TIMESTAMP WITH TIME ZONE,

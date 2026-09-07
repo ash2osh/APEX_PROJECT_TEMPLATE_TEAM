@@ -27,8 +27,9 @@ explicit replay environment path, application/workspace fixtures and any
 ORDS base URL. Destroy must verify the token and labels before removing one
 target. `ci/provisioners/docker_pdb.sh` is a working reference Oracle Free
 provider: it downloads the pinned APEX 26.1 archive, verifies its SHA-256,
-installs it into the fresh database, creates DEMO and DEMO_META, starts the
-pinned ORDS image, and returns the generated workspace identity. Teams may
+installs it into the fresh database, creates DEMO, isolated DEMO_META and the
+read-only DEMO_VERIFY profile, starts the pinned ORDS image, and returns the
+generated workspace identity. Teams may
 replace it with a cloned PDB provider without changing the argv contract. It
 requires Docker, Oracle Free and ORDS image access, SQLcl 26.2.1+, curl,
 enough CPU/RAM/disk for the database and APEX install, and a teardown-capable

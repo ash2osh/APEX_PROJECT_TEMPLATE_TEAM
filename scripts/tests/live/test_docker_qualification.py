@@ -21,7 +21,7 @@ from teamlib.control_store import MutexHeld, SqlControlStore
 from teamlib.live_inventory import inventory_target
 from teamlib.migrate import apply_plan
 from teamlib.migration_store import SqlMigrationStore
-from teamlib.sqlcl import run_sqlcl
+from teamlib.sqlcl import SqlclError, run_sqlcl
 
 
 class DockerQualificationTests(unittest.TestCase):
@@ -82,6 +82,14 @@ class DockerQualificationTests(unittest.TestCase):
             self.control.acquire_app(target.physical_key, f"live-app-b-{suffix}", second, "docker-test", "codex")
         state = self.control.release_app(target.physical_key, run_token, confirmed_success=True)
         self.assertGreaterEqual(state.generation, 2)
+
+    def test_payload_and_verify_profiles_cannot_read_controller_metadata(self):
+        driver = self.work / "metadata-isolation.sql"
+        driver.write_text("SELECT COUNT(*) FROM DEMO_META.TEAM_MIGRATION_META;\n", encoding="utf-8", newline="\n")
+        for profile in ("TABLES", "VERIFY"):
+            with self.subTest(profile=profile):
+                with self.assertRaises(SqlclError):
+                    run_sqlcl(profile_target(self.config, profile), "read", driver, self.work / f"isolation-{profile.lower()}")
 
     def test_apex_round_trip_uses_sql_controller(self):
         target = profile_target(self.config, "APEX", alias="master-app")

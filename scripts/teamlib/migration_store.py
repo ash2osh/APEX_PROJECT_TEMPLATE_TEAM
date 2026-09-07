@@ -54,7 +54,7 @@ def _clob_literal(value: str) -> str:
 
 def _b64_sql(column: str, *, clob: bool = False) -> str:
     source = (
-        f"NVL(DBMS_LOB.SUBSTR({column}, 2000, 1), CHR(1))"
+        f"NVL(DBMS_LOB.SUBSTR({column}, 900, 1), CHR(1))"
         if clob
         else f"NVL({column}, CHR(1))"
     )
@@ -645,7 +645,7 @@ END;
             # hierarchy for every outer row on Oracle and never converge.
             chunk_numbers = (
                 "(SELECT LEVEL part FROM dual CONNECT BY LEVEL <= "
-                f"NVL((SELECT MAX(CEIL(DBMS_LOB.GETLENGTH({column}) / 2000)) "
+                f"NVL((SELECT MAX(CEIL(DBMS_LOB.GETLENGTH({column}) / 900)) "
                 f"FROM TEAM_MIGRATION_HISTORY), 1))"
             )
             chunk_selects.append(
@@ -659,10 +659,10 @@ END;
                         _b64_sql("chunk"),
                     ]
                 )
-                + f" FROM (SELECT h.id, c.part, GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(h.{column}) / 2000)) total, "
-                  f"DBMS_LOB.SUBSTR(h.{column}, 2000, (c.part - 1) * 2000 + 1) chunk "
+                + f" FROM (SELECT h.id, c.part, GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(h.{column}) / 900)) total, "
+                  f"DBMS_LOB.SUBSTR(h.{column}, 900, (c.part - 1) * 900 + 1) chunk "
                   f"FROM TEAM_MIGRATION_HISTORY h CROSS JOIN {chunk_numbers} c "
-                  f"WHERE c.part <= GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(h.{column}) / 2000)))"
+                  f"WHERE c.part <= GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(h.{column}) / 900)))"
             )
         clob_rows = self._read_rows(
             store_target,
@@ -996,6 +996,10 @@ class MigrationStore:
             mutex = self._require(data, store_target)
             if mutex.get("owner_token") != run_token:
                 raise MigrationMutexHeld("inventory write requires current migration mutex owner")
+            meta = data.get("meta") or {}
+            expected_schema_set = str(meta.get("schema_set_digest", ""))
+            if expected_schema_set and manifest.get("schema_set_digest") != expected_schema_set:
+                raise MigrationStoreError("inventory schema-set digest does not match metadata bootstrap")
             existing = data.setdefault("inventories", {}).get(digest)
             if existing is not None and existing != manifest:
                 raise MigrationStoreError("inventory manifest is immutable")
