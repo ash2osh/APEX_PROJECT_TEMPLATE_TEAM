@@ -46,6 +46,7 @@ cases — an unlisted case is not thereby excluded.
 | scripts/team.sh; scripts/team.ps1 | complete command surface |
 | scripts/tests/test_*.py; scripts/tests/fixtures/ | unit and public-entry-point tests |
 | .github/workflows/template-checks.yml | database-free portability checks |
+| docs/toolchain.md; docs/app-recovery.md | qualified versions and recovery contract |
 
 Public commands (all accept --env as an alternative to PROJECT_ENV_FILE):
 
@@ -122,8 +123,9 @@ class Baseline:
 
 ## Task 1: Repository, config and target contracts
 
-**Files:** .gitignore, .gitattributes, .env.example, targets/integration.json,
-targets/test.json, scripts/teamlib/config.py, scripts/tests/test_config.py.
+**Files:** .gitignore, .gitattributes, .env.example, targets/development.json,
+targets/integration.json, targets/test.json, scripts/teamlib/config.py,
+scripts/tests/test_config.py.
 
 - [ ] Inspect parent instructions and existing files; initialize TEAM Git only
   during implementation, preserving all four documents.
@@ -160,6 +162,13 @@ targets/test.json, scripts/teamlib/config.py, scripts/tests/test_config.py.
 - [ ] Reject mismatched deployment JSON and profile identities. Define target
   JSON schema with these same fields plus per-alias app IDs; secret values are
   prohibited. Local default binding is generated only by explicit setup.
+- [ ] Define `targets/development.json` as the tracked contract spec §7
+  requires for the shared development target: a named recovery-owner role (at
+  least two people, never an individual), read by `recover-app-lock` and
+  printed in every mutex-blocking refusal. Unlike `targets/integration.json`
+  and `targets/test.json` it carries no app ID, workspace ID or binding — those
+  stay in `.env` for the shared development target (spec §5) — so its schema
+  is deliberately smaller and cannot duplicate or drift from `.env`.
 - [ ] Add ignore rules for .env and .env.*, with !.env.example; .sync-state/,
   scratch/, dist/, apps/**/deployments/default.json. Add LF rules for .apx,
   .sql, .json, .sh and .ps1.
@@ -367,9 +376,21 @@ scripts/tests/live/test_app_lock.py.
 `save_verified_baseline(target, commit, tree) -> None`.
 
 - [ ] Implement setup-state through the metadata write profile. Install exact
-  versioned TEAM_CONTROL_META, TEAM_APP_REGISTRY and TEAM_APP_MUTEX structures
-  only in METADATA_SCHEMA. Partial or incompatible setup refuses. Plan 2 extends
-  this shared schema; it does not create a second controller identity.
+  versioned structures only in METADATA_SCHEMA, at the same column-level detail
+  Plan 2 Task 2 gives its own tables so neither task leaves an implementer
+  inventing a schema: TEAM_CONTROL_META(version, project_id),
+  TEAM_APP_REGISTRY(target_key, checkout_uuid, host, registered_by_user,
+  registered_at), TEAM_APP_MUTEX(target_key, owner_token, checkout_uuid, host,
+  acquired_by_user, acquired_at, generation, is_uncertain), and
+  TEAM_APP_TRANSFER(transfer_id, target_key, old_checkout_uuid,
+  new_checkout_uuid, actor, transferred_at) — append-only, since spec §9's
+  "every transfer is recorded in metadata" otherwise has no table to live in.
+  TEAM_APP_REGISTRY's primary key is (target_key, checkout_uuid), not
+  target_key alone: the shared application is a roster (spec §9), so more than
+  one checkout legitimately registers against the same target_key at once.
+  Define primary/unique keys, state/target checks and NOT NULL contracts.
+  Partial or incompatible setup refuses. Plan 2 extends this shared schema; it
+  does not create a second controller identity.
 - [ ] register-app records a checkout against a target. For the **shared
   development application** the registry is a roster (spec §2, §9): multiple
   concurrent checkouts are expected, every registration succeeds, and
@@ -417,6 +438,11 @@ scripts/tests/live/test_app_lock.py.
   evidence and retained current target capture. It may clear ownership only
   after resolving uncertain app state; it cannot stamp a verified baseline
   from a lock-clear operation. Refuse production and unverifiable worker state.
+  Read the recovery-owner role for this target from its tracked
+  `targets/*.json` contract and include it, per spec §7's self-explaining-
+  blocking requirement, in every refusal caused by a held app-target mutex.
+  There is no membership check on who invokes the command — an org role is not
+  a database identity — so printing the name is what lets a human enforce it.
 - [ ] Store versioned manifests, immutable blobs and operation records under
   .sync-state. Derive target keys from canonical Target identity; binding and
   workspace changes invalidate reuse. Store canonical Git blob provenance,

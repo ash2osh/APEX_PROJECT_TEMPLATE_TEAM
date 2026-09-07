@@ -345,6 +345,7 @@ apps/<alias>/                    tracked APEXlang, metadata and binary assets
   deployments/default.json      ignored local SQLcl binding
   deployments/integration.json  tracked credential-free SQLcl binding
   deployments/test.json         tracked credential-free SQLcl binding
+targets/development.json         tracked recovery-owner role, shared dev target
 targets/integration.json         tracked expected target contract
 targets/test.json                tracked expected target contract
 targets/masters.json             tracked master/component identity contract

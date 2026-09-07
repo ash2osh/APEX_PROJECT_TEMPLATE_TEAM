@@ -82,6 +82,7 @@ what must be short is its duration.
 | scripts/teamlib/replay.py | disposable preparation, replay, canonical evidence and adoption |
 | scripts/teamlib/authoring.py | offline header scaffolding and dependency checksum filling |
 | scripts/migrate.sh/.ps1; scripts/check_drift.sh/.ps1 | shared CLI launchers |
+| operations/README.md | destructive-reset workflow, outside migration discovery |
 | scripts/tests/test_migration_*.py; scripts/tests/live/ | behavioral and Oracle tests |
 | docs/migrations.md; docs/schema-coverage.md | authoring, coverage and recovery contract |
 

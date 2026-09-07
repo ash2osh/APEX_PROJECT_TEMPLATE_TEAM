@@ -34,11 +34,11 @@ through the same adapter and error protocol as developer commands.
 | Files to create | Responsibility |
 |---|---|
 | AGENTS.md; self_improve.md; .agents/rules/; .agents/workflows/team-flow.md | corrected team agent contract |
-| app_context/README.md; .graphifyignore; setup_graphify_apx.py | optional alias-keyed knowledge layer |
+| app_context/README.md; .graphifyignore; setup_graphify_apx.py; scripts/graphify_*.py | optional alias-keyed knowledge layer |
 | scripts/teamlib/conflict_assistant.py; docs/conflict-resolution.md | plain-language, property-level conflict explanation and developer Q&A; never auto-resolves |
 | scripts/teamlib/announce.py; docs/import-pause.md | drafted import announcement and all-clear from observed state; import confirmation that never bypasses a guard |
 | scripts/teamlib/deploy.py; scripts/deploy_app.sh/.ps1 | named-target exact-source deployment |
-| scripts/teamlib/release.py; scripts/teamlib/runbook.py; scripts/gen_release.sh/.ps1 | offline artifact, plan, runbook and release launcher |
+| scripts/teamlib/release.py; scripts/teamlib/runbook.py; scripts/build_release.sh/.ps1 | offline artifact, plan, runbook and release launcher |
 | scripts/teamlib/ci.py; ci/runner-contract.json; ci/provisioners/docker_pdb.sh; docs/ci.md | qualification/provisioning, reference provisioner and job entry points |
 | .github/workflows/template-checks.yml; database-checks.yml | offline and required disposable replay gates |
 | .github/workflows/integration.yml; release.yml | merge deployment and tag-to-test promotion |
@@ -390,7 +390,7 @@ substitute an empty previous release.
 ## Task 7: Immutable release artifact and target-specific planning
 
 **Files:** scripts/teamlib/release.py, scripts/tests/test_release.py,
-scripts/gen_release.sh/.ps1, docs/promotion.md.
+scripts/build_release.sh/.ps1, docs/promotion.md.
 
 **Interfaces:** `build_release(repo, ref, version, out) -> Manifest`;
 `verify_release(release_tar) -> Manifest`;
@@ -525,9 +525,12 @@ docs/promotion.md.
 - [ ] State that source SQL is trusted reviewed deployment code, not a sandbox.
   Wrapper tests prove the declared automated entry points reject production;
   they do not prove arbitrary SQL cannot be run by a human with credentials.
-- [ ] Parameterize fake-SQLcl boundary tests over import, deploy, apply-release,
-  migrate, bootstrap, setup-state, register-app, adopt-baseline, app-lock recovery
-  and recover-migration. With valid
+- [ ] Parameterize fake-SQLcl boundary tests over import-app, deploy-app,
+  apply-release, migrate, bootstrap-app, migrate --bootstrap, setup-state,
+  register-app, adopt-baseline, recover-app-lock and recover-migration —
+  bootstrap has two distinct entry points (app-level and metadata-level) and
+  both need their own production refusal test, not one standing in for both.
+  With valid
   production config, assert explicit production refusal and ZERO write
   launches. Pair every negative with valid non-production positive coverage
   so a missing file or broken parser cannot masquerade as protection.
