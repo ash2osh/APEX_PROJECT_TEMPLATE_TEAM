@@ -831,9 +831,10 @@ dependent objects as a side effect of upstream DDL: adding a column to a table
 in `TABLES_SCHEMA` immediately marks dependent views, package specs and bodies,
 and triggers in `CODE_SCHEMA` as `INVALID`, without their definitions changing.
 If `STATUS` contributed to a fingerprint, a migration that altered a table
-would change the fingerprints of objects it never touched, and the very next
-migration would be refused by the precondition check — one migration blocking
-its own successor. Fingerprints therefore hash the canonical object
+would change the fingerprints of objects it never touched, and `check-drift`
+would report every one of them as structurally changed even though their
+definitions never moved — noise indistinguishable from a real change on every
+single DDL migration. Fingerprints therefore hash the canonical object
 definition only. Concretely:
 
 - `STATUS`, `LAST_DDL_TIME` and any other volatile dictionary column are

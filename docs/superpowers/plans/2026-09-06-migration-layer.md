@@ -490,8 +490,12 @@ scripts/tests/live/test_migration_acceptance.py.
   export can carry a page that depends on it, and merging the bundle promptly is
   the author's responsibility rather than a review formality.
 - [ ] Exercise shared schema with Alice's applied unmerged bundle and Bob's
-  unrelated bundle; both work, a conflicting precondition refuses, and an
-  unknown attempt blocks. Verify integration reports foreign IDs explicitly.
+  unrelated bundle; both work, a declared dependency whose checksum no longer
+  matches refuses, and an unknown attempt blocks. A same-object change between
+  the two bundles with no declared dependency is not caught here — spec §7
+  states plainly that version 1 has no object-level precondition, so that case
+  is closed by review, not by this test. Verify integration reports foreign
+  IDs explicitly.
 - [ ] Exercise the shared-application coupling above: a page exported from the
   shared application depends on a column created by a bundle that is still
   unmerged, and the page merges first. Fresh replay must not contain the column,

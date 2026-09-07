@@ -38,18 +38,18 @@ through the same adapter and error protocol as developer commands.
 | scripts/teamlib/conflict_assistant.py; docs/conflict-resolution.md | plain-language, property-level conflict explanation and developer Q&A; never auto-resolves |
 | scripts/teamlib/announce.py; docs/import-pause.md | drafted import announcement and all-clear from observed state; import confirmation that never bypasses a guard |
 | scripts/teamlib/deploy.py; scripts/deploy_app.sh/.ps1 | named-target exact-source deployment |
-| scripts/teamlib/release.py; scripts/teamlib/runbook.py | offline artifact, plan and runbook |
+| scripts/teamlib/release.py; scripts/teamlib/runbook.py; scripts/gen_release.sh/.ps1 | offline artifact, plan, runbook and release launcher |
 | scripts/teamlib/ci.py; ci/runner-contract.json; ci/provisioners/docker_pdb.sh; docs/ci.md | qualification/provisioning, reference provisioner and job entry points |
 | .github/workflows/template-checks.yml; database-checks.yml | offline and required disposable replay gates |
 | .github/workflows/integration.yml; release.yml | merge deployment and tag-to-test promotion |
 | scripts/tests/test_deploy.py; test_release.py; test_production_boundary.py | public-entry-point regression tests |
-| README.md; docs/promotion.md | user workflow, environment setup and recovery |
+| README.md; docs/promotion.md; docs/design-review-resolution.md | user workflow, environment setup, recovery and review-finding traceability |
 
 Public commands added to team.py:
 
 ```text
 explain-conflict RECOVERY_ID
-announce-import ALIAS --ref COMMIT [--all-clear RESULT_ID]
+announce-import ALIAS (--ref COMMIT | --all-clear RESULT_ID)
 deploy-app ALIAS --target TARGET_JSON --ref COMMIT
 build-release --ref TAG_OR_COMMIT --version SEMVER --out DIRECTORY
 verify-release ARCHIVE
@@ -208,7 +208,10 @@ before the write.
 **Interface:** `draft_import_announcement(alias, commit) -> Announcement` and
 `draft_all_clear(alias, result) -> str`. Announcement carries the message text,
 the observed state it was written from, and the findings that must appear in it.
-Both are read-only and produce text; neither imports anything.
+Both are read-only and produce text; neither imports anything. The CLI's two
+modes map to these two functions and are mutually exclusive: `--ref` drafts the
+pre-import announcement, `--all-clear` drafts the post-import all-clear from a
+completed import's result, and `--ref` is not read in the second mode.
 
 - [ ] Draft from observed state, never from assumption: the resolved commit, the
   target's workspace and application identity, the `app-status` roster (spec §9)

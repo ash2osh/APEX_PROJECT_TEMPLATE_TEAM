@@ -533,10 +533,13 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   success or a known refusal before payload starts.
 - [ ] Resolve the commit, require clean source, materialize exact owned blobs
   and validated binding into scratch.
-- [ ] Capture current app before replacement. Require baseline equality,
-  valid capture/resolution receipt matching selected source, or the exact
-  --replace-from capture for first alignment. Verify absent-app bootstrap
-  explicitly. A generic --force flag is not provided.
+- [ ] Capture current app before replacement. Require baseline equality, a
+  valid capture receipt whose reconciled source is contained in the selected
+  commit — not necessarily equal to it, since merging a colleague's file after
+  the export must not invalidate the receipt (spec §6) — a resolution receipt
+  binding this exact capture and source digest, or the exact --replace-from
+  capture for first alignment. Verify absent-app bootstrap explicitly. A
+  generic --force flag is not provided.
 - [ ] Treat the baseline-mismatch refusal as the design's primary guard, not a
   conservative default (spec §6). The application is shared, so the work it
   protects belongs to colleagues who do not know the command is running and
