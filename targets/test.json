@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "project": "example-team-apex",
+  "role": "test",
+  "environment": "test",
+  "instance_id": "EXAMPLE_TEST_INSTANCE",
+  "db_name": "FREEPDB1",
+  "service": "test-service",
+  "session_user": "EXAMPLE_APP",
+  "current_schema": "EXAMPLE_APP",
+  "workspace_id": 90002,
+  "app_ids": {
+    "employee-self-service": 102
+  },
+  "recovery_owner": {
+    "role": "apex-recovery-owners",
+    "members": ["test-owner-a", "test-owner-b"]
+  },
+  "binding": {
+    "connection": "test-apex",
+    "schema": "EXAMPLE_APP"
+  }
+}

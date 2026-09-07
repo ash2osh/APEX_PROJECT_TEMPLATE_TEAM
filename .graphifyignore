@@ -1,0 +1,19 @@
+# Domain allowlist: application source, database evidence and durable context.
+/*
+!/apps/
+!/database/
+!/app_context/
+
+/apps/.gitkeep
+/database/.gitkeep
+/app_context/README.md
+/database/**/manifest-code.txt
+/database/**/manifest-tables.txt
+
+/apps/**/.apex/
+/apps/**/deployments/
+/apps/**/workspace-components/
+/apps/**/static-files.apx
+/apps/**/static-files/
+**/export.log
+**/export_err.log

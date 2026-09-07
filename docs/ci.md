@@ -1,0 +1,51 @@
+# Disposable CI and candidate application checks
+
+The required database gate must qualify an exact source SHA on a fresh,
+disposable target. It then runs the previous-release upgrade when a previous
+artifact exists, records an explicit `NOT_APPLICABLE_INITIAL_RELEASE` result
+otherwise, verifies migration history immutability, replays APEX exports and
+executes every declared candidate-app check before shared integration.
+
+`ci/runner-contract.json` is a credential-free capability contract. Run its
+offline doctor with:
+
+```text
+PYTHONPATH=scripts python3 scripts/team.py ci-doctor --contract ci/runner-contract.json
+```
+
+The contract names a pinned SQLcl/JDK/APEX/database toolchain, the five
+required profile classes and an executable provisioner. The provisioner
+interface is deliberately small:
+
+```text
+create --run-id UUID --out scratch/ci/UUID
+destroy --run-id UUID --instance-token TOKEN
+```
+
+The create result is versioned JSON containing a disposable instance token, an
+explicit replay environment path, application/workspace fixtures and any
+ORDS base URL. Destroy must verify the token and labels before removing one
+target. `ci/provisioners/docker_pdb.sh` is a reference Oracle Free provider;
+teams may replace it with a cloned PDB provider without changing the argv
+contract. It requires Docker, Oracle Free image access, enough CPU/RAM for the
+database, and a teardown-capable runner.
+
+Candidate declarations under `ci/app-checks/` are version 1 JSON. Each shipped
+application needs at least one restricted SELECT dependency assertion and one
+declarative authenticated/public page flow. No arbitrary script/eval step or
+embedded credential is accepted. A missing runner, fixture, result or required
+check is `UNKNOWN`/failure, never a successful skip. The report records source
+SHA, replay identity, app/page/check IDs, expected objects and coverage.
+
+The shipped `scripts/ci_replay_runner.py` is a reference adapter: it performs
+the identity probes and migration replay through the common SQLcl boundary, and
+it deploys/checks tracked applications only when the selected repository has
+matching declarations and a qualified SQL/browser adapter. A template with no
+tracked applications reports zero-app coverage explicitly. Adopting teams must
+replace or extend that adapter for their APEX/ORDS fixture and browser runner;
+the default CI job remains fail-closed when a required capability is absent.
+
+Do not run untrusted pull-request code with integration credentials. The
+workflow provisions disposable resources and removes only the exact resource
+whose token it received. Production connections and credentials are excluded
+from CI by contract.

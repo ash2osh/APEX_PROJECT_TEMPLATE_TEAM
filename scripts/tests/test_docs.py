@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class DocumentationTests(unittest.TestCase):
+    def test_required_workflow_documents_and_links_exist(self):
+        for relative in (
+            "README.md", "docs/ci.md", "docs/promotion.md", "docs/app-recovery.md",
+            "docs/conflict-resolution.md", "docs/import-pause.md", "docs/migrations.md",
+            "docs/design-review-resolution.md", "AGENTS.md", ".agents/workflows/team-flow.md",
+        ):
+            self.assertTrue((ROOT / relative).is_file(), relative)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("no import step", readme.lower())
+        self.assertIn("release.tar", (ROOT / "docs/promotion.md").read_text(encoding="utf-8"))
+        self.assertIn("UNKNOWN", (ROOT / "docs/ci.md").read_text(encoding="utf-8"))
+
+    def test_local_markdown_links_resolve(self):
+        pattern = re.compile(r"\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)")
+        for path in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]:
+            for link in pattern.findall(path.read_text(encoding="utf-8")):
+                if link.startswith(("http://", "https://", "mailto:")):
+                    continue
+                self.assertTrue((path.parent / link).resolve().is_file(), f"{path}: {link}")
+
+
+if __name__ == "__main__":
+    unittest.main()

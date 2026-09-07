@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "controllers": {
+    "EXAMPLE_INTEGRATION_INSTANCE": {
+      "metadata_schema": "EXAMPLE_META",
+      "metadata_connection": "integration-meta",
+      "expected_user": "EXAMPLE_META",
+      "current_schema": "EXAMPLE_META"
+    },
+    "EXAMPLE_TEST_INSTANCE": {
+      "metadata_schema": "EXAMPLE_META",
+      "metadata_connection": "test-meta",
+      "expected_user": "EXAMPLE_META",
+      "current_schema": "EXAMPLE_META"
+    }
+  }
+}

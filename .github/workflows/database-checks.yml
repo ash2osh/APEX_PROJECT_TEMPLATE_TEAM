@@ -1,0 +1,52 @@
+name: database-checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Required offline qualification
+        run: |
+          PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -v
+          PYTHONPATH=scripts python3 scripts/team.py ci-doctor --contract ci/runner-contract.json
+
+  replay:
+    needs: offline
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Replay selected SHA
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p evidence/ci
+          PYTHONPATH=scripts python3 scripts/team.py ci-replay \
+            --ref "$SOURCE_SHA" \
+            --contract ci/runner-contract.json \
+            --provisioner ci/provisioners/docker_pdb.sh \
+            --runner scripts/ci_replay_runner.py | tee "evidence/ci/${SOURCE_SHA}.json"
+      - name: Publish exact-SHA qualification evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualification-${{ github.sha }}
+          path: evidence/ci/${{ github.sha }}.json
+          if-no-files-found: error

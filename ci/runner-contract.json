@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "isolated": true,
+  "toolchain": {
+    "python": "3.10+",
+    "sqlcl": "26.2.1+",
+    "jdk": "17+",
+    "apex": "26.1+",
+    "database": "23ai+",
+    "cryptography": "Ed25519-qualified"
+  },
+  "profiles": ["TABLES", "CODE", "APEX", "METADATA", "VERIFY"],
+  "provisioner": {
+    "path": "provisioners/docker_pdb.sh",
+    "image": "container-registry.oracle.com/database/free@sha256:696eee2ee8985af25ef0dc4cbcac14cdaadfd4545150a87d82d9724ce43c7a77"
+  },
+  "runner": "../scripts/ci_replay_runner.py",
+  "production": {
+    "credentials": false,
+    "writes": false
+  }
+}

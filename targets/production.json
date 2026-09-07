@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "project": "example-team-apex",
+  "role": "integration",
+  "environment": "production",
+  "instance_id": "EXAMPLE_PRODUCTION_INSTANCE",
+  "db_name": "FREEPDB1",
+  "service": "production-service",
+  "session_user": "EXAMPLE_APP",
+  "current_schema": "EXAMPLE_APP",
+  "workspace_id": 90003,
+  "app_ids": {
+    "employee-self-service": 103
+  },
+  "recovery_owner": {
+    "role": "production-recovery-owners",
+    "members": ["production-owner-a", "production-owner-b"]
+  },
+  "binding": {
+    "connection": "production-apex",
+    "schema": "EXAMPLE_APP"
+  }
+}

@@ -1,8 +1,11 @@
 # Design review resolution — 2026-09-07
 
 The seven findings from the project review are addressed in the specifications
-and implementation plans. The tooling is not implemented; database, concurrency,
-CI and native-platform acceptance remain unchecked future work.
+and implementation plans. The offline safety core, SQLcl boundary,
+disposable-runner contract and promotion handoff are implemented in this
+template. The local Docker/APEX qualification below covers read-only identity,
+inventory and APEX export behavior; disposable replay and ORDS/browser checks
+remain environment-specific gates and are never replaced by an offline PASS.
 
 | Finding | Revised contract | Required implementation evidence |
 |---|---|---|
@@ -18,7 +21,7 @@ The [plain-language explainer](working-on-apex-together.html) now describes
 checkpoints, deletion protection, uncertainty, observed drift continuity,
 disposable application checks and offline authoring consistently with the plans.
 
-Validation performed for this documentation revision:
+Validation performed for this implementation revision:
 
 - Parsed all 10 Python code fences in the four design/plan documents.
 - Executed the exact documented reconciliation/receipt functions against all
@@ -26,9 +29,19 @@ Validation performed for this documentation revision:
   deleted-page resurrection.
 - Checked all 256 combinations of missing, empty, A and B across the four-tree
   reconciliation state table.
+- Passed the full offline Python suite, including the release/archive,
+  production-boundary, candidate-check, and CI-contract tests.
+- Qualified SQLcl 26.2.1 read-only identity for all five logical profiles and
+  captured read-only APEX exports from the existing APEX 26.1 workspace without
+  importing or modifying the historical applications.
+- Qualified the read-only live schema inventory adapter against the Docker
+  database and retained its result as scratch evidence; schema adoption is
+  still explicit and was not inferred from that observation.
 - Checked Markdown links, code-fence balance, LF line endings, HTML IDs/anchors
   and Git whitespace errors.
 
-These checks validate the documented pure contracts and document structure.
-They do not qualify SQLcl, database locking, CI provisioning or the future
-application-check runner. No database operation was performed.
+These checks validate the documented contracts, implementation boundaries and
+read-only local qualification. They do not claim that a team's disposable
+Oracle/APEX/ORDS/browser adapter is qualified until that adapter produces its
+own exact-SHA evidence. No import, migration, deployment or production write
+was performed.

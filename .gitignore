@@ -1,0 +1,18 @@
+# Local configuration and durable sync/recovery state
+.env
+.env.*
+!.env.example
+.sync-state/
+scratch/
+dist/
+
+# Local worktree/developer caches
+.worktrees/
+__pycache__/
+*.pyc
+
+# SQLcl deployment bindings may contain local connection names or IDs.
+apps/**/deployments/default.json
+
+# Local graph/build output
+graphify-out/

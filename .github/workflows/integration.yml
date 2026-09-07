@@ -1,0 +1,92 @@
+name: integration
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: example-team-apex-integration
+  cancel-in-progress: false
+
+jobs:
+  qualification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Wait for the exact-SHA disposable qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id="$(gh run list --workflow database-checks.yml --commit "${GITHUB_SHA}" --limit 20 --json databaseId,status,conclusion --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId' | head -n 1)"
+            test -n "$run_id" && break
+            sleep 10
+          done
+          test -n "$run_id"
+          gh run download "$run_id" --name "qualification-${GITHUB_SHA}" --dir "$RUNNER_TEMP/qualification"
+          test -s "$RUNNER_TEMP/qualification/${GITHUB_SHA}.json"
+          python3 - "$RUNNER_TEMP/qualification/${GITHUB_SHA}.json" <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          value = json.loads(path.read_text(encoding="utf-8"))
+          assert value.get("status") == "PASS", value
+          assert value.get("source_commit") == "${{ github.sha }}", value
+          assert value.get("fresh") == "PASS", value
+          PY
+      - name: Offline command and contract gate
+        run: PYTHONPATH=scripts python3 scripts/team.py ci-doctor --contract ci/runner-contract.json
+
+  deploy:
+    needs: qualification
+    runs-on: ubuntu-latest
+    environment: integration
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Require protected target binding
+        env:
+          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
+          TEAM_APP_ALIASES: ${{ vars.TEAM_APP_ALIASES }}
+        run: |
+          test -n "$TEAM_ENV_FILE"
+          test -f "$TEAM_ENV_FILE"
+          test -n "$TEAM_APP_ALIASES"
+          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+      - name: Check observed drift for this exact SHA
+        env:
+          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
+        run: |
+          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" check-drift \
+            --out "scratch/integration-drift-${GITHUB_SHA}.json"
+      - name: Apply reviewed shared migrations
+        env:
+          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
+        run: |
+          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" migrate \
+            --source migrations \
+            --expected-inventory database/schema-inventory.json \
+            --actual-inventory scratch/live-inventory.json
+      - name: Deploy every selected application from this SHA
+        env:
+          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
+          TEAM_APP_ALIASES: ${{ vars.TEAM_APP_ALIASES }}
+        run: |
+          IFS=',' read -r -a aliases <<< "$TEAM_APP_ALIASES"
+          test "${#aliases[@]}" -gt 0
+          for alias in "${aliases[@]}"; do
+            test -n "$alias"
+            PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" deploy-app "$alias" \
+              --target targets/integration.json --ref "$GITHUB_SHA"
+          done

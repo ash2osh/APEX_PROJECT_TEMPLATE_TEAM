@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "project": "example-team-apex",
+  "role": "developer",
+  "environment": "development",
+  "recovery_owner": {
+    "role": "apex-recovery-owners",
+    "members": ["developer-a", "developer-b"]
+  }
+}

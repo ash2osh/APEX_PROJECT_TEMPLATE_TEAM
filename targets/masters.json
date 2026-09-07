@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "masters": [
+    {
+      "app_id": 500,
+      "alias": "master-app",
+      "workspace_id": 5402650006222933,
+      "components": [
+        {"type": "authentication", "symbol": "opendoor-master"},
+        {"type": "authorization", "symbol": "authorization-master"},
+        {"type": "theme", "symbol": "universal-theme"}
+      ]
+    }
+  ]
+}

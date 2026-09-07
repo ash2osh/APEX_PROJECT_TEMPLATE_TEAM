@@ -1,0 +1,6 @@
+# APEXlang, SQL, metadata and launcher files are always LF.
+*.apx text eol=lf
+*.sql text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf

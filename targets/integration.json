@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "project": "example-team-apex",
+  "role": "integration",
+  "environment": "staging",
+  "instance_id": "EXAMPLE_INTEGRATION_INSTANCE",
+  "db_name": "FREEPDB1",
+  "service": "integration-service",
+  "session_user": "EXAMPLE_APP",
+  "current_schema": "EXAMPLE_APP",
+  "workspace_id": 90001,
+  "app_ids": {
+    "employee-self-service": 101
+  },
+  "recovery_owner": {
+    "role": "apex-recovery-owners",
+    "members": ["integration-owner-a", "integration-owner-b"]
+  },
+  "binding": {
+    "connection": "integration-apex",
+    "schema": "EXAMPLE_APP"
+  }
+}

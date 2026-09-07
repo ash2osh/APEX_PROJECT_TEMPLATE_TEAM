@@ -1,0 +1,102 @@
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build canonical release archive
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          PYTHONPATH=scripts python3 scripts/team.py build-release --ref "$TAG" --version "$version" --out scratch/release
+          PYTHONPATH=scripts python3 scripts/team.py verify-release scratch/release/release.tar
+          sha256sum scratch/release/release.tar | tee scratch/release/release.sha256
+      - name: Upload immutable release bytes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          path: scratch/release/release.tar
+          if-no-files-found: error
+
+  test-and-handoff:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          path: scratch/release
+      - name: Verify downloaded bytes
+        run: PYTHONPATH=scripts python3 scripts/team.py verify-release scratch/release/release.tar
+      - name: Require protected test binding and signed evidence inputs
+        env:
+          TEAM_TEST_ENV_FILE: ${{ vars.TEAM_TEST_ENV_FILE }}
+          TEAM_TEST_HISTORY_JSON: ${{ vars.TEAM_TEST_HISTORY_JSON }}
+          TEAM_TEST_EVIDENCE: ${{ vars.TEAM_TEST_EVIDENCE }}
+          TEAM_TEST_SIGNATURE: ${{ vars.TEAM_TEST_SIGNATURE }}
+          TEAM_TRUST_KEY: ${{ vars.TEAM_TRUST_KEY }}
+          TEAM_PRODUCTION_HISTORY_JSON: ${{ vars.TEAM_PRODUCTION_HISTORY_JSON }}
+        run: |
+          test -n "$TEAM_TEST_ENV_FILE" && test -f "$TEAM_TEST_ENV_FILE"
+          test -n "$TEAM_TEST_HISTORY_JSON" && test -f "$TEAM_TEST_HISTORY_JSON"
+          test -n "$TEAM_TEST_EVIDENCE" && test -f "$TEAM_TEST_EVIDENCE"
+          test -n "$TEAM_TEST_SIGNATURE" && test -f "$TEAM_TEST_SIGNATURE"
+          test -n "$TEAM_TRUST_KEY" && test -f "$TEAM_TRUST_KEY"
+          test -n "$TEAM_PRODUCTION_HISTORY_JSON" && test -f "$TEAM_PRODUCTION_HISTORY_JSON"
+          test ! -e .env
+          test ! -e targets/production.env
+      - name: Plan the downloaded artifact for the test target
+        env:
+          TEAM_TEST_HISTORY_JSON: ${{ vars.TEAM_TEST_HISTORY_JSON }}
+        run: |
+          PYTHONPATH=scripts python3 scripts/team.py plan-release scratch/release/release.tar \
+            --history "$TEAM_TEST_HISTORY_JSON" --target targets/test.json --out scratch/test-plan.json
+      - name: Apply only the verified artifact to non-production test
+        env:
+          TEAM_TEST_ENV_FILE: ${{ vars.TEAM_TEST_ENV_FILE }}
+          TEAM_TEST_HISTORY_JSON: ${{ vars.TEAM_TEST_HISTORY_JSON }}
+        run: |
+          scripts/apply_release.sh scratch/release/release.tar \
+            --plan scratch/test-plan.json --history "$TEAM_TEST_HISTORY_JSON" \
+            --target targets/test.json --env "$TEAM_TEST_ENV_FILE"
+      - name: Verify signed test evidence and draft production handoff
+        env:
+          TEAM_PRODUCTION_HISTORY_JSON: ${{ vars.TEAM_PRODUCTION_HISTORY_JSON }}
+          TEAM_TEST_EVIDENCE: ${{ vars.TEAM_TEST_EVIDENCE }}
+          TEAM_TEST_SIGNATURE: ${{ vars.TEAM_TEST_SIGNATURE }}
+          TEAM_TRUST_KEY: ${{ vars.TEAM_TRUST_KEY }}
+        run: |
+          PYTHONPATH=scripts python3 scripts/team.py gen-runbook scratch/release/release.tar \
+            --history "$TEAM_PRODUCTION_HISTORY_JSON" --target targets/production.json \
+            --test-evidence "$TEAM_TEST_EVIDENCE" --signature "$TEAM_TEST_SIGNATURE" \
+            --trust-key "$TEAM_TRUST_KEY" --out scratch/PRODUCTION_RUNBOOK.md
+          test -s scratch/PRODUCTION_RUNBOOK.md
+      - name: Retain offline production handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-handoff-${{ github.ref_name }}
+          path: scratch/PRODUCTION_RUNBOOK.md
+          if-no-files-found: error
