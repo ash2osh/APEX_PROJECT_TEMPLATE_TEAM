@@ -91,6 +91,22 @@ class CIContractTests(unittest.TestCase):
             with self.assertRaises(CIError):
                 ci_replay("abc", None, contract=self._contract(root), provisioner=provisioner, runner=lambda *_: {"status": "FAIL"})
 
+    def test_invalid_create_result_still_cleans_exact_token(self):
+        with tempfile.TemporaryDirectory(prefix="team-ci-invalid-create-") as directory:
+            root = Path(directory)
+            calls = []
+
+            def provisioner(argv, out):
+                calls.append(tuple(argv))
+                if argv[0] == "create":
+                    return {"version": 1, "instance_token": "run-1", "status": "shared", "env_path": str(out / "replay.env")}
+                return {"version": 1, "destroyed": True}
+
+            with self.assertRaisesRegex(CIError, "disposable"):
+                ci_replay("abc", None, contract=self._contract(root), provisioner=provisioner, runner=lambda *_: {})
+            self.assertEqual(calls[-1][0], "destroy")
+            self.assertEqual(calls[-1][-1], "run-1")
+
     def test_replay_requires_explicit_fresh_and_upgrade_results(self):
         with tempfile.TemporaryDirectory(prefix="team-ci-evidence-") as directory:
             root = Path(directory)

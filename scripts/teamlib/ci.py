@@ -244,10 +244,12 @@ def ci_replay(
     out = base / run_id
     out.mkdir(parents=True, exist_ok=False)
     created: dict[str, Any] | None = None
+    created_raw: Mapping[str, Any] | None = None
     cleanup_error: str | None = None
     try:
         create_argv = ["create", "--run-id", run_id, "--out", str(out)]
-        created = _validate_created(_invoke_provisioner(provisioner, create_argv, out), ref)
+        created_raw = _invoke_provisioner(provisioner, create_argv, out)
+        created = _validate_created(created_raw, ref)
         target = dict(created)
         target["run_id"] = run_id
         observed = runner(ref, previous_artifact, target)
@@ -276,13 +278,16 @@ def ci_replay(
         }
         return ReplayReport("PASS", ref, str(created["instance_token"]), "PASS", upgrade, previous_digest, evidence)
     finally:
-        if created is not None:
+        cleanup_token = created.get("instance_token") if created is not None else (created_raw or {}).get("instance_token")
+        if isinstance(cleanup_token, str) and cleanup_token and not any(char.isspace() for char in cleanup_token):
             try:
-                destroyed = _invoke_provisioner(provisioner, ["destroy", "--run-id", run_id, "--instance-token", str(created["instance_token"])], out)
+                destroyed = _invoke_provisioner(provisioner, ["destroy", "--run-id", run_id, "--instance-token", cleanup_token], out)
                 if destroyed.get("version") != 1 or destroyed.get("destroyed") is not True:
                     cleanup_error = "CI provisioner did not confirm exact-target destruction"
             except Exception as exc:
                 cleanup_error = str(exc)
+        elif created_raw is not None and created is None:
+            cleanup_error = "CI provisioner returned no safe instance token for exact-target cleanup"
         shutil.rmtree(out, ignore_errors=True)
         if cleanup_error:
             raise CIError(cleanup_error)
