@@ -57,8 +57,10 @@ save_connection() {
   local alias="$1"
   local user="$2"
   local port="$3"
+  local password="${TEAM_CI_ORACLE_PASSWORD:-oracle}"
+  [[ "$password" =~ ^[A-Za-z0-9._#%+:-]+$ ]] || fail "TEAM_CI_ORACLE_PASSWORD contains unsupported SQLcl connection characters"
   timeout 30s sql -S -noupdates /nolog <<SQL >/dev/null
-conn -save ${alias} -savepwd ${user}/\"${TEAM_CI_ORACLE_PASSWORD:-oracle}\"@//localhost:${port}/FREEPDB1
+conn -save ${alias} -savepwd ${user}/${password}@//localhost:${port}/FREEPDB1
 exit
 SQL
 }
