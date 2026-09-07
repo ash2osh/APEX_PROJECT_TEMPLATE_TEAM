@@ -12,7 +12,9 @@
   "profiles": ["TABLES", "CODE", "APEX", "METADATA", "VERIFY"],
   "provisioner": {
     "path": "provisioners/docker_pdb.sh",
-    "image": "container-registry.oracle.com/database/free@sha256:696eee2ee8985af25ef0dc4cbcac14cdaadfd4545150a87d82d9724ce43c7a77"
+    "image": "container-registry.oracle.com/database/free@sha256:696eee2ee8985af25ef0dc4cbcac14cdaadfd4545150a87d82d9724ce43c7a77",
+    "ords_image": "container-registry.oracle.com/database/ords@sha256:5f53eb398569e729e881f9f74d89f03910af168625a7927409214fa73d279bcb",
+    "apex_archive_sha256": "06df14e7c8465747ee45c36c5a0b09821bf2b244db0e201d3cc44abb0403f023"
   },
   "runner": "../scripts/ci_replay_runner.py",
   "production": {

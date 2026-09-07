@@ -113,6 +113,12 @@ def ci_doctor(contract: str | Path | Mapping[str, Any]) -> DoctorReport:
     image = provisioner.get("image")
     if not isinstance(image, str) or not _DIGEST_RE.search(image):
         issues.append("provisioner image must be pinned by a sha256 digest")
+    ords_image = provisioner.get("ords_image")
+    if ords_image is not None and (not isinstance(ords_image, str) or not _DIGEST_RE.search(ords_image)):
+        issues.append("provisioner ORDS image must be pinned by a sha256 digest")
+    apex_archive_sha256 = provisioner.get("apex_archive_sha256")
+    if apex_archive_sha256 is not None and (not isinstance(apex_archive_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", apex_archive_sha256)):
+        issues.append("provisioner APEX archive checksum must be a lowercase SHA-256")
     if data.get("production") not in ({"credentials": False}, {"credentials": False, "writes": False}, None):
         issues.append("CI contract must explicitly exclude production credentials")
     runner_path = data.get("runner")
@@ -132,6 +138,8 @@ def ci_doctor(contract: str | Path | Mapping[str, Any]) -> DoctorReport:
         "toolchain": dict(toolchain),
         "profiles": tuple(sorted(set(profiles or []))),
         "provisioner": str(provisioner_path or ""),
+        "ords_image": str(ords_image or ""),
+        "apex_archive_sha256": str(apex_archive_sha256 or ""),
         "isolated": data.get("isolated") is not False,
         "production_credentials": False,
         "runner": str(runner_path or ""),

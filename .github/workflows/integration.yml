@@ -64,6 +64,11 @@ jobs:
           test -f "$TEAM_ENV_FILE"
           test -n "$TEAM_APP_ALIASES"
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+      - name: Initialize the isolated integration metadata state
+        env:
+          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
+        run: |
+          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" setup-state
       - name: Check observed drift for this exact SHA
         env:
           TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}

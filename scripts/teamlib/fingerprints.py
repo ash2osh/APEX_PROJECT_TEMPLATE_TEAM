@@ -45,6 +45,19 @@ class Inventory:
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
+    def as_dict(self) -> dict[str, Any]:
+        """Return the complete, stable manifest stored as migration evidence."""
+        return {
+            "version": self.version,
+            "topology": self.topology,
+            "normalizer_version": self.normalizer_version,
+            "coverage_version": self.coverage_version,
+            "schema_set_digest": self.schema_set_digest,
+            "objects": dict(self.objects),
+            "invalid": list(self.invalid),
+            "inventory_digest": self.digest,
+        }
+
 
 def _normalize_text(value: Any) -> str:
     if isinstance(value, bytes):
@@ -81,7 +94,7 @@ def inventory_from_rows(
             raise InventoryError("inventory row identity is incomplete")
         object_type = object_type.upper()
         key = f"{owner}|{object_type}|{name}"
-        if _RESERVED_PREFIX.match(name.upper()):
+        if _RESERVED_PREFIX.match(name.split("@", 1)[0].upper()):
             raise InventoryError(f"reserved controller object appears in application inventory: {key}")
         if object_type not in SUPPORTED_OBJECT_TYPES:
             raise InventoryError(f"unsupported schema object class: {object_type}")
@@ -118,16 +131,7 @@ def diff_inventory(expected: Inventory, actual: Inventory) -> dict[str, Any]:
 
 
 def save_inventory(inventory: Inventory, path: str | Path) -> None:
-    data = {
-        "version": inventory.version,
-        "topology": inventory.topology,
-        "normalizer_version": inventory.normalizer_version,
-        "coverage_version": inventory.coverage_version,
-        "schema_set_digest": inventory.schema_set_digest,
-        "objects": inventory.objects,
-        "invalid": list(inventory.invalid),
-        "inventory_digest": inventory.digest,
-    }
+    data = inventory.as_dict()
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -148,6 +152,25 @@ def load_inventory(path: str | Path) -> Inventory:
         raise InventoryError("inventory evidence is malformed") from exc
     if data.get("inventory_digest") != inventory.digest:
         raise InventoryError("inventory digest does not match evidence")
+    return inventory
+
+
+def inventory_from_manifest(data: Mapping[str, Any]) -> Inventory:
+    """Reconstruct and verify an inventory manifest from durable evidence."""
+    try:
+        inventory = Inventory(
+            int(data["version"]),
+            data["topology"],
+            data["normalizer_version"],
+            data["coverage_version"],
+            dict(data["objects"]),
+            tuple(data.get("invalid", [])),
+            data.get("schema_set_digest", ""),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InventoryError("inventory manifest is malformed") from exc
+    if data.get("inventory_digest") != inventory.digest:
+        raise InventoryError("inventory manifest digest does not match evidence")
     return inventory
 
 

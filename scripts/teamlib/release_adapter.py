@@ -10,10 +10,11 @@ import tempfile
 from typing import Any, Mapping
 
 from .config import ConfigError, Target, load_config, parse_target_contract, profile_target
-from .control_store import ControlStore
+from .control_store import SqlControlStore
 from .deploy import deploy_app
+from .live_inventory import inventory_target
 from .migrate import apply_plan
-from .migration_store import MigrationStore
+from .migration_store import SqlMigrationStore
 from .release import (
     ApplyReport,
     ReleaseError,
@@ -87,11 +88,25 @@ def apply_verified_release(
     metadata = profile_target(config, "METADATA")
     if metadata.environment == "production":
         raise ReleaseAdapterError("metadata profile is classified as production")
-    migration_store = MigrationStore(state_root / "migration")
+    if contract.instance_id != metadata.instance_id:
+        raise ReleaseAdapterError("release target contract and metadata profile identify different instances")
+    migration_store = SqlMigrationStore(metadata, work_root=state_root / "metadata")
+    schema_set_digest = hashlib.sha256(
+        f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
+    ).hexdigest()
     migration_store.bootstrap(metadata, schema_set_digest="release")
-    control_store = ControlStore(state_root / "application")
+    control_store = SqlControlStore(metadata, work_root=state_root / "metadata")
     apps = release_app_trees(release_tar)
-    app_targets = [_target_from_contract(target_contract, alias, expected_role=contract.role) for alias in apps]
+    app_targets = []
+    for alias in apps:
+        target = _target_from_contract(target_contract, alias, expected_role=contract.role)
+        apex_profile = profile_target(config, "APEX", alias=alias)
+        if target.connection != apex_profile.connection:
+            raise ReleaseAdapterError(f"release target binding does not match the APEX profile for {alias}")
+        for field in ("instance_id", "db_name", "service", "session_user", "current_schema"):
+            if getattr(target, field) != getattr(apex_profile, field):
+                raise ReleaseAdapterError(f"release target binding does not match APEX profile {field} for {alias}")
+        app_targets.append(target)
     control_store.setup_state(app_targets)
 
     with tempfile.TemporaryDirectory(prefix="team-release-apply-") as directory:
@@ -111,6 +126,15 @@ def apply_verified_release(
                     run_sqlcl(profile_target(config, "VERIFY"), "read", migration.verify_path, work)
                 return True
 
+            def observe(_migration, phase):
+                return inventory_target(
+                    profile_target(config, "TABLES"),
+                    config.tables_schema,
+                    config.code_schema,
+                    work / "inventory" / phase,
+                    schema_set_digest=schema_set_digest,
+                )
+
             apply_plan(
                 migration_root,
                 {
@@ -119,6 +143,9 @@ def apply_verified_release(
                     "bootstrap": False,
                     "execute": execute,
                     "verify": verify,
+                    "observe": observe,
+                    "require_observation": True,
+                    "schema_set_digest": schema_set_digest,
                     "source_commit": manifest.source_commit,
                     "applied_by": "release-adapter",
                 },

@@ -16,8 +16,10 @@ team, so a Git branch does not isolate Builder state.
   reset, or discard Builder work. It requires a verified baseline/receipt,
   team pause, exact source, and verified re-export.
 - Before database writes, inspect drift and use the qualified SQLcl adapter.
-  Production writes, metadata bootstrap, adoption, recovery, and setup are
-  refused. No command commits or pushes automatically.
+  Production writes are refused. Development/test metadata bootstrap, setup,
+  adoption and recovery run only through the isolated METADATA profile and
+  retain their evidence; production-classified versions of those operations
+  remain refused. No command commits or pushes automatically.
 - Recovery captures and journals belong under `.sync-state/` and survive
   process failure. Do not repair a refusal by importing over the workspace.
 - A migration applied to the shared schema must be merged promptly: a

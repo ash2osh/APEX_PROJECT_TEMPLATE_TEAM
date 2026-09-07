@@ -34,14 +34,16 @@ Validation performed for this implementation revision:
 - Qualified SQLcl 26.2.1 read-only identity for all five logical profiles and
   captured read-only APEX exports from the existing APEX 26.1 workspace without
   importing or modifying the historical applications.
-- Qualified the read-only live schema inventory adapter against the Docker
+- Qualified the full, framed live schema inventory adapter against the Docker
   database and retained its result as scratch evidence; schema adoption is
   still explicit and was not inferred from that observation.
 - Checked Markdown links, code-fence balance, LF line endings, HTML IDs/anchors
   and Git whitespace errors.
 
 These checks validate the documented contracts, implementation boundaries and
-read-only local qualification. They do not claim that a team's disposable
-Oracle/APEX/ORDS/browser adapter is qualified until that adapter produces its
-own exact-SHA evidence. No import, migration, deployment or production write
-was performed.
+local qualification. The Docker evidence also exercises a same-source master
+APEX import/re-export through the Oracle app controller and a temporary table
+migration through the Oracle migration controller; the temporary table is
+removed after verification. Disposable cross-instance subscriptions and
+ORDS/browser candidate-app checks remain environment-specific gates and are
+never replaced by the Docker round trip. No production write was performed.

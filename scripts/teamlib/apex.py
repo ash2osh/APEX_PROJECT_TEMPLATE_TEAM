@@ -257,12 +257,13 @@ def export_app(
         target,
         checkpoint.captured,
         checkpoint.reconciled,
-        head,
+        head_tree,
         capture.tree,
         {
             "kind": "export",
             "tree_digest": tree_digest(capture.tree),
             "conflicts": list(decision.conflicts),
+            "head_commit": head,
             "work_dir": str(capture.work_dir),
         },
         root=state_root,
@@ -331,10 +332,29 @@ def _receipt_allows_import(target: Target, capture_tree: Tree, selected_tree: Tr
             receipt = load_receipt(target, path.stem, root=state_root)
         except StateError:
             continue
-        if receipt.selected_commit == commit:
+        # A normal capture receipt is tied to the exact selected commit.  A
+        # resolution receipt is tied to the reviewed result tree instead: the
+        # normal workflow creates the receipt before the developer commits the
+        # resolved source, so the eventual commit ID is necessarily newer.
+        if receipt.selected_commit == commit or receipt.kind == "resolution":
             from .trees import receipt_satisfied
             try:
-                if receipt_satisfied(capture_tree, receipt.required_absent, selected_tree):
+                if receipt.kind == "resolution":
+                    # A resolution receipt is a two-sided proof: the live
+                    # capture must be the exact capture the developer
+                    # resolved, and the selected commit must be the exact
+                    # resolved result.  Treating its result as a normal
+                    # capture would make the baseline guard reject every
+                    # legitimate conflict-resolution import.
+                    if receipt.capture_digest != tree_digest(capture_tree):
+                        continue
+                    if receipt.resolved_digest != tree_digest(selected_tree):
+                        continue
+                    if receipt.result != dict(selected_tree):
+                        continue
+                    if receipt_satisfied(receipt.result, receipt.required_absent, selected_tree):
+                        return True
+                elif receipt_satisfied(capture_tree, receipt.required_absent, selected_tree):
                     return True
             except (ValueError, TreeError):
                 continue
@@ -381,11 +401,24 @@ def import_app(
             baseline = None
         if baseline is None and replace_from is None:
             raise ApexError("no verified baseline; capture existing app and use explicit --replace-from")
-        allowed = baseline is not None and current.tree == baseline.tree
-        if not allowed and not _receipt_allows_import(target, current.tree, selected_tree, resolved, state_root):
+        allowed_by_baseline = baseline is not None and current.tree == baseline.tree
+        allowed_by_receipt = False
+        allowed = allowed_by_baseline
+        replacement_capture = None
+        if replace_from is not None:
+            try:
+                replacement_capture = load_capture(target, replace_from, root=state_root)
+            except StateError as exc:
+                raise ApexError(f"--replace-from recovery is unreadable: {exc}") from exc
+        if not allowed and _receipt_allows_import(target, current.tree, selected_tree, resolved, state_root):
+            # The receipt is the durable proof that the current capture was
+            # reviewed/reconciled for this source; carry that decision into
+            # the second, pre-destructive capture check below.
+            allowed = True
+            allowed_by_receipt = True
+        elif not allowed:
             if replace_from is not None:
-                evidence = load_capture(target, replace_from, root=state_root)
-                if evidence.mine != current.tree:
+                if replacement_capture is None or replacement_capture.mine != current.tree:
                     raise ApexError("--replace-from does not bind the current captured application")
                 allowed = True
             else:
@@ -393,9 +426,16 @@ def import_app(
                     "current application differs from the verified baseline; run export-app, review changes, commit, and retry"
                 )
         # Re-check after all preconditions, while the same physical mutex is held.
+        first_guard_tree = current.tree
         current = capture_app(target, held_by=run_token, repo=repo_path, root=state_root, control_store=store, runner=runner)
-        if not allowed and current.tree != selected_tree:
-            raise ApexError("application changed during import pre-check")
+        if current.tree != first_guard_tree:
+            raise ApexError("application changed during import pre-check; rerun export-app")
+        if allowed_by_baseline and current.tree != baseline.tree:
+            raise ApexError("application no longer matches the verified baseline")
+        if replacement_capture is not None and allowed and current.tree != replacement_capture.mine:
+            raise ApexError("application no longer matches --replace-from evidence")
+        if allowed_by_receipt and not _receipt_allows_import(target, current.tree, selected_tree, resolved, state_root):
+            raise ApexError("capture receipt no longer binds the pre-destructive application state")
         master_contract_path = repo_path / "targets" / "masters.json"
         if master_contract_path.is_file():
             try:
@@ -419,6 +459,26 @@ def import_app(
         if verified.tree != selected_tree:
             raise ApexError("post-import export does not match the selected source commit")
         save_verified_baseline(target, resolved, selected_tree, root=state_root)
+        result_path = state_root / "recovery" / current.recovery_id / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "status": "success",
+                    "verified": True,
+                    "operation_id": current.recovery_id,
+                    "source_commit": resolved,
+                    "tree_digest": tree_digest(selected_tree),
+                    "recovery_path": str(result_path.parent),
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         store.release_app(target.physical_key, run_token, confirmed_success=True)
         return load_baseline(target, root=state_root)
     except Exception as exc:
@@ -511,8 +571,8 @@ def resolve_export(
     root: str | Path | None = None,
 ) -> Decision:
     """Apply a complete reviewed tree from an immutable export recovery."""
-    if target.environment == "production":
-        raise ApexError("resolve-export is refused for production targets")
+    if target.role != "developer" or target.environment != "development":
+        raise ApexError("resolve-export is restricted to the shared development target")
     _assert_app_target(target)
     repo_path = _default_repo(repo)
     state_root = _state_root(repo_path, root)
@@ -528,11 +588,40 @@ def resolve_export(
         source_tree = read_git_tree(repo_path, current_head, target.alias or "")
     except TreeError as exc:
         raise ApexError(str(exc)) from exc
+    if "application.apx" not in resolved_tree or ".apex/apexlang.json" not in resolved_tree:
+        raise ApexError("resolved source must contain application.apx and .apex/apexlang.json")
+    for path, value in resolved_tree.items():
+        if Path(path).suffix.casefold() in {".apx", ".json", ".sql", ".js", ".css", ".html", ".txt", ".xml", ".yaml", ".yml"}:
+            if any(marker in value for marker in (b"<<<<<<<", b"=======", b">>>>>>>")):
+                raise ApexError(f"resolved source still contains conflict markers: {path}")
+    try:
+        expected_decision = reconcile(
+            evidence.base,
+            source_tree,
+            evidence.mine,
+            source_base=evidence.source_base,
+        )
+    except Exception as exc:
+        raise ApexError(f"could not re-evaluate export recovery: {exc}") from exc
+    declared_conflicts = evidence.diagnostics.get("conflicts", [])
+    if not isinstance(declared_conflicts, list) or tuple(sorted(declared_conflicts)) != expected_decision.conflicts:
+        raise ApexError("export recovery conflict list is inconsistent with its retained trees")
+    conflict_paths = set(expected_decision.conflicts)
+    for path in set(expected_decision.tree) | set(resolved_tree):
+        if path in conflict_paths:
+            continue
+        if expected_decision.tree.get(path) != resolved_tree.get(path):
+            raise ApexError(f"resolution changed a non-conflicting path: {path}")
     try:
         apply_tree(repo_path, target.alias or "", current_head, source_tree, resolved_tree, recovery_id)
     except PatchError as exc:
         raise ApexError(f"resolution was not applied; recovery {recovery_id} retained") from exc
-    absent = required_absences(set(), evidence.base, evidence.source_base, source_tree, evidence.mine, resolved_tree)
+    try:
+        previous_checkpoint = load_checkpoint(target, current_head, root=state_root)
+        previous_absent = previous_checkpoint.required_absent
+    except StateError:
+        previous_absent = set()
+    absent = required_absences(previous_absent, evidence.base, evidence.source_base, source_tree, evidence.mine, resolved_tree)
     receipt_id = save_receipt(target, resolved_tree, current_head, absent, tree_digest(evidence.mine), kind="resolution", resolved_digest=tree_digest(resolved_tree), root=state_root)
     save_checkpoint(target, evidence.mine, resolved_tree, current_head, receipt_id, anchor_commit=current_head, required_absent=absent, root=state_root)
     return Decision(resolved_tree, ())

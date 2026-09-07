@@ -91,6 +91,9 @@ def _driver_text(payload_name: str, operation: str) -> str:
         "SET ENCODING UTF-8\n"
         "SET HEADING OFF\n"
         "SET FEEDBACK OFF\n"
+        "SET LINESIZE 32767\n"
+        "SET PAGESIZE 0\n"
+        "SET LONG 1000000\n"
         "SET ECHO OFF\n"
         "SET VERIFY OFF\n"
         "WHENEVER SQLERROR EXIT SQL.SQLCODE\n"
@@ -190,10 +193,13 @@ def run_sqlcl(
     if target.environment == "production" and operation != "read":
         raise SqlclError("production database operations are always read-only")
 
-    driver_path = Path(driver)
+    # SQLcl changes its process directory to ``work``.  Resolve both paths
+    # before building the @driver argument; otherwise a caller that supplies a
+    # relative work directory makes SQLcl look for ``work/work/driver.sql``.
+    driver_path = Path(driver).resolve()
     if not driver_path.is_file() or driver_path.is_symlink():
         raise SqlclError(f"SQLcl driver is not a regular file: {driver_path}")
-    work_path = Path(work)
+    work_path = Path(work).resolve()
     work_path.mkdir(parents=True, exist_ok=True)
     if work_path.is_symlink():
         raise SqlclError(f"SQLcl work directory must not be a symbolic link: {work_path}")

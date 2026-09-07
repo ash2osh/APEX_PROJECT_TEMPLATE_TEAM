@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import base64
 import tempfile
 import unittest
 
@@ -38,6 +39,47 @@ class LiveInventoryTests(unittest.TestCase):
             self.assertEqual(inventory.topology, "separate")
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][1], "read")
+
+    def test_parses_framed_chunked_full_definition_and_shared_owner(self):
+        definition = "CREATE TABLE SHARED.T (ID NUMBER, NOTE VARCHAR2(4000))\n".encode()
+        encoded = base64.b64encode(definition).decode()
+        result = SimpleNamespace(
+            stdout=(
+                "TEAM_IDENTITY|SESSION_USER=DEMO|CURRENT_SCHEMA=DEMO|DB_NAME=DB|SERVICE=SERVICE|INSTANCE_ID=CI\n"
+                "TEAM_IDENTITY|SESSION_USER=DEMO|CURRENT_SCHEMA=DEMO|DB_NAME=DB|SERVICE=SERVICE|INSTANCE_ID=CI\n"
+                "TEAM_INVENTORY_BEGIN|version=2|topology=shared|count=1\n"
+                f"TEAM_INVENTORY_CHUNK|DEMO|TABLE|T|VALID|1|1|{encoded}\n"
+                "TEAM_INVENTORY_END|count=1\n"
+                "TEAM_COMPLETION|operation=read\n"
+            ),
+        )
+        inventory = inventory_from_sqlcl_result(self.target(), result, "DEMO", "DEMO")
+        self.assertEqual(inventory.topology, "shared")
+        self.assertIn("shared|TABLE|T", inventory.objects)
+
+    def test_framed_inventory_rejects_missing_chunk(self):
+        result = SimpleNamespace(
+            stdout=(
+                "TEAM_IDENTITY|SESSION_USER=DEMO|CURRENT_SCHEMA=DEMO|DB_NAME=DB|SERVICE=SERVICE|INSTANCE_ID=CI\n"
+                "TEAM_IDENTITY|SESSION_USER=DEMO|CURRENT_SCHEMA=DEMO|DB_NAME=DB|SERVICE=SERVICE|INSTANCE_ID=CI\n"
+                "TEAM_INVENTORY_BEGIN|version=2|topology=shared|count=1\n"
+                "TEAM_INVENTORY_END|count=1\n"
+            ),
+        )
+        with self.assertRaises(ValueError):
+            inventory_from_sqlcl_result(self.target(), result, "DEMO", "DEMO")
+
+    def test_parses_a_verified_empty_framed_inventory(self):
+        result = SimpleNamespace(
+            stdout=(
+                "TEAM_IDENTITY|SESSION_USER=DEMO|CURRENT_SCHEMA=DEMO|DB_NAME=DB|SERVICE=SERVICE|INSTANCE_ID=CI\n"
+                "TEAM_IDENTITY|SESSION_USER=DEMO|CURRENT_SCHEMA=DEMO|DB_NAME=DB|SERVICE=SERVICE|INSTANCE_ID=CI\n"
+                "TEAM_INVENTORY_BEGIN|version=2|topology=shared|count=0\n"
+                "TEAM_INVENTORY_END|count=0\n"
+            ),
+        )
+        inventory = inventory_from_sqlcl_result(self.target(), result, "DEMO", "DEMO")
+        self.assertEqual(inventory.objects, {})
 
 
 if __name__ == "__main__":

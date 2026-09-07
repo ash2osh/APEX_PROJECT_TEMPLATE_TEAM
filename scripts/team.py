@@ -27,17 +27,18 @@ from teamlib.announce import draft_all_clear, draft_import_announcement
 from teamlib.app_checks import AppCheckError
 from teamlib.ci import CIError
 from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, load_config, parse_target_contract, profile_target
-from teamlib.control_store import ControlStore, ControlStoreError
+from teamlib.control_store import ControlStore, ControlStoreError, SqlControlStore
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.fingerprints import InventoryError, diff_inventory, load_inventory
 from teamlib.migrate import MigrationRunError, apply_plan
-from teamlib.migration_store import MigrationStore, MigrationStoreError
+from teamlib.migration_store import MigrationStore, MigrationStoreError, SqlMigrationStore
+from teamlib.sqlcl import run_sqlcl
 from teamlib.live_inventory import inventory_target
 from teamlib.patch import PatchError, recover_files
 from teamlib.release import ReleaseError
 from teamlib.runbook import RunbookError
-from teamlib.state import StateError
-from teamlib.trees import read_git_tree
+from teamlib.state import StateError, load_baseline
+from teamlib.trees import TreeError, read_git_tree
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -66,6 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     register = sub.add_parser("register-app")
     register.add_argument("alias")
     register.add_argument("--transfer-from")
+    register.add_argument("--capture-recovery-id")
     status = sub.add_parser("app-status")
     status.add_argument("alias")
     recover_lock = sub.add_parser("recover-app-lock")
@@ -125,6 +127,14 @@ def _store(repo: Path) -> ControlStore:
     return ControlStore(repo / ".sync-state")
 
 
+def _sql_control_store(repo: Path, metadata: Target) -> SqlControlStore:
+    return SqlControlStore(metadata, work_root=repo / "scratch" / "metadata")
+
+
+def _sql_migration_store(repo: Path, metadata: Target) -> SqlMigrationStore:
+    return SqlMigrationStore(metadata, work_root=repo / "scratch" / "metadata")
+
+
 def _json(value: object) -> None:
     print(json.dumps(value, sort_keys=True, ensure_ascii=False))
 
@@ -169,6 +179,60 @@ def _resolved_commit(repo: Path, ref: str) -> str:
     return result.stdout.strip()
 
 
+def _import_notice(
+    args: argparse.Namespace,
+    target: Target,
+    store: Any,
+    repo: Path,
+    commit: str,
+) -> str:
+    """Build the pause notice from a fresh read-only capture and baseline."""
+    try:
+        baseline = load_baseline(target, root=repo / ".sync-state")
+        observed = capture_app(
+            target,
+            repo=repo,
+            root=repo / ".sync-state",
+            control_store=store,
+            persist=False,
+        )
+        selected = read_git_tree(repo, commit, target.alias or "")
+        changed = sorted(
+            path
+            for path in set(baseline.tree) | set(observed.tree)
+            if baseline.tree.get(path) != observed.tree.get(path)
+        )
+        planned = sorted(
+            path
+            for path in set(baseline.tree) | set(selected)
+            if baseline.tree.get(path) != selected.get(path)
+        )
+        roster = [entry.checkout_uuid for entry in store.list_registry(target)]
+    except (ApexError, ControlStoreError, StateError, TreeError) as exc:
+        raise ConfigError(f"cannot draft import pause notice from observed state: {exc}") from exc
+    return draft_import_announcement(
+        target.alias or "",
+        commit,
+        target={"app_id": target.app_id, "workspace_id": target.workspace_id, "instance_id": target.instance_id},
+        roster=roster,
+        changed_paths=changed,
+        planned_paths=planned,
+        operator=os.environ.get("USER", "the import operator"),
+    ).text
+
+
+def _confirm_import_pause(args: argparse.Namespace, notice: str) -> None:
+    print(notice)
+    if args.confirm_pause:
+        print("Import pause confirmed by --confirm-pause.")
+        return
+    if not sys.stdin.isatty():
+        raise ConfigError("import-app requires --confirm-pause in a non-interactive session")
+    answer = input("Has this pause notice been posted and has everyone stopped editing? Type 'proceed' to continue: ")
+    if answer.strip().casefold() != "proceed":
+        raise ConfigError("import-app cancelled; explicit pause confirmation was not received")
+
+
 def _online(args: argparse.Namespace) -> object:
     repo = Path.cwd()
     command = args.command
@@ -180,7 +244,8 @@ def _online(args: argparse.Namespace) -> object:
         config = _config(args)
         if config.environment == "production":
             raise ConfigError("setup-state is refused for production targets")
-        store = _store(repo)
+        metadata = profile_target(config, "METADATA")
+        store = _sql_control_store(repo, metadata)
         store.setup_state([profile_target(config, "APEX", alias=alias) for alias in config.apps])
         _json({"status": "success", "operation": "setup-state", "targets": sorted(config.apps)})
         return 0
@@ -200,8 +265,48 @@ def _online(args: argparse.Namespace) -> object:
                 raise MigrationRunError("migration drift gate is blocked: " + json.dumps(drift, sort_keys=True))
             verified_digest = load_inventory(args.actual_inventory).digest
         metadata = profile_target(config, "METADATA")
-        store = MigrationStore(repo / ".sync-state" / "migration")
-        report = apply_plan(args.source, {"store": store, "target": metadata, "dry_run": args.dry_run, "bootstrap": args.bootstrap, "verified_inventory_digest": verified_digest})
+        store = _sql_migration_store(repo, metadata)
+        schema_set_digest = hashlib.sha256(
+            f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
+        ).hexdigest()
+
+        def execute(migration):
+            payload_target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
+            run_sqlcl(payload_target, "write", migration.sql_path, repo / "scratch" / "migration-payload")
+
+        def verify(migration):
+            if migration.verify_path is not None and migration.verify_bytes.strip():
+                run_sqlcl(profile_target(config, "VERIFY"), "read", migration.verify_path, repo / "scratch" / "migration-verify")
+            return True
+
+        def observe(migration, phase):
+            observation_target = profile_target(config, "TABLES")
+            observation_work = repo / "scratch" / "migration-observation" / phase / migration.id
+            return inventory_target(
+                observation_target,
+                config.tables_schema,
+                config.code_schema,
+                observation_work,
+                schema_set_digest=schema_set_digest,
+            )
+
+        report = apply_plan(
+            args.source,
+            {
+                "store": store,
+                "target": metadata,
+                "dry_run": args.dry_run,
+                "bootstrap": args.bootstrap,
+                "schema_set_digest": schema_set_digest,
+                "verified_inventory_digest": verified_digest,
+                "require_observation": True,
+                "observe": observe,
+                "source_commit": _resolved_commit(repo, "HEAD"),
+                "applied_by": os.environ.get("USER", "migration-worker"),
+                "execute": execute,
+                "verify": verify,
+            },
+        )
         _json({"status": "success", "operation": command, "applied": report.applied, "foreign_applied": report.foreign_applied, "blocked_attempt": report.blocked_attempt})
         return 0
     if command == "check-drift":
@@ -238,22 +343,30 @@ def _online(args: argparse.Namespace) -> object:
         if command == "recover-migration" and config.environment == "production":
             raise ConfigError("recover-migration is refused for production targets")
         metadata = profile_target(config, "METADATA")
-        store = MigrationStore(repo / ".sync-state" / "migration")
+        store = _sql_migration_store(repo, metadata)
         if command == "export-history":
             store.export_history(metadata, args.out)
             _json({"status": "success", "operation": command, "path": args.out})
         else:
-            store.recover(metadata, args.run_token, args.evidence)
+            store.recover(metadata, args.run_token, args.evidence, attempt_id=args.attempt)
             _json({"status": "success", "operation": command})
         return 0
     if command in {"register-app", "app-status", "recover-app-lock", "capture-app", "bootstrap-app", "adopt-app", "export-app", "import-app"}:
         config, target = _target(args, args.alias)
         if target.environment == "production" and command in {"register-app", "recover-app-lock"}:
             raise ConfigError(f"{command} is refused for production targets")
-        store = _store(repo)
+        metadata = profile_target(config, "METADATA")
+        store = _sql_control_store(repo, metadata)
         if command == "register-app":
             checkout = os.environ.get("TEAM_CHECKOUT_UUID") or str(uuid.uuid4())
-            entry = store.register_app(target, checkout, socket.gethostname(), os.environ.get("USER", "unknown"), transfer_from=args.transfer_from)
+            entry = store.register_app(
+                target,
+                checkout,
+                socket.gethostname(),
+                os.environ.get("USER", "unknown"),
+                transfer_from=args.transfer_from,
+                capture_recovery_id=args.capture_recovery_id,
+            )
             _json({"status": "success", "operation": command, "checkout_uuid": entry.checkout_uuid})
             return 0
         if command == "app-status":
@@ -280,10 +393,22 @@ def _online(args: argparse.Namespace) -> object:
             decision = export_app(target, repo=repo, control_store=store)
             _json({"status": "success", "operation": command, "changed_paths": sorted(decision.tree), "conflicts": list(decision.conflicts)})
             return 0
-        if not args.confirm_pause:
-            raise ConfigError("import-app requires --confirm-pause after the pause notice has been posted")
+        resolved = _resolved_commit(repo, args.ref)
+        notice = _import_notice(args, target, store, repo, resolved)
+        _confirm_import_pause(args, notice)
         baseline = import_app(target, args.ref, replace_from=args.replace_from, repo=repo, control_store=store)
-        _json({"status": "success", "operation": command, "source_commit": baseline.source_commit})
+        operation_id = None
+        recovery_path = None
+        for result_path in sorted((repo / ".sync-state" / "recovery").glob("*/result.json"), key=lambda path: path.stat().st_mtime, reverse=True):
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if result.get("verified") is True and result.get("source_commit") == baseline.source_commit:
+                operation_id = result.get("operation_id")
+                recovery_path = result.get("recovery_path")
+                break
+        _json({"status": "success", "operation": command, "source_commit": baseline.source_commit, "verified": True, "operation_id": operation_id, "recovery_path": recovery_path})
         return 0
     if command == "resolve-export":
         # Resolve uses the target selected by the environment; the recovery ID
@@ -301,18 +426,33 @@ def _online(args: argparse.Namespace) -> object:
         return 0
     if command == "deploy-app":
         target = _target_from_contract(args.target, args.alias)
+        config = _config(args, require_verify=True)
+        if config.role != target.role or config.environment != target.environment:
+            raise ConfigError("deployment target contract and environment profile roles do not match")
+        apex_profile = config.profiles.get("APEX")
+        if apex_profile is None or apex_profile.connection != target.connection:
+            raise ConfigError("deployment target binding does not match the configured APEX SQLcl profile")
+        for field, expected in (
+            ("instance_id", apex_profile.expected_instance_id),
+            ("db_name", apex_profile.expected_db_name),
+            ("service", apex_profile.expected_service),
+            ("session_user", apex_profile.expected_user),
+            ("current_schema", apex_profile.expected_current_schema),
+        ):
+            if getattr(target, field) != expected:
+                raise ConfigError(f"deployment target binding does not match APEX profile {field}")
         commit = _resolved_commit(repo, args.ref)
         tree = read_git_tree(repo, commit, args.alias)
-        report = deploy_app(target, tree, commit, repo=repo, control_store=_store(repo))
+        metadata = profile_target(config, "METADATA")
+        report = deploy_app(target, tree, commit, repo=repo, control_store=_sql_control_store(repo, metadata))
         _json({"status": "success", "operation": command, "source_commit": report.source_commit, "tree_digest": report.tree_digest, "verified_tree_digest": report.verified_tree_digest, "recovery_id": report.recovery_id})
         return 0
     if command == "announce-import":
         config, target = _target(args, args.alias)
         if args.ref:
-            store = _store(repo)
-            roster = [entry.checkout_uuid for entry in store.list_registry(target)] if (repo / ".sync-state" / "control.json").is_file() else []
-            announcement = draft_import_announcement(args.alias, _resolved_commit(repo, args.ref), target={"app_id": target.app_id, "workspace_id": target.workspace_id, "instance_id": target.instance_id}, roster=roster)
-            print(announcement.text)
+            metadata = profile_target(config, "METADATA")
+            store = _sql_control_store(repo, metadata)
+            print(_import_notice(args, target, store, repo, _resolved_commit(repo, args.ref)))
         else:
             result_path = repo / ".sync-state" / "recovery" / args.all_clear / "result.json"
             if not result_path.is_file():

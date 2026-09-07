@@ -12,8 +12,9 @@ drift report has three separate parts: structural differences, unexplained
 frontier differences, and local/applied history differences. A migration ID by
 itself never excuses a changed object.
 
-The bundled live SQLcl adapter uses a deterministic DBMS_METADATA prefix plus
-the full definition length for its first qualification pass. This is useful
-for identity/drift triage but is not an adoption baseline for very large DDL
-definitions. A project must replace that bounded query with its qualified
-full-definition/chunked adapter before accepting canonical schema evidence.
+The bundled live SQLcl adapter emits begin/count/end framing and reconstructs
+complete UTF-8 `DBMS_METADATA` definitions from bounded chunks before hashing
+them. Constraint and object-grant rows are included as structured dictionary
+evidence. SQLcl-wrapped, empty, malformed or unsupported output is unknown and
+refuses adoption; a project must still qualify its exact grants and metadata
+transforms before treating the result as a canonical replay baseline.

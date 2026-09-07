@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from teamlib.config import Target
+from teamlib.fingerprints import inventory_from_rows
 from teamlib.migration_store import MigrationMutexHeld, MigrationSetupRequired, MigrationStore
 
 
@@ -36,7 +37,12 @@ class MigrationStoreTests(unittest.TestCase):
         self.store.acquire(self.target, "run", "worker", "host")
         with self.assertRaises(MigrationMutexHeld):
             self.store.release(self.target, "wrong")
-        self.store.record_applied(self.target, "m1", "a" * 64, "tables", (), "commit", "alice", {"before": "b", "after": "a"})
+        before = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "before"}])
+        after = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "after"}])
+        self.store.record_inventory(self.target, before, run_token="run")
+        self.store.ensure_observation(self.target, before.digest, run_token="run")
+        self.store.record_inventory(self.target, after, run_token="run")
+        self.store.record_applied(self.target, "m1", "a" * 64, "tables", (), "commit", "alice", {"before": before.digest, "after": after.digest})
         self.store.release(self.target, "run")
         history = self.store.read_history(self.target)
         self.assertEqual(history["m1"]["status"], "APPLIED")

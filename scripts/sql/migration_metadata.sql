@@ -8,7 +8,7 @@ CREATE TABLE TEAM_MIGRATION_META (
 
 CREATE TABLE TEAM_MIGRATION_MUTEX (
     singleton_id NUMBER(1) NOT NULL,
-    owner_token VARCHAR2(64),
+    owner_token VARCHAR2(128),
     worker_identity VARCHAR2(256),
     host VARCHAR2(512),
     acquired_at TIMESTAMP WITH TIME ZONE,
@@ -26,7 +26,8 @@ CREATE TABLE TEAM_MIGRATION_HISTORY (
     applied_sequence NUMBER(19) NOT NULL,
     applied_at TIMESTAMP WITH TIME ZONE NOT NULL,
     applied_by VARCHAR2(256) NOT NULL,
-    run_token VARCHAR2(64) NOT NULL,
+    run_token VARCHAR2(128),
+    attempt_id VARCHAR2(128),
     CONSTRAINT team_migration_history_pk PRIMARY KEY (id),
     CONSTRAINT team_migration_history_target_ck CHECK (target IN ('tables', 'code'))
 );

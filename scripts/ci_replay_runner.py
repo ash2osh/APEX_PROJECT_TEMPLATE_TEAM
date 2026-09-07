@@ -10,15 +10,17 @@ application/browser checks remain project declarations and are not inferred.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 
 from teamlib.config import load_config, profile_target
-from teamlib.control_store import ControlStore
+from teamlib.control_store import SqlControlStore
 from teamlib.deploy import deploy_app
-from teamlib.migration_store import MigrationStore
+from teamlib.live_inventory import inventory_target
+from teamlib.migration_store import SqlMigrationStore
 from teamlib.migrate import apply_plan
 from teamlib.app_checks import AppCheckError, verify_candidate_apps
 from teamlib.release import ReleaseError, release_app_trees, release_migration_files, verify_release
@@ -80,6 +82,27 @@ def _materialize_migrations(root: Path, files: dict[str, bytes]) -> Path:
     return root
 
 
+def _assert_exact_checkout(repo: Path, ref: str) -> None:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD^{commit}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or result.stdout.strip() != ref:
+        raise SystemExit("replay runner checkout is not the exact selected source SHA")
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0 or status.stdout.strip():
+        raise SystemExit("replay runner checkout is not clean; refusing to mix local files with the selected SHA")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ci-replay-runner")
     parser.add_argument("--ref", required=True)
@@ -97,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from teamlib.apex import _default_repo
         repo = _default_repo(Path.cwd())
+        _assert_exact_checkout(repo, args.ref)
         identity_driver = repo / "scripts" / "sql" / "identity.sql"
         for profile in ("TABLES", "CODE", "APEX", "METADATA", "VERIFY"):
             target = profile_target(config, profile, alias=next(iter(config.apps)) if profile == "APEX" else None)
@@ -105,8 +129,11 @@ def main(argv: list[str] | None = None) -> int:
         if not migration_root.is_dir():
             raise SystemExit("selected source has no migrations directory")
         metadata = profile_target(config, "METADATA")
-        migration_store = MigrationStore(work / "migration-store")
-        migration_store.bootstrap(metadata, schema_set_digest="replay")
+        migration_store = SqlMigrationStore(profile_target(config, "METADATA"), work_root=work / "metadata")
+        schema_set_digest = hashlib.sha256(
+            f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
+        ).hexdigest()
+        migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest)
 
         def run_migration_source(source_root: Path, source_commit: str):
             def execute(migration):
@@ -118,6 +145,15 @@ def main(argv: list[str] | None = None) -> int:
                     run_sqlcl(profile_target(config, "VERIFY"), "read", migration.verify_path, work)
                 return True
 
+            def observe(_migration, phase):
+                return inventory_target(
+                    profile_target(config, "TABLES"),
+                    config.tables_schema,
+                    config.code_schema,
+                    work / "inventory" / source_commit / phase,
+                    schema_set_digest=schema_set_digest,
+                )
+
             return apply_plan(
                 source_root,
                 {
@@ -126,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
                     "bootstrap": False,
                     "execute": execute,
                     "verify": verify,
+                    "observe": observe,
+                    "require_observation": True,
+                    "schema_set_digest": schema_set_digest,
                     "source_commit": source_commit,
                     "applied_by": "ci-replay",
                 },
@@ -168,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         if aliases:
             declarations = _check_declarations(repo, aliases)
-            control_store = ControlStore(work / "application-store")
+            control_store = SqlControlStore(metadata, work_root=work / "metadata")
             app_targets = [profile_target(config, "APEX", alias=alias) for alias in aliases]
             control_store.setup_state(app_targets)
             for alias in _master_first(aliases, repo):
