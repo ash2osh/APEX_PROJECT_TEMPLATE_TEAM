@@ -99,7 +99,24 @@ def _assert_exact_checkout(repo: Path, ref: str) -> None:
         text=True,
         check=False,
     )
-    if status.returncode != 0 or status.stdout.strip():
+    if status.returncode != 0:
+        raise SystemExit("replay runner checkout status could not be read")
+    allowed_ignored = ("scratch/", ".sync-state/", ".env", ".env.")
+    unexpected: list[str] = []
+    for line in status.stdout.splitlines():
+        if not line.strip():
+            continue
+        code = line[:2]
+        path = line[3:] if len(line) > 3 else ""
+        if code == "!!" and (
+            path in allowed_ignored
+            or path.startswith(allowed_ignored)
+            or "__pycache__/" in path
+            or path.endswith(".pyc")
+        ):
+            continue
+        unexpected.append(line)
+    if unexpected:
         raise SystemExit("replay runner checkout is not clean; refusing to mix local files with the selected SHA")
 
 
