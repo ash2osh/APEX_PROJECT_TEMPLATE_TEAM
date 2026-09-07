@@ -472,9 +472,33 @@ scripts/tests/live/test_app_lock.py.
   uses the same mutex without developer registration. A second concurrent
   *import* must fail to acquire the same target; a second *checkout* of the
   shared application must not.
+- [ ] `mark_payload_starting(target_key, run_token)` sets `is_uncertain = 1`
+  in a single `UPDATE ... WHERE target_key = :target_key AND owner_token =
+  :run_token` — the held-token match makes a call from anyone who does not
+  currently hold the row an error, not a silent no-op. Both import_app and
+  deploy_app call it immediately before their own destructive payload runs,
+  after every pre-check (registration, baseline/receipt comparison) has
+  already passed cleanly. This mirrors Plan 2's "commit RUNNING before the
+  payload": a crash gives the process no chance to write a failure marker
+  afterward, so uncertainty must be the state the instant risk begins, not
+  something a handler writes on the way out — without this step, nothing in
+  either plan ever sets `is_uncertain` at all, so `TARGET_UNCERTAIN` and
+  recover-app-lock's clearing of it would have nothing to do.
+  `release_app` clears owner_token unconditionally (when the token matches)
+  and clears `is_uncertain` plus increments generation (the bullet below) in
+  the same transaction only when the caller passes `confirmed_success=True`;
+  import_app and deploy_app pass it only after their entire flow — payload
+  through post-write verification — has succeeded. A refusal caught before
+  `mark_payload_starting` ever ran releases cleanly with `is_uncertain` still
+  0, since nothing risky happened; a failure caught after it ran releases
+  with `is_uncertain` still 1, correctly requiring recover-app-lock's review
+  before the next attempt; a crash severe enough to skip even that release
+  leaves owner_token held too, so the next acquirer sees `MUTEX_HELD` first —
+  either way, nothing proceeds without review. Test all three paths.
 - [ ] Maintain a monotonic import generation for each target alongside the
-  mutex, incremented when an import completes **or when recover-app-lock
-  clears a held or uncertain target**, so a reader can prove no import —
+  mutex, incremented by `release_app`'s `confirmed_success=True` path when an
+  import completes, **or by recover-app-lock when it clears a held or
+  uncertain target**, so a reader can prove no import —
   successful, crashed, or crashed-and-recovered — intervened during its
   capture (spec §2.1). Without the recover-app-lock case, a crash that
   partially writes and then gets cleared entirely inside another developer's
@@ -498,9 +522,10 @@ scripts/tests/live/test_app_lock.py.
   `is_uncertain` together, in the same reviewed operation, always — never one
   without the other. This is what "resolving uncertain app state" means, and
   it is why `--run-token` cannot be unconditionally required: a target left
-  unheld-but-uncertain (a crash that never held the row, or simply the state
-  right after this same command last ran) would otherwise have no token for a
-  second recovery to match, and no other command ever clears `is_uncertain` —
+  unheld-but-uncertain — the routine result of `release_app`'s
+  `confirmed_success=False` path after a cleanly caught import failure, not
+  only a rare crash — would otherwise have no token for a second recovery to
+  match, and no other command ever clears `is_uncertain` —
   permanently locking the target out of every future acquisition. It cannot
   stamp a verified baseline from a lock-clear operation — that still requires
   a subsequent successful import or adopt-app. Refuse production and
@@ -514,14 +539,18 @@ scripts/tests/live/test_app_lock.py.
   .sync-state. Derive target keys from canonical Target identity; binding and
   workspace changes invalidate reuse. Store canonical Git blob provenance,
   but do not depend on its continued reachability.
-- [ ] Store capture receipts linking mine digest to the reconciled source
-  manifest — the full path/blob-hash mapping `tree_contains` (Task 3) checks
-  against, keyed and content-addressed the same way baselines already are
-  (spec §6), not a bare digest a subset check has nothing to compare against.
-  "Successfully accounted for," not "successfully written": a zero-change
-  export (Task 8) reconciles nothing to disk but still receipts the manifest
-  it confirmed. Resolution receipts additionally record conflict paths and
-  resolved digest. These are not database-alignment baselines.
+- [ ] Store capture receipts as a path/SHA-256 manifest plus its referenced
+  content-addressed blobs — the same on-disk shape baselines already use
+  (spec §6) for the same reason: deduplicated storage, not a bare digest a
+  later comparison has nothing to compare against. This manifest+blobs pair
+  is resolved into an ordinary `Tree` (Task 3, `dict[str, bytes]`) by reading
+  the referenced blobs before it reaches `tree_contains` or any other
+  Tree-typed function; the stored shape is a storage optimization, never a
+  second type those functions need to accept. "Successfully accounted for,"
+  not "successfully written": a zero-change export (Task 8) reconciles
+  nothing to disk but still receipts the manifest it confirmed. Resolution
+  receipts additionally record conflict paths and resolved digest. These are
+  not database-alignment baselines.
 - [ ] Atomic-save manifests only after all blobs exist; validate hashes on load.
   An existing baseline becomes uncertain at the start of an import mutation.
 - [ ] Add tests for target rebinding, pruned commit with retained blobs,
@@ -583,25 +612,34 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** scripts/teamlib/apex.py, scripts/tests/test_export_app.py.
 **Interfaces:** `capture_app(target, held_by=None) -> Capture` (Capture has
 tree, recovery_id, target and the sync state observed either side of the
-read); `export_app(target) -> Decision`.
+read); `export_app(target) -> Decision`. `held_by` is the general rule for
+any caller that already holds the app-target mutex when it captures, not a
+special case for one specific call site — see the bracket bullet below.
 
 - [ ] Implement spec §6 export sequence using Tasks 2–7. Capture first, retain
   before mutation, reconcile contents, journal the patch, verify and receipt.
 - [ ] Bracket the capture with `read_app_sync_state` (Task 5). Refuse before
   starting if an import holds the mutex — **unless the caller passes
   `held_by=` its own held run_token**, in which case a holder matching that
-  token is expected, not a competing import, and does not refuse. import_app's
-  own post-import re-export (Task 9) is the only caller that ever passes one;
-  every other caller passes none and refuses on any holder at all. After the
-  read, accept the capture only if the generation is unchanged and no *other*
-  holder appeared; otherwise discard it as possibly torn and retry a bounded
-  number of times before reporting that an import is in progress. **Export
-  never acquires the mutex** — readers that lock can block the team and
-  strand a lock when a developer's export dies, and two concurrent exports
-  are harmless (spec §2.1). A discarded capture has no side effects, so retry
-  is free. Without the `held_by` carve-out, import_app's own verification
-  step deadlocks against the lock it is itself holding — test that case
-  explicitly, not just the carve-out's positive path.
+  token is expected, not a competing import, and does not refuse. The rule is
+  general, not tied to one call site: **any** operation that already holds
+  the app-target mutex when it captures must pass its own token — this is
+  every internal capture inside import_app (Task 9's pre-replacement check,
+  its pre-destructive-step recheck, and its post-import re-export alike) and
+  inside deploy_app (Plan 3 Task 4's destination capture and its own
+  post-deployment re-export), because all of them run after their caller has
+  already acquired the same mutex. A caller with no held mutex of its own —
+  an ordinary developer export — passes none and refuses on any holder at
+  all. After the read, accept the capture only if the generation is unchanged
+  and no *other* holder appeared; otherwise discard it as possibly torn and
+  retry a bounded number of times before reporting that an import is in
+  progress. **Export never acquires the mutex** — readers that lock can
+  block the team and strand a lock when a developer's export dies, and two
+  concurrent exports are harmless (spec §2.1). A discarded capture has no
+  side effects, so retry is free. Without the `held_by` carve-out, every one
+  of import_app's and deploy_app's own internal captures deadlocks against
+  the lock its caller is itself holding — test each of those call sites
+  explicitly, not just one representative case.
 - [ ] Record a capture receipt even when reconciliation changes zero paths
   (spec §6). Test that a no-op export still receipts and that a subsequent
   import of the matching commit is allowed by it. This is the ordinary
@@ -636,8 +674,10 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 
 - [ ] Verify checkout registration and acquire the shared app-target mutex
   through control_store before capture. Refuse parallel clients and retain the
-  lock on unknown import state until reviewed recovery; release on verified
-  success or a known refusal before payload starts.
+  lock on unknown import state until reviewed recovery; release with
+  `confirmed_success=True` on verified success, or release plainly (leaving
+  `is_uncertain` at whatever `mark_payload_starting` left it, if it ran at
+  all) on a known refusal before payload starts.
 - [ ] Resolve the commit, require clean source, materialize exact owned blobs
   and validated binding into scratch.
 - [ ] Capture current app before replacement. Require baseline equality, a
@@ -670,11 +710,14 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   floor. Plan 3 Task 3 adds `announce-import`, which drafts the message from
   observed state and confirms with the developer; keep this print correct on its
   own, because Plan 1 must be usable before Plan 3 exists.
-- [ ] Validate masters/source, guard write, recheck capture and target, import,
-  then call `capture_app(target, held_by=run_token)` to re-export and verify
-  bytes plus master linkage without tripping its own held-mutex refusal.
-  Baseline becomes verified only after all checks. Preserve old state as
-  uncertain on import failure.
+- [ ] Validate masters/source, guard write, recheck capture and target, call
+  `mark_payload_starting(target_key, run_token)` (Task 5), import, then call
+  `capture_app(target, held_by=run_token)` to re-export and verify bytes plus
+  master linkage without tripping its own held-mutex refusal. Baseline
+  becomes verified, and `release_app` runs with `confirmed_success=True`,
+  only after every one of those checks passes; any failure among them
+  releases without it, which is what leaves the target uncertain — not a
+  separate ad hoc marking step.
 - [ ] Test uncaptured Builder edit refusal, captured-and-committed edits,
   dirty source, stale receipt, changed app between captures, import error-zero,
   subscription mismatch, interrupted verification and successful stamping.

@@ -312,8 +312,14 @@ END;
   the environment owner" (plan-release, gen-runbook) actually means in
   practice: a human runs this once against the target being planned for and
   hands the file off, rather than plan-release or gen-runbook connecting to
-  anything themselves. Test that it never acquires the mutex and never
-  succeeds against a production-classified target.
+  anything themselves. It must succeed against a production-classified
+  target precisely because it is read-only: production reads are SELECT-only
+  and allowed everywhere in this design (spec §8), and generating a
+  production runbook is the one case where the "environment owner" supplying
+  history *is* the production owner running this against production. Test
+  that it never acquires the mutex, never executes anything but the read, and
+  that a production target refuses every other command in this list while
+  still permitting this one.
 - [ ] Test concurrent acquire (one winner), DDL commits, wrong-token updates,
   killed parent/live child, partial bootstrap and absent metadata dry-run.
   Verify neither tables nor code users have mutation grants on log tables.

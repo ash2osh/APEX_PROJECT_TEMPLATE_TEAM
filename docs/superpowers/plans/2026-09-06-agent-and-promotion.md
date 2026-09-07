@@ -129,8 +129,9 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 't
 ## Task 3: Developer-facing assistants
 
 **Files:** scripts/teamlib/conflict_assistant.py, scripts/teamlib/announce.py,
-scripts/tests/test_conflict_assistant.py, scripts/tests/test_announce.py,
-docs/conflict-resolution.md, docs/import-pause.md.
+scripts/team.py, scripts/tests/test_conflict_assistant.py,
+scripts/tests/test_announce.py, docs/conflict-resolution.md,
+docs/import-pause.md.
 
 Two assistants, one posture. Both exist because this template's users are APEX
 developers rather than git users (spec §1), and both are bound by the same rules:
@@ -281,10 +282,14 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** scripts/teamlib/deploy.py, scripts/deploy_app.sh/.ps1,
 scripts/tests/test_deploy.py.
 
-**Interface:** `deploy_app(alias, target, source_tree, source_commit)
+**Interface:** `deploy_app(target, source_tree, source_commit)
 -> DeployReport`; source_tree is immutable materialized bytes, not a live path.
-DeployReport includes commit, target identity, verified tree/subscription digests
-and recovery location.
+`target.alias` (Plan 1's `Target`) identifies which archive tree to deploy —
+there is no separate `alias` parameter, since `team.py deploy-app ALIAS
+--target TARGET_JSON` already resolves both into one `Target` before calling
+this, and a second parameter could only ever agree with `target.alias` or be
+a bug. DeployReport includes commit, target identity, verified
+tree/subscription digests and recovery location.
 
 - [ ] Resolve target JSON and .env explicitly. For integration/test require
   named deployment binding agreement with the exact profile, workspace, schema,
@@ -295,9 +300,15 @@ and recovery location.
 - [ ] Capture destination before replacement to durable deployment recovery.
   These downstream workspaces are explicitly replaceable from approved source;
   they do not use developer .sync-state baseline or capture receipt.
-- [ ] Validate masters and source, guard production, verify in-session identity,
-  import and re-export, verify owned source and subscription linkage.
-  Record deployment evidence only after verification.
+- [ ] Validate masters and source, guard production, verify in-session
+  identity, call `mark_payload_starting` (Plan 1 Task 5) before import, then
+  import and re-export via `capture_app(target, held_by=run_token)` — the
+  same held-mutex carve-out import_app uses, since this path holds the exact
+  same mutex — and verify owned source and subscription linkage. Record
+  deployment evidence and call `release_app` with `confirmed_success=True`
+  only after verification passes; any earlier failure releases without it,
+  same as import_app, so a crashed or failed deployment also requires
+  recover-app-lock's review before the next attempt.
 - [ ] Acquire Plan 1 control_store's persistent app-target mutex before capture,
   hold through import/verification and retain it on unknown results. This protects
   separate clones and local automated clients as well as CI. Controller access
