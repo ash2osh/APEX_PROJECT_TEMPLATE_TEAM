@@ -103,6 +103,8 @@ class Target:
     workspace_id: int | None
     app_id: int | None
     parsing_schema: str | None
+    ownership_mode: str                    # "shared" | "single"
+                                            # (from APP_OWNERSHIP_MODE)
     binding_digest: str
 
 # reconcile.py
@@ -134,7 +136,8 @@ scripts/tests/test_config.py.
   APEX_PARSING_SCHEMA, METADATA_SCHEMA; for each profile prefix require
   SQLCL_CONNECTION, EXPECTED_USER, EXPECTED_CURRENT_SCHEMA,
   EXPECTED_DB_NAME, EXPECTED_SERVICE, EXPECTED_INSTANCE_ID; additionally
-  APEX_WORKSPACE_ID.
+  APEX_WORKSPACE_ID and APP_OWNERSHIP_MODE (`shared` default, or `single` for
+  an optional isolated developer copy per spec §2.1).
 - [ ] Split profiles into core and on-demand, and validate them separately.
   **Core** is TABLES, CODE, APEX and METADATA: required by every command,
   validated at load. **On-demand** is VERIFY: Plan 1 never uses it, so an
@@ -248,7 +251,8 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 
 **Interfaces:** `read_git_tree(repo, commit, alias) -> dict[str, bytes]`;
 `read_export_tree(path) -> dict[str, bytes]`;
-`tree_digest(tree) -> str`; `assert_source_clean(repo, alias) -> None`.
+`tree_digest(tree) -> str`; `assert_source_clean(repo, alias) -> None`;
+`tree_contains(subset: Tree, superset: Tree) -> bool`.
 
 - [ ] Define ownership using a qualified full SQLcl export fixture. Include
   binaries and .apex/apexlang.json; exclude deployments/** and export logs.
@@ -261,6 +265,12 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   source set. Unrelated ignored files outside that set remain untouched.
 - [ ] Digest sorted POSIX paths plus explicit byte lengths and file hashes;
   use the same canonical JSON manifest encoding everywhere.
+- [ ] Implement `tree_contains` as a pure subset check: every path in `subset`
+  must be present in `superset` with identical bytes; extra paths in
+  `superset` are permitted. This is the exact predicate behind spec §6's
+  capture-receipt "contained in" language (Task 9) — containment, not
+  equality, is what lets a commit legitimately carry source the receipt never
+  captured.
 - [ ] Add fixtures for names containing spaces, binary zeroes, LF/CRLF,
   zero-byte-versus-missing, deleted/added Git files, corrupt refs and preserved
   deployment JSON. Confirm corrupted Git reads never become empty trees.
@@ -270,7 +280,7 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 
 ```python
 import unittest
-from teamlib.trees import read_export_tree, tree_digest
+from teamlib.trees import read_export_tree, tree_digest, tree_contains
 
 class TreeSemanticsTests(unittest.TestCase):
     def test_zero_byte_file_is_present_not_absent(self):
@@ -305,6 +315,15 @@ class TreeSemanticsTests(unittest.TestCase):
         # A digest concatenating path and bytes without length framing
         # collides here; this asserts the framing exists.
         self.assertNotEqual(tree_digest({"ab": b"c"}), tree_digest({"a": b"bc"}))
+
+    def test_contains_allows_extra_paths_in_superset(self):
+        # A commit may legitimately carry source a receipt never captured
+        # (spec §6); containment must not demand equality.
+        self.assertTrue(tree_contains({"a": b"1"}, {"a": b"1", "b": b"2"}))
+
+    def test_contains_rejects_missing_or_changed_path(self):
+        self.assertFalse(tree_contains({"a": b"1"}, {}))
+        self.assertFalse(tree_contains({"a": b"1"}, {"a": b"2"}))
 ```
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_trees.py -v`.
@@ -398,24 +417,36 @@ scripts/tests/live/test_app_lock.py.
   here would lock out the whole team after the first developer registered, so a
   test asserting that refusal would be asserting the bug. Verify registration
   before developer app mutation, and record host and user so a held mutex and a
-  recovery can name a person.
+  recovery can name a person. Idempotently ensure a TEAM_APP_MUTEX row exists
+  for this target_key before returning — insert one with owner_token NULL,
+  generation 1 and is_uncertain 0 only if absent — so acquire_app's
+  `NO_DATA_FOUND` unambiguously means "never bootstrapped for this alias"
+  rather than colliding with "this alias was never registered." Test that
+  acquiring immediately after a fresh register-app succeeds with no separate
+  seeding step.
 - [ ] Keep exclusive-checkout and transfer semantics for a target declared
   single-owner — an optional isolated developer copy (spec §2.1). There a
   transfer requires the old UUID, a retained fresh capture and proof the old
-  worker ended; unknown liveness blocks. Drive this from the target's declared
-  ownership mode, not from the command name, so the shared and isolated paths
-  cannot diverge in their guards.
-- [ ] Define acquire_app(target_key, run_token) and release_app(target_key,
-  run_token) on control_store.py. Acquisition uses spec §7's
-  `SELECT ... FOR UPDATE NOWAIT` transition, never a bare conditional `UPDATE`:
-  Oracle blocks a conditional update on the row lock until the holding
-  transaction ends, so an importer that crashed before committing freezes every
-  later importer inside its SQLcl subprocess with no error message. Distinguish
-  the same four outcomes as the migration mutex and test each: success;
-  `ORA-00054` (another transaction holds the row — in-flight or uncommitted
-  crash); `ORA-20001 MUTEX_HELD:<token>` (cleanly held, and the token names the
-  holder for the blocking message); `NO_DATA_FOUND` (metadata not bootstrapped —
-  a setup-required error, never an acquisition failure). Any other error is a
+  worker ended; unknown liveness blocks. Drive this from `Target.ownership_mode`
+  (config.py, from `APP_OWNERSHIP_MODE`), not from the command name, so the
+  shared and isolated paths cannot diverge in their guards.
+- [ ] Define acquire_app(target_key, run_token, checkout_uuid, host,
+  acquired_by_user) and release_app(target_key, run_token) on control_store.py.
+  Acquisition uses spec §7's `SELECT ... FOR UPDATE NOWAIT` transition plus its
+  app-target addendum, never a bare conditional `UPDATE`: Oracle blocks a
+  conditional update on the row lock until the holding transaction ends, so an
+  importer that crashed before committing freezes every later importer inside
+  its SQLcl subprocess with no error message. Distinguish five outcomes — one
+  more than the migration mutex, because TEAM_APP_MUTEX also carries
+  `is_uncertain` — and test each: success; `ORA-00054` (another transaction
+  holds the row — in-flight or uncommitted crash);
+  `ORA-20001 MUTEX_HELD:<token>` (cleanly held, and the token names the
+  holder for the blocking message);
+  `ORA-20002 TARGET_UNCERTAIN` (unheld but flagged uncertain by an interrupted
+  import; acquisition must refuse until `recover-app-lock` clears it, never
+  proceed past an unchecked `is_uncertain`); `NO_DATA_FOUND` (never bootstrapped
+  for this target_key — a setup-required error, distinct from a target that is
+  simply unregistered; see the register-app bullet above). Any other error is a
   hard failure. A subprocess wall-clock timeout is a backstop for network stalls
   only and is never read as "not acquired": it leaves the target uncertain and
   blocked.
@@ -561,8 +592,9 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   and validated binding into scratch.
 - [ ] Capture current app before replacement. Require baseline equality, a
   valid capture receipt whose reconciled source is contained in the selected
-  commit — not necessarily equal to it, since merging a colleague's file after
-  the export must not invalidate the receipt (spec §6) — a resolution receipt
+  commit (`tree_contains`, Task 3) — not necessarily equal to it, since
+  merging a colleague's file after the export must not invalidate the receipt
+  (spec §6) — a resolution receipt
   binding this exact capture and source digest, or the exact --replace-from
   capture for first alignment. Verify absent-app bootstrap explicitly. A
   generic --force flag is not provided.
@@ -621,8 +653,9 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 
 ## Task 11: Thin Bash/PowerShell launchers and native parity
 
-**Files:** scripts/team.sh/.ps1, export_app.sh/.ps1, import_app.sh/.ps1,
-scripts/tests/test_launchers.py, .github/workflows/template-checks.yml.
+**Files:** scripts/team.sh/.ps1, scripts/export_app.sh/.ps1,
+scripts/import_app.sh/.ps1, scripts/tests/test_launchers.py,
+.github/workflows/template-checks.yml.
 
 - [ ] Launch Python with quoted argv and propagate its status; choose python3
   or py -3 only after a version check. Do not duplicate config or reconciliation.

@@ -97,7 +97,7 @@ add-dependency MIGRATION_ID --on MIGRATION_ID
 replay --source DIRECTORY --replay-env FILE [--previous DIRECTORY]
 snapshot --out DIRECTORY
 adopt-baseline MIGRATION_ID --evidence DIRECTORY
-recover-migration RUN_TOKEN --attempt ATTEMPT_ID --evidence DIRECTORY
+recover-migration RUN_TOKEN [--attempt ATTEMPT_ID] --evidence DIRECTORY
 ```
 
 Offline migration-plan reads supplied history, never connects. Online dry-run
@@ -108,8 +108,8 @@ a test deployment by passing --mode shared to migrate.
 
 ## Task 1: Bundle, dependency and immutability contract
 
-**Files:** migration_bundle.py, migration_plan.py, test_migration_bundle.py,
-test_migration_plan.py.
+**Files:** migration_bundle.py, migration_plan.py, authoring.py,
+test_migration_bundle.py, test_migration_plan.py, test_authoring.py.
 
 **Types/interfaces:**
 
@@ -140,7 +140,10 @@ class Plan:
   `[0-9]{8}T[0-9]{6}__[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*[.]sql`.
   Validate UTC calendar values. Each has exactly one .verify.sql sibling and
   no other sibling members; an orphan .verify.sql, a missing one, or an
-  unexpected third member is an error.
+  unexpected third member is an error. A file that never matches the primary
+  pattern at all — `.gitkeep`, `README.md` — is not discovered and is not an
+  error; the sibling-completeness rule applies only to files sharing a
+  matched primary's exact stem.
 - [ ] Require LF/UTF-8 and a strictly parsed header block preceding any
   executable statement, containing exactly one `-- migration-version:`,
   one `-- target: tables|code`, one `-- destructive: true|false`, and zero or
@@ -203,13 +206,15 @@ def test_foreign_history_is_not_deleted_history(self):
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p 'test_migration_*plan*.py' -v`;
 run test_migration_bundle.py separately with the same discovery command.
+Run test_authoring.py the same way — it needs no database connection at all.
 
 ## Task 2: Central metadata, bootstrap and persistent mutex
 
 **Files:** migration_store.py, scripts/sql/migration_metadata.sql,
 test_migration_store.py, scripts/tests/live/test_migration_store.py.
 
-**Interface:** `bootstrap(store_target)`; `acquire(store_target, run_token)`;
+**Interface:** `bootstrap(store_target)`;
+`acquire(store_target, run_token, worker_identity, host)`;
 `release(store_target, run_token)`; `read_history(store_target) -> dict`.
 All Target arguments here are the isolated METADATA profile. Extend Plan 1's
 control_store foundation; app and migration mutexes are distinct resources.
@@ -220,12 +225,18 @@ control_store foundation; app and migration mutexes are distinct resources.
   out of staged SQL, payload processes and diagnostic logs. Live negative tests
   attempt a metadata write/drop via both payload users and expect refusal.
 - [ ] Define TEAM_MIGRATION_META(version, project_id, schema_set_digest),
-  TEAM_MIGRATION_MUTEX(singleton_id, owner_token, acquired_at),
-  TEAM_MIGRATION_HISTORY(id, checksum, target, dependencies_json,
+  TEAM_MIGRATION_MUTEX(singleton_id, owner_token, worker_identity, host,
+  acquired_at), TEAM_MIGRATION_HISTORY(id, checksum, target, dependencies_json,
   payload_manifest_json, source_commit, applied_sequence, applied_at,
   applied_by, run_token), TEAM_MIGRATION_ATTEMPT(attempt_id, migration_id,
   checksum, state, run_token, worker_identity, started_at, finished_at,
   diagnostic_digest).
+  TEAM_MIGRATION_MUTEX carries worker_identity and host directly rather than
+  relying on TEAM_MIGRATION_ATTEMPT for them: acquisition happens before
+  dependencies are checked and before RUNNING is committed (see Apply and
+  failure semantics below), so a crash in that window leaves the mutex held
+  with no attempt row yet to look the holder up in. Bind both at acquisition
+  so the blocking message spec §7 requires can always name a worker.
   Define primary/unique keys, state/target checks and NOT NULL contracts.
   There is no expected-fingerprint table: revision 3 made canonical replay
   evidence under `database/` the single source of expected schema state, so a
@@ -256,7 +267,8 @@ BEGIN
   END IF;
 
   UPDATE team_migration_mutex
-     SET owner_token = :run_token, acquired_at = SYSTIMESTAMP
+     SET owner_token = :run_token, worker_identity = :worker_identity,
+         host = :host, acquired_at = SYSTIMESTAMP
    WHERE singleton_id = 1;
   COMMIT;
 END;
@@ -276,9 +288,22 @@ END;
 - [ ] Every state mutation predicates on the owner token. Release only after
   all workers ended and no unresolved attempt remains. Compare-and-clear the
   selected token; record recovery evidence when clearing a failed run.
+- [ ] `--attempt` is optional: a crash between mutex acquisition and the first
+  committed RUNNING row (dependency/checksum confirmation runs under the mutex
+  before RUNNING is written) leaves owner_token set with no attempt row at all.
+  Requiring an attempt ID in that case would make the mutex unrecoverable. When
+  omitted, clear the mutex directly from worker-termination evidence with no
+  attempt-state repair, since none was ever recorded. Test this exact case:
+  acquire, crash before any attempt row, recover with no `--attempt`.
 - [ ] Reject manual "unlock by age". Recovery evidence must identify all workers
   and establish that no payload process/session is still live; if privileges
   cannot establish this, require the environment owner to supply evidence.
+- [ ] Read the recovery-owner role for this target from its tracked
+  `targets/*.json` contract (spec §7; Plan 1 Task 1 defines
+  `targets/development.json` for the developer role) and include it in every
+  refusal caused by a held migration mutex, mirroring Plan 1's
+  `recover-app-lock`. Do not introduce a second recovery-owner file — migration
+  and app mutexes read the same per-target contract.
 - [ ] Test concurrent acquire (one winner), DDL commits, wrong-token updates,
   killed parent/live child, partial bootstrap and absent metadata dry-run.
   Verify neither tables nor code users have mutation grants on log tables.

@@ -673,7 +673,8 @@ BEGIN
   END IF;
 
   UPDATE team_migration_mutex
-     SET owner_token = :run_token, acquired_at = SYSTIMESTAMP
+     SET owner_token = :run_token, worker_identity = :worker_identity,
+         host = :host, acquired_at = SYSTIMESTAMP
    WHERE singleton_id = 1;
   COMMIT;
 END;
@@ -690,7 +691,15 @@ subprocess is a backstop for network-level stalls, never the primary mechanism,
 and a timeout is never interpreted as "not acquired": it leaves the target
 uncertain and blocked.
 
-The same NOWAIT discipline applies to the Plan 1 app-target mutex.
+The same NOWAIT discipline applies to the Plan 1 app-target mutex, which
+extends this transition with one addition the migration mutex does not need:
+`TEAM_APP_MUTEX` also carries `is_uncertain`, set when an import is interrupted
+before its outcome is known (Plan 1 Task 5). Acquisition must check it in the
+same branch as `v_token IS NOT NULL`: an unheld but uncertain row raises a
+distinct, named error (`ORA-20002 TARGET_UNCERTAIN`) rather than proceeding, so
+a target left uncertain by a crashed import cannot be silently reacquired
+before `recover-app-lock` clears it. This is a directive on the same
+transition, not a second block to transcribe separately.
 
 Having acquired, check exactly one affected row before planning any
 writes. The token persists
