@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from teamlib.conflict_assistant import explain_conflict
+from teamlib.conflict_assistant import ConflictAssistantError, explain_conflict, write_candidate
 
 
 class ConflictAssistantTests(unittest.TestCase):
@@ -36,6 +36,19 @@ class ConflictAssistantTests(unittest.TestCase):
             briefing = explain_conflict("r2", root=root)
             self.assertFalse(briefing.questions)
             self.assertIn("independent", briefing.text.lower())
+
+    def test_candidate_output_rejects_parent_traversal_in_scratch_root(self):
+        with tempfile.TemporaryDirectory(prefix="team-conflict-output-") as directory:
+            root = Path(directory)
+            recovery = root / "recovery" / "r3"
+            recovery.mkdir(parents=True)
+            (recovery / "capture.json").write_text(
+                '{"version":1,"diagnostics":{"conflicts":["pages/p1.apx"]},"base":{"pages/p1.apx":"title: old"},"source_base":{"pages/p1.apx":"title: old"},"head":{"pages/p1.apx":"title: head"},"mine":{"pages/p1.apx":"title: shared"}}',
+                encoding="utf-8",
+            )
+            briefing = explain_conflict("r3", root=root)
+            with self.assertRaises(ConflictAssistantError):
+                write_candidate(briefing, {"pages/p1.apx": "title: resolved"}, out_root=root / "scratch" / ".." / "outside")
 
 
 if __name__ == "__main__":

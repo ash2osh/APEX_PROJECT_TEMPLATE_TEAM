@@ -78,6 +78,21 @@ def _find_secret_keys(value: Any, prefix: str = "") -> list[str]:
     return found
 
 
+def _sanitize_evidence(value: Any) -> Any:
+    """Keep qualified runner evidence useful without copying secret-like keys."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _sanitize_evidence(item)
+            for key, item in value.items()
+            if not _SECRET_KEY.search(str(key))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_evidence(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def ci_doctor(contract: str | Path | Mapping[str, Any]) -> DoctorReport:
     """Validate the non-secret runner contract without probing production."""
     try:
@@ -246,7 +261,19 @@ def ci_replay(
         ):
             raise CIError("disposable replay did not produce a verified PASS for the selected source ref")
         upgrade = expected_upgrade
-        evidence = {"version": 1, "status": "PASS", "source_commit": ref, "fresh": "PASS", "upgrade": upgrade, "target": {key: target[key] for key in ("instance_token", "status", "source_commit")}}
+        evidence = {
+            "version": 1,
+            "status": "PASS",
+            "source_commit": ref,
+            "fresh": "PASS",
+            "upgrade": upgrade,
+            "target": _sanitize_evidence({
+                key: target[key]
+                for key in ("instance_token", "status", "source_commit", "instance_id", "workspace_id", "app_ids", "ords_base_url")
+                if key in target
+            }),
+            "runner": _sanitize_evidence(observed),
+        }
         return ReplayReport("PASS", ref, str(created["instance_token"]), "PASS", upgrade, previous_digest, evidence)
     finally:
         if created is not None:
@@ -313,5 +340,5 @@ def main(argv: list[str] | None = None) -> int:
         args.ref, args.previous, contract=args.contract, provisioner=provisioner_path,
         runner=runner, scratch_root=args.scratch_root,
     )
-    print(json.dumps({"status": report.status, "source_commit": report.source_commit, "fresh": report.fresh, "upgrade": report.upgrade, "instance_token": report.instance_token, "previous_archive_digest": report.previous_archive_digest}, sort_keys=True))
+    print(json.dumps({"status": report.status, "source_commit": report.source_commit, "fresh": report.fresh, "upgrade": report.upgrade, "instance_token": report.instance_token, "previous_archive_digest": report.previous_archive_digest, "evidence": report.evidence}, sort_keys=True))
     return 0

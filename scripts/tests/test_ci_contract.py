@@ -56,6 +56,29 @@ class CIContractTests(unittest.TestCase):
             self.assertEqual(calls[0][0], "create")
             self.assertEqual(calls[-1][0], "destroy")
 
+    def test_replay_retains_sanitized_runner_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="team-ci-evidence-keep-") as directory:
+            root = Path(directory)
+
+            def provisioner(argv, out):
+                if argv[0] == "create":
+                    return {
+                        "version": 1, "instance_token": "run-1", "status": "disposable",
+                        "env_path": str(out / "replay.env"), "instance_id": "FREE@host",
+                    }
+                return {"version": 1, "destroyed": True}
+
+            report = ci_replay(
+                "abc", None, contract=self._contract(root), provisioner=provisioner,
+                runner=lambda ref, _previous, _target: {
+                    "status": "PASS", "source_commit": ref, "fresh": "PASS",
+                    "upgrade": "NOT_APPLICABLE_INITIAL_RELEASE", "application_checks": {"status": "PASS"},
+                    "password": "must-not-be-retained",
+                },
+            )
+            self.assertEqual(report.evidence["runner"]["application_checks"]["status"], "PASS")
+            self.assertNotIn("password", report.evidence["runner"])
+
     def test_failed_runner_is_not_reported_as_pass(self):
         with tempfile.TemporaryDirectory(prefix="team-ci-") as directory:
             root = Path(directory)

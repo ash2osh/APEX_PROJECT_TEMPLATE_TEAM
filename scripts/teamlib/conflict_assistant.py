@@ -143,6 +143,8 @@ def write_candidate(briefing: ConflictBriefing, answers: Mapping[str, str], *, o
     if set(answers) != set(briefing.paths):
         raise ConflictAssistantError("every conflicted path requires an explicit answer")
     root = Path(out_root)
+    if ".." in root.parts:
+        raise ConflictAssistantError("conflict assistant output must remain under scratch/")
     if root.name != "scratch" and root.parent.name != "scratch":
         raise ConflictAssistantError("conflict assistant output must remain under scratch/")
     destination = root / f"conflict-{briefing.recovery_id}"
