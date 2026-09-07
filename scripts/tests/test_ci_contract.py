@@ -110,6 +110,33 @@ class CIContractTests(unittest.TestCase):
                 ])
             self.assertEqual(result, 0)
 
+    def test_replay_passes_absolute_scratch_path_to_provisioner(self):
+        with tempfile.TemporaryDirectory(prefix="team-ci-absolute-", dir="/tmp") as directory:
+            root = Path(directory)
+            observed = []
+
+            def provisioner(argv, out):
+                if argv[0] == "create":
+                    observed.append(Path(argv[argv.index("--out") + 1]))
+                    return {"version": 1, "instance_token": "run-1", "status": "disposable", "env_path": str(out / "replay.env")}
+                return {"version": 1, "destroyed": True}
+
+            ci_replay(
+                "abc",
+                None,
+                contract=self._contract(root),
+                provisioner=provisioner,
+                runner=lambda ref, _previous, _target: {
+                    "status": "PASS",
+                    "source_commit": ref,
+                    "fresh": "PASS",
+                    "upgrade": "NOT_APPLICABLE_INITIAL_RELEASE",
+                },
+                scratch_root=Path("scratch") / "relative-ci",
+            )
+            self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0].is_absolute())
+
 
 if __name__ == "__main__":
     unittest.main()

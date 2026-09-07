@@ -220,6 +220,11 @@ def ci_replay(
             raise CIError(f"previous release artifact is invalid: {exc}") from exc
     base = Path(scratch_root) if scratch_root is not None else Path("scratch") / "ci"
     base.mkdir(parents=True, exist_ok=True)
+    # Provisioners mount the output directory into Docker/Podman.  A relative
+    # host path is interpreted as a named volume by Docker and fails (or, on
+    # some engines, silently targets the wrong host directory), so the argv
+    # contract always receives an absolute path.
+    base = base.resolve()
     run_id = str(uuid.uuid4())
     out = base / run_id
     out.mkdir(parents=True, exist_ok=False)
