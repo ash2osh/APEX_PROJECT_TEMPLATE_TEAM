@@ -98,6 +98,7 @@ replay --source DIRECTORY --replay-env FILE [--previous DIRECTORY]
 snapshot --out DIRECTORY
 adopt-baseline MIGRATION_ID --evidence DIRECTORY
 recover-migration RUN_TOKEN [--attempt ATTEMPT_ID] --evidence DIRECTORY
+export-history --out FILE
 ```
 
 Offline migration-plan reads supplied history, never connects. Online dry-run
@@ -215,7 +216,8 @@ test_migration_store.py, scripts/tests/live/test_migration_store.py.
 
 **Interface:** `bootstrap(store_target)`;
 `acquire(store_target, run_token, worker_identity, host)`;
-`release(store_target, run_token)`; `read_history(store_target) -> dict`.
+`release(store_target, run_token)`; `read_history(store_target) -> dict`;
+`export_history(store_target, out) -> None`.
 All Target arguments here are the isolated METADATA profile. Extend Plan 1's
 control_store foundation; app and migration mutexes are distinct resources.
 
@@ -304,6 +306,14 @@ END;
   refusal caused by a held migration mutex, mirroring Plan 1's
   `recover-app-lock`. Do not introduce a second recovery-owner file — migration
   and app mutexes read the same per-target contract.
+- [ ] `export-history` writes `read_history`'s exact result to a canonical JSON
+  file through a read-only metadata connection — no mutex, no write guard
+  bypass needed since it changes nothing. This is what "history supplied by
+  the environment owner" (plan-release, gen-runbook) actually means in
+  practice: a human runs this once against the target being planned for and
+  hands the file off, rather than plan-release or gen-runbook connecting to
+  anything themselves. Test that it never acquires the mutex and never
+  succeeds against a production-classified target.
 - [ ] Test concurrent acquire (one winner), DDL commits, wrong-token updates,
   killed parent/live child, partial bootstrap and absent metadata dry-run.
   Verify neither tables nor code users have mutation grants on log tables.

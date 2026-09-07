@@ -691,15 +691,46 @@ subprocess is a backstop for network-level stalls, never the primary mechanism,
 and a timeout is never interpreted as "not acquired": it leaves the target
 uncertain and blocked.
 
-The same NOWAIT discipline applies to the Plan 1 app-target mutex, which
-extends this transition with one addition the migration mutex does not need:
-`TEAM_APP_MUTEX` also carries `is_uncertain`, set when an import is interrupted
-before its outcome is known (Plan 1 Task 5). Acquisition must check it in the
-same branch as `v_token IS NOT NULL`: an unheld but uncertain row raises a
-distinct, named error (`ORA-20002 TARGET_UNCERTAIN`) rather than proceeding, so
-a target left uncertain by a crashed import cannot be silently reacquired
-before `recover-app-lock` clears it. This is a directive on the same
-transition, not a second block to transcribe separately.
+The same NOWAIT discipline applies to the Plan 1 app-target mutex, keyed by
+`target_key` rather than a singleton row, and extended with one column the
+migration mutex does not need: `TEAM_APP_MUTEX` also carries `is_uncertain`,
+set when an import is interrupted before its outcome is known (Plan 1 Task 5).
+Read it in the same SELECT as `owner_token` and check it in its own `ELSIF`,
+never inside the `v_token IS NOT NULL` branch — that branch is for the held
+case, and an uncertain-but-unheld row must still be caught when `v_token IS
+NULL`, which the first attempt at stating this as a directive rather than a
+block left ambiguous enough to be misread the wrong way round:
+
+```sql
+DECLARE
+  v_token     VARCHAR2(64);
+  v_uncertain NUMBER(1);
+BEGIN
+  SELECT owner_token, is_uncertain INTO v_token, v_uncertain
+    FROM team_app_mutex
+   WHERE target_key = :target_key
+     FOR UPDATE NOWAIT;
+
+  IF v_token IS NOT NULL THEN
+    RAISE_APPLICATION_ERROR(-20001, 'MUTEX_HELD:' || v_token);
+  ELSIF v_uncertain = 1 THEN
+    RAISE_APPLICATION_ERROR(-20002, 'TARGET_UNCERTAIN');
+  END IF;
+
+  UPDATE team_app_mutex
+     SET owner_token = :run_token, checkout_uuid = :checkout_uuid,
+         host = :host, acquired_by_user = :acquired_by_user,
+         acquired_at = SYSTIMESTAMP
+   WHERE target_key = :target_key;
+  COMMIT;
+END;
+/
+```
+
+A target left uncertain by a crashed import cannot be silently reacquired
+before `recover-app-lock` clears it — see Plan 1 Task 5 for how clearing
+`is_uncertain` and clearing ownership are the same reviewed operation, never
+one without the other.
 
 Having acquired, check exactly one affected row before planning any
 writes. The token persists
@@ -1076,7 +1107,7 @@ overwrite each other. The revised topology (§2) strengthens this rather than
 weakening it — every developer targets the same application by design, so the
 mutex is the only serialization that exists, and export's torn-capture check
 reads the same metadata rather than adding a second mechanism. It is small at
-this stage — three tables — and Plan 2 extends the same schema rather than
+this stage — four tables — and Plan 2 extends the same schema rather than
 introducing a second controller.
 
 Do not treat the ladder as permission to ship Plan 2 without the disposable

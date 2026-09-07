@@ -55,7 +55,7 @@ team.py doctor
 team.py setup-state
 team.py register-app ALIAS [--transfer-from CHECKOUT_UUID]
 team.py app-status ALIAS
-team.py recover-app-lock ALIAS --run-token TOKEN --evidence DIRECTORY
+team.py recover-app-lock ALIAS [--run-token TOKEN] --evidence DIRECTORY
 team.py capture-app ALIAS
 team.py bootstrap-app ALIAS
 team.py adopt-app ALIAS --ref COMMIT
@@ -100,6 +100,9 @@ class Target:
     service: str
     session_user: str
     current_schema: str
+    alias: str | None                      # None for tables/code/metadata/
+                                            # verify profiles; required
+                                            # wherever apps/<alias>/ resolves
     workspace_id: int | None
     app_id: int | None
     parsing_schema: str | None
@@ -402,11 +405,24 @@ scripts/tests/live/test_app_lock.py.
   registered_at), TEAM_APP_MUTEX(target_key, owner_token, checkout_uuid, host,
   acquired_by_user, acquired_at, generation, is_uncertain), and
   TEAM_APP_TRANSFER(transfer_id, target_key, old_checkout_uuid,
-  new_checkout_uuid, actor, transferred_at) — append-only, since spec §9's
-  "every transfer is recorded in metadata" otherwise has no table to live in.
+  new_checkout_uuid, actor, capture_recovery_id, transferred_at) —
+  append-only, since spec §9's "every transfer is recorded in metadata"
+  otherwise has no table to live in. capture_recovery_id points at the
+  pre-transfer capture spec §9 requires ("the capture taken beforehand") —
+  without it the table records that a transfer happened but not the evidence
+  a reviewer would need to check it was safe.
   TEAM_APP_REGISTRY's primary key is (target_key, checkout_uuid), not
   target_key alone: the shared application is a roster (spec §9), so more than
   one checkout legitimately registers against the same target_key at once.
+  Seed a TEAM_APP_MUTEX row (owner_token NULL, generation 1, is_uncertain 0)
+  for every target_key declared across the current profiles — the developer
+  alias and every downstream deployment target alike — as part of this same
+  operation. This is the primary seeding path and the only one downstream
+  targets ever get: deploy-app acquires this mutex (Task 5's acquire_app
+  bullet below) without ever running register-app, so a row that only
+  register-app could create would leave every downstream target permanently
+  unacquirable. Re-running setup-state after adding a new alias or target must
+  seed the new row without disturbing existing ones.
   Define primary/unique keys, state/target checks and NOT NULL contracts.
   Partial or incompatible setup refuses. Plan 2 extends this shared schema; it
   does not create a second controller identity.
@@ -417,13 +433,13 @@ scripts/tests/live/test_app_lock.py.
   here would lock out the whole team after the first developer registered, so a
   test asserting that refusal would be asserting the bug. Verify registration
   before developer app mutation, and record host and user so a held mutex and a
-  recovery can name a person. Idempotently ensure a TEAM_APP_MUTEX row exists
-  for this target_key before returning — insert one with owner_token NULL,
-  generation 1 and is_uncertain 0 only if absent — so acquire_app's
-  `NO_DATA_FOUND` unambiguously means "never bootstrapped for this alias"
-  rather than colliding with "this alias was never registered." Test that
-  acquiring immediately after a fresh register-app succeeds with no separate
-  seeding step.
+  recovery can name a person. Idempotently insert the same TEAM_APP_MUTEX row
+  setup-state seeds (owner_token NULL, generation 1, is_uncertain 0) if it is
+  somehow still absent — a safety net for an alias added after the last
+  setup-state run, not the primary seeding path (see setup-state above). Test
+  that register-app never overwrites an existing mutex row's state — a
+  developer registering against a target someone else is mid-import against
+  must not reset owner_token, generation or is_uncertain.
 - [ ] Keep exclusive-checkout and transfer semantics for a target declared
   single-owner — an optional isolated developer copy (spec §2.1). There a
   transfer requires the old UUID, a retained fresh capture and proof the old
@@ -444,9 +460,10 @@ scripts/tests/live/test_app_lock.py.
   holder for the blocking message);
   `ORA-20002 TARGET_UNCERTAIN` (unheld but flagged uncertain by an interrupted
   import; acquisition must refuse until `recover-app-lock` clears it, never
-  proceed past an unchecked `is_uncertain`); `NO_DATA_FOUND` (never bootstrapped
-  for this target_key — a setup-required error, distinct from a target that is
-  simply unregistered; see the register-app bullet above). Any other error is a
+  proceed past an unchecked `is_uncertain`);
+  `NO_DATA_FOUND` (never bootstrapped for this target_key — a setup-required
+  error meaning setup-state has not been run, or not re-run since this target
+  was added; see the setup-state bullet above). Any other error is a
   hard failure. A subprocess wall-clock timeout is a backstop for network stalls
   only and is never read as "not acquired": it leaves the target uncertain and
   blocked.
@@ -455,20 +472,39 @@ scripts/tests/live/test_app_lock.py.
   uses the same mutex without developer registration. A second concurrent
   *import* must fail to acquire the same target; a second *checkout* of the
   shared application must not.
-- [ ] Maintain a monotonic import generation for each target alongside the mutex,
-  incremented when an import completes, so a reader can prove no import
-  intervened during its capture (spec §2.1). Expose it through a single
-  read-only `read_app_sync_state(target_key)` returning generation, current
-  mutex holder and an explicit uncertain-target flag, so export never acquires
-  anything. Report uncertainty as its own field rather than leaving it inferable
-  only from a retained mutex: export's acceptance rule would otherwise depend
-  silently on recovery discipline implemented in Task 9. Test that an import
-  which begins and completes entirely between two reads is still detected, and
-  that a partially written import leaves the flag set.
-- [ ] recover-app-lock requires the selected run token, worker-termination
-  evidence and retained current target capture. It may clear ownership only
-  after resolving uncertain app state; it cannot stamp a verified baseline
-  from a lock-clear operation. Refuse production and unverifiable worker state.
+- [ ] Maintain a monotonic import generation for each target alongside the
+  mutex, incremented when an import completes **or when recover-app-lock
+  clears a held or uncertain target**, so a reader can prove no import —
+  successful, crashed, or crashed-and-recovered — intervened during its
+  capture (spec §2.1). Without the recover-app-lock case, a crash that
+  partially writes and then gets cleared entirely inside another developer's
+  capture window would leave generation unchanged at both of that reader's
+  observations (Task 8) — the crash never reached completion to bump it, and
+  by the second read the mutex is already clear — letting a torn capture
+  through undetected. Expose it through a single read-only
+  `read_app_sync_state(target_key)` returning generation, current mutex
+  holder and an explicit uncertain-target flag, so export never acquires
+  anything. Report uncertainty as its own field rather than leaving it
+  inferable only from a retained mutex: export's acceptance rule would
+  otherwise depend silently on recovery discipline implemented in Task 9.
+  Test that an import which begins and completes entirely between two reads
+  is still detected, that a partially written import leaves the flag set,
+  and that a crash-then-recover cycle entirely inside another reader's
+  capture window bumps generation even though no import ever completed.
+- [ ] recover-app-lock requires worker-termination evidence and retained
+  current target capture in every case. `--run-token` is required only when
+  the target is currently held, matched exactly against the live owner_token;
+  omit it when the target is already unheld. Clear owner_token (if held) and
+  `is_uncertain` together, in the same reviewed operation, always — never one
+  without the other. This is what "resolving uncertain app state" means, and
+  it is why `--run-token` cannot be unconditionally required: a target left
+  unheld-but-uncertain (a crash that never held the row, or simply the state
+  right after this same command last ran) would otherwise have no token for a
+  second recovery to match, and no other command ever clears `is_uncertain` —
+  permanently locking the target out of every future acquisition. It cannot
+  stamp a verified baseline from a lock-clear operation — that still requires
+  a subsequent successful import or adopt-app. Refuse production and
+  unverifiable worker state.
   Read the recovery-owner role for this target from its tracked
   `targets/*.json` contract and include it, per spec §7's self-explaining-
   blocking requirement, in every refusal caused by a held app-target mutex.
@@ -478,9 +514,14 @@ scripts/tests/live/test_app_lock.py.
   .sync-state. Derive target keys from canonical Target identity; binding and
   workspace changes invalidate reuse. Store canonical Git blob provenance,
   but do not depend on its continued reachability.
-- [ ] Store capture receipts linking mine digest to successfully written source
-  digest; resolution receipts additionally record conflict paths and resolved
-  digest. These are not database-alignment baselines.
+- [ ] Store capture receipts linking mine digest to the reconciled source
+  manifest — the full path/blob-hash mapping `tree_contains` (Task 3) checks
+  against, keyed and content-addressed the same way baselines already are
+  (spec §6), not a bare digest a subset check has nothing to compare against.
+  "Successfully accounted for," not "successfully written": a zero-change
+  export (Task 8) reconciles nothing to disk but still receipts the manifest
+  it confirmed. Resolution receipts additionally record conflict paths and
+  resolved digest. These are not database-alignment baselines.
 - [ ] Atomic-save manifests only after all blobs exist; validate hashes on load.
   An existing baseline becomes uncertain at the start of an import mutation.
 - [ ] Add tests for target rebinding, pruned commit with retained blobs,
@@ -540,20 +581,27 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 ## Task 8: Export and explicit bootstrap
 
 **Files:** scripts/teamlib/apex.py, scripts/tests/test_export_app.py.
-**Interfaces:** `capture_app(target) -> Capture` (Capture has tree,
-recovery_id, target and the sync state observed either side of the read);
-`export_app(target) -> Decision`.
+**Interfaces:** `capture_app(target, held_by=None) -> Capture` (Capture has
+tree, recovery_id, target and the sync state observed either side of the
+read); `export_app(target) -> Decision`.
 
 - [ ] Implement spec §6 export sequence using Tasks 2–7. Capture first, retain
   before mutation, reconcile contents, journal the patch, verify and receipt.
 - [ ] Bracket the capture with `read_app_sync_state` (Task 5). Refuse before
-  starting if an import holds the mutex. After the read, accept the capture only
-  if the generation is unchanged and no holder appeared; otherwise discard it as
-  possibly torn and retry a bounded number of times before reporting that an
-  import is in progress. **Export never acquires the mutex** — readers that lock
-  can block the team and strand a lock when a developer's export dies, and two
-  concurrent exports are harmless (spec §2.1). A discarded capture has no side
-  effects, so retry is free.
+  starting if an import holds the mutex — **unless the caller passes
+  `held_by=` its own held run_token**, in which case a holder matching that
+  token is expected, not a competing import, and does not refuse. import_app's
+  own post-import re-export (Task 9) is the only caller that ever passes one;
+  every other caller passes none and refuses on any holder at all. After the
+  read, accept the capture only if the generation is unchanged and no *other*
+  holder appeared; otherwise discard it as possibly torn and retry a bounded
+  number of times before reporting that an import is in progress. **Export
+  never acquires the mutex** — readers that lock can block the team and
+  strand a lock when a developer's export dies, and two concurrent exports
+  are harmless (spec §2.1). A discarded capture has no side effects, so retry
+  is free. Without the `held_by` carve-out, import_app's own verification
+  step deadlocks against the lock it is itself holding — test that case
+  explicitly, not just the carve-out's positive path.
 - [ ] Record a capture receipt even when reconciliation changes zero paths
   (spec §6). Test that a no-op export still receipts and that a subsequent
   import of the matching commit is allowed by it. This is the ordinary
@@ -570,10 +618,12 @@ recovery_id, target and the sync state observed either side of the read);
   deployments and HEAD movement. Assert actual filesystem and exit status.
 - [ ] Test the torn-capture cases with a fake SQLcl that mutates the sync state
   mid-read: an import already holding the mutex when export starts, an import
-  starting and still running when the capture ends, and an import that begins
-  and completes entirely within the capture window. All three must discard the
-  capture and write no tracked source. Add the negative: two concurrent exports
-  must both succeed and neither may block the other.
+  starting and still running when the capture ends, an import that begins and
+  completes entirely within the capture window, and an import that begins,
+  partially writes, crashes and is cleared by recover-app-lock entirely
+  within the capture window (Task 5). All four must discard the capture and
+  write no tracked source. Add the negative: two concurrent exports must both
+  succeed and neither may block the other.
 - [ ] Verify a refusal prints the durable capture location and resolution
   command, never an unconditional instruction to import over Builder work.
 
@@ -621,8 +671,10 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   observed state and confirms with the developer; keep this print correct on its
   own, because Plan 1 must be usable before Plan 3 exists.
 - [ ] Validate masters/source, guard write, recheck capture and target, import,
-  re-export and verify bytes plus master linkage. Baseline becomes verified
-  only after all checks. Preserve old state as uncertain on import failure.
+  then call `capture_app(target, held_by=run_token)` to re-export and verify
+  bytes plus master linkage without tripping its own held-mutex refusal.
+  Baseline becomes verified only after all checks. Preserve old state as
+  uncertain on import failure.
 - [ ] Test uncaptured Builder edit refusal, captured-and-committed edits,
   dirty source, stale receipt, changed app between captures, import error-zero,
   subscription mismatch, interrupted verification and successful stamping.
@@ -637,6 +689,7 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 
 **Files:** scripts/team.py, scripts/teamlib/state.py,
 scripts/tests/test_recovery_flow.py.
+**Interface:** `resolve_export(recovery_id: str, resolved: Path) -> Decision`.
 
 - [ ] Wire all documented commands with argparse; no implicit commit or push.
 - [ ] resolve-export takes a validated complete resolved source tree and the

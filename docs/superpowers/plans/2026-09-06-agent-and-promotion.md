@@ -33,14 +33,14 @@ through the same adapter and error protocol as developer commands.
 
 | Files to create | Responsibility |
 |---|---|
-| AGENTS.md; self_improve.md; .agents/rules/; .agents/workflows/team-flow.md | corrected team agent contract |
+| AGENTS.md; self_improve.md; .agents/rules/; .agents/workflows/team-flow.md; docs/app-recovery.md | corrected team agent contract |
 | app_context/README.md; .graphifyignore; setup_graphify_apx.py; scripts/graphify_*.py | optional alias-keyed knowledge layer |
 | scripts/teamlib/conflict_assistant.py; docs/conflict-resolution.md | plain-language, property-level conflict explanation and developer Q&A; never auto-resolves |
 | scripts/teamlib/announce.py; docs/import-pause.md | drafted import announcement and all-clear from observed state; import confirmation that never bypasses a guard |
 | scripts/teamlib/deploy.py; scripts/deploy_app.sh/.ps1 | named-target exact-source deployment |
 | scripts/teamlib/release.py; scripts/teamlib/runbook.py; scripts/build_release.sh/.ps1 | offline artifact, plan, runbook and release launcher |
 | scripts/teamlib/ci.py; ci/runner-contract.json; ci/provisioners/docker_pdb.sh; docs/ci.md | qualification/provisioning, reference provisioner and job entry points |
-| .github/workflows/template-checks.yml; database-checks.yml | offline and required disposable replay gates |
+| .github/workflows/database-checks.yml | required disposable replay gate |
 | .github/workflows/integration.yml; release.yml | merge deployment and tag-to-test promotion |
 | scripts/tests/test_deploy.py; test_release.py; test_production_boundary.py | public-entry-point regression tests |
 | README.md; docs/promotion.md; docs/design-review-resolution.md | user workflow, environment setup, recovery and review-finding traceability |
@@ -49,7 +49,7 @@ Public commands added to team.py:
 
 ```text
 explain-conflict RECOVERY_ID
-announce-import ALIAS (--ref COMMIT | --all-clear RESULT_ID)
+announce-import ALIAS (--ref COMMIT | --all-clear OPERATION_ID)
 deploy-app ALIAS --target TARGET_JSON --ref COMMIT
 build-release --ref TAG_OR_COMMIT --version SEMVER --out DIRECTORY
 verify-release ARCHIVE
@@ -212,6 +212,11 @@ Both are read-only and produce text; neither imports anything. The CLI's two
 modes map to these two functions and are mutually exclusive: `--ref` drafts the
 pre-import announcement, `--all-clear` drafts the post-import all-clear from a
 completed import's result, and `--ref` is not read in the second mode.
+`--all-clear` takes the `operation_id` Plan 1 Task 1 already prints in every
+command's JSON result — not a new identifier scheme — and `draft_all_clear`
+loads that operation's persisted outcome from `.sync-state` to build `result`;
+it is the same ID `recover-files OPERATION_ID` already addresses recovery
+state by.
 
 - [ ] Draft from observed state, never from assumption: the resolved commit, the
   target's workspace and application identity, the `app-status` roster (spec §9)
@@ -242,6 +247,14 @@ completed import's result, and `--ref` is not read in the second mode.
 
 #### Confirming the import
 
+- [ ] This confirmation lives in `team.py`'s CLI dispatch for `import-app`, not
+  in `announce-import` itself and not in Plan 1's `import_app` library
+  function: the dispatcher calls `draft_import_announcement` internally to
+  gather what to show, prompts, and only then calls `import_app`.
+  `announce-import` stays a separately-run, read-only drafting command a
+  developer can invoke on its own; it is not modified to prompt or block.
+  "Proceed" below means the `import-app` dispatcher proceeding to call
+  `import_app`, never `import_app` proceeding on its own.
 - [ ] Put the consequences to the developer as a question they must answer, not a
   banner they scroll past: the application and target by identity, the paths that
   will change, any uncaptured work found, and whether the announcement has been
@@ -304,6 +317,8 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** scripts/teamlib/ci.py, ci/runner-contract.json,
 ci/provisioners/docker_pdb.sh, docs/ci.md,
 .github/workflows/database-checks.yml, scripts/tests/test_ci_contract.py.
+**Interface:** `ci_doctor(contract) -> DoctorReport`;
+`ci_replay(ref, previous_artifact) -> ReplayReport`.
 
 - [ ] Specify an isolated disposable runner contract: qualified exact SQLcl,
   JDK/APEX/database versions, Python, provisioner executable and named profiles.
@@ -394,7 +409,8 @@ scripts/build_release.sh/.ps1, docs/promotion.md.
 
 **Interfaces:** `build_release(repo, ref, version, out) -> Manifest`;
 `verify_release(release_tar) -> Manifest`;
-`plan_release(release_tar, history, target) -> ReleasePlan`.
+`plan_release(release_tar, history, target) -> ReleasePlan`;
+`apply_release(release_tar, target, plan) -> ApplyReport`.
 
 Canonical distributable: release.tar. Build returns a staging directory plus
 this exact archive. CI uploads/downloads it as an opaque file; the GitHub wrapper
@@ -460,8 +476,15 @@ release/
   then rereads history under the migration mutex and recomputes the pending plan.
   Require exact equality before writes; changed pending work refuses and requires
   a new plan. Pass the reviewed plan into Plan 2 apply_plan as expected_plan;
-  that comparison and execution share the same held mutex. Credentials and selected binding are injected only into
-  deployment staging.
+  that comparison and execution share the same held mutex. apply-release is
+  also where the archive's packaged apps reach a target: after migrations
+  apply, deploy every `apps/<alias>` tree the archive contains, in master
+  dependency order, through Task 4's `deploy_app` — fed the verified archive
+  bytes as its `source_tree`, not a Git commit. `deploy-app`'s own CLI stays
+  `--ref COMMIT`-only, for an ad hoc named-target deployment outside a
+  release; apply-release is the release-shaped path, and is what Task 8's
+  test job means by "deploy apps in master dependency order". Credentials
+  and selected binding are injected only into deployment staging.
 - [ ] Add positive build tests from a temporary Git commit, dirty/untracked
   contamination tests, binary parity, deterministic rebuild, path attacks,
   historical-already-applied exclusion, tampered history and artifact tampering.
@@ -487,6 +510,8 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** .github/workflows/release.yml, scripts/teamlib/runbook.py,
 scripts/tests/test_release_workflow.py, scripts/tests/test_production_boundary.py,
 docs/promotion.md.
+**Interface:** `gen_runbook(release_tar, history, target, test_evidence,
+signature, trust_key) -> Runbook`.
 
 - [ ] Bind refs/tags/vX.Y.Z exactly to manifest version X.Y.Z. Configure protected
   immutable tags and a protected append-only release record mapping version to
@@ -527,9 +552,10 @@ docs/promotion.md.
   they do not prove arbitrary SQL cannot be run by a human with credentials.
 - [ ] Parameterize fake-SQLcl boundary tests over import-app, deploy-app,
   apply-release, migrate, bootstrap-app, migrate --bootstrap, setup-state,
-  register-app, adopt-baseline, recover-app-lock and recover-migration —
-  bootstrap has two distinct entry points (app-level and metadata-level) and
-  both need their own production refusal test, not one standing in for both.
+  register-app, adopt-app, adopt-baseline, recover-app-lock and
+  recover-migration — bootstrap and adopt each have two distinct entry points
+  (app-level and metadata-level) and all four need their own production
+  refusal test, not two standing in for four.
   With valid
   production config, assert explicit production refusal and ZERO write
   launches. Pair every negative with valid non-production positive coverage
