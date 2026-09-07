@@ -4,7 +4,8 @@
 > superpowers:subagent-driven-development when delegation is authorized.
 > Checkboxes are implementation work, not verification already performed.
 
-**Revision:** 4 — adds observed drift continuity and disposable candidate-app checks; predicted effects remain out of scope.
+**Revision:** 4 — adds observed drift continuity and disposable candidate-app
+checks; predicted effects remain out of scope.
 **Goal:** Make shared-schema changes attributable, restartable and reproducible.
 **Architecture:** Immutable two-member SQL/verification bundles describe
 transitions, with target and dependencies declared in a strictly parsed SQL
@@ -420,9 +421,9 @@ developer does to write a migration.
   evidence and live equality. Stamp baseline only on exact match; never execute
   CREATE statements over existing business data.
 - [ ] Metadata setup may precede adoption, but until adoption or a verified
-  empty bootstrap the target has no accepted starting point and strict
-  and shared operations refuse. A nonempty schema is never blessed by sampling
-  its live objects into evidence; adoption must prove a reviewed initial migration
+empty bootstrap the target has no accepted starting point and strict and shared
+  operations refuse. A nonempty schema is never blessed by sampling its live
+  objects into evidence; adoption must prove a reviewed initial migration
   reproduces it on an empty disposable target.
 - [ ] Test valid adoption, changed live baseline, missing reference data,
   candidate changes outside declared scope and unknown normalization.
@@ -477,10 +478,10 @@ foreign_applied, blocked_attempt and verified inventory digest.
 - [ ] Restrict recovery to selected run/attempt and verified evidence. A restart
   uses exact immutable bytes after a human-reviewed restartability check;
   completion without replay requires structural AND data postconditions.
-  Failed immutable source needing correction uses a separately reviewed
-  corrective transition with a durable link to the failed attempt. Recovery
-  retains the mutex and observed partial state; only verified recovery completion
-  adds an accepted observation. Lock clearing alone never advances the frontier.
+Failed immutable source needing correction uses a separately reviewed corrective
+  transition with a durable link to the failed attempt. Recovery retains the
+  mutex and observed partial state; only verified recovery completion adds an
+  accepted observation. Lock clearing alone never advances the frontier.
   Ordinary apply cannot execute a corrective bundle while an attempt remains
   unresolved; it must use the selected recovery path.
 - [ ] Test separate-schema routing, rollback-independent DDL partial state,

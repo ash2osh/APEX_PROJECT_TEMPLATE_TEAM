@@ -4,7 +4,8 @@
 > superpowers:subagent-driven-development when delegation is authorized.
 > Do not mark a gate complete before its behavioral acceptance tests run.
 
-**Revision:** 3 — verifies candidate-app dependencies on disposable replay before shared integration.
+**Revision:** 3 — verifies candidate-app dependencies on disposable replay
+before shared integration.
 **Goal:** Give agents correct team rules and prove selected source can be built,
 deployed to integration, promoted to test and handed to production safely.
 **Architecture:** CI first proves canonical replay, then deploys an exact commit
@@ -141,8 +142,8 @@ never let an answer from a person substitute for a machine guard.
 ### `explain-conflict` — resolving a conflict without reading a diff
 
 **Interface:** `explain_conflict(recovery_id) -> ConflictBriefing` — offline,
-reads only the retained Plan 1 recovery bundle (base/source_base/head/mine trees, the
-conflict path list and capture/commit author metadata Plan 1 already
+reads only the retained Plan 1 recovery bundle (base/source_base/head/mine
+trees, the conflict path list and capture/commit author metadata Plan 1 already
 persists). ConflictBriefing enumerates, per conflicted path, the APEXlang
 properties that actually differ and a bounded question set (keep head / keep
 mine / keep both with developer-supplied text / raw diff fallback). It writes
@@ -156,11 +157,12 @@ choice they're asked to make is "which page title do you want" rather than
 
 - [ ] Depends on Plan 1 Task 10's recovery bundle format and Task 1's
   corrected agent contract; do not define a second bundle schema here.
-- [ ] Parse each conflicted file's base/source_base/head/mine as APEXlang structure, not
-  raw text — show any captured/reconciled checkpoint divergence and diff at the property level (page/region/item/button/
-  subscription). A file the parser cannot confidently handle refuses to guess;
-  it returns the raw captured/source-checkpoint/HEAD/current-capture comparison
-  instead, never a guessed structural read.
+- [ ] Parse each conflicted file's base/source_base/head/mine as APEXlang
+  structure, not raw text — show any captured/reconciled checkpoint
+  divergence and diff at the property level (page/region/item/button/
+  subscription). A file the parser cannot confidently handle refuses to
+  guess; it returns the raw captured/source-checkpoint/HEAD/current-capture
+  comparison instead, never a guessed structural read.
 - [ ] Distinguish two outcomes per path: (a) the two sides changed *different*
   properties — report this, but still require developer confirmation before
   writing anything, never auto-apply; (b) the two sides changed the *same*
@@ -190,8 +192,8 @@ choice they're asked to make is "which page title do you want" rather than
   scratch/ output is one valid way to produce that directory, not a trusted
   bypass of resolve-export's own checks.
 - [ ] Test: different-property auto-identification, same-property question
-  generation, unparsable-file fallback to raw checkpoint comparison, refusal to write outside
-  scratch/, refusal to proceed with an unanswered path, and that
+  generation, unparsable-file fallback to raw checkpoint comparison, refusal to
+  write outside scratch/, refusal to proceed with an unanswered path, and that
   resolve-export applied to the assistant's output is byte-identical to the
   same resolution supplied by hand.
 
@@ -282,8 +284,9 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** scripts/teamlib/deploy.py, scripts/deploy_app.sh/.ps1,
 scripts/tests/test_deploy.py.
 
-**Interface:** `deploy_app(target, source_tree, source_commit, replay_proof=None)
--> DeployReport`; source_tree is immutable materialized bytes, not a live path.
+**Interface:** `deploy_app(target, source_tree, source_commit,
+replay_proof=None) -> DeployReport`; source_tree is immutable materialized
+bytes, not a live path.
 `target.alias` (Plan 1's `Target`) identifies which archive tree to deploy —
 there is no separate `alias` parameter, since `team.py deploy-app ALIAS
 --target TARGET_JSON` already resolves both into one `Target` before calling
@@ -385,28 +388,31 @@ ci/provisioners/docker_pdb.sh, docs/ci.md,
 **Files:** `ci/app-checks/<alias>.json`, `ci/app-checks/<alias>/*.verify.sql`,
 `ci/app-checks/<alias>/flows/*.json`, `scripts/teamlib/app_checks.py`,
 `scripts/tests/test_app_checks.py`, `scripts/tests/live/test_app_checks.py`.
-**Interface:** `verify_candidate_apps(source, replay_target, checks) -> AppCheckReport`.
+**Interface:** `verify_candidate_apps(source, replay_target, checks) ->
+AppCheckReport`.
 
-- [ ] Materialize every actual app from the same selected SHA used for migrations;
-  deploy into that disposable replay target in master order through Task 4
-  with verified replay_proof. The provisioner
-  exposes ORDS/base URL and isolated test-user provisioning as well as SQLcl
-  profiles. Shared development/integration profiles cannot satisfy this gate.
+- [ ] Materialize every actual app from the same selected SHA used for
+  migrations; deploy into that disposable replay target in master order through
+  Task 4 with verified replay_proof. The provisioner exposes ORDS/base URL and
+  isolated test-user provisioning as well as SQLcl profiles. Shared
+  development/integration profiles cannot satisfy this gate.
 - [ ] Version 1 declaration schema contains alias, covered page IDs, checks
   (unique ID, page ID, kind, expected object names) and required fixture IDs.
-  `select` checks reference a tracked .verify.sql member using Plan 2's restricted
-  observation-only grammar and VERIFY profile; checks assert the actual page's
-  required schema/data conditions. `flow` checks reference declarative steps
-  with path, action (`navigate`, `fill`, `click`), selector, optional value or
-  test-secret reference, and expected visible text/URL. Run them through a pinned
-  browser adapter on verified replay/test targets with isolated test fixtures;
-  only disposable replay satisfies source qualification. Test promotion supplies
-  its own fixture identities. No arbitrary script/eval steps or
-  embedded credentials. Record page/flow coverage and source/check digests.
+  `select` checks reference a tracked .verify.sql member using Plan 2's
+  restricted observation-only grammar and VERIFY profile; checks assert the
+  actual page's required schema/data conditions. `flow` checks reference
+  declarative steps with path, action (`navigate`, `fill`, `click`),
+  selector, optional value or test-secret reference, and expected visible
+  text/URL. Run them through a pinned browser adapter on verified replay/test
+  targets with isolated test fixtures; only disposable replay satisfies
+  source qualification. Test promotion supplies its own fixture identities.
+  No arbitrary script/eval steps or embedded credentials. Record page/flow
+  coverage and source/check digests.
 - [ ] Every shipped app requires at least one SELECT dependency assertion and
   one authenticated or explicitly public page smoke flow. Changed database
-  dependencies require updated checks in review. Report uncovered paths honestly;
-  these declarations do not automatically discover every dynamic SQL reference.
+  dependencies require updated checks in review. Report uncovered paths
+  honestly; these declarations do not automatically discover every dynamic SQL
+  reference.
 - [ ] AppCheckReport contains source SHA, replay identity, app/page/check IDs,
   declared object names, observed diagnostics and PASS/FAIL/UNKNOWN for each
   required check. Any missing declaration, fixture, runner capability, result,
@@ -443,8 +449,9 @@ substitute an empty previous release.
 - [ ] Provision saved connections in the job's isolated store from protected
   non-production secrets. .env contains names and expectations only.
 - [ ] Apply migrations using shared mode when integration uses the shared dev
-  schema. Report foreign_applied IDs and enforce the observed-history drift gate; do not
-  pretend the shared schema equals HEAD. Fresh replay supplies canonical proof.
+  schema. Report foreign_applied IDs and enforce the observed-history drift
+  gate; do not pretend the shared schema equals HEAD. Fresh replay supplies
+  canonical proof.
 - [ ] Deploy every tracked application from the selected commit, respecting
   master-before-subscriber dependencies. Detect cycles/missing managed masters;
   externally managed masters must already satisfy the contract.
@@ -490,7 +497,7 @@ release/
   evidence/schema/...             canonical schema fingerprints
   contracts/masters.json          master and component requirements
   contracts/toolchain.json        qualified versions and manifest format
-  checks/apps/...                 candidate app declarations, assertions and flows
+  checks/apps/...                 candidate app checks and flow declarations
   tools/...                      versioned offline verification/planning tools
 ```
 
@@ -502,7 +509,8 @@ release/
   .env, default/named deployment bindings, sync state, logs and scratch.
 - [ ] Manifest fields: format_version, version, source_commit, source_tree,
   toolchain, ordered migration IDs/checksums/dependencies, owned app tree
-  digests, master contract digest, app-check digest, sorted payload path/size/SHA-256 entries.
+  digests, master contract digest, app-check digest, sorted payload
+  path/size/SHA-256 entries.
   The manifest does not hash itself. The SHA-256 of release.tar is the external
   artifact digest recorded in CI evidence and the protected release record.
   Serialize sorted POSIX ustar entries with UTF-8 names, uid/gid 0, empty
@@ -587,17 +595,19 @@ signature, trust_key) -> Runbook`.
   Serialize target jobs and refuse outdated deployment.
 - [ ] Emit TEST_EVIDENCE.json with format version, archive SHA-256, source SHA,
   qualification SHA/toolchain digest, target identity, CI run identity and final
-  successful deployment/schema/data/APEX/subscription/application-check results,
-  including disposable replay identity, coverage and check digests. Sign canonical
-  JSON bytes with the protected CI Ed25519 signing key after all gates pass.
+successful deployment/schema/data/APEX/subscription/application-check results,
+  including disposable replay identity, coverage and check digests. Sign
+  canonical JSON bytes with the protected CI Ed25519 signing key after all gates
+  pass.
   Use a qualified pinned cryptography dependency for offline verification;
   include its installation/version/hash requirements in the toolchain contract.
   Production receives the same artifact bytes; never rebuild from main.
 - [ ] Implement gen-runbook as offline code taking artifact, owner-supplied
   history, target contract, TEST_EVIDENCE.json, detached signature and a trusted
   public key supplied independently of the artifact. Verify signature, archive
-  digest, source SHA, qualification identity, app-check digests/coverage and all required PASS results.
-  Missing/failed/untrusted evidence refuses a ready handoff. Test tampering,
+digest, source SHA, qualification identity, app-check digests/coverage and all
+  required PASS results. Missing/failed/untrusted evidence refuses a ready
+  handoff. Test tampering,
   wrong key, unrelated artifact and failed-result attestations. Output is a
   human document and pending plan, not a production apply command.
 - [ ] Runbook must state exact source/artifact digest, tool versions, target

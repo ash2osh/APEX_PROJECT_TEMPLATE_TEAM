@@ -4,7 +4,8 @@
 > superpowers:subagent-driven-development when delegation is authorized.
 > Execute tasks with their tests; checkboxes below describe unfinished work.
 
-**Revision:** 3 — separates export checkpoints, receipt absences and physical lock identity.
+**Revision:** 3 — separates export checkpoints, receipt absences and physical
+lock identity.
 **Goal:** Capture Builder changes without silently overwriting Git or local work.
 **Architecture:** One Python core performs target validation, content reconciliation,
 journaled file changes and verified imports. Bash and PowerShell are launchers.
@@ -263,10 +264,10 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** scripts/teamlib/trees.py, scripts/tests/test_trees.py.
 
 **Interfaces:** `read_git_tree(repo, commit, alias) -> dict[str, bytes]`;
-`read_export_tree(path) -> dict[str, bytes]`;
-`tree_digest(tree) -> str`; `assert_source_clean(repo, alias) -> None`;
-`tree_contains(subset: Tree, superset: Tree) -> bool`;
-`receipt_satisfied(result: Tree, required_absent: set[str], selected: Tree) -> bool`.
+`read_export_tree(path) -> dict[str, bytes]`; `tree_digest(tree) -> str`;
+`assert_source_clean(repo, alias) -> None`; `tree_contains(subset: Tree,
+superset: Tree) -> bool`; `receipt_satisfied(result: Tree, required_absent:
+set[str], selected: Tree) -> bool`.
 
 - [ ] Define ownership using a qualified full SQLcl export fixture. Include
   binaries and .apex/apexlang.json; exclude deployments/** and export logs.
@@ -437,8 +438,8 @@ class ReceiptTests(unittest.TestCase):
 ```
 
 - [ ] Exhaustively enumerate one-path states missing, empty, A and B for
-  base/source_base/head/mine. Check the specification table for all 256 cases; add
-  multi-path cases combining a safe edit and conflict.
+  base/source_base/head/mine. Check the specification table for all 256 cases;
+  add multi-path cases combining a safe edit and conflict.
 - [ ] Assert callers never apply Decision.tree when conflicts is nonempty.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_reconcile.py -v`.
@@ -448,10 +449,10 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 **Files:** scripts/teamlib/state.py, scripts/teamlib/control_store.py,
 scripts/sql/control_metadata.sql, scripts/tests/test_state.py,
 scripts/tests/live/test_app_lock.py.
-**Interfaces:** `save_capture(target, base, source_base, head, mine, diagnostics) -> str`;
-`load_baseline(target) -> Baseline`;
-`save_verified_baseline(target, commit, tree) -> None`;
-`save_checkpoint(target, captured, reconciled, original_head, receipt_id) -> None`;
+**Interfaces:** `save_capture(target, base, source_base, head, mine,
+diagnostics) -> str`; `load_baseline(target) -> Baseline`;
+`save_verified_baseline(target, commit, tree) -> None`; `save_checkpoint(target,
+captured, reconciled, original_head, receipt_id) -> None`;
 `load_checkpoint(target, head) -> Checkpoint` (including ancestry validation).
 
 - [ ] Implement setup-state through the metadata write profile. Install exact
@@ -504,10 +505,12 @@ scripts/tests/live/test_app_lock.py.
   (config.py, from `APP_OWNERSHIP_MODE`), not from the command name, so the
   shared and isolated paths cannot diverge in their guards.
 - [ ] Define acquire_app(target_key, run_token, checkout_uuid, host,
-  acquired_by_user) and
-  release_app(target_key, run_token, confirmed_success=False) on control_store.py.
-  Acquisition uses spec §7's `SELECT ... FOR UPDATE NOWAIT` transition plus its
-  app-target addendum, never a bare conditional `UPDATE`: Oracle blocks a
+  acquired_by_user) and release_app(target_key, run_token,
+  confirmed_success=False) on control_store.py. `target_key` is
+  `app_lock_key(target)`'s output (defined later in this task) — the
+  physical identity, never the local `state_key`. Acquisition uses spec §7's
+  `SELECT ... FOR UPDATE NOWAIT` transition plus its app-target addendum,
+  never a bare conditional `UPDATE`: Oracle blocks a
   conditional update on the row lock until the holding transaction ends, so an
   importer that crashed before committing freezes every later importer inside
   its SQLcl subprocess with no error message. Distinguish five outcomes — one
@@ -536,8 +539,9 @@ scripts/tests/live/test_app_lock.py.
   currently hold the row an error, not a silent no-op. Both import_app and
   deploy_app call it immediately before their own destructive payload runs,
   after every pre-check (registration, baseline/receipt comparison) has
-  already passed cleanly. Commit this transition before launching payload SQL. This mirrors Plan 2's "commit RUNNING before the
-  payload": a crash gives the process no chance to write a failure marker
+already passed cleanly. Commit this transition before launching payload SQL.
+  This mirrors Plan 2's "commit RUNNING before the payload": a crash gives the
+  process no chance to write a failure marker
   afterward, so uncertainty must be the state the instant risk begins, not
   something a handler writes on the way out — without this step, nothing in
   either plan ever sets `is_uncertain` at all, so `TARGET_UNCERTAIN` and
@@ -597,14 +601,15 @@ scripts/tests/live/test_app_lock.py.
   a database identity — so printing the name is what lets a human enforce it.
 - [ ] Implement `app_lock_key(target)` exactly as spec §5's physical identity
   tuple. Registry, generation and mutex use only that key. Local state uses a
-  separate `state_key` over full Target identity, including binding digest.
-  Load tracked `targets/controllers.json`, keyed by verified instance_id,
-  naming exactly one METADATA owner per instance. Setup and every app mutation
-  verify the selected controller against this contract; `.env` cannot override
-  it. A controller move requires coordinated migration of registry/lock state,
-  never bootstrap of a parallel empty store. Test two connection names, service aliases, roles and binding digests
-  targeting one app: identical mutex key, different local state keys, one import
-  winner. Different instance/workspace/app IDs produce distinct mutex keys.
+separate `state_key` over full Target identity, including binding digest. Load
+  tracked `targets/controllers.json`, keyed by verified instance_id, naming
+  exactly one METADATA owner per instance. Setup and every app mutation verify
+  the selected controller against this contract; `.env` cannot override it. A
+  controller move requires coordinated migration of registry/lock state, never
+  bootstrap of a parallel empty store. Test two connection names, service
+  aliases, roles and binding digests targeting one app: identical mutex key,
+  different local state keys, one import winner. Different
+  instance/workspace/app IDs produce distinct mutex keys.
 - [ ] Store versioned manifests, immutable blobs and operation records under
   .sync-state. Binding changes invalidate local baseline/checkpoint/receipt
   reuse, never physical lock identity. Retain blobs independently of Git.
@@ -625,11 +630,11 @@ scripts/tests/live/test_app_lock.py.
   Tree-typed function; the stored shape is a storage optimization, never a
   second type those functions need to accept. "Successfully accounted for,"
   not "successfully written": a zero-change export (Task 8) reconciles
-  nothing to disk but still receipts the manifest it confirmed. Resolution
-  receipts additionally record conflict paths and resolved digest. These are
-  not database-alignment baselines. Also persist the sorted required-absence
-  set from spec §6 with every receipt. Tombstones survive no-op captures; only
-  a reconciled re-add removes one. Test deleted-page resurrection, older commits,
+nothing to disk but still receipts the manifest it confirmed. Resolution
+  receipts additionally record conflict paths and resolved digest. These are not
+  database-alignment baselines. Also persist the sorted required-absence set
+  from spec §6 with every receipt. Tombstones survive no-op captures; only a
+  reconciled re-add removes one. Test deleted-page resurrection, older commits,
   legitimate new paths, binary/empty paths and corrupted absence evidence.
 - [ ] Atomic-save manifests only after all blobs exist; validate hashes on load.
   An existing baseline becomes uncertain at the start of an import mutation.
@@ -699,9 +704,10 @@ special case for one specific call site — see the bracket bullet below.
 - [ ] Implement spec §6 export sequence using Tasks 2–7. Capture first, retain
   before mutation, reconcile contents, journal the patch, verify and receipt.
 - [ ] Bracket the capture with `read_app_sync_state` (Task 5). Refuse before
-  starting if the target is uncertain or an import holds the mutex — **unless the caller passes
-  `held_by=` its own held run_token**, in which case a holder matching that
-  token is expected, not a competing import, and does not refuse. The rule is
+  starting if the target is uncertain or an import holds the mutex — **unless
+  the caller passes `held_by=` its own held run_token**, in which case a
+  holder matching that token is expected, not a competing import, and does
+  not refuse. The rule is
   general, not tied to one call site: **any** operation that already holds
   the app-target mutex when it captures must pass its own token — this is
   every internal capture inside import_app (Task 9's pre-replacement check,
