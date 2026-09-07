@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 import re
+import uuid
 from typing import Any, Callable, Mapping
 
 from .config import Target
+from .sqlcl import SqlclError, run_sqlcl
 
 
 class MasterError(ValueError):
@@ -215,3 +218,83 @@ def validate_masters(
             }
         )
     return MasterReport(True, references, tuple(checked), _contract_digest(contract))
+
+
+_COMPONENT_VIEWS = {
+    "authentication": ("APEX_APPLICATION_AUTH", "AUTHENTICATION_SCHEME_NAME"),
+    "authorization": ("APEX_APPLICATION_AUTHORIZATION", "AUTHORIZATION_SCHEME_NAME"),
+    "theme": ("APEX_APPLICATION_THEMES", "STATIC_ID"),
+}
+
+
+def _sql_literal(value: str) -> str:
+    if not isinstance(value, str) or "\x00" in value:
+        raise MasterError("master lookup value is invalid")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def apex_component_resolver(
+    *,
+    runner: Callable[..., Any] = run_sqlcl,
+    work_root: str | Path | None = None,
+) -> Callable[[MasterReference, Mapping[str, Any], Target], bool]:
+    """Return a resolver that proves master identity through the target APEX views.
+
+    The resolver deliberately supports only the APEX 26.1 component views that
+    are qualified by this template.  An unknown component type is refused
+    rather than silently reduced to an application-ID check.
+    """
+
+    root = Path(work_root) if work_root is not None else Path("scratch") / "master-checks"
+
+    def resolve(reference: MasterReference, entry: Mapping[str, Any], target: Target) -> bool:
+        if bool(entry.get("builtin", False)):
+            # Built-in masters are contracted explicitly.  APEX's built-in
+            # theme is resolved by the target engine rather than an
+            # application row, so only the contracted type/symbol is accepted.
+            return reference.master_app_id == 0 and reference.component_type.casefold() == "theme"
+        view_spec = _COMPONENT_VIEWS.get(reference.component_type.casefold())
+        if view_spec is None:
+            return False
+        view, name_column = view_spec
+        expected_workspace = entry.get("workspace_id")
+        alias = entry.get("alias")
+        if not isinstance(expected_workspace, int) or expected_workspace <= 0 or not isinstance(alias, str) or not alias:
+            return False
+        work = root / uuid.uuid4().hex
+        work.mkdir(parents=True, exist_ok=False)
+        driver = work / "master-check.sql"
+        driver.write_text(
+            "SET DEFINE OFF\n"
+            "SET HEADING OFF\n"
+            "SET FEEDBACK OFF\n"
+            "SET PAGESIZE 0\n"
+            "SET LINESIZE 32767\n"
+            "SELECT 'TEAM_MASTER_APP|' || COUNT(*) || '|' ||\n"
+            f"       NVL(MAX(CASE WHEN workspace_id = {expected_workspace} THEN '1' ELSE '0' END), '0') || '|' ||\n"
+            f"       NVL(MAX(CASE WHEN UPPER(alias) = UPPER({_sql_literal(alias)}) THEN '1' ELSE '0' END), '0')\n"
+            "  FROM APEX_APPLICATIONS\n"
+            f" WHERE application_id = {reference.master_app_id};\n"
+            "SELECT 'TEAM_MASTER_COMPONENT|' || COUNT(*)\n"
+            f"  FROM {view}\n"
+            f" WHERE application_id = {reference.master_app_id}\n"
+            f"   AND UPPER({name_column}) = UPPER({_sql_literal(reference.symbol)});\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        try:
+            result = runner(target, "read", driver, work)
+        except (OSError, SqlclError):
+            return False
+        app_row = re.search(r"(?:^|\n)TEAM_MASTER_APP\|(\d+)\|([01])\|([01])\s*$", result.stdout, re.MULTILINE)
+        component_row = re.search(r"(?:^|\n)TEAM_MASTER_COMPONENT\|(\d+)\s*$", result.stdout, re.MULTILINE)
+        if not app_row or not component_row:
+            return False
+        return (
+            int(app_row.group(1)) == 1
+            and app_row.group(2) == "1"
+            and app_row.group(3) == "1"
+            and int(component_row.group(1)) >= 1
+        )
+
+    return resolve

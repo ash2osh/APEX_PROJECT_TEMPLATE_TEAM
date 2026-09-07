@@ -29,6 +29,10 @@ observations, a positive operation completion record, `application.apx`,
 are normalized to LF; binaries are hashed byte-for-byte. Production drivers are
 SELECT-only and all writes are rejected before SQLcl starts.
 
+`INSTANCE_ID` is the verified `INSTANCE_NAME@SERVER_HOST` pair. The host suffix
+is intentional: cloned Oracle Free containers can otherwise all report the
+same `INSTANCE_NAME` (`FREE`) and incorrectly share a physical lock key.
+
 The offline portability gate is:
 
 ```bash

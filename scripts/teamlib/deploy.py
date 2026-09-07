@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from .apex import _export_driver, _find_export_dir, _import_driver, _verify_result_identity, _default_repo
 from .config import Target
 from .control_store import ControlStore, ControlStoreError
-from .masters import MasterError, validate_masters
+from .masters import MasterError, apex_component_resolver, validate_masters
 from .sqlcl import run_sqlcl, SqlclError
 from .state import save_capture
 from .trees import Tree, TreeError, _validate_tree_paths, read_export_tree, tree_digest
@@ -88,7 +88,15 @@ def deploy_app(
         contract_path = repo_path / "targets" / "masters.json"
         if contract_path.is_file():
             try:
-                validate_masters(source_tree, target, json.loads(contract_path.read_text(encoding="utf-8")))
+                validate_masters(
+                    source_tree,
+                    target,
+                    json.loads(contract_path.read_text(encoding="utf-8")),
+                    component_resolver=apex_component_resolver(
+                        runner=runner,
+                        work_root=state_root / "master-checks",
+                    ),
+                )
             except (OSError, UnicodeError, json.JSONDecodeError, MasterError) as exc:
                 raise DeployError(f"master contract validation failed: {exc}") from exc
         store.mark_payload_starting(target.physical_key, token)

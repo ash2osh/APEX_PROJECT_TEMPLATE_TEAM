@@ -10,17 +10,21 @@ from __future__ import annotations
 import os
 import hashlib
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
+import threading
 import tempfile
 import unittest
 import uuid
 
-from teamlib.apex import adopt_app, capture_app, import_app
+from teamlib.apex import ApexError, adopt_app, capture_app, import_app
 from teamlib.config import load_config, profile_target
 from teamlib.control_store import MutexHeld, SqlControlStore
 from teamlib.live_inventory import inventory_target
 from teamlib.migrate import apply_plan
-from teamlib.migration_store import SqlMigrationStore
+from teamlib.migration_store import MigrationMutexHeld, SqlMigrationStore
+from teamlib.masters import MasterError, apex_component_resolver, validate_masters
 from teamlib.sqlcl import SqlclError, run_sqlcl
 
 
@@ -91,6 +95,37 @@ class DockerQualificationTests(unittest.TestCase):
                 with self.assertRaises(SqlclError):
                     run_sqlcl(profile_target(self.config, profile), "read", driver, self.work / f"isolation-{profile.lower()}")
 
+    def test_master_component_identity_is_queried_on_target(self):
+        contract_path = Path(__file__).resolve().parents[3] / "targets" / "masters.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        target = profile_target(self.config, "APEX", alias="employee-self-service")
+        source = {
+            "shared-components/auth.apx":
+            b"authentication subscriber-auth { subscription { master: @/500/opendoor-master } }"
+        }
+        report = validate_masters(
+            source,
+            target,
+            contract,
+            component_resolver=apex_component_resolver(
+                work_root=self.work / "master-checks",
+            ),
+        )
+        self.assertTrue(report.valid)
+        wrong = dict(source)
+        wrong["shared-components/auth.apx"] = (
+            b"authentication subscriber-auth { subscription { master: @/500/not-a-component } }"
+        )
+        with self.assertRaises(MasterError):
+            validate_masters(
+                wrong,
+                target,
+                contract,
+                component_resolver=apex_component_resolver(
+                    work_root=self.work / "master-checks-wrong",
+                ),
+            )
+
     def test_apex_round_trip_uses_sql_controller(self):
         target = profile_target(self.config, "APEX", alias="master-app")
         self.control.setup_state([target])
@@ -123,6 +158,146 @@ class DockerQualificationTests(unittest.TestCase):
                 user="codex",
             )
             self.assertEqual(baseline.source_commit, head)
+
+    def test_concurrent_apex_exports_both_succeed(self):
+        """Shared-app exports are independent reads and must not serialize."""
+        target = profile_target(self.config, "APEX", alias="master-app")
+        self.control.setup_state([target])
+        with tempfile.TemporaryDirectory(prefix="team-live-concurrent-export-") as directory:
+            repo = Path(directory)
+            import subprocess
+
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "codex@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Codex"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "--allow-empty", "-qm", "live export baseline"], check=True)
+
+            def export_once():
+                return capture_app(
+                    target,
+                    repo=repo,
+                    control_store=self.control,
+                    runner=run_sqlcl,
+                    persist=False,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first, second = tuple(pool.map(lambda _index: export_once(), (1, 2)))
+            self.assertEqual(first.tree, second.tree)
+            self.assertEqual(first.after_sync.generation, second.after_sync.generation)
+
+    def test_second_concurrent_import_refuses_while_first_holds_mutex(self):
+        """A second writer must fail fast while a real import owns the row."""
+        target = profile_target(self.config, "APEX", alias="master-app")
+        self.control.setup_state([target])
+        with tempfile.TemporaryDirectory(prefix="team-live-concurrent-import-") as directory:
+            repo = Path(directory)
+            import subprocess
+
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "codex@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Codex"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "--allow-empty", "-qm", "live import baseline"], check=True)
+            capture = capture_app(target, repo=repo, control_store=self.control)
+            source = repo / "apps" / "master-app"
+            source.mkdir(parents=True)
+            for relative, data in capture.tree.items():
+                destination = source / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
+            subprocess.run(["git", "-C", str(repo), "add", "apps/master-app"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "adopt live import source"], check=True)
+            adopt_app(target, repo=repo, control_store=self.control)
+            head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+            first_write_started = threading.Event()
+            release_first_write = threading.Event()
+
+            def first_runner(run_target, operation, driver, work):
+                if operation == "write" and Path(driver).name == "import.sql":
+                    first_write_started.set()
+                    if not release_first_write.wait(120):
+                        raise AssertionError("timed out waiting for the competing import")
+                return run_sqlcl(run_target, operation, driver, work)
+
+            first_checkout = f"live-import-a-{uuid.uuid4().hex}"
+            second_checkout = f"live-import-b-{uuid.uuid4().hex}"
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_future = pool.submit(
+                    import_app,
+                    target,
+                    head,
+                    repo=repo,
+                    control_store=self.control,
+                    checkout_uuid=first_checkout,
+                    host="docker-test",
+                    user="codex-a",
+                    runner=first_runner,
+                )
+                try:
+                    self.assertTrue(first_write_started.wait(180), "first import did not reach its payload")
+                    second_future = pool.submit(
+                        import_app,
+                        target,
+                        head,
+                        repo=repo,
+                        control_store=self.control,
+                        checkout_uuid=second_checkout,
+                        host="docker-test",
+                        user="codex-b",
+                        runner=run_sqlcl,
+                    )
+                    with self.assertRaises(ApexError) as caught:
+                        second_future.result(timeout=180)
+                    message = str(caught.exception).lower()
+                    self.assertTrue("mutex" in message or "held" in message, message)
+                    release_first_write.set()
+                    self.assertEqual(first_future.result(timeout=240).source_commit, head)
+                finally:
+                    release_first_write.set()
+
+    def test_capture_straddling_real_state_change_is_discarded(self):
+        """A generation change between export observations invalidates capture."""
+        target = profile_target(self.config, "APEX", alias="master-app")
+        self.control.setup_state([target])
+        with tempfile.TemporaryDirectory(prefix="team-live-torn-capture-") as directory:
+            repo = Path(directory)
+            import subprocess
+
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "codex@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Codex"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "--allow-empty", "-qm", "live torn baseline"], check=True)
+            export_finished = threading.Event()
+            allow_capture_return = threading.Event()
+
+            def delayed_runner(run_target, operation, driver, work):
+                result = run_sqlcl(run_target, operation, driver, work)
+                if operation == "read":
+                    export_finished.set()
+                    if not allow_capture_return.wait(120):
+                        raise AssertionError("timed out waiting for the state mutation")
+                return result
+
+            checkout = f"live-torn-{uuid.uuid4().hex}"
+            self.control.register_app(target, checkout, "docker-test", "codex")
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    capture_app,
+                    target,
+                    repo=repo,
+                    control_store=self.control,
+                    runner=delayed_runner,
+                    persist=False,
+                )
+                self.assertTrue(export_finished.wait(180), "export did not complete before the mutation")
+                token = f"live-torn-token-{uuid.uuid4().hex}"
+                self.control.acquire_app(target.physical_key, token, checkout, "docker-test", "codex")
+                self.control.release_app(target.physical_key, token, confirmed_success=True)
+                allow_capture_return.set()
+                with self.assertRaises(ApexError) as caught:
+                    future.result(timeout=180)
+                self.assertIn("generation", str(caught.exception).lower())
 
     def test_real_sql_migration_records_observation_and_cleans_payload(self):
         suffix = uuid.uuid4().hex[:12].upper()
@@ -194,6 +369,25 @@ class DockerQualificationTests(unittest.TestCase):
             cleanup = self.work / "cleanup.sql"
             cleanup.write_text(f"DROP TABLE {table_name} PURGE;\n", encoding="utf-8", newline="\n")
             run_sqlcl(tables, "write", cleanup, self.work / "migration-cleanup")
+
+    def test_oracle_migration_mutex_rejects_second_runner_nowait(self):
+        """The migration controller fails a competing runner without waiting."""
+        schema_set_digest = hashlib.sha256(
+            f"{self.config.tables_schema}|{self.config.code_schema}|{self.config.metadata_schema}".encode("ascii")
+        ).hexdigest()
+        self.migration.bootstrap(self.metadata, schema_set_digest=schema_set_digest)
+        first_token = f"live-migration-a-{uuid.uuid4().hex}"
+        second_token = f"live-migration-b-{uuid.uuid4().hex}"
+        self.migration.acquire(self.metadata, first_token, "live-runner-a", "docker-test")
+        try:
+            competing = SqlMigrationStore(self.metadata, work_root=self.work / "competing-migration")
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(competing.acquire, self.metadata, second_token, "live-runner-b", "docker-test")
+                with self.assertRaises(MigrationMutexHeld) as caught:
+                    future.result(timeout=60)
+            self.assertIn(first_token, str(caught.exception))
+        finally:
+            self.migration.release(self.metadata, first_token)
 
 
 if __name__ == "__main__":

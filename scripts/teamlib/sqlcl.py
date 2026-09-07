@@ -36,7 +36,9 @@ class SqlResult:
 
 _UNSAFE_ARG_RE = re.compile(r"[\x00-\x1f\x7f;&|<>`$]")
 _OUTPUT_ERROR_RE = re.compile(
-    r"(?:ORA-\d+|SP2-\d+|DPI-\d+|SQLcl\s+error|Exception in thread|startup\s+exception|Traceback \(most recent call last\)|java\.)",
+    r"(?:ORA-\d+|SP2-\d+|DPI-\d+|SQLcl\s+error|Option\s+not\s+recognized|Unexpected\s+token|"
+    r"Expected\s+a\s+subcommand|Error\s+starting\s+at\s+line|Exception in thread|startup\s+exception|"
+    r"Traceback \(most recent call last\)|java\.)",
     re.IGNORECASE,
 )
 _IDENTITY_KEYS = ("SESSION_USER", "CURRENT_SCHEMA", "DB_NAME", "SERVICE", "INSTANCE_ID")
@@ -71,16 +73,17 @@ def _assert_production_read_only(driver_text: str) -> None:
 
 
 def _sql_marker_query() -> str:
-    # INSTANCE_NAME is the stable database/container identity used by the
-    # configured Target. The adapter verifies the configured expected value;
-    # it never treats a connection alias as identity evidence.
+    # INSTANCE_NAME alone is not unique across cloned Docker/Free databases.
+    # Pair it with the verified database server host so independent
+    # containers cannot share a physical application lock by accident.
     return (
         "SELECT 'TEAM_IDENTITY|' || "
         "'SESSION_USER=' || REPLACE(SYS_CONTEXT('USERENV','SESSION_USER'),'|','/') || "
         "'|CURRENT_SCHEMA=' || REPLACE(SYS_CONTEXT('USERENV','CURRENT_SCHEMA'),'|','/') || "
         "'|DB_NAME=' || REPLACE(SYS_CONTEXT('USERENV','DB_NAME'),'|','/') || "
         "'|SERVICE=' || REPLACE(SYS_CONTEXT('USERENV','SERVICE_NAME'),'|','/') || "
-        "'|INSTANCE_ID=' || REPLACE(SYS_CONTEXT('USERENV','INSTANCE_NAME'),'|','/') "
+        "'|INSTANCE_ID=' || REPLACE(SYS_CONTEXT('USERENV','INSTANCE_NAME'),'|','/') || '@' || "
+        "REPLACE(SYS_CONTEXT('USERENV','SERVER_HOST'),'|','/') "
         "FROM DUAL;"
     )
 

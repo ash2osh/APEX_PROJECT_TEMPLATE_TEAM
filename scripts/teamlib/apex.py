@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping
 
 from .config import Target
 from .control_store import ControlStore, ControlStoreError
-from .masters import MasterError, validate_masters
+from .masters import MasterError, apex_component_resolver, validate_masters
 from .patch import PatchError, apply_tree
 from .reconcile import Decision, reconcile
 from .sqlcl import SqlclError, SqlResult, run_sqlcl
@@ -104,12 +104,13 @@ def _export_driver(target: Target, export_dir: Path) -> str:
 
 
 def _import_driver(target: Target, source_dir: Path) -> str:
-    if target.app_id is None:
-        raise ApexError("import target has no application ID")
-    escaped = str(source_dir / "application.apx").replace('"', '""')
+    if target.app_id is None or target.workspace_id is None or target.parsing_schema is None:
+        raise ApexError("import target has incomplete application identity")
+    escaped = str(source_dir).replace('"', '""')
     return (
         "SET DEFINE OFF\n"
-        f"APEX IMPORT -FILE \"{escaped}\" -APPLICATIONID {target.app_id}\n"
+        f"APEX IMPORT -INPUT \"{escaped}\" -ID {target.app_id} "
+        f"-WORKSPACEID {target.workspace_id} -SCHEMA {target.parsing_schema}\n"
     )
 
 
@@ -440,7 +441,15 @@ def import_app(
         if master_contract_path.is_file():
             try:
                 contract = json.loads(master_contract_path.read_text(encoding="utf-8"))
-                validate_masters(selected_tree, target, contract)
+                validate_masters(
+                    selected_tree,
+                    target,
+                    contract,
+                    component_resolver=apex_component_resolver(
+                        runner=runner,
+                        work_root=state_root / "master-checks",
+                    ),
+                )
             except (OSError, UnicodeError, json.JSONDecodeError, MasterError) as exc:
                 raise ApexError(f"master/component contract validation failed: {exc}") from exc
         print(

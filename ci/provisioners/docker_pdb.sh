@@ -114,6 +114,8 @@ if [[ "$ACTION" == "create" ]]; then
   done
   PORT="$(docker port "$NAME" 1521/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)"
   [[ "$PORT" =~ ^[0-9]+$ ]] || fail "could not discover the disposable listener"
+  INSTANCE_ID="$(printf '%s\n' 'set heading off feedback off pages 0 verify off echo off' 'alter session set container=FREEPDB1;' "select 'TEAM_INSTANCE|' || replace(sys_context('USERENV','INSTANCE_NAME'),'|' ,'/' ) || '@' || replace(sys_context('USERENV','SERVER_HOST'),'|','/') from dual;" 'exit' | docker exec -i "$NAME" sqlplus -s / as sysdba | sed -n 's/.*TEAM_INSTANCE|//p' | tr -d '[:space:]' | tail -n 1)"
+  [[ "$INSTANCE_ID" =~ ^[A-Za-z0-9._:-]+@[A-Za-z0-9._:-]+$ ]] || fail "could not discover the disposable database identity"
 
   APEX_ARCHIVE="${TEAM_CI_APEX_ARCHIVE:-$OUT/apex_26.1.zip}"
   if [[ -n "${TEAM_CI_APEX_ARCHIVE:-}" ]]; then
@@ -218,31 +220,31 @@ TABLES_EXPECTED_USER=DEMO
 TABLES_EXPECTED_CURRENT_SCHEMA=DEMO
 TABLES_EXPECTED_DB_NAME=FREEPDB1
 TABLES_EXPECTED_SERVICE=freepdb1
-TABLES_EXPECTED_INSTANCE_ID=FREE
+TABLES_EXPECTED_INSTANCE_ID=${INSTANCE_ID}
 CODE_SQLCL_CONNECTION=ci-${RUN_ID}-demo
 CODE_EXPECTED_USER=DEMO
 CODE_EXPECTED_CURRENT_SCHEMA=DEMO
 CODE_EXPECTED_DB_NAME=FREEPDB1
 CODE_EXPECTED_SERVICE=freepdb1
-CODE_EXPECTED_INSTANCE_ID=FREE
+CODE_EXPECTED_INSTANCE_ID=${INSTANCE_ID}
 APEX_SQLCL_CONNECTION=ci-${RUN_ID}-demo
 APEX_EXPECTED_USER=DEMO
 APEX_EXPECTED_CURRENT_SCHEMA=DEMO
 APEX_EXPECTED_DB_NAME=FREEPDB1
 APEX_EXPECTED_SERVICE=freepdb1
-APEX_EXPECTED_INSTANCE_ID=FREE
+APEX_EXPECTED_INSTANCE_ID=${INSTANCE_ID}
 METADATA_SQLCL_CONNECTION=ci-${RUN_ID}-meta
 METADATA_EXPECTED_USER=DEMO_META
 METADATA_EXPECTED_CURRENT_SCHEMA=DEMO_META
 METADATA_EXPECTED_DB_NAME=FREEPDB1
 METADATA_EXPECTED_SERVICE=freepdb1
-METADATA_EXPECTED_INSTANCE_ID=FREE
+METADATA_EXPECTED_INSTANCE_ID=${INSTANCE_ID}
 VERIFY_SQLCL_CONNECTION=ci-${RUN_ID}-verify
 VERIFY_EXPECTED_USER=DEMO_VERIFY
 VERIFY_EXPECTED_CURRENT_SCHEMA=DEMO_VERIFY
 VERIFY_EXPECTED_DB_NAME=FREEPDB1
 VERIFY_EXPECTED_SERVICE=freepdb1
-VERIFY_EXPECTED_INSTANCE_ID=FREE
+VERIFY_EXPECTED_INSTANCE_ID=${INSTANCE_ID}
 EOF
   cat > "$OUT/replay.json" <<EOF
 {
@@ -251,6 +253,7 @@ EOF
   "instance_token": "${NAME}",
   "env_path": "${OUT}/replay.env",
   "workspace_id": ${WORKSPACE_ID},
+  "instance_id": "${INSTANCE_ID}",
   "app_ids": {"employee-self-service": 100},
   "fixture_ids": ["workspace:DEMO"],
   "ords_base_url": "http://localhost:${ORDS_PORT}/ords/",

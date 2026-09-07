@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
 import unittest
 
 from teamlib.config import Target
-from teamlib.masters import MasterError, parse_subscriptions, validate_masters
+from teamlib.masters import MasterError, apex_component_resolver, parse_subscriptions, validate_masters
 
 
 class MasterTests(unittest.TestCase):
@@ -77,6 +80,40 @@ class MasterTests(unittest.TestCase):
             contract,
         )
         self.assertTrue(report.valid)
+
+    def test_live_resolver_requires_application_workspace_alias_and_component(self):
+        source = {
+            "shared-components/auth.apx": b"authentication opendoor-master { subscription { master: @/500/opendoor-master } }"
+        }
+
+        def runner(_target, _operation, _driver, _work):
+            return SimpleNamespace(
+                stdout="TEAM_MASTER_APP|1|1|1\nTEAM_MASTER_COMPONENT|1\n",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = validate_masters(
+                source,
+                self.target,
+                self.contract,
+                component_resolver=apex_component_resolver(runner=runner, work_root=Path(directory)),
+            )
+        self.assertTrue(report.valid)
+
+        def missing_component_runner(_target, _operation, _driver, _work):
+            return SimpleNamespace(stdout="TEAM_MASTER_APP|1|1|1\nTEAM_MASTER_COMPONENT|0\n")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(MasterError):
+                validate_masters(
+                    source,
+                    self.target,
+                    self.contract,
+                    component_resolver=apex_component_resolver(
+                        runner=missing_component_runner,
+                        work_root=Path(directory),
+                    ),
+                )
 
 
 if __name__ == "__main__":

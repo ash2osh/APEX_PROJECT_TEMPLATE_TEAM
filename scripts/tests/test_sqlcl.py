@@ -120,6 +120,11 @@ class SqlclBoundaryTests(unittest.TestCase):
         self.assertEqual(result.identity["INSTANCE_ID"], "FREE")
         self.assertIn("message✓", result.stdout)
 
+    def test_sqlcl_command_diagnostic_with_zero_exit_is_refused(self):
+        os.environ["FAKE_EXTRA_OUTPUT"] = "Option not recognized"
+        with self.assertRaisesRegex(SqlclError, "Option not recognized"):
+            self.execute()
+
     def test_rejects_shell_metacharacters_in_connection(self):
         with self.assertRaisesRegex(SqlclError, "unsupported"):
             self.execute(target=self.target(connection="docker-demo;DROP"))
