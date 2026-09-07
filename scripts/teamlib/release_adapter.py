@@ -83,6 +83,21 @@ def apply_verified_release(
         raise ReleaseAdapterError("release environment and target contract role do not match a non-production target")
     manifest = verify_release(release_tar)
     repo_path = Path(repo)
+    target_path = Path(target_contract)
+    if target_path.is_symlink() or not target_path.is_file():
+        raise ReleaseAdapterError(f"release target contract is not a regular file: {target_path}")
+    try:
+        target_document = json.loads(target_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseAdapterError("release target contract is unreadable") from exc
+    if not isinstance(target_document, Mapping):
+        raise ReleaseAdapterError("release target contract must contain an object")
+    # plan-release hashes the complete target JSON.  Preserve that exact
+    # document through apply-release; a reduced identity-only mapping would
+    # make every legitimate plan fail its stale-target check.
+    target_document = dict(target_document)
+    if target_document.get("role") != contract.role or target_document.get("environment") != contract.environment:
+        raise ReleaseAdapterError("release target contract changed while loading")
     state_root = Path(root) if root is not None else repo_path / ".sync-state" / "release"
     state_root.mkdir(parents=True, exist_ok=True)
     metadata = profile_target(config, "METADATA")
@@ -166,13 +181,7 @@ def apply_verified_release(
 
         return apply_release(
             release_tar,
-            {
-                "role": contract.role,
-                "environment": contract.environment,
-                "instance_id": contract.instance_id,
-                "workspace_id": contract.workspace_id,
-                "app_ids": dict(contract.app_ids),
-            },
+            target_document,
             plan,
             history=history,
             apply_migrations=apply_migrations,

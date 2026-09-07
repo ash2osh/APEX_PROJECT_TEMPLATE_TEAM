@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import json
+from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from teamlib.release import ReleasePlan
+from teamlib.config import Target
+from teamlib.release import ApplyReport, ReleasePlan
 from teamlib.release_adapter import ReleaseAdapterError, apply_verified_release
 
 
@@ -23,6 +28,47 @@ class ReleaseAdapterTests(unittest.TestCase):
                     plan,
                     {},
                 )
+
+    def test_apply_uses_the_complete_planned_target_document(self):
+        target_path = ROOT / "targets" / "test.json"
+        target_document = json.loads(target_path.read_text(encoding="utf-8"))
+        target_digest = hashlib.sha256(
+            json.dumps(target_document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        plan = ReleasePlan("a" * 64, target_digest, (), "c" * 64, target_document, "d" * 64)
+        profile = Target(
+            project="example-team-apex", role="test", environment="test", connection="test-apex",
+            instance_id="EXAMPLE_TEST_INSTANCE", db_name="FREEPDB1", service="test-service",
+            session_user="EXAMPLE_APP", current_schema="EXAMPLE_APP", alias=None,
+            workspace_id=None, app_id=None, parsing_schema=None, ownership_mode="shared", binding_digest="b" * 64,
+        )
+        config = SimpleNamespace(
+            role="test", environment="test", tables_schema="EXAMPLE_APP", code_schema="EXAMPLE_APP",
+            metadata_schema="EXAMPLE_META",
+        )
+        migration_store = SimpleNamespace(bootstrap=lambda *args, **kwargs: None)
+        control_store = SimpleNamespace(setup_state=lambda *args, **kwargs: None)
+        observed = {}
+
+        def capture_apply(archive, target, received_plan, **kwargs):
+            observed["target"] = target
+            return ApplyReport("planned", received_plan.pending, archive_digest="a" * 64)
+
+        with patch("teamlib.release_adapter.load_config", return_value=config), \
+             patch("teamlib.release_adapter.verify_release", return_value=SimpleNamespace(source_commit="abc")), \
+             patch("teamlib.release_adapter.profile_target", return_value=profile), \
+             patch("teamlib.release_adapter.SqlMigrationStore", return_value=migration_store), \
+             patch("teamlib.release_adapter.SqlControlStore", return_value=control_store), \
+             patch("teamlib.release_adapter.release_app_trees", return_value={}), \
+             patch("teamlib.release_adapter.release_migration_files", return_value={}), \
+             patch("teamlib.release_adapter.apply_release", side_effect=capture_apply):
+            with tempfile.TemporaryDirectory(prefix="team-release-adapter-positive-") as directory:
+                archive = Path(directory) / "release.tar"
+                archive.write_bytes(b"fixture")
+                result = apply_verified_release(archive, target_path, Path(directory) / "env", plan, {})
+
+        self.assertEqual(result.status, "planned")
+        self.assertEqual(observed["target"], target_document)
 
 
 if __name__ == "__main__":

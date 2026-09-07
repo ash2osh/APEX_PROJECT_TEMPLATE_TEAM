@@ -120,7 +120,7 @@ def _git_files(repo: Path, commit: str) -> dict[str, bytes]:
 
 def _allowed(path: str) -> bool:
     if path.startswith("apps/"):
-        if path == "apps/.gitkeep":
+        if path.endswith("/.gitkeep"):
             return False
         return "/deployments/" not in f"/{path}" and not path.endswith("/deployments")
     if path.startswith("migrations/"):
