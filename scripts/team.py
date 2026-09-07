@@ -29,7 +29,7 @@ from teamlib.ci import CIError
 from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, load_config, parse_target_contract, profile_target
 from teamlib.control_store import ControlStore, ControlStoreError, SqlControlStore
 from teamlib.deploy import DeployError, deploy_app
-from teamlib.fingerprints import InventoryError, diff_inventory, load_inventory
+from teamlib.fingerprints import InventoryError, diff_inventory, inventory_from_manifest, load_inventory
 from teamlib.migrate import MigrationRunError, apply_plan
 from teamlib.migration_store import MigrationStore, MigrationStoreError, SqlMigrationStore
 from teamlib.sqlcl import run_sqlcl
@@ -315,8 +315,17 @@ def _online(args: argparse.Namespace) -> object:
             raise ConfigError("check-drift requires both --expected-inventory and --actual-inventory")
         if not args.expected_inventory:
             live_target = profile_target(config, "TABLES")
+            schema_set_digest = hashlib.sha256(
+                f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
+            ).hexdigest()
             try:
-                actual_inventory = inventory_target(live_target, config.tables_schema, config.code_schema, repo / "scratch" / "live-inventory")
+                actual_inventory = inventory_target(
+                    live_target,
+                    config.tables_schema,
+                    config.code_schema,
+                    repo / "scratch" / "live-inventory",
+                    schema_set_digest=schema_set_digest,
+                )
             except Exception as exc:
                 raise MigrationRunError(f"live drift inventory failed: {exc}") from exc
             actual_path = repo / "scratch" / "live-inventory.json"
@@ -334,10 +343,37 @@ def _online(args: argparse.Namespace) -> object:
         except InventoryError as exc:
             raise ConfigError(str(exc)) from exc
         result = diff_inventory(expected, actual)
+        frontier_result: dict[str, object] = {"status": "unavailable"}
+        try:
+            metadata = profile_target(config, "METADATA")
+            migration_store = _sql_migration_store(repo, metadata)
+            state = migration_store.read_state(metadata)
+            observations = state.get("observations", [])
+            if observations:
+                frontier_digest = observations[-1].get("after")
+                inventories = migration_store.read_inventories(metadata)
+                frontier_manifest = inventories.get(frontier_digest)
+                if not isinstance(frontier_manifest, dict):
+                    frontier_result = {"status": "unknown", "reason": "accepted frontier manifest is missing"}
+                else:
+                    frontier = inventory_from_manifest(frontier_manifest)
+                    frontier_result = {
+                        "status": "clean" if not any(diff_inventory(frontier, actual)[key] for key in ("added", "missing", "changed", "invalid")) else "drift",
+                        "digest": frontier.digest,
+                        "diff": diff_inventory(frontier, actual),
+                    }
+            else:
+                frontier_result = {"status": "unknown", "reason": "no observed migration frontier is adopted"}
+        except (MigrationStoreError, InventoryError) as exc:
+            frontier_result = {"status": "unknown", "reason": str(exc)}
+        result["observed_frontier"] = frontier_result
         if args.out:
             Path(args.out).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
-        _json({"status": "clean" if not any(result[key] for key in ("added", "missing", "changed", "invalid")) and not result.get("topology_mismatch") else "drift", "operation": command, "diff": result})
-        return 0 if not any(result[key] for key in ("added", "missing", "changed", "invalid")) and not result.get("topology_mismatch") else 3
+        canonical_clean = not any(result[key] for key in ("added", "missing", "changed", "invalid")) and not result.get("topology_mismatch")
+        frontier_clean = frontier_result.get("status") == "clean"
+        status = "clean" if canonical_clean and frontier_clean else "drift" if frontier_result.get("status") == "drift" or not canonical_clean else "unknown"
+        _json({"status": status, "operation": command, "diff": result})
+        return 0 if status == "clean" else 3
     if command in {"export-history", "recover-migration"}:
         config = _config(args)
         if command == "recover-migration" and config.environment == "production":
