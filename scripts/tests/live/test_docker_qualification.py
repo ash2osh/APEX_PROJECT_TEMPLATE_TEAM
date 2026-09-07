@@ -95,6 +95,14 @@ class DockerQualificationTests(unittest.TestCase):
                 with self.assertRaises(SqlclError):
                     run_sqlcl(profile_target(self.config, profile), "read", driver, self.work / f"isolation-{profile.lower()}")
 
+    def test_payload_and_verify_profiles_cannot_mutate_controller_metadata(self):
+        driver = self.work / "metadata-mutation.sql"
+        driver.write_text("DELETE FROM DEMO_META.TEAM_MIGRATION_META;\n", encoding="utf-8", newline="\n")
+        for profile in ("TABLES", "CODE", "VERIFY"):
+            with self.subTest(profile=profile):
+                with self.assertRaises(SqlclError):
+                    run_sqlcl(profile_target(self.config, profile), "write", driver, self.work / f"mutation-{profile.lower()}")
+
     def test_master_component_identity_is_queried_on_target(self):
         contract_path = Path(__file__).resolve().parents[3] / "targets" / "masters.json"
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
