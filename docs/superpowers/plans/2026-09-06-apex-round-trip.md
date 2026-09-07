@@ -138,7 +138,8 @@ targets/test.json, scripts/teamlib/config.py, scripts/tests/test_config.py.
   validated at load. **On-demand** is VERIFY: Plan 1 never uses it, so an
   absent VERIFY profile must not fail `doctor`, `export-app`, `import-app` or
   any Plan 1 command. Validate VERIFY only when a command that observes
-  postconditions requests it (Plan 2 `migrate`, `replay`, `check-drift`), and
+  postconditions requests it (Plan 2 `migrate` and `replay`; `check-drift`
+  reads through the tables/code profiles and does not require VERIFY), and
   fail then with a specific "VERIFY profile required for <command>" error
   naming the missing keys. A partially configured VERIFY profile is an error
   whenever it is present, so a half-filled profile cannot be ignored.
@@ -384,7 +385,19 @@ scripts/tests/live/test_app_lock.py.
   ownership mode, not from the command name, so the shared and isolated paths
   cannot diverge in their guards.
 - [ ] Define acquire_app(target_key, run_token) and release_app(target_key,
-  run_token) on control_store.py using committed conditional mutex updates.
+  run_token) on control_store.py. Acquisition uses spec §7's
+  `SELECT ... FOR UPDATE NOWAIT` transition, never a bare conditional `UPDATE`:
+  Oracle blocks a conditional update on the row lock until the holding
+  transaction ends, so an importer that crashed before committing freezes every
+  later importer inside its SQLcl subprocess with no error message. Distinguish
+  the same four outcomes as the migration mutex and test each: success;
+  `ORA-00054` (another transaction holds the row — in-flight or uncommitted
+  crash); `ORA-20001 MUTEX_HELD:<token>` (cleanly held, and the token names the
+  holder for the blocking message); `NO_DATA_FOUND` (metadata not bootstrapped —
+  a setup-required error, never an acquisition failure). Any other error is a
+  hard failure. A subprocess wall-clock timeout is a backstop for network stalls
+  only and is never read as "not acquired": it leaves the target uncertain and
+  blocked.
   Hold this app-target mutex across import and verification; do not expire or
   steal it. Recovery follows exact-token/no-live-worker rules. Downstream deploy
   uses the same mutex without developer registration. A second concurrent
@@ -393,9 +406,13 @@ scripts/tests/live/test_app_lock.py.
 - [ ] Maintain a monotonic import generation for each target alongside the mutex,
   incremented when an import completes, so a reader can prove no import
   intervened during its capture (spec §2.1). Expose it through a single
-  read-only `read_app_sync_state(target_key)` returning generation plus current
-  mutex holder, so export never acquires anything. Test that an import which
-  begins and completes entirely between two reads is still detected.
+  read-only `read_app_sync_state(target_key)` returning generation, current
+  mutex holder and an explicit uncertain-target flag, so export never acquires
+  anything. Report uncertainty as its own field rather than leaving it inferable
+  only from a retained mutex: export's acceptance rule would otherwise depend
+  silently on recovery discipline implemented in Task 9. Test that an import
+  which begins and completes entirely between two reads is still detected, and
+  that a partially written import leaves the flag set.
 - [ ] recover-app-lock requires the selected run token, worker-termination
   evidence and retained current target capture. It may clear ownership only
   after resolving uncertain app state; it cannot stamp a verified baseline
@@ -480,6 +497,11 @@ recovery_id, target and the sync state observed either side of the read);
   can block the team and strand a lock when a developer's export dies, and two
   concurrent exports are harmless (spec §2.1). A discarded capture has no side
   effects, so retry is free.
+- [ ] Record a capture receipt even when reconciliation changes zero paths
+  (spec §6). Test that a no-op export still receipts and that a subsequent
+  import of the matching commit is allowed by it. This is the ordinary
+  pre-import export when nobody has uncaptured work; without the receipt the
+  refusal it is meant to clear becomes an unbreakable loop.
 - [ ] bootstrap-app requires absent tracked alias source, captures the existing
   app and writes a reviewable candidate without database writes. adopt-app
   requires clean committed source and exact re-export equality before baseline.
@@ -519,7 +541,13 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
   conservative default (spec §6). The application is shared, so the work it
   protects belongs to colleagues who do not know the command is running and
   cannot consent to losing it. The refusal names the paths that differ and the
-  export that would preserve them; no flag waives it.
+  export that would preserve them; no flag waives it. It states both
+  possibilities and the single action that resolves either — run `export-app`;
+  if it reports changes, review and commit them before retrying; if it reports
+  none, retry immediately. Do not assert that a colleague has uncaptured work:
+  at refusal time that has not been established, and sending a developer to
+  interrupt a colleague when the answer is "you have not exported yet" is how a
+  correct guard acquires a reputation for crying wolf.
 - [ ] Increment the target's import generation on completion (Task 5) so a
   concurrent export can prove whether its capture straddled this import.
   Increment on the completion path only — a refused or failed import that wrote

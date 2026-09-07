@@ -468,6 +468,13 @@ places all Builder work into source, also record a capture receipt binding
 that database-export digest to the result tree. This receipt lets a subsequent
 import distinguish captured Builder edits from new uncaptured edits.
 
+A capture that reconciles to zero changed paths still records a receipt. The
+receipt attests that this exact database state was captured and accounted for,
+which is independent of whether any file needed writing. Withholding it in the
+no-op case would make the documented "export first" recovery unable to clear the
+refusal it is offered for: the developer would export, see no changes, retry the
+import, and be refused again with no action left to take.
+
 ### Import, bootstrap and conflict recovery
 
 Developer import accepts a clean application source at a resolved commit.
@@ -476,18 +483,26 @@ binding. Do not import a changing working directory.
 
 Before every whole-application import, capture the existing database app into
 durable recovery. If its digest differs from the verified baseline, allow
-replacement only if it matches a receipt whose reconciled source is present
+replacement only if it matches a receipt whose reconciled source is contained
 in the selected commit, or an explicit resolution receipt binds this capture
 and selected source digest. Otherwise refuse and direct the developer to
 export/reconcile first.
 
+The receipt attests that the captured database state was accounted for, so the
+selected commit may legitimately carry additional source the application has
+never received (§2.1); it need not equal the reconciled tree. A strict reading
+requiring equality would refuse an import whose commit merged a colleague's
+hand-edited file after the export — the case whole-application import exists to
+serve.
+
 **This refusal carries the weight of §2.1.** Because the application is shared,
 the work an unguarded import would destroy belongs to the whole team, not to the
 person running the command, and its owners have no way to know it is about to
-happen. A capture that differs from the baseline means somebody has unexported
-Builder work in the shared application; the refusal is therefore not a
-conservative default that an experienced operator may waive, and no flag
-overrides it. The documented path is to export and commit that work first, which
+happen. An unreceipted capture means the application state has not been
+accounted for by this checkout — either a colleague has unexported Builder work,
+or this checkout has simply not exported yet, and only the export distinguishes
+them. The refusal is therefore not a conservative default that an experienced
+operator may waive, and no flag overrides it. The documented path is to export and commit that work first, which
 is exactly what its owner would have done.
 
 Recheck the current capture before the destructive step; Builder edits during
@@ -602,8 +617,9 @@ its objects or rows, execute controller routines or assume its identity.
 Setup verifies effective privileges (including roles, ANY privileges and proxy
 access); missing privilege-isolation evidence blocks writes. Controller
 credentials and mutex tokens are never passed to payload processes or logs.
-Reserve `TEAM_MIGRATION_*` names for infrastructure, reject them in application
-schemas, and verify metadata structure independently of application snapshots. Store:
+Reserve `TEAM_MIGRATION_*`, `TEAM_APP_*` and `TEAM_CONTROL_*` names for
+infrastructure, reject them in application schemas, and verify metadata
+structure independently of application snapshots. Store:
 - an exact metadata schema version and project/schema-set identity;
 - a persistent mutex with owner run token and state;
 - immutable migration payload/checksum/target provenance and execution sequence;
@@ -1090,12 +1106,14 @@ in the Builder at the same time is not this case and is not reachable by this
 tooling: the later Builder save already overwrote the earlier one inside the
 database, before any export ran (§2.1).
 
-A database change starts as SQL plus verification and replay-generated
-its declared dependencies. The runner checks dependencies and known checksums
+A database change starts as a SQL bundle, its verification member and its
+declared dependencies. The runner checks dependencies and known checksums
 under its mutex, applies and verifies through the declared target, captures
 before and after inventories for the record, and records history centrally.
-A colleague's unrelated unmerged migration is reported without blocking Bob;
-a conflicting object precondition or unexplained drift blocks both.
+A colleague's unrelated unmerged migration is reported without blocking Bob.
+A colleague's migration touching the *same* object is not detected here —
+version 1 declares no object preconditions (§7) — so an explicit `depends-on`
+and review are the controls. Unexplained drift blocks both.
 
 After merge, CI proves fresh/upgrade replay and deploys the selected commit to
 integration. Shared integration reports any foreign migrations explicitly.

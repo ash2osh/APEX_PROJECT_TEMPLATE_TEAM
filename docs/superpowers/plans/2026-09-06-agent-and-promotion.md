@@ -39,7 +39,7 @@ through the same adapter and error protocol as developer commands.
 | scripts/teamlib/announce.py; docs/import-pause.md | drafted import announcement and all-clear from observed state; import confirmation that never bypasses a guard |
 | scripts/teamlib/deploy.py; scripts/deploy_app.sh/.ps1 | named-target exact-source deployment |
 | scripts/teamlib/release.py; scripts/teamlib/runbook.py | offline artifact, plan and runbook |
-| scripts/teamlib/ci.py; ci/runner-contract.json; docs/ci.md | qualification/provisioning and job entry points |
+| scripts/teamlib/ci.py; ci/runner-contract.json; ci/provisioners/docker_pdb.sh; docs/ci.md | qualification/provisioning, reference provisioner and job entry points |
 | .github/workflows/template-checks.yml; database-checks.yml | offline and required disposable replay gates |
 | .github/workflows/integration.yml; release.yml | merge deployment and tag-to-test promotion |
 | scripts/tests/test_deploy.py; test_release.py; test_production_boundary.py | public-entry-point regression tests |
@@ -157,9 +157,9 @@ choice they're asked to make is "which page title do you want" rather than
   corrected agent contract; do not define a second bundle schema here.
 - [ ] Parse each conflicted file's base/head/mine as APEXlang structure, not
   raw text — diff at the property level (page/region/item/button/
-  subscription). A file the parser cannot confidently handle refuses to
-  reduced-guess; it returns the raw three-way diff instead, never a
-  best-effort structural read.
+  subscription). A file the parser cannot confidently handle refuses to guess;
+  it returns the raw three-way diff instead, never a best-effort structural
+  read.
 - [ ] Distinguish two outcomes per path: (a) the two sides changed *different*
   properties — report this, but still require developer confirmation before
   writing anything, never auto-apply; (b) the two sides changed the *same*
@@ -224,6 +224,11 @@ Both are read-only and produce text; neither imports anything.
   the person whose work it is recognises it and exports before the pause instead
   of discovering the loss afterwards. A message saying only "some uncommitted
   changes exist" fails this requirement and is a defect.
+  The list is nonetheless a snapshot: it is drawn before the pause, while people
+  are still editing, so work started after the draft cannot appear in it. Say so
+  in the message. Presenting it as exhaustive would invite readers to conclude
+  their work is safe because it was not listed, which is the opposite of the
+  message's purpose.
 - [ ] Draft the all-clear as a separate output after a verified import: what was
   imported, that editing may resume, and where the recovery bundle is if
   something looks wrong. A pause with no resume signal leaves the team either
@@ -293,7 +298,8 @@ Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p te
 
 ## Task 5: Required CI database provisioning and replay gate
 
-**Files:** scripts/teamlib/ci.py, ci/runner-contract.json, docs/ci.md,
+**Files:** scripts/teamlib/ci.py, ci/runner-contract.json,
+ci/provisioners/docker_pdb.sh, docs/ci.md,
 .github/workflows/database-checks.yml, scripts/tests/test_ci_contract.py.
 
 - [ ] Specify an isolated disposable runner contract: qualified exact SQLcl,

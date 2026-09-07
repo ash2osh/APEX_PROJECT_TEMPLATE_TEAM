@@ -310,9 +310,10 @@ has no entry. `snapshot(profiles, out) -> Inventory`;
   topologies until a new replay baseline is reviewed. Configuration equality
   alone must not collapse two distinct objects.
 - [ ] Snapshot application schemas only; independently verify metadata schema
-  structure. A reserved TEAM_MIGRATION_* or TEAM_APP_* object in an application
-  schema is an error, not an exclusion. Refuse unsupported classes or unknown
-  ownership. Explicit external verification scopes prevent whole-system claims.
+  structure. A reserved TEAM_MIGRATION_*, TEAM_APP_* or TEAM_CONTROL_* object in
+  an application schema is an error, not an exclusion. Refuse unsupported
+  classes or unknown ownership. Explicit external verification scopes prevent
+  whole-system claims.
 - [ ] Test changed/deleted/added objects, invalid packages, grants, distinct
   schemas, same schemas, CRLF, SQL literals containing schema names, sequence
   advancement without definition change and schema-name-neutral replay.
@@ -378,10 +379,14 @@ foreign_applied, blocked_attempt and verified inventory digest.
   same mutex. Any difference refuses before RUNNING or payload execution.
 - [ ] Preflight the whole plan, including all destructive flags, dependencies,
   checksum conflicts and unresolved attempts before the first application.
-- [ ] For each migration enforce full live inventory equality and declared
-  before states, persist RUNNING, execute staged SQL with target routing and
-  snapshot immediately after. Verify data/compiled-object postconditions through
-  the observation-only VERIFY profile; a payload profile must not run verify SQL.
+- [ ] For each migration capture the live inventory, persist RUNNING, execute
+  staged SQL with target routing and snapshot immediately after. There is no
+  precondition gate on that inventory: version 1 declares no expected before
+  state (spec §7), and a shared development schema legitimately holds a
+  colleague's applied-but-unmerged migration, so requiring inventory equality
+  would refuse every apply for the exact reason the design calls normal. Verify
+  data/compiled-object postconditions through the observation-only VERIFY
+  profile; a payload profile must not run verify SQL.
 - [ ] Capture both profiles after execution and record the before/after
   inventories as observed history for recovery and audit. Version 1 has no
   declared effects to compare them against, so do not gate on a predicted
@@ -410,7 +415,7 @@ foreign_applied, blocked_attempt and verified inventory digest.
 State sequence to encode:
 
 ```text
-READY -> mutex-owned -> live/preconditions-verified -> RUNNING(committed)
+READY -> mutex-owned -> dependencies/checksums verified -> RUNNING(committed)
 RUNNING -> payload + postconditions verified -> APPLIED(committed)
 RUNNING -> SQL failure -> FAILED; stop and retain ownership
 RUNNING -> unknown worker/result/ack -> UNKNOWN or still RUNNING; stop
@@ -446,7 +451,7 @@ scripts/tests/live/test_migration_replay.py, database/.gitkeep.
   an explicit evidence-update workflow stages that output into database/.
   Its metadata records source commit/digest, normalizer version and coverage.
 - [ ] Test earlier timestamp merged after a later migration, incompatible
-  incompatible same-object changes, missing canonical member, untracked extra snapshot file,
+  same-object changes, missing canonical member, untracked extra snapshot file,
   drift hidden by a later timestamp, absent DB provisioning and unsafe replay target.
 
 Command: `PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -p test_migration_replay.py -v`.
