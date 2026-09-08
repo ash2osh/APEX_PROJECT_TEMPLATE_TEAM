@@ -304,8 +304,8 @@ def load_config(path: str | Path, *, require_verify: bool = False) -> Config:
 
     project = _require_text(values, "PROJECT_NAME")
     role = _require_text(values, "TARGET_ROLE")
-    if role not in {"developer", "integration", "test", "replay"}:
-        raise ConfigError("TARGET_ROLE must be developer, integration, test, or replay")
+    if role not in {"developer", "integration", "test", "replay", "operator", "production"}:
+        raise ConfigError("TARGET_ROLE must be developer, integration, test, replay, operator, or production")
     environment = _require_text(values, "DB_ENVIRONMENT")
     if environment not in {"development", "test", "staging", "production"}:
         raise ConfigError("DB_ENVIRONMENT must be development, test, staging, or production")
@@ -496,7 +496,7 @@ def parse_target_contract(
 
     project = _contract_text(data, "project")
     role = _contract_text(data, "role")
-    if role not in {"developer", "integration", "test", "replay"}:
+    if role not in {"developer", "integration", "test", "replay", "operator", "production"}:
         raise ConfigError("target contract role is invalid")
     if expected_role is not None and role != expected_role:
         raise ConfigError(f"target contract role {role!r} does not match {expected_role!r}")

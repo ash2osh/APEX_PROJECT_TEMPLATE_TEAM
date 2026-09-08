@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "example-team-apex",
-  "role": "integration",
+  "role": "production",
   "environment": "production",
   "instance_id": "EXAMPLE_PRODUCTION_INSTANCE",
   "db_name": "FREEPDB1",

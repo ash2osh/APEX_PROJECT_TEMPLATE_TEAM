@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 import hashlib
 import json
 import os
@@ -117,13 +124,23 @@ def _lock(repo: Path):
             lock_path = repo / ".sync-state" / "patch.lock"
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             self.handle = lock_path.open("a+")
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_LOCK, 1)
             return self
 
         def __exit__(self, exc_type, exc, tb):
             if self.handle is not None:
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-                self.handle.close()
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                    elif msvcrt is not None:
+                        self.handle.seek(0)
+                        msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+                finally:
+                    self.handle.close()
             return False
 
     return _Lock()

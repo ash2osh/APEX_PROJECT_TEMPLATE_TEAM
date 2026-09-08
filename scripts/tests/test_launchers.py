@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve().parent.name == "tests" else 2])
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
 from pathlib import Path
 import shutil
 import subprocess
@@ -62,6 +69,18 @@ class LauncherTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_launchers_accept_env_argument_after_subcommand(self):
+        env_file = self.repo / ".env.example"
+        result = subprocess.run(
+            [str(self.repo / "scripts" / "team.sh"), "doctor", "--env", str(env_file)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"status": "valid"', result.stdout)
 
 
 if __name__ == "__main__":

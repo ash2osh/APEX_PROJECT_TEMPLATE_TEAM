@@ -42,61 +42,67 @@ from teamlib.trees import TreeError, read_git_tree
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="team.py", description="APEX team round-trip and promotion workflow")
-    parser.add_argument("--env", dest="env_file", help="literal environment profile file")
+    env_parent = argparse.ArgumentParser(add_help=False)
+    env_parent.add_argument("--env", dest="env_file", default=argparse.SUPPRESS, help="literal environment profile file")
+
+    parser = argparse.ArgumentParser(
+        prog="team.py",
+        description="APEX team round-trip and promotion workflow",
+        parents=[env_parent],
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("doctor")
-    sub.add_parser("setup-state")
-    migrate = sub.add_parser("migrate")
+    sub.add_parser("doctor", parents=[env_parent])
+    sub.add_parser("setup-state", parents=[env_parent])
+    migrate = sub.add_parser("migrate", parents=[env_parent])
     migrate.add_argument("--source", default="migrations")
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--bootstrap", action="store_true")
     migrate.add_argument("--expected-inventory")
     migrate.add_argument("--actual-inventory")
-    drift = sub.add_parser("check-drift")
+    drift = sub.add_parser("check-drift", parents=[env_parent])
     drift.add_argument("--expected-inventory")
     drift.add_argument("--actual-inventory")
     drift.add_argument("--out")
-    history = sub.add_parser("export-history")
+    history = sub.add_parser("export-history", parents=[env_parent])
     history.add_argument("--out", required=True)
-    recover_migration = sub.add_parser("recover-migration")
+    recover_migration = sub.add_parser("recover-migration", parents=[env_parent])
     recover_migration.add_argument("run_token")
     recover_migration.add_argument("--attempt")
     recover_migration.add_argument("--evidence", required=True)
-    register = sub.add_parser("register-app")
+    register = sub.add_parser("register-app", parents=[env_parent])
     register.add_argument("alias")
     register.add_argument("--transfer-from")
     register.add_argument("--capture-recovery-id")
-    status = sub.add_parser("app-status")
+    status = sub.add_parser("app-status", parents=[env_parent])
     status.add_argument("alias")
-    recover_lock = sub.add_parser("recover-app-lock")
+    recover_lock = sub.add_parser("recover-app-lock", parents=[env_parent])
     recover_lock.add_argument("alias")
     recover_lock.add_argument("--run-token")
     recover_lock.add_argument("--evidence", required=True)
-    capture = sub.add_parser("capture-app")
+    capture = sub.add_parser("capture-app", parents=[env_parent])
     capture.add_argument("alias")
     for name in ("bootstrap-app", "adopt-app", "export-app"):
-        command = sub.add_parser(name)
+        command = sub.add_parser(name, parents=[env_parent])
         command.add_argument("alias")
-    resolve = sub.add_parser("resolve-export")
+    resolve = sub.add_parser("resolve-export", parents=[env_parent])
     resolve.add_argument("recovery_id")
     resolve.add_argument("--resolved", required=True)
-    imp = sub.add_parser("import-app")
+    imp = sub.add_parser("import-app", parents=[env_parent])
     imp.add_argument("alias")
     imp.add_argument("--ref", default="HEAD")
     imp.add_argument("--replace-from")
     imp.add_argument("--confirm-pause", action="store_true", help="confirm the independently posted team pause notice")
-    announce = sub.add_parser("announce-import")
+    announce = sub.add_parser("announce-import", parents=[env_parent])
     announce.add_argument("alias")
     announce_choice = announce.add_mutually_exclusive_group(required=True)
     announce_choice.add_argument("--ref")
     announce_choice.add_argument("--all-clear")
-    deploy = sub.add_parser("deploy-app")
+    deploy = sub.add_parser("deploy-app", parents=[env_parent])
     deploy.add_argument("alias")
     deploy.add_argument("--target", required=True)
     deploy.add_argument("--ref", required=True)
-    files = sub.add_parser("recover-files")
+    files = sub.add_parser("recover-files", parents=[env_parent])
     files.add_argument("operation_id")
     files.add_argument("--action", choices=("finish", "restore"), required=True)
 
@@ -109,7 +115,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _env_path(args: argparse.Namespace) -> Path:
-    return Path(args.env_file or os.environ.get("PROJECT_ENV_FILE", ".env"))
+    return Path(getattr(args, "env_file", None) or os.environ.get("PROJECT_ENV_FILE", ".env"))
 
 
 def _config(args: argparse.Namespace, *, require_verify: bool = False):
@@ -518,7 +524,7 @@ def _offline(args: argparse.Namespace) -> int:
         "adopt-baseline": "replay",
         "ci-doctor": "ci",
         "ci-replay": "ci",
-        "apply-release": "release",
+        "apply-release": "release_adapter",
     }
     module_name = module_names[args.command]
     try:

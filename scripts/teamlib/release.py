@@ -542,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--target", required=True)
     apply_parser.add_argument("--plan", required=True)
     apply_parser.add_argument("--history", required=True)
+    apply_parser.add_argument("--env", default=None)
     args = parser.parse_args(list(argv or []))
     if args.command == "build-release":
         result = build_release(args.repo, args.ref, args.version, args.out)
@@ -573,6 +574,10 @@ def main(argv: list[str] | None = None) -> int:
             plan_raw["archive_digest"], plan_raw["target_digest"], tuple(plan_raw.get("pending", ())),
             plan_raw["artifact_history_digest"], plan_raw.get("target", target), plan_raw.get("history_digest", ""),
         )
-        report = apply_release(args.archive, target, plan, history=history)
+        if getattr(args, "env", None):
+            from .release_adapter import apply_verified_release
+            report = apply_verified_release(args.archive, args.target, args.env, plan, history)
+        else:
+            report = apply_release(args.archive, target, plan, history=history)
         print(json.dumps({"status": report.status, "pending": report.pending, "archive_digest": report.archive_digest}, sort_keys=True))
     return 0

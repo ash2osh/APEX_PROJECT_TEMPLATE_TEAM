@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 import base64
 from datetime import datetime, timezone
 import json
@@ -950,15 +957,25 @@ class MigrationStore:
         class Lock:
             def __enter__(self):
                 self.handle = outer.lock_path.open("a+")
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+                elif msvcrt is not None:
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_LOCK, 1)
                 self.data = outer._read()
                 return self.data
 
             def __exit__(self, exc_type, exc, tb):
                 if exc_type is None:
                     outer._write(self.data)
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-                self.handle.close()
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                    elif msvcrt is not None:
+                        self.handle.seek(0)
+                        msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+                finally:
+                    self.handle.close()
                 return False
 
         return Lock()

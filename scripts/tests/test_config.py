@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve().parent.name == "tests" else 2])
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
 import json
 from pathlib import Path
 import shutil
@@ -254,6 +261,14 @@ class TargetTests(unittest.TestCase):
         )
         self.assertIsNone(parsed.workspace_id)
         self.assertEqual(parsed.app_ids, {})
+
+    def test_production_target_contract_parses_with_production_role(self):
+        parsed = parse_target_contract(
+            Path(__file__).resolve().parents[2] / "targets" / "production.json",
+            expected_role="production",
+        )
+        self.assertEqual(parsed.role, "production")
+        self.assertEqual(parsed.environment, "production")
 
     def _write_env(self, source: str) -> Path:
         directory = Path(tempfile.mkdtemp(prefix="team-target-test-"))

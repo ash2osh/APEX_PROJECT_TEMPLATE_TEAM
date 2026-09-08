@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 import json
 import os
 from pathlib import Path
@@ -104,7 +111,11 @@ class ControlStore:
             def __enter__(self):
                 self.outer.lock_path.parent.mkdir(parents=True, exist_ok=True)
                 self.handle = self.outer.lock_path.open("a+")
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+                elif msvcrt is not None:
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_LOCK, 1)
                 self.data = self.outer._read()
                 return self.data
 
@@ -112,8 +123,14 @@ class ControlStore:
                 if exc_type is None and self.data is not None:
                     self.outer._write(self.data)
                 if self.handle is not None:
-                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-                    self.handle.close()
+                    try:
+                        if fcntl is not None:
+                            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                        elif msvcrt is not None:
+                            self.handle.seek(0)
+                            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    finally:
+                        self.handle.close()
                 return False
 
         return _Lock(self)

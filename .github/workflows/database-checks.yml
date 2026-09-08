@@ -33,6 +33,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Validate runner environment
+        run: |
+          if ! command -v sql >/dev/null 2>&1; then
+            echo "::error::Oracle SQLcl 26.2.1+ is required for ci-replay. Ensure the runner has SQLcl in PATH or use a qualified self-hosted runner."
+            exit 1
+          fi
       - name: Replay selected SHA
         env:
           SOURCE_SHA: ${{ github.sha }}
