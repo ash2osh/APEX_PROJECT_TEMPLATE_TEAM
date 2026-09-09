@@ -108,6 +108,27 @@ class TreeSemanticsTests(unittest.TestCase):
         self.assertTrue(receipt_satisfied(result, {"pages/p7.apx"}, result))
         self.assertTrue(receipt_satisfied(result, {"pages/p7.apx"}, {**result, "pages/p8.apx": b"new"}))
 
+    def test_common_static_application_file_classes_are_accepted(self):
+        with tempfile.TemporaryDirectory(prefix="team-tree-classes-") as directory:
+            root = Path(directory) / "app"
+            root.mkdir()
+            (root / "application.apx").write_text("x", encoding="utf-8")
+            for name in ("README.md", "notes.md", "module.wasm", "guide.pdf", "app.ts", "bundle.mjs"):
+                (root / name).write_bytes(b"x")
+            tree = read_export_tree(root)
+            for name in ("README.md", "module.wasm", "guide.pdf", "app.ts", "bundle.mjs"):
+                self.assertIn(name, tree)
+
+    def test_executables_and_archives_are_still_refused(self):
+        for name in ("payload.exe", "script.sh", "lib.so", "installer.msi", "bundle.tar"):
+            with tempfile.TemporaryDirectory(prefix="team-tree-classes-") as directory:
+                root = Path(directory) / "app"
+                root.mkdir()
+                (root / "application.apx").write_text("x", encoding="utf-8")
+                (root / name).write_bytes(b"x")
+                with self.assertRaises(TreeError, msg=name):
+                    read_export_tree(root)
+
 
 class GitTreeTests(unittest.TestCase):
     def setUp(self) -> None:

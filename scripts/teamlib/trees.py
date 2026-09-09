@@ -25,11 +25,16 @@ _EXCLUDED_PREFIXES = {"deployments", "logs", ".logs"}
 _EXCLUDED_LOG_NAMES = {"export.log", "apex_export.log", "apex-export.log"}
 _TEXT_NORMALIZED_SUFFIXES = {".apx"}
 _TEXT_NORMALIZED_NAMES = {"apexlang.json"}
+# APEX static application files are arbitrary uploads, and static-files/ is part
+# of the owned tree, so this list has to cover what a real application carries.
+# It stays deny-by-default: executables, libraries and archives are excluded
+# deliberately, because an application export has no reason to contain them.
 _ALLOWED_SUFFIXES = {
     ".apex", ".apx", ".bin", ".css", ".csv", ".dat", ".eot", ".gif",
-    ".html", ".ico", ".jpeg", ".jpg", ".js", ".json", ".map", ".png",
-    ".properties", ".sql", ".svg", ".txt", ".ttf", ".woff", ".woff2",
-    ".webp", ".xml", ".yaml", ".yml", ".zip",
+    ".html", ".ico", ".jpeg", ".jpg", ".js", ".json", ".map", ".md",
+    ".mjs", ".mp3", ".mp4", ".otf", ".pdf", ".png", ".properties",
+    ".sql", ".svg", ".ts", ".txt", ".ttf", ".wasm", ".webm", ".webp",
+    ".woff", ".woff2", ".xml", ".yaml", ".yml", ".zip",
 }
 _ALLOWED_NAMES = {"application", "README", "LICENSE"}
 _RESERVED_COMPONENTS = {
@@ -120,7 +125,10 @@ def _read_regular_tree(root: Path) -> dict[str, bytes]:
             if _is_excluded(rel_path):
                 continue
             if not _is_known_export_file(rel_path):
-                raise TreeError(f"unsupported exported source class: {rel_path}")
+                raise TreeError(
+                    f"unsupported exported source class: {rel_path} "
+                    "(extend _ALLOWED_SUFFIXES in teamlib/trees.py if APEX legitimately exports it)"
+                )
             folded_path = rel_path.casefold()
             if folded_path in folded and folded[folded_path] != rel_path:
                 raise TreeError(f"case-colliding source paths: {folded[folded_path]} and {rel_path}")
@@ -193,7 +201,10 @@ def read_git_tree(repo: str | Path, commit: str, alias: str) -> dict[str, bytes]
         if _is_excluded(relative):
             continue
         if not _is_known_export_file(relative):
-            raise TreeError(f"unsupported Git source class: {relative}")
+            raise TreeError(
+                f"unsupported Git source class: {relative} "
+                "(extend _ALLOWED_SUFFIXES in teamlib/trees.py if APEX legitimately exports it)"
+            )
         folded_path = relative.casefold()
         if folded_path in folded and folded[folded_path] != relative:
             raise TreeError(f"case-colliding source paths: {folded[folded_path]} and {relative}")
