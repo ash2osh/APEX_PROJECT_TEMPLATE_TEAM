@@ -311,6 +311,13 @@ def load_config(path: str | Path, *, require_verify: bool = False) -> Config:
     environment = _require_text(values, "DB_ENVIRONMENT")
     if environment not in {"development", "test", "staging", "production"}:
         raise ConfigError("DB_ENVIRONMENT must be development, test, staging, or production")
+    # The production classification must be unambiguous: run_sqlcl gates writes
+    # on environment while the workflow commands gate on role, so a mismatched
+    # pair weakens one of the two guards without any warning.
+    if (role == "production") != (environment == "production"):
+        raise ConfigError(
+            "TARGET_ROLE and DB_ENVIRONMENT must both be production or neither"
+        )
     apps = parse_apps(_require_text(values, "APEX_APPS"))
 
     tables_schema = _validate_oracle_identifier(
@@ -505,6 +512,10 @@ def parse_target_contract(
     environment = _contract_text(data, "environment")
     if environment not in {"development", "test", "staging", "production"}:
         raise ConfigError("target contract environment is invalid")
+    if (role == "production") != (environment == "production"):
+        raise ConfigError(
+            "target contract role and environment must both be production or neither"
+        )
 
     identity_keys = {"instance_id", "db_name", "service", "session_user", "current_schema"}
     present_identity = identity_keys.intersection(data)

@@ -279,5 +279,38 @@ class TargetTests(unittest.TestCase):
         return path
 
 
+class RoleEnvironmentInvariantTests(unittest.TestCase):
+    def test_production_role_requires_production_environment(self):
+        from teamlib.config import ConfigError, load_config
+        root = Path(__file__).resolve().parents[2]
+        text = (root / ".env.example").read_text(encoding="utf-8")
+        mismatched = text.replace("TARGET_ROLE=developer", "TARGET_ROLE=production")
+        with tempfile.TemporaryDirectory(prefix="team-config-") as directory:
+            path = Path(directory) / "mismatch.env"
+            path.write_text(mismatched, encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "production"):
+                load_config(path)
+
+    def test_production_environment_requires_production_role(self):
+        from teamlib.config import ConfigError, load_config
+        root = Path(__file__).resolve().parents[2]
+        text = (root / ".env.example").read_text(encoding="utf-8")
+        mismatched = text.replace("DB_ENVIRONMENT=development", "DB_ENVIRONMENT=production")
+        with tempfile.TemporaryDirectory(prefix="team-config-") as directory:
+            path = Path(directory) / "mismatch.env"
+            path.write_text(mismatched, encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "production"):
+                load_config(path)
+
+    def test_the_shipped_example_and_target_contracts_still_load(self):
+        from teamlib.config import load_config, parse_target_contract
+        root = Path(__file__).resolve().parents[2]
+        load_config(root / ".env.example")
+        for name in ("development", "integration", "test", "production", "controllers", "masters"):
+            path = root / "targets" / f"{name}.json"
+            if path.is_file() and name not in {"controllers", "masters"}:
+                parse_target_contract(path)
+
+
 if __name__ == "__main__":
     unittest.main()
