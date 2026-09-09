@@ -168,6 +168,32 @@ class SqlclBoundaryTests(unittest.TestCase):
                 with self.assertRaises(SqlclError):
                     _resolve_timeout(None)
 
+    def test_error_scan_ignores_rows_between_the_result_markers(self):
+        from teamlib.sqlcl import _diagnostic_region
+        stdout = (
+            "TEAM_IDENTITY|...\n"
+            "TEAM_RESULT_BEGIN\n"
+            "ORA-00001 unique constraint violated\n"   # a selected row, not a diagnostic
+            "java.lang.String\n"
+            "TEAM_RESULT_END\n"
+            "TEAM_COMPLETION|operation=read\n"
+        )
+        self.assertNotIn("ORA-00001", _diagnostic_region(stdout))
+        self.assertNotIn("java.lang.String", _diagnostic_region(stdout))
+
+    def test_error_scan_still_sees_diagnostics_outside_the_markers(self):
+        from teamlib.sqlcl import _diagnostic_region
+        stdout = (
+            "TEAM_RESULT_BEGIN\nrow\nTEAM_RESULT_END\n"
+            "ORA-00942: table or view does not exist\n"
+        )
+        self.assertIn("ORA-00942", _diagnostic_region(stdout))
+
+    def test_unbalanced_markers_fall_back_to_scanning_everything(self):
+        from teamlib.sqlcl import _diagnostic_region
+        stdout = "TEAM_RESULT_BEGIN\nORA-00942: boom\n"
+        self.assertIn("ORA-00942", _diagnostic_region(stdout))
+
     def test_apex_operations_request_the_long_budget(self):
         import inspect
         from teamlib import apex

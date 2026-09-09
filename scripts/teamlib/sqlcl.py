@@ -133,6 +133,28 @@ def _sql_marker_query() -> str:
     )
 
 
+_RESULT_BEGIN = "TEAM_RESULT_BEGIN"
+_RESULT_END = "TEAM_RESULT_END"
+
+
+def _diagnostic_region(stdout: str) -> str:
+    """Return output outside the payload's own result rows.
+
+    A successful query may legitimately select text that looks like a
+    diagnostic -- a table of ORA- codes, a column holding a Java class name.
+    Scanning it for error patterns fails the run on its own data. Markers that
+    do not pair are treated as absent, so an aborted payload is still scanned
+    in full.
+    """
+    lines = stdout.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.strip() == _RESULT_BEGIN]
+    ends = [index for index, line in enumerate(lines) if line.strip() == _RESULT_END]
+    if len(starts) != 1 or len(ends) != 1 or ends[0] < starts[0]:
+        return stdout
+    kept = lines[: starts[0]] + lines[ends[0] + 1 :]
+    return "\n".join(kept)
+
+
 def _driver_text(payload_name: str, operation: str) -> str:
     return (
         "SET DEFINE OFF\n"
@@ -150,7 +172,9 @@ def _driver_text(payload_name: str, operation: str) -> str:
         + "\n"
         + _sql_marker_query()
         + "\n"
+        + f"PROMPT {_RESULT_BEGIN}\n"
         + f"@{payload_name}\n"
+        + f"PROMPT {_RESULT_END}\n"
         + f"SELECT 'TEAM_COMPLETION|operation={operation}' FROM DUAL;\n"
         + "EXIT\n"
     )
@@ -300,8 +324,9 @@ def run_sqlcl(
 
     if completed.returncode != 0:
         raise SqlclError(f"SQLcl failed with exit code {completed.returncode}; see {log_path}")
-    if _OUTPUT_ERROR_RE.search(stdout) or _OUTPUT_ERROR_RE.search(stderr):
-        match = _OUTPUT_ERROR_RE.search(stdout) or _OUTPUT_ERROR_RE.search(stderr)
+    diagnostics = _diagnostic_region(stdout)
+    if _OUTPUT_ERROR_RE.search(diagnostics) or _OUTPUT_ERROR_RE.search(stderr):
+        match = _OUTPUT_ERROR_RE.search(diagnostics) or _OUTPUT_ERROR_RE.search(stderr)
         raise SqlclError(f"SQLcl reported an error ({match.group(0)}); see {log_path}")
 
     observations = _parse_identity_lines(stdout)
