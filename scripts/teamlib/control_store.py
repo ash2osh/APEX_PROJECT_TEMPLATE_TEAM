@@ -93,6 +93,12 @@ class ControlStore:
     """File-backed controller store used by tests and offline simulations."""
 
     def __init__(self, root: str | Path):
+        if fcntl is None and msvcrt is None:
+            # A lock that silently becomes a no-op is the wrong failure mode for
+            # a store this file describes as durable.
+            raise ControlStoreError(
+                "control store requires advisory file locking (fcntl or msvcrt)"
+            )
         self.root = Path(root)
         if self.root.exists() and self.root.is_symlink():
             raise ControlStoreError("control store root must not be a symlink")

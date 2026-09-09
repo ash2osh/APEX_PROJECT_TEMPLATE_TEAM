@@ -10,6 +10,7 @@ if _SCRIPTS_DIR not in sys.path:
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from teamlib.config import Target
 from teamlib.control_store import (
@@ -111,6 +112,14 @@ class ControlStoreTests(unittest.TestCase):
         bad = Target(**{**metadata.__dict__, "current_schema": "OTHER"})
         with self.assertRaises(ControllerError):
             self.store.validate_controller(bad, contract)
+
+    def test_store_refuses_to_open_without_a_locking_primitive(self):
+        from teamlib import control_store
+        from teamlib.control_store import ControlStore, ControlStoreError
+        with tempfile.TemporaryDirectory(prefix="team-lockless-") as directory:
+            with patch.object(control_store, "fcntl", None), patch.object(control_store, "msvcrt", None):
+                with self.assertRaisesRegex(ControlStoreError, "advisory file locking"):
+                    ControlStore(Path(directory) / "state")
 
 
 class SqlRecoverAppLockPredicateTests(unittest.TestCase):
