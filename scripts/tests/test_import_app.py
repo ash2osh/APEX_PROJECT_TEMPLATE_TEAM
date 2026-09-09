@@ -76,14 +76,21 @@ class ImportTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "new source"], check=True)
         return subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
 
-    def test_import_stamps_baseline_only_after_verified_reexport(self):
+    def _run_successful_import(self, *, announce=lambda message: None, **kwargs):
         selected = self.commit_new_source()
         from teamlib.trees import read_git_tree
         self.selected_tree = read_git_tree(self.repo, selected, "checkout")
-        baseline = import_app(self.target, selected, repo=self.repo, control_store=self.store, runner=self.fake_runner)
+        baseline = import_app(
+            self.target, selected, repo=self.repo, control_store=self.store, runner=self.fake_runner,
+            announce=announce, **kwargs,
+        )
         self.assertEqual(baseline.source_commit, selected)
         self.assertEqual(load_baseline(self.target, root=self.repo / ".sync-state").tree, self.selected_tree)
         self.assertEqual(self.store.read_app_sync_state(self.target.physical_key).generation, 2)
+        return baseline
+
+    def test_import_stamps_baseline_only_after_verified_reexport(self):
+        self._run_successful_import()
 
     def test_uncaptured_builder_state_refuses_without_advancing_generation(self):
         selected = self.commit_new_source()
@@ -104,10 +111,25 @@ class ImportTests(unittest.TestCase):
             raise SqlclError("SQLcl timed out; target state is unknown")
 
         with self.assertRaises(ApexError):
-            import_app(self.target, selected, repo=self.repo, control_store=self.store, runner=failing_runner)
+            import_app(
+                self.target, selected, repo=self.repo, control_store=self.store, runner=failing_runner,
+                announce=lambda message: None,
+            )
         state = self.store.read_app_sync_state(self.target.physical_key)
         self.assertIsNotNone(state.owner_token)
         self.assertTrue(state.is_uncertain)
+
+    def test_pause_notice_goes_to_the_supplied_announcer_not_stdout(self):
+        notices: list[str] = []
+        # Reuse this file's existing successful-import fixture, adding the
+        # announce callback; the assertion is that stdout stays clean.
+        import io
+        import contextlib
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self._run_successful_import(announce=notices.append)
+        self.assertEqual(buffer.getvalue(), "")
+        self.assertTrue(any("PAUSE:" in notice for notice in notices))
 
 
 if __name__ == "__main__":

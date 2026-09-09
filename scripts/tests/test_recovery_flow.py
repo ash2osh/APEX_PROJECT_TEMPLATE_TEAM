@@ -105,6 +105,7 @@ class RecoveryFlowTests(unittest.TestCase):
         baseline = import_app(
             self.target, selected, repo=self.repo, root=self.repo / ".sync-state",
             control_store=self.store, runner=self._runner,
+            announce=lambda message: None,
         )
         self.assertEqual(baseline.source_commit, selected)
         self.assertEqual(load_baseline(self.target, root=self.repo / ".sync-state").tree, self.selected_tree)

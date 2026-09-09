@@ -391,6 +391,7 @@ def import_app(
     checkout_uuid: str = "local-checkout",
     host: str = "local",
     user: str = "developer",
+    announce: Callable[[str], None] = print,
 ) -> Baseline:
     if target.role != "developer" or target.environment != "development":
         raise ApexError("import-app is restricted to the shared development target")
@@ -469,8 +470,9 @@ def import_app(
                 )
             except (OSError, UnicodeError, json.JSONDecodeError, MasterError) as exc:
                 raise ApexError(f"master/component contract validation failed: {exc}") from exc
-        print(
-            f"PAUSE: importing {target.alias} application {target.app_id} into {target.instance_id}/workspace {target.workspace_id}; "
+        announce(
+            f"PAUSE: importing {target.alias} application {target.app_id} into "
+            f"{target.instance_id}/workspace {target.workspace_id}; "
             "all Builder edits must stop until verification completes."
         )
         store.mark_payload_starting(target.physical_key, run_token)

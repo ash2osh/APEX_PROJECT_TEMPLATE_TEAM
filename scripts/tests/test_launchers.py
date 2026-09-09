@@ -152,5 +152,24 @@ class RepositoryRootTests(unittest.TestCase):
                 os.chdir(original)
 
 
+class ExceptionSurfaceTests(unittest.TestCase):
+    def test_incidental_value_errors_are_not_swallowed_as_a_clean_exit(self):
+        def explode(argv=None):
+            raise ValueError("an incidental bug, not a domain refusal")
+
+        with patch("teamlib.ci.main", explode):
+            with self.assertRaises(ValueError):
+                team.main(["ci-doctor", "--contract", "ci/runner-contract.json"])
+
+    def test_domain_refusals_still_exit_with_the_documented_codes(self):
+        from teamlib.config import ConfigError
+
+        def refuse(argv=None):
+            raise ConfigError("a domain refusal")
+
+        with patch("teamlib.ci.main", refuse):
+            self.assertEqual(team.main(["ci-doctor", "--contract", "ci/runner-contract.json"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

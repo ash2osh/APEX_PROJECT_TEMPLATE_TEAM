@@ -39,6 +39,7 @@ from teamlib.patch import PatchError, recover_files
 from teamlib.release import ReleaseError
 from teamlib.runbook import RunbookError
 from teamlib.state import StateError, load_baseline
+from teamlib.migration_bundle import BundleError
 from teamlib.trees import TreeError, read_git_tree
 
 
@@ -594,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
     except ExportConflict as exc:
         print(json.dumps({"status": "conflict", "operation": "export-app", "conflicts": list(exc.decision.conflicts), "recovery_path": exc.recovery_id}, sort_keys=True))
         return 3
-    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, ValueError) as exc:
+    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, TreeError, BundleError) as exc:
         print(str(exc), file=sys.stderr)
         return 2 if isinstance(exc, ConfigError) else 3
 
