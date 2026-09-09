@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import base64
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 
 class ConflictAssistantError(RuntimeError):

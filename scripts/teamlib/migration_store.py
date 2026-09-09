@@ -12,13 +12,15 @@ except ImportError:
     msvcrt = None  # type: ignore[assignment]
 import base64
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
 import uuid
-from typing import Any, Iterable, Mapping
+from typing import Any
+from collections.abc import Iterable, Mapping
 
 from .config import Target
 from .fingerprints import InventoryError, inventory_from_manifest
@@ -353,7 +355,7 @@ END;
         self._require_sql(store_target)
         if not run_token or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise MigrationStoreError("initial observation requires a valid inventory digest and mutex token")
-        evidence = __import__("hashlib").sha256(f"initial:{digest}".encode("ascii")).hexdigest()
+        evidence = hashlib.sha256(f"initial:{digest}".encode("ascii")).hexdigest()
         payload = f"""
 DECLARE
   v_owned NUMBER;
@@ -709,7 +711,7 @@ END;
         for row in rows:
             if len(row) != len(fields):
                 raise MigrationStoreError("malformed migration history row")
-            values = dict(zip(fields, row))
+            values = dict(zip(fields, row, strict=True))
             try:
                 dependencies = json.loads(clob_value(values["id"], "dependencies") or "[]")
                 observation = json.loads(clob_value(values["id"], "observation") or "{}")
@@ -1033,7 +1035,7 @@ class MigrationStore:
             if not observations:
                 if data.get("history"):
                     raise MigrationStoreError("migration history exists without an observed baseline; run adoption before applying")
-                evidence = __import__("hashlib").sha256(f"initial:{digest}".encode("ascii")).hexdigest()
+                evidence = hashlib.sha256(f"initial:{digest}".encode("ascii")).hexdigest()
                 observations.append({
                     "sequence": 0, "migration_id": None, "attempt_id": None,
                     "predecessor_sequence": None, "before": digest, "after": digest,

@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from .config import ConfigError, Target, load_config, parse_target_contract, profile_target
 from .control_store import SqlControlStore
@@ -224,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": report.status, "pending": report.pending, "archive_digest": report.archive_digest}, sort_keys=True))
         return 0
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ConfigError, ReleaseError, ReleaseAdapterError, ValueError) as exc:
-        raise SystemExit(str(exc))
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

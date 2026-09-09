@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any
+from collections.abc import Mapping
 
 from .migration_bundle import BundleError, Migration, dependency_order
 
@@ -103,9 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(list(argv or []))
     from .migration_bundle import load_bundles
     try:
-        raw = json.loads(__import__("pathlib").Path(args.history).read_text(encoding="utf-8"))
+        raw = json.loads(Path(args.history).read_text(encoding="utf-8"))
     except Exception as exc:
-        raise SystemExit(f"invalid history: {exc}")
+        raise SystemExit(f"invalid history: {exc}") from exc
     history = raw.get("history", raw) if isinstance(raw, dict) else {}
     plan = plan_migrations(load_bundles(args.source), history, args.mode)
     print(json.dumps({"pending": plan.pending, "foreign_applied": plan.foreign_applied, "errors": plan.errors}, sort_keys=True))

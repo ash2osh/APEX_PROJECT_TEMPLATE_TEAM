@@ -36,6 +36,21 @@ class DocumentationTests(unittest.TestCase):
                     continue
                 self.assertTrue((path.parent / link).resolve().is_file(), f"{path}: {link}")
 
+    def test_lint_gate_is_configured_and_wired_into_ci(self):
+        config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("[tool.ruff]", config)
+        self.assertIn('"F"', config)
+        workflow = (ROOT / ".github/workflows/template-checks.yml").read_text(encoding="utf-8")
+        self.assertIn("ruff check scripts/", workflow)
+
+    def test_no_string_literal_imports_outside_the_command_dispatcher(self):
+        offenders = []
+        for path in sorted((ROOT / "scripts").rglob("*.py")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if "__import__(" in line and "teamlib." not in line:
+                    offenders.append(f"{path.relative_to(ROOT)}:{number}")
+        self.assertEqual(offenders, [], f"use ordinary imports: {offenders}")
+
 
 if __name__ == "__main__":
     unittest.main()

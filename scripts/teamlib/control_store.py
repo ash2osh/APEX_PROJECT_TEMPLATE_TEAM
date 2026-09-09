@@ -8,7 +8,7 @@ process lock is a database mutex.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 try:
     import fcntl
@@ -24,7 +24,8 @@ from pathlib import Path
 import re
 import tempfile
 import uuid
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 from .config import Target
 from .migration_store import _b64_sql, _row_lines, _sql_literal

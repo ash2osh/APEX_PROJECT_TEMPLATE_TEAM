@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 import re
 import uuid
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable, Mapping
 
 from .config import Target
 from .sqlcl import SqlclError, run_sqlcl

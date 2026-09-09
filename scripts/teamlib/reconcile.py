@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
 
 from .trees import Tree, _validate_tree_paths
 

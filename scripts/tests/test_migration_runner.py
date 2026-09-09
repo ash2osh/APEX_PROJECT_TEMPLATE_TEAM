@@ -14,7 +14,7 @@ import unittest
 from teamlib.config import Target
 from teamlib.fingerprints import inventory_from_rows
 from teamlib.migrate import MigrationRunError, apply_plan
-from teamlib.migration_store import MigrationStore
+from teamlib.migration_store import MigrationSetupRequired, MigrationStore
 
 
 class MigrationRunnerTests(unittest.TestCase):
@@ -54,7 +54,7 @@ class MigrationRunnerTests(unittest.TestCase):
     def test_dry_run_does_not_bootstrap_or_execute(self):
         report = apply_plan(self.migrations, {"store": self.store, "target": self.target, "dry_run": True, "execute": lambda migration: self.fail("executed")})
         self.assertEqual(report.applied, ())
-        with self.assertRaises(Exception):
+        with self.assertRaises(MigrationSetupRequired):
             self.store.read_history(self.target)
 
     def test_known_failure_is_recorded_and_blocks_followup(self):

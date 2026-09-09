@@ -8,9 +8,9 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import tempfile
 import uuid
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable, Mapping
 
 from .release import ReleaseError, verify_release
 
@@ -172,7 +172,7 @@ def _invoke_provisioner(provisioner: Any, argv: list[str], out: Path) -> dict[st
         return dict(value)
     path = Path(str(provisioner))
     try:
-        result = subprocess.run([str(path), *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        result = subprocess.run([str(path), *argv], capture_output=True, text=True, check=False)
     except OSError as exc:
         raise CIError(f"could not run CI provisioner: {path}") from exc
     if result.returncode != 0:
@@ -328,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         if previous is not None:
             command.extend(["--previous", str(previous)])
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
         finally:
             target_path.unlink(missing_ok=True)
         if result.returncode != 0:

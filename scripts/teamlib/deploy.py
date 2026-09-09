@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import shutil
 import uuid
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable, Mapping
 
 from .apex import _export_driver, _find_export_dir, _import_driver, _verify_result_identity, _default_repo
 from .config import Target

@@ -6,12 +6,13 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import uuid
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable, Mapping
 
 from .config import Target
 from .migration_bundle import Migration, load_bundles
 from .migration_plan import Plan, plan_migrations
-from .migration_store import MigrationMutexHeld, MigrationSetupRequired, MigrationStore, MigrationStoreError
+from .migration_store import MigrationSetupRequired
 from .sqlcl import SqlclError
 
 

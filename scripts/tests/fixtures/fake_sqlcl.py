@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import stat
 import sys
 
 
@@ -19,7 +20,7 @@ def main() -> int:
         Path(log_path).write_text(
             "argv=" + repr(args) + "\n"
             + "cwd=" + os.getcwd() + "\n"
-            + "stdin_regular=" + str(__import__("stat").S_ISREG(stdin_mode)) + "\n"
+            + "stdin_regular=" + str(stat.S_ISREG(stdin_mode)) + "\n"
             + "identity_count=" + str(text.count("TEAM_IDENTITY")) + "\n",
             encoding="utf-8",
         )

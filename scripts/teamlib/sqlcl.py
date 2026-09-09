@@ -234,8 +234,7 @@ def run_sqlcl(
                 stdin=empty,
                 cwd=work_path,
                 shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired as exc:

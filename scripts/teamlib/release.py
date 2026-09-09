@@ -7,17 +7,16 @@ import hashlib
 import io
 import json
 from pathlib import Path
-import posixpath
 import re
 import shutil
 import subprocess
 import tarfile
 import tempfile
-from typing import Any, Mapping
-from typing import Callable
+from typing import Any
+from collections.abc import Mapping
+from collections.abc import Callable
 
-from .migration_bundle import BundleError, Migration, load_bundles
-from .migration_plan import plan_migrations
+from .migration_bundle import BundleError, load_bundles
 from .trees import tree_digest
 
 
@@ -82,7 +81,7 @@ def _canonical(value: Any) -> bytes:
 
 
 def _git(repo: Path, args: list[str]) -> bytes:
-    result = subprocess.run(["git", "-C", str(repo), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=False)
     if result.returncode != 0:
         raise ReleaseError(result.stderr.decode("utf-8", "replace").strip() or "Git operation failed")
     return result.stdout
@@ -316,10 +315,10 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
     payload_paths = data.get("payload_paths")
     if not isinstance(payload_paths, list) or payload_paths != sorted(expected):
         raise ReleaseError("release manifest payload_paths does not match payload")
-    for field, path, label in (
+    for field_name, path, label in (
         ("master_contract_digest", "release/contracts/masters.json", "master contract"),
     ):
-        supplied = data.get(field)
+        supplied = data.get(field_name)
         if supplied is not None and (not isinstance(supplied, str) or not re.fullmatch(r"[0-9a-f]{64}", supplied)):
             raise ReleaseError(f"release manifest {label} digest is malformed")
         actual_digest = hashlib.sha256(members[path]).hexdigest() if path in members else None

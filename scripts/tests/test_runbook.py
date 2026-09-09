@@ -47,7 +47,6 @@ class RunbookTests(unittest.TestCase):
             evidence = root / "evidence.json"
             evidence.write_text(json.dumps(evidence_data, sort_keys=True, separators=(",", ":")), encoding="utf-8")
             key = Ed25519PrivateKey.generate()
-            private_bytes = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
             public_bytes = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
             (root / "key.pem").write_bytes(public_bytes)
             (root / "sig").write_bytes(key.sign(evidence.read_bytes()))

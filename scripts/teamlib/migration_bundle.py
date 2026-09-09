@@ -8,7 +8,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 
 class BundleError(ValueError):
@@ -119,7 +120,6 @@ def _comment_directives(text: str) -> list[tuple[int, str, str]]:
     i = 0
     state = "normal"
     quote = ""
-    line_start = 0
     while i < len(text):
         c = text[i]
         n = text[i + 1] if i + 1 < len(text) else ""

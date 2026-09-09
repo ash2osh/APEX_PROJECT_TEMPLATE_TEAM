@@ -8,7 +8,8 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
-from typing import Mapping, TypeAlias
+from typing import TypeAlias
+from collections.abc import Mapping
 
 
 Tree: TypeAlias = Mapping[str, bytes]
@@ -107,7 +108,6 @@ def _read_regular_tree(root: Path) -> dict[str, bytes]:
         except OSError as exc:
             raise TreeError(f"could not read tree directory: {directory}") from exc
         for entry in entries:
-            relative = entry.path if directory == root else entry.path
             rel_path = Path(entry.path).relative_to(root).as_posix()
             rel_path = _validate_relative_path(rel_path)
             if entry.is_symlink():
@@ -144,8 +144,7 @@ def _git(repo: Path, args: list[str], *, stdin: bytes | None = None) -> subproce
         result = subprocess.run(
             ["git", "-C", str(repo), *args],
             input=stdin,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except OSError as exc:

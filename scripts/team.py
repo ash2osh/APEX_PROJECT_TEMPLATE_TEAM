@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+from typing import Any
 import uuid
 
 from teamlib.apex import (
@@ -31,7 +32,7 @@ from teamlib.control_store import ControlStore, ControlStoreError, SqlControlSto
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.fingerprints import InventoryError, diff_inventory, inventory_from_manifest, load_inventory
 from teamlib.migrate import MigrationRunError, apply_plan
-from teamlib.migration_store import MigrationStore, MigrationStoreError, SqlMigrationStore
+from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
 from teamlib.sqlcl import run_sqlcl
 from teamlib.live_inventory import inventory_target
 from teamlib.patch import PatchError, recover_files
@@ -179,7 +180,7 @@ def _target_from_contract(path: str | Path, alias: str) -> Target:
 
 
 def _resolved_commit(repo: Path, ref: str) -> str:
-    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise ConfigError(f"could not resolve source ref: {ref}")
     return result.stdout.strip()

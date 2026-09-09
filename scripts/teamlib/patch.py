@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
 try:
     import fcntl
 except ImportError:
@@ -12,14 +11,14 @@ try:
     import msvcrt
 except ImportError:
     msvcrt = None  # type: ignore[assignment]
-import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import uuid
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from .trees import Tree, TreeError, _validate_tree_paths, assert_source_clean, read_export_tree
 
@@ -35,8 +34,7 @@ def _git_head(repo: Path) -> str:
     try:
         result = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except OSError as exc:
@@ -162,7 +160,6 @@ def _load_journal(repo: Path, operation_id: str) -> tuple[Path, dict[str, Any]]:
 
 
 def _verify_operation_paths(repo: Path, alias: str, files: list[dict[str, Any]]) -> list[tuple[str, object, object]]:
-    source_root = repo / "apps" / alias
     result = []
     for item in files:
         if not isinstance(item, dict) or set(item) != {"path", "before", "after"}:

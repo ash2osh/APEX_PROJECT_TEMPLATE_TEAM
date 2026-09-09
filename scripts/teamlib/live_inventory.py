@@ -7,7 +7,8 @@ import base64
 import hashlib
 from pathlib import Path
 import re
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable
 
 from .config import Target
 from .fingerprints import Inventory, InventoryError, inventory_from_rows
@@ -144,7 +145,7 @@ def inventory_from_sqlcl_result(target: Target, result: Any, tables_schema: str,
         raise InventoryError("live inventory identity does not match the target contract")
     if any(line.strip().startswith("TEAM_INVENTORY_BEGIN|") for line in stdout.splitlines()):
         rows, topology = _v2_rows(stdout, tables_schema, code_schema)
-        schema_digest = hashlib.sha256(f"inventory-v2|{topology}|{tables_schema}|{code_schema}".encode("utf-8")).hexdigest()
+        schema_digest = hashlib.sha256(f"inventory-v2|{topology}|{tables_schema}|{code_schema}".encode()).hexdigest()
         return inventory_from_rows(rows, topology=topology, schema_set_digest=schema_digest)
 
     rows: list[dict[str, str]] = []
@@ -159,7 +160,7 @@ def inventory_from_sqlcl_result(target: Target, result: Any, tables_schema: str,
         rows.append({"owner": owner, "object_type": object_type, "object_name": object_name, "status": status, "definition_digest": digest})
     if not rows:
         raise InventoryError("live inventory output is unframed or empty")
-    schema_digest = hashlib.sha256(f"{tables_schema}|{code_schema}".encode("utf-8")).hexdigest()
+    schema_digest = hashlib.sha256(f"{tables_schema}|{code_schema}".encode()).hexdigest()
     return inventory_from_rows(rows, topology="separate", schema_set_digest=schema_digest)
 
 

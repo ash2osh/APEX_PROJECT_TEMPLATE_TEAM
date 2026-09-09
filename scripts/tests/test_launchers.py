@@ -35,8 +35,7 @@ class LauncherTests(unittest.TestCase):
                     result = subprocess.run(
                         [str(self.repo / launcher), *arguments],
                         cwd=cwd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
+                        capture_output=True,
                         text=True,
                         check=False,
                     )
@@ -66,8 +65,7 @@ class LauncherTests(unittest.TestCase):
             self.skipTest("PowerShell is not installed on this host")
         result = subprocess.run(
             [powershell, "-NoProfile", "-File", str(self.repo / "scripts" / "team.ps1"), "new-migration", "--help"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
         )
@@ -77,8 +75,7 @@ class LauncherTests(unittest.TestCase):
         env_file = self.repo / ".env.example"
         result = subprocess.run(
             [str(self.repo / "scripts" / "team.sh"), "doctor", "--env", str(env_file)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
         )

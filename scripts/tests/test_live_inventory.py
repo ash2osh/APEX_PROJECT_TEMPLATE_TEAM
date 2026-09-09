@@ -48,7 +48,7 @@ class LiveInventoryTests(unittest.TestCase):
             self.assertEqual(calls[0][1], "read")
 
     def test_parses_framed_chunked_full_definition_and_shared_owner(self):
-        definition = "CREATE TABLE SHARED.T (ID NUMBER, NOTE VARCHAR2(4000))\n".encode()
+        definition = b"CREATE TABLE SHARED.T (ID NUMBER, NOTE VARCHAR2(4000))\n"
         encoded = base64.b64encode(definition).decode()
         result = SimpleNamespace(
             stdout=(

@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-from typing import Sequence
+from collections.abc import Sequence
 
-from .migration_bundle import BundleError, bundle_checksum, load_bundles
+from .migration_bundle import BundleError, load_bundles
 
 
 @dataclass(frozen=True)

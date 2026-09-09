@@ -12,13 +12,14 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
+from collections.abc import Callable, Mapping, Sequence
 
 from .migration_bundle import BundleError, _validate_verify
 
 
 class AppCheckError(RuntimeError):
-    def __init__(self, message: str, report: "AppCheckReport | None" = None):
+    def __init__(self, message: str, report: AppCheckReport | None = None):
         super().__init__(message)
         self.report = report
 
@@ -147,7 +148,7 @@ def _load_declaration(alias: str, value: Any) -> dict[str, Any]:
                 except BundleError as exc:
                     raise AppCheckError(str(exc)) from exc
         else:
-            flow_path = _safe_relative(check.get("flow"), f"flow for {alias}/{check_id}", ".json")
+            _safe_relative(check.get("flow"), f"flow for {alias}/{check_id}", ".json")
             steps = check.get("steps")
             if not isinstance(steps, list) or not steps:
                 raise AppCheckError(f"candidate flow {alias}/{check_id} must contain steps")

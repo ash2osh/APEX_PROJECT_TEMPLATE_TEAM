@@ -1,0 +1,15 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 200
+src = ["scripts"]
+
+[tool.ruff.lint]
+# F  pyflakes      - undefined names, unused imports (the Task 1 crash class)
+# E9 syntax errors
+# B  bugbear       - mutable defaults, silent except patterns
+# UP unpyupgrade   - keep the 3.10+ idioms consistent
+select = ["F", "E9", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately import symbols to assert they are re-exported.
+"scripts/tests/*" = ["F401"]

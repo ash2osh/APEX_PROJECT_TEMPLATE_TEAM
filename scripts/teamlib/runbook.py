@@ -14,7 +14,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from .release import ReleaseError, ReleasePlan, plan_release, verify_release
 
@@ -273,4 +274,4 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"archive_digest": runbook.archive_digest, "source_commit": runbook.source_commit, "pending": runbook.pending}, sort_keys=True))
         return 0
     except (OSError, UnicodeError, json.JSONDecodeError, RunbookError) as exc:
-        raise SystemExit(str(exc))
+        raise SystemExit(str(exc)) from exc

@@ -10,7 +10,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import uuid
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from .config import Target
 from .trees import Tree, TreeError, tree_digest, tree_manifest
@@ -267,8 +268,7 @@ def _check_head_ancestry(root: Path, original_head: str, head: str) -> None:
     try:
         result = subprocess.run(
             ["git", "-C", str(repo), "merge-base", "--is-ancestor", original_head, head],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except OSError as exc:

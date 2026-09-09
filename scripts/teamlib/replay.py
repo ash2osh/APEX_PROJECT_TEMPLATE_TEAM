@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from .migration_bundle import BundleError, load_bundles
 from .migration_plan import plan_migrations
@@ -36,7 +38,7 @@ def replay(source: str | Path, replay_target: Mapping[str, Any], previous: str |
         raise ReplayError("replay plan is blocked: " + "; ".join(plan.errors))
     order = plan.pending
     checksums = {migration_id: bundles[migration_id].checksum for migration_id in order}
-    source_digest = __import__("hashlib").sha256(
+    source_digest = hashlib.sha256(
         json.dumps(checksums, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     if previous is not None:

@@ -31,8 +31,7 @@ from teamlib.trees import read_git_tree
 def _source_app_aliases(repo: Path, ref: str) -> tuple[str, ...]:
     result = subprocess.run(
         ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", ref, "--", "apps"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -85,8 +84,7 @@ def _materialize_migrations(root: Path, files: dict[str, bytes]) -> Path:
 def _assert_exact_checkout(repo: Path, ref: str) -> None:
     result = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD^{commit}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -94,8 +92,7 @@ def _assert_exact_checkout(repo: Path, ref: str) -> None:
         raise SystemExit("replay runner checkout is not the exact selected source SHA")
     status = subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )

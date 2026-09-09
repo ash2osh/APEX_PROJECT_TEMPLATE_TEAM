@@ -4,26 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 import uuid
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable, Mapping
 
 from .config import Target
 from .control_store import ControlStore, ControlStoreError
 from .masters import MasterError, apex_component_resolver, validate_masters
 from .patch import PatchError, apply_tree
 from .reconcile import Decision, reconcile
-from .sqlcl import SqlclError, SqlResult, run_sqlcl
+from .sqlcl import SqlclError, run_sqlcl
 from .state import (
     Baseline,
-    Capture as StateCapture,
-    Checkpoint,
     StateError,
-    app_lock_key,
     load_baseline,
     load_checkpoint,
     load_capture,
@@ -82,8 +78,7 @@ def _git_head(repo: Path, ref: str = "HEAD") -> str:
     try:
         result = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except OSError as exc:
