@@ -9,6 +9,7 @@ if _SCRIPTS_DIR not in sys.path:
 
 from pathlib import Path
 from types import SimpleNamespace
+import json
 import subprocess
 import tempfile
 import unittest
@@ -70,6 +71,13 @@ class ExportTests(unittest.TestCase):
         capture = capture_app(self.target, repo=self.repo, control_store=self.store, runner=self.fake_runner)
         self.assertEqual(capture.tree, self.database_tree)
         self.assertEqual(capture.before_sync.generation, capture.after_sync.generation)
+
+    def test_capture_records_a_self_contained_evidence_source_marker(self):
+        capture = capture_app(self.target, repo=self.repo, control_store=self.store, runner=self.fake_runner)
+        marker = self.repo / ".sync-state" / "recovery" / capture.recovery_id / "evidence-source.json"
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(record["authoritative"], "sync-state")
+        self.assertEqual(record["scratch_work_dir"], str(capture.work_dir))
 
     def test_export_preserves_committed_git_only_addition(self):
         head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()

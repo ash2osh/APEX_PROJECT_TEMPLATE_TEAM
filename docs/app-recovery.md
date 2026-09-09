@@ -1,5 +1,10 @@
 # Application recovery contract
 
+`scratch/` is disposable working space, not evidence. Recovery records under
+`.sync-state/` retain their own copy of the captured tree, so scratch can be
+pruned at any time with `team.py prune-scratch`; capture directories a
+recovery record still references are never removed.
+
 `export-app` reads the shared Builder application without taking its mutex. It
 brackets the export with the persistent application generation and mutex state;
 if an import begins, completes, or is recovered during that window, the

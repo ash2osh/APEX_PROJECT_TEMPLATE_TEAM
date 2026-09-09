@@ -67,6 +67,7 @@ OFFLINE_COMMANDS = frozenset(
         "verify-history",
         "replay",
         "adopt-baseline",
+        "prune-scratch",
     }
 )
 

@@ -69,6 +69,17 @@ migration remains held until the named recovery owner reviews evidence.
 Use [docs/app-recovery.md](docs/app-recovery.md)
 and [docs/conflict-resolution.md](docs/conflict-resolution.md).
 
+`scratch/` is disposable working space, not evidence. Recovery records under
+`.sync-state/` retain their own copy of the captured tree, so scratch can be
+pruned at any time:
+
+```text
+scripts/team.sh prune-scratch --keep 5
+```
+
+Add `--dry-run` to see what would go. Capture directories a recovery record
+still references are never removed.
+
 Production writes are not exposed by the automated commands. `gen-runbook`
 verifies an immutable archive and signed test evidence and produces an offline
 handoff for the production owner.

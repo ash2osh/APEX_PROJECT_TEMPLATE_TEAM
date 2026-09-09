@@ -214,6 +214,28 @@ def capture_app(
         },
         root=state_root,
     ) if persist else ""
+    if recovery_id:
+        # scratch/ is disposable by name and by .gitignore; a recovery record
+        # must not depend on it. save_capture already stores the tree bytes, so
+        # this only records that the durable copy is the authoritative one.
+        marker = state_root / "recovery" / recovery_id / "evidence-source.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "authoritative": "sync-state",
+                    "tree_digest": tree_digest(tree),
+                    "scratch_work_dir": str(work),
+                    "note": "scratch/ may be pruned; the retained tree in this record is the evidence",
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
     return ApexCapture(tree, recovery_id, target, before, after, work, result)
 
 
