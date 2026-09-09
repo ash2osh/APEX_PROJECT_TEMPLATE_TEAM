@@ -143,5 +143,42 @@ METADATA_EXPECTED_INSTANCE_ID=FREEPDB1
             self.assertFalse((root / ".sync-state").exists())
 
 
+class ProductionReadAllowlistTests(unittest.TestCase):
+    def test_client_and_mutation_constructs_are_refused(self):
+        from teamlib.sqlcl import _assert_production_read_only, SqlclError
+        for sql in (
+            "HOST rm -rf /tmp/x\n",
+            "!id\n",
+            "SCRIPT var x = 1;\n",
+            "@/tmp/other.sql\n",
+            "SPOOL /tmp/out.txt\n",
+            "CONNECT other/pw@db\n",
+            "CALL my_proc();\n",
+            "LOCK TABLE t IN EXCLUSIVE MODE;\n",
+            "SAVEPOINT s1;\n",
+            "SET TRANSACTION READ WRITE;\n",
+            "INSERT INTO t VALUES (1);\n",
+        ):
+            with self.assertRaises(SqlclError, msg=sql):
+                _assert_production_read_only(sql)
+
+    def test_genuine_read_only_drivers_are_accepted(self):
+        from teamlib.sqlcl import _assert_production_read_only
+        for sql in (
+            "SELECT 1 FROM dual;\n",
+            "SET HEADING OFF\nSET PAGESIZE 0\nSELECT 1 FROM dual;\n",
+            "WITH x AS (SELECT 1 a FROM dual) SELECT a FROM x;\n",
+            "SELECT q'[don't drop this]' FROM dual;\n",
+            "-- a comment\n/* another */\nSELECT 1 FROM dual;\n",
+            "SELECT id FROM org START WITH id = 1 CONNECT BY PRIOR id = parent_id;\n",
+        ):
+            _assert_production_read_only(sql)
+
+    def test_the_shipped_identity_driver_is_accepted(self):
+        from teamlib.sqlcl import _assert_production_read_only
+        root = Path(__file__).resolve().parents[2]
+        _assert_production_read_only((root / "scripts/sql/identity.sql").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

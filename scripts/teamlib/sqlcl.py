@@ -50,23 +50,49 @@ def _assert_safe_argument(name: str, value: str) -> None:
         raise SqlclError(f"{name} contains unsupported shell/control characters")
 
 
+# A production read may only issue queries and the display settings the driver
+# needs. Anything else -- SQL the allowlist does not name, or a SQLcl client
+# command such as HOST, SCRIPT, @, SPOOL or CONNECT -- is refused. An allowlist
+# fails closed on a SQLcl feature that does not exist yet; a denylist does not.
+_PRODUCTION_READ_ALLOWED_RE = re.compile(r"^(?:SELECT|WITH)\b", re.IGNORECASE)
+_PRODUCTION_READ_SETTINGS_RE = re.compile(
+    r"^SET\s+(?:HEADING|FEEDBACK|LINESIZE|PAGESIZE|LONG|ECHO|VERIFY|DEFINE|ENCODING|"
+    r"TERMOUT|TRIMSPOOL|SQLBLANKLINES|MARKUP)\b",
+    re.IGNORECASE,
+)
+_PRODUCTION_READ_DIRECTIVE_RE = re.compile(r"^(?:WHENEVER\s+(?:SQLERROR|OSERROR)\b|EXIT\b)", re.IGNORECASE)
+
+
 def _assert_production_read_only(driver_text: str) -> None:
     masked, terminated = mask_sql(driver_text)
     if not terminated:
         raise SqlclError(
             "production read-only SQLcl operation has an unterminated comment or literal"
         )
-    forbidden = re.search(
-        r"\b(?:INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|COMMIT|"
-        r"ROLLBACK|GRANT|REVOKE|BEGIN|DECLARE|EXEC|EXECUTE)\b",
-        masked,
-        re.IGNORECASE,
-    )
-    if forbidden:
-        raise SqlclError(
-            "production read-only SQLcl operation contains a mutation/control statement: "
-            + forbidden.group(0)
-        )
+    pending = True
+    in_block = False
+    for number, raw in enumerate(masked.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        if in_block:
+            if line == "/":
+                in_block = False
+                pending = True
+            continue
+        if pending:
+            if _PRODUCTION_READ_ALLOWED_RE.match(line):
+                pass
+            elif _PRODUCTION_READ_SETTINGS_RE.match(line):
+                pass
+            elif _PRODUCTION_READ_DIRECTIVE_RE.match(line):
+                pass
+            else:
+                raise SqlclError(
+                    "production read-only SQLcl operation contains a statement that is not a "
+                    f"query or a display setting (line {number})"
+                )
+        pending = line.endswith(";") or line == "/"
 
 
 def _sql_marker_query() -> str:
