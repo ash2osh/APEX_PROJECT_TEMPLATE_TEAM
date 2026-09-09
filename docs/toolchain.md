@@ -16,6 +16,11 @@ TEAM_LIVE_ENV=scratch/live-docker.env \\
   PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests/live -v
 ```
 
+One SQLcl process is bounded by `TEAM_SQLCL_TIMEOUT` seconds, defaulting to 120.
+APEX export and import use a longer built-in budget because a timeout there
+marks the shared application uncertain and pauses the team. Raise the variable
+for a slow link; do not lower it below the time a metadata write needs.
+
 That suite expects the five credential-free profile names to resolve through
 the local SQLcl connection store, exercises the full inventory, Oracle app and
 migration mutexes, and performs only a same-source master import plus a

@@ -16,7 +16,7 @@ from .control_store import ControlStore, ControlStoreError
 from .masters import MasterError, apex_component_resolver, validate_masters
 from .patch import PatchError, apply_tree
 from .reconcile import Decision, reconcile
-from .sqlcl import SqlclError, run_sqlcl
+from .sqlcl import APEX_TIMEOUT_SECONDS, SqlclError, run_sqlcl
 from .state import (
     Baseline,
     StateError,
@@ -183,7 +183,7 @@ def capture_app(
     driver = work / "export.sql"
     driver.write_text(_export_driver(target, work), encoding="utf-8", newline="\n")
     try:
-        result = runner(target, "read", driver, work)
+        result = runner(target, "read", driver, work, timeout=APEX_TIMEOUT_SECONDS)
     except Exception as exc:
         raise ApexError(f"APEX export failed: {exc}") from exc
     _verify_result_identity(target, result)
@@ -457,7 +457,7 @@ def import_app(
         staged = _materialize_tree(work / "source", selected_tree)
         driver = work / "import.sql"
         driver.write_text(_import_driver(target, staged), encoding="utf-8", newline="\n")
-        result = runner(target, "write", driver, work)
+        result = runner(target, "write", driver, work, timeout=APEX_TIMEOUT_SECONDS)
         _verify_result_identity(target, result)
         verified = capture_app(target, held_by=run_token, repo=repo_path, root=state_root, control_store=store, runner=runner)
         if verified.tree != selected_tree:

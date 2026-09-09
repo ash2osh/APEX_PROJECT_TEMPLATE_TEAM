@@ -13,6 +13,7 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from teamlib.config import Target
 from teamlib.sqlcl import SqlclError, run_sqlcl
@@ -151,6 +152,29 @@ class SqlclBoundaryTests(unittest.TestCase):
         from teamlib.sqlcl import _assert_production_read_only, SqlclError
         with self.assertRaisesRegex(SqlclError, "unterminated"):
             _assert_production_read_only("SELECT 'never closed FROM dual;")
+
+    def test_timeout_defaults_and_env_override_resolve(self):
+        from teamlib.sqlcl import _resolve_timeout, DEFAULT_TIMEOUT_SECONDS, SqlclError
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TEAM_SQLCL_TIMEOUT", None)
+            self.assertEqual(_resolve_timeout(None), DEFAULT_TIMEOUT_SECONDS)
+            self.assertEqual(_resolve_timeout(45.0), 45.0)
+        with patch.dict(os.environ, {"TEAM_SQLCL_TIMEOUT": "900"}):
+            self.assertEqual(_resolve_timeout(None), 900.0)
+            # An explicit argument still wins over the environment.
+            self.assertEqual(_resolve_timeout(45.0), 45.0)
+        for bad in ("0", "-5", "abc", ""):
+            with patch.dict(os.environ, {"TEAM_SQLCL_TIMEOUT": bad}):
+                with self.assertRaises(SqlclError):
+                    _resolve_timeout(None)
+
+    def test_apex_operations_request_the_long_budget(self):
+        import inspect
+        from teamlib import apex
+        from teamlib.sqlcl import APEX_TIMEOUT_SECONDS
+        self.assertGreaterEqual(APEX_TIMEOUT_SECONDS, 900.0)
+        source = inspect.getsource(apex)
+        self.assertIn("APEX_TIMEOUT_SECONDS", source)
 
 
 if __name__ == "__main__":

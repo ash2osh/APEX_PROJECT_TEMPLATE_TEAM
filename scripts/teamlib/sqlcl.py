@@ -62,6 +62,28 @@ _PRODUCTION_READ_SETTINGS_RE = re.compile(
 )
 _PRODUCTION_READ_DIRECTIVE_RE = re.compile(r"^(?:WHENEVER\s+(?:SQLERROR|OSERROR)\b|EXIT\b)", re.IGNORECASE)
 
+DEFAULT_TIMEOUT_SECONDS = 120.0
+# A full APEX application export or import is not comparable to a metadata
+# query. Timing one out marks the shared application uncertain, which stops the
+# whole team until a named recovery owner reviews evidence, so the budget has to
+# fit a real application over a real network.
+APEX_TIMEOUT_SECONDS = 1800.0
+
+
+def _resolve_timeout(timeout: float | None) -> float:
+    if timeout is not None:
+        return float(timeout)
+    raw = os.environ.get("TEAM_SQLCL_TIMEOUT")
+    if raw is None:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SqlclError("TEAM_SQLCL_TIMEOUT must be a positive number of seconds") from exc
+    if value <= 0:
+        raise SqlclError("TEAM_SQLCL_TIMEOUT must be a positive number of seconds")
+    return value
+
 
 def _assert_production_read_only(driver_text: str) -> None:
     masked, terminated = mask_sql(driver_text)
@@ -211,9 +233,10 @@ def run_sqlcl(
     work: str | Path,
     *,
     executable: str | Path | None = None,
-    timeout: float = 120.0,
+    timeout: float | None = None,
 ) -> SqlResult:
     """Run one verified SQLcl process with a regular empty stdin file."""
+    resolved_timeout = _resolve_timeout(timeout)
     if operation not in {"read", "write"}:
         raise SqlclError(f"unsupported SQLcl operation: {operation}")
     if target.environment == "production" and operation != "read":
@@ -258,7 +281,7 @@ def run_sqlcl(
                 cwd=work_path,
                 shell=False,
                 capture_output=True,
-                timeout=timeout,
+                timeout=resolved_timeout,
             )
     except subprocess.TimeoutExpired as exc:
         raise SqlclError("SQLcl timed out; target state is unknown") from exc
