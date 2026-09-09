@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from teamlib.config import Target
 from teamlib.release import ApplyReport, ReleasePlan
-from teamlib.release_adapter import ReleaseAdapterError, apply_verified_release
+from teamlib.release_adapter import ReleaseAdapterError, apply_verified_release, main
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +76,24 @@ class ReleaseAdapterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "planned")
         self.assertEqual(observed["target"], target_document)
+
+    def test_main_resolves_environment_without_an_explicit_env_flag(self):
+        with tempfile.TemporaryDirectory(prefix="team-release-adapter-cli-") as directory:
+            root = Path(directory)
+            (root / "dummy.json").write_text("{}", encoding="utf-8")
+            (root / "dummy.tar").write_bytes(b"")
+            argv = [
+                "apply-release",
+                str(root / "dummy.tar"),
+                "--plan", str(root / "dummy.json"),
+                "--history", str(root / "dummy.json"),
+                "--target", str(ROOT / "targets" / "test.json"),
+            ]
+            # The environment profile is absent, so main() must fail with the
+            # diagnostic SystemExit -- not with NameError from a missing import.
+            with self.assertRaises(SystemExit) as caught:
+                main(argv)
+            self.assertIn("environment profile file not found", str(caught.exception))
 
 
 if __name__ == "__main__":
