@@ -10,7 +10,6 @@ try:
     import msvcrt
 except ImportError:
     msvcrt = None  # type: ignore[assignment]
-import base64
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -25,6 +24,12 @@ from collections.abc import Iterable, Mapping
 from .config import Target
 from .fingerprints import InventoryError, inventory_from_manifest
 from .sqlcl import SqlclError, run_sqlcl
+from .sql_text import (
+    SqlTextError,
+    b64_sql as _b64_sql,
+    row_lines as _row_lines,
+    sql_literal as _sql_literal,
+)
 
 
 class MigrationStoreError(RuntimeError):
@@ -45,33 +50,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _sql_literal(value: str) -> str:
-    if not isinstance(value, str) or "\x00" in value:
-        raise MigrationStoreError("metadata SQL value is invalid")
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _clob_literal(value: str) -> str:
-    """Build a SQL expression for a CLOB without a 4000-byte literal."""
+    """Build a SQL expression for a CLOB without a 4000-byte literal.
+
+    Superseded by ``sql_text.clob_builder``; Task 9 removes this once
+    record_inventory and record_applied are rewired onto it.
+    """
     if not isinstance(value, str) or "\x00" in value:
         raise MigrationStoreError("metadata CLOB value is invalid")
     if not value:
         return "TO_CLOB('')"
     pieces = [_sql_literal(value[index:index + 1000]) for index in range(0, len(value), 1000)]
     return " || ".join(f"TO_CLOB({piece})" for piece in pieces)
-
-
-def _b64_sql(column: str) -> str:
-    """Base64-encode a column so wrapped output stays safely re-joinable.
-
-    CLOB columns are never read through this helper: they are read in bounded
-    chunks with an explicit part/total, so a truncating branch here would only
-    ever be a silent-data-loss trap.
-    """
-    return (
-        "UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE("
-        f"UTL_RAW.CAST_TO_RAW(NVL({column}, CHR(1)))))"
-    )
 
 
 def _inventory_manifest(value: Any) -> tuple[dict[str, Any], str]:
@@ -89,42 +79,6 @@ def _inventory_manifest(value: Any) -> tuple[dict[str, Any], str]:
     except InventoryError as exc:
         raise MigrationStoreError(f"inventory evidence is invalid: {exc}") from exc
     return inventory.as_dict(), inventory.digest
-
-
-def _decode_b64(value: str) -> str:
-    try:
-        decoded = base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8")
-        return "" if decoded == "\x01" else decoded
-    except (ValueError, UnicodeError) as exc:
-        raise MigrationStoreError("metadata row contains invalid encoded text") from exc
-
-
-def _row_lines(stdout: str, prefix: str) -> list[list[str]]:
-    rows: list[list[str]] = []
-    pending: str | None = None
-
-    def consume(value: str) -> None:
-        parts = value.split("|")[1:]
-        if not parts or any(not part for part in parts):
-            raise MigrationStoreError(f"malformed {prefix} metadata row")
-        rows.append([_decode_b64(part) for part in parts])
-
-    for raw in stdout.splitlines():
-        line = raw.strip().rstrip("\r")
-        if line.startswith(prefix):
-            if pending is not None:
-                consume(pending)
-            pending = line
-            continue
-        # SQLcl may wrap a long SELECT expression at its terminal width even
-        # after LINESIZE is raised.  The encoded payload deliberately contains
-        # only base64 characters and separators, so continuation lines can be
-        # joined without accepting arbitrary diagnostic output.
-        if pending is not None and re.fullmatch(r"[A-Za-z0-9+/=|]+", line):
-            pending += line
-    if pending is not None:
-        consume(pending)
-    return rows
 
 
 _MIGRATION_BOOTSTRAP_SQL = r"""
@@ -631,7 +585,10 @@ END;
     def _read_rows(self, target: Target, payload: str, prefix: str) -> list[list[str]]:
         self._require_sql(target)
         result = self._run("read", payload)
-        return _row_lines(getattr(result, "stdout", ""), prefix)
+        try:
+            return _row_lines(getattr(result, "stdout", ""), prefix)
+        except SqlTextError as exc:
+            raise MigrationStoreError(str(exc)) from exc
 
     def read_history(self, store_target: Target) -> dict[str, Any]:
         fields = [

@@ -142,6 +142,16 @@ class SqlclBoundaryTests(unittest.TestCase):
             self.execute(target=self.target(environment="production"))
         self.assertFalse(self.log.exists())
 
+    def test_q_quoted_literal_does_not_trigger_a_false_mutation_refusal(self):
+        from teamlib.sqlcl import _assert_production_read_only
+        # No exception: the keyword lives inside the literal.
+        _assert_production_read_only("SELECT q'[don't drop this table]' FROM dual;")
+
+    def test_unterminated_literal_is_refused_on_a_production_read(self):
+        from teamlib.sqlcl import _assert_production_read_only, SqlclError
+        with self.assertRaisesRegex(SqlclError, "unterminated"):
+            _assert_production_read_only("SELECT 'never closed FROM dual;")
+
 
 if __name__ == "__main__":
     unittest.main()

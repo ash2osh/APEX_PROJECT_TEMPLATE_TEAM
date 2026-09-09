@@ -84,6 +84,21 @@ class MigrationBundleTests(unittest.TestCase):
         with self.assertRaises(BundleError):
             load_bundles(self.root)
 
+    def test_q_quoted_literals_load_without_a_false_unterminated_error(self):
+        from teamlib.migration_bundle import _mask_code
+        for text in (
+            "UPDATE t SET msg = q'[don't touch]' WHERE id = 1;",
+            "UPDATE t SET msg = q'{it's a test}' WHERE id = 1;",
+        ):
+            masked = _mask_code(text)
+            self.assertEqual(len(masked), len(text))
+            self.assertNotIn("touch", masked)
+
+    def test_genuinely_unterminated_literals_still_fail(self):
+        from teamlib.migration_bundle import _mask_code, BundleError
+        with self.assertRaisesRegex(BundleError, "unterminated"):
+            _mask_code("UPDATE t SET msg = 'never closed;")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,8 +28,8 @@ from typing import Any
 from collections.abc import Iterable
 
 from .config import Target
-from .migration_store import _b64_sql, _row_lines, _sql_literal
 from .sqlcl import SqlclError, run_sqlcl
+from .sql_text import b64_sql as _b64_sql, row_lines as _row_lines, sql_literal as _sql_literal
 
 
 class ControlStoreError(RuntimeError):

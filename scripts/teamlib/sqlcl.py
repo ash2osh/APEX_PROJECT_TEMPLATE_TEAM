@@ -15,6 +15,7 @@ import uuid
 from typing import Any
 
 from .config import Target
+from .sql_text import mask_sql
 
 
 class SqlclError(RuntimeError):
@@ -49,16 +50,12 @@ def _assert_safe_argument(name: str, value: str) -> None:
         raise SqlclError(f"{name} contains unsupported shell/control characters")
 
 
-def _mask_sql_comments_and_literals(text: str) -> str:
-    pattern = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'", re.DOTALL)
-    return pattern.sub(
-        lambda match: "".join("\n" if char == "\n" else " " for char in match.group(0)),
-        text,
-    )
-
-
 def _assert_production_read_only(driver_text: str) -> None:
-    masked = _mask_sql_comments_and_literals(driver_text)
+    masked, terminated = mask_sql(driver_text)
+    if not terminated:
+        raise SqlclError(
+            "production read-only SQLcl operation has an unterminated comment or literal"
+        )
     forbidden = re.search(
         r"\b(?:INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|COMMIT|"
         r"ROLLBACK|GRANT|REVOKE|BEGIN|DECLARE|EXEC|EXECUTE)\b",

@@ -11,6 +11,8 @@ import re
 from typing import Any
 from collections.abc import Mapping
 
+from .sql_text import mask_sql
+
 
 class BundleError(ValueError):
     """Raised when a migration bundle is incomplete, unsafe or ambiguous."""
@@ -53,65 +55,10 @@ def _validate_id(migration_id: str) -> tuple[str, str]:
 
 def _mask_code(text: str) -> str:
     """Mask strings and comments while retaining positions/newlines."""
-    chars = list(text)
-    i = 0
-    state = "normal"
-    quote = ""
-    while i < len(text):
-        c = text[i]
-        n = text[i + 1] if i + 1 < len(text) else ""
-        if state == "normal":
-            if c == "-" and n == "-":
-                chars[i] = chars[i + 1] = " "
-                i += 2
-                state = "line"
-                continue
-            if c == "/" and n == "*":
-                chars[i] = chars[i + 1] = " "
-                i += 2
-                state = "block"
-                continue
-            if c in {"'", '"'}:
-                quote = c
-                chars[i] = " "
-                i += 1
-                state = "string"
-                continue
-            i += 1
-            continue
-        if state == "line":
-            if c == "\n":
-                state = "normal"
-            else:
-                chars[i] = " "
-            i += 1
-            continue
-        if state == "block":
-            if c == "*" and n == "/":
-                chars[i] = chars[i + 1] = " "
-                i += 2
-                state = "normal"
-            else:
-                if c != "\n":
-                    chars[i] = " "
-                i += 1
-            continue
-        # string
-        if c == quote:
-            if n == quote:
-                chars[i] = chars[i + 1] = " "
-                i += 2
-            else:
-                chars[i] = " "
-                i += 1
-                state = "normal"
-        else:
-            if c != "\n":
-                chars[i] = " "
-            i += 1
-    if state in {"block", "string"}:
+    masked, terminated = mask_sql(text)
+    if not terminated:
         raise BundleError("unterminated SQL comment or literal")
-    return "".join(chars)
+    return masked
 
 
 def _comment_directives(text: str) -> list[tuple[int, str, str]]:
