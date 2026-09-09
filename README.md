@@ -35,6 +35,14 @@ scripts/team.sh setup-state
 scripts/team.sh register-app <alias>
 ```
 
+The daily workflow needs no third-party packages. Two commands do:
+`gen-runbook` needs `cryptography` to verify signed test evidence, and the
+graphify tooling needs `graphify` and `tree-sitter-sql`. Install what you need:
+
+```text
+python3 -m pip install -e '.[promotion]'
+```
+
 The example target contracts are binding specifications, not credentials. Keep
 `TABLES`, `CODE`, `APEX`, `METADATA` and observation-only `VERIFY` profiles
 explicit. `METADATA_SCHEMA` must be isolated from application schemas.

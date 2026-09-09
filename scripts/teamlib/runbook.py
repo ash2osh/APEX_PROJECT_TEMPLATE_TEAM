@@ -24,6 +24,10 @@ class RunbookError(RuntimeError):
     """Raised when a release cannot be handed to a production owner."""
 
 
+class RunbookDependencyError(RunbookError):
+    """Raised when an optional signing dependency is not installed."""
+
+
 @dataclass(frozen=True)
 class Runbook:
     text: str
@@ -59,7 +63,12 @@ def _public_key(raw: bytes):
     try:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
+    except ImportError as exc:
+        raise RunbookDependencyError(
+            "verifying a signed test handoff requires the 'cryptography' package; "
+            "install it with: python3 -m pip install cryptography"
+        ) from exc
+    try:
         key = serialization.load_pem_public_key(raw)
     except Exception as exc:  # the precise cryptography exception varies by version
         raise RunbookError("trusted production handoff key is not a readable PEM public key") from exc

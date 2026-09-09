@@ -1,3 +1,21 @@
+[project]
+name = "apex-team-template"
+version = "0.1.0"
+description = "Shared-application APEX team workflow, migrations and promotion"
+requires-python = ">=3.10"
+# The daily team workflow -- export, reconcile, migrate, release -- is stdlib
+# only and deliberately has no runtime dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+# Required by gen-runbook to verify the signed test evidence on the production
+# handoff path.
+promotion = ["cryptography>=41"]
+# Required only by setup_graphify_apx.py and teamlib/graphify_corpus.py.
+graph = ["graphify", "tree-sitter-sql"]
+# Offline quality gate.
+dev = ["ruff>=0.5"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 200
