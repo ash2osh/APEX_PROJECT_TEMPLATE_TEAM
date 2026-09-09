@@ -652,7 +652,15 @@ END;
         evidence_path = Path(evidence)
         if evidence_path.is_symlink() or not evidence_path.is_file() or not evidence_path.read_text(encoding="utf-8", errors="ignore").strip():
             raise ControlStoreError("worker-termination and retained-capture evidence is required")
-        predicate = "owner_token IS NOT NULL OR is_uncertain = 1" if run_token is None else f"owner_token = {_sql_literal(run_token)}"
+        # A failure after the payload started clears owner_token but leaves the
+        # target uncertain, so matching only on the token would refuse exactly
+        # the operator who names the run they are recovering.
+        predicate = (
+            "owner_token IS NOT NULL OR is_uncertain = 1"
+            if run_token is None
+            else f"(owner_token = {_sql_literal(run_token)} "
+                 f"OR (owner_token IS NULL AND is_uncertain = 1))"
+        )
         payload = f"""
 DECLARE v_count NUMBER;
 BEGIN

@@ -26,6 +26,11 @@ termination, retain a current capture, and run `recover-app-lock` with the
 exact held token when one exists. Recovery increments the generation, so a
 capture cannot silently straddle a crash-and-clear cycle.
 
+`--run-token` is optional. Supply it when the failure message or the recovery
+journal names a run: it is accepted both while that run still owns the mutex and
+after a failed attempt released the token but left the target uncertain.
+Omitting it recovers any held or uncertain target for the alias.
+
 File-level interruptions leave journals in `.sync-state/journals/`. Use only
 the explicit actions below; later user edits are never overwritten:
 

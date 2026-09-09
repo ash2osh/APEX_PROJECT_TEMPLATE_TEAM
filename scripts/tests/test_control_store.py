@@ -18,6 +18,7 @@ from teamlib.control_store import (
     SetupRequired,
     TargetUncertain,
     ControlStore,
+    SqlControlStore,
 )
 
 
@@ -110,6 +111,51 @@ class ControlStoreTests(unittest.TestCase):
         bad = Target(**{**metadata.__dict__, "current_schema": "OTHER"})
         with self.assertRaises(ControllerError):
             self.store.validate_controller(bad, contract)
+
+
+class SqlRecoverAppLockPredicateTests(unittest.TestCase):
+    """SqlControlStore needs a live SQLcl connection to run for real, so this
+    captures the generated SQL predicate through a mocked runner instead of
+    asserting on database state, the way test_sql_metadata_store.py does for
+    SqlMigrationStore."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="team-sql-control-")
+        self.metadata = Target(
+            project="team-template", role="developer", environment="development",
+            connection="meta", instance_id="FREE", db_name="FREEPDB1", service="freep1",
+            session_user="META", current_schema="META", alias=None, workspace_id=None,
+            app_id=None, parsing_schema=None, ownership_mode="shared", binding_digest="a" * 64,
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _captured_predicate(self, run_token):
+        captured: list[str] = []
+
+        def runner(target, operation, driver, work, **kwargs):
+            captured.append(Path(driver).read_text(encoding="utf-8"))
+            raise RuntimeError("payload captured")
+
+        evidence = Path(self.temp.name) / "evidence.txt"
+        evidence.write_text("worker terminated; capture retained\n", encoding="utf-8")
+        store = SqlControlStore(self.metadata, runner=runner, work_root=Path(self.temp.name) / "work")
+        with self.assertRaises(RuntimeError):
+            store.recover_app_lock("key", evidence=evidence, run_token=run_token)
+        return captured[0]
+
+    def test_a_named_run_token_also_matches_a_released_uncertain_row(self):
+        # A failure after the payload started clears owner_token but leaves
+        # is_uncertain set, so the predicate must match that row too -- not
+        # only a row where owner_token still equals the supplied token.
+        payload = self._captured_predicate("a" * 32)
+        self.assertIn("owner_token IS NULL AND is_uncertain = 1", payload)
+        self.assertIn(f"owner_token = '{'a' * 32}'", payload)
+
+    def test_omitting_the_run_token_keeps_the_original_broad_predicate(self):
+        payload = self._captured_predicate(None)
+        self.assertIn("owner_token IS NOT NULL OR is_uncertain = 1", payload)
 
 
 if __name__ == "__main__":

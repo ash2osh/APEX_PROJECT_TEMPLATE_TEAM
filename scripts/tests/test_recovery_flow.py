@@ -148,6 +148,36 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIn("pages/home.apx", checkpoint.required_absent)
         self.assertIn("pages/removed.apx", checkpoint.required_absent)
 
+    def test_supplying_the_run_token_of_a_released_uncertain_target_still_recovers(self):
+        key = self.target.physical_key
+        run_token = "a" * 32
+        self.store.register_app(self.target, "checkout-1", "host-1", "dev")
+        self.store.acquire_app(key, run_token, "checkout-1", "host-1", "dev")
+        self.store.mark_payload_starting(key, run_token)
+        # A non-SQLcl failure after the payload started clears the owner token
+        # but leaves the target uncertain.
+        self.store.release_app(key, run_token, confirmed_success=False)
+        state = self.store.read_app_sync_state(key)
+        self.assertIsNone(state.owner_token)
+        self.assertTrue(state.is_uncertain)
+
+        evidence = self.repo / "evidence.txt"
+        evidence.write_text("worker terminated; capture retained\n", encoding="utf-8")
+        recovered = self.store.recover_app_lock(key, evidence=evidence, run_token=run_token)
+        self.assertFalse(recovered.is_uncertain)
+        self.assertIsNone(recovered.owner_token)
+
+    def test_a_run_token_that_never_held_the_target_is_still_refused(self):
+        from teamlib.control_store import MutexHeld
+        key = self.target.physical_key
+        self.store.register_app(self.target, "checkout-1", "host-1", "dev")
+        self.store.acquire_app(key, "a" * 32, "checkout-1", "host-1", "dev")
+        self.store.mark_payload_starting(key, "a" * 32)
+        evidence = self.repo / "evidence.txt"
+        evidence.write_text("worker terminated\n", encoding="utf-8")
+        with self.assertRaises(MutexHeld):
+            self.store.recover_app_lock(key, evidence=evidence, run_token="b" * 32)
+
 
 if __name__ == "__main__":
     unittest.main()
