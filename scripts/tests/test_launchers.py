@@ -8,6 +8,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import tempfile
@@ -126,6 +127,29 @@ class OfflineEnvForwardingTests(unittest.TestCase):
         with patch("teamlib.ci.main", spy):
             team.main(["--env", "profiles/test.env", "ci-doctor", "--contract", "ci/runner-contract.json"])
         self.assertNotIn("--env", captured[0])
+
+
+class RepositoryRootTests(unittest.TestCase):
+    def test_repo_root_is_stable_from_any_subdirectory(self):
+        root = Path(__file__).resolve().parents[2]
+        original = Path.cwd()
+        try:
+            os.chdir(root / "docs")
+            self.assertEqual(team._repo_root().resolve(), root)
+            os.chdir(root)
+            self.assertEqual(team._repo_root().resolve(), root)
+        finally:
+            os.chdir(original)
+
+    def test_repo_root_falls_back_to_the_script_parent_outside_a_repository(self):
+        root = Path(__file__).resolve().parents[2]
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory(prefix="team-nonrepo-") as directory:
+            try:
+                os.chdir(directory)
+                self.assertEqual(team._repo_root().resolve(), root)
+            finally:
+                os.chdir(original)
 
 
 if __name__ == "__main__":

@@ -116,7 +116,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _env_path(args: argparse.Namespace) -> Path:
-    return Path(getattr(args, "env_file", None) or os.environ.get("PROJECT_ENV_FILE", ".env"))
+    explicit = getattr(args, "env_file", None) or os.environ.get("PROJECT_ENV_FILE")
+    if explicit:
+        return Path(explicit)
+    return _repo_root() / ".env"
 
 
 def _config(args: argparse.Namespace, *, require_verify: bool = False):
@@ -240,8 +243,24 @@ def _confirm_import_pause(args: argparse.Namespace, notice: str) -> None:
         raise ConfigError("import-app cancelled; explicit pause confirmation was not received")
 
 
+def _repo_root() -> Path:
+    """Resolve the repository root rather than trusting the caller's directory.
+
+    Every online command reads .env and writes .sync-state/ and scratch/. Those
+    belong to the repository, not to whatever directory the developer happened
+    to be standing in when they ran the launcher.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return Path(result.stdout.strip())
+    return Path(__file__).resolve().parent.parent
+
+
 def _online(args: argparse.Namespace) -> object:
-    repo = Path.cwd()
+    repo = _repo_root()
     command = args.command
     if command == "doctor":
         config = _config(args)
