@@ -8,6 +8,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -62,6 +63,41 @@ class SqlMetadataStoreTests(unittest.TestCase):
         with self.assertRaises(MigrationMutexHeld) as caught:
             store.acquire(self.target, "other", "worker", "host")
         self.assertEqual(caught.exception.owner_token, "run-token")
+
+
+class GeneratedSqlLineLengthTests(unittest.TestCase):
+    MAX_LINE = 1200
+
+    def _capture_payload(self, call):
+        seen: list[str] = []
+
+        def runner(target, operation, driver, work, **kwargs):
+            seen.append(Path(driver).read_text(encoding="utf-8"))
+            raise RuntimeError("payload captured")
+
+        try:
+            call(runner)
+        except Exception:
+            pass
+        return seen
+
+    def test_a_large_inventory_manifest_emits_only_bounded_lines(self):
+        from teamlib.sql_text import clob_builder
+        manifest = json.dumps(
+            {"version": 1, "objects": [
+                {"name": f"TBL_{i:04d}", "type": "TABLE", "sha256": "a" * 64} for i in range(400)
+            ]},
+            sort_keys=True, separators=(",", ":"),
+        )
+        built = clob_builder("v_manifest", manifest)
+        self.assertGreater(len(manifest), 40000)
+        self.assertLess(max(len(line) for line in built.splitlines()), self.MAX_LINE)
+        # The value is emitted once, not once per reference.
+        self.assertEqual(built.count("CREATETEMPORARY"), 1)
+
+    def test_clob_literal_is_gone(self):
+        import teamlib.migration_store as store
+        self.assertFalse(hasattr(store, "_clob_literal"))
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from .sqlcl import SqlclError, run_sqlcl
 from .sql_text import (
     SqlTextError,
     b64_sql as _b64_sql,
+    clob_builder as _clob_builder,
     row_lines as _row_lines,
     sql_literal as _sql_literal,
 )
@@ -48,20 +49,6 @@ class MigrationMutexHeld(MigrationStoreError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _clob_literal(value: str) -> str:
-    """Build a SQL expression for a CLOB without a 4000-byte literal.
-
-    Superseded by ``sql_text.clob_builder``; Task 9 removes this once
-    record_inventory and record_applied are rewired onto it.
-    """
-    if not isinstance(value, str) or "\x00" in value:
-        raise MigrationStoreError("metadata CLOB value is invalid")
-    if not value:
-        return "TO_CLOB('')"
-    pieces = [_sql_literal(value[index:index + 1000]) for index in range(0, len(value), 1000)]
-    return " || ".join(f"TO_CLOB({piece})" for piece in pieces)
 
 
 def _inventory_manifest(value: Any) -> tuple[dict[str, Any], str]:
@@ -259,7 +246,9 @@ DECLARE
   v_meta_schema_set VARCHAR2(64);
   v_normalizer VARCHAR2(32);
   v_coverage VARCHAR2(32);
+  v_manifest CLOB;
 BEGIN
+{_clob_builder('v_manifest', manifest_json)}
   SELECT COUNT(*) INTO v_owned FROM TEAM_MIGRATION_MUTEX
    WHERE singleton_id = 1 AND owner_token = {_sql_literal(run_token)};
   IF v_owned = 0 THEN RAISE_APPLICATION_ERROR(-20002, 'INVENTORY_WRITE_REFUSED'); END IF;
@@ -274,12 +263,12 @@ BEGIN
   IF v_existing = 0 THEN
     INSERT INTO TEAM_MIGRATION_INVENTORY
       (inventory_digest, manifest_json, schema_set_digest, normalizer_version, coverage_version)
-    VALUES ({_sql_literal(digest)}, {_clob_literal(manifest_json)},
+    VALUES ({_sql_literal(digest)}, v_manifest,
             {_sql_literal(str(manifest['schema_set_digest']))},
             {_sql_literal(str(manifest['normalizer_version']))},
             {_sql_literal(str(manifest['coverage_version']))});
   ELSE
-    SELECT DBMS_LOB.COMPARE(manifest_json, {_clob_literal(manifest_json)}),
+    SELECT DBMS_LOB.COMPARE(manifest_json, v_manifest),
            schema_set_digest, normalizer_version, coverage_version
       INTO v_compare, v_schema_set, v_normalizer, v_coverage
       FROM TEAM_MIGRATION_INVENTORY
@@ -540,7 +529,11 @@ DECLARE
   v_frontier VARCHAR2(64);
   v_inventory_count NUMBER;
   v_attempt_count NUMBER;
+  v_dependencies CLOB;
+  v_observation CLOB;
 BEGIN
+{_clob_builder('v_dependencies', dependency_json)}
+{_clob_builder('v_observation', observation_json)}
   SELECT COUNT(*) INTO v_owned FROM TEAM_MIGRATION_MUTEX
    WHERE singleton_id = 1 AND owner_token = {_sql_literal(run_token)};
   IF v_owned = 0 THEN RAISE_APPLICATION_ERROR(-20002, 'HISTORY_WRITE_REFUSED'); END IF;
@@ -563,7 +556,7 @@ BEGIN
     (id, checksum, target, dependencies_json, payload_manifest_json, source_commit,
      applied_sequence, applied_at, applied_by, run_token, attempt_id)
   VALUES ({_sql_literal(migration_id)}, {_sql_literal(checksum)}, {_sql_literal(target)},
-          {_clob_literal(dependency_json)}, {_clob_literal(observation_json)},
+          v_dependencies, v_observation,
           {_sql_literal(source_commit)}, v_sequence, SYSTIMESTAMP, {_sql_literal(applied_by)},
           {_sql_literal(run_token)}, {_sql_literal(attempt_id or '')});
   UPDATE TEAM_MIGRATION_ATTEMPT SET state = 'APPLIED', finished_at = SYSTIMESTAMP
