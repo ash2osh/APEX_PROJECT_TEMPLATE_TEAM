@@ -61,15 +61,16 @@ def _clob_literal(value: str) -> str:
     return " || ".join(f"TO_CLOB({piece})" for piece in pieces)
 
 
-def _b64_sql(column: str, *, clob: bool = False) -> str:
-    source = (
-        f"NVL(DBMS_LOB.SUBSTR({column}, 900, 1), CHR(1))"
-        if clob
-        else f"NVL({column}, CHR(1))"
-    )
+def _b64_sql(column: str) -> str:
+    """Base64-encode a column so wrapped output stays safely re-joinable.
+
+    CLOB columns are never read through this helper: they are read in bounded
+    chunks with an explicit part/total, so a truncating branch here would only
+    ever be a silent-data-loss trap.
+    """
     return (
         "UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE("
-        f"UTL_RAW.CAST_TO_RAW({source})))"
+        f"UTL_RAW.CAST_TO_RAW(NVL({column}, CHR(1)))))"
     )
 
 

@@ -58,5 +58,22 @@ class ConflictAssistantTests(unittest.TestCase):
                 write_candidate(briefing, {"pages/p1.apx": "title: resolved"}, out_root=root / "scratch" / ".." / "outside")
 
 
+class SingleAdapterTests(unittest.TestCase):
+    def test_explain_conflict_has_exactly_one_cli_adapter(self):
+        root = Path(__file__).resolve().parents[2]
+        self.assertFalse(
+            (root / "scripts/teamlib/conflict_assistant_cli.py").exists(),
+            "conflict_assistant_cli.py duplicates conflict_assistant.main",
+        )
+        from teamlib import conflict_assistant
+        self.assertTrue(callable(getattr(conflict_assistant, "main", None)))
+
+    def test_b64_sql_has_no_silently_truncating_clob_branch(self):
+        import inspect
+        from teamlib.migration_store import _b64_sql
+        self.assertNotIn("clob", inspect.signature(_b64_sql).parameters)
+        self.assertNotIn("900", inspect.getsource(_b64_sql))
+
+
 if __name__ == "__main__":
     unittest.main()

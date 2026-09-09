@@ -226,8 +226,11 @@ def assert_source_clean(repo: str | Path, alias: str) -> None:
             path = raw_path.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise TreeError("Git status contains a non-UTF-8 path") from exc
-        if " -> " in path:
-            path = path.rsplit(" -> ", 1)[-1]
+        # --porcelain=v1 -z emits a rename as two NUL-separated records (new
+        # path, then original) rather than an "orig -> new" pair, so there is no
+        # arrow to split. The bare original-path record cannot start with the
+        # alias prefix after the two-character status slice, and any record that
+        # does is refused below by the non-clean status check.
         if not path.startswith(prefix):
             continue
         relative = _validate_relative_path(path[len(prefix):])
