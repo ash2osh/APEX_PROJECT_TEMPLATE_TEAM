@@ -12,6 +12,9 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+
+import team
 
 
 class LauncherTests(unittest.TestCase):
@@ -81,6 +84,51 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"status": "valid"', result.stdout)
+
+
+class OfflineEnvForwardingTests(unittest.TestCase):
+    def test_global_env_flag_reaches_an_env_aware_offline_handler(self):
+        captured: list[list[str]] = []
+
+        def spy(argv=None):
+            captured.append(list(argv or []))
+            return 0
+
+        with patch("teamlib.release_adapter.main", spy):
+            team.main([
+                "--env", "profiles/test.env", "apply-release", "release.tar",
+                "--plan", "plan.json", "--history", "history.json", "--target", "t.json",
+            ])
+        self.assertEqual(len(captured), 1)
+        self.assertIn("--env", captured[0])
+        self.assertEqual(captured[0][captured[0].index("--env") + 1], "profiles/test.env")
+
+    def test_explicit_env_after_the_subcommand_is_not_duplicated(self):
+        captured: list[list[str]] = []
+
+        def spy(argv=None):
+            captured.append(list(argv or []))
+            return 0
+
+        with patch("teamlib.release_adapter.main", spy):
+            team.main([
+                "--env", "profiles/global.env", "apply-release", "release.tar",
+                "--plan", "plan.json", "--history", "history.json", "--target", "t.json",
+                "--env", "profiles/explicit.env",
+            ])
+        self.assertEqual(captured[0].count("--env"), 1)
+        self.assertEqual(captured[0][captured[0].index("--env") + 1], "profiles/explicit.env")
+
+    def test_global_env_is_not_forwarded_to_handlers_that_reject_it(self):
+        captured: list[list[str]] = []
+
+        def spy(argv=None):
+            captured.append(list(argv or []))
+            return 0
+
+        with patch("teamlib.ci.main", spy):
+            team.main(["--env", "profiles/test.env", "ci-doctor", "--contract", "ci/runner-contract.json"])
+        self.assertNotIn("--env", captured[0])
 
 
 if __name__ == "__main__":

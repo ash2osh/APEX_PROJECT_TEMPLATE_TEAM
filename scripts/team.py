@@ -508,6 +508,12 @@ def _online(args: argparse.Namespace) -> object:
     raise ConfigError(f"unsupported online command: {command}")
 
 
+# Offline commands take explicit local inputs, but apply-release binds a
+# non-production target and therefore accepts an environment profile. A global
+# --env must reach it rather than being silently dropped.
+ENV_AWARE_OFFLINE_COMMANDS = frozenset({"apply-release"})
+
+
 def _offline(args: argparse.Namespace) -> int:
     module_names = {
         "new-migration": "authoring",
@@ -536,6 +542,9 @@ def _offline(args: argparse.Namespace) -> int:
         raise ConfigError(f"offline command has no public handler: {args.command}")
     command_prefixed = {"new-migration", "add-dependency", "build-release", "verify-release", "plan-release", "apply-release", "adopt-baseline", "ci-doctor", "ci-replay"}
     handler_args = [args.command, *args.args] if args.command in command_prefixed else list(args.args)
+    env_file = getattr(args, "env_file", None)
+    if env_file and args.command in ENV_AWARE_OFFLINE_COMMANDS and "--env" not in handler_args:
+        handler_args.extend(["--env", env_file])
     result = handler(handler_args)
     return int(result or 0)
 
