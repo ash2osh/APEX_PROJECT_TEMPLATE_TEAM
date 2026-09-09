@@ -10,6 +10,7 @@ if _SCRIPTS_DIR not in sys.path:
 from pathlib import Path
 import json
 import os
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -198,6 +199,27 @@ class ReplayWorkflowIsolationTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         source = (root / "scripts/ci_replay_runner.py").read_text(encoding="utf-8")
         self.assertIn('allowed_ignored = ("scratch/", ".sync-state/", ".env", ".env.")', source)
+
+
+class WorkflowPythonVersionTests(unittest.TestCase):
+    FLOOR = "'3.10'"
+
+    def test_every_job_running_team_py_pins_the_declared_floor(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in ("template-checks", "database-checks", "integration", "release"):
+            text = (root / ".github/workflows" / f"{name}.yml").read_text(encoding="utf-8")
+            versions = re.findall(r"python-version:\s*(\S+)", text)
+            self.assertTrue(versions, f"{name} pins no python-version")
+            for version in versions:
+                self.assertEqual(version, self.FLOOR, f"{name} pins {version}")
+            # Any job invoking team.py must have set up Python first.
+            if "team.py" in text:
+                self.assertIn("actions/setup-python", text)
+
+    def test_the_declared_floor_matches_the_launchers(self):
+        root = Path(__file__).resolve().parents[2]
+        self.assertIn("3.10+", (root / "scripts/team.sh").read_text(encoding="utf-8"))
+        self.assertIn("3.10+", (root / "scripts/team.ps1").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
