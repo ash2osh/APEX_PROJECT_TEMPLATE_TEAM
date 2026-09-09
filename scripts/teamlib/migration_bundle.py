@@ -159,12 +159,57 @@ def _parse_header(text: str, migration_id: str) -> tuple[int, str, bool, tuple[t
     return version, target, destructive == "true", tuple(sorted(dependencies))
 
 
+# SQLcl interprets a client command only where a new statement begins. Matching
+# these words anywhere in a body rejects CONNECT BY, EXIT WHEN and any column
+# named host -- including this template's own control_metadata.sql.
+_CLIENT_COMMAND_RE = re.compile(
+    r"^(?:@{1,2}|!)|^(?:CONNECT|CONN|HOST|EXIT|QUIT|WHENEVER|SPOOL|SCRIPT|START)\b",
+    re.IGNORECASE,
+)
+_BLOCK_START_RE = re.compile(
+    r"^(?:DECLARE|BEGIN)\b"
+    r"|^CREATE(?:\s+OR\s+REPLACE)?\s+(?:PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE)\b",
+    re.IGNORECASE,
+)
+
+
+def _statement_leading_lines(masked: str):
+    """Yield (line number, text) for lines that begin a top-level statement.
+
+    A PL/SQL block is one statement terminated by a line containing only "/",
+    so nothing inside it can be a client command. Outside a block, a statement
+    begins after a ";" or "/" -- which is why a continuation line carrying
+    CONNECT BY is never offered to the caller.
+    """
+    pending = True
+    in_block = False
+    for number, raw in enumerate(masked.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        if in_block:
+            if line == "/":
+                in_block = False
+                pending = True
+            continue
+        if pending:
+            yield number, line
+            if _BLOCK_START_RE.match(line):
+                in_block = True
+                pending = False
+                continue
+        pending = line.endswith(";") or line == "/"
+
+
 def _assert_controls(text: str, *, verify: bool = False) -> None:
     code = _mask_code(text)
-    if re.search(r"(?im)(?:^|[;\n])\s*(?:@{1,2}|START\b|SCRIPT\b)", code):
-        raise BundleError("nested SQLcl includes are prohibited")
-    if re.search(r"\b(?:CONNECT|CONN|HOST|EXIT|WHENEVER)\b", code, re.IGNORECASE):
-        raise BundleError("SQLcl control command is prohibited in migration members")
+    for number, line in _statement_leading_lines(code):
+        if re.match(r"^(?:@{1,2}|START\b|SCRIPT\b)", line, re.IGNORECASE):
+            raise BundleError(f"nested SQLcl includes are prohibited (line {number})")
+        if _CLIENT_COMMAND_RE.match(line):
+            raise BundleError(
+                f"SQLcl control command is prohibited in migration members (line {number})"
+            )
     if re.search(r"(?i)\bSET\s+(?:DEFINE\s+ON|SQLTERMINATOR\s+OFF|ESCAPE\s+ON)\b", code):
         raise BundleError("SQLcl substitution/error-policy changes are prohibited")
     if verify:

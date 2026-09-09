@@ -99,6 +99,34 @@ class MigrationBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(BundleError, "unterminated"):
             _mask_code("UPDATE t SET msg = 'never closed;")
 
+    def test_valid_oracle_constructs_are_not_mistaken_for_client_commands(self):
+        from teamlib.migration_bundle import _assert_controls
+        for sql in (
+            "SELECT id FROM org\nSTART WITH id = 1\nCONNECT BY PRIOR id = parent_id;\n",
+            "BEGIN\n  FOR r IN (SELECT 1 x FROM dual) LOOP\n    EXIT WHEN r.x > 5;\n  END LOOP;\nEND;\n/\n",
+            "CREATE TABLE nodes (host VARCHAR2(255));\n",
+            "CREATE TABLE t (\n  host VARCHAR2(512) NOT NULL,\n  id NUMBER\n);\n",
+            "CREATE OR REPLACE PROCEDURE p IS\nBEGIN\n  EXIT;\nEND;\n/\n",
+        ):
+            _assert_controls(sql)
+
+    def test_the_template_own_control_metadata_ddl_is_a_valid_migration_member(self):
+        from teamlib.migration_bundle import _assert_controls
+        root = Path(__file__).resolve().parents[2]
+        _assert_controls((root / "scripts/sql/control_metadata.sql").read_text(encoding="utf-8"))
+
+    def test_real_client_commands_are_still_rejected(self):
+        from teamlib.migration_bundle import _assert_controls, BundleError
+        for sql in (
+            "HOST rm -rf /tmp/x\n",
+            "SELECT 1 FROM dual;\nEXIT\n",
+            "SELECT 1 FROM dual;\nWHENEVER SQLERROR CONTINUE\n",
+            "SELECT 1 FROM dual;\nCONNECT scott/tiger@db\n",
+            "SELECT 1 FROM dual;\nSPOOL /tmp/out.txt\n",
+        ):
+            with self.assertRaises(BundleError, msg=sql):
+                _assert_controls(sql)
+
 
 if __name__ == "__main__":
     unittest.main()
