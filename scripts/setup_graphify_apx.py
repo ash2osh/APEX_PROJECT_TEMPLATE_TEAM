@@ -8,16 +8,45 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 CANONICAL_EXTRACTOR = REPO_ROOT / "scripts" / "graphify_apexlang_extractor.py"
 # The exact text this installer writes; the only proof that .apx is ours.
 DETECT_MARKER = "'.sql', '.apx',"
+
+# Patching another package's installed source is reverted silently by the next
+# upgrade of that package. Record what this installer was written against and
+# refuse anything else, so an upgrade surfaces as a clear message rather than
+# .apx support quietly disappearing.
+SUPPORTED_GRAPHIFY_VERSIONS = ("0.1", "0.2", "0.3")
+
+
+def _graphify_version(base):
+    for name in ("__version__.py", "version.py", "__init__.py"):
+        candidate = Path(base) / name
+        if not candidate.is_file():
+            continue
+        match = re.search(r"__version__\s*=\s*[\"']([^\"']+)[\"']", candidate.read_text(encoding="utf-8"))
+        if match:
+            return match.group(1)
+    return None
+
+
+def _version_is_supported(base):
+    if os.environ.get("TEAM_GRAPHIFY_ALLOW_UNTESTED") == "1":
+        return True, "override"
+    version = _graphify_version(base)
+    if version is None:
+        return False, "the installed Graphify version could not be determined"
+    if not any(version.startswith(supported) for supported in SUPPORTED_GRAPHIFY_VERSIONS):
+        return False, f"Graphify {version} is not one of {', '.join(SUPPORTED_GRAPHIFY_VERSIONS)}"
+    return True, version
 
 def find_graphify_dirs():
     dirs = []
@@ -206,6 +235,14 @@ def patch_graphify_dir(base: Path) -> bool:
         print(f"Warning: could not patch {extract_path}; extractor routing anchors not found")
         return False
 
+    supported, detail = _version_is_supported(base)
+    if not supported:
+        print(
+            f"Warning: refusing to patch Graphify at '{base}': {detail}. "
+            "Set TEAM_GRAPHIFY_ALLOW_UNTESTED=1 to proceed anyway."
+        )
+        return False
+
     try:
         detect_path.write_text(patched_detect, encoding="utf-8", newline="")
         extract_path.write_text(patched_extract, encoding="utf-8", newline="")
@@ -237,7 +274,7 @@ def setup_graphify_apx() -> bool:
     graphify_bin = shutil.which("graphify")
     if graphify_bin and os.path.exists(graphify_bin):
         try:
-            with open(graphify_bin, "r") as f:
+            with open(graphify_bin) as f:
                 first_line = f.readline()
         except (UnicodeDecodeError, OSError):
             # Windows pip/uv console-script shims are compiled .exe launchers,

@@ -44,5 +44,18 @@ class GraphifyCorpusTests(unittest.TestCase):
                 collect_corpus(root)
 
 
+class GraphifyInstallerTests(unittest.TestCase):
+    def test_installer_lives_with_the_rest_of_the_python_code(self):
+        root = Path(__file__).resolve().parents[2]
+        self.assertFalse((root / "setup_graphify_apx.py").exists())
+        self.assertTrue((root / "scripts/setup_graphify_apx.py").is_file())
+
+    def test_installer_pins_the_versions_it_knows_how_to_patch(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "scripts/setup_graphify_apx.py").read_text(encoding="utf-8")
+        self.assertIn("SUPPORTED_GRAPHIFY_VERSIONS", source)
+        self.assertIn("TEAM_GRAPHIFY_ALLOW_UNTESTED", source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@ name: graphify
 description: Build and query the optional domain graph without changing source state.
 ---
 
-`python3 setup_graphify_apx.py` installs the tracked extractor only when the
+`python3 scripts/setup_graphify_apx.py` installs the tracked extractor only when the
 optional Graphify package is present and verifies the installed bytes with a
 smoke extraction. Run `graphify extract . --force` after changing
 `.graphifyignore`; otherwise use `graphify update .` for application/database
