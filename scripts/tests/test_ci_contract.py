@@ -184,5 +184,21 @@ class CIContractTests(unittest.TestCase):
             self.assertTrue(observed[0].is_absolute())
 
 
+class ReplayWorkflowIsolationTests(unittest.TestCase):
+    def test_replay_evidence_is_never_written_into_the_checkout(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/database-checks.yml").read_text(encoding="utf-8")
+        # The runner refuses any untracked path outside its four allowed
+        # prefixes, so evidence must not land in the working tree at all.
+        self.assertNotIn('tee "evidence/', workflow)
+        self.assertNotIn("mkdir -p evidence/ci", workflow)
+        self.assertIn("RUNNER_TEMP", workflow)
+
+    def test_runner_allowed_ignored_prefixes_are_documented_and_unchanged(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "scripts/ci_replay_runner.py").read_text(encoding="utf-8")
+        self.assertIn('allowed_ignored = ("scratch/", ".sync-state/", ".env", ".env.")', source)
+
+
 if __name__ == "__main__":
     unittest.main()

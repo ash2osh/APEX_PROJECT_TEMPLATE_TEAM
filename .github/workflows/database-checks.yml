@@ -43,16 +43,20 @@ jobs:
         env:
           SOURCE_SHA: ${{ github.sha }}
         run: |
-          mkdir -p evidence/ci
+          # The replay runner refuses to run against a working tree carrying
+          # untracked files, so evidence is written outside the checkout.
+          mkdir -p "$RUNNER_TEMP/evidence"
           PYTHONPATH=scripts python3 scripts/team.py ci-replay \
             --ref "$SOURCE_SHA" \
             --contract ci/runner-contract.json \
             --provisioner provisioners/docker_pdb.sh \
-            --runner ../scripts/ci_replay_runner.py | tee "evidence/ci/${SOURCE_SHA}.json"
+            --runner ../scripts/ci_replay_runner.py \
+            > "$RUNNER_TEMP/evidence/${SOURCE_SHA}.json"
+          cat "$RUNNER_TEMP/evidence/${SOURCE_SHA}.json"
       - name: Publish exact-SHA qualification evidence
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: qualification-${{ github.sha }}
-          path: evidence/ci/${{ github.sha }}.json
+          path: ${{ runner.temp }}/evidence/${{ github.sha }}.json
           if-no-files-found: error
