@@ -17,12 +17,22 @@ ROOT = Path(__file__).resolve().parents[2]
 class IntegrationWorkflowTests(unittest.TestCase):
     def test_integration_workflow_is_a_real_exact_sha_gate(self):
         workflow = (ROOT / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
-        self.assertIn("needs:", workflow)
-        self.assertIn("migrate", workflow)
-        self.assertIn("deploy-app", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("push:", workflow)
+        self.assertEqual(workflow.count("runs-on:"), 1)
+        self.assertIn("environment: integration", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        for command in ("setup-state", "adopt-frontier", "check-drift", "migrate", "deploy-app", "qualify-target"):
+            self.assertIn(command, workflow)
         self.assertIn("TEAM_ENV_FILE", workflow)
         self.assertIn("TEAM_APP_ALIASES", workflow)
         self.assertIn("GITHUB_SHA", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn("upload-artifact", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+        ordered = [workflow.index(command) for command in ("setup-state", "adopt-frontier", "check-drift", "migrate", "deploy-app", "qualify-target")]
+        self.assertEqual(ordered, sorted(ordered))
+        self.assertNotIn("--destructive-confirmation", workflow)
         self.assertNotIn("Use the qualified adapter", workflow)
         self.assertNotIn("echo \"Integration credentials", workflow)
 
