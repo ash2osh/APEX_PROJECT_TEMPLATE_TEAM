@@ -106,21 +106,15 @@ def row_lines(stdout: str, prefix: str) -> list[list[str]]:
     return rows
 
 
-def _mask_span(chars: list[str], text: str, start: int, stop: int) -> None:
-    for index in range(start, stop):
-        if text[index] != "\n":
-            chars[index] = " "
+def _scan(text: str) -> tuple[list[tuple[str, int, int]], bool]:
+    """Locate every comment and literal span, Oracle alternative quoting included.
 
-
-def mask_sql(text: str) -> tuple[str, bool]:
-    """Blank comments and literals, preserving offsets and newlines.
-
-    Returns the masked text and whether every construct was terminated. Oracle
-    alternative quoting (``q'[...]'``, ``nq'{...}'``) is recognised, so an
-    embedded apostrophe neither ends the literal early nor leaks the rest of
-    the literal's text into the masked output as if it were code.
+    Returns ``(spans, terminated)``. ``terminated`` is False when a construct
+    runs off the end of the text, which every caller treats as a refusal: an
+    unterminated literal means the rest of the file is not what it looks like.
+    Spans are ascending, non-overlapping, and ``stop`` is exclusive.
     """
-    chars = list(text)
+    spans: list[tuple[str, int, int]] = []
     index = 0
     length = len(text)
     while index < length:
@@ -128,24 +122,20 @@ def mask_sql(text: str) -> tuple[str, bool]:
         following = text[index + 1] if index + 1 < length else ""
 
         if current == "-" and following == "-":
-            while index < length and text[index] != "\n":
-                chars[index] = " "
-                index += 1
+            end = text.find("\n", index)
+            if end == -1:
+                end = length
+            spans.append(("line-comment", index, end))
+            index = end
             continue
 
         if current == "/" and following == "*":
-            chars[index] = chars[index + 1] = " "
-            index += 2
-            while index < length:
-                if text[index] == "*" and index + 1 < length and text[index + 1] == "/":
-                    chars[index] = chars[index + 1] = " "
-                    index += 2
-                    break
-                if text[index] != "\n":
-                    chars[index] = " "
-                index += 1
-            else:
-                return "".join(chars), False
+            end = text.find("*/", index + 2)
+            if end == -1:
+                spans.append(("block-comment", index, length))
+                return spans, False
+            spans.append(("block-comment", index, end + 2))
+            index = end + 2
             continue
 
         if current in {"q", "Q"} and following == "'":
@@ -161,31 +151,58 @@ def mask_sql(text: str) -> tuple[str, bool]:
                 closer = _Q_CLOSERS.get(delimiter, delimiter)
                 end = text.find(closer + "'", index + 3)
                 if end == -1:
-                    _mask_span(chars, text, start, length)
-                    return "".join(chars), False
-                _mask_span(chars, text, start, end + 2)
+                    spans.append(("literal", start, length))
+                    return spans, False
+                spans.append(("literal", start, end + 2))
                 index = end + 2
                 continue
 
         if current in {"'", '"'}:
             quote = current
-            chars[index] = " "
-            index += 1
-            while index < length:
-                if text[index] == quote:
-                    if index + 1 < length and text[index + 1] == quote:
-                        chars[index] = chars[index + 1] = " "
-                        index += 2
+            cursor = index + 1
+            while cursor < length:
+                if text[cursor] == quote:
+                    if cursor + 1 < length and text[cursor + 1] == quote:
+                        cursor += 2
                         continue
-                    chars[index] = " "
-                    index += 1
+                    spans.append(("literal", index, cursor + 1))
+                    index = cursor + 1
                     break
-                if text[index] != "\n":
-                    chars[index] = " "
-                index += 1
+                cursor += 1
             else:
-                return "".join(chars), False
+                spans.append(("literal", index, length))
+                return spans, False
             continue
 
         index += 1
-    return "".join(chars), True
+    return spans, True
+
+
+def mask_sql(text: str) -> tuple[str, bool]:
+    """Blank comments and literals, preserving offsets and newlines.
+
+    Returns the masked text and whether every construct was terminated. Oracle
+    alternative quoting (``q'[...]'``, ``nq'{...}'``) is recognised, so an
+    embedded apostrophe neither ends the literal early nor leaks the rest of
+    the literal's text into the masked output as if it were code.
+    """
+    spans, terminated = _scan(text)
+    chars = list(text)
+    for _, start, stop in spans:
+        for index in range(start, stop):
+            if text[index] != "\n":
+                chars[index] = " "
+    return "".join(chars), terminated
+
+
+def comment_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Return ``(start, stop)`` offsets of every real ``--`` line comment.
+
+    A ``--`` inside a string literal -- including a q-quoted literal whose body
+    contains an apostrophe -- is data and is not reported. Callers that parse
+    directives out of comments must use this rather than scanning raw lines.
+    """
+    spans, terminated = _scan(text)
+    if not terminated:
+        raise SqlTextError("unterminated SQL comment or literal")
+    return tuple((start, stop) for kind, start, stop in spans if kind == "line-comment")

@@ -100,5 +100,34 @@ class SqlLiteralTests(unittest.TestCase):
             sql_literal("bad\x00value")
 
 
+class CommentSpanTests(unittest.TestCase):
+    def test_line_comment_offsets_are_reported(self):
+        from teamlib.sql_text import comment_spans
+
+        text = "SELECT 1 FROM dual; -- trailing note\nSELECT 2 FROM dual;\n"
+        self.assertEqual(comment_spans(text), ((20, 36),))
+        self.assertEqual(text[20:36], "-- trailing note")
+
+    def test_q_quoted_literal_hides_a_comment_marker(self):
+        from teamlib.sql_text import comment_spans
+
+        # The apostrophe in "It's" must not end the q-quoted literal, so the
+        # "--" inside it is data, not a comment.
+        text = "SELECT q'[It's a trap -- depends-on: forged]' FROM dual;\n"
+        self.assertEqual(comment_spans(text), ())
+
+    def test_block_comment_is_not_a_line_comment(self):
+        from teamlib.sql_text import comment_spans
+
+        self.assertEqual(comment_spans("/* -- not a line comment */\n"), ())
+
+    def test_mask_sql_still_blanks_the_same_text(self):
+        from teamlib.sql_text import mask_sql
+
+        masked, terminated = mask_sql("SELECT 'abc' FROM dual; -- note\n")
+        self.assertTrue(terminated)
+        self.assertEqual(masked, "SELECT       FROM dual;        \n")
+
+
 if __name__ == "__main__":
     unittest.main()
