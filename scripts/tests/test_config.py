@@ -312,5 +312,34 @@ class RoleEnvironmentInvariantTests(unittest.TestCase):
                 parse_target_contract(path)
 
 
+class TargetBindingTypeTests(unittest.TestCase):
+    def _contract(self, connection):
+        return {
+            "version": 1,
+            "project": "team",
+            "role": "integration",
+            "environment": "test",
+            "instance_id": "INST",
+            "db_name": "DB",
+            "service": "svc",
+            "session_user": "APP",
+            "current_schema": "APP",
+            "workspace_id": 1,
+            "app_ids": {"checkout": 101},
+            "recovery_owner": {"role": "owners", "members": ["a", "b"]},
+            "binding": {"connection": connection},
+        }
+
+    def test_non_string_connection_is_a_config_error(self):
+        for value in (5, True, ["alias"], {"name": "alias"}):
+            with self.subTest(value=value):
+                with self.assertRaises(ConfigError):
+                    parse_target_contract(self._contract(value))
+
+    def test_valid_connection_still_parses(self):
+        contract = parse_target_contract(self._contract("integration-alias"))
+        self.assertEqual(contract.binding["connection"], "integration-alias")
+
+
 if __name__ == "__main__":
     unittest.main()

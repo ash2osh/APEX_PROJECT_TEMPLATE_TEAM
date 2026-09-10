@@ -592,6 +592,11 @@ def parse_target_contract(
         raise ConfigError("unsupported target binding fields: " + ", ".join(unknown_binding))
     connection = binding.get("connection", binding.get("sqlcl_connection"))
     if connection is not None:
+        # Every other field in this parser is type-checked before it reaches a
+        # regex. Without this, a JSON number here escapes the ConfigError
+        # contract as a TypeError and team.py prints a traceback.
+        if not isinstance(connection, str):
+            raise ConfigError("target binding.connection must be a credential-free connection name")
         _validate_connection("binding.connection", connection)
     for key, actual in (
         ("instance_id", instance_id), ("db_name", db_name), ("service", service),
