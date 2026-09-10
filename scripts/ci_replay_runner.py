@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -132,6 +133,67 @@ def _select_runner(*, profile, repo: Path, work: Path, run_sqlcl=run_sqlcl):
             "diagnostic": "",
             "assertions": [name for name, _ in rows],
         }
+
+    return resolve
+
+
+def _require_flow_adapter(declarations: Mapping[str, Any], executable: str | None) -> None:
+    """Refuse early, and by name, when a declared flow check has no adapter.
+
+    A browser driver cannot ship with a stdlib-only template. Leaving its
+    absence to surface as a per-check UNKNOWN produced a correct refusal with an
+    unactionable message, so name the checks and the variable instead.
+    """
+    if executable:
+        return
+    pending = [
+        f"{alias}/{check.get('id')}"
+        for alias, declaration in sorted(declarations.items())
+        for check in declaration.get("checks", [])
+        if check.get("kind") == "flow"
+    ]
+    if not pending:
+        return
+    raise SystemExit(
+        "declared flow checks have no qualified browser adapter: "
+        + ", ".join(pending)
+        + ". Set TEAM_FLOW_RUNNER to an executable invoked as "
+        "`<executable> --alias <alias> --check-json <path>` that prints one JSON "
+        "object with a status of PASS, FAIL or UNKNOWN."
+    )
+
+
+def _flow_runner(executable: str, work: Path):
+    """Return a flow-check adapter that delegates to a qualified executable."""
+
+    def resolve(alias: str, check: Mapping[str, Any]) -> dict[str, Any]:
+        payload_root = Path(work) / "flow" / alias
+        payload_root.mkdir(parents=True, exist_ok=True)
+        payload = payload_root / f"{check.get('id', 'check')}.json"
+        payload.write_text(
+            json.dumps(dict(check), sort_keys=True), encoding="utf-8", newline="\n"
+        )
+        try:
+            result = subprocess.run(
+                [executable, "--alias", alias, "--check-json", str(payload)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            return {"status": "FAIL", "diagnostic": f"flow adapter could not start: {exc}"}
+        if result.returncode != 0:
+            return {
+                "status": "FAIL",
+                "diagnostic": result.stderr.strip() or f"flow adapter exit {result.returncode}",
+            }
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            return {"status": "FAIL", "diagnostic": f"flow adapter did not return JSON: {exc}"}
+        if not isinstance(value, dict):
+            return {"status": "FAIL", "diagnostic": "flow adapter returned a non-object"}
+        return value
 
     return resolve
 
@@ -286,6 +348,12 @@ def main(argv: list[str] | None = None) -> int:
         }
         if aliases:
             declarations = _check_declarations(repo, aliases)
+            loaded = {
+                alias: json.loads(path.read_text(encoding="utf-8"))
+                for alias, path in declarations.items()
+            }
+            flow_executable = os.environ.get("TEAM_FLOW_RUNNER") or None
+            _require_flow_adapter(loaded, flow_executable)
             control_store = SqlControlStore(metadata, work_root=work / "metadata")
             app_targets = [profile_target(config, "APEX", alias=alias) for alias in aliases]
             control_store.setup_state(app_targets)
@@ -304,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
                     repo=repo,
                     work=work,
                 ),
+                "flow_runner": _flow_runner(flow_executable, work) if flow_executable else None,
             }
             try:
                 report = verify_candidate_apps(

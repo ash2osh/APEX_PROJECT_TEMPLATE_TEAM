@@ -156,5 +156,40 @@ class SelectRunnerTests(unittest.TestCase):
         self.assertIn("absent.verify.sql", observed["diagnostic"])
 
 
+class FlowRunnerTests(unittest.TestCase):
+    def test_absent_flow_adapter_is_named_in_the_refusal(self):
+        import ci_replay_runner
+
+        with self.assertRaises(SystemExit) as raised:
+            ci_replay_runner._require_flow_adapter(
+                {"employee": {"checks": [{"id": "smoke", "kind": "flow"}]}}, None
+            )
+        message = str(raised.exception)
+        self.assertIn("TEAM_FLOW_RUNNER", message)
+        self.assertIn("employee/smoke", message)
+
+    def test_no_flow_checks_needs_no_adapter(self):
+        import ci_replay_runner
+
+        ci_replay_runner._require_flow_adapter(
+            {"employee": {"checks": [{"id": "t1", "kind": "select"}]}}, None
+        )
+
+    def test_flow_runner_parses_the_adapter_result(self):
+        import ci_replay_runner
+
+        root = Path(tempfile.mkdtemp(prefix="team-flow-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        adapter = root / "flow.sh"
+        adapter.write_text(
+            '#!/usr/bin/env bash\necho \'{"status": "PASS", "diagnostic": ""}\'\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        adapter.chmod(0o755)
+        runner = ci_replay_runner._flow_runner(str(adapter), root)
+        self.assertEqual(runner("employee", {"id": "smoke", "kind": "flow"})["status"], "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()
