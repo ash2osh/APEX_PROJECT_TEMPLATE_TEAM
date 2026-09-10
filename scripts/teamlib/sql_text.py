@@ -206,3 +206,73 @@ def comment_spans(text: str) -> tuple[tuple[int, int], ...]:
     if not terminated:
         raise SqlTextError("unterminated SQL comment or literal")
     return tuple((start, stop) for kind, start, stop in spans if kind == "line-comment")
+
+
+# A PL/SQL block is one statement whose body may contain any number of
+# semicolons. It ends at a line containing only "/", never at a ";".
+BLOCK_START_RE = re.compile(
+    r"^(?:DECLARE|BEGIN)\b"
+    r"|^CREATE(?:\s+OR\s+REPLACE)?(?:\s+(?:EDITIONABLE|NONEDITIONABLE))?\s+"
+    r"(?:PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE)\b",
+    re.IGNORECASE,
+)
+# SQLcl client commands are terminated by the end of the line, not by ";".
+# Treating them as SQL made one unterminated "SET DEFINE OFF" swallow every
+# following statement, so nothing after it was ever offered to a guard.
+_LINE_TERMINATED_RE = re.compile(
+    r"^(?:@{1,2}|!)"
+    r"|^(?:SET|SHOW|SPOOL|PROMPT|WHENEVER|EXIT|QUIT|CONNECT|CONN|DISCONNECT|DISC"
+    r"|HOST|HO|START|SCRIPT|DEFINE|DEF|UNDEFINE|UNDEF|COLUMN|COL|CLEAR|ACCEPT|ACC"
+    r"|PAUSE|TIMING|REM|REMARK|DESCRIBE|DESC|EXECUTE|EXEC|ALIAS|APEX|LIQUIBASE|LB"
+    r"|CD|INFO|HISTORY)\b",
+    re.IGNORECASE,
+)
+
+
+def statement_starts(masked: str):
+    """Yield ``(line_number, text)`` for every top-level statement.
+
+    ``masked`` must be :func:`mask_sql` output, so a ``;`` it still contains
+    really does terminate a statement rather than sitting inside a literal or a
+    comment. ``text`` runs from the statement's first non-blank character to the
+    next top-level ``;`` or the end of that line -- enough to match a leading
+    keyword, which is all any guard in this repository inspects.
+
+    Two properties matter and are why this replaced the per-line walkers:
+    a second statement after an inline ``;`` is offered, and a client command
+    with no ``;`` does not hide the lines that follow it.
+    """
+    pending = True
+    in_block = False
+    for number, raw in enumerate(masked.splitlines(), start=1):
+        line = raw.strip()
+        if in_block:
+            if line == "/":
+                in_block = False
+                pending = True
+            continue
+        if not line:
+            continue
+        if line == "/":
+            pending = True
+            continue
+        position = 0
+        line_length = len(line)
+        while position < line_length:
+            semicolon = line.find(";", position)
+            piece = (line[position:semicolon] if semicolon >= 0 else line[position:]).strip()
+            if pending and piece:
+                yield number, piece
+                if BLOCK_START_RE.match(piece):
+                    in_block = True
+                    pending = False
+                    break
+                if _LINE_TERMINATED_RE.match(piece):
+                    # The command ended with this line regardless of any ";".
+                    pending = True
+                    break
+            if semicolon < 0:
+                pending = False
+                break
+            pending = True
+            position = semicolon + 1
