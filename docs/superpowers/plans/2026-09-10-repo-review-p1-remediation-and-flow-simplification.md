@@ -74,7 +74,7 @@
 - Consumes: SQLcl result objects with a text `stdout` attribute.
 - Produces: `parse_team_assertions(stdout: str) -> tuple[str, ...]` and `run_verification_member(profile, path, work, *, runner=run_sqlcl) -> tuple[str, ...]`.
 
-- [ ] **Step 1: Write the parser failure and success tests**
+- [x] **Step 1: Write the parser failure and success tests**
 
 ```python
 from pathlib import Path
@@ -141,7 +141,7 @@ class AssertionTests(unittest.TestCase):
                 run_verification_member(object(), member, root / "work", runner=runner)
 ```
 
-- [ ] **Step 2: Run the new tests and confirm the missing module failure**
+- [x] **Step 2: Run the new tests and confirm the missing module failure**
 
 Run:
 
@@ -151,7 +151,7 @@ PYTHONPATH=scripts python3 -m unittest scripts.tests.test_assertions -v
 
 Expected: FAIL because `teamlib.assertions` does not exist.
 
-- [ ] **Step 3: Implement strict parsing and the empty-member exception**
+- [x] **Step 3: Implement strict parsing and the empty-member exception**
 
 ```python
 """Strict parsing for the shared TEAM_ASSERT SQL output protocol."""
@@ -215,7 +215,7 @@ def run_verification_member(
     return parse_team_assertions(getattr(result, "stdout", ""))
 ```
 
-- [ ] **Step 4: Replace all three assertion implementations with the shared helper**
+- [x] **Step 4: Replace all three assertion implementations with the shared helper**
 
 In `qualification._select_runner`, call `parse_team_assertions` and translate
 `AssertionVerificationError` into the existing structured `FAIL` result:
@@ -255,14 +255,14 @@ def verify(migration, action, verify_path):
 
 Do not add a second parser.
 
-- [ ] **Step 5: Add callback-level regressions**
+- [x] **Step 5: Add callback-level regressions**
 
 Add one CLI callback test and one release-adapter callback test whose fake SQLcl
 returns `TEAM_ASSERT|postcondition|FAIL`; assert that no history event is
 recorded and the attempt is `FAILED`. Also retain explicit tests for forward,
 undo, redo, and empty verification members.
 
-- [ ] **Step 6: Run the focused suites**
+- [x] **Step 6: Run the focused suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -274,7 +274,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the assertion boundary**
+- [x] **Step 7: Commit the assertion boundary**
 
 ```bash
 git add scripts/teamlib/assertions.py scripts/teamlib/qualification.py \
@@ -301,7 +301,7 @@ git commit -m "fix: enforce migration verification assertions"
 - Consumes: an exception and its `__cause__`/`__context__` chain.
 - Produces: `result_is_unknown(exc: BaseException) -> bool` and phase-aware attempt handling in `_apply_operation`.
 
-- [ ] **Step 1: Write exception-chain regressions**
+- [x] **Step 1: Write exception-chain regressions**
 
 ```python
 from teamlib.migration_store import MigrationStoreError
@@ -337,7 +337,7 @@ class CommitThenLoseEventAckStore(MigrationStore):
 Assert `apply_plan` reports an unknown result, does not overwrite the committed
 attempt with `FAILED`, and leaves the mutex for recovery.
 
-- [ ] **Step 2: Run the focused tests and confirm failure**
+- [x] **Step 2: Run the focused tests and confirm failure**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -348,7 +348,7 @@ PYTHONPATH=scripts python3 -m unittest \
 Expected: FAIL because wrapped errors are not classified and the engine always
 writes a second attempt state.
 
-- [ ] **Step 3: Add cause-chain classification to `sqlcl.py`**
+- [x] **Step 3: Add cause-chain classification to `sqlcl.py`**
 
 ```python
 _UNKNOWN_RESULT_MARKERS = (
@@ -374,7 +374,7 @@ def result_is_unknown(exc: BaseException) -> bool:
 
 Delete the narrower duplicate `_result_is_unknown` from `migrate.py`.
 
-- [ ] **Step 4: Track the operation phase and avoid contradictory writes**
+- [x] **Step 4: Track the operation phase and avoid contradictory writes**
 
 Immediately before the inner operation block, initialize `phase = "execute"`.
 Set it before each potentially state-changing boundary:
@@ -479,14 +479,14 @@ return _report(
 )
 ```
 
-- [ ] **Step 5: Cover each required phase**
+- [x] **Step 5: Cover each required phase**
 
 Parameterize failures for `execute`, `verify`, after-inventory persistence,
 `record_event`, `record_attempt_state`, and `release`. For each case assert the
 attempt/history combination, retained or uncertain mutex, message, and absence
 of a false `FAILED` claim after a possibly committed event.
 
-- [ ] **Step 6: Run focused and recovery suites**
+- [x] **Step 6: Run focused and recovery suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -498,7 +498,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit unknown-result preservation**
+- [x] **Step 7: Commit unknown-result preservation**
 
 ```bash
 git add scripts/teamlib/sqlcl.py scripts/teamlib/migrate.py \
@@ -523,7 +523,7 @@ git commit -m "fix: preserve unknown migration outcomes"
 - Consumes: the computed lowercase 64-character schema-set digest.
 - Produces: `_validate_schema_set_digest(value: str) -> str` and matching SQL/JSON bootstrap identity behavior.
 
-- [ ] **Step 1: Write bootstrap identity tests**
+- [x] **Step 1: Write bootstrap identity tests**
 
 For the JSON store, cover fresh, repeated matching, empty legacy, and mismatched
 identity:
@@ -542,7 +542,7 @@ version-2 row with digest `"a" * 64`. Assert matching bootstrap reaches the
 write call, while `"b" * 64` refuses after read-only preflight and emits no
 write call.
 
-- [ ] **Step 2: Run the metadata tests and confirm failure**
+- [x] **Step 2: Run the metadata tests and confirm failure**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -553,7 +553,7 @@ PYTHONPATH=scripts python3 -m unittest \
 Expected: FAIL because SQL bootstrap overwrites the existing digest and digest
 shape is not shared by both stores.
 
-- [ ] **Step 3: Add one exact digest validator**
+- [x] **Step 3: Add one exact digest validator**
 
 ```python
 def _validate_schema_set_digest(value: str) -> str:
@@ -566,7 +566,7 @@ def _validate_schema_set_digest(value: str) -> str:
 
 Call it before either backend opens its write transaction.
 
-- [ ] **Step 4: Preflight an existing Oracle metadata row before DDL**
+- [x] **Step 4: Preflight an existing Oracle metadata row before DDL**
 
 Add a private SQL-store reader that first queries `user_tables`; only if the
 table exists does it query the project row:
@@ -613,7 +613,7 @@ The write SQL inserts on a fresh store, fills an empty version-1 digest, advance
 version 1 to 2, and performs no version-2 digest update. Keep the reference SQL
 semantically identical.
 
-- [ ] **Step 5: Permit only explicit empty-legacy JSON adoption**
+- [x] **Step 5: Permit only explicit empty-legacy JSON adoption**
 
 When a JSON v1 backup exists and its upgraded metadata digest is empty, allow
 the first bootstrap to fill the supplied digest. Otherwise preserve exact
@@ -635,7 +635,7 @@ if meta is not None and meta != identity:
 data["meta"] = identity
 ```
 
-- [ ] **Step 6: Run metadata, migration, and production-boundary suites**
+- [x] **Step 6: Run metadata, migration, and production-boundary suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -647,7 +647,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit metadata identity enforcement**
+- [x] **Step 7: Commit metadata identity enforcement**
 
 ```bash
 git add scripts/teamlib/migration_store.py scripts/sql/migration_metadata.sql \
@@ -670,7 +670,7 @@ git commit -m "fix: refuse migration metadata rebinding"
 - Consumes: verified archive member bytes.
 - Produces: `_migration_manifest(loaded: Mapping[str, Migration]) -> tuple[dict[str, Any], ...]` and a closed `_verify_archive_members` result.
 
-- [ ] **Step 1: Add manifest/payload disagreement tests**
+- [x] **Step 1: Add manifest/payload disagreement tests**
 
 Add a helper to rebuild a test archive after changing only its manifest. Use it
 to alter each migration field while retaining all generic payload hashes:
@@ -702,7 +702,7 @@ Add separate cases for a false `source_tree`, unknown/missing top-level field,
 malformed source commit, and application-tree digest mismatch through direct
 `verify_release` rather than only `release_app_trees`.
 
-- [ ] **Step 2: Run release tests and confirm acceptance of tampered metadata**
+- [x] **Step 2: Run release tests and confirm acceptance of tampered metadata**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest scripts.tests.test_release -v
@@ -711,7 +711,7 @@ PYTHONPATH=scripts python3 -m unittest scripts.tests.test_release -v
 Expected: FAIL because the current verifier accepts manifest migration fields
 that are not derived from archived SQL.
 
-- [ ] **Step 3: Extract one canonical migration-manifest builder**
+- [x] **Step 3: Extract one canonical migration-manifest builder**
 
 ```python
 def _migration_manifest(
@@ -733,7 +733,7 @@ def _migration_manifest(
 
 Use this helper in `build_release`; remove the duplicate inline mapping.
 
-- [ ] **Step 4: Reconstruct archived migration bundles during verification**
+- [x] **Step 4: Reconstruct archived migration bundles during verification**
 
 Within a temporary directory, write only `release/migrations/<top-level-name>`
 members, reject nested paths, call `load_bundles`, and compare exact canonical
@@ -756,7 +756,7 @@ if tuple(data.get("migrations", ())) != derived:
 
 Translate `BundleError` to `ReleaseError`.
 
-- [ ] **Step 5: Close and recompute the complete manifest**
+- [x] **Step 5: Close and recompute the complete manifest**
 
 Require exactly these top-level keys:
 
@@ -781,13 +781,13 @@ Build application groups from `members`, compare `tree_digest` for every alias,
 and retain the existing master-contract/app-check digest checks. Only then call
 `_manifest_from_data`.
 
-- [ ] **Step 6: Make build self-verify its emitted archive**
+- [x] **Step 6: Make build self-verify its emitted archive**
 
 After closing the tar and calculating its digest, call `verify_release(archive)`
 and compare the returned digest with the built digest. Return the verified
 manifest with `staging_dir` restored via `dataclasses.replace`.
 
-- [ ] **Step 7: Run release and runbook suites**
+- [x] **Step 7: Run release and runbook suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -798,7 +798,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit archive verification**
+- [x] **Step 8: Commit archive verification**
 
 ```bash
 git add scripts/teamlib/release.py scripts/tests/test_release.py \
@@ -823,7 +823,7 @@ git commit -m "fix: bind release metadata to payload bytes"
 - Consumes: canonical version-2 evidence bytes.
 - Produces: `validate_test_evidence(raw: bytes) -> dict[str, Any]`, shared by signing and runbook generation.
 
-- [ ] **Step 1: Add role, environment, completeness, and frontier tests**
+- [x] **Step 1: Add role, environment, completeness, and frontier tests**
 
 Extend the signing fixture to carry the complete identity emitted by
 `qualification._target_identity`. Parameterize these rejected mutations:
@@ -850,7 +850,7 @@ Also construct distinct TABLES and METADATA targets and assert
 the signed evidence must identify the owner of migration history, not a payload
 schema.
 
-- [ ] **Step 2: Run the evidence suites and confirm failure**
+- [x] **Step 2: Run the evidence suites and confirm failure**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -861,7 +861,7 @@ PYTHONPATH=scripts python3 -m unittest \
 Expected: FAIL because integration-role evidence is accepted and the report
 uses `observation["evidence"]`.
 
-- [ ] **Step 3: Implement one canonical evidence validator**
+- [x] **Step 3: Implement one canonical evidence validator**
 
 Move canonical JSON and version-2 PASS validation to `evidence.py`:
 
@@ -904,7 +904,7 @@ safe-alias-to-positive-integer mapping. Require `coverage.apps` to equal the
 sorted application-ID aliases, require positive check coverage, and validate
 each result against the existing closed `CheckResult.as_dict()` shape.
 
-- [ ] **Step 4: Use the accepted after digest and share validation**
+- [x] **Step 4: Use the accepted after digest and share validation**
 
 In `_base_report`:
 
@@ -938,7 +938,7 @@ delete `_required_passes`; call the same validator and translate
 `EvidenceError` into `RunbookError`. Signature verification still covers the
 exact raw bytes.
 
-- [ ] **Step 5: Run evidence, qualification, and runbook suites**
+- [x] **Step 5: Run evidence, qualification, and runbook suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -949,7 +949,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the promotion boundary**
+- [x] **Step 6: Commit the promotion boundary**
 
 ```bash
 git add scripts/teamlib/evidence.py scripts/teamlib/qualification.py \
@@ -976,7 +976,7 @@ git commit -m "fix: require protected test promotion evidence"
 - Consumes: validated `Config`, runner contract, flow executable, identity SQL, and version SQL.
 - Produces: `RuntimeReport` and `preflight_online(config, repo, flow_executable, *, runner=run_sqlcl, command_runner=subprocess.run) -> RuntimeReport`.
 
-- [ ] **Step 1: Write preflight tests before implementation**
+- [x] **Step 1: Write preflight tests before implementation**
 
 ```python
 class RuntimePreflightTests(unittest.TestCase):
@@ -1008,7 +1008,7 @@ Also test an old SQLcl/JDK/APEX/database version, mismatched profile identity,
 non-executable flow adapter, production config, and absent flow adapter when any
 selected declaration contains a flow.
 
-- [ ] **Step 2: Run the new tests and confirm the missing module failure**
+- [x] **Step 2: Run the new tests and confirm the missing module failure**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest scripts.tests.test_runtime -v
@@ -1016,7 +1016,7 @@ PYTHONPATH=scripts python3 -m unittest scripts.tests.test_runtime -v
 
 Expected: FAIL because `teamlib.runtime` does not exist.
 
-- [ ] **Step 3: Add read-only framed database/APEX version SQL**
+- [x] **Step 3: Add read-only framed database/APEX version SQL**
 
 Create `scripts/sql/runtime_versions.sql` with only SELECT statements and strict
 markers:
@@ -1036,7 +1036,7 @@ SELECT 'TEAM_RUNTIME|apex|' || version_no
 The Python parser requires exactly one value for each name and rejects malformed
 or duplicate markers.
 
-- [ ] **Step 4: Implement observed runtime validation**
+- [x] **Step 4: Implement observed runtime validation**
 
 ```python
 @dataclass(frozen=True)
@@ -1145,14 +1145,14 @@ contract version.
 Compute `toolchain_digest` from canonical observed versions plus the contract
 version, not merely from declared requirement strings.
 
-- [ ] **Step 5: Thread the observed digest into qualification**
+- [x] **Step 5: Thread the observed digest into qualification**
 
 Add a keyword-only `runtime_report: RuntimeReport` parameter to
 `qualify_target`. Require it for online callers and use
 `runtime_report.toolchain_digest`. Direct tests supply a valid fake report;
 production code obtains it before any metadata write.
 
-- [ ] **Step 6: Run runtime, config, CI, and qualification suites**
+- [x] **Step 6: Run runtime, config, CI, and qualification suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -1164,7 +1164,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit observed runtime preflight**
+- [x] **Step 7: Commit observed runtime preflight**
 
 ```bash
 git add scripts/teamlib/runtime.py scripts/sql/runtime_versions.sql \
@@ -1191,7 +1191,7 @@ git commit -m "feat: verify online runner capabilities"
 - Consumes: repository path, validated integration config, output path, protected flow-adapter path, and existing stores/runners.
 - Produces: `run_integration(repo: Path, config: Config, out: Path, *, flow_executable: str, dependencies: OnlineDependencies | None = None) -> OnlineRunResult`.
 
-- [ ] **Step 1: Write the orchestration-order and derivation tests**
+- [x] **Step 1: Write the orchestration-order and derivation tests**
 
 Use a dependency recorder rather than SQLcl:
 
@@ -1230,7 +1230,7 @@ Also test:
 - failed/unknown migration or deployment stops later steps; and
 - report output is canonical and preserves structured failure evidence.
 
-- [ ] **Step 2: Run the new tests and confirm the missing module failure**
+- [x] **Step 2: Run the new tests and confirm the missing module failure**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest scripts.tests.test_online_workflows -v
@@ -1238,7 +1238,7 @@ PYTHONPATH=scripts python3 -m unittest scripts.tests.test_online_workflows -v
 
 Expected: FAIL because `teamlib.online_workflows` does not exist.
 
-- [ ] **Step 3: Define injectable dependencies and the result contract**
+- [x] **Step 3: Define injectable dependencies and the result contract**
 
 ```python
 @dataclass(frozen=True)
@@ -1283,7 +1283,7 @@ class OnlineRunResult:
 Provide real defaults in one `_default_dependencies()` function; tests inject
 fakes. Do not pass raw globals through every call site.
 
-- [ ] **Step 4: Implement the fail-closed integration sequence**
+- [x] **Step 4: Implement the fail-closed integration sequence**
 
 The implementation must make the order visible and linear:
 
@@ -1349,7 +1349,7 @@ history, and recomputes pending work before its first payload. Assert in tests
 that the destructive preview performs no payload and that a race which changes
 the live plan is refused by the live recomputation.
 
-- [ ] **Step 5: Add the CLI without repeated commit or alias arguments**
+- [x] **Step 5: Add the CLI without repeated commit or alias arguments**
 
 Parser:
 
@@ -1377,7 +1377,7 @@ Add `run-integration` to `PRODUCTION_REFUSED_COMMANDS`. Keep `qualify-target`,
 `setup-state`, `adopt-frontier`, `check-drift`, `migrate`, and `deploy-app` for
 diagnosis/maintenance; do not remove them.
 
-- [ ] **Step 6: Run orchestration, CLI, and production-boundary suites**
+- [x] **Step 6: Run orchestration, CLI, and production-boundary suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -1390,7 +1390,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the integration orchestrator**
+- [x] **Step 7: Commit the integration orchestrator**
 
 ```bash
 git add scripts/teamlib/online_workflows.py scripts/team.py \
@@ -1419,7 +1419,7 @@ git commit -m "feat: add single-command integration run"
 - Consumes: verified release archive, test target contract, validated test config, protected flow adapter, and output path.
 - Produces: `run_release_test(repo: Path, config: Config, release_tar: Path, target_contract: Path, out: Path, *, flow_executable: str, dependencies: OnlineDependencies | None = None) -> OnlineRunResult`.
 
-- [ ] **Step 1: Write live-history and internal-handoff tests**
+- [x] **Step 1: Write live-history and internal-handoff tests**
 
 ```python
 def test_release_test_reads_live_history_and_emits_evidence_without_plan_files(self):
@@ -1447,7 +1447,7 @@ Also assert archive source commit and aliases are derived, role must be exactly
 mutex, destructive release work refuses, and apply/qualification failure emits
 no PASS evidence.
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -1458,7 +1458,7 @@ PYTHONPATH=scripts python3 -m unittest \
 Expected: FAIL because the release adapter still requires caller-supplied plan
 and history files and no high-level release-test function exists.
 
-- [ ] **Step 3: Refactor release application around live store history**
+- [x] **Step 3: Refactor release application around live store history**
 
 Add a Python API that receives already validated objects, not plan/history JSON
 paths:
@@ -1530,7 +1530,7 @@ The existing file-oriented `apply-release` CLI may remain for offline/manual
 compatibility, but it must delegate to safe shared internals and may not be used
 by `run-release-test` or the release workflow.
 
-- [ ] **Step 4: Accept an in-memory apply report during qualification**
+- [x] **Step 4: Accept an in-memory apply report during qualification**
 
 Replace the path-only `_check_apply_report` with:
 
@@ -1568,7 +1568,7 @@ def _check_apply_report(
 This removes the workflow-level apply-report file without weakening its
 identity validation.
 
-- [ ] **Step 5: Implement the release-test orchestration**
+- [x] **Step 5: Implement the release-test orchestration**
 
 ```python
 def run_release_test(
@@ -1616,7 +1616,7 @@ def run_release_test(
 part of `_validated_release_context`, so all three alias sets are equal before
 its first metadata write.
 
-- [ ] **Step 6: Add the CLI route**
+- [x] **Step 6: Add the CLI route**
 
 ```python
 release_test = sub.add_parser("run-release-test", parents=[env_parent])
@@ -1630,7 +1630,7 @@ Load the environment with `require_verify=True`, obtain `TEAM_FLOW_RUNNER`, call
 `PRODUCTION_REFUSED_COMMANDS`. It is an online command; do not route it through
 `OFFLINE_COMMANDS`.
 
-- [ ] **Step 7: Run release-test, qualification, and production suites**
+- [x] **Step 7: Run release-test, qualification, and production suites**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -1643,7 +1643,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit the release-test orchestrator**
+- [x] **Step 8: Commit the release-test orchestrator**
 
 ```bash
 git add scripts/teamlib/online_workflows.py scripts/teamlib/release_adapter.py \
@@ -1671,7 +1671,7 @@ git commit -m "feat: add live-history release test run"
 - Consumes: protected self-hosted runner labels, environment-profile secret content, executable flow-adapter path, signing key content, public trust key, and production history.
 - Produces: one online command per integration/test workflow and unchanged signed runbook artifacts.
 
-- [ ] **Step 1: Rewrite workflow tests before YAML**
+- [x] **Step 1: Rewrite workflow tests before YAML**
 
 Integration assertions:
 
@@ -1702,7 +1702,7 @@ Retain assertions for exact checkout, serial integration, protected
 environments, signing-key permissions/cleanup, diagnostics upload, no production
 credentials, and no production apply.
 
-- [ ] **Step 2: Run workflow tests and confirm failure**
+- [x] **Step 2: Run workflow tests and confirm failure**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -1713,7 +1713,7 @@ PYTHONPATH=scripts python3 -m unittest \
 Expected: FAIL because both workflows still use `ubuntu-latest` and the old
 multi-step handoffs.
 
-- [ ] **Step 3: Reduce `integration.yml` to materialization plus one command**
+- [x] **Step 3: Reduce `integration.yml` to materialization plus one command**
 
 Use:
 
@@ -1750,7 +1750,7 @@ Keep the existing `if: always()` report upload, but use
 report exists. Add a cleanup test that the exact bounded profile path is
 removed.
 
-- [ ] **Step 4: Reduce the release test job to one online command**
+- [x] **Step 4: Reduce the release test job to one online command**
 
 Keep build/upload and post-download verification. Change only the online test
 job:
@@ -1833,7 +1833,7 @@ Upload test evidence and its detached signature in the diagnostic artifact;
 remove the obsolete apply-report path. Never upload any materialized key,
 environment profile, or production-history file.
 
-- [ ] **Step 5: Run workflow, launcher, and docs tests**
+- [x] **Step 5: Run workflow, launcher, and docs tests**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest \
@@ -1845,7 +1845,7 @@ PYTHONPATH=scripts python3 -m unittest \
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the workflow conversion**
+- [x] **Step 6: Commit the workflow conversion**
 
 ```bash
 git add .github/workflows/integration.yml .github/workflows/release.yml \
@@ -1873,7 +1873,7 @@ git commit -m "ci: simplify protected online workflows"
 - Consumes: final CLI and workflow behavior from Tasks 1–9.
 - Produces: one consistent daily, integration, release-test, maintenance, recovery, and production-owner guide.
 
-- [ ] **Step 1: Add documentation contract assertions**
+- [x] **Step 1: Add documentation contract assertions**
 
 ```python
 required = (
@@ -1898,7 +1898,7 @@ for obsolete in ("TEAM_TEST_HISTORY_JSON", "test-plan.json", "apply-report.json"
 Do not apply obsolete-token assertions to historical design/plan documents;
 those intentionally record prior states.
 
-- [ ] **Step 2: Run docs tests and confirm they fail on old operator instructions**
+- [x] **Step 2: Run docs tests and confirm they fail on old operator instructions**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest scripts.tests.test_docs -v
@@ -1906,7 +1906,7 @@ PYTHONPATH=scripts python3 -m unittest scripts.tests.test_docs -v
 
 Expected: FAIL until current operator docs match the final interfaces.
 
-- [ ] **Step 3: Rewrite the normal-flow documentation**
+- [x] **Step 3: Rewrite the normal-flow documentation**
 
 Document these exact paths:
 
@@ -1933,7 +1933,7 @@ Document the prepared-runner contract, observed version preflight, materialized
 secret-file lifecycle, exact test-role signing requirement, payload-derived
 release manifest, and accepted after-inventory digest.
 
-- [ ] **Step 4: Run the full offline verification suite**
+- [x] **Step 4: Run the full offline verification suite**
 
 ```bash
 PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -q
@@ -1985,7 +1985,7 @@ attempt, a retained mutex/recovery token, and no signable PASS evidence. Recover
 only after the target owner reviews the observed state and supplies worker
 termination evidence.
 
-- [ ] **Step 6: Verify the final diff and repository boundary**
+- [x] **Step 6: Verify the final diff and repository boundary**
 
 ```bash
 git status --short
@@ -1998,7 +1998,7 @@ captures, `.sync-state` evidence, or live test artifacts are staged. Confirm the
 docs still state that uncaptured/transient Builder edits and arbitrary DML are
 outside the inventory boundary.
 
-- [ ] **Step 7: Commit documentation and final verification updates**
+- [x] **Step 7: Commit documentation and final verification updates**
 
 ```bash
 git add README.md docs/ci.md docs/migrations.md docs/promotion.md \
