@@ -96,5 +96,21 @@ class ReleaseAdapterTests(unittest.TestCase):
             self.assertIn("environment profile file not found", str(caught.exception))
 
 
+class SchemaSetDigestTests(unittest.TestCase):
+    def test_bootstrap_receives_the_computed_schema_set_digest(self):
+        import inspect
+
+        from teamlib import release_adapter
+
+        source = inspect.getsource(release_adapter.apply_verified_release)
+        self.assertNotIn(
+            'schema_set_digest="release"',
+            source,
+            "apply-release must bootstrap with the computed digest, not a literal; "
+            "a literal makes every record_inventory raise ORA-20011",
+        )
+        self.assertIn("bootstrap(metadata, schema_set_digest=schema_set_digest)", source)
+
+
 if __name__ == "__main__":
     unittest.main()

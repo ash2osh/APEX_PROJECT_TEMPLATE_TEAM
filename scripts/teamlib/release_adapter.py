@@ -111,7 +111,11 @@ def apply_verified_release(
     schema_set_digest = hashlib.sha256(
         f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
     ).hexdigest()
-    migration_store.bootstrap(metadata, schema_set_digest="release")
+    # The digest must be the one the live inventories carry. A placeholder here
+    # is written into TEAM_MIGRATION_META and makes every record_inventory in
+    # this run -- and every later `migrate` against the same metadata schema --
+    # fail with ORA-20011 SCHEMA_SET_DIGEST_MISMATCH.
+    migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest)
     control_store = SqlControlStore(metadata, work_root=state_root / "metadata")
     apps = release_app_trees(release_tar)
     app_targets = []
