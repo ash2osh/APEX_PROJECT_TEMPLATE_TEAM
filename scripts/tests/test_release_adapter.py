@@ -18,7 +18,13 @@ from unittest.mock import patch
 from teamlib.assertions import AssertionVerificationError
 from teamlib.config import Target
 from teamlib.release import ApplyReport, ReleasePlan
-from teamlib.release_adapter import ReleaseAdapterError, apply_verified_release, main
+from teamlib.release_adapter import (
+    ReleaseAdapterError,
+    ReleaseApplyContext,
+    apply_verified_release,
+    apply_verified_release_live,
+    main,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -234,6 +240,96 @@ class SchemaSetDigestTests(unittest.TestCase):
             "a literal makes every record_inventory raise ORA-20011",
         )
         self.assertIn("bootstrap(metadata, schema_set_digest=schema_set_digest)", source)
+
+
+class LiveReleaseAdapterTests(unittest.TestCase):
+    def context(self, *, destructive: bool = False, events: list[str] | None = None):
+        events = events if events is not None else []
+        metadata = Target(
+            project="team", role="test", environment="test", connection="meta",
+            instance_id="INSTANCE", db_name="FREEPDB1", service="service",
+            session_user="META", current_schema="META", alias=None, workspace_id=None,
+            app_id=None, parsing_schema=None, ownership_mode="shared", binding_digest="a" * 64,
+        )
+        manifest = SimpleNamespace(
+            source_commit="a" * 40,
+            archive_digest="b" * 64,
+            app_tree_digests={"employee": "c" * 64},
+            migrations=[{"id": "m1", "destructive": destructive}],
+        )
+        config = SimpleNamespace(role="test", environment="test")
+
+        class Store:
+            def bootstrap(self, *_args, **_kwargs):
+                events.append("bootstrap")
+
+            def read_history(self, *_args, **_kwargs):
+                events.append("read-live-history")
+                return {"m1": {"status": "APPLIED"}}
+
+        class Control:
+            def setup_state(self, *_args, **_kwargs):
+                events.append("setup-control")
+
+        context = ReleaseApplyContext(
+            manifest=manifest,
+            target_document={"version": 1, "role": "test", "environment": "test"},
+            config=config,
+            metadata=metadata,
+            migration_store=Store(),
+            control_store=Control(),
+            schema_set_digest="d" * 64,
+            app_targets=(),
+        )
+        return context, events
+
+    def test_live_adapter_recomputes_plan_from_store_without_plan_or_history_files(self):
+        events: list[str] = []
+        context, events = self.context(events=events)
+        plan = ReleasePlan(
+            context.manifest.archive_digest, "e" * 64, (), "f" * 64,
+            context.target_document, "1" * 64,
+        )
+        applied = ApplyReport("applied", (), context.manifest.archive_digest, source_commit=context.manifest.source_commit)
+        with patch("teamlib.release_adapter._validated_release_context", return_value=context), \
+             patch("teamlib.release_adapter.plan_release", return_value=plan) as planned, \
+             patch("teamlib.release_adapter._apply_release_context", return_value=applied) as applied_context:
+            result = apply_verified_release_live(
+                self.context_file("release.tar"),
+                self.context_file("targets/test.json"),
+                context.config,
+                repo=self.context_file("repo"),
+            )
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(events, ["bootstrap", "read-live-history", "setup-control"])
+        planned.assert_called_once_with(self.context_file("release.tar"), {"m1": {"status": "APPLIED"}}, context.target_document)
+        applied_context.assert_called_once()
+
+    def test_live_adapter_refuses_destructive_pending_work_before_control_setup(self):
+        events: list[str] = []
+        context, events = self.context(destructive=True, events=events)
+        plan = ReleasePlan(
+            context.manifest.archive_digest, "e" * 64, ("m1",), "f" * 64,
+            context.target_document, "1" * 64,
+        )
+        with patch("teamlib.release_adapter._validated_release_context", return_value=context), \
+             patch("teamlib.release_adapter.plan_release", return_value=plan), \
+             patch("teamlib.release_adapter._apply_release_context") as applied_context:
+            with self.assertRaisesRegex(ReleaseAdapterError, "destructive maintenance"):
+                apply_verified_release_live(
+                    self.context_file("release.tar"),
+                    self.context_file("targets/test.json"),
+                    context.config,
+                    repo=self.context_file("repo"),
+                )
+        self.assertEqual(events, ["bootstrap", "read-live-history"])
+        applied_context.assert_not_called()
+
+    @staticmethod
+    def context_file(name: str) -> Path:
+        # The live adapter test patches context construction, so paths only
+        # need to prove that the API accepts archive/contract objects directly.
+        return Path(name)
 
 
 if __name__ == "__main__":

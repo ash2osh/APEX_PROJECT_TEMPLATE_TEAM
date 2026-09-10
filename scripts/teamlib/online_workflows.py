@@ -22,6 +22,7 @@ from .migrate import RunReport, apply_plan
 from .migration_store import MigrationStoreError, SqlMigrationStore
 from .qualification import qualify_target, write_report
 from .release import ApplyReport, Manifest, verify_release
+from .release_adapter import apply_verified_release_live
 from .runtime import RuntimeReport, preflight_online
 from .sqlcl import run_sqlcl
 from .trees import read_git_tree
@@ -310,6 +311,35 @@ def _qualify_integration(
     )
 
 
+def _qualify_release(
+    repo: Path,
+    config: Config,
+    source_commit: str,
+    aliases: tuple[str, ...],
+    *,
+    release_archive: Path,
+    apply_report: Mapping[str, Any],
+    flow_executable: str,
+    runtime_report: RuntimeReport,
+) -> Mapping[str, Any]:
+    return qualify_target(
+        repo,
+        config,
+        source_commit,
+        aliases,
+        store=SqlMigrationStore(
+            profile_target(config, "METADATA"),
+            work_root=repo / "scratch" / "metadata",
+        ),
+        work=repo / "scratch" / "test" / "qualification",
+        release_archive=release_archive,
+        apply_report=apply_report,
+        flow_executable=flow_executable,
+        runner_contract=repo / "ci" / "runner-contract.json",
+        runtime_report=runtime_report,
+    )
+
+
 def _default_dependencies() -> OnlineDependencies:
     return OnlineDependencies(
         resolve_head=_resolve_head,
@@ -324,12 +354,8 @@ def _default_dependencies() -> OnlineDependencies:
         deploy_apps=_deploy_apps,
         qualify_integration=_qualify_integration,
         verify_release=verify_release,
-        apply_release_live=lambda *args, **kwargs: (_ for _ in ()).throw(
-            OnlineWorkflowError("live release application is not part of run-integration")
-        ),
-        qualify_release=lambda *args, **kwargs: (_ for _ in ()).throw(
-            OnlineWorkflowError("release qualification is not part of run-integration")
-        ),
+        apply_release_live=apply_verified_release_live,
+        qualify_release=_qualify_release,
         write_report=write_report,
     )
 
@@ -409,5 +435,70 @@ def run_integration(
         raise
     if not isinstance(report, Mapping):
         raise OnlineWorkflowError("integration qualification did not return a report")
+    deps.write_report(report, Path(out))
+    return OnlineRunResult("PASS", source_commit, report)
+
+
+def run_release_test(
+    repo: str | Path,
+    config: Config,
+    release_tar: str | Path,
+    target_contract: str | Path,
+    out: str | Path,
+    *,
+    flow_executable: str,
+    dependencies: OnlineDependencies | None = None,
+) -> OnlineRunResult:
+    """Run the protected test qualification from a verified release archive."""
+    if config.role != "test" or config.environment != "test":
+        raise OnlineWorkflowError("run-release-test requires the protected test target")
+    deps = dependencies or _default_dependencies()
+    repo_path = Path(repo)
+    archive_path = Path(release_tar)
+    target_path = Path(target_contract)
+    manifest = deps.verify_release(archive_path)
+    app_digests = getattr(manifest, "app_tree_digests", None)
+    if not isinstance(app_digests, Mapping):
+        raise OnlineWorkflowError("release manifest application bindings are malformed")
+    archive_aliases = tuple(sorted(app_digests))
+    config_aliases = tuple(sorted(config.apps))
+    if archive_aliases != config_aliases:
+        raise OnlineWorkflowError(
+            "release archive and test configuration application bindings differ"
+        )
+    runtime = deps.preflight(config, repo_path, flow_executable)
+    apply_report = deps.apply_release_live(
+        archive_path,
+        target_path,
+        config,
+        repo=repo_path,
+    )
+    if hasattr(apply_report, "as_dict") and callable(apply_report.as_dict):
+        apply_document = apply_report.as_dict()
+    elif isinstance(apply_report, Mapping):
+        apply_document = dict(apply_report)
+    else:
+        raise OnlineWorkflowError("release application did not return a report")
+    source_commit = getattr(manifest, "source_commit", None)
+    if not isinstance(source_commit, str) or len(source_commit) != 40:
+        raise OnlineWorkflowError("release manifest source commit is malformed")
+    try:
+        report = deps.qualify_release(
+            repo_path,
+            config,
+            source_commit,
+            config_aliases,
+            release_archive=archive_path,
+            apply_report=apply_document,
+            flow_executable=flow_executable,
+            runtime_report=runtime,
+        )
+    except Exception as exc:
+        evidence = getattr(exc, "report", None)
+        if isinstance(evidence, Mapping):
+            deps.write_report(evidence, Path(out))
+        raise
+    if not isinstance(report, Mapping):
+        raise OnlineWorkflowError("release qualification did not return a report")
     deps.write_report(report, Path(out))
     return OnlineRunResult("PASS", source_commit, report)

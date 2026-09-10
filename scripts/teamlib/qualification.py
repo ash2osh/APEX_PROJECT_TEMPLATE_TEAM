@@ -189,23 +189,33 @@ def _sha256_field(value: Any, label: str) -> str:
     return value
 
 
-def _check_apply_report(path: Path, *, source_commit: str, archive_digest: str, target_state_key: str) -> None:
-    _, value = _load_json(path, "apply report")
+def _check_apply_report(
+    value: Mapping[str, Any] | str | Path,
+    *,
+    source_commit: str,
+    archive_digest: str,
+    target_state_key: str,
+) -> None:
+    document = dict(value) if isinstance(value, Mapping) else _load_json(value, "apply report")[1]
     allowed = {
         "version", "status", "source_commit", "archive_digest", "target_state_key",
         "target_digest", "history_digest", "pending",
     }
-    if set(value) != allowed:
+    if set(document) != allowed:
         raise QualificationError("apply report has an unexpected shape")
-    if value["version"] != 1 or value["status"] != "applied":
+    if document["version"] != 1 or document["status"] != "applied":
         raise QualificationError("apply report is not a successful version-1 report")
-    if value["source_commit"] != source_commit or value["archive_digest"] != archive_digest:
-        raise QualificationError("apply report does not match the selected release")
-    if value["target_state_key"] != target_state_key:
+    if document["source_commit"] != source_commit:
+        raise QualificationError("apply report source commit does not match qualification")
+    if document["archive_digest"] != archive_digest:
+        raise QualificationError("apply report archive does not match qualification")
+    if document["target_state_key"] != target_state_key:
         raise QualificationError("apply report target identity does not match qualification target")
-    _sha256_field(value["target_digest"], "apply report target_digest")
-    _sha256_field(value["history_digest"], "apply report history_digest")
-    if not isinstance(value["pending"], list) or any(not isinstance(item, str) for item in value["pending"]):
+    _sha256_field(document["target_digest"], "apply report target_digest")
+    _sha256_field(document["history_digest"], "apply report history_digest")
+    if not isinstance(document["pending"], list) or any(
+        not isinstance(item, str) or not item for item in document["pending"]
+    ):
         raise QualificationError("apply report pending must be a list of migration IDs")
 
 

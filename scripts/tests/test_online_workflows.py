@@ -12,7 +12,13 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from teamlib.config import Config, Profile
-from teamlib.online_workflows import OnlineDependencies, OnlineWorkflowError, run_integration
+from teamlib.online_workflows import (
+    OnlineDependencies,
+    OnlineWorkflowError,
+    run_integration,
+    run_release_test,
+)
+from teamlib.release import ApplyReport, Manifest
 
 
 def config_for(*, role: str = "integration", environment: str = "staging", apps: dict[str, int] | None = None) -> Config:
@@ -223,6 +229,142 @@ class OnlineWorkflowTests(unittest.TestCase):
             run_integration(self.root, config_for(), out, flow_executable=str(self.flow_runner), dependencies=dependencies)
         self.assertEqual(json.loads(out.read_text(encoding="utf-8")), evidence)
         self.assertEqual(events[-1], "write-report")
+
+    def release_dependencies(self, events: list[str], *, manifest=None, apply_error=None, qualify_error=None):
+        manifest = manifest or Manifest(
+            1, "1.0.0", "a" * 40, "b" * 64, (), {"employee": "c" * 64},
+            (), self.root / "release.tar", "d" * 64,
+        )
+        runtime = SimpleNamespace(toolchain_digest="e" * 64)
+        apply_report = ApplyReport(
+            "applied", (), archive_digest=manifest.archive_digest,
+            source_commit=manifest.source_commit, target_state_key="f" * 64,
+            target_digest="1" * 64, history_digest="2" * 64,
+        )
+
+        def verify_release(archive):
+            events.append("verify-archive")
+            return manifest
+
+        def preflight(_config, _repo, _flow):
+            events.append("preflight")
+            return runtime
+
+        def apply_live(archive, target, config, **kwargs):
+            events.append("read-live-history")
+            if apply_error is not None:
+                raise apply_error
+            return apply_report
+
+        def qualify(*args, **kwargs):
+            events.append("qualify-release")
+            if qualify_error is not None:
+                raise qualify_error
+            self.assertEqual(kwargs["runtime_report"], runtime)
+            self.assertEqual(kwargs["apply_report"], apply_report.as_dict())
+            return {"version": 2, "final_status": "PASS", "source_commit": manifest.source_commit}
+
+        def write_report(report, out):
+            events.append("write-report")
+            Path(out).write_bytes(json.dumps(report, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+
+        dependencies = OnlineDependencies(
+            resolve_head=lambda _repo: manifest.source_commit,
+            preflight=preflight,
+            setup_control=lambda *_args: None,
+            bootstrap_metadata=lambda *_args: None,
+            read_state=lambda *_args: {"observations": []},
+            adopt_frontier=lambda *_args: "",
+            capture_inventory=lambda *_args: None,
+            check_drift=lambda *_args: None,
+            apply_migrations=lambda *_args: None,
+            deploy_apps=lambda *_args: (),
+            qualify_integration=lambda *_args, **_kwargs: {},
+            verify_release=verify_release,
+            apply_release_live=apply_live,
+            qualify_release=qualify,
+            write_report=write_report,
+        )
+        return dependencies, manifest
+
+    def test_release_test_reads_live_history_and_emits_evidence_without_plan_files(self):
+        events: list[str] = []
+        dependencies, manifest = self.release_dependencies(events)
+        archive = self.root / "release.tar"
+        archive.write_bytes(b"verified archive")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir()
+        target.write_text("{}\n", encoding="utf-8")
+        out = self.root / "test-evidence.json"
+        result = run_release_test(
+            self.root,
+            config_for(role="test", environment="test", apps={"employee": 201}),
+            archive,
+            target,
+            out,
+            flow_executable=str(self.flow_runner),
+            dependencies=dependencies,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.source_commit, manifest.source_commit)
+        self.assertIn("read-live-history", events)
+        self.assertNotIn("read-history-file", events)
+        self.assertFalse((self.root / "plan.json").exists())
+        self.assertFalse((self.root / "apply-report.json").exists())
+
+    def test_release_test_requires_exact_test_target_and_matching_archive_aliases(self):
+        events: list[str] = []
+        dependencies, _ = self.release_dependencies(events)
+        with self.assertRaisesRegex(OnlineWorkflowError, "protected test target"):
+            run_release_test(
+                self.root,
+                config_for(),
+                self.root / "release.tar",
+                self.root / "target.json",
+                self.root / "out.json",
+                flow_executable=str(self.flow_runner), dependencies=dependencies,
+            )
+        self.assertEqual(events, [])
+
+        mismatch_manifest = Manifest(
+            1, "1.0.0", "a" * 40, "b" * 64, (), {"other": "c" * 64},
+            (), self.root / "release.tar", "d" * 64,
+        )
+        events.clear()
+        dependencies, _ = self.release_dependencies(events, manifest=mismatch_manifest)
+        with self.assertRaisesRegex(OnlineWorkflowError, "application bindings differ"):
+            run_release_test(
+                self.root,
+                config_for(role="test", environment="test", apps={"employee": 201}),
+                self.root / "release.tar",
+                self.root / "target.json",
+                self.root / "out.json",
+                flow_executable=str(self.flow_runner), dependencies=dependencies,
+            )
+        self.assertEqual(events, ["verify-archive"])
+        self.assertNotIn("preflight", events)
+
+    def test_release_test_does_not_emit_pass_evidence_for_destructive_or_failed_apply(self):
+        from teamlib.release_adapter import ReleaseAdapterError
+
+        for error in (
+            ReleaseAdapterError("release-test requires reviewed destructive maintenance before apply"),
+            ReleaseAdapterError("release apply failed"),
+        ):
+            with self.subTest(error=str(error)):
+                events: list[str] = []
+                dependencies, _ = self.release_dependencies(events, apply_error=error)
+                with self.assertRaises(ReleaseAdapterError):
+                    run_release_test(
+                        self.root,
+                        config_for(role="test", environment="test", apps={"employee": 201}),
+                        self.root / "release.tar",
+                        self.root / "target.json",
+                        self.root / "out.json",
+                        flow_executable=str(self.flow_runner), dependencies=dependencies,
+                    )
+                self.assertNotIn("write-report", events)
+                self.assertNotIn("qualify-release", events)
 
 
 if __name__ == "__main__":

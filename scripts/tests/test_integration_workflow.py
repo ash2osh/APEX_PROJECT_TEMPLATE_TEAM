@@ -69,6 +69,19 @@ class FrontierAdoptionTests(unittest.TestCase):
         self.assertEqual(parsed.out, "qualification.json")
         self.assertIn("run-integration", team.PRODUCTION_REFUSED_COMMANDS)
 
+    def test_run_release_test_has_archive_target_output_and_is_protected(self):
+        import team
+
+        parsed = team._parser().parse_args([
+            "run-release-test", "release.tar", "--target", "targets/test.json",
+            "--out", "test-evidence.json",
+        ])
+        self.assertEqual(parsed.command, "run-release-test")
+        self.assertEqual(parsed.archive, "release.tar")
+        self.assertEqual(parsed.target, "targets/test.json")
+        self.assertEqual(parsed.out, "test-evidence.json")
+        self.assertIn("run-release-test", team.PRODUCTION_REFUSED_COMMANDS)
+
     def test_migration_lifecycle_commands_share_confirmation_and_drift_options(self):
         import team
 
