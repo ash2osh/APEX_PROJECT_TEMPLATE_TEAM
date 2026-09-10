@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import inspect
 from pathlib import Path
+import re
 import uuid
 from typing import Any
 from collections.abc import Mapping
@@ -24,7 +25,17 @@ from .sqlcl import result_is_unknown
 
 
 class MigrationRunError(RuntimeError):
-    pass
+    """Raised for a fail-closed migration outcome.
+
+    ``recovery`` is populated only when the failure retains the migration
+    mutex: it carries what ``recover-migration`` needs (the run token) plus
+    enough context to explain why recovery is required. It never includes a
+    secret, credential, wallet, or connection string.
+    """
+
+    def __init__(self, message: str, recovery: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.recovery = dict(recovery) if isinstance(recovery, Mapping) else None
 
 
 @dataclass(frozen=True)
@@ -234,6 +245,45 @@ def _report(
     )
 
 
+_EVIDENCE_LOG_RE = re.compile(r"; see (\S+)$")
+
+
+def _evidence_path(exc: BaseException) -> str | None:
+    """Best-effort local SQLcl log path already embedded in an exception chain."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        match = _EVIDENCE_LOG_RE.search(str(current))
+        if match:
+            return match.group(1)
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _recovery_context(
+    *,
+    run_token: str,
+    attempt_id: str | None,
+    migration_id: str | None,
+    operation: str,
+    phase: str,
+    result: str,
+    mutex_retained: bool,
+    evidence_path: str | None,
+) -> dict[str, Any]:
+    return {
+        "run_token": run_token,
+        "attempt_id": attempt_id,
+        "migration_id": migration_id,
+        "operation": operation,
+        "phase": phase,
+        "result": result,
+        "mutex_retained": mutex_retained,
+        "evidence_path": evidence_path,
+    }
+
+
 def _apply_operation(
     action: str,
     selected_ids: tuple[str, ...],
@@ -372,17 +422,30 @@ def _apply_operation(
                     except Exception as state_exc:
                         if result_is_unknown(state_exc):
                             raise MigrationRunError(
-                                f"migration attempt-state result is unknown: {migration_id}"
+                                f"migration attempt-state result is unknown: {migration_id}",
+                                _recovery_context(
+                                    run_token=run_token, attempt_id=attempt_id,
+                                    migration_id=migration_id, operation=action,
+                                    phase="record-attempt-state", result="UNKNOWN",
+                                    mutex_retained=True, evidence_path=_evidence_path(state_exc),
+                                ),
                             ) from state_exc
                         raise
+                recovery = _recovery_context(
+                    run_token=run_token, attempt_id=attempt_id, migration_id=migration_id,
+                    operation=action, phase=phase, result=state,
+                    mutex_retained=True, evidence_path=_evidence_path(exc),
+                )
                 if unknown:
                     raise MigrationRunError(
-                        f"migration result is unknown during {phase}: {migration_id}: {exc}"
+                        f"migration result is unknown during {phase}: {migration_id}: {exc}",
+                        recovery,
                     ) from exc
                 if isinstance(exc, MigrationRunError):
-                    raise
+                    raise MigrationRunError(str(exc), recovery) from exc
                 raise MigrationRunError(
-                    f"migration payload failed during {phase}: {migration_id}: {exc}"
+                    f"migration payload failed during {phase}: {migration_id}: {exc}",
+                    recovery,
                 ) from exc
             if operation == "up":
                 applied.append(migration_id)
@@ -393,13 +456,21 @@ def _apply_operation(
         try:
             store.release(target, run_token)
         except Exception as exc:
-            if result_is_unknown(exc):
+            unknown = result_is_unknown(exc)
+            recovery = _recovery_context(
+                run_token=run_token, attempt_id=None, migration_id=None, operation=action,
+                phase="release", result="UNKNOWN" if unknown else "FAILED",
+                mutex_retained=True, evidence_path=_evidence_path(exc),
+            )
+            if unknown:
                 raise MigrationRunError(
                     f"migration mutex release is unknown for run {run_token}; "
-                    "inspect live metadata before recovery"
+                    "inspect live metadata before recovery",
+                    recovery,
                 ) from exc
             raise MigrationRunError(
-                f"migration mutex release failed for run {run_token}: {exc}"
+                f"migration mutex release failed for run {run_token}: {exc}",
+                recovery,
             ) from exc
         return _report(run_token, action, selected_ids, plan, applied, reverted, accepted_frontier, None)
     except Exception:

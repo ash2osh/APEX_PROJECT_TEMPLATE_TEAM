@@ -133,6 +133,110 @@ class MigrationRunnerTests(unittest.TestCase):
             apply_plan(self.migrations, self.profiles(bootstrap=True, execute=fail))
         self.assertTrue(self.store.read_state(self.target)["attempts"])
 
+    def test_deterministic_failure_after_attempt_start_carries_recovery_context(self):
+        def fail(migration):
+            raise MigrationRunError("payload failed")
+        try:
+            apply_plan(self.migrations, self.profiles(bootstrap=True, execute=fail))
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            recovery = error.recovery
+        self.assertIsNotNone(recovery)
+        self.assertEqual(len(recovery["run_token"]), 32)
+        self.assertEqual(recovery["migration_id"], self.migration_id)
+        self.assertEqual(recovery["operation"], "migrate")
+        self.assertEqual(recovery["phase"], "execute")
+        self.assertEqual(recovery["result"], "FAILED")
+        self.assertTrue(recovery["mutex_retained"])
+        self.assertIn(recovery["attempt_id"], self.store.read_state(self.target)["attempts"])
+
+    def test_verification_failure_wraps_without_losing_the_original_message(self):
+        try:
+            apply_plan(self.migrations, self.profiles(
+                bootstrap=True, execute=lambda migration: None, verify=lambda migration: False,
+            ))
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertIn("verification failed", str(error))
+            self.assertEqual(error.recovery["phase"], "verify")
+            self.assertEqual(error.recovery["result"], "FAILED")
+
+    def test_unknown_payload_failure_reports_unknown_result(self):
+        def fail(migration):
+            raise SqlclError("SQLcl timed out; target state is unknown")
+        try:
+            apply_plan(self.migrations, self.profiles(bootstrap=True, execute=fail))
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertEqual(error.recovery["result"], "UNKNOWN")
+            self.assertEqual(error.recovery["phase"], "execute")
+
+    def test_observation_failure_after_attempt_start_carries_recovery_context(self):
+        before_inventory = self.inventory(
+            [{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}]
+        )
+
+        def observe(migration, phase):
+            if phase == "after":
+                raise MigrationRunError("boom")
+            return before_inventory
+
+        try:
+            apply_plan(self.migrations, self.profiles(
+                bootstrap=True, execute=lambda migration: None, verify=lambda migration: True,
+                observe=observe, require_observation=True,
+            ))
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertEqual(error.recovery["phase"], "observe-after")
+            self.assertEqual(error.recovery["result"], "FAILED")
+
+    def test_inventory_failure_after_attempt_start_carries_recovery_context(self):
+        inventory = self.inventory(
+            [{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}]
+        )
+
+        class FailSecondRecordInventoryStore(MigrationStore):
+            def __init__(self, root):
+                super().__init__(root)
+                self._record_inventory_calls = 0
+
+            def record_inventory(self, store_target, inventory, *, run_token):
+                self._record_inventory_calls += 1
+                if self._record_inventory_calls == 2:
+                    raise MigrationRunError("inventory write failed")
+                return super().record_inventory(store_target, inventory, run_token=run_token)
+
+        store = FailSecondRecordInventoryStore(self.root / "inventory-failure-state")
+        try:
+            apply_plan(
+                self.migrations,
+                {
+                    **self.profiles(),
+                    "store": store,
+                    "bootstrap": True,
+                    "execute": lambda *_args: None,
+                    "verify": lambda *_args: True,
+                    "observe": lambda *_args: inventory,
+                    "require_observation": True,
+                },
+            )
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertEqual(error.recovery["phase"], "record-inventory")
+            self.assertEqual(error.recovery["result"], "FAILED")
+            self.assertTrue(error.recovery["mutex_retained"])
+
+    def test_pre_attempt_failure_does_not_claim_recovery_is_required(self):
+        try:
+            apply_plan(self.migrations, self.profiles(
+                bootstrap=True, execute=lambda migration: None, verify=lambda migration: True,
+                observe=lambda migration, phase: None, require_observation=True,
+            ))
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertIsNone(error.recovery)
+
     def test_committed_event_with_lost_ack_is_unknown_without_failed_rewrite(self):
         inventory = self.inventory(
             [
@@ -158,7 +262,7 @@ class MigrationRunnerTests(unittest.TestCase):
                     ) from exc
 
         store = CommitThenLoseEventAckStore(self.root / "lost-ack-state")
-        with self.assertRaisesRegex(MigrationRunError, "unknown"):
+        try:
             apply_plan(
                 self.migrations,
                 {
@@ -171,6 +275,11 @@ class MigrationRunnerTests(unittest.TestCase):
                     "require_observation": True,
                 },
             )
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertRegex(str(error), "unknown")
+            self.assertEqual(error.recovery["phase"], "record-event")
+            self.assertEqual(error.recovery["result"], "UNKNOWN")
 
         state = store.read_state(self.target)
         self.assertEqual(
@@ -207,7 +316,7 @@ class MigrationRunnerTests(unittest.TestCase):
                     ) from exc
 
         store = LoseAttemptStateAckStore(self.root / "attempt-state-lost-ack")
-        with self.assertRaisesRegex(MigrationRunError, "attempt-state result is unknown"):
+        try:
             apply_plan(
                 self.migrations,
                 {
@@ -222,6 +331,11 @@ class MigrationRunnerTests(unittest.TestCase):
                     "require_observation": True,
                 },
             )
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertRegex(str(error), "attempt-state result is unknown")
+            self.assertEqual(error.recovery["phase"], "record-attempt-state")
+            self.assertEqual(error.recovery["result"], "UNKNOWN")
         state = store.read_state(self.target)
         self.assertEqual(
             {attempt["state"] for attempt in state["attempts"].values()},
@@ -253,7 +367,7 @@ class MigrationRunnerTests(unittest.TestCase):
                     ) from exc
 
         store = LoseReleaseAckStore(self.root / "release-lost-ack")
-        with self.assertRaisesRegex(MigrationRunError, "mutex release is unknown"):
+        try:
             apply_plan(
                 self.migrations,
                 {
@@ -266,6 +380,12 @@ class MigrationRunnerTests(unittest.TestCase):
                     "require_observation": True,
                 },
             )
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            self.assertRegex(str(error), "mutex release is unknown")
+            self.assertEqual(error.recovery["phase"], "release")
+            self.assertEqual(error.recovery["result"], "UNKNOWN")
+            self.assertTrue(error.recovery["mutex_retained"])
         state = store.read_state(self.target)
         self.assertEqual(
             {attempt["state"] for attempt in state["attempts"].values()},
