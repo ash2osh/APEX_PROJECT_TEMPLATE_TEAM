@@ -8,13 +8,15 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from pathlib import Path
+import json
 import tempfile
 import unittest
 
 from teamlib.config import Target
 from teamlib.fingerprints import inventory_from_rows
-from teamlib.migrate import MigrationRunError, apply_plan
+from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
 from teamlib.migration_store import MigrationSetupRequired, MigrationStore
+from teamlib.sqlcl import SqlclError
 
 
 class MigrationRunnerTests(unittest.TestCase):
@@ -34,25 +36,52 @@ class MigrationRunnerTests(unittest.TestCase):
         )
         self.store = MigrationStore(self.root / ".state")
 
+    def profiles(self, **overrides):
+        value = {
+            "store": self.store,
+            "target": self.target,
+            "payload_targets": {"tables": self.target, "code": self.target},
+        }
+        value.update(overrides)
+        return value
+
+    def add_migration(self, migration_id, *, destructive=False, down_destructive=False, dependency=None):
+        dependency_line = f"-- depends-on: {dependency[0]} sha256:{dependency[1]}\n" if dependency else ""
+        (self.migrations / f"{migration_id}.sql").write_text(
+            f"-- migration-version: 1\n-- target: tables\n-- destructive: {'true' if destructive else 'false'}\n"
+            f"{dependency_line}\nCREATE TABLE {migration_id[-3:].upper()}(ID NUMBER);\n",
+            encoding="utf-8",
+        )
+        (self.migrations / f"{migration_id}.verify.sql").write_text("", encoding="utf-8")
+        if down_destructive is not None:
+            (self.migrations / f"{migration_id}.down.sql").write_text(
+                f"-- migration-version: 1\n-- destructive: {'true' if down_destructive else 'false'}\n\nDROP TABLE {migration_id[-3:].upper()};\n",
+                encoding="utf-8",
+            )
+            (self.migrations / f"{migration_id}.down.verify.sql").write_text("", encoding="utf-8")
+
+    def remove_default_migration(self):
+        for suffix in (".sql", ".verify.sql"):
+            (self.migrations / f"{self.migration_id}{suffix}").unlink()
+
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     def test_apply_commits_attempt_and_history(self):
         calls = []
         inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
-        report = apply_plan(self.migrations, {
-            "store": self.store, "target": self.target,
-            "execute": lambda migration: calls.append(migration.id),
-            "verify": lambda migration: True, "bootstrap": True,
-            "observe": lambda migration, phase: inventory,
-            "require_observation": True,
-        })
+        report = apply_plan(self.migrations, self.profiles(
+            execute=lambda migration: calls.append(migration.id),
+            verify=lambda migration: True, bootstrap=True,
+            observe=lambda migration, phase: inventory,
+            require_observation=True,
+        ))
         self.assertEqual(report.applied, (self.migration_id,))
         self.assertEqual(calls, [self.migration_id])
         self.assertEqual(self.store.read_history(self.target)[self.migration_id]["status"], "APPLIED")
 
     def test_dry_run_does_not_bootstrap_or_execute(self):
-        report = apply_plan(self.migrations, {"store": self.store, "target": self.target, "dry_run": True, "execute": lambda migration: self.fail("executed")})
+        report = apply_plan(self.migrations, self.profiles(dry_run=True, execute=lambda migration: self.fail("executed")))
         self.assertEqual(report.applied, ())
         with self.assertRaises(MigrationSetupRequired):
             self.store.read_history(self.target)
@@ -61,7 +90,7 @@ class MigrationRunnerTests(unittest.TestCase):
         def fail(migration):
             raise MigrationRunError("payload failed")
         with self.assertRaises(MigrationRunError):
-            apply_plan(self.migrations, {"store": self.store, "target": self.target, "bootstrap": True, "execute": fail})
+            apply_plan(self.migrations, self.profiles(bootstrap=True, execute=fail))
         self.assertTrue(self.store.read_state(self.target)["attempts"])
 
     def test_multiple_migrations_extend_one_observed_frontier(self):
@@ -87,20 +116,155 @@ class MigrationRunnerTests(unittest.TestCase):
 
         report = apply_plan(
             self.migrations,
-            {
-                "store": self.store,
-                "target": self.target,
-                "bootstrap": True,
-                "execute": lambda migration: None,
-                "verify": lambda migration: True,
-                "observe": observe,
-                "require_observation": True,
-            },
+            self.profiles(
+                bootstrap=True,
+                execute=lambda migration: None,
+                verify=lambda migration: True,
+                observe=observe,
+                require_observation=True,
+            ),
         )
         self.assertEqual(report.applied, (self.migration_id, second_id))
         observations = self.store.read_state(self.target)["observations"]
         self.assertEqual([item["sequence"] for item in observations], [0, 1, 2])
         self.assertEqual([item["predecessor_sequence"] for item in observations], [None, 0, 1])
+
+    def test_undo_redo_execute_directional_members_in_lifo_order(self):
+        self.remove_default_migration()
+        a_id = "20260907T110000__alice__aaa"
+        b_id = "20260907T110001__alice__bbb"
+        self.add_migration(a_id, down_destructive=False)
+        from teamlib.migration_bundle import load_bundles
+        a_checksum = load_bundles(self.migrations)[a_id].checksum
+        self.add_migration(b_id, down_destructive=False, dependency=(a_id, a_checksum))
+        inventories = [
+            inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": str(index)}])
+            for index in range(7)
+        ]
+        phase = {"index": 0}
+        executed = []
+        verified = []
+
+        def observe(_migration, current_phase):
+            if current_phase == "before":
+                return inventories[phase["index"]]
+            phase["index"] += 1
+            return inventories[phase["index"]]
+
+        def execute(migration, action, sql_path):
+            executed.append((action, sql_path.read_bytes()))
+
+        def verify(migration, action, verify_path):
+            verified.append((action, verify_path.read_bytes() if verify_path else None))
+            return True
+
+        common = self.profiles(
+            bootstrap=True, observe=observe, execute=execute, verify=verify,
+            require_observation=True,
+        )
+        apply_plan(self.migrations, common)
+        apply_undo(self.migrations, b_id, {**common, "bootstrap": False})
+        apply_undo(self.migrations, a_id, {**common, "bootstrap": False})
+        apply_redo(self.migrations, a_id, {**common, "bootstrap": False})
+        apply_redo(self.migrations, b_id, {**common, "bootstrap": False})
+        self.assertEqual([item[0] for item in executed], ["migrate", "migrate", "undo", "undo", "redo", "redo"])
+        self.assertEqual(executed[0][1], load_bundles(self.migrations)[a_id].sql_bytes)
+        self.assertEqual(executed[2][1], load_bundles(self.migrations)[b_id].down_sql_bytes)
+        self.assertEqual(executed[4][1], load_bundles(self.migrations)[a_id].sql_bytes)
+        self.assertEqual([item[0] for item in verified], ["migrate", "migrate", "undo", "undo", "redo", "redo"])
+        self.assertEqual(self.store.read_history(self.target)[b_id]["status"], "APPLIED")
+
+    def test_destructive_confirmation_is_exact_and_recorded_on_attempt(self):
+        self.remove_default_migration()
+        destructive_id = "20260907T120000__alice__danger"
+        self.add_migration(destructive_id, destructive=True, down_destructive=True)
+        from teamlib.migration_bundle import load_bundles
+        migration = load_bundles(self.migrations)[destructive_id]
+        inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        common = self.profiles(
+            bootstrap=True, observe=lambda _migration, _phase: inventory,
+            execute=lambda *_args: None, verify=lambda *_args: True,
+            require_observation=True,
+        )
+        with self.assertRaises(MigrationRunError):
+            apply_plan(self.migrations, common, confirmation=True)
+        self.assertFalse(self.store.read_state(self.target)["attempts"])
+        document = {"version": 1, "confirmations": [{
+            "migration_id": destructive_id, "action": "migrate", "bundle_checksum": migration.checksum,
+            "payload_target_state_key": self.target.state_key, "confirmed": True,
+        }]}
+        report = apply_plan(self.migrations, common, confirmation=document)
+        self.assertEqual(report.applied, (destructive_id,))
+        attempts = self.store.read_state(self.target)["attempts"]
+        attempt = next(iter(attempts.values()))
+        self.assertEqual(attempt["action"], "migrate")
+        self.assertRegex(attempt["confirmation_digest"], r"^[0-9a-f]{64}$")
+
+    def test_undo_and_redo_require_the_same_confirmation_contract(self):
+        self.remove_default_migration()
+        migration_id = "20260907T130000__alice__danger"
+        self.add_migration(migration_id, destructive=True, down_destructive=True)
+        from teamlib.migration_bundle import load_bundles
+        migration = load_bundles(self.migrations)[migration_id]
+        inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        common = self.profiles(
+            bootstrap=True, observe=lambda _migration, _phase: inventory,
+            execute=lambda *_args: None, verify=lambda *_args: True,
+            require_observation=True,
+        )
+        migrate_doc = {"version": 1, "confirmations": [{
+            "migration_id": migration_id, "action": "migrate", "bundle_checksum": migration.checksum,
+            "payload_target_state_key": self.target.state_key, "confirmed": True,
+        }]}
+        apply_plan(self.migrations, common, confirmation=migrate_doc)
+        with self.assertRaises(MigrationRunError):
+            apply_undo(self.migrations, migration_id, {**common, "bootstrap": False})
+        undo_doc = {"version": 1, "confirmations": [{
+            "migration_id": migration_id, "action": "undo", "bundle_checksum": migration.checksum,
+            "payload_target_state_key": self.target.state_key, "confirmed": True,
+        }]}
+        apply_undo(self.migrations, migration_id, {**common, "bootstrap": False}, confirmation=undo_doc)
+        with self.assertRaises(MigrationRunError):
+            apply_redo(self.migrations, migration_id, {**common, "bootstrap": False}, confirmation=undo_doc)
+        redo_doc = {"version": 1, "confirmations": [{
+            "migration_id": migration_id, "action": "redo", "bundle_checksum": migration.checksum,
+            "payload_target_state_key": self.target.state_key, "confirmed": True,
+        }]}
+        apply_redo(self.migrations, migration_id, {**common, "bootstrap": False}, confirmation=redo_doc)
+
+    def test_dry_run_returns_false_confirmation_template_without_locking(self):
+        self.remove_default_migration()
+        migration_id = "20260907T140000__alice__danger"
+        self.add_migration(migration_id, destructive=True, down_destructive=True)
+        from teamlib.migration_bundle import load_bundles
+        migration = load_bundles(self.migrations)[migration_id]
+        report = apply_plan(self.migrations, self.profiles(dry_run=True))
+        self.assertEqual(report.selected, (migration_id,))
+        self.assertEqual(report.confirmation_template["confirmations"][0]["confirmed"], False)
+        with self.assertRaises(MigrationSetupRequired):
+            self.store.read_history(self.target)
+
+    def test_known_and_unknown_payload_failures_leave_recovery_evidence(self):
+        inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        common = self.profiles(
+            bootstrap=True, observe=lambda _migration, _phase: inventory,
+            verify=lambda *_args: True, require_observation=True,
+        )
+        with self.assertRaises(MigrationRunError):
+            apply_plan(self.migrations, {**common, "execute": lambda *_args: (_ for _ in ()).throw(MigrationRunError("known"))})
+        state = self.store.read_state(self.target)
+        self.assertEqual(next(iter(state["attempts"].values()))["state"], "FAILED")
+        recovery_root = self.root / "second-state"
+        second_store = MigrationStore(recovery_root)
+        with self.assertRaises(MigrationRunError):
+            apply_plan(self.migrations, {
+                **common,
+                "store": second_store,
+                "execute": lambda *_args: (_ for _ in ()).throw(SqlclError("transport timed out")),
+            })
+        second_store.bootstrap(self.target)
+        state = second_store.read_state(self.target)
+        self.assertEqual(next(iter(state["attempts"].values()))["state"], "UNKNOWN")
 
 
 if __name__ == "__main__":
