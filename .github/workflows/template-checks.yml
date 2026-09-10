@@ -19,6 +19,11 @@ jobs:
       - name: Shell syntax
         run: |
           for script in scripts/*.sh; do bash -n "$script"; done
+      - name: Install the signed-handoff verification dependency
+        run: |
+          # test_runbook.py exercises real Ed25519 signing. The daily workflow
+          # is stdlib-only; this is the one command that needs the promotion extra.
+          python3 -m pip install --quiet 'cryptography>=41'
       - name: Python tests
         run: PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -v
       - name: JSON and line-ending checks
