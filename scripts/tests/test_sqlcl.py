@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 
 from teamlib.config import Target
-from teamlib.sqlcl import SqlclError, run_sqlcl
+from teamlib.sqlcl import SqlclError, result_is_unknown, run_sqlcl
 
 
 class SqlclBoundaryTests(unittest.TestCase):
@@ -201,6 +201,22 @@ class SqlclBoundaryTests(unittest.TestCase):
         self.assertGreaterEqual(APEX_TIMEOUT_SECONDS, 900.0)
         source = inspect.getsource(apex)
         self.assertIn("APEX_TIMEOUT_SECONDS", source)
+
+    def test_wrapped_sqlcl_timeout_is_unknown(self):
+        from teamlib.migration_store import MigrationStoreError
+
+        try:
+            try:
+                raise SqlclError("SQLcl timed out; target state is unknown")
+            except SqlclError as exc:
+                raise MigrationStoreError("metadata write failed") from exc
+        except MigrationStoreError as wrapped:
+            self.assertTrue(result_is_unknown(wrapped))
+
+    def test_deterministic_oracle_error_is_not_unknown(self):
+        self.assertFalse(
+            result_is_unknown(SqlclError("ORA-00942: table does not exist"))
+        )
 
 
 class ProductionReadOnlyGuardTests(unittest.TestCase):

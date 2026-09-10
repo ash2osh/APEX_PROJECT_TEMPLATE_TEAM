@@ -18,7 +18,11 @@ import team
 from teamlib.config import Target
 from teamlib.fingerprints import inventory_from_rows
 from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
-from teamlib.migration_store import MigrationSetupRequired, MigrationStore
+from teamlib.migration_store import (
+    MigrationSetupRequired,
+    MigrationStore,
+    MigrationStoreError,
+)
 from teamlib.sqlcl import SqlclError
 
 
@@ -123,6 +127,146 @@ class MigrationRunnerTests(unittest.TestCase):
         with self.assertRaises(MigrationRunError):
             apply_plan(self.migrations, self.profiles(bootstrap=True, execute=fail))
         self.assertTrue(self.store.read_state(self.target)["attempts"])
+
+    def test_committed_event_with_lost_ack_is_unknown_without_failed_rewrite(self):
+        inventory = inventory_from_rows(
+            [
+                {
+                    "owner": "tables",
+                    "object_type": "TABLE",
+                    "object_name": "T",
+                    "definition": "stable",
+                }
+            ]
+        )
+
+        class CommitThenLoseEventAckStore(MigrationStore):
+            def record_event(self, *args, **kwargs):
+                super().record_event(*args, **kwargs)
+                try:
+                    raise SqlclError(
+                        "SQLcl timed out; target state is unknown"
+                    )
+                except SqlclError as exc:
+                    raise MigrationStoreError(
+                        "metadata result unavailable"
+                    ) from exc
+
+        store = CommitThenLoseEventAckStore(self.root / "lost-ack-state")
+        with self.assertRaisesRegex(MigrationRunError, "unknown"):
+            apply_plan(
+                self.migrations,
+                {
+                    **self.profiles(),
+                    "store": store,
+                    "bootstrap": True,
+                    "execute": lambda *_args: None,
+                    "verify": lambda *_args: True,
+                    "observe": lambda *_args: inventory,
+                    "require_observation": True,
+                },
+            )
+
+        state = store.read_state(self.target)
+        self.assertEqual(
+            {attempt["state"] for attempt in state["attempts"].values()},
+            {"APPLIED"},
+        )
+        self.assertEqual(len(store.read_history(self.target)), 1)
+        self.assertEqual(
+            state["mutex"]["owner_token"],
+            next(iter(state["attempts"].values()))["run_token"],
+        )
+
+    def test_unknown_attempt_state_update_does_not_release_mutex(self):
+        inventory = inventory_from_rows(
+            [
+                {
+                    "owner": "tables",
+                    "object_type": "TABLE",
+                    "object_name": "T",
+                    "definition": "stable",
+                }
+            ]
+        )
+
+        class LoseAttemptStateAckStore(MigrationStore):
+            def record_attempt_state(self, *args, **kwargs):
+                try:
+                    raise SqlclError(
+                        "SQLcl timed out; target state is unknown"
+                    )
+                except SqlclError as exc:
+                    raise MigrationStoreError(
+                        "attempt state result unavailable"
+                    ) from exc
+
+        store = LoseAttemptStateAckStore(self.root / "attempt-state-lost-ack")
+        with self.assertRaisesRegex(MigrationRunError, "attempt-state result is unknown"):
+            apply_plan(
+                self.migrations,
+                {
+                    **self.profiles(),
+                    "store": store,
+                    "bootstrap": True,
+                    "execute": lambda *_args: (_ for _ in ()).throw(
+                        MigrationRunError("known payload failure")
+                    ),
+                    "verify": lambda *_args: True,
+                    "observe": lambda *_args: inventory,
+                    "require_observation": True,
+                },
+            )
+        state = store.read_state(self.target)
+        self.assertEqual(
+            {attempt["state"] for attempt in state["attempts"].values()},
+            {"RUNNING"},
+        )
+        self.assertTrue(state["mutex"]["owner_token"])
+
+    def test_unknown_mutex_release_keeps_completed_evidence(self):
+        inventory = inventory_from_rows(
+            [
+                {
+                    "owner": "tables",
+                    "object_type": "TABLE",
+                    "object_name": "T",
+                    "definition": "stable",
+                }
+            ]
+        )
+
+        class LoseReleaseAckStore(MigrationStore):
+            def release(self, *args, **kwargs):
+                try:
+                    raise SqlclError(
+                        "SQLcl timed out; target state is unknown"
+                    )
+                except SqlclError as exc:
+                    raise MigrationStoreError(
+                        "mutex release result unavailable"
+                    ) from exc
+
+        store = LoseReleaseAckStore(self.root / "release-lost-ack")
+        with self.assertRaisesRegex(MigrationRunError, "mutex release is unknown"):
+            apply_plan(
+                self.migrations,
+                {
+                    **self.profiles(),
+                    "store": store,
+                    "bootstrap": True,
+                    "execute": lambda *_args: None,
+                    "verify": lambda *_args: True,
+                    "observe": lambda *_args: inventory,
+                    "require_observation": True,
+                },
+            )
+        state = store.read_state(self.target)
+        self.assertEqual(
+            {attempt["state"] for attempt in state["attempts"].values()},
+            {"APPLIED"},
+        )
+        self.assertTrue(state["mutex"]["owner_token"])
 
     def test_multiple_migrations_extend_one_observed_frontier(self):
         second_id = "20260907T100001__alice__two"

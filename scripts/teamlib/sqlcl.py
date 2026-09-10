@@ -22,6 +22,28 @@ class SqlclError(RuntimeError):
     """Raised when SQLcl or the verified session contract fails."""
 
 
+_UNKNOWN_RESULT_MARKERS = (
+    "timed out",
+    "state is unknown",
+    "acknowledg",
+    "lost result",
+)
+
+
+def result_is_unknown(exc: BaseException) -> bool:
+    """Return true when an exception chain indicates lost acknowledgement."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, SqlclError):
+            text = str(current).casefold()
+            if any(marker in text for marker in _UNKNOWN_RESULT_MARKERS):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 @dataclass(frozen=True)
 class SqlResult:
     identity: dict[str, str]

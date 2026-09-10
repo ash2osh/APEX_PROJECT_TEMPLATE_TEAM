@@ -26,10 +26,18 @@ an explicit `--replace-from` recovery capture must bind the replacement.
 
 Before a destructive import the command prints a team pause message. After the
 payload begins, a known failure leaves the target uncertain and an unknown
-SQLcl result retains the mutex. A recovery owner must establish worker
-termination, retain a current capture, and run `recover-app-lock` with the
-exact held token when one exists. Recovery increments the generation, so a
-capture cannot silently straddle a crash-and-clear cycle.
+SQLcl result retains the mutex. The migration engine preserves that UNKNOWN
+classification through metadata-adapter exception wrappers and names the
+uncertain phase (`execute`, `verify`, `observe-after`, inventory persistence,
+history/event commit, attempt-state update, or mutex release). It never follows
+a possibly committed history event with a contradictory `FAILED` write.
+
+A recovery owner must establish worker termination, retain a current capture,
+and run `recover-app-lock` with the exact held token when one exists. For an
+uncertain attempt-state or mutex-release result, inspect the live metadata and
+the recorded run token before choosing a recovery action; do not retry the
+payload. Recovery increments the generation, so a capture cannot silently
+straddle a crash-and-clear cycle.
 
 `--run-token` is optional. Supply it when the failure message or the recovery
 journal names a run: it is accepted both while that run still owns the mutex and

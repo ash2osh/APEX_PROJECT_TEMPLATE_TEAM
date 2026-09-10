@@ -20,7 +20,7 @@ from .destructive_confirmation import (
 from .migration_bundle import BundleError, Migration, load_bundles
 from .migration_plan import Plan, plan_migrations, plan_redo, plan_undo
 from .migration_store import MigrationSetupRequired
-from .sqlcl import SqlclError
+from .sqlcl import result_is_unknown
 
 
 class MigrationRunError(RuntimeError):
@@ -61,14 +61,6 @@ def _mode(target: Target, profiles: Mapping[str, Any]) -> str:
     if value in {"shared", "strict"}:
         return value
     return "shared" if target.role in {"developer", "integration"} else "strict"
-
-
-def _result_is_unknown(exc: BaseException) -> bool:
-    """Classify only lost acknowledgement/timeout failures as UNKNOWN."""
-    if not isinstance(exc, SqlclError):
-        return False
-    text = str(exc).casefold()
-    return any(marker in text for marker in ("timed out", "state is unknown", "acknowledg", "lost result"))
 
 
 def _observation(callback: Any, migration: Migration, phase: str) -> InventoryObservation | None:
@@ -340,11 +332,14 @@ def _apply_operation(
                 action=action, confirmation_digest=destructive_digest,
             )
             current_attempt_started = True
+            phase = "execute"
             try:
                 _call_callback(execute, (migration, action, sql_path), (migration,))
+                phase = "verify"
                 verification = _call_callback(verify, (migration, action, verify_path), (migration,))
                 if callable(verify) and verification is not True:
                     raise MigrationRunError(f"verification failed for {migration_id}")
+                phase = "observe-after"
                 after_observation = _observation(observe, migration, "after")
                 after_digest = after_observation.digest if after_observation else str(profiles.get("after_digest", ""))
                 evidence_digest = str(profiles.get("evidence_digest", ""))
@@ -352,30 +347,60 @@ def _apply_operation(
                     raise MigrationRunError(f"migration requires a verified after inventory: {migration_id}")
                 if not evidence_digest and before_digest and after_digest:
                     evidence_digest = hashlib.sha256(f"{before_digest}:{after_digest}".encode("ascii")).hexdigest()
+                phase = "record-inventory"
                 if after_observation and after_observation.manifest is not None and callable(record_inventory):
                     record_inventory(target, after_observation.manifest, run_token=run_token)
+                phase = "record-event"
                 store.record_event(
                     target, migration_id, migration.checksum, migration.target, migration.dependencies,
                     str(profiles.get("source_commit", "unknown")), str(profiles.get("applied_by", worker)),
                     {"before": before_digest, "after": after_digest, "evidence": evidence_digest},
                     operation=operation, run_token=run_token, attempt_id=attempt_id,
                 )
-            except MigrationRunError:
-                store.record_attempt_state(target, attempt_id, run_token, "FAILED")
-                raise
             except Exception as exc:
-                state = "UNKNOWN" if _result_is_unknown(exc) else "FAILED"
-                store.record_attempt_state(target, attempt_id, run_token, state, hashlib.sha256(str(exc).encode()).hexdigest())
-                if state == "UNKNOWN":
-                    raise MigrationRunError(f"migration result is unknown: {migration_id}: {exc}") from exc
-                raise MigrationRunError(f"migration payload failed: {migration_id}: {exc}") from exc
+                unknown = result_is_unknown(exc)
+                state = "UNKNOWN" if unknown else "FAILED"
+                if not (unknown and phase == "record-event"):
+                    try:
+                        store.record_attempt_state(
+                            target,
+                            attempt_id,
+                            run_token,
+                            state,
+                            hashlib.sha256(str(exc).encode()).hexdigest(),
+                        )
+                    except Exception as state_exc:
+                        if result_is_unknown(state_exc):
+                            raise MigrationRunError(
+                                f"migration attempt-state result is unknown: {migration_id}"
+                            ) from state_exc
+                        raise
+                if unknown:
+                    raise MigrationRunError(
+                        f"migration result is unknown during {phase}: {migration_id}: {exc}"
+                    ) from exc
+                if isinstance(exc, MigrationRunError):
+                    raise
+                raise MigrationRunError(
+                    f"migration payload failed during {phase}: {migration_id}: {exc}"
+                ) from exc
             if operation == "up":
                 applied.append(migration_id)
             else:
                 reverted.append(migration_id)
             if after_digest:
                 accepted_frontier = after_digest
-        store.release(target, run_token)
+        try:
+            store.release(target, run_token)
+        except Exception as exc:
+            if result_is_unknown(exc):
+                raise MigrationRunError(
+                    f"migration mutex release is unknown for run {run_token}; "
+                    "inspect live metadata before recovery"
+                ) from exc
+            raise MigrationRunError(
+                f"migration mutex release failed for run {run_token}: {exc}"
+            ) from exc
         return _report(run_token, action, selected_ids, plan, applied, reverted, accepted_frontier, None)
     except Exception:
         # A failure before the current attempt starts is safe to release. Once
