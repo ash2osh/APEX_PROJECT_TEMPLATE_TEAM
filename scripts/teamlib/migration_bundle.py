@@ -11,7 +11,7 @@ import re
 from typing import Any
 from collections.abc import Mapping
 
-from .sql_text import mask_sql
+from .sql_text import SqlTextError, comment_spans, mask_sql, statement_starts
 
 
 class BundleError(ValueError):
@@ -62,53 +62,21 @@ def _mask_code(text: str) -> str:
 
 
 def _comment_directives(text: str) -> list[tuple[int, str, str]]:
-    """Return real line-comment directives, not strings or block comments."""
+    """Return real line-comment directives, not strings or block comments.
+
+    Comment locations come from the shared Oracle-aware scanner, so an
+    apostrophe inside a ``q'[...]'`` literal can no longer end string state
+    early and turn the literal's own text into a directive.
+    """
     result: list[tuple[int, str, str]] = []
-    i = 0
-    state = "normal"
-    quote = ""
-    while i < len(text):
-        c = text[i]
-        n = text[i + 1] if i + 1 < len(text) else ""
-        if state == "normal":
-            if c == "-" and n == "-":
-                end = text.find("\n", i)
-                if end < 0:
-                    end = len(text)
-                content = text[i:end]
-                match = _DIRECTIVE_RE.match(content)
-                if match:
-                    result.append((i, match.group(1).casefold(), match.group(2)))
-                i = end
-                continue
-            if c == "/" and n == "*":
-                state = "block"
-                i += 2
-                continue
-            if c in {"'", '"'}:
-                quote = c
-                state = "string"
-                i += 1
-                continue
-            i += 1
-            continue
-        if state == "block":
-            if c == "*" and n == "/":
-                state = "normal"
-                i += 2
-            else:
-                i += 1
-            continue
-        if c == quote:
-            if n == quote:
-                i += 2
-            else:
-                state = "normal"
-                i += 1
-        else:
-            i += 1
-    if state in {"block", "string"}:
-        raise BundleError("unterminated SQL comment or literal")
+    try:
+        spans = comment_spans(text)
+    except SqlTextError as exc:
+        raise BundleError(str(exc)) from exc
+    for start, stop in spans:
+        match = _DIRECTIVE_RE.match(text[start:stop])
+        if match:
+            result.append((start, match.group(1).casefold(), match.group(2)))
     return result
 
 
@@ -161,52 +129,21 @@ def _parse_header(text: str, migration_id: str) -> tuple[int, str, bool, tuple[t
 
 # SQLcl interprets a client command only where a new statement begins. Matching
 # these words anywhere in a body rejects CONNECT BY, EXIT WHEN and any column
-# named host -- including this template's own control_metadata.sql.
+# named host -- including this template's own control_metadata.sql. Statement
+# boundaries come from sql_text.statement_starts, so an inline ";" starts a new
+# statement here exactly as it does in SQLcl.
 _CLIENT_COMMAND_RE = re.compile(
     r"^(?:@{1,2}|!)|^(?:CONNECT|CONN|HOST|EXIT|QUIT|WHENEVER|SPOOL|SCRIPT|START)\b",
     re.IGNORECASE,
 )
-_BLOCK_START_RE = re.compile(
-    r"^(?:DECLARE|BEGIN)\b"
-    r"|^CREATE(?:\s+OR\s+REPLACE)?\s+(?:PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE)\b",
-    re.IGNORECASE,
-)
-
-
-def _statement_leading_lines(masked: str):
-    """Yield (line number, text) for lines that begin a top-level statement.
-
-    A PL/SQL block is one statement terminated by a line containing only "/",
-    so nothing inside it can be a client command. Outside a block, a statement
-    begins after a ";" or "/" -- which is why a continuation line carrying
-    CONNECT BY is never offered to the caller.
-    """
-    pending = True
-    in_block = False
-    for number, raw in enumerate(masked.splitlines(), start=1):
-        line = raw.strip()
-        if not line:
-            continue
-        if in_block:
-            if line == "/":
-                in_block = False
-                pending = True
-            continue
-        if pending:
-            yield number, line
-            if _BLOCK_START_RE.match(line):
-                in_block = True
-                pending = False
-                continue
-        pending = line.endswith(";") or line == "/"
 
 
 def _assert_controls(text: str, *, verify: bool = False) -> None:
     code = _mask_code(text)
-    for number, line in _statement_leading_lines(code):
-        if re.match(r"^(?:@{1,2}|START\b|SCRIPT\b)", line, re.IGNORECASE):
+    for number, statement in statement_starts(code):
+        if re.match(r"^(?:@{1,2}|START\b|SCRIPT\b)", statement, re.IGNORECASE):
             raise BundleError(f"nested SQLcl includes are prohibited (line {number})")
-        if _CLIENT_COMMAND_RE.match(line):
+        if _CLIENT_COMMAND_RE.match(statement):
             raise BundleError(
                 f"SQLcl control command is prohibited in migration members (line {number})"
             )

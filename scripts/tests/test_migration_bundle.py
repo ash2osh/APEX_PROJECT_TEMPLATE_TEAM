@@ -128,5 +128,52 @@ class MigrationBundleTests(unittest.TestCase):
                 _assert_controls(sql)
 
 
+class StatementBoundaryGuardTests(unittest.TestCase):
+    def test_inline_client_command_after_a_query_is_refused(self):
+        from teamlib.migration_bundle import BundleError, _assert_controls
+
+        with self.assertRaises(BundleError) as raised:
+            _assert_controls("SELECT 1 FROM dual; HOST rm -rf /;\n")
+        self.assertIn("control command", str(raised.exception))
+
+    def test_inline_nested_include_after_a_query_is_refused(self):
+        from teamlib.migration_bundle import BundleError, _assert_controls
+
+        with self.assertRaises(BundleError) as raised:
+            _assert_controls("SELECT 1 FROM dual; @malicious.sql;\n")
+        self.assertIn("nested SQLcl includes", str(raised.exception))
+
+    def test_command_after_an_unterminated_set_is_refused(self):
+        from teamlib.migration_bundle import BundleError, _assert_controls
+
+        with self.assertRaises(BundleError):
+            _assert_controls("SET HEADING OFF\nHOST rm -rf /;\n")
+
+    def test_ordinary_sql_using_reserved_words_still_passes(self):
+        from teamlib.migration_bundle import _assert_controls
+
+        _assert_controls(
+            "SELECT level\n"
+            "  FROM dual\n"
+            "CONNECT BY level <= 3;\n"
+            "CREATE TABLE t (host VARCHAR2(30));\n"
+        )
+
+    def test_directive_inside_a_q_quoted_literal_is_not_a_directive(self):
+        from teamlib.migration_bundle import _comment_directives
+
+        text = "SELECT q'[It's a trap -- depends-on: forged]' FROM dual;\n"
+        self.assertEqual(_comment_directives(text), [])
+
+    def test_real_directives_are_still_parsed(self):
+        from teamlib.migration_bundle import _comment_directives
+
+        text = "-- migration-version: 1\n-- target: tables\nSELECT 1 FROM dual;\n"
+        self.assertEqual(
+            _comment_directives(text),
+            [(0, "migration-version", "1"), (24, "target", "tables")],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
