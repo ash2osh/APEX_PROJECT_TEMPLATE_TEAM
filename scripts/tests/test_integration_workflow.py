@@ -40,6 +40,17 @@ class FrontierAdoptionTests(unittest.TestCase):
         self.assertIn("adopt-frontier", team.PRODUCTION_REFUSED_COMMANDS)
         self.assertIn("setup-state", team.PRODUCTION_REFUSED_COMMANDS)
 
+    def test_qualify_target_has_exact_source_and_alias_arguments(self):
+        import team
+
+        parsed = team._parser().parse_args([
+            "qualify-target", "--source-commit", "a" * 40,
+            "--aliases", "employee", "--out", "qualification.json",
+        ])
+        self.assertEqual(parsed.command, "qualify-target")
+        self.assertEqual(parsed.aliases, "employee")
+        self.assertIn("qualify-target", team.PRODUCTION_REFUSED_COMMANDS)
+
     def test_integration_workflow_adopts_before_it_checks_drift(self):
         from pathlib import Path
 

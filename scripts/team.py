@@ -35,6 +35,7 @@ from teamlib.migrate import MigrationRunError, apply_plan
 from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
 from teamlib.sqlcl import run_sqlcl
 from teamlib.live_inventory import inventory_target
+from teamlib.qualification import QualificationError, qualify_target, write_report
 from teamlib.patch import PatchError, recover_files
 from teamlib.release import ReleaseError
 from teamlib.runbook import RunbookError
@@ -46,7 +47,7 @@ from teamlib.trees import TreeError, read_git_tree
 # a production classification. Kept in one place so the parser, the online
 # dispatcher and the tests cannot drift apart.
 PRODUCTION_REFUSED_COMMANDS = frozenset(
-    {"setup-state", "adopt-frontier", "recover-migration", "register-app", "recover-app-lock"}
+    {"setup-state", "adopt-frontier", "qualify-target", "recover-migration", "register-app", "recover-app-lock"}
 )
 
 
@@ -64,6 +65,12 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", parents=[env_parent])
     sub.add_parser("setup-state", parents=[env_parent])
     sub.add_parser("adopt-frontier", parents=[env_parent])
+    qualify = sub.add_parser("qualify-target", parents=[env_parent])
+    qualify.add_argument("--source-commit", required=True)
+    qualify.add_argument("--aliases", required=True, help="comma-separated configured application aliases")
+    qualify.add_argument("--out", required=True)
+    qualify.add_argument("--release-archive")
+    qualify.add_argument("--apply-report")
     migrate = sub.add_parser("migrate", parents=[env_parent])
     migrate.add_argument("--source", default="migrations")
     migrate.add_argument("--dry-run", action="store_true")
@@ -311,6 +318,37 @@ def _online(args: argparse.Namespace) -> object:
             # clears it with evidence, exactly as a failed migrate does.
             store.release(metadata, run_token)
         _json({"status": "success", "operation": command, "inventory_digest": digest})
+        return 0
+    if command == "qualify-target":
+        config = _config(args, require_verify=True)
+        if config.environment == "production":
+            raise ConfigError("qualify-target is refused for production targets")
+        if bool(args.release_archive) != bool(args.apply_report):
+            raise ConfigError("--release-archive and --apply-report must be supplied together")
+        if _resolved_commit(repo, "HEAD") != args.source_commit:
+            raise ConfigError("qualification checkout is not the exact source commit")
+        aliases = tuple(part.strip() for part in args.aliases.split(",") if part.strip())
+        metadata = profile_target(config, "METADATA")
+        store = _sql_migration_store(repo, metadata)
+        try:
+            report = qualify_target(
+                repo,
+                config,
+                args.source_commit,
+                aliases,
+                store=store,
+                work=repo / "scratch" / "qualification",
+                release_archive=args.release_archive,
+                apply_report=args.apply_report,
+                flow_executable=os.environ.get("TEAM_FLOW_RUNNER") or None,
+                runner_contract=repo / "ci" / "runner-contract.json",
+            )
+        except QualificationError as exc:
+            if exc.report is not None:
+                write_report(exc.report, args.out)
+            raise
+        write_report(report, args.out)
+        _json({"status": report["final_status"], "operation": command, "out": str(args.out)})
         return 0
     if command == "migrate":
         config = _config(args, require_verify=True)
@@ -637,7 +675,7 @@ def main(argv: list[str] | None = None) -> int:
     except ExportConflict as exc:
         print(json.dumps({"status": "conflict", "operation": "export-app", "conflicts": list(exc.decision.conflicts), "recovery_path": exc.recovery_id}, sort_keys=True))
         return 3
-    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, TreeError, BundleError, InventoryError) as exc:
+    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, QualificationError, TreeError, BundleError, InventoryError) as exc:
         print(str(exc), file=sys.stderr)
         return 2 if isinstance(exc, ConfigError) else 3
 
