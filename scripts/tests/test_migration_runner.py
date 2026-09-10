@@ -8,6 +8,8 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from pathlib import Path
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -236,6 +238,32 @@ class MigrationRunnerTests(unittest.TestCase):
             self.fail("expected MigrationRunError")
         except MigrationRunError as error:
             self.assertIsNone(error.recovery)
+
+    def test_cli_prints_recovery_context_an_operator_can_feed_to_recover_migration(self):
+        def fail(migration):
+            raise MigrationRunError("payload failed")
+        try:
+            apply_plan(self.migrations, self.profiles(bootstrap=True, execute=fail))
+            self.fail("expected MigrationRunError")
+        except MigrationRunError as error:
+            real_error = error
+        self.assertIsNotNone(real_error.recovery)
+
+        stderr = io.StringIO()
+        with patch("team._online", side_effect=real_error):
+            with contextlib.redirect_stderr(stderr):
+                code = team.main(["doctor"])
+        self.assertEqual(code, 3)
+
+        lines = [line for line in stderr.getvalue().splitlines() if line.strip()]
+        self.assertEqual(lines[0], str(real_error))
+        rendered = json.loads(lines[1])
+        self.assertEqual(rendered["recovery"], real_error.recovery)
+
+        parsed = team._parser().parse_args([
+            "recover-migration", rendered["recovery"]["run_token"], "--evidence", "evidence.json",
+        ])
+        self.assertEqual(parsed.run_token, real_error.recovery["run_token"])
 
     def test_committed_event_with_lost_ack_is_unknown_without_failed_rewrite(self):
         inventory = self.inventory(

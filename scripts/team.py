@@ -783,6 +783,9 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, ReleaseAdapterError, RunbookError, CIError, AppCheckError, QualificationError, TreeError, BundleError, InventoryError, OnlineWorkflowError) as exc:
         print(str(exc), file=sys.stderr)
+        recovery = getattr(exc, "recovery", None)
+        if isinstance(recovery, dict):
+            print(json.dumps({"recovery": recovery}, sort_keys=True), file=sys.stderr)
         return 2 if isinstance(exc, ConfigError) else 3
 
 
