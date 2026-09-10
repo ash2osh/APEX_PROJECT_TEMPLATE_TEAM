@@ -192,6 +192,7 @@ def apply_verified_release(
             history=history,
             apply_migrations=apply_migrations,
             deploy_application=deploy_application,
+            target_state_key=metadata.state_key,
         )
 
 
@@ -206,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env", default=None, help="environment profile file")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--state-root")
+    parser.add_argument("--out", required=True, help="canonical apply report output")
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if raw_args and raw_args[0] == "apply-release":
         raw_args = raw_args[1:]
@@ -226,7 +228,14 @@ def main(argv: list[str] | None = None) -> int:
             args.archive, args.target, env_file, plan, history,
             repo=args.repo, root=args.state_root,
         )
-        print(json.dumps({"status": report.status, "pending": report.pending, "archive_digest": report.archive_digest}, sort_keys=True))
+        destination = Path(args.out)
+        if destination.is_symlink():
+            raise ReleaseAdapterError("apply report output must not be a symlink")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(
+            json.dumps(report.as_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+        )
+        print(json.dumps(report.as_dict(), sort_keys=True, separators=(",", ":")))
         return 0
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ConfigError, ReleaseError, ReleaseAdapterError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc

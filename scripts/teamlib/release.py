@@ -55,6 +55,23 @@ class ApplyReport:
     status: str
     pending: tuple[str, ...]
     archive_digest: str
+    version: int = 1
+    source_commit: str = ""
+    target_state_key: str = ""
+    target_digest: str = ""
+    history_digest: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "status": self.status,
+            "source_commit": self.source_commit,
+            "archive_digest": self.archive_digest,
+            "target_state_key": self.target_state_key,
+            "target_digest": self.target_digest,
+            "history_digest": self.history_digest,
+            "pending": list(self.pending),
+        }
 
 
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -479,6 +496,7 @@ def apply_release(
     history: Mapping[str, Any] | None = None,
     apply_migrations: Callable[[tuple[Mapping[str, Any], ...], ReleasePlan], Any] | None = None,
     deploy_application: Callable[[str, Mapping[str, bytes], ReleasePlan], Any] | None = None,
+    target_state_key: str | None = None,
 ) -> ApplyReport:
     environment = target.get("environment") if isinstance(target, Mapping) else getattr(target, "environment", None)
     if environment == "production":
@@ -498,7 +516,13 @@ def apply_release(
     if current.history_digest != plan.history_digest or current.pending != plan.pending or current.target_digest != plan.target_digest:
         raise ReleaseError("target history or pending release work changed after plan generation")
     if apply_migrations is None and deploy_application is None:
-        return ApplyReport("planned", plan.pending, manifest.archive_digest)
+        return ApplyReport(
+            "planned", plan.pending, manifest.archive_digest,
+            source_commit=manifest.source_commit,
+            target_state_key=target_state_key or (str(target.get("state_key", "")) if isinstance(target, Mapping) else ""),
+            target_digest=plan.target_digest,
+            history_digest=plan.history_digest,
+        )
     pending = tuple(item for item in manifest.migrations if item.get("id") in plan.pending)
     if pending and apply_migrations is None:
         raise ReleaseError("release contains pending migrations but no non-production migration adapter was supplied")
@@ -516,7 +540,13 @@ def apply_release(
                 deploy_application(alias, apps[alias], plan)
             except Exception as exc:
                 raise ReleaseError(f"release deployment adapter failed for {alias}: {exc}") from exc
-    return ApplyReport("applied", plan.pending, manifest.archive_digest)
+    return ApplyReport(
+        "applied", plan.pending, manifest.archive_digest,
+        source_commit=manifest.source_commit,
+        target_state_key=target_state_key or (str(target.get("state_key", "")) if isinstance(target, Mapping) else ""),
+        target_digest=plan.target_digest,
+        history_digest=plan.history_digest,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

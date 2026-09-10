@@ -59,7 +59,7 @@ class ReleaseAdapterTests(unittest.TestCase):
 
         def capture_apply(archive, target, received_plan, **kwargs):
             observed["target"] = target
-            return ApplyReport("planned", received_plan.pending, archive_digest="a" * 64)
+            return ApplyReport("planned", received_plan.pending, archive_digest="a" * 64, target_state_key=profile.state_key)
 
         with patch("teamlib.release_adapter.load_config", return_value=config), \
              patch("teamlib.release_adapter.verify_release", return_value=SimpleNamespace(source_commit="abc")), \
@@ -75,6 +75,7 @@ class ReleaseAdapterTests(unittest.TestCase):
                 result = apply_verified_release(archive, target_path, Path(directory) / "env", plan, {})
 
         self.assertEqual(result.status, "planned")
+        self.assertEqual(result.target_state_key, profile.state_key)
         self.assertEqual(observed["target"], target_document)
 
     def test_main_resolves_environment_without_an_explicit_env_flag(self):
@@ -88,6 +89,7 @@ class ReleaseAdapterTests(unittest.TestCase):
                 "--plan", str(root / "dummy.json"),
                 "--history", str(root / "dummy.json"),
                 "--target", str(ROOT / "targets" / "test.json"),
+                "--out", str(root / "apply-report.json"),
             ]
             # The environment profile is absent, so main() must fail with the
             # diagnostic SystemExit -- not with NameError from a missing import.
