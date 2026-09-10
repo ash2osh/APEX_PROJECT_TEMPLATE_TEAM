@@ -353,16 +353,24 @@ def save_capture(
     records: dict[str, list[dict[str, Any]]] = {}
     for name, tree in (("base", base), ("source_base", source_base), ("mine", mine)):
         records[name], _ = _file_records(state_root, tree)
+    diagnostic_commit = (
+        diagnostics.get("head_commit") if isinstance(diagnostics, Mapping) else None
+    )
     if isinstance(head, Mapping):
-        head_commit = ""
         head_records, _ = _file_records(state_root, head)
+        # load_capture requires a non-empty commit. Writing a record it can
+        # never read back is worse than refusing here: the caller still holds
+        # the tree and can name the commit it came from.
+        if not isinstance(diagnostic_commit, str) or not diagnostic_commit:
+            raise StateError(
+                "a capture with an exact source tree as HEAD requires a head_commit diagnostic"
+            )
+        head_commit = diagnostic_commit
     elif isinstance(head, str) and head:
-        head_commit = head
         head_records = []
+        head_commit = diagnostic_commit if isinstance(diagnostic_commit, str) and diagnostic_commit else head
     else:
         raise StateError("capture HEAD must be a commit or exact source tree")
-    if isinstance(diagnostics, Mapping) and isinstance(diagnostics.get("head_commit"), str):
-        head_commit = diagnostics["head_commit"]
     manifest = {
         "version": 1,
         "type": "capture",

@@ -16,6 +16,7 @@ from teamlib.config import Target
 from teamlib.state import (
     StateError,
     load_baseline,
+    load_capture,
     load_checkpoint,
     load_receipt,
     required_absences,
@@ -105,6 +106,39 @@ class StateTests(unittest.TestCase):
             save_receipt(
                 self.target, {"bad\\path": b"x"}, "abc", set(), "d", root=self.root
             )
+
+
+class CaptureHeadContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="team-capture-head-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.target = Target(
+            project="team-template", role="developer", environment="development",
+            connection="docker-demo", instance_id="FREE", db_name="FREEPDB1",
+            service="freep1", session_user="DEMO", current_schema="DEMO",
+            alias="checkout", workspace_id=5402650006222933, app_id=100,
+            parsing_schema="DEMO", ownership_mode="shared", binding_digest="a" * 64,
+        )
+
+    def test_tree_head_without_a_head_commit_diagnostic_is_refused(self):
+        with self.assertRaises(StateError) as raised:
+            save_capture(self.target, {}, {}, {"application.apx": b"x"}, {}, {"kind": "x"}, root=self.root)
+        self.assertIn("head_commit", str(raised.exception))
+
+    def test_tree_head_with_a_head_commit_diagnostic_round_trips(self):
+        recovery_id = save_capture(
+            self.target, {}, {}, {"application.apx": b"x"}, {},
+            {"kind": "export", "head_commit": "a" * 40}, root=self.root,
+        )
+        self.assertEqual(load_capture(self.target, recovery_id, root=self.root).head, "a" * 40)
+
+    def test_commit_head_still_round_trips(self):
+        recovery_id = save_capture(
+            self.target, {}, {}, "b" * 40, {"application.apx": b"x"},
+            {"kind": "apex-capture"}, root=self.root,
+        )
+        self.assertEqual(load_capture(self.target, recovery_id, root=self.root).head, "b" * 40)
 
 
 if __name__ == "__main__":

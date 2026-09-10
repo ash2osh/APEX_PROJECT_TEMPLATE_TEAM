@@ -635,9 +635,24 @@ def parse_target_contract(
     )
 
 
+_LAUNCHER_NAMES = frozenset({"team.py", "team.sh", "team.ps1"})
+
+
 def is_offline_command(command: str) -> bool:
-    """Return whether a team command can run without loading database config."""
-    first = command.strip().split(maxsplit=1)[0] if command.strip() else ""
-    if first.startswith("team.py"):
-        first = first.rsplit("/", 1)[-1]
+    """Return whether a team command can run without loading database config.
+
+    Accepts a bare command name, or a full invocation whose first token is a
+    launcher -- with or without a directory prefix. The previous implementation
+    stripped a path only from a token that already started with ``team.py``,
+    which is exactly the token that needs no stripping, so every prefixed form
+    reported False.
+    """
+    tokens = command.strip().split()
+    if not tokens:
+        return False
+    first = tokens[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if first in _LAUNCHER_NAMES:
+        if len(tokens) < 2:
+            return False
+        first = tokens[1]
     return first in OFFLINE_COMMANDS
