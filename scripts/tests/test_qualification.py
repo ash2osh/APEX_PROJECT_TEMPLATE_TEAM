@@ -16,6 +16,7 @@ if _SCRIPTS_DIR not in sys.path:
 from teamlib.app_checks import AppCheckReport
 from teamlib.config import Config, Profile, profile_target
 from teamlib.qualification import QualificationError, _target_identity, qualify_target, sign_test_evidence, write_report
+from teamlib.release import ApplyReport
 
 
 class FakeStore:
@@ -107,6 +108,92 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(report["qualification_identity"]["observation_digest"], "c" * 64)
         self.assertEqual(report["application_checks"]["unknown"], 0)
         self.assertEqual(report["results"]["application_checks"], "PASS")
+
+    def apply_report_for(self, config):
+        metadata = profile_target(config, "METADATA")
+        return ApplyReport(
+            "applied", (), archive_digest="e" * 64, source_commit="a" * 40,
+            target_state_key=metadata.state_key, target_digest="1" * 64,
+            history_digest="2" * 64,
+        )
+
+    def test_qualify_target_accepts_an_apply_report_mapping_from_the_live_adapter(self):
+        config = config_for()
+        fake_app = AppCheckReport(
+            "a" * 40, {"target_kind": "persistent", "instance_id": "INSTANCE"}, (),
+            "a" * 64, "b" * 64, {"apps": ["employee"], "checks": 1, "unknown": 0}, "PASS",
+        )
+        manifest = SimpleNamespace(source_commit="a" * 40, archive_digest="e" * 64)
+        apply_report = self.apply_report_for(config)
+        with patch("teamlib.qualification.verify_candidate_apps", return_value=fake_app), \
+                patch("teamlib.qualification.verify_release", return_value=manifest):
+            report = qualify_target(
+                self.root, config, "a" * 40, ("employee",),
+                store=FakeStore(), work=self.root / "work",
+                release_archive=self.root / "release.tar",
+                apply_report=apply_report.as_dict(),
+                runner_contract=Path("ci/runner-contract.json"),
+                runtime_report=runtime_report(),
+                sql_runner=lambda *args, **kwargs: object(),
+            )
+        self.assertEqual(report["final_status"], "PASS")
+        self.assertEqual(report["archive_digest"], "e" * 64)
+
+    def test_qualify_target_accepts_an_apply_report_json_file(self):
+        config = config_for()
+        fake_app = AppCheckReport(
+            "a" * 40, {"target_kind": "persistent", "instance_id": "INSTANCE"}, (),
+            "a" * 64, "b" * 64, {"apps": ["employee"], "checks": 1, "unknown": 0}, "PASS",
+        )
+        manifest = SimpleNamespace(source_commit="a" * 40, archive_digest="e" * 64)
+        apply_report_path = self.root / "apply-report.json"
+        apply_report_path.write_text(
+            json.dumps(self.apply_report_for(config).as_dict()), encoding="utf-8",
+        )
+        with patch("teamlib.qualification.verify_candidate_apps", return_value=fake_app), \
+                patch("teamlib.qualification.verify_release", return_value=manifest):
+            report = qualify_target(
+                self.root, config, "a" * 40, ("employee",),
+                store=FakeStore(), work=self.root / "work2",
+                release_archive=self.root / "release.tar",
+                apply_report=apply_report_path,
+                runner_contract=Path("ci/runner-contract.json"),
+                runtime_report=runtime_report(),
+                sql_runner=lambda *args, **kwargs: object(),
+            )
+        self.assertEqual(report["final_status"], "PASS")
+
+    def test_qualify_target_rejects_a_malformed_apply_report_mapping(self):
+        config = config_for()
+        manifest = SimpleNamespace(source_commit="a" * 40, archive_digest="e" * 64)
+        with patch("teamlib.qualification.verify_release", return_value=manifest):
+            with self.assertRaisesRegex(QualificationError, "unexpected shape|not a successful"):
+                qualify_target(
+                    self.root, config, "a" * 40, ("employee",),
+                    store=FakeStore(), work=self.root / "work3",
+                    release_archive=self.root / "release.tar",
+                    apply_report={"version": 1, "status": "pending"},
+                    runner_contract=Path("ci/runner-contract.json"),
+                    runtime_report=runtime_report(),
+                    sql_runner=lambda *args, **kwargs: object(),
+                )
+
+    def test_qualify_target_rejects_an_unreadable_apply_report_file(self):
+        config = config_for()
+        manifest = SimpleNamespace(source_commit="a" * 40, archive_digest="e" * 64)
+        bad_path = self.root / "bad-apply-report.json"
+        bad_path.write_text("not json", encoding="utf-8")
+        with patch("teamlib.qualification.verify_release", return_value=manifest):
+            with self.assertRaisesRegex(QualificationError, "not valid UTF-8 JSON"):
+                qualify_target(
+                    self.root, config, "a" * 40, ("employee",),
+                    store=FakeStore(), work=self.root / "work4",
+                    release_archive=self.root / "release.tar",
+                    apply_report=bad_path,
+                    runner_contract=Path("ci/runner-contract.json"),
+                    runtime_report=runtime_report(),
+                    sql_runner=lambda *args, **kwargs: object(),
+                )
 
     def test_production_and_unresolved_attempts_refuse(self):
         with self.assertRaisesRegex(QualificationError, "non-production"):

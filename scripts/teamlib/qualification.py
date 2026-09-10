@@ -269,7 +269,7 @@ def qualify_target(
     store: Any,
     work: str | Path,
     release_archive: str | Path | None = None,
-    apply_report: str | Path | None = None,
+    apply_report: str | Path | Mapping[str, Any] | None = None,
     flow_executable: str | None = None,
     sql_runner: Callable[..., Any] = run_sqlcl,
     run_identity: Mapping[str, Any] | None = None,
@@ -354,7 +354,7 @@ def qualify_target(
             raise QualificationError("release archive source commit does not match qualification", report)
         report["archive_digest"] = manifest.archive_digest
         _check_apply_report(
-            Path(apply_report),
+            apply_report,
             source_commit=source_commit,
             archive_digest=manifest.archive_digest,
             target_state_key=targets["METADATA"].state_key,
