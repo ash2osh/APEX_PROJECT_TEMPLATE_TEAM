@@ -13,8 +13,11 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+from typing import Any
+from collections.abc import Mapping
 
 from teamlib.config import load_config, profile_target
 from teamlib.control_store import SqlControlStore
@@ -69,6 +72,68 @@ def _check_declarations(repo: Path, aliases: tuple[str, ...]) -> dict[str, Path]
             raise SystemExit(f"candidate application declaration is missing: {path}")
         declarations[alias] = path
     return declarations
+
+
+_ASSERTION_RE = re.compile(r"^TEAM_ASSERT\|([^|]+)\|(PASS|FAIL)$")
+
+
+def _select_runner(*, profile, repo: Path, work: Path, run_sqlcl=run_sqlcl):
+    """Return a qualified SELECT-check adapter for verify_candidate_apps.
+
+    A declared ``select`` check names a ``.verify.sql`` member beside its
+    declaration. The member is already constrained to SELECT-only assertions
+    that project ``assertion_name`` and ``status``; this runner executes it
+    through the read-only VERIFY profile and reports PASS only when every
+    returned row says PASS. A member that cannot be read is a FAIL, never an
+    UNKNOWN -- an unavailable check must never look like a passing one.
+    """
+    checks_root = Path(repo) / "ci" / "app-checks"
+
+    def resolve(alias: str, check: Mapping[str, Any]) -> dict[str, Any]:
+        relative = str(check.get("verify_sql", ""))
+        member = checks_root / relative
+        if member.is_symlink() or not member.is_file():
+            return {
+                "status": "FAIL",
+                "diagnostic": f"verification member is missing: {relative}",
+            }
+        driver_root = Path(work) / "app-checks" / alias / str(check.get("id", "check"))
+        driver_root.mkdir(parents=True, exist_ok=True)
+        driver = driver_root / "verify.sql"
+        driver.write_text(
+            "SET DEFINE OFF\nSET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n"
+            + member.read_text(encoding="utf-8"),
+            encoding="utf-8",
+            newline="\n",
+        )
+        try:
+            result = run_sqlcl(profile, "read", driver, driver_root)
+        except Exception as exc:  # noqa: BLE001 - any adapter failure is a check failure
+            return {"status": "FAIL", "diagnostic": f"verification query failed: {exc}"}
+        rows = []
+        for raw in getattr(result, "stdout", "").splitlines():
+            match = _ASSERTION_RE.match(raw.strip())
+            if match:
+                rows.append((match.group(1), match.group(2)))
+        if not rows:
+            return {
+                "status": "FAIL",
+                "diagnostic": "verification query returned no TEAM_ASSERT rows",
+            }
+        failures = [name for name, status in rows if status != "PASS"]
+        if failures:
+            return {
+                "status": "FAIL",
+                "diagnostic": "failed assertions: " + ", ".join(sorted(failures)),
+                "assertions": [name for name, _ in rows],
+            }
+        return {
+            "status": "PASS",
+            "diagnostic": "",
+            "assertions": [name for name, _ in rows],
+        }
+
+    return resolve
 
 
 def _materialize_migrations(root: Path, files: dict[str, bytes]) -> Path:
@@ -234,6 +299,11 @@ def main(argv: list[str] | None = None) -> int:
                 "environment": config.environment,
                 "instance_id": config.profiles["TABLES"].expected_instance_id,
                 "app_ids": config.apps,
+                "select_runner": _select_runner(
+                    profile=profile_target(config, "VERIFY"),
+                    repo=repo,
+                    work=work,
+                ),
             }
             try:
                 report = verify_candidate_apps(

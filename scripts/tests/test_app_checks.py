@@ -7,6 +7,8 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve(
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import shutil
+import tempfile
 import unittest
 
 from teamlib.app_checks import AppCheckError, verify_candidate_apps
@@ -82,6 +84,76 @@ class AppCheckTests(unittest.TestCase):
                 {"status": "disposable"},
                 {"employee": broken},
             )
+
+
+class SelectRunnerTests(unittest.TestCase):
+    def test_all_pass_rows_produce_a_pass(self):
+        import ci_replay_runner
+
+        recorded = {}
+
+        def fake_run_sqlcl(target, operation, driver, work, **kwargs):
+            recorded["operation"] = operation
+            recorded["driver"] = Path(driver).read_text(encoding="utf-8")
+
+            class Result:
+                stdout = "TEAM_ASSERT|employee_table_exists|PASS\nTEAM_ASSERT|dept_fk|PASS\n"
+
+            return Result()
+
+        root = Path(tempfile.mkdtemp(prefix="team-select-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        checks = root / "ci" / "app-checks" / "employee"
+        checks.mkdir(parents=True)
+        (checks.parent / "employee" / "employee-table.verify.sql").write_text(
+            "SELECT 'employee_table_exists' assertion_name, 'PASS' status FROM dual;\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        runner = ci_replay_runner._select_runner(
+            profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
+        )
+        observed = runner("employee", {"id": "t1", "verify_sql": "employee/employee-table.verify.sql"})
+        self.assertEqual(observed["status"], "PASS")
+        self.assertEqual(recorded["operation"], "read")
+
+    def test_a_fail_row_produces_a_fail_with_the_assertion_named(self):
+        import ci_replay_runner
+
+        def fake_run_sqlcl(target, operation, driver, work, **kwargs):
+            class Result:
+                stdout = "TEAM_ASSERT|dept_fk|FAIL\n"
+
+            return Result()
+
+        root = Path(tempfile.mkdtemp(prefix="team-select-fail-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        checks = root / "ci" / "app-checks" / "employee"
+        checks.mkdir(parents=True)
+        (checks / "dept.verify.sql").write_text(
+            "SELECT 'dept_fk' assertion_name, 'FAIL' status FROM dual;\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        runner = ci_replay_runner._select_runner(
+            profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
+        )
+        observed = runner("employee", {"id": "t2", "verify_sql": "employee/dept.verify.sql"})
+        self.assertEqual(observed["status"], "FAIL")
+        self.assertIn("dept_fk", observed["diagnostic"])
+
+    def test_a_missing_verify_member_is_a_fail_not_an_unknown(self):
+        import ci_replay_runner
+
+        root = Path(tempfile.mkdtemp(prefix="team-select-missing-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "ci" / "app-checks").mkdir(parents=True)
+        runner = ci_replay_runner._select_runner(
+            profile=object(), repo=root, work=root / "work", run_sqlcl=lambda *a, **k: None
+        )
+        observed = runner("employee", {"id": "t3", "verify_sql": "employee/absent.verify.sql"})
+        self.assertEqual(observed["status"], "FAIL")
+        self.assertIn("absent.verify.sql", observed["diagnostic"])
 
 
 if __name__ == "__main__":
