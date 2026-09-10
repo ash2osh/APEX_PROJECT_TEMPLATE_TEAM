@@ -42,12 +42,17 @@ class MigrationRunnerTests(unittest.TestCase):
             app_id=None, parsing_schema=None, ownership_mode="shared", binding_digest="a" * 64,
         )
         self.store = MigrationStore(self.root / ".state")
+        self.schema_set_digest = "a" * 64
+
+    def inventory(self, rows):
+        return inventory_from_rows(rows, schema_set_digest=self.schema_set_digest)
 
     def profiles(self, **overrides):
         value = {
             "store": self.store,
             "target": self.target,
             "payload_targets": {"tables": self.target, "code": self.target},
+            "schema_set_digest": self.schema_set_digest,
         }
         value.update(overrides)
         return value
@@ -76,7 +81,7 @@ class MigrationRunnerTests(unittest.TestCase):
 
     def test_apply_commits_attempt_and_history(self):
         calls = []
-        inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        inventory = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
         report = apply_plan(self.migrations, self.profiles(
             execute=lambda migration: calls.append(migration.id),
             verify=lambda migration: True, bootstrap=True,
@@ -129,7 +134,7 @@ class MigrationRunnerTests(unittest.TestCase):
         self.assertTrue(self.store.read_state(self.target)["attempts"])
 
     def test_committed_event_with_lost_ack_is_unknown_without_failed_rewrite(self):
-        inventory = inventory_from_rows(
+        inventory = self.inventory(
             [
                 {
                     "owner": "tables",
@@ -179,7 +184,7 @@ class MigrationRunnerTests(unittest.TestCase):
         )
 
     def test_unknown_attempt_state_update_does_not_release_mutex(self):
-        inventory = inventory_from_rows(
+        inventory = self.inventory(
             [
                 {
                     "owner": "tables",
@@ -225,7 +230,7 @@ class MigrationRunnerTests(unittest.TestCase):
         self.assertTrue(state["mutex"]["owner_token"])
 
     def test_unknown_mutex_release_keeps_completed_evidence(self):
-        inventory = inventory_from_rows(
+        inventory = self.inventory(
             [
                 {
                     "owner": "tables",
@@ -276,9 +281,9 @@ class MigrationRunnerTests(unittest.TestCase):
         )
         (self.migrations / f"{second_id}.verify.sql").write_text("", encoding="utf-8")
         inventories = [
-            inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "zero"}]),
-            inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "one"}]),
-            inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "two"}]),
+            self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "zero"}]),
+            self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "one"}]),
+            self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "two"}]),
         ]
         phase = {"index": 0}
 
@@ -313,7 +318,7 @@ class MigrationRunnerTests(unittest.TestCase):
         a_checksum = load_bundles(self.migrations)[a_id].checksum
         self.add_migration(b_id, down_destructive=False, dependency=(a_id, a_checksum))
         inventories = [
-            inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": str(index)}])
+            self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": str(index)}])
             for index in range(7)
         ]
         phase = {"index": 0}
@@ -355,7 +360,7 @@ class MigrationRunnerTests(unittest.TestCase):
         self.add_migration(destructive_id, destructive=True, down_destructive=True)
         from teamlib.migration_bundle import load_bundles
         migration = load_bundles(self.migrations)[destructive_id]
-        inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        inventory = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
         common = self.profiles(
             bootstrap=True, observe=lambda _migration, _phase: inventory,
             execute=lambda *_args: None, verify=lambda *_args: True,
@@ -381,7 +386,7 @@ class MigrationRunnerTests(unittest.TestCase):
         self.add_migration(migration_id, destructive=True, down_destructive=True)
         from teamlib.migration_bundle import load_bundles
         migration = load_bundles(self.migrations)[migration_id]
-        inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        inventory = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
         common = self.profiles(
             bootstrap=True, observe=lambda _migration, _phase: inventory,
             execute=lambda *_args: None, verify=lambda *_args: True,
@@ -418,7 +423,7 @@ class MigrationRunnerTests(unittest.TestCase):
             self.store.read_history(self.target)
 
     def test_known_and_unknown_payload_failures_leave_recovery_evidence(self):
-        inventory = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        inventory = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
         common = self.profiles(
             bootstrap=True, observe=lambda _migration, _phase: inventory,
             verify=lambda *_args: True, require_observation=True,
@@ -435,7 +440,7 @@ class MigrationRunnerTests(unittest.TestCase):
                 "store": second_store,
                 "execute": lambda *_args: (_ for _ in ()).throw(SqlclError("transport timed out")),
             })
-        second_store.bootstrap(self.target)
+        second_store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
         state = second_store.read_state(self.target)
         self.assertEqual(next(iter(state["attempts"].values()))["state"], "UNKNOWN")
 

@@ -32,6 +32,10 @@ class MigrationStoreTests(unittest.TestCase):
             app_id=None, parsing_schema=None, ownership_mode="shared", binding_digest="a" * 64,
         )
         self.store = MigrationStore(Path(self.temp.name))
+        self.schema_set_digest = "a" * 64
+
+    def inventory(self, rows):
+        return inventory_from_rows(rows, schema_set_digest=self.schema_set_digest)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -39,19 +43,19 @@ class MigrationStoreTests(unittest.TestCase):
     def test_bootstrap_acquire_and_release(self):
         with self.assertRaises(MigrationSetupRequired):
             self.store.acquire(self.target, "run", "worker", "host")
-        self.store.bootstrap(self.target)
+        self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
         self.store.acquire(self.target, "run", "worker", "host")
         with self.assertRaises(MigrationMutexHeld):
             self.store.acquire(self.target, "other", "worker2", "host2")
         self.store.release(self.target, "run")
 
     def test_wrong_token_cannot_release_and_history_is_exportable(self):
-        self.store.bootstrap(self.target)
+        self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
         self.store.acquire(self.target, "run", "worker", "host")
         with self.assertRaises(MigrationMutexHeld):
             self.store.release(self.target, "wrong")
-        before = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "before"}])
-        after = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "after"}])
+        before = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "before"}])
+        after = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "after"}])
         self.store.record_inventory(self.target, before, run_token="run")
         self.store.ensure_observation(self.target, before.digest, run_token="run")
         self.store.record_inventory(self.target, after, run_token="run")
@@ -64,7 +68,7 @@ class MigrationStoreTests(unittest.TestCase):
         self.assertIn("m1", output.read_text(encoding="utf-8"))
 
     def test_unresolved_attempt_blocks_release(self):
-        self.store.bootstrap(self.target)
+        self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
         self.store.acquire(self.target, "run", "worker", "host")
         self.store.record_attempt_start(self.target, "attempt", "m1", "a" * 64, "run")
         with self.assertRaises(MigrationMutexHeld):
@@ -75,8 +79,71 @@ class MigrationStoreTests(unittest.TestCase):
         self.assertEqual(data["version"], 2)
         self.assertEqual(data["history"], [])
 
+    def test_bootstrap_refuses_schema_set_rebinding(self):
+        first = self.schema_set_digest
+        self.store.bootstrap(self.target, schema_set_digest=first)
+        self.store.bootstrap(self.target, schema_set_digest=first)
+        with self.assertRaisesRegex(
+            MigrationStoreError, "different project/schema set"
+        ):
+            self.store.bootstrap(self.target, schema_set_digest="b" * 64)
+
+    def test_bootstrap_requires_a_lowercase_schema_set_digest(self):
+        with self.assertRaisesRegex(
+            MigrationStoreError, "lowercase schema-set SHA-256"
+        ):
+            self.store.bootstrap(self.target, schema_set_digest="not-a-digest")
+
+    def test_bootstrap_adopts_empty_v1_digest_only_with_preserved_backup(self):
+        self.store.path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "meta": {
+                        "state_key": self.target.state_key,
+                        "project_id": self.target.project,
+                        "schema_set_digest": "",
+                    },
+                    "mutex": None,
+                    "history": [],
+                    "attempts": {},
+                    "inventories": {},
+                    "observations": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.store._backup_path.write_bytes(b"preserved v1 source")
+        self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
+        self.assertEqual(
+            json.loads(self.store.path.read_text(encoding="utf-8"))["meta"]["schema_set_digest"],
+            self.schema_set_digest,
+        )
+
+    def test_bootstrap_refuses_unowned_empty_digest(self):
+        self.store.path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "meta": {
+                        "state_key": self.target.state_key,
+                        "project_id": self.target.project,
+                        "schema_set_digest": "",
+                    },
+                    "mutex": None,
+                    "history": [],
+                    "attempts": {},
+                    "inventories": {},
+                    "observations": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(MigrationStoreError, "unowned schema set"):
+            self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
+
     def test_v1_store_is_upgraded_and_original_bytes_are_preserved(self):
-        before = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "before"}])
+        before = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "before"}])
         entry = {
             "status": "APPLIED",
             "checksum": "a" * 64,
@@ -112,11 +179,11 @@ class MigrationStoreTests(unittest.TestCase):
         self.assertEqual(upgraded._backup_path.read_bytes(), original)
 
     def test_event_ledger_appends_and_collapses_current_state(self):
-        self.store.bootstrap(self.target)
+        self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
         self.store.acquire(self.target, "run", "worker", "host")
-        first = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "one"}])
-        second = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "two"}])
-        third = inventory_from_rows([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "three"}])
+        first = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "one"}])
+        second = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "two"}])
+        third = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "three"}])
         for inventory in (first, second, third):
             self.store.record_inventory(self.target, inventory, run_token="run")
         self.store.ensure_observation(self.target, first.digest, run_token="run")
@@ -174,7 +241,7 @@ class MigrationStoreTests(unittest.TestCase):
                     root.rmdir()
 
     def test_attempt_records_action_and_confirmation_digest(self):
-        self.store.bootstrap(self.target)
+        self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
         self.store.acquire(self.target, "run", "worker", "host")
         with self.assertRaises(MigrationStoreError):
             self.store.record_attempt_start(self.target, "bad-action", "m1", "a" * 64, "run", action="pause")

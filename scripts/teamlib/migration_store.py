@@ -47,6 +47,14 @@ class MigrationMutexHeld(MigrationStoreError):
         self.owner_token = owner_token
 
 
+def _validate_schema_set_digest(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise MigrationStoreError(
+            "migration metadata bootstrap requires a lowercase schema-set SHA-256"
+        )
+    return value
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -69,6 +77,10 @@ def _inventory_manifest(value: Any) -> tuple[dict[str, Any], str]:
 
 
 _MIGRATION_BOOTSTRAP_SQL = r"""
+-- Bootstrap identity contract: a fresh project row records the supplied
+-- lowercase schema-set SHA-256 at version 2; an upgraded version-1 row may
+-- fill only its empty digest; a non-empty version-2 digest is immutable and
+-- any mismatch must be refused before metadata writes begin.
 DECLARE
   PROCEDURE create_if_missing(p_sql CLOB) IS
   BEGIN
@@ -315,8 +327,14 @@ class SqlMigrationStore:
         self._assert_nonproduction(store_target)
         if store_target.state_key != self.target.state_key:
             raise MigrationStoreError("metadata target does not match the configured SQL controller")
-        if not isinstance(schema_set_digest, str) or not schema_set_digest:
-            raise MigrationStoreError("migration metadata bootstrap requires a schema-set digest")
+        schema_set_digest = _validate_schema_set_digest(schema_set_digest)
+        existing = self._existing_meta(store_target)
+        if existing is not None:
+            version, recorded = existing
+            if version not in {1, 2}:
+                raise MigrationStoreError("migration metadata version is unsupported")
+            if recorded and recorded != schema_set_digest:
+                raise MigrationStoreError("metadata store belongs to a different project/schema set")
         payload = _MIGRATION_BOOTSTRAP_SQL + f"""
 DECLARE
   v_count NUMBER;
@@ -339,9 +357,6 @@ BEGIN
       UPDATE TEAM_MIGRATION_META SET version_number = 2,
           schema_set_digest = {_sql_literal(schema_set_digest)}
        WHERE project_id = {_sql_literal(store_target.project)} AND version_number = 1;
-    ELSE
-      UPDATE TEAM_MIGRATION_META SET schema_set_digest = {_sql_literal(schema_set_digest)}
-       WHERE project_id = {_sql_literal(store_target.project)} AND version_number = 2;
     END IF;
   END IF;
   SELECT COUNT(*) INTO v_count FROM TEAM_MIGRATION_META
@@ -359,6 +374,46 @@ VALUES (1, NULL, NULL, NULL);
 COMMIT;
 """
         self._run("write", payload)
+
+    def _existing_meta(self, store_target: Target) -> tuple[int, str] | None:
+        exists = self._read_rows(
+            store_target,
+            "SELECT 'TEAM_META_TABLE|' || "
+            + _b64_sql("TO_CHAR(COUNT(*))")
+            + " FROM user_tables WHERE table_name = 'TEAM_MIGRATION_META';",
+            "TEAM_META_TABLE|",
+        )
+        if exists == [["0"]]:
+            return None
+        if exists != [["1"]]:
+            raise MigrationStoreError("migration metadata table probe is malformed")
+        rows = self._read_rows(
+            store_target,
+            "SELECT 'TEAM_META_ID|' || "
+            + _b64_sql("TO_CHAR(version_number)")
+            + " || '|' || "
+            + _b64_sql("schema_set_digest")
+            + " FROM TEAM_MIGRATION_META WHERE project_id = "
+            + _sql_literal(store_target.project)
+            + ";",
+            "TEAM_META_ID|",
+        )
+        if not rows:
+            return None
+        if len(rows) != 1 or len(rows[0]) != 2:
+            raise MigrationStoreError(
+                "migration metadata project identity is missing or duplicated"
+            )
+        try:
+            version = int(rows[0][0])
+        except (TypeError, ValueError) as exc:
+            raise MigrationStoreError("migration metadata version is malformed") from exc
+        recorded = rows[0][1]
+        if not isinstance(recorded, str):
+            raise MigrationStoreError("migration metadata schema-set digest is malformed")
+        if recorded and not re.fullmatch(r"[0-9a-f]{64}", recorded):
+            raise MigrationStoreError("migration metadata schema-set digest is malformed")
+        return version, recorded
 
     def _require_sql(self, target: Target) -> str:
         if target.state_key != self.target.state_key:
@@ -1283,10 +1338,37 @@ class MigrationStore:
 
     def bootstrap(self, store_target: Target, *, schema_set_digest: str = "") -> None:
         self._assert_nonproduction(store_target)
+        schema_set_digest = _validate_schema_set_digest(schema_set_digest)
         with self._locked() as data:
-            identity = {"state_key": self._key(store_target), "project_id": store_target.project, "schema_set_digest": schema_set_digest}
-            if data.get("meta") is not None and data["meta"] != identity:
-                raise MigrationStoreError("metadata store belongs to a different project/schema set")
+            meta = data.get("meta")
+            if meta is not None:
+                if not isinstance(meta, Mapping):
+                    raise MigrationStoreError("migration metadata identity is malformed")
+                if (
+                    meta.get("state_key") != self._key(store_target)
+                    or meta.get("project_id") != store_target.project
+                ):
+                    raise MigrationStoreError(
+                        "metadata store belongs to a different project/schema set"
+                    )
+                recorded = meta.get("schema_set_digest")
+                if recorded == "":
+                    if not self._backup_path.exists():
+                        raise MigrationStoreError("metadata store has an unowned schema set")
+                else:
+                    if not isinstance(recorded, str) or not re.fullmatch(
+                        r"[0-9a-f]{64}", recorded
+                    ):
+                        raise MigrationStoreError("migration metadata identity is malformed")
+                    if recorded != schema_set_digest:
+                        raise MigrationStoreError(
+                            "metadata store belongs to a different project/schema set"
+                        )
+            identity = {
+                "state_key": self._key(store_target),
+                "project_id": store_target.project,
+                "schema_set_digest": schema_set_digest,
+            }
             data["meta"] = identity
             if data.get("mutex") is None:
                 data["mutex"] = {"owner_token": None, "worker_identity": None, "host": None, "acquired_at": None}

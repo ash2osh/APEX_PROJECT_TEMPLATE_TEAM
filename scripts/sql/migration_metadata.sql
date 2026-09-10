@@ -1,4 +1,8 @@
 -- Controller-owned migration metadata.  Execute only through METADATA.
+-- Bootstrap identity contract: a fresh project row records the supplied
+-- lowercase schema-set SHA-256 at version 2; an upgraded version-1 row may
+-- fill only its empty digest; a non-empty version-2 digest is immutable and
+-- any mismatch must be refused before metadata writes begin.
 CREATE TABLE TEAM_MIGRATION_META (
     version_number NUMBER(10) NOT NULL,
     project_id VARCHAR2(128) NOT NULL,

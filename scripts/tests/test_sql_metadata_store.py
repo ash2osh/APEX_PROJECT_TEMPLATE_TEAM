@@ -14,7 +14,7 @@ import unittest
 from types import SimpleNamespace
 
 from teamlib.config import Target
-from teamlib.migration_store import MigrationMutexHeld, SqlMigrationStore
+from teamlib.migration_store import MigrationMutexHeld, MigrationStoreError, SqlMigrationStore
 from teamlib.sqlcl import SqlclError
 
 
@@ -45,13 +45,45 @@ class SqlMetadataStoreTests(unittest.TestCase):
 
     def test_bootstrap_and_mutex_use_sqlcl_and_nowait_transition(self):
         store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
-        store.bootstrap(self.target, schema_set_digest="digest")
+        store._read_rows = lambda _target, _payload, prefix: [["0"]]  # type: ignore[method-assign]
+        store.bootstrap(self.target, schema_set_digest="a" * 64)
         store.acquire(self.target, "run-token", "worker", "host")
         store.release(self.target, "run-token")
         self.assertEqual([operation for operation, _ in self.calls], ["write", "write", "write"])
         self.assertIn("FOR UPDATE NOWAIT", self.calls[1][1])
         self.assertIn("COMMIT", self.calls[1][1])
         self.assertNotIn("password", "\n".join(payload for _, payload in self.calls).lower())
+
+    def test_existing_schema_set_mismatch_refuses_before_metadata_write(self):
+        store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
+        reads: list[str] = []
+
+        def read_rows(_target, _payload, prefix):
+            reads.append(prefix)
+            if prefix == "TEAM_META_TABLE|":
+                return [["1"]]
+            if prefix == "TEAM_META_ID|":
+                return [["2", "a" * 64]]
+            raise AssertionError(prefix)
+
+        store._read_rows = read_rows  # type: ignore[method-assign]
+        with self.assertRaisesRegex(MigrationStoreError, "different project/schema set"):
+            store.bootstrap(self.target, schema_set_digest="b" * 64)
+        self.assertEqual(reads, ["TEAM_META_TABLE|", "TEAM_META_ID|"])
+        self.assertEqual(self.calls, [])
+
+    def test_matching_existing_schema_set_reaches_metadata_write(self):
+        store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
+        reads: list[str] = []
+
+        def read_rows(_target, _payload, prefix):
+            reads.append(prefix)
+            return [["1"]] if prefix == "TEAM_META_TABLE|" else [["2", "a" * 64]]
+
+        store._read_rows = read_rows  # type: ignore[method-assign]
+        store.bootstrap(self.target, schema_set_digest="a" * 64)
+        self.assertEqual(reads, ["TEAM_META_TABLE|", "TEAM_META_ID|"])
+        self.assertEqual([operation for operation, _ in self.calls], ["write"])
 
     def test_mutex_error_is_classified_from_sanitized_log(self):
         def held_runner(target, operation, driver, work, **kwargs):
@@ -70,6 +102,7 @@ class SqlMetadataStoreTests(unittest.TestCase):
         reference = (Path(__file__).resolve().parents[2] / "scripts" / "sql" / "migration_metadata.sql").read_text(encoding="utf-8")
         embedded = migration_store._MIGRATION_BOOTSTRAP_SQL
         for ddl in (embedded, reference):
+            self.assertIn("non-empty version-2 digest is immutable", ddl)
             self.assertIn("operation VARCHAR2(4) NOT NULL", ddl)
             self.assertIn("CONSTRAINT team_migration_history_operation_ck CHECK (operation IN ('up','down'))", ddl)
             self.assertIn("CREATE INDEX team_migration_history_id_ix ON TEAM_MIGRATION_HISTORY (id, applied_sequence)", ddl)
