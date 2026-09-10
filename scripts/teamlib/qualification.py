@@ -313,7 +313,7 @@ def qualify_target(
         contract_raw = json.loads(contract_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise QualificationError("runner contract is unreadable") from exc
-    doctor = ci_doctor(contract_raw)
+    doctor = ci_doctor(contract_path)
     if not doctor.valid:
         raise QualificationError("runner contract is invalid: " + "; ".join(doctor.issues))
     toolchain_digest = _digest({"toolchain": contract_raw["toolchain"], "profiles": contract_raw["profiles"]})
