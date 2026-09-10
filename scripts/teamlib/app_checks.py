@@ -1,8 +1,8 @@
-"""Declared candidate-application checks for disposable replay targets.
+"""Declared candidate-application checks for qualified non-production targets.
 
 This module validates the reviewable check declarations and executes them only
-through callbacks supplied by a qualified disposable-target adapter.  It does
-not infer application correctness from export equality or schema fingerprints.
+through callbacks supplied by a qualified target adapter. It does not infer
+application correctness from export equality or schema fingerprints.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class CheckResult:
 @dataclass(frozen=True)
 class AppCheckReport:
     source_commit: str
-    replay_identity: Mapping[str, Any]
+    target_identity: Mapping[str, Any]
     results: tuple[CheckResult, ...]
     source_digest: str
     checks_digest: str
@@ -63,7 +63,7 @@ class AppCheckReport:
             "version": 1,
             "status": self.status,
             "source_commit": self.source_commit,
-            "replay_identity": dict(self.replay_identity),
+            "target_identity": dict(self.target_identity),
             "source_digest": self.source_digest,
             "checks_digest": self.checks_digest,
             "coverage": dict(self.coverage),
@@ -202,13 +202,24 @@ def _source_details(source: Any) -> tuple[str, Mapping[str, Any]]:
 
 def _target_details(target: Any) -> tuple[str, dict[str, Any]]:
     if not isinstance(target, Mapping):
-        raise AppCheckError("replay target must be a contract mapping")
-    if target.get("status") not in {"disposable", "ready"} or target.get("environment") == "production" or target.get("role") not in {None, "replay", "test"}:
-        raise AppCheckError("candidate application checks require a verified disposable replay target")
+        raise AppCheckError("qualification target must be a contract mapping")
+    if target.get("target_kind") != "persistent":
+        raise AppCheckError("candidate application checks require a persistent qualification target")
+    if target.get("environment") == "production":
+        raise AppCheckError("candidate application checks refuse production targets")
+    if target.get("role") not in {"integration", "test"}:
+        raise AppCheckError("candidate application checks require an integration or test role")
     instance = target.get("instance_id")
     if not isinstance(instance, str) or not instance:
-        raise AppCheckError("replay target identity is incomplete")
-    identity = {key: target[key] for key in ("instance_id", "workspace_id", "app_ids", "source_commit") if key in target}
+        raise AppCheckError("qualification target identity is incomplete")
+    identity = {
+        key: target[key]
+        for key in (
+            "target_kind", "role", "environment", "instance_id",
+            "workspace_id", "app_ids", "state_key", "binding_digest",
+        )
+        if key in target
+    }
     return instance, identity
 
 
@@ -237,7 +248,7 @@ def _result(alias: str, check: Mapping[str, Any], callback: Callable[..., Any] |
 
 
 def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str, Any], checks: Mapping[str, Any] | Sequence[Any]) -> AppCheckReport:
-    """Run all declared app checks on a disposable replay target.
+    """Run all declared app checks on a persistent qualified target.
 
     A report is returned only when every required check passes.  On a failed
     or unknown result an :class:`AppCheckError` carries the complete report so
@@ -247,7 +258,7 @@ def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str,
     _, identity = _target_details(replay_target)
     target_source_commit = replay_target.get("source_commit")
     if target_source_commit is not None and target_source_commit != source_commit:
-        raise AppCheckError("replay target was not provisioned from the selected source commit")
+        raise AppCheckError("qualification target was not prepared from the selected source commit")
     if isinstance(checks, Mapping):
         raw_declarations = dict(checks)
     elif isinstance(checks, Sequence) and not isinstance(checks, (str, bytes)):
@@ -299,4 +310,3 @@ def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str,
         failures = [f"{item.alias}/{item.check_id}={item.status}" for item in results if item.status != "PASS"]
         raise AppCheckError("candidate application checks did not pass: " + ", ".join(failures), report)
     return report
-

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 from teamlib.app_checks import AppCheckError, verify_candidate_apps
+from teamlib.qualification import QualificationError, _flow_runner, _require_flow_adapter, _select_runner
 
 
 def declaration():
@@ -43,7 +44,7 @@ def declaration():
 
 
 class AppCheckTests(unittest.TestCase):
-    def test_candidate_checks_require_disposable_target_and_pass(self):
+    def test_candidate_checks_require_persistent_target_and_pass(self):
         seen = []
 
         def select_runner(alias, check):
@@ -56,7 +57,7 @@ class AppCheckTests(unittest.TestCase):
 
         report = verify_candidate_apps(
             {"commit": "abc123", "apps": {"employee": {"app_id": 11}}},
-            {"status": "disposable", "instance_id": "ci-1", "workspace_id": 22, "app_ids": {"employee": 11}, "select_runner": select_runner, "flow_runner": flow_runner},
+            {"target_kind": "persistent", "role": "integration", "environment": "staging", "instance_id": "ci-1", "workspace_id": 22, "app_ids": {"employee": 11}, "select_runner": select_runner, "flow_runner": flow_runner},
             {"employee": declaration()},
         )
         self.assertEqual(report.status, "PASS")
@@ -69,7 +70,7 @@ class AppCheckTests(unittest.TestCase):
         with self.assertRaises(AppCheckError) as caught:
             verify_candidate_apps(
                 {"commit": "abc123", "apps": {"employee": {}}},
-                {"status": "disposable", "instance_id": "ci-1", "workspace_id": 22, "app_ids": {"employee": 11}},
+                {"target_kind": "persistent", "role": "integration", "environment": "staging", "instance_id": "ci-1", "workspace_id": 22, "app_ids": {"employee": 11}},
                 {"employee": declaration()},
             )
         self.assertIn("UNKNOWN", str(caught.exception))
@@ -81,15 +82,13 @@ class AppCheckTests(unittest.TestCase):
         with self.assertRaises(AppCheckError):
             verify_candidate_apps(
                 {"commit": "abc123", "apps": {"employee": {}}},
-                {"status": "disposable"},
+                {"target_kind": "persistent", "role": "integration", "environment": "staging", "instance_id": "ci-1", "app_ids": {"employee": 11}},
                 {"employee": broken},
             )
 
 
 class SelectRunnerTests(unittest.TestCase):
     def test_all_pass_rows_produce_a_pass(self):
-        import ci_replay_runner
-
         recorded = {}
 
         def fake_run_sqlcl(target, operation, driver, work, **kwargs):
@@ -110,7 +109,7 @@ class SelectRunnerTests(unittest.TestCase):
             encoding="utf-8",
             newline="\n",
         )
-        runner = ci_replay_runner._select_runner(
+        runner = _select_runner(
             profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
         )
         observed = runner("employee", {"id": "t1", "verify_sql": "employee/employee-table.verify.sql"})
@@ -118,8 +117,6 @@ class SelectRunnerTests(unittest.TestCase):
         self.assertEqual(recorded["operation"], "read")
 
     def test_a_fail_row_produces_a_fail_with_the_assertion_named(self):
-        import ci_replay_runner
-
         def fake_run_sqlcl(target, operation, driver, work, **kwargs):
             class Result:
                 stdout = "TEAM_ASSERT|dept_fk|FAIL\n"
@@ -135,7 +132,7 @@ class SelectRunnerTests(unittest.TestCase):
             encoding="utf-8",
             newline="\n",
         )
-        runner = ci_replay_runner._select_runner(
+        runner = _select_runner(
             profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
         )
         observed = runner("employee", {"id": "t2", "verify_sql": "employee/dept.verify.sql"})
@@ -143,12 +140,10 @@ class SelectRunnerTests(unittest.TestCase):
         self.assertIn("dept_fk", observed["diagnostic"])
 
     def test_a_missing_verify_member_is_a_fail_not_an_unknown(self):
-        import ci_replay_runner
-
         root = Path(tempfile.mkdtemp(prefix="team-select-missing-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         (root / "ci" / "app-checks").mkdir(parents=True)
-        runner = ci_replay_runner._select_runner(
+        runner = _select_runner(
             profile=object(), repo=root, work=root / "work", run_sqlcl=lambda *a, **k: None
         )
         observed = runner("employee", {"id": "t3", "verify_sql": "employee/absent.verify.sql"})
@@ -158,10 +153,8 @@ class SelectRunnerTests(unittest.TestCase):
 
 class FlowRunnerTests(unittest.TestCase):
     def test_absent_flow_adapter_is_named_in_the_refusal(self):
-        import ci_replay_runner
-
-        with self.assertRaises(SystemExit) as raised:
-            ci_replay_runner._require_flow_adapter(
+        with self.assertRaises(QualificationError) as raised:
+            _require_flow_adapter(
                 {"employee": {"checks": [{"id": "smoke", "kind": "flow"}]}}, None
             )
         message = str(raised.exception)
@@ -169,15 +162,11 @@ class FlowRunnerTests(unittest.TestCase):
         self.assertIn("employee/smoke", message)
 
     def test_no_flow_checks_needs_no_adapter(self):
-        import ci_replay_runner
-
-        ci_replay_runner._require_flow_adapter(
+        _require_flow_adapter(
             {"employee": {"checks": [{"id": "t1", "kind": "select"}]}}, None
         )
 
     def test_flow_runner_parses_the_adapter_result(self):
-        import ci_replay_runner
-
         root = Path(tempfile.mkdtemp(prefix="team-flow-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         adapter = root / "flow.sh"
@@ -187,7 +176,7 @@ class FlowRunnerTests(unittest.TestCase):
             newline="\n",
         )
         adapter.chmod(0o755)
-        runner = ci_replay_runner._flow_runner(str(adapter), root)
+        runner = _flow_runner(str(adapter), root)
         self.assertEqual(runner("employee", {"id": "smoke", "kind": "flow"})["status"], "PASS")
 
 
