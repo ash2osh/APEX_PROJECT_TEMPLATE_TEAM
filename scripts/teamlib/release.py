@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import io
 import json
@@ -78,6 +78,15 @@ class ApplyReport:
 
 
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_MANIFEST_KEYS = {
+    "format_version", "version", "source_commit", "source_tree", "toolchain",
+    "migrations", "app_tree_digests", "master_contract_digest",
+    "app_checks_digest", "payload_paths", "payload",
+}
+_TOOLCHAIN_KEYS = {"python", "archive_format", "normalizer"}
+_PAYLOAD_RECORD_KEYS = {"path", "length", "sha256"}
 
 
 def validate_release_identity(ref: str, version: str, source_commit: str, records: Mapping[str, Any]) -> None:
@@ -98,6 +107,23 @@ def validate_release_identity(ref: str, version: str, source_commit: str, record
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _migration_manifest(
+    loaded: Mapping[str, Migration],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "id": item.id,
+            "checksum": item.checksum,
+            "target": item.target,
+            "dependencies": [list(edge) for edge in item.dependencies],
+            "destructive": item.destructive,
+            "reversible": item.reversible,
+            "down_destructive": item.down_destructive,
+        }
+        for item in sorted(loaded.values(), key=lambda value: (value.stamp, value.id))
+    )
 
 
 def _git(repo: Path, args: list[str]) -> bytes:
@@ -228,15 +254,7 @@ def build_release(repo: str | Path, ref: str, version: str, out: str | Path) -> 
                 loaded = load_bundles(migration_root)
             except BundleError as exc:
                 raise ReleaseError(str(exc)) from exc
-            migrations = tuple({
-                "id": item.id,
-                "checksum": item.checksum,
-                "target": item.target,
-                "dependencies": list(item.dependencies),
-                "destructive": item.destructive,
-                "reversible": item.reversible,
-                "down_destructive": item.down_destructive,
-            } for item in sorted(loaded.values(), key=lambda value: (value.stamp, value.id)))
+            migrations = _migration_manifest(loaded)
         app_groups: dict[str, dict[str, bytes]] = {}
         for path, data in payload.items():
             if path.startswith("release/apps/"):
@@ -282,13 +300,25 @@ def build_release(repo: str | Path, ref: str, version: str, out: str | Path) -> 
             shutil.rmtree(staging_dir)
         shutil.copytree(stage / "release", staging_dir)
     archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    try:
+        verified = verify_release(archive)
+    except ReleaseError:
+        archive.unlink(missing_ok=True)
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        raise
+    if verified.archive_digest != archive_digest:
+        archive.unlink(missing_ok=True)
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        raise ReleaseError("release archive digest changed during verification")
     existing_record = records.get(version) if isinstance(records, Mapping) else None
     if isinstance(existing_record, Mapping) and existing_record.get("archive_digest") not in (None, "", archive_digest):
         archive.unlink(missing_ok=True)
         if staging_dir.exists():
             shutil.rmtree(staging_dir)
         raise ReleaseError(f"release version {version} is already bound to a different archive digest")
-    return _manifest_from_data(manifest_data, archive, archive_digest, staging_dir)
+    return replace(verified, staging_dir=staging_dir)
 
 
 def verify_release(release_tar: str | Path) -> Manifest:
@@ -309,6 +339,55 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         raise ReleaseError("release manifest is unreadable") from exc
     if not isinstance(data, Mapping):
         raise ReleaseError("release manifest must be a JSON object")
+    missing_keys = sorted(_MANIFEST_KEYS - set(data))
+    unknown_keys = sorted(set(data) - _MANIFEST_KEYS)
+    if missing_keys or unknown_keys:
+        detail = []
+        if missing_keys:
+            detail.append("missing=" + ",".join(missing_keys))
+        if unknown_keys:
+            detail.append("unknown=" + ",".join(unknown_keys))
+        raise ReleaseError("release manifest keys are not closed: " + "; ".join(detail))
+    if type(data["format_version"]) is not int or data["format_version"] != 1:
+        raise ReleaseError("release manifest format version is unsupported")
+    if not isinstance(data["version"], str) or not _SEMVER_RE.fullmatch(data["version"]):
+        raise ReleaseError("release manifest version is malformed")
+    if not isinstance(data["source_commit"], str) or not _COMMIT_RE.fullmatch(data["source_commit"]):
+        raise ReleaseError("release manifest source commit is malformed")
+    if not isinstance(data["source_tree"], str) or not _DIGEST_RE.fullmatch(data["source_tree"]):
+        raise ReleaseError("release manifest source tree digest is malformed")
+    toolchain = data["toolchain"]
+    if (
+        not isinstance(toolchain, Mapping)
+        or set(toolchain) != _TOOLCHAIN_KEYS
+        or any(not isinstance(value, str) or not value.strip() for value in toolchain.values())
+    ):
+        raise ReleaseError("release manifest toolchain is malformed")
+    app_tree_digests = data["app_tree_digests"]
+    if not isinstance(app_tree_digests, Mapping):
+        raise ReleaseError("release manifest application tree digests are malformed")
+    for alias, digest in app_tree_digests.items():
+        if (
+            not isinstance(alias, str)
+            or not alias
+            or "/" in alias
+            or not isinstance(digest, str)
+            or not _DIGEST_RE.fullmatch(digest)
+        ):
+            raise ReleaseError("release manifest application tree digests are malformed")
+    migrations = data["migrations"]
+    if not isinstance(migrations, list):
+        raise ReleaseError("release manifest migration metadata must be a list")
+    for migration in migrations:
+        if not isinstance(migration, Mapping):
+            raise ReleaseError("release manifest migration metadata is malformed")
+    for field_name, label in (
+        ("master_contract_digest", "master contract"),
+        ("app_checks_digest", "app-check"),
+    ):
+        supplied = data[field_name]
+        if supplied is not None and (not isinstance(supplied, str) or not _DIGEST_RE.fullmatch(supplied)):
+            raise ReleaseError(f"release manifest {label} digest is malformed")
     payload_records = data.get("payload")
     if not isinstance(payload_records, list):
         raise ReleaseError("release manifest payload must be a list")
@@ -316,6 +395,8 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
     for record in payload_records:
         if not isinstance(record, Mapping):
             raise ReleaseError("release manifest payload record must be an object")
+        if set(record) != _PAYLOAD_RECORD_KEYS:
+            raise ReleaseError("release manifest payload record keys are not closed")
         path = record.get("path")
         length = record.get("length")
         checksum = record.get("sha256")
@@ -332,33 +413,57 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         ):
             raise ReleaseError("release manifest contains an invalid payload record")
         expected[path] = record
-    actual = {name: name for name in members if name != "release/MANIFEST.json"}
-    if set(expected) != set(actual):
+    actual_records = tuple(
+        {
+            "path": path,
+            "length": len(member_bytes),
+            "sha256": hashlib.sha256(member_bytes).hexdigest(),
+        }
+        for path, member_bytes in sorted(members.items())
+        if path != "release/MANIFEST.json"
+    )
+    actual_by_path = {record["path"]: record for record in actual_records}
+    if set(expected) != set(actual_by_path):
         raise ReleaseError("release payload set does not match manifest")
     for path, record in expected.items():
-        data_bytes = members[path]
-        if len(data_bytes) != record["length"] or hashlib.sha256(data_bytes).hexdigest() != record["sha256"]:
+        if dict(record) != actual_by_path[path]:
             raise ReleaseError(f"release payload hash mismatch: {path}")
+    if tuple(payload_records) != actual_records:
+        raise ReleaseError("release manifest payload records are not canonical")
     payload_paths = data.get("payload_paths")
-    if not isinstance(payload_paths, list) or payload_paths != sorted(expected):
+    if not isinstance(payload_paths, list) or payload_paths != [record["path"] for record in actual_records]:
         raise ReleaseError("release manifest payload_paths does not match payload")
+    actual_source_tree = hashlib.sha256(_canonical(actual_records)).hexdigest()
+    if data["source_tree"] != actual_source_tree:
+        raise ReleaseError("release manifest source tree does not match payload")
     for field_name, path, label in (
         ("master_contract_digest", "release/contracts/masters.json", "master contract"),
     ):
-        supplied = data.get(field_name)
-        if supplied is not None and (not isinstance(supplied, str) or not re.fullmatch(r"[0-9a-f]{64}", supplied)):
-            raise ReleaseError(f"release manifest {label} digest is malformed")
         actual_digest = hashlib.sha256(members[path]).hexdigest() if path in members else None
-        if supplied != actual_digest:
+        if data[field_name] != actual_digest:
             raise ReleaseError(f"release manifest {label} digest does not match payload")
-    supplied_checks = data.get("app_checks_digest")
-    if supplied_checks is not None and (not isinstance(supplied_checks, str) or not re.fullmatch(r"[0-9a-f]{64}", supplied_checks)):
-        raise ReleaseError("release manifest app-check digest is malformed")
-    check_records = [record for path, record in sorted(expected.items()) if path.startswith("release/checks/apps/")]
+    check_records = [record for record in actual_records if record["path"].startswith("release/checks/apps/")]
     actual_checks = hashlib.sha256(_canonical(check_records)).hexdigest() if check_records else None
-    if supplied_checks != actual_checks:
+    if data["app_checks_digest"] != actual_checks:
         raise ReleaseError("release manifest app-check digest does not match payload")
-    return _manifest_from_data(data, archive, archive_digest)
+    with tempfile.TemporaryDirectory(prefix="team-release-verify-") as directory:
+        migration_root = Path(directory)
+        for path, member_bytes in members.items():
+            if not path.startswith("release/migrations/"):
+                continue
+            relative = path.removeprefix("release/migrations/")
+            if not relative or "/" in relative or not relative.endswith(".sql"):
+                raise ReleaseError(f"malformed packaged migration path: {path}")
+            (migration_root / relative).write_bytes(member_bytes)
+        try:
+            derived_migrations = _migration_manifest(load_bundles(migration_root))
+        except BundleError as exc:
+            raise ReleaseError(f"release manifest migration metadata is invalid: {exc}") from exc
+    if tuple(migrations) != derived_migrations:
+        raise ReleaseError("release manifest migration metadata does not match payload")
+    manifest = _manifest_from_data(data, archive, archive_digest)
+    _release_app_trees_from_members(manifest, members)
+    return manifest
 
 
 def _read_archive_bytes(archive: Path) -> tuple[str, dict[str, bytes]]:

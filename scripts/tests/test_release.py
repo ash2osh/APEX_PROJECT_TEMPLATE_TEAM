@@ -14,6 +14,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from copy import copy
 from unittest.mock import patch
 
 import teamlib.release as release_module
@@ -47,6 +48,24 @@ class ReleaseTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def rewrite_manifest(self, archive: Path, mutate, label: str) -> Path:
+        destination = Path(self.temp.name) / f"tampered-{label}.tar"
+        with tarfile.open(archive, mode="r:") as source, tarfile.open(
+            destination, mode="w", format=tarfile.USTAR_FORMAT
+        ) as output:
+            for original in source.getmembers():
+                member = copy(original)
+                data = source.extractfile(original).read() if original.isfile() else b""
+                if member.name == "release/MANIFEST.json":
+                    manifest = json.loads(data.decode("utf-8"))
+                    mutate(manifest)
+                    data = json.dumps(
+                        manifest, sort_keys=True, indent=2, ensure_ascii=False
+                    ).encode("utf-8") + b"\n"
+                    member.size = len(data)
+                output.addfile(member, io.BytesIO(data) if member.isfile() else None)
+        return destination
+
     def test_deterministic_build_and_complete_verify(self):
         first = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out1")
         second = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out2")
@@ -62,6 +81,11 @@ class ReleaseTests(unittest.TestCase):
             "20260907T100000__alice__one.sql",
             "20260907T100000__alice__one.verify.sql",
         ))
+
+    def test_build_self_verifies_the_emitted_archive(self):
+        with patch.object(release_module, "verify_release", wraps=release_module.verify_release) as verifier:
+            build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "self-verify-out")
+        self.assertEqual(verifier.call_count, 1)
 
     def test_release_preserves_authored_down_members_and_detects_tampering(self):
         migration_id = "20260907T100001__alice__reversible"
@@ -203,6 +227,73 @@ class ReleaseTests(unittest.TestCase):
                 destination.addfile(member, io.BytesIO(data) if member.isfile() else None)
         with self.assertRaisesRegex(ReleaseError, "app-check"):
             verify_release(tampered)
+
+    def test_verify_rejects_migration_manifest_not_derived_from_payload(self):
+        manifest = build_release(
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "metadata-out"
+        )
+        mutations = {
+            "checksum": "0" * 64,
+            "target": "code",
+            "dependencies": [["foreign", "1" * 64]],
+            "destructive": True,
+            "reversible": True,
+            "down_destructive": True,
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                tampered = self.rewrite_manifest(
+                    manifest.archive_path,
+                    lambda data, field=field, value=value: data["migrations"][0].__setitem__(field, value),
+                    field,
+                )
+                with self.assertRaisesRegex(ReleaseError, "migration metadata"):
+                    verify_release(tampered)
+
+    def test_verify_rejects_false_source_tree_and_application_tree_digest(self):
+        manifest = build_release(
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "digest-out"
+        )
+        tampered_source = self.rewrite_manifest(
+            manifest.archive_path,
+            lambda data: data.__setitem__("source_tree", "0" * 64),
+            "source-tree",
+        )
+        with self.assertRaisesRegex(ReleaseError, "source tree"):
+            verify_release(tampered_source)
+        tampered_app = self.rewrite_manifest(
+            manifest.archive_path,
+            lambda data: data["app_tree_digests"].__setitem__("checkout", "0" * 64),
+            "app-tree",
+        )
+        with self.assertRaisesRegex(ReleaseError, "application tree"):
+            verify_release(tampered_app)
+
+    def test_verify_requires_a_closed_manifest_shape_and_valid_source_commit(self):
+        manifest = build_release(
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "shape-out"
+        )
+        unknown = self.rewrite_manifest(
+            manifest.archive_path,
+            lambda data: data.__setitem__("unexpected", True),
+            "unknown-field",
+        )
+        with self.assertRaisesRegex(ReleaseError, "manifest keys"):
+            verify_release(unknown)
+        missing = self.rewrite_manifest(
+            manifest.archive_path,
+            lambda data: data.pop("toolchain"),
+            "missing-field",
+        )
+        with self.assertRaisesRegex(ReleaseError, "manifest keys"):
+            verify_release(missing)
+        bad_commit = self.rewrite_manifest(
+            manifest.archive_path,
+            lambda data: data.__setitem__("source_commit", "not-a-commit"),
+            "source-commit",
+        )
+        with self.assertRaisesRegex(ReleaseError, "source commit"):
+            verify_release(bad_commit)
 
 
 if __name__ == "__main__":
