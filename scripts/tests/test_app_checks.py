@@ -139,6 +139,36 @@ class SelectRunnerTests(unittest.TestCase):
         self.assertEqual(observed["status"], "FAIL")
         self.assertIn("dept_fk", observed["diagnostic"])
 
+    def test_duplicate_assertion_rows_are_rejected(self):
+        def fake_run_sqlcl(target, operation, driver, work, **kwargs):
+            class Result:
+                stdout = (
+                    "TEAM_ASSERT|dept_fk|PASS\n"
+                    "TEAM_ASSERT|dept_fk|PASS\n"
+                )
+
+            return Result()
+
+        root = Path(tempfile.mkdtemp(prefix="team-select-duplicate-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        checks = root / "ci" / "app-checks" / "employee"
+        checks.mkdir(parents=True)
+        (checks / "dept.verify.sql").write_text(
+            "SELECT 'TEAM_ASSERT|dept_fk|PASS' FROM dual;\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        runner = _select_runner(
+            profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
+        )
+
+        observed = runner(
+            "employee", {"id": "t2", "verify_sql": "employee/dept.verify.sql"}
+        )
+
+        self.assertEqual(observed["status"], "FAIL")
+        self.assertIn("duplicate assertion", observed["diagnostic"])
+
     def test_a_missing_verify_member_is_a_fail_not_an_unknown(self):
         root = Path(tempfile.mkdtemp(prefix="team-select-missing-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)

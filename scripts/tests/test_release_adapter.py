@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from teamlib.assertions import AssertionVerificationError
 from teamlib.config import Target
 from teamlib.release import ApplyReport, ReleasePlan
 from teamlib.release_adapter import ReleaseAdapterError, apply_verified_release, main
@@ -96,6 +97,127 @@ class ReleaseAdapterTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 main(argv)
             self.assertIn("environment profile file not found", str(caught.exception))
+
+    def test_migration_verification_rejects_a_failed_assertion(self):
+        target_path = ROOT / "targets" / "test.json"
+        target_document = json.loads(target_path.read_text(encoding="utf-8"))
+        target_digest = hashlib.sha256(
+            json.dumps(
+                target_document,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        migration_id = "20260910T120000__review__assertion"
+        plan = ReleasePlan(
+            "a" * 64,
+            target_digest,
+            (migration_id,),
+            "c" * 64,
+            target_document,
+            "d" * 64,
+        )
+        profile = Target(
+            project="example-team-apex",
+            role="test",
+            environment="test",
+            connection="test-apex",
+            instance_id="EXAMPLE_TEST_INSTANCE",
+            db_name="FREEPDB1",
+            service="test-service",
+            session_user="EXAMPLE_APP",
+            current_schema="EXAMPLE_APP",
+            alias=None,
+            workspace_id=None,
+            app_id=None,
+            parsing_schema=None,
+            ownership_mode="shared",
+            binding_digest="b" * 64,
+        )
+        config = SimpleNamespace(
+            role="test",
+            environment="test",
+            tables_schema="EXAMPLE_APP",
+            code_schema="EXAMPLE_APP",
+            metadata_schema="EXAMPLE_META",
+        )
+        migration_store = SimpleNamespace(bootstrap=lambda *args, **kwargs: None)
+        control_store = SimpleNamespace(setup_state=lambda *args, **kwargs: None)
+
+        def invoke_adapter(archive, target, reviewed, **kwargs):
+            kwargs["apply_migrations"](({"id": migration_id},), reviewed)
+            return ApplyReport(
+                "applied",
+                reviewed.pending,
+                archive_digest="a" * 64,
+                target_state_key=profile.state_key,
+            )
+
+        def invoke_verification(source, profiles, **kwargs):
+            profiles["verify"](
+                SimpleNamespace(id=migration_id, target="tables"),
+                "migrate",
+                Path(source) / f"{migration_id}.verify.sql",
+            )
+
+        migration_files = {
+            f"{migration_id}.sql": (
+                b"-- migration-version: 1\n-- target: tables\n"
+                b"-- destructive: false\n\nSELECT 1 FROM dual;\n"
+            ),
+            f"{migration_id}.verify.sql": (
+                b"SELECT 'TEAM_ASSERT|postcondition|FAIL' FROM dual;\n"
+            ),
+        }
+        with patch("teamlib.release_adapter.load_config", return_value=config), \
+             patch(
+                 "teamlib.release_adapter.verify_release",
+                 return_value=SimpleNamespace(source_commit="abc"),
+             ), \
+             patch("teamlib.release_adapter.profile_target", return_value=profile), \
+             patch(
+                 "teamlib.release_adapter.SqlMigrationStore",
+                 return_value=migration_store,
+             ), \
+             patch(
+                 "teamlib.release_adapter.SqlControlStore",
+                 return_value=control_store,
+             ), \
+             patch("teamlib.release_adapter.release_app_trees", return_value={}), \
+             patch(
+                 "teamlib.release_adapter.release_migration_files",
+                 return_value=migration_files,
+             ), \
+             patch(
+                 "teamlib.release_adapter.run_sqlcl",
+                 return_value=SimpleNamespace(
+                     stdout="TEAM_ASSERT|postcondition|FAIL\n"
+                 ),
+             ), \
+             patch(
+                 "teamlib.release_adapter.apply_plan",
+                 side_effect=invoke_verification,
+             ), \
+             patch(
+                 "teamlib.release_adapter.apply_release",
+                 side_effect=invoke_adapter,
+             ):
+            with tempfile.TemporaryDirectory(
+                prefix="team-release-adapter-assertion-"
+            ) as directory:
+                archive = Path(directory) / "release.tar"
+                archive.write_bytes(b"fixture")
+                with self.assertRaisesRegex(
+                    AssertionVerificationError, "postcondition"
+                ):
+                    apply_verified_release(
+                        archive,
+                        target_path,
+                        Path(directory) / "env",
+                        plan,
+                        {},
+                    )
 
 
 class SchemaSetDigestTests(unittest.TestCase):

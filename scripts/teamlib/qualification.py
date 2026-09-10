@@ -19,6 +19,7 @@ from typing import Any
 from collections.abc import Callable, Mapping, Sequence
 
 from .app_checks import AppCheckError, AppCheckReport, verify_candidate_apps
+from .assertions import AssertionVerificationError, parse_team_assertions
 from .ci import ci_doctor
 from .config import Config, Target, profile_target
 from .migration_store import MigrationStoreError
@@ -35,7 +36,6 @@ class QualificationError(RuntimeError):
 
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-_ASSERTION_RE = re.compile(r"^TEAM_ASSERT\|([^|]+)\|(PASS|FAIL)$")
 
 
 def canonical_json(value: Mapping[str, Any]) -> bytes:
@@ -106,21 +106,11 @@ def _select_runner(*, profile: Any, repo: Path, work: Path, run_sqlcl: Callable[
             result = run_sqlcl(profile, "read", driver, driver_root)
         except Exception as exc:  # noqa: BLE001
             return {"status": "FAIL", "diagnostic": f"verification query failed: {exc}"}
-        rows = []
-        for raw in getattr(result, "stdout", "").splitlines():
-            match = _ASSERTION_RE.match(raw.strip())
-            if match:
-                rows.append((match.group(1), match.group(2)))
-        if not rows:
-            return {"status": "FAIL", "diagnostic": "verification query returned no TEAM_ASSERT rows"}
-        failures = [name for name, status in rows if status != "PASS"]
-        if failures:
-            return {
-                "status": "FAIL",
-                "diagnostic": "failed assertions: " + ", ".join(sorted(failures)),
-                "assertions": [name for name, _ in rows],
-            }
-        return {"status": "PASS", "diagnostic": "", "assertions": [name for name, _ in rows]}
+        try:
+            names = parse_team_assertions(getattr(result, "stdout", ""))
+        except AssertionVerificationError as exc:
+            return {"status": "FAIL", "diagnostic": str(exc)}
+        return {"status": "PASS", "diagnostic": "", "assertions": list(names)}
 
     return resolve
 

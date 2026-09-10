@@ -11,7 +11,10 @@ from pathlib import Path
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import team
 from teamlib.config import Target
 from teamlib.fingerprints import inventory_from_rows
 from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
@@ -79,6 +82,34 @@ class MigrationRunnerTests(unittest.TestCase):
         self.assertEqual(report.applied, (self.migration_id,))
         self.assertEqual(calls, [self.migration_id])
         self.assertEqual(self.store.read_history(self.target)[self.migration_id]["status"], "APPLIED")
+
+    def test_cli_verification_callback_rejects_a_failed_assertion(self):
+        verify_path = self.migrations / f"{self.migration_id}.verify.sql"
+        verify_path.write_text(
+            "SELECT 'postcondition' assertion_name, 'FAIL' status FROM dual;\n",
+            encoding="utf-8",
+        )
+        config = SimpleNamespace()
+        with patch("team.profile_target", return_value=self.target), patch(
+            "team.run_sqlcl",
+            return_value=SimpleNamespace(stdout="TEAM_ASSERT|postcondition|FAIL\n"),
+        ):
+            _, verify, _ = team._migration_callbacks(config, self.root, "a" * 64)
+            with self.assertRaisesRegex(MigrationRunError, "postcondition"):
+                apply_plan(
+                    self.migrations,
+                    self.profiles(
+                        bootstrap=True,
+                        execute=lambda *_args: None,
+                        verify=verify,
+                    ),
+                )
+        state = self.store.read_state(self.target)
+        self.assertEqual(
+            {attempt["state"] for attempt in state["attempts"].values()},
+            {"FAILED"},
+        )
+        self.assertEqual(self.store.read_history(self.target), {})
 
     def test_dry_run_does_not_bootstrap_or_execute(self):
         report = apply_plan(self.migrations, self.profiles(dry_run=True, execute=lambda migration: self.fail("executed")))

@@ -11,6 +11,7 @@ import tempfile
 from typing import Any
 from collections.abc import Mapping
 
+from .assertions import run_verification_member
 from .config import ConfigError, Target, load_config, parse_target_contract, profile_target
 from .control_store import SqlControlStore
 from .deploy import deploy_app
@@ -143,8 +144,12 @@ def apply_verified_release(
                 run_sqlcl(target, "write", sql_path, work / "payload" / action / migration.id)
 
             def verify(migration, action, verify_path):
-                if verify_path is not None and verify_path.is_file() and verify_path.read_bytes().strip():
-                    run_sqlcl(profile_target(config, "VERIFY"), "read", verify_path, work / "verify" / action / migration.id)
+                run_verification_member(
+                    profile_target(config, "VERIFY"),
+                    verify_path,
+                    work / "verify" / action / migration.id,
+                    runner=run_sqlcl,
+                )
                 return True
 
             def observe(_migration, phase):

@@ -26,6 +26,7 @@ from teamlib.apex import (
 )
 from teamlib.announce import draft_all_clear, draft_import_announcement
 from teamlib.app_checks import AppCheckError
+from teamlib.assertions import run_verification_member
 from teamlib.ci import CIError
 from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, load_config, parse_target_contract, profile_target
 from teamlib.control_store import ControlStore, ControlStoreError, SqlControlStore
@@ -317,8 +318,12 @@ def _migration_callbacks(config: Any, repo: Path, schema_set_digest: str):
         run_sqlcl(payload_target, "write", sql_path, repo / "scratch" / "migration-payload" / action / migration.id)
 
     def verify(migration, action, verify_path):
-        if verify_path is not None and verify_path.is_file() and verify_path.read_bytes().strip():
-            run_sqlcl(profile_target(config, "VERIFY"), "read", verify_path, repo / "scratch" / "migration-verify" / action / migration.id)
+        run_verification_member(
+            profile_target(config, "VERIFY"),
+            verify_path,
+            repo / "scratch" / "migration-verify" / action / migration.id,
+            runner=run_sqlcl,
+        )
         return True
 
     def observe(migration, phase):
