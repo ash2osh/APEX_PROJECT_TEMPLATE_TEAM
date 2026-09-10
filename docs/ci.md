@@ -1,88 +1,81 @@
-# Persistent CI and candidate application checks
+# CI and qualification
 
-The default `database-checks` workflow is deliberately offline. It checks the
-repository with the unit suite and runs:
+## Offline pull-request gate
+
+`database-checks.yml` never opens Oracle or loads a target profile. It runs the
+stdlib test suite, static checks, and the closed contract doctor:
 
 ```text
-PYTHONPATH=scripts python3 scripts/team.py ci-doctor --contract ci/runner-contract.json
+PYTHONPATH=scripts python3 scripts/team.py ci-doctor \
+  --contract ci/runner-contract.json
 ```
 
-`ci/runner-contract.json` contains no credentials or target provisioner. The
-doctor validates version 1, the declared Python/SQLcl/JDK/APEX/database and
-Ed25519 toolchain requirements, the five profiles (`TABLES`, `CODE`, `APEX`,
-`METADATA`, `VERIFY`), both production-safety booleans set to `false`, and the
-absence of populated secret-like fields. The offline job does not require
-Oracle, Docker, SQLcl, or a secret.
+`ci/runner-contract.json` describes the required Python, SQLcl, JDK, APEX,
+database, and Ed25519 capability. `ci-doctor` validates that shape only; it
+does not claim the live runner is installed or reachable.
 
-## Manual integration qualification
+## Protected integration
 
-The `integration` workflow is started with `workflow_dispatch` and runs one
-serial job in the protected `integration` environment. It checks out the exact
-`github.sha`, prepares the credential-free environment profile, initializes
-metadata state, adopts an observed frontier when needed, checks drift, applies
-reviewed pending migrations, deploys the selected applications, and then runs:
+The manually dispatched integration job runs on
+`runs-on: [self-hosted, team-apex, integration]` in the protected integration
+environment. It checks out the exact `github.sha`, materializes the
+`TEAM_ENV_CONTENT` secret at `$RUNNER_TEMP/integration.env` with mode 0600,
+maps `TEAM_FLOW_RUNNER`, and invokes one command:
 
 ```text
-PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" qualify-target \
-  --source-commit "$GITHUB_SHA" \
-  --aliases "$TEAM_APP_ALIASES" \
+PYTHONPATH=scripts python3 scripts/team.py \
+  --env "$RUNNER_TEMP/integration.env" run-integration \
   --out "$RUNNER_TEMP/qualification.json"
 ```
 
-The protected environment supplies `TEAM_ENV_FILE` (a path),
-`TEAM_ENV_CONTENT` (the file contents), and `TEAM_APP_ALIASES` (the complete
-comma-separated binding set). The profile must expose the five SQLcl roles,
-including an observation-only `VERIFY` connection, and must identify the same
-non-production instance across them. The workflow never supplies a destructive
-migration confirmation. It uploads `qualification.json` with `if: always()`;
-application-check failures carry a structured `FAIL` report when available.
+The command performs observed runtime/profile preflight before writes, then
+sets up controller state, captures one live inventory, adopts a frontier only
+for empty metadata, checks drift, applies ordinary migrations, deploys all
+configured apps, runs checks, and emits the canonical report. A missing or
+unusable flow adapter, profile identity mismatch, old version, or production
+classification is a refusal. The profile file is removed in a bounded
+`always()` cleanup step; report upload is also `always()` and warns when no
+report exists because preflight may refuse early.
 
-The report binds one source commit, target identity, current migration history,
-and the latest accepted observation sequence/digest. It explicitly records
-`target_kind: persistent`. Persistent staging does not prove fresh installation;
-it is observational shared state and does not prove isolation or a clean
-upgrade path.
+`qualify-target` remains available for read-only diagnosis. It derives neither
+write state nor a fresh installation claim. Version-2 reports contain
+`target_kind: persistent`, `observation_digest` from the accepted after
+inventory, history and toolchain digests, target identity, and structured
+application-check results.
 
-## Candidate application declarations
+## Candidate checks
 
-Store one version-1 JSON declaration at `ci/app-checks/<alias>.json` for every
-selected application. A declaration must include at least one restricted
-observation-only `select` check and one declarative `flow` check. Every check
-names its page, expected objects (for SELECT checks), and a safe relative
-fixture. Missing declarations, fixtures, SQL members, adapters, or structured
-results fail closed; an unavailable check is never promoted to PASS.
-
-SELECT checks run through the read-only `VERIFY` profile and must return framed
-rows in the form `TEAM_ASSERT|assertion_name|PASS` (a FAIL row or no row fails).
-Flow checks are sent to the executable named by `TEAM_FLOW_RUNNER`:
+Each configured alias has `ci/app-checks/<alias>.json`. SELECT checks run only
+through the observation-only `VERIFY` profile and must return framed rows such
+as:
 
 ```text
-TEAM_FLOW_RUNNER --alias <alias> --check-json <path>
+TEAM_ASSERT|employee_table_exists|PASS
 ```
 
-The adapter must return one JSON object with `status` equal to `PASS`, `FAIL`,
-or `UNKNOWN`, plus optional diagnostic and observed fields. The qualification
-report records deterministic declaration/check digests, app/page/check IDs,
-coverage, expected objects, and the unknown count.
+Missing, malformed, duplicate, FAIL, or empty assertion output fails closed.
+Flow checks invoke `TEAM_FLOW_RUNNER --alias <alias> --check-json <path>` and
+accept only a structured `PASS`, `FAIL`, or `UNKNOWN` result. Unknown checks
+are counted and never silently promoted.
 
-## Release-test qualification
+## Protected release-test
 
-The protected `test` job applies the exact release archive and writes its
-canonical report below `RUNNER_TEMP`. It then supplies both files to
-`qualify-target`:
+The release job keeps archive build/download/verification offline, then uses a
+prepared `self-hosted` test runner. The test command derives source commit and
+aliases from the verified archive and reads live metadata history:
 
 ```text
-PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_TEST_ENV_FILE" qualify-target \
-  --source-commit "$GITHUB_SHA" --aliases "$TEAM_APP_ALIASES" \
-  --release-archive scratch/release/release.tar \
-  --apply-report "$RUNNER_TEMP/apply-report.json" \
+PYTHONPATH=scripts python3 scripts/team.py \
+  --env "$RUNNER_TEMP/test.env" run-release-test \
+  scratch/release/release.tar --target targets/test.json \
   --out "$RUNNER_TEMP/test-evidence.json"
 ```
 
-The command verifies the archive digest, source commit, target state key,
-history/observation frontier, and application checks before emitting evidence
-version 2. The report contains `final_status`, `archive_digest`,
-`toolchain_digest`, `target_identity`, `run_identity`, `qualification_identity`,
-`application_checks`, and the three PASS/FAIL result fields. It is canonical
-compact UTF-8 JSON with one LF terminator. Release handoff signing and trust
-key handling are described in [docs/promotion.md](promotion.md).
+It requires `role: test` and environment `test`, refuses destructive pending
+migrations before payload execution, and passes an in-memory apply result into
+qualification. No external test-history, plan, or apply-report file is part
+of this flow. Evidence is signed in a separate step with the protected test
+key before the production-owner runbook is generated.
+
+Persistent staging is observational and does not prove a fresh installation,
+isolation, or arbitrary-DML coverage.

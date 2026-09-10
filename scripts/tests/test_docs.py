@@ -39,6 +39,15 @@ class DocumentationTests(unittest.TestCase):
         )
         text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         for required in (
+            "run-integration",
+            "run-release-test",
+            "TEAM_ASSERT|",
+            "self-hosted",
+            "role: test",
+            "observation_digest",
+            "destructive-confirmation",
+            "persistent",
+            "does not prove a fresh installation",
             "qualify-target",
             "sign-test-evidence",
             "target_kind: persistent",
@@ -57,6 +66,13 @@ class DocumentationTests(unittest.TestCase):
             "replay_identity",
         ):
             self.assertNotIn(removed.lower(), text.lower())
+        operator_docs = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in paths
+            if path.name not in {"2026-09-10-repo-review-p1-remediation-and-flow-simplification-design.md"}
+        )
+        for obsolete in ("TEAM_TEST_HISTORY_JSON", "test-plan.json", "apply-report.json"):
+            self.assertNotIn(obsolete, operator_docs)
 
     def test_migration_lifecycle_documentation_matches_the_contract(self):
         text = "\n".join(

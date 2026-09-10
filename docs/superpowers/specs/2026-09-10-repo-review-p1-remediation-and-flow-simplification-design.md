@@ -1,7 +1,7 @@
 # Repository review P1 remediation and flow simplification — Design
 
 **Date:** 2026-09-10
-**Status:** Draft after repository-wide review
+**Status:** Implemented (2026-09-10)
 **Parent:** [Staging qualification and migration undo/redo index](2026-09-10-staging-qualification-and-undo-design.md)
 
 ## 1. Purpose
@@ -17,6 +17,11 @@ operator flow. Simplification must reduce duplicated arguments, files, and
 workflow steps; it must not remove drift, target-identity, mutex, attempt,
 verification, destructive-confirmation, signing, recovery, or production-owner
 boundaries.
+
+The implementation is complete in the corresponding branch commits. The
+operator-facing contract is now the two online commands described below;
+historical plan/history/apply-report handoffs remain documented only in older
+design records, not in the current workflows.
 
 ## 2. Mandatory P1 remediations
 

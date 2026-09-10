@@ -1,40 +1,39 @@
 # Shared schema migrations
 
-Create migrations offline with `team.py new-migration`; the generated pair is
-an immutable SQL member and a SELECT-only verification member. Add exact
-dependencies with `team.py add-dependency`. The header is authoritative for
-target, destructive status, and dependency checksums.
-
-An authored reversal is a second complete pair, committed before the forward
-bundle is first applied:
+Migration authoring is offline. `new-migration` creates a forward SQL member
+and a SELECT-only verification member; `add-dependency` records exact checksum
+edges. A reversible bundle must include authored pairs:
 
 ```text
-<id>.down.sql
-<id>.down.verify.sql
+migrations/<id>.sql
+migrations/<id>.verify.sql
+migrations/<id>.down.sql
+migrations/<id>.down.verify.sql
 ```
 
-The down header contains only `migration-version` and `destructive`. Down SQL
-is never generated, and its checksum is part of the immutable four-member
-bundle. A lone down member, unsafe SQL, or a changed pair is refused.
+Down SQL is reviewed deployment code and is never generated. The metadata v2
+ledger stores every event with an immutable `applied_sequence`; the latest
+event makes an ID `APPLIED` or `REVERTED`. Routine migrate does not silently
+reapply a reverted migration. Undo is global LIFO and redo is explicit and
+dependency-safe.
 
-`migration-plan` is safe to run without an environment file. Developer and
-shared integration history may contain foreign applied or reverted migrations;
-strict test targets require the complete selected history. A local `REVERTED`
-migration is neither ordinary pending work nor a reason for routine `migrate`
-to reapply it. Dependents of a reverted migration are blocked until the
-dependency is redone.
+## Safe lifecycle
 
-Undo is global LIFO: only the currently applied migration with the greatest
-event sequence can be undone, and it must have a down pair. Redo is explicit
-and dependency-safe; it runs the original forward members. The metadata v2
-event ledger appends `up` and `down` rows keyed by `applied_sequence` and
-collapses the latest row per ID to `APPLIED` or `REVERTED`.
+All migration writes use the non-production isolated `METADATA` profile. A
+qualified drift gate and accepted observation frontier are required before a
+payload. Every attempt records identity, checksum, action, verification, and
+before/after inventory evidence. A known failure is `FAILED`; a lost result is
+`UNKNOWN`. Either state retains the mutex for the recovery owner.
 
-All lifecycle writes use the isolated METADATA target and retain a mutex and
-attempt record. An unresolved or unknown attempt blocks later work until its
-worker has ended and the recorded evidence is reviewed.
+Destructive `migrate`, `undo-migration`, and `redo-migration` share one
+structured destructive-confirmation convention. Begin with a dry run:
 
-Destructive migrate, undo, and redo operations use the same closed JSON file:
+```text
+scripts/team.py --env .env migrate --source migrations --dry-run
+```
+
+Review the exact migration ID, action, bundle checksum, and
+`payload_target_state_key`. The output is a version-1 document such as:
 
 ```json
 {
@@ -45,24 +44,29 @@ Destructive migrate, undo, and redo operations use the same closed JSON file:
       "action": "migrate",
       "bundle_checksum": "<64 lowercase hex characters>",
       "payload_target_state_key": "<64 lowercase hex characters>",
-      "confirmed": true
+      "confirmed": false
     }
   ]
 }
 ```
 
-Use `--dry-run` first to obtain exact entries with `confirmed: false`, then pass
-the reviewed file with `--destructive-confirmation <confirmation.json>`. The
-operator reviews the immutable identity fields and changes only confirmation;
-missing, duplicate, stale, extra, boolean, or wrong-action entries are
-refused. Production database operations remain refused.
+Change only `confirmed: false` to `true`, save the canonical JSON, and pass it
+with `--destructive-confirmation confirmation.json` to the matching command.
+The same convention covers forward migrate and undo/redo; boolean shortcuts,
+missing or duplicate entries, stale checksums, wrong actions, and extra entries
+are refused. The orchestrator never creates an affirmative confirmation.
 
-Applying a bundle to the shared schema makes it visible to every developer
-immediately. A page exported after that can depend on an unmerged migration, so
-the author owns merging the bundle promptly. The shared schema is not the
-oracle for candidate readiness: persistent qualification and declared app
-checks are separate promotion evidence.
+## Frontier and recovery
 
-Database undo does not revert APEX application source. Uncaptured Builder edits
-and arbitrary DML outside the supported inventory remain outside the observed
-boundary; use the app recovery workflow for Builder recovery.
+An empty metadata owner may adopt one observed sequence-zero frontier. History
+without a frontier is refused; it cannot be repaired by importing over the
+workspace. Drift, verification failure, unknown SQLcl results, and mutex
+release uncertainty stop before the next payload. Inspect retained `.sync-state/`
+evidence and the run token, then use the explicit recovery command after the
+named owner reviews the target.
+
+Applying a migration to the shared schema must be merged promptly because a
+colleague's export can depend on it. Database undo does not roll back an APEX
+Builder import; Builder recovery is a separate evidence-driven workflow.
+Production writes remain refused, and uncaptured Builder edits or arbitrary DML
+outside the supported inventory are outside the observed boundary.

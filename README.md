@@ -1,31 +1,30 @@
 # APEX project template for teams
 
-This repository treats one development APEX application as a shared physical
-resource. The stable identity is the lowercase application alias under
-`apps/<alias>/`; developers do not receive separate Builder applications.
-Integration, test and production bind that alias to different workspace and
-application IDs.
+This repository treats each APEX application as a shared physical Builder
+resource. The tracked source is `apps/<alias>/`; the database and Builder
+workspace are identified by the validated target profiles, not by a Git branch.
 
-## Daily development loop
+## Daily Builder loop
 
-1. Edit in App Builder and export the whole current application with
-   `scripts/team.sh export-app <alias>`.
-2. Review the durable reconciliation/recovery evidence, then commit the
-   resulting `apps/<alias>/` tree.
-3. Pull and continue from the shared source.
+Edit in Builder, export the whole application, review the durable evidence, then
+commit and push:
 
-There is no import step in the ordinary daily loop. Import overwrites the shared Builder workspace
-and requires a team pause; a Git branch does not isolate Builder state.
+```text
+scripts/team.sh export-app <alias>
+git diff -- apps/<alias>/ .sync-state/
+git commit -am "Describe the Builder change"
+git push
+```
 
-SQL intent belongs in two-member migration bundles under `migrations/`. Shared
-schema application and persistent-target qualification are separate concerns:
-qualification observes a protected non-production target and never treats it as
-a fresh installation.
+There is no import step in the normal edit loop. `import-app` overwrites the
+shared Builder workspace and requires a separately posted team pause. Transient
+Builder edits and arbitrary DML outside the supported inventory remain
+unobservable.
 
-## First setup
+## Local setup
 
-Copy `.env.example` to a local `.env`, fill the credential-free SQLcl profile
-names and expected identities, then run:
+Copy `.env.example` to `.env`, fill the credential-free SQLcl connection names
+and expected identities, and validate the profile set:
 
 ```text
 scripts/team.sh doctor
@@ -33,96 +32,81 @@ scripts/team.sh setup-state
 scripts/team.sh register-app <alias>
 ```
 
-The default workflow is stdlib-only. `gen-runbook` and
-`sign-test-evidence` need `cryptography`; graphify tooling has its own optional
-dependencies:
+The online integration and test jobs run on prepared `self-hosted` runners.
+`TEAM_FLOW_RUNNER` names the executable browser adapter when a declaration has a
+flow check. It must return one JSON object with `status` `PASS`, `FAIL`, or
+`UNKNOWN`; the runner preflight also verifies SQLcl, JDK, database/APEX version
+markers, profile identity, and Ed25519 capability.
+
+## One normal command per protected target
+
+The offline pull-request gate runs unit tests, static checks, and `ci-doctor`.
+Protected integration derives `HEAD` and the configured aliases itself:
 
 ```text
-python3 -m pip install -e '.[promotion]'
-```
-
-Keep `TABLES`, `CODE`, `APEX`, `METADATA` and observation-only `VERIFY` profiles
-explicit. `METADATA_SCHEMA` must be isolated from application schemas.
-
-## Migrations and qualification
-
-Create and validate bundles offline:
-
-```text
-scripts/team.sh new-migration --author alice --slug add-status --target tables
-scripts/team.sh migration-plan --source migrations --history history.json --mode shared
-```
-
-To make a migration reversible, author both additional members before its first
-application:
-
-```text
-migrations/<id>.down.sql
-migrations/<id>.down.verify.sql
-```
-
-Down SQL is reviewed deployment code; it is never generated. Undo is global
-LIFO, while redo names one currently `REVERTED` migration and checks its
-dependencies. The metadata v2 event ledger records every `up` and `down`
-operation, so routine `migrate` never silently reapplies a reverted migration.
-
-All three database lifecycle commands are non-production only and share one
-exact destructive-confirmation file. Start with a dry run, review the emitted
-ID, action, bundle checksum and payload target-state key, then set only
-`confirmed` to `true` in the canonical JSON file:
-
-```text
-scripts/team.py --env .env.development migrate --source migrations --dry-run
-scripts/team.py --env .env.development undo-migration <migration-id> --source migrations --dry-run
-scripts/team.py --env .env.development redo-migration <migration-id> --source migrations --dry-run
-```
-
-Pass the reviewed file as `--destructive-confirmation confirmation.json` to
-`migrate`, `undo-migration`, or `redo-migration`. Boolean shortcuts, partial
-documents, stale checksums, and extra entries are refused. Database undo does
-not roll back an APEX Builder import; use the app recovery workflow for that
-boundary.
-
-The manual integration workflow checks an exact commit after applying reviewed
-migrations and deploying the selected applications:
-
-```text
-scripts/team.py --env "$TEAM_ENV_FILE" qualify-target \
-  --source-commit "$GITHUB_SHA" \
-  --aliases "$TEAM_APP_ALIASES" \
+scripts/team.py --env "$RUNNER_TEMP/integration.env" run-integration \
   --out "$RUNNER_TEMP/qualification.json"
 ```
 
-The report is evidence version 2 with `target_kind: persistent`, the observed
-frontier and declared application-check coverage. Persistent staging evidence
-does not prove fresh installation or isolation.
+It captures one live inventory, adopts a sequence-zero frontier only for empty
+metadata, checks drift, applies ordinary migrations, deploys every configured
+application, runs declared checks, and writes canonical persistent evidence.
+Destructive pending work returns `maintenance-required` with an exact template;
+the command never invents confirmation.
 
-For a release-test target, qualify the exact applied archive and report, then
-sign the canonical evidence bytes with the protected test key:
+Release testing uses the verified archive and a protected test-role profile:
 
 ```text
-scripts/team.py --env "$TEAM_TEST_ENV_FILE" qualify-target \
-  --source-commit "$GITHUB_SHA" --aliases "$TEAM_APP_ALIASES" \
-  --release-archive scratch/release/release.tar \
-  --apply-report "$RUNNER_TEMP/apply-report.json" \
+scripts/team.py --env "$RUNNER_TEMP/test.env" run-release-test \
+  scratch/release/release.tar --target targets/test.json \
   --out "$RUNNER_TEMP/test-evidence.json"
-scripts/team.sh sign-test-evidence --evidence "$RUNNER_TEMP/test-evidence.json" \
-  --private-key "$RUNNER_TEMP/test-signing-key.pem" \
-  --out "$RUNNER_TEMP/test-evidence.sig"
 ```
 
-See [docs/ci.md](docs/ci.md), [docs/migrations.md](docs/migrations.md) and
-[docs/promotion.md](docs/promotion.md) for workflow, lifecycle and handoff
-rules.
+The archive supplies the source commit and application aliases. The command
+reads live metadata history, recomputes the plan, refuses destructive pending
+work, deploys exact packaged bytes, and emits unsigned evidence. The target
+must have `role: test`, environment `test`, and matching application bindings.
 
-## Recovery and safety
+`qualify-target` remains the read-only diagnostic primitive when an operator
+needs to inspect a persistent target directly. Version-2 evidence contains
+`target_kind: persistent`, the latest `observation_digest` (the accepted
+after-inventory digest), history, toolchain, target identity, and check
+coverage. Persistent staging does not prove fresh installation or isolation.
 
-`.sync-state/` contains retained baselines, checkpoints, manifests, mutex
-state and recovery captures. It is not scratch data. An uncertain app or
-migration remains held until the named recovery owner reviews evidence. Use
-[docs/app-recovery.md](docs/app-recovery.md) and
-[docs/conflict-resolution.md](docs/conflict-resolution.md).
+## Migrations and recovery
 
-Production writes remain refused by automated commands. `gen-runbook` verifies
-an immutable archive and signed test evidence and produces an offline handoff
-for the production owner.
+Create migration bundles offline. A reversible migration has authored
+`.down.sql` and `.down.verify.sql` members; down SQL is never generated. Undo
+is global LIFO and redo is explicit for a `REVERTED` migration. All writes use
+the isolated METADATA profile, retain attempt/mutex evidence under
+`.sync-state/`, and refuse production.
+
+Destructive `migrate`, `undo-migration`, and `redo-migration` share one closed
+confirmation document. Start with `--dry-run`, review the exact migration ID,
+action, bundle checksum, and `payload_target_state_key`, then change only
+`confirmed: false` to `true` and pass:
+
+```text
+scripts/team.py --env .env migrate --source migrations --dry-run
+scripts/team.py --env .env migrate --source migrations \
+  --destructive-confirmation confirmation.json \
+  --expected-inventory database/schema-inventory.json \
+  --actual-inventory scratch/live-inventory.json
+```
+
+Stale, partial, boolean-shortcut, or extra confirmation entries are refused.
+An unknown or failed attempt retains the mutex until the named recovery owner
+reviews the evidence and runs an explicit recovery command. Database undo does
+not roll back an APEX Builder import; use the app recovery workflow for that
+separate boundary.
+
+## Promotion
+
+Build and verify one immutable `release.tar` offline. The release workflow then
+downloads and verifies those bytes, runs `run-release-test`, signs the canonical
+test evidence with the protected Ed25519 key, and generates an offline
+production-owner runbook. Automated production writes remain refused.
+
+See [docs/ci.md](docs/ci.md), [docs/migrations.md](docs/migrations.md),
+[docs/promotion.md](docs/promotion.md), and
+[docs/app-recovery.md](docs/app-recovery.md) for the detailed contracts.
