@@ -16,7 +16,8 @@ from typing import Any
 from collections.abc import Mapping
 from collections.abc import Callable
 
-from .migration_bundle import BundleError, load_bundles
+from .migration_bundle import BundleError, Migration, load_bundles
+from .migration_plan import plan_migrations
 from .trees import tree_digest
 
 
@@ -48,6 +49,8 @@ class ReleasePlan:
     artifact_history_digest: str
     target: Mapping[str, Any]
     history_digest: str = ""
+    foreign_applied: tuple[str, ...] = ()
+    foreign_reverted: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,7 +228,15 @@ def build_release(repo: str | Path, ref: str, version: str, out: str | Path) -> 
                 loaded = load_bundles(migration_root)
             except BundleError as exc:
                 raise ReleaseError(str(exc)) from exc
-            migrations = tuple({"id": item.id, "checksum": item.checksum, "target": item.target, "dependencies": list(item.dependencies), "destructive": item.destructive} for item in sorted(loaded.values(), key=lambda value: (value.stamp, value.id)))
+            migrations = tuple({
+                "id": item.id,
+                "checksum": item.checksum,
+                "target": item.target,
+                "dependencies": list(item.dependencies),
+                "destructive": item.destructive,
+                "reversible": item.reversible,
+                "down_destructive": item.down_destructive,
+            } for item in sorted(loaded.values(), key=lambda value: (value.stamp, value.id)))
         app_groups: dict[str, dict[str, bytes]] = {}
         for path, data in payload.items():
             if path.startswith("release/apps/"):
@@ -401,7 +412,16 @@ def release_migration_files(release_tar: str | Path) -> dict[str, bytes]:
         if not relative or "/" in relative or not relative.endswith((".sql", ".verify.sql")):
             raise ReleaseError(f"malformed packaged migration path: {path}")
         files[relative] = data
-    return dict(sorted(files.items()))
+    def member_order(path: str) -> tuple[str, int]:
+        if path.endswith(".down.verify.sql"):
+            return path[: -len(".down.verify.sql")], 3
+        if path.endswith(".down.sql"):
+            return path[: -len(".down.sql")], 2
+        if path.endswith(".verify.sql"):
+            return path[: -len(".verify.sql")], 1
+        return path[: -len(".sql")], 0
+
+    return dict(sorted(files.items(), key=lambda item: member_order(item[0])))
 
 
 def _release_app_trees_from_members(manifest: Manifest, members: Mapping[str, bytes]) -> dict[str, dict[str, bytes]]:
@@ -454,33 +474,51 @@ def _plan_from_manifest(manifest: Manifest, history: Mapping[str, Any], target: 
     history_data = history.get("history", history) if isinstance(history, Mapping) else {}
     if not isinstance(history_data, Mapping):
         raise ReleaseError("target history must contain a mapping")
-    errors = []
-    pending = []
-    artifact_ids = {str(item.get("id")) for item in manifest.migrations if isinstance(item, Mapping)}
-    for migration_id, entry in history_data.items():
-        if not isinstance(migration_id, str) or not isinstance(entry, Mapping):
-            errors.append(f"malformed target history entry: {migration_id}")
-            continue
-        status = entry.get("status")
-        if status in {"RUNNING", "UNKNOWN", "FAILED"}:
-            errors.append(f"unresolved target migration attempt: {migration_id}")
-        elif status not in {"APPLIED", None, ""}:
-            errors.append(f"unknown target migration history status: {migration_id}")
-        if migration_id not in artifact_ids and status == "APPLIED":
-            errors.append(f"target history contains foreign migration: {migration_id}")
-    for migration in manifest.migrations:
-        entry = history_data.get(migration["id"]) if isinstance(history_data, Mapping) else None
-        if isinstance(entry, Mapping) and entry.get("status") == "APPLIED":
-            if entry.get("checksum") != migration["checksum"]:
-                errors.append(f"history checksum mismatch: {migration['id']}")
-        else:
-            pending.append(migration["id"])
-    if errors:
-        raise ReleaseError("; ".join(dict.fromkeys(errors)))
+    bundles: dict[str, Migration] = {}
+    for item in manifest.migrations:
+        if not isinstance(item, Mapping):
+            raise ReleaseError("release manifest migration entry must be an object")
+        migration_id = item.get("id")
+        checksum = item.get("checksum")
+        target_name = item.get("target")
+        dependencies = item.get("dependencies", [])
+        if (
+            not isinstance(migration_id, str)
+            or not isinstance(checksum, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", checksum)
+            or target_name not in {"tables", "code"}
+            or not isinstance(dependencies, list)
+        ):
+            raise ReleaseError("release manifest migration entry is malformed")
+        try:
+            dependency_tuple = tuple((str(edge[0]), str(edge[1])) for edge in dependencies)
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ReleaseError(f"release manifest migration dependencies are malformed: {migration_id}") from exc
+        reversible = bool(item.get("reversible", False))
+        bundles[migration_id] = Migration(
+            id=migration_id,
+            stamp=migration_id.split("__", 1)[0],
+            target=target_name,
+            checksum=checksum,
+            dependencies=dependency_tuple,
+            destructive=bool(item.get("destructive", False)),
+            down_sql_path=Path(f"{migration_id}.down.sql") if reversible else None,
+            down_verify_path=Path(f"{migration_id}.down.verify.sql") if reversible else None,
+            down_destructive=bool(item.get("down_destructive", False)),
+        )
+    role = target.get("role") if isinstance(target, Mapping) else None
+    mode = target.get("mode") if isinstance(target, Mapping) else None
+    mode = mode if mode in {"shared", "strict"} else ("shared" if role in {"developer", "integration"} else "strict")
+    plan = plan_migrations(bundles, history_data, mode)
+    if plan.errors:
+        raise ReleaseError("; ".join(plan.errors))
     target_digest = hashlib.sha256(_canonical(target)).hexdigest()
     artifact_history_digest = hashlib.sha256(_canonical(manifest.migrations)).hexdigest()
     history_digest = hashlib.sha256(_canonical(history_data)).hexdigest()
-    return ReleasePlan(manifest.archive_digest, target_digest, tuple(pending), artifact_history_digest, target, history_digest)
+    return ReleasePlan(
+        manifest.archive_digest, target_digest, plan.pending, artifact_history_digest, target, history_digest,
+        plan.foreign_applied, plan.foreign_reverted,
+    )
 
 
 def plan_release(release_tar: str | Path, history: Mapping[str, Any], target: Mapping[str, Any]) -> ReleasePlan:

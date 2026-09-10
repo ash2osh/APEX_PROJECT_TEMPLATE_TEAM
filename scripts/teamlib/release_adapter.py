@@ -138,13 +138,13 @@ def apply_verified_release(
             (migration_root / relative).write_bytes(data)
 
         def apply_migrations(_pending: tuple[Mapping[str, Any], ...], reviewed: ReleasePlan) -> None:
-            def execute(migration):
+            def execute(migration, action, sql_path):
                 target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
-                run_sqlcl(target, "write", migration.sql_path, work)
+                run_sqlcl(target, "write", sql_path, work / "payload" / action / migration.id)
 
-            def verify(migration):
-                if migration.verify_path is not None and migration.verify_bytes.strip():
-                    run_sqlcl(profile_target(config, "VERIFY"), "read", migration.verify_path, work)
+            def verify(migration, action, verify_path):
+                if verify_path is not None and verify_path.is_file() and verify_path.read_bytes().strip():
+                    run_sqlcl(profile_target(config, "VERIFY"), "read", verify_path, work / "verify" / action / migration.id)
                 return True
 
             def observe(_migration, phase):
@@ -160,6 +160,10 @@ def apply_verified_release(
                 migration_root,
                 {
                     "target": metadata,
+                    "payload_targets": {
+                        "tables": profile_target(config, "TABLES"),
+                        "code": profile_target(config, "CODE"),
+                    },
                     "store": migration_store,
                     "bootstrap": False,
                     "execute": execute,

@@ -63,6 +63,37 @@ class ReleaseTests(unittest.TestCase):
             "20260907T100000__alice__one.verify.sql",
         ))
 
+    def test_release_preserves_authored_down_members_and_detects_tampering(self):
+        migration_id = "20260907T100001__alice__reversible"
+        migration_root = self.repo / "migrations"
+        (migration_root / f"{migration_id}.sql").write_text(
+            "-- migration-version: 1\n-- target: tables\n-- destructive: false\n\nCREATE TABLE REVERSIBLE(ID NUMBER);\n",
+            encoding="utf-8",
+        )
+        (migration_root / f"{migration_id}.verify.sql").write_text("", encoding="utf-8")
+        (migration_root / f"{migration_id}.down.sql").write_text(
+            "-- migration-version: 1\n-- destructive: true\n\nDROP TABLE REVERSIBLE;\n",
+            encoding="utf-8",
+        )
+        (migration_root / f"{migration_id}.down.verify.sql").write_text("", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "reversible migration"], check=True)
+        commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        manifest = build_release(self.repo, commit, "1.2.4", Path(self.temp.name) / "reversible-out")
+        self.assertEqual(tuple(path for path in release_migration_files(manifest.archive_path) if path.startswith(migration_id)), (
+            f"{migration_id}.sql", f"{migration_id}.verify.sql", f"{migration_id}.down.sql", f"{migration_id}.down.verify.sql",
+        ))
+        tampered = Path(self.temp.name) / "reversible-tampered.tar"
+        with tarfile.open(manifest.archive_path, mode="r:") as source, tarfile.open(tampered, mode="w", format=tarfile.USTAR_FORMAT) as destination:
+            for member in source.getmembers():
+                data = source.extractfile(member).read() if member.isfile() else b""
+                if member.name.endswith(f"{migration_id}.down.sql"):
+                    data = data.replace(b"DROP TABLE", b"DROP VIEW")
+                    member.size = len(data)
+                destination.addfile(member, io.BytesIO(data) if member.isfile() else None)
+        with self.assertRaisesRegex(ReleaseError, "hash mismatch"):
+            verify_release(tampered)
+
     def test_dirty_and_untracked_files_do_not_enter_artifact(self):
         (self.repo / "apps" / "checkout" / "evil.apx").write_text("untracked", encoding="utf-8")
         manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out")
@@ -105,6 +136,13 @@ class ReleaseTests(unittest.TestCase):
         manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out")
         plan = plan_release(manifest.archive_path, {}, {"role": "test", "environment": "test", "instance_id": "TEST"})
         self.assertEqual(plan.pending, ("20260907T100000__alice__one",))
+
+    def test_plan_release_excludes_reverted_artifacts(self):
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "reverted-out")
+        migration_id = manifest.migrations[0]["id"]
+        history = {migration_id: {"status": "REVERTED", "checksum": manifest.migrations[0]["checksum"], "sequence": 2}}
+        plan = plan_release(manifest.archive_path, history, {"role": "test", "environment": "test", "instance_id": "TEST"})
+        self.assertEqual(plan.pending, ())
 
     def test_plan_release_refuses_unresolved_and_foreign_history(self):
         manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "history-out")
