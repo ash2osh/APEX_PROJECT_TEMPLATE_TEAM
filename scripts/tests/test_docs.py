@@ -28,6 +28,36 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("release.tar", (ROOT / "docs/promotion.md").read_text(encoding="utf-8"))
         self.assertIn("UNKNOWN", (ROOT / "docs/ci.md").read_text(encoding="utf-8"))
 
+    def test_persistent_qualification_documentation_matches_the_contract(self):
+        paths = (
+            ROOT / "README.md",
+            ROOT / "docs" / "ci.md",
+            ROOT / "docs" / "promotion.md",
+            ROOT / "ci" / "app-checks" / "README.md",
+            ROOT / ".github" / "workflows" / "integration.yml",
+            ROOT / ".github" / "workflows" / "release.yml",
+        )
+        text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        for required in (
+            "qualify-target",
+            "sign-test-evidence",
+            "target_kind: persistent",
+            "version 2",
+            "TEAM_FLOW_RUNNER",
+            "workflow_dispatch",
+            "Persistent staging does not prove fresh installation",
+        ):
+            self.assertIn(required, text)
+        for removed in (
+            "ci-replay",
+            "disposable Oracle",
+            "fresh result",
+            "upgrade result",
+            "qualification_sha",
+            "replay_identity",
+        ):
+            self.assertNotIn(removed.lower(), text.lower())
+
     def test_local_markdown_links_resolve(self):
         pattern = re.compile(r"\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)")
         for path in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]:

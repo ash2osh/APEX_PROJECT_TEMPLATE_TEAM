@@ -1,71 +1,88 @@
-# Disposable CI and candidate application checks
+# Persistent CI and candidate application checks
 
-The required database gate must qualify an exact source SHA on a fresh,
-disposable target. It then runs the previous-release upgrade when a previous
-artifact exists, records an explicit `NOT_APPLICABLE_INITIAL_RELEASE` result
-otherwise, verifies migration history immutability, replays APEX exports and
-executes every declared candidate-app check before shared integration.
-
-`ci/runner-contract.json` is a credential-free capability contract. Run its
-offline doctor with:
+The default `database-checks` workflow is deliberately offline. It checks the
+repository with the unit suite and runs:
 
 ```text
 PYTHONPATH=scripts python3 scripts/team.py ci-doctor --contract ci/runner-contract.json
 ```
 
-The contract names a pinned SQLcl/JDK/APEX/database toolchain, the five
-required profile classes and an executable provisioner. The provisioner
-interface is deliberately small:
+`ci/runner-contract.json` contains no credentials or target provisioner. The
+doctor validates version 1, the declared Python/SQLcl/JDK/APEX/database and
+Ed25519 toolchain requirements, the five profiles (`TABLES`, `CODE`, `APEX`,
+`METADATA`, `VERIFY`), both production-safety booleans set to `false`, and the
+absence of populated secret-like fields. The offline job does not require
+Oracle, Docker, SQLcl, or a secret.
+
+## Manual integration qualification
+
+The `integration` workflow is started with `workflow_dispatch` and runs one
+serial job in the protected `integration` environment. It checks out the exact
+`github.sha`, prepares the credential-free environment profile, initializes
+metadata state, adopts an observed frontier when needed, checks drift, applies
+reviewed pending migrations, deploys the selected applications, and then runs:
 
 ```text
-create --run-id UUID --out scratch/ci/UUID
-destroy --run-id UUID --instance-token TOKEN
+PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" qualify-target \
+  --source-commit "$GITHUB_SHA" \
+  --aliases "$TEAM_APP_ALIASES" \
+  --out "$RUNNER_TEMP/qualification.json"
 ```
 
-The create result is versioned JSON containing a disposable instance token, an
-explicit replay environment path, application/workspace fixtures and any
-ORDS base URL. Destroy must verify the token and labels before removing one
-target. `ci/provisioners/docker_pdb.sh` is a working reference Oracle Free
-provider: it downloads the pinned APEX 26.1 archive, verifies its SHA-256,
-installs it into the fresh database, creates DEMO, isolated DEMO_META and the
-read-only DEMO_VERIFY profile, starts the pinned ORDS image, and returns the
-generated workspace identity. Teams may
-replace it with a cloned PDB provider without changing the argv contract. It
-requires Docker, Oracle Free and ORDS image access, SQLcl 26.2.1+, curl,
-enough CPU/RAM/disk for the database and APEX install, and a teardown-capable
-runner. To avoid the download in a controlled environment, set
-`TEAM_CI_APEX_ARCHIVE` to a reviewed local `apex_26.1.zip`; the provider still
-checks the pinned digest. Destroy removes only the exact labeled database,
-ORDS container, network, and run-scoped SQLcl aliases.
+The protected environment supplies `TEAM_ENV_FILE` (a path),
+`TEAM_ENV_CONTENT` (the file contents), and `TEAM_APP_ALIASES` (the complete
+comma-separated binding set). The profile must expose the five SQLcl roles,
+including an observation-only `VERIFY` connection, and must identify the same
+non-production instance across them. The workflow never supplies a destructive
+migration confirmation. It uploads `qualification.json` with `if: always()`;
+application-check failures carry a structured `FAIL` report when available.
 
-Candidate declarations under `ci/app-checks/` are version 1 JSON. Each shipped
-application needs at least one restricted SELECT dependency assertion and one
-declarative authenticated/public page flow. No arbitrary script/eval step or
-embedded credential is accepted. A missing runner, fixture, result or required
-check is `UNKNOWN`/failure, never a successful skip. The report records source
-SHA, replay identity, app/page/check IDs, expected objects and coverage.
+The report binds one source commit, target identity, current migration history,
+and the latest accepted observation sequence/digest. It explicitly records
+`target_kind: persistent`. Persistent staging does not prove fresh installation;
+it is observational shared state and does not prove isolation or a clean
+upgrade path.
 
-The shipped `scripts/ci_replay_runner.py` is a reference adapter: it performs
-the identity probes and migration replay through the common SQLcl boundary, and
-it deploys/checks tracked applications only when the selected repository has
-matching declarations and a qualified SQL/browser adapter. A template with no
-tracked applications reports zero-app coverage explicitly. Adopting teams must
-replace or extend that adapter for their APEX/ORDS fixture and browser runner;
-the default CI job remains fail-closed when a required capability is absent.
+## Candidate application declarations
 
-Do not run untrusted pull-request code with integration credentials. The
-workflow provisions disposable resources and removes only the exact resource
-whose token it received. Production connections and credentials are excluded
-from CI by contract.
+Store one version-1 JSON declaration at `ci/app-checks/<alias>.json` for every
+selected application. A declaration must include at least one restricted
+observation-only `select` check and one declarative `flow` check. Every check
+names its page, expected objects (for SELECT checks), and a safe relative
+fixture. Missing declarations, fixtures, SQL members, adapters, or structured
+results fail closed; an unavailable check is never promoted to PASS.
 
-## First run against a new environment
+SELECT checks run through the read-only `VERIFY` profile and must return framed
+rows in the form `TEAM_ASSERT|assertion_name|PASS` (a FAIL row or no row fails).
+Flow checks are sent to the executable named by `TEAM_FLOW_RUNNER`:
 
-`check-drift` compares live structure against the accepted observed frontier and
-exits 3 while no frontier has been adopted. A new database has none, and a
-migration run creates one only as a side effect of applying a migration — so a
-project with nothing pending can never reach a clean drift check on its own.
+```text
+TEAM_FLOW_RUNNER --alias <alias> --check-json <path>
+```
 
-Run `team.py adopt-frontier` once, after `setup-state`. It bootstraps the
-migration metadata, takes one read-only inventory through the TABLES profile,
-records it as an immutable manifest and writes the sequence-0 observation. It is
-refused for a production classification, and it does not write any schema object.
+The adapter must return one JSON object with `status` equal to `PASS`, `FAIL`,
+or `UNKNOWN`, plus optional diagnostic and observed fields. The qualification
+report records deterministic declaration/check digests, app/page/check IDs,
+coverage, expected objects, and the unknown count.
+
+## Release-test qualification
+
+The protected `test` job applies the exact release archive and writes its
+canonical report below `RUNNER_TEMP`. It then supplies both files to
+`qualify-target`:
+
+```text
+PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_TEST_ENV_FILE" qualify-target \
+  --source-commit "$GITHUB_SHA" --aliases "$TEAM_APP_ALIASES" \
+  --release-archive scratch/release/release.tar \
+  --apply-report "$RUNNER_TEMP/apply-report.json" \
+  --out "$RUNNER_TEMP/test-evidence.json"
+```
+
+The command verifies the archive digest, source commit, target state key,
+history/observation frontier, and application checks before emitting evidence
+version 2. The report contains `final_status`, `archive_digest`,
+`toolchain_digest`, `target_identity`, `run_identity`, `qualification_identity`,
+`application_checks`, and the three PASS/FAIL result fields. It is canonical
+compact UTF-8 JSON with one LF terminator. Release handoff signing and trust
+key handling are described in [docs/promotion.md](promotion.md).
