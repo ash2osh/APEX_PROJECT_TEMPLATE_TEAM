@@ -236,8 +236,6 @@ class MigrationRunnerTests(unittest.TestCase):
         self.remove_default_migration()
         migration_id = "20260907T140000__alice__danger"
         self.add_migration(migration_id, destructive=True, down_destructive=True)
-        from teamlib.migration_bundle import load_bundles
-        migration = load_bundles(self.migrations)[migration_id]
         report = apply_plan(self.migrations, self.profiles(dry_run=True))
         self.assertEqual(report.selected, (migration_id,))
         self.assertEqual(report.confirmation_template["confirmations"][0]["confirmed"], False)
