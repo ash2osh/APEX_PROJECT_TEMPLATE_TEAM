@@ -9,6 +9,7 @@ if _SCRIPTS_DIR not in sys.path:
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -169,6 +170,39 @@ class GitTreeTests(unittest.TestCase):
         (self.repo / ".gitignore").write_text("outside-ignored.txt\n", encoding="utf-8")
         (self.repo / "outside-ignored.txt").write_text("ignored", encoding="utf-8")
         assert_source_clean(self.repo, "checkout")
+
+
+class SourceCleanExclusionTests(unittest.TestCase):
+    def _repo(self) -> Path:
+        directory = Path(tempfile.mkdtemp(prefix="team-clean-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(directory)], check=True)
+        subprocess.run(["git", "-C", str(directory), "config", "user.email", "x@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(directory), "config", "user.name", "x"], check=True)
+        app = directory / "apps" / "demo" / ".apex"
+        app.mkdir(parents=True)
+        (directory / "apps" / "demo" / "application.apx").write_bytes(b"x")
+        (app / "apexlang.json").write_bytes(b"{}")
+        (directory / ".gitignore").write_text("apps/demo/export.log\n", encoding="utf-8", newline="\n")
+        subprocess.run(["git", "-C", str(directory), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(directory), "commit", "-qm", "seed"], check=True)
+        return directory
+
+    def test_ignored_export_log_does_not_make_source_dirty(self):
+        repo = self._repo()
+        (repo / "apps" / "demo" / "export.log").write_text("APEX export log\n", encoding="utf-8", newline="\n")
+        assert_source_clean(repo, "demo")
+
+    def test_ignored_file_that_is_not_excluded_still_fails(self):
+        repo = self._repo()
+        (repo / ".gitignore").write_text(
+            "apps/demo/export.log\napps/demo/shadow.sql\n", encoding="utf-8", newline="\n"
+        )
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "ignore"], check=True)
+        (repo / "apps" / "demo" / "shadow.sql").write_text("select 1 from dual;\n", encoding="utf-8", newline="\n")
+        with self.assertRaises(TreeError):
+            assert_source_clean(repo, "demo")
 
 
 if __name__ == "__main__":

@@ -245,7 +245,11 @@ def assert_source_clean(repo: str | Path, alias: str) -> None:
         if not path.startswith(prefix):
             continue
         relative = _validate_relative_path(path[len(prefix):])
-        if relative.startswith("deployments/") or relative == "deployments":
+        # The same paths the tree readers skip are not owned source, so a
+        # status entry for one of them is not an uncleanliness. Anything the
+        # predicate does not name -- including an ignored file shadowing a real
+        # owned path -- is still refused below.
+        if _is_excluded(relative) or relative == "deployments":
             continue
         if code != "  ":
             raise TreeError(f"owned source is not clean: {path}")
