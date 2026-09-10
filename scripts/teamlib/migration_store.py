@@ -236,7 +236,13 @@ COMMIT;
         if not run_token:
             raise MigrationStoreError("inventory writes require a mutex token")
         manifest, digest = _inventory_manifest(inventory)
-        manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        # read_inventories reads this CLOB back in 900-character chunks and
+        # base64-encodes each one through UTL_RAW/UTL_ENCODE, whose SQL results
+        # are RAW and capped at 2000 bytes. ASCII escaping keeps 900 characters
+        # at 900 bytes, matching the other two CLOBs this module writes. The
+        # digest is computed from the Inventory, not these bytes, so escaping
+        # does not change identity.
+        manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         payload = f"""
 DECLARE
   v_owned NUMBER;

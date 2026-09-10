@@ -100,5 +100,35 @@ class GeneratedSqlLineLengthTests(unittest.TestCase):
         self.assertFalse(hasattr(store, "_clob_literal"))
 
 
+class ManifestEncodingTests(unittest.TestCase):
+    def test_manifest_json_is_ascii_so_900_characters_is_900_bytes(self):
+        import inspect
+
+        from teamlib.migration_store import SqlMigrationStore
+
+        source = inspect.getsource(SqlMigrationStore.record_inventory)
+        self.assertIn("manifest_json = json.dumps(", source)
+        self.assertNotIn(
+            "ensure_ascii=False",
+            source,
+            "read_inventories chunks the manifest 900 characters at a time and "
+            "base64-encodes each chunk through SQL RAW, which is capped at 2000 "
+            "bytes; non-ASCII characters overflow it",
+        )
+
+    def test_ascii_escaped_manifest_round_trips(self):
+        import json
+
+        from teamlib.fingerprints import inventory_from_manifest, inventory_from_rows
+
+        inventory = inventory_from_rows(
+            [{"logical_owner": "tables", "object_type": "TABLE", "object_name": "MITARBEITER_Ü", "definition": "x"}],
+            schema_set_digest="a" * 64,
+        )
+        encoded = json.dumps(inventory.as_dict(), sort_keys=True, separators=(",", ":"))
+        self.assertTrue(all(ord(char) < 128 for char in encoded))
+        self.assertEqual(inventory_from_manifest(json.loads(encoded)).digest, inventory.digest)
+
+
 if __name__ == "__main__":
     unittest.main()
