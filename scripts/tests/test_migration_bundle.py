@@ -19,6 +19,10 @@ HEADER = """-- migration-version: 1
 -- destructive: false
 
 """
+DOWN_HEADER = """-- migration-version: 1
+-- destructive: true
+
+"""
 
 
 class MigrationBundleTests(unittest.TestCase):
@@ -29,9 +33,20 @@ class MigrationBundleTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def write(self, migration_id: str, sql: str = "CREATE TABLE T_X (ID NUMBER);\n", verify: str = "") -> None:
+    def write(
+        self,
+        migration_id: str,
+        sql: str = "CREATE TABLE T_X (ID NUMBER);\n",
+        verify: str = "",
+        down_sql: str | None = None,
+        down_verify: str | None = None,
+    ) -> None:
         (self.root / f"{migration_id}.sql").write_text(HEADER + sql, encoding="utf-8", newline="\n")
         (self.root / f"{migration_id}.verify.sql").write_text(verify, encoding="utf-8", newline="\n")
+        if down_sql is not None:
+            (self.root / f"{migration_id}.down.sql").write_text(DOWN_HEADER + down_sql, encoding="utf-8", newline="\n")
+        if down_verify is not None:
+            (self.root / f"{migration_id}.down.verify.sql").write_text(down_verify, encoding="utf-8", newline="\n")
 
     def test_loads_complete_bundle_and_checksum_changes_with_member(self):
         migration_id = "20260907T100000__alice__create-table"
@@ -41,6 +56,68 @@ class MigrationBundleTests(unittest.TestCase):
         checksum = bundles[migration_id].checksum
         (self.root / f"{migration_id}.verify.sql").write_text("SELECT 'other' assertion_name, 'PASS' status FROM dual;\n", encoding="utf-8")
         self.assertNotEqual(load_bundles(self.root)[migration_id].checksum, checksum)
+
+    def test_loads_complete_down_pair_and_checksums_both_members(self):
+        migration_id = "20260907T100000__alice__reversible"
+        self.write(
+            migration_id,
+            verify="SELECT 'table' assertion_name, 'PASS' status FROM dual;\n",
+            down_sql="DROP TABLE T_X;\n",
+            down_verify="SELECT 'table' assertion_name, 'PASS' status FROM dual;\n",
+        )
+        migration = load_bundles(self.root)[migration_id]
+        self.assertTrue(migration.reversible)
+        self.assertFalse(migration.destructive)
+        self.assertTrue(migration.down_destructive)
+        checksum = migration.checksum
+        (self.root / f"{migration_id}.down.sql").write_text(DOWN_HEADER + "DROP TABLE T_Y;\n", encoding="utf-8")
+        self.assertNotEqual(load_bundles(self.root)[migration_id].checksum, checksum)
+        checksum = load_bundles(self.root)[migration_id].checksum
+        (self.root / f"{migration_id}.down.verify.sql").write_text("SELECT 'other' assertion_name, 'PASS' status FROM dual;\n", encoding="utf-8")
+        self.assertNotEqual(load_bundles(self.root)[migration_id].checksum, checksum)
+
+    def test_down_pair_is_atomic_and_direction_header_is_closed(self):
+        migration_id = "20260907T100000__alice__down-shape"
+        self.write(migration_id, down_sql="DROP TABLE T_X;\n")
+        with self.assertRaises(BundleError):
+            load_bundles(self.root)
+        (self.root / f"{migration_id}.down.verify.sql").write_text("", encoding="utf-8")
+        down = self.root / f"{migration_id}.down.sql"
+        down.unlink()
+        down.symlink_to("/etc/passwd")
+        with self.assertRaises(BundleError):
+            load_bundles(self.root)
+        down.unlink()
+        down.write_bytes(DOWN_HEADER.replace("\n", "\r\n").encode())
+        with self.assertRaises(BundleError):
+            load_bundles(self.root)
+
+    def test_down_members_reject_controls_writes_and_forbidden_directives(self):
+        migration_id = "20260907T100000__alice__down-invalid"
+        cases = (
+            ("CONNECT other\nDROP TABLE T_X;\n", ""),
+            ("DROP TABLE T_X;\n", "INSERT INTO T_X VALUES (1);\n"),
+            ("-- target: tables\nDROP TABLE T_X;\n", ""),
+            ("-- depends-on: 20260907T090000__alice__base sha256:" + "a" * 64 + "\nDROP TABLE T_X;\n", ""),
+            ("-- migration-version: 1\n-- migration-version: 1\n-- destructive: true\nDROP TABLE T_X;\n", ""),
+            ("-- migration-version: 1\n-- destructive: true\n-- destructive: false\nDROP TABLE T_X;\n", ""),
+        )
+        for sql, verify in cases:
+            with self.subTest(sql=sql, verify=verify):
+                self.write(migration_id, down_sql=sql, down_verify=verify)
+                if not (self.root / f"{migration_id}.down.verify.sql").exists():
+                    (self.root / f"{migration_id}.down.verify.sql").write_text("", encoding="utf-8")
+                with self.assertRaises(BundleError):
+                    load_bundles(self.root)
+                for path in self.root.iterdir():
+                    path.unlink()
+
+    def test_down_invalid_utf8_is_rejected(self):
+        migration_id = "20260907T100000__alice__down-utf8"
+        self.write(migration_id, down_sql="DROP TABLE T_X;\n", down_verify="")
+        (self.root / f"{migration_id}.down.sql").write_bytes(b"\xff")
+        with self.assertRaises(BundleError):
+            load_bundles(self.root)
 
     def test_ignores_unrelated_docs_but_rejects_orphan_and_extra_member(self):
         (self.root / "README.md").write_text("notes", encoding="utf-8")

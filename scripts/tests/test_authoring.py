@@ -26,6 +26,8 @@ class AuthoringTests(unittest.TestCase):
             bundles = load_bundles(root)
             self.assertEqual(bundles[created.migration_id].dependencies[0][0], dependency)
             self.assertEqual(created.sql_path.read_bytes().count(b"-- migration-version:"), 1)
+            self.assertFalse(bundles[created.migration_id].reversible)
+            self.assertFalse(any(created.migration_id in path.name and ".down." in path.name for path in root.iterdir()))
 
 
 if __name__ == "__main__":
