@@ -52,5 +52,19 @@ class DocumentationTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"use ordinary imports: {offenders}")
 
 
+class ReleaseWorkflowDependencyTests(unittest.TestCase):
+    def test_runbook_job_installs_the_promotion_extra(self):
+        from pathlib import Path
+
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("gen-runbook", text)
+        self.assertIn(
+            "pip install --quiet 'cryptography>=41'",
+            text,
+            "gen-runbook verifies an Ed25519 signature and fails without cryptography",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
