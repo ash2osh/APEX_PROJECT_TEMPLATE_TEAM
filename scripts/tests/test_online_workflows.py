@@ -11,6 +11,9 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve(
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+from unittest.mock import patch
+
+from teamlib.app_checks import AppCheckReport
 from teamlib.config import Config, Profile
 from teamlib.online_workflows import (
     OnlineDependencies,
@@ -18,6 +21,7 @@ from teamlib.online_workflows import (
     run_integration,
     run_release_test,
 )
+from teamlib.qualification import qualify_target
 from teamlib.release import ApplyReport, Manifest
 
 
@@ -311,6 +315,90 @@ class OnlineWorkflowTests(unittest.TestCase):
         self.assertNotIn("read-history-file", events)
         self.assertFalse((self.root / "plan.json").exists())
         self.assertFalse((self.root / "apply-report.json").exists())
+
+    def test_release_test_qualification_validates_a_real_apply_report_through_qualify_target(self):
+        from teamlib.config import profile_target
+
+        config = config_for(role="test", environment="test")
+        metadata = profile_target(config, "METADATA")
+        manifest = Manifest(
+            1, "1.0.0", "a" * 40, "b" * 64, (), {"employee": "c" * 64},
+            (), self.root / "release.tar", "d" * 64,
+        )
+        real_apply_report = ApplyReport(
+            "applied", (), archive_digest=manifest.archive_digest,
+            source_commit=manifest.source_commit, target_state_key=metadata.state_key,
+            target_digest="1" * 64, history_digest="2" * 64,
+        )
+        runtime = SimpleNamespace(toolchain_digest="e" * 64)
+        (self.root / "ci" / "app-checks").mkdir(parents=True)
+        (self.root / "ci" / "app-checks" / "employee.json").write_text(
+            json.dumps({"version": 1, "alias": "employee", "page_ids": [1], "checks": [
+                {"id": "objects", "page_id": 1, "kind": "select", "verify_sql": "employee/objects.verify.sql",
+                 "expected_objects": ["APP.T"], "sql": "SELECT 'objects' assertion_name, 'PASS' status FROM dual"},
+            ]}),
+            encoding="utf-8",
+        )
+
+        class FakeMetadataStore:
+            def validate_observation_chain(self, target):
+                return None
+
+            def read_history(self, target):
+                return {"m1": {"status": "APPLIED", "checksum": "a" * 64, "sequence": 2}}
+
+            def read_state(self, target):
+                return {"attempts": {}, "observations": [{"sequence": 3, "after": "c" * 64}]}
+
+        def real_qualify_release(repo, config, source_commit, aliases, *, release_archive, apply_report, flow_executable, runtime_report):
+            fake_app = AppCheckReport(
+                source_commit, {"target_kind": "persistent"}, (), "a" * 64, "b" * 64,
+                {"apps": list(aliases), "checks": 1, "unknown": 0}, "PASS",
+            )
+            with patch("teamlib.qualification.verify_candidate_apps", return_value=fake_app), \
+                    patch("teamlib.qualification.verify_release", return_value=manifest):
+                return qualify_target(
+                    repo, config, source_commit, aliases,
+                    store=FakeMetadataStore(), work=self.root / "qualify-work",
+                    release_archive=release_archive, apply_report=apply_report,
+                    flow_executable=flow_executable, runner_contract=Path("ci/runner-contract.json"),
+                    runtime_report=runtime_report, sql_runner=lambda *args, **kwargs: object(),
+                )
+
+        dependencies = OnlineDependencies(
+            resolve_head=lambda _repo: manifest.source_commit,
+            preflight=lambda *_args: runtime,
+            setup_control=lambda *_args: None,
+            bootstrap_metadata=lambda *_args: None,
+            read_state=lambda *_args: {"observations": []},
+            adopt_frontier=lambda *_args: "",
+            capture_inventory=lambda *_args: None,
+            check_drift=lambda *_args: None,
+            apply_migrations=lambda *_args: None,
+            deploy_apps=lambda *_args: (),
+            qualify_integration=lambda *_args, **_kwargs: {},
+            verify_release=lambda _archive: manifest,
+            apply_release_live=lambda *_args, **_kwargs: real_apply_report,
+            qualify_release=real_qualify_release,
+            write_report=lambda report, out: Path(out).write_bytes(
+                json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+            ),
+        )
+        archive = self.root / "release.tar"
+        archive.write_bytes(b"verified archive")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir()
+        target.write_text("{}\n", encoding="utf-8")
+        out = self.root / "test-evidence.json"
+
+        result = run_release_test(
+            self.root, config, archive, target, out,
+            flow_executable=str(self.flow_runner), dependencies=dependencies,
+        )
+
+        self.assertEqual(result.status, "PASS")
+        written = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(written["archive_digest"], manifest.archive_digest)
 
     def test_release_test_requires_exact_test_target_and_matching_archive_aliases(self):
         events: list[str] = []
