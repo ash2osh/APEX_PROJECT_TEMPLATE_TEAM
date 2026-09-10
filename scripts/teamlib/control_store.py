@@ -603,6 +603,7 @@ END;
                     owner_token=owner, recovery_role=recovery_role,
                 ) from exc
             raise
+        return self.read_app_sync_state(target_key)
 
     def mark_payload_starting(self, target_key: str, run_token: str) -> SyncState:
         payload = f"""

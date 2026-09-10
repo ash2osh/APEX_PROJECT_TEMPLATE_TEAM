@@ -7,6 +7,7 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve(
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import base64
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from teamlib.control_store import (
     ControllerError,
     MutexHeld,
     SetupRequired,
+    SyncState,
     TargetUncertain,
     ControlStore,
     SqlControlStore,
@@ -165,6 +167,64 @@ class SqlRecoverAppLockPredicateTests(unittest.TestCase):
     def test_omitting_the_run_token_keeps_the_original_broad_predicate(self):
         payload = self._captured_predicate(None)
         self.assertIn("owner_token IS NOT NULL OR is_uncertain = 1", payload)
+
+
+class SqlControlStoreContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="team-sql-control-")
+        self.addCleanup(self.temp.cleanup)
+        self.metadata = Target(
+            project="team-template", role="developer", environment="development",
+            connection="docker-demo", instance_id="FREE", db_name="FREEPDB1",
+            service="freep1", session_user="META", current_schema="META",
+            alias=None, workspace_id=None, app_id=None, parsing_schema=None,
+            ownership_mode="shared", binding_digest="a" * 64,
+        )
+
+    @staticmethod
+    def _mutex_stdout(target_key: str) -> str:
+        # read_app_sync_state parses eight base64 fields; NULL is encoded as
+        # CHR(1) by b64_sql and decoded back to "".
+        fields = [target_key, "", "", "", "", "", "1", "0"]
+        encoded = "|".join(
+            base64.b64encode((value or "\x01").encode("utf-8")).decode("ascii")
+            for value in fields
+        )
+        return f"TEAM_MUTEX|{encoded}\n"
+
+    def _store(self) -> SqlControlStore:
+        stdout = self._mutex_stdout("key")
+
+        def fake_runner(target, operation, driver, work, **kwargs):
+            class Result:
+                pass
+
+            result = Result()
+            result.stdout = stdout
+            return result
+
+        return SqlControlStore(self.metadata, runner=fake_runner, work_root=Path(self.temp.name))
+
+    def test_acquire_app_returns_a_sync_state(self):
+        observed = self._store().acquire_app("key", "run", "checkout", "host", "user")
+        self.assertIsInstance(
+            observed,
+            SyncState,
+            "acquire_app is annotated -> SyncState; returning None diverges from "
+            "ControlStore.acquire_app and breaks any caller that reads the result",
+        )
+        self.assertEqual(observed.target_key, "key")
+
+    def test_every_mutex_transition_returns_a_state(self):
+        import inspect
+
+        for name in ("acquire_app", "mark_payload_starting", "release_app", "recover_app_lock"):
+            source = inspect.getsource(getattr(SqlControlStore, name))
+            self.assertIn(
+                "return self.read_app_sync_state(target_key)",
+                source,
+                f"{name} is annotated -> SyncState but does not return one",
+            )
 
 
 if __name__ == "__main__":
