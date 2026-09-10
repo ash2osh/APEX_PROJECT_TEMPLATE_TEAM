@@ -64,6 +64,44 @@ class SqlMetadataStoreTests(unittest.TestCase):
             store.acquire(self.target, "other", "worker", "host")
         self.assertEqual(caught.exception.owner_token, "run-token")
 
+    def test_embedded_and_reference_ddl_define_metadata_v2(self):
+        import teamlib.migration_store as migration_store
+
+        reference = (Path(__file__).resolve().parents[2] / "scripts" / "sql" / "migration_metadata.sql").read_text(encoding="utf-8")
+        embedded = migration_store._MIGRATION_BOOTSTRAP_SQL
+        for ddl in (embedded, reference):
+            self.assertIn("operation VARCHAR2(4) NOT NULL", ddl)
+            self.assertIn("CONSTRAINT team_migration_history_operation_ck CHECK (operation IN ('up','down'))", ddl)
+            self.assertIn("CREATE INDEX team_migration_history_id_ix ON TEAM_MIGRATION_HISTORY (id, applied_sequence)", ddl)
+            self.assertIn("action VARCHAR2(16) NOT NULL", ddl)
+            self.assertIn("CONSTRAINT team_migration_attempt_action_ck CHECK (action IN ('migrate','undo','redo'))", ddl)
+            self.assertIn("confirmation_digest VARCHAR2(64)", ddl)
+            self.assertIn("PRIMARY KEY (applied_sequence)", ddl)
+            self.assertNotIn("PRIMARY KEY (id)", ddl)
+
+    def test_sql_history_reads_repeated_ids_by_sequence_and_collapses(self):
+        store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
+        scalar_rows = [
+            ["m1", "up", "a" * 64, "tables", "commit", "1", "now", "alice", "run", "up-attempt"],
+            ["m1", "down", "a" * 64, "tables", "commit", "2", "now", "alice", "run", "down-attempt"],
+        ]
+        clob_rows = [
+            ["m1", "1", "dependencies", "1", "2", "["],
+            ["m1", "1", "dependencies", "2", "2", "]"],
+            ["m1", "1", "observation", "1", "1", "{}"],
+            ["m1", "2", "dependencies", "1", "1", "[]"],
+            ["m1", "2", "observation", "1", "1", "{}"],
+        ]
+
+        def rows(_target, _payload, prefix):
+            return scalar_rows if prefix == "TEAM_HISTORY|" else clob_rows
+
+        store._read_rows = rows  # type: ignore[method-assign]
+        history = store.read_history(self.target)
+        self.assertEqual(history["m1"]["status"], "REVERTED")
+        self.assertEqual(history["m1"]["operation"], "down")
+        self.assertEqual(history["m1"]["sequence"], 2)
+
 
 class GeneratedSqlLineLengthTests(unittest.TestCase):
     MAX_LINE = 1200

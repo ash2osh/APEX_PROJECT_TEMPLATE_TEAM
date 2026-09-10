@@ -18,6 +18,7 @@ CREATE TABLE TEAM_MIGRATION_MUTEX (
 
 CREATE TABLE TEAM_MIGRATION_HISTORY (
     id VARCHAR2(128) NOT NULL,
+    operation VARCHAR2(4) NOT NULL,
     checksum VARCHAR2(64) NOT NULL,
     target VARCHAR2(16) NOT NULL,
     dependencies_json CLOB NOT NULL,
@@ -28,21 +29,27 @@ CREATE TABLE TEAM_MIGRATION_HISTORY (
     applied_by VARCHAR2(256) NOT NULL,
     run_token VARCHAR2(128),
     attempt_id VARCHAR2(128),
-    CONSTRAINT team_migration_history_pk PRIMARY KEY (id),
+    CONSTRAINT team_migration_history_pk PRIMARY KEY (applied_sequence),
+    CONSTRAINT team_migration_history_operation_ck CHECK (operation IN ('up','down')),
     CONSTRAINT team_migration_history_target_ck CHECK (target IN ('tables', 'code'))
 );
+
+CREATE INDEX team_migration_history_id_ix ON TEAM_MIGRATION_HISTORY (id, applied_sequence);
 
 CREATE TABLE TEAM_MIGRATION_ATTEMPT (
     attempt_id VARCHAR2(128) NOT NULL,
     migration_id VARCHAR2(128) NOT NULL,
     checksum VARCHAR2(64) NOT NULL,
+    action VARCHAR2(16) NOT NULL,
     state VARCHAR2(16) NOT NULL,
     run_token VARCHAR2(128) NOT NULL,
     worker_identity VARCHAR2(256) NOT NULL,
     started_at TIMESTAMP WITH TIME ZONE NOT NULL,
     finished_at TIMESTAMP WITH TIME ZONE,
     diagnostic_digest VARCHAR2(64),
+    confirmation_digest VARCHAR2(64),
     CONSTRAINT team_migration_attempt_pk PRIMARY KEY (attempt_id),
+    CONSTRAINT team_migration_attempt_action_ck CHECK (action IN ('migrate','undo','redo')),
     CONSTRAINT team_migration_attempt_state_ck CHECK (state IN ('RUNNING','APPLIED','FAILED','UNKNOWN','RECOVERED'))
 );
 

@@ -77,6 +77,13 @@ DECLARE
     WHEN OTHERS THEN
       IF SQLCODE != -955 THEN RAISE; END IF;
   END;
+  v_count NUMBER;
+  v_pk_count NUMBER;
+  v_sequence_pk NUMBER;
+  v_id_pk NUMBER;
+  v_pk_name VARCHAR2(128);
+  v_condition VARCHAR2(4000);
+  v_duplicate NUMBER;
 BEGIN
   create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_META (
     version_number NUMBER(10) NOT NULL,
@@ -95,6 +102,7 @@ BEGIN
   )]');
   create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_HISTORY (
     id VARCHAR2(128) NOT NULL,
+    operation VARCHAR2(4) NOT NULL,
     checksum VARCHAR2(64) NOT NULL,
     target VARCHAR2(16) NOT NULL,
     dependencies_json CLOB NOT NULL,
@@ -105,20 +113,24 @@ BEGIN
     applied_by VARCHAR2(256) NOT NULL,
     run_token VARCHAR2(128),
     attempt_id VARCHAR2(128),
-    CONSTRAINT team_migration_history_pk PRIMARY KEY (id),
+    CONSTRAINT team_migration_history_pk PRIMARY KEY (applied_sequence),
+    CONSTRAINT team_migration_history_operation_ck CHECK (operation IN ('up','down')),
     CONSTRAINT team_migration_history_target_ck CHECK (target IN ('tables', 'code'))
   )]');
   create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_ATTEMPT (
     attempt_id VARCHAR2(128) NOT NULL,
     migration_id VARCHAR2(128) NOT NULL,
     checksum VARCHAR2(64) NOT NULL,
+    action VARCHAR2(16) NOT NULL,
     state VARCHAR2(16) NOT NULL,
     run_token VARCHAR2(128) NOT NULL,
     worker_identity VARCHAR2(256) NOT NULL,
     started_at TIMESTAMP WITH TIME ZONE NOT NULL,
     finished_at TIMESTAMP WITH TIME ZONE,
     diagnostic_digest VARCHAR2(64),
+    confirmation_digest VARCHAR2(64),
     CONSTRAINT team_migration_attempt_pk PRIMARY KEY (attempt_id),
+    CONSTRAINT team_migration_attempt_action_ck CHECK (action IN ('migrate','undo','redo')),
     CONSTRAINT team_migration_attempt_state_ck CHECK (state IN ('RUNNING','APPLIED','FAILED','UNKNOWN','RECOVERED'))
   )]');
   create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_INVENTORY (
@@ -139,6 +151,110 @@ BEGIN
     evidence_digest VARCHAR2(64) NOT NULL,
     CONSTRAINT team_migration_observation_pk PRIMARY KEY (sequence_number)
   )]');
+
+  -- Existing v1 history receives its direction before constraints are checked.
+  SELECT COUNT(*) INTO v_count FROM user_tab_columns
+   WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND column_name = 'OPERATION';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_HISTORY ADD (operation VARCHAR2(4))';
+  END IF;
+  UPDATE TEAM_MIGRATION_HISTORY SET operation = 'up' WHERE operation IS NULL;
+  SELECT COUNT(*) INTO v_count FROM TEAM_MIGRATION_HISTORY
+   WHERE operation IS NULL OR operation NOT IN ('up', 'down');
+  IF v_count <> 0 THEN
+    RAISE_APPLICATION_ERROR(-20021, 'MIGRATION_HISTORY_OPERATION_INVALID');
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM user_tab_columns
+   WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND column_name = 'OPERATION'
+     AND data_type = 'VARCHAR2' AND data_length = 4 AND nullable = 'N';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_HISTORY MODIFY (operation VARCHAR2(4) NOT NULL)';
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM user_constraints
+   WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND constraint_name = 'TEAM_MIGRATION_HISTORY_OPERATION_CK';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_HISTORY ADD CONSTRAINT team_migration_history_operation_ck CHECK (operation IN (''up'',''down''))';
+  ELSE
+    SELECT DBMS_LOB.SUBSTR(search_condition, 4000, 1) INTO v_condition
+      FROM user_constraints
+     WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND constraint_name = 'TEAM_MIGRATION_HISTORY_OPERATION_CK';
+    IF REGEXP_REPLACE(UPPER(v_condition), '[[:space:]]', '') <> 'OPERATIONIN(''UP'',''DOWN'')' THEN
+      RAISE_APPLICATION_ERROR(-20022, 'MIGRATION_HISTORY_OPERATION_CONSTRAINT_INVALID');
+    END IF;
+  END IF;
+
+  SELECT COUNT(*) - COUNT(DISTINCT applied_sequence) INTO v_duplicate FROM TEAM_MIGRATION_HISTORY;
+  IF v_duplicate <> 0 THEN
+    RAISE_APPLICATION_ERROR(-20023, 'MIGRATION_HISTORY_SEQUENCE_DUPLICATE');
+  END IF;
+  SELECT COUNT(*) INTO v_pk_count FROM user_constraints
+   WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND constraint_type = 'P';
+  SELECT COUNT(*) INTO v_sequence_pk
+    FROM user_constraints c JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name
+   WHERE c.table_name = 'TEAM_MIGRATION_HISTORY' AND c.constraint_type = 'P'
+     AND cc.column_name = 'APPLIED_SEQUENCE';
+  SELECT COUNT(*) INTO v_id_pk
+    FROM user_constraints c JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name
+   WHERE c.table_name = 'TEAM_MIGRATION_HISTORY' AND c.constraint_type = 'P'
+     AND cc.column_name = 'ID';
+  IF v_pk_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_HISTORY ADD CONSTRAINT team_migration_history_pk PRIMARY KEY (applied_sequence)';
+  ELSIF v_sequence_pk = 0 THEN
+    IF v_pk_count <> 1 OR v_id_pk <> 1 THEN
+      RAISE_APPLICATION_ERROR(-20024, 'MIGRATION_HISTORY_PRIMARY_KEY_INVALID');
+    END IF;
+    SELECT constraint_name INTO v_pk_name FROM user_constraints
+     WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND constraint_type = 'P';
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_HISTORY DROP CONSTRAINT ' || v_pk_name;
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_HISTORY ADD CONSTRAINT team_migration_history_pk PRIMARY KEY (applied_sequence)';
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM user_indexes WHERE index_name = 'TEAM_MIGRATION_HISTORY_ID_IX';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'CREATE INDEX team_migration_history_id_ix ON TEAM_MIGRATION_HISTORY (id, applied_sequence)';
+  END IF;
+
+  -- Existing v1 attempts are backfilled before action is constrained.
+  SELECT COUNT(*) INTO v_count FROM user_tab_columns
+   WHERE table_name = 'TEAM_MIGRATION_ATTEMPT' AND column_name = 'ACTION';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_ATTEMPT ADD (action VARCHAR2(16))';
+  END IF;
+  UPDATE TEAM_MIGRATION_ATTEMPT SET action = 'migrate' WHERE action IS NULL;
+  SELECT COUNT(*) INTO v_count FROM TEAM_MIGRATION_ATTEMPT
+   WHERE action IS NULL OR action NOT IN ('migrate', 'undo', 'redo');
+  IF v_count <> 0 THEN
+    RAISE_APPLICATION_ERROR(-20025, 'MIGRATION_ATTEMPT_ACTION_INVALID');
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM user_tab_columns
+   WHERE table_name = 'TEAM_MIGRATION_ATTEMPT' AND column_name = 'ACTION'
+     AND data_type = 'VARCHAR2' AND data_length = 16 AND nullable = 'N';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_ATTEMPT MODIFY (action VARCHAR2(16) NOT NULL)';
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM user_constraints
+   WHERE table_name = 'TEAM_MIGRATION_ATTEMPT' AND constraint_name = 'TEAM_MIGRATION_ATTEMPT_ACTION_CK';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_ATTEMPT ADD CONSTRAINT team_migration_attempt_action_ck CHECK (action IN (''migrate'',''undo'',''redo''))';
+  ELSE
+    SELECT DBMS_LOB.SUBSTR(search_condition, 4000, 1) INTO v_condition
+      FROM user_constraints
+     WHERE table_name = 'TEAM_MIGRATION_ATTEMPT' AND constraint_name = 'TEAM_MIGRATION_ATTEMPT_ACTION_CK';
+    IF REGEXP_REPLACE(UPPER(v_condition), '[[:space:]]', '') <> 'ACTIONIN(''MIGRATE'',''UNDO'',''REDO'')' THEN
+      RAISE_APPLICATION_ERROR(-20026, 'MIGRATION_ATTEMPT_ACTION_CONSTRAINT_INVALID');
+    END IF;
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM user_tab_columns
+   WHERE table_name = 'TEAM_MIGRATION_ATTEMPT' AND column_name = 'CONFIRMATION_DIGEST';
+  IF v_count = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_ATTEMPT ADD (confirmation_digest VARCHAR2(64))';
+  ELSE
+    SELECT COUNT(*) INTO v_count FROM user_tab_columns
+     WHERE table_name = 'TEAM_MIGRATION_ATTEMPT' AND column_name = 'CONFIRMATION_DIGEST'
+       AND data_type = 'VARCHAR2' AND data_length = 64 AND nullable = 'Y';
+    IF v_count = 0 THEN
+      RAISE_APPLICATION_ERROR(-20027, 'MIGRATION_ATTEMPT_CONFIRMATION_COLUMN_INVALID');
+    END IF;
+  END IF;
   COMMIT;
 END;
 /
@@ -202,13 +318,39 @@ class SqlMigrationStore:
         if not isinstance(schema_set_digest, str) or not schema_set_digest:
             raise MigrationStoreError("migration metadata bootstrap requires a schema-set digest")
         payload = _MIGRATION_BOOTSTRAP_SQL + f"""
-MERGE INTO TEAM_MIGRATION_META d
-USING (SELECT 1 version_number, {_sql_literal(store_target.project)} project_id,
-              {_sql_literal(schema_set_digest)} schema_set_digest FROM dual) s
-   ON (d.version_number = s.version_number AND d.project_id = s.project_id)
-WHEN MATCHED THEN UPDATE SET d.schema_set_digest = s.schema_set_digest
-WHEN NOT MATCHED THEN INSERT (version_number, project_id, schema_set_digest)
-VALUES (s.version_number, s.project_id, s.schema_set_digest);
+DECLARE
+  v_count NUMBER;
+  v_version NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_count FROM TEAM_MIGRATION_META
+   WHERE project_id = {_sql_literal(store_target.project)};
+  IF v_count > 1 THEN
+    RAISE_APPLICATION_ERROR(-20028, 'MIGRATION_META_PROJECT_DUPLICATE');
+  ELSIF v_count = 0 THEN
+    INSERT INTO TEAM_MIGRATION_META (version_number, project_id, schema_set_digest)
+    VALUES (2, {_sql_literal(store_target.project)}, {_sql_literal(schema_set_digest)});
+  ELSE
+    SELECT version_number INTO v_version FROM TEAM_MIGRATION_META
+     WHERE project_id = {_sql_literal(store_target.project)};
+    IF v_version NOT IN (1, 2) THEN
+      RAISE_APPLICATION_ERROR(-20029, 'MIGRATION_META_VERSION_INVALID');
+    END IF;
+    IF v_version = 1 THEN
+      UPDATE TEAM_MIGRATION_META SET version_number = 2,
+          schema_set_digest = {_sql_literal(schema_set_digest)}
+       WHERE project_id = {_sql_literal(store_target.project)} AND version_number = 1;
+    ELSE
+      UPDATE TEAM_MIGRATION_META SET schema_set_digest = {_sql_literal(schema_set_digest)}
+       WHERE project_id = {_sql_literal(store_target.project)} AND version_number = 2;
+    END IF;
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM TEAM_MIGRATION_META
+   WHERE project_id = {_sql_literal(store_target.project)} AND version_number = 2;
+  IF v_count <> 1 THEN
+    RAISE_APPLICATION_ERROR(-20030, 'MIGRATION_META_VERSION_NOT_TWO');
+  END IF;
+END;
+/
 MERGE INTO TEAM_MIGRATION_MUTEX d
 USING (SELECT 1 singleton_id FROM dual) s
    ON (d.singleton_id = s.singleton_id)
@@ -260,7 +402,7 @@ BEGIN
   IF v_owned = 0 THEN RAISE_APPLICATION_ERROR(-20002, 'INVENTORY_WRITE_REFUSED'); END IF;
   SELECT schema_set_digest INTO v_meta_schema_set
     FROM TEAM_MIGRATION_META
-   WHERE version_number = 1 AND project_id = {_sql_literal(store_target.project)};
+   WHERE version_number = 2 AND project_id = {_sql_literal(store_target.project)};
   IF v_meta_schema_set <> {_sql_literal(str(manifest['schema_set_digest']))} THEN
     RAISE_APPLICATION_ERROR(-20011, 'SCHEMA_SET_DIGEST_MISMATCH');
   END IF;
@@ -447,14 +589,29 @@ END;
                 raise MigrationMutexHeld("migration mutex token does not match current owner") from exc
             raise
 
-    def record_attempt_start(self, store_target: Target, attempt_id: str, migration_id: str, checksum: str, run_token: str) -> None:
+    def record_attempt_start(
+        self,
+        store_target: Target,
+        attempt_id: str,
+        migration_id: str,
+        checksum: str,
+        run_token: str,
+        *,
+        action: str = "migrate",
+        confirmation_digest: str = "",
+    ) -> None:
         self._assert_nonproduction(store_target)
         self._require_sql(store_target)
+        if action not in {"migrate", "undo", "redo"}:
+            raise MigrationStoreError(f"unsupported migration action: {action}")
+        if confirmation_digest and not re.fullmatch(r"[0-9a-f]{64}", confirmation_digest):
+            raise MigrationStoreError("confirmation digest must be a lowercase SHA-256")
         payload = f"""
 INSERT INTO TEAM_MIGRATION_ATTEMPT
-  (attempt_id, migration_id, checksum, state, run_token, worker_identity, started_at)
+  (attempt_id, migration_id, checksum, action, state, run_token, worker_identity, started_at, confirmation_digest)
 SELECT {_sql_literal(attempt_id)}, {_sql_literal(migration_id)}, {_sql_literal(checksum)},
-       'RUNNING', {_sql_literal(run_token)}, worker_identity, SYSTIMESTAMP
+       {_sql_literal(action)}, 'RUNNING', {_sql_literal(run_token)}, worker_identity, SYSTIMESTAMP,
+       NULLIF({_sql_literal(confirmation_digest)}, '')
   FROM TEAM_MIGRATION_MUTEX
  WHERE singleton_id = 1 AND owner_token = {_sql_literal(run_token)};
 DECLARE v_count NUMBER; BEGIN
@@ -500,7 +657,7 @@ END;
 """
         self._run("write", payload)
 
-    def record_applied(
+    def record_event(
         self,
         store_target: Target,
         migration_id: str,
@@ -511,6 +668,7 @@ END;
         applied_by: str,
         observation: Mapping[str, Any],
         *,
+        operation: str,
         run_token: str | None = None,
         attempt_id: str | None = None,
     ) -> None:
@@ -518,15 +676,17 @@ END;
         self._require_sql(store_target)
         if target not in {"tables", "code"}:
             raise MigrationStoreError("migration target must be tables or code")
+        if operation not in {"up", "down"}:
+            raise MigrationStoreError(f"unsupported migration event operation: {operation}")
         if not run_token:
-            raise MigrationStoreError("SQL migration history writes require a mutex token")
+            raise MigrationStoreError("SQL migration event writes require a mutex token")
         dependency_json = json.dumps(list(dependencies), sort_keys=True, separators=(",", ":"))
         observation_json = json.dumps(dict(observation), sort_keys=True, separators=(",", ":"))
         before = str(observation.get("before", ""))
         after = str(observation.get("after", ""))
         evidence = str(observation.get("evidence", observation.get("evidence_digest", "")))
         if not re.fullmatch(r"[0-9a-f]{64}", before) or not re.fullmatch(r"[0-9a-f]{64}", after):
-            raise MigrationStoreError("applied migration requires complete before and after inventory digests")
+            raise MigrationStoreError("migration event requires complete before and after inventory digests")
         payload = f"""
 DECLARE
   v_sequence NUMBER;
@@ -535,6 +695,7 @@ DECLARE
   v_frontier VARCHAR2(64);
   v_inventory_count NUMBER;
   v_attempt_count NUMBER;
+  v_current_operation VARCHAR2(4);
   v_dependencies CLOB;
   v_observation CLOB;
 BEGIN
@@ -557,11 +718,19 @@ BEGIN
   IF v_frontier <> {_sql_literal(before)} THEN
     RAISE_APPLICATION_ERROR(-20010, 'OBSERVATION_FRONTIER_MISMATCH');
   END IF;
-  SELECT NVL(MAX(sequence_number), 0) + 1 INTO v_sequence FROM TEAM_MIGRATION_OBSERVATION;
+  SELECT MAX(operation) KEEP (DENSE_RANK LAST ORDER BY applied_sequence)
+    INTO v_current_operation
+    FROM TEAM_MIGRATION_HISTORY WHERE id = {_sql_literal(migration_id)};
+  IF {_sql_literal(operation)} = 'down' AND NVL(v_current_operation, 'none') <> 'up' THEN
+    RAISE_APPLICATION_ERROR(-20031, 'MIGRATION_NOT_APPLIED');
+  ELSIF {_sql_literal(operation)} = 'up' AND v_current_operation = 'up' THEN
+    RAISE_APPLICATION_ERROR(-20032, 'MIGRATION_ALREADY_APPLIED');
+  END IF;
+  SELECT NVL(MAX(applied_sequence), 0) + 1 INTO v_sequence FROM TEAM_MIGRATION_HISTORY;
   INSERT INTO TEAM_MIGRATION_HISTORY
-    (id, checksum, target, dependencies_json, payload_manifest_json, source_commit,
+    (id, operation, checksum, target, dependencies_json, payload_manifest_json, source_commit,
      applied_sequence, applied_at, applied_by, run_token, attempt_id)
-  VALUES ({_sql_literal(migration_id)}, {_sql_literal(checksum)}, {_sql_literal(target)},
+  VALUES ({_sql_literal(migration_id)}, {_sql_literal(operation)}, {_sql_literal(checksum)}, {_sql_literal(target)},
           v_dependencies, v_observation,
           {_sql_literal(source_commit)}, v_sequence, SYSTIMESTAMP, {_sql_literal(applied_by)},
           {_sql_literal(run_token)}, {_sql_literal(attempt_id or '')});
@@ -581,6 +750,25 @@ END;
 """
         self._run("write", payload)
 
+    def record_applied(
+        self,
+        store_target: Target,
+        migration_id: str,
+        checksum: str,
+        target: str,
+        dependencies: Iterable[tuple[str, str]],
+        source_commit: str,
+        applied_by: str,
+        observation: Mapping[str, Any],
+        *,
+        run_token: str | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
+        self.record_event(
+            store_target, migration_id, checksum, target, dependencies, source_commit,
+            applied_by, observation, operation="up", run_token=run_token, attempt_id=attempt_id,
+        )
+
     def _read_rows(self, target: Target, payload: str, prefix: str) -> list[list[str]]:
         self._require_sql(target)
         result = self._run("read", payload)
@@ -591,11 +779,11 @@ END;
 
     def read_history(self, store_target: Target) -> dict[str, Any]:
         fields = [
-            "id", "checksum", "target", "source_commit",
+            "id", "operation", "checksum", "target", "source_commit",
             "applied_sequence", "applied_at", "applied_by", "run_token", "attempt_id",
         ]
         expressions = [
-            _b64_sql("id"), _b64_sql("checksum"), _b64_sql("target"),
+            _b64_sql("id"), _b64_sql("operation"), _b64_sql("checksum"), _b64_sql("target"),
             _b64_sql("source_commit"),
             _b64_sql("TO_CHAR(applied_sequence)"),
             _b64_sql("TO_CHAR(applied_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')"),
@@ -619,13 +807,14 @@ END;
                 + " || '|' || ".join(
                     [
                         _b64_sql("id"),
+                        _b64_sql("TO_CHAR(applied_sequence)"),
                         _b64_sql(_sql_literal(label)),
                         _b64_sql("TO_CHAR(part)"),
                         _b64_sql("TO_CHAR(total)"),
                         _b64_sql("chunk"),
                     ]
                 )
-                + f" FROM (SELECT h.id, c.part, GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(h.{column}) / 900)) total, "
+                + f" FROM (SELECT h.id, h.applied_sequence, c.part, GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(h.{column}) / 900)) total, "
                   f"DBMS_LOB.SUBSTR(h.{column}, 900, (c.part - 1) * 900 + 1) chunk "
                   f"FROM TEAM_MIGRATION_HISTORY h CROSS JOIN {chunk_numbers} c "
                   f"WHERE c.part <= GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(h.{column}) / 900)))"
@@ -635,20 +824,21 @@ END;
             " UNION ALL ".join(chunk_selects),
             "TEAM_HISTORY_CLOB|",
         )
-        clob_parts: dict[tuple[str, str], dict[int, str]] = {}
-        clob_totals: dict[tuple[str, str], int] = {}
+        clob_parts: dict[tuple[int, str], dict[int, str]] = {}
+        clob_totals: dict[tuple[int, str], int] = {}
         for row in clob_rows:
-            if len(row) != 5:
+            if len(row) != 6:
                 raise MigrationStoreError("malformed migration history CLOB row")
-            migration_id, field, raw_part, raw_total, chunk = row
+            _, raw_sequence, field, raw_part, raw_total, chunk = row
             if field not in {"dependencies", "observation"}:
                 raise MigrationStoreError("unknown migration history CLOB field")
             try:
+                sequence = int(raw_sequence)
                 part = int(raw_part)
                 total = int(raw_total)
             except ValueError as exc:
                 raise MigrationStoreError("migration history CLOB numbering is malformed") from exc
-            key = (migration_id, field)
+            key = (sequence, field)
             if part < 1 or total < part or part in clob_parts.setdefault(key, {}):
                 raise MigrationStoreError("migration history CLOB chunks are inconsistent")
             if key in clob_totals and clob_totals[key] != total:
@@ -656,35 +846,49 @@ END;
             clob_totals[key] = total
             clob_parts[key][part] = chunk
 
-        def clob_value(migration_id: str, field: str) -> str:
-            key = (migration_id, field)
+        def clob_value(sequence: int, field: str) -> str:
+            key = (sequence, field)
             parts = clob_parts.get(key)
             total = clob_totals.get(key)
             if not parts or total is None or set(parts) != set(range(1, total + 1)):
-                raise MigrationStoreError(f"migration history CLOB is incomplete: {migration_id}/{field}")
+                raise MigrationStoreError(f"migration history CLOB is incomplete: {sequence}/{field}")
             return "".join(parts[index] for index in range(1, total + 1))
 
-        history: dict[str, Any] = {}
+        events: list[dict[str, Any]] = []
         for row in rows:
             if len(row) != len(fields):
                 raise MigrationStoreError("malformed migration history row")
             values = dict(zip(fields, row, strict=True))
             try:
-                dependencies = json.loads(clob_value(values["id"], "dependencies") or "[]")
-                observation = json.loads(clob_value(values["id"], "observation") or "{}")
+                sequence = int(values["applied_sequence"])
+            except ValueError as exc:
+                raise MigrationStoreError("migration history sequence is malformed") from exc
+            if values["operation"] not in {"up", "down"}:
+                raise MigrationStoreError("migration history operation is invalid")
+            if not re.fullmatch(r"[0-9a-f]{64}", values["checksum"]):
+                raise MigrationStoreError("migration history checksum is invalid")
+            if values["target"] not in {"tables", "code"}:
+                raise MigrationStoreError("migration history target is invalid")
+            try:
+                dependencies = json.loads(clob_value(sequence, "dependencies") or "[]")
+                observation = json.loads(clob_value(sequence, "observation") or "{}")
             except json.JSONDecodeError as exc:
                 raise MigrationStoreError("migration history dependency JSON is malformed") from exc
             if not isinstance(dependencies, list) or not isinstance(observation, dict):
                 raise MigrationStoreError("migration history JSON payload is malformed")
-            history[values["id"]] = {
-                "status": "APPLIED", "checksum": values["checksum"], "target": values["target"],
+            events.append({
+                "id": values["id"], "operation": values["operation"],
+                "status": "APPLIED" if values["operation"] == "up" else "REVERTED",
+                "checksum": values["checksum"], "target": values["target"],
                 "dependencies": dependencies, "source_commit": values["source_commit"],
-                "sequence": int(values["applied_sequence"]), "applied_at": values["applied_at"],
+                "sequence": sequence, "applied_sequence": sequence, "applied_at": values["applied_at"],
                 "applied_by": values["applied_by"],
                 "run_token": values["run_token"] or None, "attempt_id": values["attempt_id"] or None,
                 "observation": observation,
-            }
-        return history
+            })
+        events.sort(key=lambda event: event["sequence"])
+        _validate_history_events(events)
+        return _collapse_history(events)
 
     def read_inventories(self, store_target: Target) -> dict[str, dict[str, Any]]:
         """Read and verify every immutable complete inventory manifest."""
@@ -772,9 +976,11 @@ END;
             store_target,
             "SELECT 'TEAM_ATTEMPT|' || " + " || '|' || ".join(
                 [
-                    _b64_sql("attempt_id"), _b64_sql("migration_id"), _b64_sql("state"), _b64_sql("run_token"),
-                    _b64_sql("worker_identity"), _b64_sql("TO_CHAR(started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')"),
-                    _b64_sql("TO_CHAR(finished_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')"), _b64_sql("diagnostic_digest"),
+                    _b64_sql("attempt_id"), _b64_sql("migration_id"), _b64_sql("action"), _b64_sql("state"),
+                    _b64_sql("run_token"), _b64_sql("worker_identity"),
+                    _b64_sql("TO_CHAR(started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')"),
+                    _b64_sql("TO_CHAR(finished_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')"),
+                    _b64_sql("diagnostic_digest"), _b64_sql("confirmation_digest"),
                 ]
             ) + " FROM TEAM_MIGRATION_ATTEMPT ORDER BY started_at;",
             "TEAM_ATTEMPT|",
@@ -797,11 +1003,12 @@ END;
             },
             "attempts": {
                 row[0]: {
-                    "attempt_id": row[0], "migration_id": row[1], "state": row[2], "run_token": row[3],
-                    "worker_identity": row[4], "started_at": row[5], "finished_at": row[6] or None,
-                    "diagnostic_digest": row[7] or "",
+                    "attempt_id": row[0], "migration_id": row[1], "action": row[2], "state": row[3],
+                    "run_token": row[4], "worker_identity": row[5], "started_at": row[6],
+                    "finished_at": row[7] or None, "diagnostic_digest": row[8] or "",
+                    "confirmation_digest": row[9] or "",
                 }
-                for row in attempts if len(row) == 8
+                for row in attempts if len(row) == 10
             },
             "observations": [
                 {
@@ -816,7 +1023,7 @@ END;
 
     def export_history(self, store_target: Target, out: str | Path) -> None:
         envelope = {
-            "version": 1,
+            "version": 2,
             "target_state_key": store_target.state_key,
             "history": self.read_history(store_target),
             "observations": self.read_state(store_target)["observations"],
@@ -876,6 +1083,57 @@ END;
             raise
 
 
+def _history_sequence(event: Mapping[str, Any], label: str) -> int:
+    value = event.get("applied_sequence", event.get("sequence"))
+    if type(value) is not int or value < 1:
+        raise MigrationStoreError(f"migration history sequence is malformed: {label}")
+    return value
+
+
+def _validate_history_events(events: Any) -> None:
+    if not isinstance(events, list):
+        raise MigrationStoreError("migration history must be an event list")
+    last_sequence = 0
+    current: dict[str, str] = {}
+    for index, raw in enumerate(events):
+        if not isinstance(raw, Mapping):
+            raise MigrationStoreError(f"migration history event {index} is malformed")
+        migration_id = raw.get("id", raw.get("migration_id"))
+        if not isinstance(migration_id, str) or not migration_id:
+            raise MigrationStoreError(f"migration history event {index} has no migration ID")
+        operation = raw.get("operation")
+        if operation not in {"up", "down"}:
+            raise MigrationStoreError(f"migration history event has invalid operation: {migration_id}")
+        sequence = _history_sequence(raw, migration_id)
+        if sequence != last_sequence + 1:
+            raise MigrationStoreError("migration history sequence is not contiguous")
+        status = "APPLIED" if operation == "up" else "REVERTED"
+        prior = current.get(migration_id, "")
+        if operation == "down" and prior != "APPLIED":
+            raise MigrationStoreError(f"migration history contains a down event before up: {migration_id}")
+        if operation == "up" and prior == "APPLIED":
+            raise MigrationStoreError(f"migration history contains duplicate applied event: {migration_id}")
+        if raw.get("status", status) != status:
+            raise MigrationStoreError(f"migration history event status disagrees with operation: {migration_id}")
+        current[migration_id] = status
+        last_sequence = sequence
+
+
+def _collapse_history(events: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    _validate_history_events(events)
+    collapsed: dict[str, dict[str, Any]] = {}
+    for raw in events:
+        event = dict(raw)
+        migration_id = str(event.get("id", event.get("migration_id")))
+        sequence = _history_sequence(event, migration_id)
+        event["id"] = migration_id
+        event["status"] = "APPLIED" if event.get("operation") == "up" else "REVERTED"
+        event["sequence"] = sequence
+        event["applied_sequence"] = sequence
+        collapsed[migration_id] = event
+    return collapsed
+
+
 class MigrationStore:
     def __init__(self, root: str | Path):
         self.root = Path(root)
@@ -885,15 +1143,90 @@ class MigrationStore:
         self.path = self.root / "migration-store.json"
         self.lock_path = self.root / "migration-store.lock"
         if not self.path.exists():
-            self._write({"version": 1, "meta": None, "mutex": None, "history": {}, "attempts": {}, "inventories": {}, "observations": []})
+            self._write({"version": 2, "meta": None, "mutex": None, "history": [], "attempts": {}, "inventories": {}, "observations": []})
+        else:
+            self._upgrade_v1_if_needed()
+
+    @property
+    def _backup_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".v1-backup")
+
+    def _upgrade_v1_if_needed(self) -> None:
+        try:
+            raw = self.path.read_bytes()
+            value = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise MigrationStoreError("migration metadata is unreadable") from exc
+        if not isinstance(value, dict):
+            raise MigrationStoreError("migration metadata must contain an object")
+        if value.get("version") == 2:
+            if not isinstance(value.get("history"), list):
+                raise MigrationStoreError("version-two migration history must be an event list")
+            _validate_history_events(value["history"])
+            return
+        if value.get("version") != 1:
+            raise MigrationStoreError("unsupported migration metadata version")
+        history = value.get("history")
+        attempts = value.get("attempts")
+        if not isinstance(history, dict) or not isinstance(attempts, dict):
+            raise MigrationStoreError("version-one migration metadata is incomplete")
+        events: list[dict[str, Any]] = []
+        for index, (migration_id, raw_entry) in enumerate(sorted(history.items()), start=1):
+            if not isinstance(raw_entry, Mapping) or raw_entry.get("status") != "APPLIED":
+                raise MigrationStoreError("version-one history contains a non-applied entry")
+            event = dict(raw_entry)
+            event.pop("status", None)
+            sequence = event.get("applied_sequence", event.get("sequence", index))
+            if type(sequence) is not int or sequence < 1:
+                raise MigrationStoreError(f"version-one history sequence is malformed: {migration_id}")
+            event.update({
+                "id": migration_id,
+                "operation": "up",
+                "status": "APPLIED",
+                "sequence": sequence,
+                "applied_sequence": sequence,
+            })
+            events.append(event)
+        events.sort(key=lambda item: item["applied_sequence"])
+        _validate_history_events(events)
+        upgraded: dict[str, Any] = {
+            "version": 2,
+            "meta": value.get("meta"),
+            "mutex": value.get("mutex"),
+            "history": events,
+            "attempts": json.loads(json.dumps(attempts)),
+            "inventories": json.loads(json.dumps(value.get("inventories", {}))),
+            "observations": json.loads(json.dumps(value.get("observations", []))),
+        }
+        for attempt in upgraded["attempts"].values():
+            if isinstance(attempt, dict):
+                attempt.setdefault("action", "migrate")
+                attempt.setdefault("confirmation_digest", "")
+        backup = self._backup_path
+        if backup.exists():
+            try:
+                if backup.read_bytes() != raw:
+                    raise MigrationStoreError("version-one migration backup conflicts with source bytes")
+            except OSError as exc:
+                raise MigrationStoreError("version-one migration backup is unreadable") from exc
+        else:
+            try:
+                with backup.open("xb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                raise MigrationStoreError("could not preserve version-one migration metadata") from exc
+        self._write(upgraded)
 
     def _read(self) -> dict[str, Any]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise MigrationStoreError("migration metadata is unreadable") from exc
-        if not isinstance(data, dict) or data.get("version") != 1:
+        if not isinstance(data, dict) or data.get("version") != 2:
             raise MigrationStoreError("unsupported migration metadata version")
+        _validate_history_events(data.get("history"))
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -1050,15 +1383,33 @@ class MigrationStore:
                 raise MigrationMutexHeld("unresolved migration attempt prevents release")
             mutex.update(owner_token=None, worker_identity=None, host=None, acquired_at=None)
 
-    def record_attempt_start(self, store_target: Target, attempt_id: str, migration_id: str, checksum: str, run_token: str) -> None:
+    def record_attempt_start(
+        self,
+        store_target: Target,
+        attempt_id: str,
+        migration_id: str,
+        checksum: str,
+        run_token: str,
+        *,
+        action: str = "migrate",
+        confirmation_digest: str = "",
+    ) -> None:
         self._assert_nonproduction(store_target)
+        if action not in {"migrate", "undo", "redo"}:
+            raise MigrationStoreError(f"unsupported migration action: {action}")
+        if confirmation_digest and not re.fullmatch(r"[0-9a-f]{64}", confirmation_digest):
+            raise MigrationStoreError("confirmation digest must be a lowercase SHA-256")
         with self._locked() as data:
             mutex = self._require(data, store_target)
             if mutex.get("owner_token") != run_token:
                 raise MigrationMutexHeld("attempt start requires current migration mutex owner")
+            if attempt_id in data["attempts"]:
+                raise MigrationStoreError("migration attempt already exists")
             data["attempts"][attempt_id] = {
                 "attempt_id": attempt_id, "migration_id": migration_id,
-                "checksum": checksum, "state": "RUNNING", "run_token": run_token,
+                "checksum": checksum, "action": action,
+                "confirmation_digest": confirmation_digest,
+                "state": "RUNNING", "run_token": run_token,
                 "started_at": "now", "finished_at": None,
             }
 
@@ -1075,6 +1426,96 @@ class MigrationStore:
                 raise MigrationStoreError("migration attempt does not exist")
             attempt.update(state=state, finished_at="now" if state != "RUNNING" else None, diagnostic_digest=diagnostic_digest)
 
+    def _record_event_locked(
+        self,
+        data: dict[str, Any],
+        store_target: Target,
+        migration_id: str,
+        checksum: str,
+        target: str,
+        dependencies: Iterable[tuple[str, str]],
+        source_commit: str,
+        applied_by: str,
+        observation: Mapping[str, Any],
+        *,
+        operation: str,
+        run_token: str | None,
+        attempt_id: str | None,
+    ) -> None:
+        if operation not in {"up", "down"}:
+            raise MigrationStoreError(f"unsupported migration event operation: {operation}")
+        before = str(observation.get("before", ""))
+        after = str(observation.get("after", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", before) or not re.fullmatch(r"[0-9a-f]{64}", after):
+            raise MigrationStoreError("migration event requires complete before and after inventory digests")
+        mutex = self._require(data, store_target)
+        if run_token is not None and mutex.get("owner_token") != run_token:
+            raise MigrationMutexHeld("history write requires current migration mutex owner")
+        if before not in data.get("inventories", {}) or after not in data.get("inventories", {}):
+            raise MigrationStoreError("migration event references an unrecorded inventory manifest")
+        observations = data.setdefault("observations", [])
+        if not observations:
+            raise MigrationSetupRequired("migration metadata has no observed inventory frontier")
+        if observations[-1].get("after") != before:
+            raise MigrationStoreError("live inventory does not match accepted observed frontier")
+        _validate_history_events(data["history"])
+        current = _collapse_history(data["history"]).get(migration_id)
+        current_status = current.get("status") if isinstance(current, Mapping) else ""
+        if operation == "down" and current_status != "APPLIED":
+            raise MigrationStoreError(f"cannot record down event before an applied event: {migration_id}")
+        if operation == "up" and current_status == "APPLIED":
+            raise MigrationStoreError(f"migration is already currently APPLIED: {migration_id}")
+        sequence = (data["history"][-1].get("applied_sequence", 0) if data["history"] else 0) + 1
+        event = {
+            "id": migration_id,
+            "operation": operation,
+            "status": "APPLIED" if operation == "up" else "REVERTED",
+            "checksum": checksum,
+            "target": target,
+            "dependencies": list(dependencies),
+            "source_commit": source_commit,
+            "sequence": sequence,
+            "applied_sequence": sequence,
+            "applied_at": "now",
+            "applied_by": applied_by,
+            "run_token": run_token,
+            "attempt_id": attempt_id,
+            "observation": dict(observation),
+        }
+        data["history"].append(event)
+        if attempt_id and attempt_id in data["attempts"]:
+            data["attempts"][attempt_id].update(state="APPLIED", finished_at="now")
+        observations.append({
+            "sequence": len(observations),
+            "migration_id": migration_id,
+            "attempt_id": attempt_id,
+            "predecessor_sequence": len(observations) - 1,
+            **dict(observation),
+        })
+
+    def record_event(
+        self,
+        store_target: Target,
+        migration_id: str,
+        checksum: str,
+        target: str,
+        dependencies: Iterable[tuple[str, str]],
+        source_commit: str,
+        applied_by: str,
+        observation: Mapping[str, Any],
+        *,
+        operation: str,
+        run_token: str | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
+        self._assert_nonproduction(store_target)
+        with self._locked() as data:
+            self._record_event_locked(
+                data, store_target, migration_id, checksum, target, dependencies,
+                source_commit, applied_by, observation,
+                operation=operation, run_token=run_token, attempt_id=attempt_id,
+            )
+
     def record_applied(
         self,
         store_target: Target,
@@ -1089,39 +1530,15 @@ class MigrationStore:
         run_token: str | None = None,
         attempt_id: str | None = None,
     ) -> None:
-        self._assert_nonproduction(store_target)
-        before = str(observation.get("before", ""))
-        after = str(observation.get("after", ""))
-        if not re.fullmatch(r"[0-9a-f]{64}", before) or not re.fullmatch(r"[0-9a-f]{64}", after):
-            raise MigrationStoreError("applied migration requires complete before and after inventory digests")
-        with self._locked() as data:
-            mutex = self._require(data, store_target)
-            if run_token is not None and mutex.get("owner_token") != run_token:
-                raise MigrationMutexHeld("history write requires current migration mutex owner")
-            if before not in data.get("inventories", {}) or after not in data.get("inventories", {}):
-                raise MigrationStoreError("applied migration references an unrecorded inventory manifest")
-            observations = data.setdefault("observations", [])
-            if not observations:
-                raise MigrationSetupRequired("migration metadata has no observed inventory frontier")
-            if observations[-1].get("after") != before:
-                raise MigrationStoreError("live inventory does not match accepted observed frontier")
-            sequence = max(int(item.get("sequence", 0)) for item in observations) + 1
-            data["history"][migration_id] = {
-                "status": "APPLIED", "checksum": checksum, "target": target,
-                "dependencies": list(dependencies), "source_commit": source_commit,
-                "sequence": sequence, "applied_at": "now", "applied_by": applied_by,
-                "run_token": run_token, "attempt_id": attempt_id,
-                "observation": dict(observation),
-            }
-            if attempt_id and attempt_id in data["attempts"]:
-                data["attempts"][attempt_id].update(state="APPLIED", finished_at="now")
-            observations.append({"sequence": sequence, "migration_id": migration_id, "attempt_id": attempt_id,
-                                 "predecessor_sequence": sequence - 1, **dict(observation)})
+        self.record_event(
+            store_target, migration_id, checksum, target, dependencies, source_commit,
+            applied_by, observation, operation="up", run_token=run_token, attempt_id=attempt_id,
+        )
 
     def read_history(self, store_target: Target) -> dict[str, Any]:
         with self._locked() as data:
             self._require(data, store_target)
-            return json.loads(json.dumps(data["history"]))
+            return json.loads(json.dumps(_collapse_history(data["history"])))
 
     def read_state(self, store_target: Target) -> dict[str, Any]:
         with self._locked() as data:
@@ -1130,7 +1547,7 @@ class MigrationStore:
 
     def export_history(self, store_target: Target, out: str | Path) -> None:
         envelope = {
-            "version": 1,
+            "version": 2,
             "target_state_key": store_target.state_key,
             "history": self.read_history(store_target),
             "observations": self.read_state(store_target)["observations"],
