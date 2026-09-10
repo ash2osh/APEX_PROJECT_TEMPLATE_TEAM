@@ -13,7 +13,7 @@ from .apex import _export_driver, _find_export_dir, _import_driver, _verify_resu
 from .config import Target
 from .control_store import ControlStore, ControlStoreError
 from .masters import MasterError, apex_component_resolver, validate_masters
-from .sqlcl import run_sqlcl, SqlclError
+from .sqlcl import APEX_TIMEOUT_SECONDS, run_sqlcl, SqlclError
 from .state import save_capture
 from .trees import Tree, TreeError, _validate_tree_paths, read_export_tree, tree_digest
 
@@ -40,7 +40,7 @@ def _capture_destination(target: Target, repo: Path, root: Path, store: ControlS
     work.mkdir(parents=True, exist_ok=False)
     driver = work / "export.sql"
     driver.write_text(_export_driver(target, work), encoding="utf-8", newline="\n")
-    result = runner(target, "read", driver, work)
+    result = runner(target, "read", driver, work, timeout=APEX_TIMEOUT_SECONDS)
     _verify_result_identity(target, result)
     tree = read_export_tree(_find_export_dir(work))
     after = store.read_app_sync_state(target.physical_key)
@@ -110,7 +110,7 @@ def deploy_app(
             destination.write_bytes(data)
         driver = work / "import.sql"
         driver.write_text(_import_driver(target, staged), encoding="utf-8", newline="\n")
-        result = runner(target, "write", driver, work)
+        result = runner(target, "write", driver, work, timeout=APEX_TIMEOUT_SECONDS)
         _verify_result_identity(target, result)
         verified, _, _ = _capture_destination(target, repo_path, state_root, store, runner, token)
         if verified != dict(source_tree):

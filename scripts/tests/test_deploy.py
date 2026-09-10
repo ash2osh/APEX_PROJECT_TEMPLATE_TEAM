@@ -63,5 +63,28 @@ class DeployTests(unittest.TestCase):
             deploy_app(target, self.source_tree, "abc", repo=self.root, control_store=self.store, runner=self.runner)
 
 
+class DeployTimeoutTests(unittest.TestCase):
+    def test_every_apex_operation_gets_the_application_budget(self):
+        import inspect
+
+        from teamlib import deploy
+        from teamlib.sqlcl import APEX_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS
+
+        self.assertGreater(APEX_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS)
+        source = inspect.getsource(deploy)
+        runner_calls = [
+            line.strip()
+            for line in source.splitlines()
+            if "runner(target," in line
+        ]
+        self.assertTrue(runner_calls, "deploy.py must still drive SQLcl through runner()")
+        for call in runner_calls:
+            self.assertIn(
+                "timeout=APEX_TIMEOUT_SECONDS",
+                call,
+                f"APEX operation runs on the metadata budget: {call}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
