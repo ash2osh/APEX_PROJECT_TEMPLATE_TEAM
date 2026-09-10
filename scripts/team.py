@@ -42,6 +42,7 @@ from teamlib.patch import PatchError, recover_files
 from teamlib.release import ReleaseError
 from teamlib.runbook import RunbookError
 from teamlib.runtime import preflight_online
+from teamlib.online_workflows import OnlineWorkflowError, run_integration
 from teamlib.state import StateError, load_baseline
 from teamlib.migration_bundle import BundleError
 from teamlib.trees import TreeError, read_git_tree
@@ -53,6 +54,7 @@ PRODUCTION_REFUSED_COMMANDS = frozenset(
     {
         "setup-state", "adopt-frontier", "qualify-target", "recover-migration",
         "register-app", "recover-app-lock", "migrate", "undo-migration", "redo-migration",
+        "run-integration",
     }
 )
 
@@ -77,6 +79,8 @@ def _parser() -> argparse.ArgumentParser:
     qualify.add_argument("--out", required=True)
     qualify.add_argument("--release-archive")
     qualify.add_argument("--apply-report")
+    integration = sub.add_parser("run-integration", parents=[env_parent])
+    integration.add_argument("--out", required=True)
     migrate = sub.add_parser("migrate", parents=[env_parent])
     migrate.add_argument("--source", default="migrations")
     migrate.add_argument("--dry-run", action="store_true")
@@ -441,6 +445,16 @@ def _online(args: argparse.Namespace) -> object:
         write_report(report, args.out)
         _json({"status": report["final_status"], "operation": command, "out": str(args.out)})
         return 0
+    if command == "run-integration":
+        config = _config(args, require_verify=True)
+        result = run_integration(
+            repo,
+            config,
+            Path(args.out),
+            flow_executable=os.environ.get("TEAM_FLOW_RUNNER", ""),
+        )
+        _json({"operation": command, **result.as_dict()})
+        return 0 if result.status == "PASS" else 3
     if command in {"migrate", "undo-migration", "redo-migration"}:
         config = _config(args, require_verify=True)
         if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
@@ -749,7 +763,7 @@ def main(argv: list[str] | None = None) -> int:
     except ExportConflict as exc:
         print(json.dumps({"status": "conflict", "operation": "export-app", "conflicts": list(exc.decision.conflicts), "recovery_path": exc.recovery_id}, sort_keys=True))
         return 3
-    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, QualificationError, TreeError, BundleError, InventoryError) as exc:
+    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, QualificationError, TreeError, BundleError, InventoryError, OnlineWorkflowError) as exc:
         print(str(exc), file=sys.stderr)
         return 2 if isinstance(exc, ConfigError) else 3
 

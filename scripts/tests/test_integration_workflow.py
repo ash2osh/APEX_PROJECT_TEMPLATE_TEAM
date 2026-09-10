@@ -61,6 +61,14 @@ class FrontierAdoptionTests(unittest.TestCase):
         self.assertEqual(parsed.aliases, "employee")
         self.assertIn("qualify-target", team.PRODUCTION_REFUSED_COMMANDS)
 
+    def test_run_integration_has_single_output_argument_and_is_protected(self):
+        import team
+
+        parsed = team._parser().parse_args(["run-integration", "--out", "qualification.json"])
+        self.assertEqual(parsed.command, "run-integration")
+        self.assertEqual(parsed.out, "qualification.json")
+        self.assertIn("run-integration", team.PRODUCTION_REFUSED_COMMANDS)
+
     def test_migration_lifecycle_commands_share_confirmation_and_drift_options(self):
         import team
 
