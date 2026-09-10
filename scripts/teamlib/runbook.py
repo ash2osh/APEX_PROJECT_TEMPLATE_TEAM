@@ -93,31 +93,39 @@ def _signature_bytes(raw: bytes) -> bytes:
 
 
 def _required_passes(value: Mapping[str, Any]) -> None:
-    if value.get("version") != 1:
+    required = {
+        "version", "final_status", "source_commit", "archive_digest",
+        "toolchain_digest", "target_identity", "run_identity",
+        "qualification_identity", "application_checks", "results",
+    }
+    if set(value) != required or value.get("version") != 2:
         raise RunbookError("test evidence has an unsupported format version")
     if value.get("final_status") != "PASS":
         raise RunbookError("test evidence is not a successful final result")
-    results = value.get("results")
-    if not isinstance(results, Mapping) or not results:
-        raise RunbookError("test evidence has no required result set")
-    failures = [str(name) for name, status in results.items() if status != "PASS"]
-    if failures:
-        raise RunbookError("test evidence contains non-PASS results: " + ", ".join(sorted(failures)))
-    for field in ("source_commit", "archive_digest"):
+    for field in ("source_commit", "archive_digest", "toolchain_digest"):
         if not isinstance(value.get(field), str) or not value[field]:
             raise RunbookError(f"test evidence is missing {field}")
-
-    # These fields are required for the real CI handoff.  The compact fixture
-    # accepted by the unit test has only the two required result keys, so the
-    # checks are conditional for backwards-compatible template adoption.
-    for field in ("qualification_sha", "toolchain_digest", "target_identity", "run_identity", "replay_identity"):
-        if field not in value or not value[field]:
+    if not re.fullmatch(r"[0-9a-f]{64}", value["archive_digest"]):
+        raise RunbookError("test evidence archive digest is malformed")
+    if not re.fullmatch(r"[0-9a-f]{64}", value["toolchain_digest"]):
+        raise RunbookError("test evidence toolchain digest is malformed")
+    for field in ("target_identity", "run_identity"):
+        if not isinstance(value.get(field), Mapping) or not value[field]:
             raise RunbookError(f"test evidence has an empty {field}")
+    qualification = value.get("qualification_identity")
+    if not isinstance(qualification, Mapping) or qualification.get("target_kind") != "persistent":
+        raise RunbookError("test evidence qualification identity is incomplete")
+    for field in ("observation_digest", "history_digest"):
+        if not isinstance(qualification.get(field), str) or not re.fullmatch(r"[0-9a-f]{64}", qualification[field]):
+            raise RunbookError(f"test evidence {field} is malformed")
     checks = value.get("application_checks")
     if not isinstance(checks, Mapping) or checks.get("status") != "PASS":
         raise RunbookError("candidate application checks did not pass")
     if checks.get("unknown") or not checks.get("coverage") or not checks.get("checks_digest"):
         raise RunbookError("candidate application evidence is incomplete or contains UNKNOWN results")
+    results = value.get("results")
+    if results != {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"}:
+        raise RunbookError("test evidence result set is incomplete or contains a failure")
 
 
 def _target_value(target: Mapping[str, Any] | Any, name: str, default: Any = None) -> Any:
@@ -241,10 +249,6 @@ def gen_runbook(
         raise RunbookError("test evidence is for a different release archive")
     if evidence["source_commit"] != manifest.source_commit:
         raise RunbookError("test evidence is for a different source commit")
-    if evidence.get("qualification_sha") != manifest.source_commit:
-        raise RunbookError("test evidence qualification SHA does not match the release source")
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(evidence.get("toolchain_digest", ""))):
-        raise RunbookError("test evidence toolchain digest is malformed")
     key = _public_key(_read_file(trust_key, "trust key"))
     try:
         key.verify(_signature_bytes(_read_file(signature, "detached signature")), evidence_bytes)

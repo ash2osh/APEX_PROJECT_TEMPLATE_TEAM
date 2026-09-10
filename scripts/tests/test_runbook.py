@@ -37,13 +37,13 @@ class RunbookTests(unittest.TestCase):
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
             manifest = build_release(repo, commit, "1.0.0", root / "out")
             evidence_data = {
-                "version": 1, "archive_digest": manifest.archive_digest, "source_commit": commit,
-                "qualification_sha": commit, "toolchain_digest": "b" * 64,
+                "version": 2, "final_status": "PASS", "archive_digest": manifest.archive_digest, "source_commit": commit,
+                "toolchain_digest": "b" * 64,
                 "target_identity": {"instance_id": "TEST", "workspace_id": 1},
-                "run_identity": "ci-run-1", "replay_identity": {"instance_token": "ci-1"},
-                "application_checks": {"status": "PASS", "checks_digest": "c" * 64, "coverage": {"apps": []}, "unknown": 0},
-                "final_status": "PASS",
-                "results": {"replay": "PASS", "apex": "PASS", "subscription": "PASS", "application_checks": "PASS"},
+                "run_identity": {"run_id": "ci-run-1"},
+                "qualification_identity": {"target_kind": "persistent", "observation_sequence": 1, "observation_digest": "d" * 64, "history_digest": "e" * 64},
+                "application_checks": {"status": "PASS", "checks_digest": "c" * 64, "coverage": {"apps": ["a"], "checks": 1}, "unknown": 0},
+                "results": {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"},
             }
             evidence = root / "evidence.json"
             evidence.write_text(json.dumps(evidence_data, sort_keys=True, separators=(",", ":")), encoding="utf-8")

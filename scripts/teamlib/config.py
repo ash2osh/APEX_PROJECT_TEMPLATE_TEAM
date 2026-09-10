@@ -63,6 +63,7 @@ OFFLINE_COMMANDS = frozenset(
         "explain-conflict",
         "ci-doctor",
         "ci-replay",
+        "sign-test-evidence",
         "snapshot",
         "verify-history",
         "replay",
