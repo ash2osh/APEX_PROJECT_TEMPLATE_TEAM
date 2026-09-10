@@ -31,11 +31,31 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("verify-release", release)
         self.assertIn("release.tar", release)
         self.assertIn("apply_release.sh", release)
+        self.assertIn("--out \"$RUNNER_TEMP/apply-report.json\"", release)
+        self.assertIn("qualify-target", release)
+        self.assertIn("sign-test-evidence", release)
         self.assertIn("TEAM_TEST_ENV_FILE", release)
         self.assertIn("gen-runbook", release)
-        self.assertIn("TEST_EVIDENCE", release)
         self.assertIn("cancel-in-progress: false", integration)
         self.assertNotIn("production-secrets", release)
+
+    def test_release_generates_and_signs_test_evidence_in_order(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        ordered = [release.index(token) for token in ("apply_release.sh", "qualify-target", "sign-test-evidence", "gen-runbook")]
+        self.assertEqual(ordered, sorted(ordered))
+        self.assertIn("TEAM_TEST_SIGNING_KEY_CONTENT: ${{ secrets.TEAM_TEST_SIGNING_KEY_CONTENT }}", release)
+        self.assertIn("$RUNNER_TEMP/test-signing-key.pem", release)
+        self.assertIn("umask 077", release)
+        self.assertIn("chmod 600", release)
+        self.assertIn("if: always()", release)
+        self.assertIn('rm -f -- "$RUNNER_TEMP/test-signing-key.pem"', release)
+        self.assertNotIn("TEAM_TEST_EVIDENCE", release)
+        self.assertNotIn("TEAM_TEST_SIGNATURE", release)
+        self.assertIn("$RUNNER_TEMP/apply-report.json", release)
+        self.assertIn("$RUNNER_TEMP/test-evidence.json", release)
+        self.assertIn("$RUNNER_TEMP/test-evidence.sig", release)
+        self.assertIn("if-no-files-found: warn", release)
+        self.assertIn("if-no-files-found: error", release)
 
     def test_contract_declares_only_non_secret_runner_requirements(self):
         contract = (ROOT / "ci" / "runner-contract.json").read_text(encoding="utf-8")
