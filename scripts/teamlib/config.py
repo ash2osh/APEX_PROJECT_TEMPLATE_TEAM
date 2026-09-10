@@ -62,7 +62,6 @@ OFFLINE_COMMANDS = frozenset(
         "gen-runbook",
         "explain-conflict",
         "ci-doctor",
-        "ci-replay",
         "sign-test-evidence",
         "snapshot",
         "verify-history",

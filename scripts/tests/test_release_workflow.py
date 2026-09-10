@@ -22,7 +22,12 @@ class WorkflowContractTests(unittest.TestCase):
         for workflow in (database, integration, release):
             self.assertNotIn("pull_request_target", workflow)
             self.assertIn("github.sha", workflow)
-        self.assertIn("ci-replay", database)
+        self.assertEqual(database.count("\n  offline:"), 1)
+        self.assertNotIn("ci-" + "replay", database)
+        self.assertNotIn("docker", database.lower())
+        self.assertNotIn("oracle/free", database.lower())
+        self.assertNotIn("command -v sql", database)
+        self.assertNotIn("upload-artifact", database)
         self.assertIn("verify-release", release)
         self.assertIn("release.tar", release)
         self.assertIn("apply_release.sh", release)
@@ -32,12 +37,13 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", integration)
         self.assertNotIn("production-secrets", release)
 
-    def test_contract_and_reference_scripts_are_executable(self):
-        for path in (ROOT / "ci" / "provisioners" / "docker_pdb.sh", ROOT / "scripts" / "ci_replay_runner.py"):
-            self.assertTrue(path.stat().st_mode & 0o111, path)
+    def test_contract_declares_only_non_secret_runner_requirements(self):
         contract = (ROOT / "ci" / "runner-contract.json").read_text(encoding="utf-8")
-        self.assertIn("@sha256:", contract)
+        self.assertIn('"cryptography": "Ed25519-qualified"', contract)
         self.assertIn('"credentials": false', contract)
+        self.assertIn('"writes": false', contract)
+        self.assertNotIn("provisioner", contract)
+        self.assertNotIn("runner", contract)
 
 
 if __name__ == "__main__":

@@ -624,7 +624,6 @@ def _offline(args: argparse.Namespace) -> int:
         "replay": "replay",
         "adopt-baseline": "replay",
         "ci-doctor": "ci",
-        "ci-replay": "ci",
         "sign-test-evidence": "qualification",
         "apply-release": "release_adapter",
         "prune-scratch": "prune",
@@ -637,7 +636,7 @@ def _offline(args: argparse.Namespace) -> int:
     handler = getattr(module, "main", None)
     if handler is None:
         raise ConfigError(f"offline command has no public handler: {args.command}")
-    command_prefixed = {"new-migration", "add-dependency", "build-release", "verify-release", "plan-release", "apply-release", "adopt-baseline", "ci-doctor", "ci-replay", "sign-test-evidence", "prune-scratch"}
+    command_prefixed = {"new-migration", "add-dependency", "build-release", "verify-release", "plan-release", "apply-release", "adopt-baseline", "ci-doctor", "sign-test-evidence", "prune-scratch"}
     handler_args = [args.command, *args.args] if args.command in command_prefixed else list(args.args)
     env_file = getattr(args, "env_file", None)
     if env_file and args.command in ENV_AWARE_OFFLINE_COMMANDS and "--env" not in handler_args:
