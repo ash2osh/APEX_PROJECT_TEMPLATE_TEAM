@@ -197,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rows", required=True, help="JSON file containing qualified rows")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(list(argv or []))
-    data = json.loads(Path(args.rows).read_text(encoding="utf-8"))
+    try:
+        data = json.loads(Path(args.rows).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise InventoryError(f"qualified inventory rows are unreadable: {args.rows}: {exc}") from exc
     snapshot(data, args.out)
     return 0

@@ -603,7 +603,13 @@ def _offline(args: argparse.Namespace) -> int:
     env_file = getattr(args, "env_file", None)
     if env_file and args.command in ENV_AWARE_OFFLINE_COMMANDS and "--env" not in handler_args:
         handler_args.extend(["--env", env_file])
-    result = handler(handler_args)
+    try:
+        result = handler(handler_args)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        # Offline handlers take explicit local inputs. A missing or malformed
+        # one is a user error and must answer with the same structured refusal
+        # every other command produces, not a traceback.
+        raise ConfigError(f"{args.command} could not read its input: {exc}") from exc
     return int(result or 0)
 
 
@@ -631,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
     except ExportConflict as exc:
         print(json.dumps({"status": "conflict", "operation": "export-app", "conflicts": list(exc.decision.conflicts), "recovery_path": exc.recovery_id}, sort_keys=True))
         return 3
-    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, TreeError, BundleError) as exc:
+    except (ConfigError, ControlStoreError, StateError, PatchError, ApexError, MigrationRunError, MigrationStoreError, DeployError, ReleaseError, RunbookError, CIError, AppCheckError, TreeError, BundleError, InventoryError) as exc:
         print(str(exc), file=sys.stderr)
         return 2 if isinstance(exc, ConfigError) else 3
 

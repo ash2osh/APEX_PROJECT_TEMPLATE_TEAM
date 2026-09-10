@@ -171,5 +171,42 @@ class ExceptionSurfaceTests(unittest.TestCase):
             self.assertEqual(team.main(["ci-doctor", "--contract", "ci/runner-contract.json"]), 2)
 
 
+class OfflineErrorContainmentTests(unittest.TestCase):
+    def _run(self, argv):
+        import io
+        import contextlib
+
+        import team
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = team.main(argv)
+        return code, stderr.getvalue()
+
+    def test_missing_rows_file_is_a_refusal_not_a_traceback(self):
+        code, message = self._run(["snapshot", "--rows", "/nonexistent-rows.json", "--out", "/tmp/out.json"])
+        self.assertIn(code, (2, 3))
+        self.assertIn("nonexistent-rows.json", message)
+        self.assertNotIn("Traceback", message)
+
+    def test_malformed_rows_json_is_a_refusal(self):
+        directory = Path(tempfile.mkdtemp(prefix="team-rows-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        rows = directory / "rows.json"
+        rows.write_text("{not json", encoding="utf-8", newline="\n")
+        code, message = self._run(["snapshot", "--rows", str(rows), "--out", str(directory / "out.json")])
+        self.assertIn(code, (2, 3))
+        self.assertNotIn("Traceback", message)
+
+    def test_rows_document_without_rows_is_a_refusal(self):
+        directory = Path(tempfile.mkdtemp(prefix="team-rows2-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        rows = directory / "rows.json"
+        rows.write_text('{"topology": "separate"}', encoding="utf-8", newline="\n")
+        code, message = self._run(["snapshot", "--rows", str(rows), "--out", str(directory / "out.json")])
+        self.assertIn(code, (2, 3))
+        self.assertNotIn("Traceback", message)
+
+
 if __name__ == "__main__":
     unittest.main()
