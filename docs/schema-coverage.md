@@ -18,3 +18,23 @@ them. Constraint and object-grant rows are included as structured dictionary
 evidence. SQLcl-wrapped, empty, malformed or unsupported output is unknown and
 refuses adoption; a project must still qualify its exact grants and metadata
 transforms before treating the result as a canonical replay baseline.
+
+## What a production read may contain
+
+A production target is read-only, and the read-only guard is an allowlist, not a
+denylist. A driver sent to a production target may contain only:
+
+- `SELECT` and `WITH` queries,
+- the display settings the generated driver needs (`SET HEADING`, `FEEDBACK`,
+  `LINESIZE`, `PAGESIZE`, `LONG`, `ECHO`, `VERIFY`, `DEFINE`, `ENCODING`,
+  `TERMOUT`, `TRIMSPOOL`, `SQLBLANKLINES`, `MARKUP`),
+- `WHENEVER SQLERROR`/`WHENEVER OSERROR` and `EXIT`,
+- one anonymous PL/SQL block whose every line is a
+  `DBMS_METADATA.SET_TRANSFORM_PARAM` call or the fixed
+  `EXCEPTION`/`WHEN OTHERS THEN`/`RAISE;` tail. This is what
+  `scripts/sql/schema_inventory.sql` needs, and it changes session rendering
+  only.
+
+Statement boundaries follow SQLcl: an inline `;` starts a new statement, and a
+client command ends at the end of its line. Anything the list does not name is
+refused before SQLcl is launched.

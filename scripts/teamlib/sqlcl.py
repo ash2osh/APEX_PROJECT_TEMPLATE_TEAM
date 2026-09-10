@@ -15,7 +15,7 @@ import uuid
 from typing import Any
 
 from .config import Target
-from .sql_text import mask_sql
+from .sql_text import BLOCK_START_RE, mask_sql, statement_starts
 
 
 class SqlclError(RuntimeError):
@@ -85,36 +85,63 @@ def _resolve_timeout(timeout: float | None) -> float:
     return value
 
 
+# DBMS_METADATA session transforms change how a definition is rendered for this
+# session and touch no data. schema_inventory.sql needs them, and a production
+# read of the schema is exactly the operation this guard exists to permit. The
+# allowance is deliberately line-oriented and exhaustive: one call per line, and
+# any other line inside the block leaves the whole block in place to be refused.
+_PRODUCTION_READ_SETUP_LINE_RE = re.compile(
+    r"^(?:BEGIN|END;?|EXCEPTION|WHEN\s+OTHERS\s+THEN|RAISE;|"
+    r"DBMS_METADATA\.SET_TRANSFORM_PARAM\s*\(.*\);)$",
+    re.IGNORECASE,
+)
+
+
+def _blank_metadata_setup_blocks(masked: str) -> str:
+    """Blank PL/SQL blocks that only configure DBMS_METADATA session transforms.
+
+    Offsets and line count are preserved so the refusal messages produced by the
+    statement walk still name the right line. A block with even one line the
+    allowance does not name is left untouched, so the walk sees its ``BEGIN``
+    and refuses it.
+    """
+    lines = masked.splitlines(keepends=True)
+    output = list(lines)
+    index = 0
+    total = len(lines)
+    while index < total:
+        if not BLOCK_START_RE.match(lines[index].strip()):
+            index += 1
+            continue
+        end = index
+        while end < total and lines[end].strip() != "/":
+            end += 1
+        body = [line.strip() for line in lines[index:end] if line.strip()]
+        if body and all(_PRODUCTION_READ_SETUP_LINE_RE.match(item) for item in body):
+            for position in range(index, min(end + 1, total)):
+                output[position] = "\n" if lines[position].endswith("\n") else ""
+        index = end + 1
+    return "".join(output)
+
+
 def _assert_production_read_only(driver_text: str) -> None:
     masked, terminated = mask_sql(driver_text)
     if not terminated:
         raise SqlclError(
             "production read-only SQLcl operation has an unterminated comment or literal"
         )
-    pending = True
-    in_block = False
-    for number, raw in enumerate(masked.splitlines(), start=1):
-        line = raw.strip()
-        if not line:
+    masked = _blank_metadata_setup_blocks(masked)
+    for number, statement in statement_starts(masked):
+        if _PRODUCTION_READ_ALLOWED_RE.match(statement):
             continue
-        if in_block:
-            if line == "/":
-                in_block = False
-                pending = True
+        if _PRODUCTION_READ_SETTINGS_RE.match(statement):
             continue
-        if pending:
-            if _PRODUCTION_READ_ALLOWED_RE.match(line):
-                pass
-            elif _PRODUCTION_READ_SETTINGS_RE.match(line):
-                pass
-            elif _PRODUCTION_READ_DIRECTIVE_RE.match(line):
-                pass
-            else:
-                raise SqlclError(
-                    "production read-only SQLcl operation contains a statement that is not a "
-                    f"query or a display setting (line {number})"
-                )
-        pending = line.endswith(";") or line == "/"
+        if _PRODUCTION_READ_DIRECTIVE_RE.match(statement):
+            continue
+        raise SqlclError(
+            "production read-only SQLcl operation contains a statement that is not a "
+            f"query or a display setting (line {number})"
+        )
 
 
 def _sql_marker_query() -> str:

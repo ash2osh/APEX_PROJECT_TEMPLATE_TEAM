@@ -203,5 +203,52 @@ class SqlclBoundaryTests(unittest.TestCase):
         self.assertIn("APEX_TIMEOUT_SECONDS", source)
 
 
+class ProductionReadOnlyGuardTests(unittest.TestCase):
+    def test_second_statement_on_one_line_is_refused(self):
+        from teamlib.sqlcl import SqlclError, _assert_production_read_only
+
+        with self.assertRaises(SqlclError) as raised:
+            _assert_production_read_only("SELECT 1 FROM dual; DROP TABLE audit_log;\n")
+        self.assertIn("not a query or a display setting", str(raised.exception))
+
+    def test_statement_after_an_unterminated_setting_is_refused(self):
+        from teamlib.sqlcl import SqlclError, _assert_production_read_only
+
+        with self.assertRaises(SqlclError):
+            _assert_production_read_only("SET HEADING OFF\nDROP TABLE audit_log;\n")
+
+    def test_shipped_schema_inventory_is_accepted(self):
+        from pathlib import Path
+
+        from teamlib.sqlcl import _assert_production_read_only
+
+        source = Path(__file__).resolve().parents[1] / "sql" / "schema_inventory.sql"
+        _assert_production_read_only(source.read_text(encoding="utf-8"))
+
+    def test_a_block_that_is_not_pure_metadata_setup_is_refused(self):
+        from teamlib.sqlcl import SqlclError, _assert_production_read_only
+
+        driver = (
+            "BEGIN\n"
+            "  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', FALSE);\n"
+            "  DELETE FROM audit_log;\n"
+            "END;\n"
+            "/\n"
+        )
+        with self.assertRaises(SqlclError):
+            _assert_production_read_only(driver)
+
+    def test_plain_queries_and_settings_still_pass(self):
+        from teamlib.sqlcl import _assert_production_read_only
+
+        _assert_production_read_only(
+            "SET DEFINE OFF\n"
+            "SET HEADING OFF\n"
+            "WHENEVER SQLERROR EXIT SQL.SQLCODE\n"
+            "WITH x AS (SELECT 1 a FROM dual)\n"
+            "SELECT a FROM x;\n"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
