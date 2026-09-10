@@ -41,6 +41,7 @@ from teamlib.qualification import QualificationError, qualify_target, write_repo
 from teamlib.patch import PatchError, recover_files
 from teamlib.release import ReleaseError
 from teamlib.runbook import RunbookError
+from teamlib.runtime import preflight_online
 from teamlib.state import StateError, load_baseline
 from teamlib.migration_bundle import BundleError
 from teamlib.trees import TreeError, read_git_tree
@@ -412,6 +413,14 @@ def _online(args: argparse.Namespace) -> object:
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
         try:
+            try:
+                runtime_report = preflight_online(
+                    config,
+                    repo,
+                    os.environ.get("TEAM_FLOW_RUNNER") or None,
+                )
+            except RuntimeError as exc:
+                raise ConfigError(str(exc)) from exc
             report = qualify_target(
                 repo,
                 config,
@@ -423,6 +432,7 @@ def _online(args: argparse.Namespace) -> object:
                 apply_report=args.apply_report,
                 flow_executable=os.environ.get("TEAM_FLOW_RUNNER") or None,
                 runner_contract=repo / "ci" / "runner-contract.json",
+                runtime_report=runtime_report,
             )
         except QualificationError as exc:
             if exc.report is not None:

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve().parent.name == "tests" else 2])
@@ -55,6 +56,10 @@ def config_for(role="integration", environment="staging"):
     )
 
 
+def runtime_report():
+    return SimpleNamespace(toolchain_digest="f" * 64)
+
+
 class QualificationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="team-qualification-")
@@ -90,6 +95,7 @@ class QualificationTests(unittest.TestCase):
                 store=FakeStore(),
                 work=self.root / "work",
                 runner_contract=Path("ci/runner-contract.json"),
+                runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),
             )
         self.assertEqual(report["version"], 2)
@@ -108,6 +114,7 @@ class QualificationTests(unittest.TestCase):
                 self.root, config_for("production", "production"), "a" * 40, ("employee",),
                 store=FakeStore(), work=self.root / "work",
                 runner_contract=Path("ci/runner-contract.json"),
+                runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),
             )
         with self.assertRaisesRegex(QualificationError, "unresolved"):
@@ -115,6 +122,7 @@ class QualificationTests(unittest.TestCase):
                 self.root, config_for(), "a" * 40, ("employee",),
                 store=FakeStore(attempts={"attempt": {"state": "UNKNOWN"}}), work=self.root / "work2",
                 runner_contract=Path("ci/runner-contract.json"),
+                runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),
             )
 

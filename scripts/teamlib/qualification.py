@@ -25,6 +25,7 @@ from .config import Config, Target, profile_target
 from .evidence import EvidenceError, canonical_json, validate_test_evidence
 from .migration_store import MigrationStoreError
 from .release import ReleaseError, verify_release
+from .runtime import RuntimeReport
 from .sqlcl import run_sqlcl
 
 
@@ -263,11 +264,16 @@ def qualify_target(
     sql_runner: Callable[..., Any] = run_sqlcl,
     run_identity: Mapping[str, Any] | None = None,
     runner_contract: str | Path = "ci/runner-contract.json",
+    runtime_report: RuntimeReport | None = None,
 ) -> dict[str, Any]:
     if config.environment == "production" or config.role not in {"integration", "test"}:
         raise QualificationError("qualification requires a non-production integration or test target")
     if not source_commit or any(char.isspace() for char in source_commit):
         raise QualificationError("qualification requires an exact source commit")
+    if runtime_report is None:
+        raise QualificationError("qualification requires an observed runtime preflight")
+    runtime_toolchain_digest = getattr(runtime_report, "toolchain_digest", None)
+    _sha256_field(runtime_toolchain_digest, "runtime toolchain digest")
     selected = tuple(alias.strip() for alias in aliases if alias and alias.strip())
     if len(set(selected)) != len(selected) or set(selected) != set(config.apps):
         raise QualificationError("qualification aliases must exactly match configured application bindings")
@@ -294,14 +300,10 @@ def qualify_target(
         raise QualificationError(f"target identity qualification failed: {exc}") from exc
 
     contract_path = Path(runner_contract)
-    try:
-        contract_raw = json.loads(contract_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise QualificationError("runner contract is unreadable") from exc
     doctor = ci_doctor(contract_path)
     if not doctor.valid:
         raise QualificationError("runner contract is invalid: " + "; ".join(doctor.issues))
-    toolchain_digest = _digest({"toolchain": contract_raw["toolchain"], "profiles": contract_raw["profiles"]})
+    toolchain_digest = runtime_toolchain_digest
 
     try:
         store.validate_observation_chain(metadata)
