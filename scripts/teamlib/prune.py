@@ -1,8 +1,13 @@
 """Bounded retention for scratch working directories and SQLcl run files.
 
-scratch/ holds one full application export per capture and four files per SQLcl
-process, and nothing removed them. Retention is deliberate for recent evidence,
-so this prunes by age while pinning anything a recovery record still points at.
+scratch/ holds one full application export per capture or deployment, one
+directory per SQLcl statement issued to the metadata target, and four files per
+SQLcl process. Retention is deliberate for recent application evidence, so
+captures are pruned by age while anything a recovery record still points at is
+pinned. Per-statement metadata and master-check directories are transient by
+construction and are removed regardless of age.
+
+Evidence under .sync-state/ is durable and is never touched by this command.
 """
 
 from __future__ import annotations
@@ -19,7 +24,17 @@ class PruneError(RuntimeError):
 
 
 _RUN_FILE_GLOBS = (".team-driver-*", ".team-payload-*", ".team-stdin-*", ".team-sqlcl-*")
-_CAPTURE_GLOBS = ("apex-capture-*", "apex-import-*")
+# One directory per captured or imported application, retained by age.
+_CAPTURE_GLOBS = (
+    "apex-capture-*", "apex-import-*", "deploy-capture-*", "deploy-import-*",
+)
+# One directory per SQLcl statement. These are transient by construction -- the
+# evidence a recovery record depends on lives in .sync-state -- so they are
+# removed regardless of `keep`. Recovery evidence under .sync-state/ is never
+# touched by this command.
+_TRANSIENT_WORK_GLOBS = (
+    "metadata/control-*", "metadata/migration-*", "master-checks/*",
+)
 
 
 def _referenced_work_dirs(state_root: Path) -> set[str]:
@@ -73,17 +88,26 @@ def prune_scratch(repo: str | Path, *, keep: int = 5, dry_run: bool = False) -> 
         for path in scratch.rglob(pattern)
         if path.is_file() and not path.is_symlink()
     ]
+    transient = [
+        path
+        for pattern in _TRANSIENT_WORK_GLOBS
+        for path in scratch.glob(pattern)
+        if path.is_dir() and not path.is_symlink() and str(path.resolve()) not in referenced
+    ]
 
     if dry_run:
         return {
             "removed": 0,
-            "would_remove": len(doomed) + len(run_files),
+            "would_remove": len(doomed) + len(run_files) + len(transient),
             "kept": len(unpinned) - len(doomed),
             "pinned": len(pinned),
         }
 
     removed = 0
     for path in doomed:
+        shutil.rmtree(path, ignore_errors=True)
+        removed += 1
+    for path in transient:
         shutil.rmtree(path, ignore_errors=True)
         removed += 1
     for path in run_files:

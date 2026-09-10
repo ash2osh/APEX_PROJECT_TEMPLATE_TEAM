@@ -8,6 +8,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 import json
+import shutil
 import tempfile
 import unittest
 
@@ -67,6 +68,44 @@ class PruneScratchTests(unittest.TestCase):
             report = prune_scratch(root, keep=0, dry_run=True)
             self.assertTrue((root / "scratch" / "apex-capture-aaa").is_dir())
             self.assertGreater(report["would_remove"], 0)
+
+
+class WorkDirectoryCoverageTests(unittest.TestCase):
+    def _scratch(self) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="team-prune-cover-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        scratch = root / "scratch"
+        for name in (
+            "apex-capture-1", "apex-import-1",
+            "deploy-capture-1", "deploy-import-1",
+            "master-checks/aaaa", "metadata/control-1", "metadata/migration-1",
+        ):
+            (scratch / name).mkdir(parents=True)
+            (scratch / name / "metadata.sql").write_text("select 1 from dual;\n", encoding="utf-8", newline="\n")
+        return root
+
+    def test_deploy_and_metadata_directories_are_removed(self):
+        root = self._scratch()
+        report = prune_scratch(root, keep=0)
+        self.assertGreaterEqual(report["removed"], 7)
+        for name in (
+            "deploy-capture-1", "deploy-import-1",
+            "metadata/control-1", "metadata/migration-1", "master-checks/aaaa",
+        ):
+            self.assertFalse((root / "scratch" / name).exists(), name)
+
+    def test_keep_still_retains_the_most_recent_captures(self):
+        root = self._scratch()
+        prune_scratch(root, keep=10)
+        self.assertTrue((root / "scratch" / "apex-capture-1").exists())
+        self.assertTrue((root / "scratch" / "deploy-capture-1").exists())
+
+    def test_dry_run_removes_nothing(self):
+        root = self._scratch()
+        report = prune_scratch(root, keep=0, dry_run=True)
+        self.assertEqual(report["removed"], 0)
+        self.assertGreater(report["would_remove"], 0)
+        self.assertTrue((root / "scratch" / "metadata" / "control-1").exists())
 
 
 if __name__ == "__main__":
