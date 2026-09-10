@@ -96,21 +96,60 @@ class SqlMetadataStoreTests(unittest.TestCase):
             store.acquire(self.target, "other", "worker", "host")
         self.assertEqual(caught.exception.owner_token, "run-token")
 
-    def test_embedded_and_reference_ddl_define_metadata_v2(self):
-        import teamlib.migration_store as migration_store
-
+    def test_reference_sql_is_the_exact_runtime_bootstrap_payload(self):
         reference = (Path(__file__).resolve().parents[2] / "scripts" / "sql" / "migration_metadata.sql").read_text(encoding="utf-8")
-        embedded = migration_store._MIGRATION_BOOTSTRAP_SQL
-        for ddl in (embedded, reference):
-            self.assertIn("non-empty version-2 digest is immutable", ddl)
-            self.assertIn("operation VARCHAR2(4) NOT NULL", ddl)
-            self.assertIn("CONSTRAINT team_migration_history_operation_ck CHECK (operation IN ('up','down'))", ddl)
-            self.assertIn("CREATE INDEX team_migration_history_id_ix ON TEAM_MIGRATION_HISTORY (id, applied_sequence)", ddl)
-            self.assertIn("action VARCHAR2(16) NOT NULL", ddl)
-            self.assertIn("CONSTRAINT team_migration_attempt_action_ck CHECK (action IN ('migrate','undo','redo'))", ddl)
-            self.assertIn("confirmation_digest VARCHAR2(64)", ddl)
-            self.assertIn("PRIMARY KEY (applied_sequence)", ddl)
-            self.assertNotIn("PRIMARY KEY (id)", ddl)
+        # The reference file carries an explanatory header the runtime payload
+        # does not; the executable bootstrap text itself (everything from its
+        # stable leading comment onward) must still be byte-identical.
+        marker = "\n-- Bootstrap identity contract:"
+        self.assertIn(marker, reference)
+        executable_reference = reference[reference.index(marker):]
+        rendered_reference = (
+            executable_reference
+            .replace("__PROJECT_ID_LITERAL__", "'" + self.target.project + "'")
+            .replace("__SCHEMA_SET_DIGEST_LITERAL__", "'" + "a" * 64 + "'")
+        )
+        store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
+        store._read_rows = lambda *args, **kwargs: [["0"]]  # type: ignore[method-assign]
+        store.bootstrap(self.target, schema_set_digest="a" * 64)
+        payload = self.calls[-1][1]
+        self.assertEqual(payload, rendered_reference)
+
+    def test_empty_version_one_digest_is_adopted_without_refusal(self):
+        store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
+
+        def read_rows(_target, _payload, prefix):
+            return [["1"]] if prefix == "TEAM_META_TABLE|" else [["1", ""]]
+
+        store._read_rows = read_rows  # type: ignore[method-assign]
+        store.bootstrap(self.target, schema_set_digest="a" * 64)
+        self.assertEqual([operation for operation, _ in self.calls], ["write"])
+
+    def test_non_empty_version_one_digest_mismatch_refuses_before_metadata_write(self):
+        store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
+        reads: list[str] = []
+
+        def read_rows(_target, _payload, prefix):
+            reads.append(prefix)
+            return [["1"]] if prefix == "TEAM_META_TABLE|" else [["1", "b" * 64]]
+
+        store._read_rows = read_rows  # type: ignore[method-assign]
+        with self.assertRaisesRegex(MigrationStoreError, "different project/schema set"):
+            store.bootstrap(self.target, schema_set_digest="a" * 64)
+        self.assertEqual(reads, ["TEAM_META_TABLE|", "TEAM_META_ID|"])
+        self.assertEqual(self.calls, [])
+
+    def test_project_identity_mismatch_refuses_before_any_read_or_write(self):
+        other = Target(
+            project="other-project", role="developer", environment="development",
+            connection="meta", instance_id="FREE", db_name="FREEPDB1", service="freep1",
+            session_user="META", current_schema="META", alias=None, workspace_id=None,
+            app_id=None, parsing_schema=None, ownership_mode="shared", binding_digest="b" * 64,
+        )
+        store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
+        with self.assertRaisesRegex(MigrationStoreError, "does not match the configured SQL controller"):
+            store.bootstrap(other, schema_set_digest="a" * 64)
+        self.assertEqual(self.calls, [])
 
     def test_sql_history_reads_repeated_ids_by_sequence_and_collapses(self):
         store = SqlMigrationStore(self.target, runner=self.runner, work_root=self.root)
