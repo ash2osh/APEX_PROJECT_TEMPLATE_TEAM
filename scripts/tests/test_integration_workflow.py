@@ -61,6 +61,26 @@ class FrontierAdoptionTests(unittest.TestCase):
         self.assertEqual(parsed.aliases, "employee")
         self.assertIn("qualify-target", team.PRODUCTION_REFUSED_COMMANDS)
 
+    def test_migration_lifecycle_commands_share_confirmation_and_drift_options(self):
+        import team
+
+        for command in ("migrate", "undo-migration", "redo-migration"):
+            argv = [command]
+            if command != "migrate":
+                argv.append("20260910T120000__alice__example")
+            argv.extend([
+                "--source", "migrations", "--dry-run",
+                "--expected-inventory", "expected.json", "--actual-inventory", "actual.json",
+                "--destructive-confirmation", "confirmation.json",
+            ])
+            parsed = team._parser().parse_args(argv)
+            self.assertEqual(parsed.command, command)
+            self.assertEqual(parsed.destructive_confirmation, "confirmation.json")
+            self.assertTrue(parsed.dry_run)
+            self.assertEqual(parsed.source, "migrations")
+        for command in ("migrate", "undo-migration", "redo-migration"):
+            self.assertIn(command, team.PRODUCTION_REFUSED_COMMANDS)
+
     def test_integration_workflow_adopts_before_it_checks_drift(self):
         from pathlib import Path
 

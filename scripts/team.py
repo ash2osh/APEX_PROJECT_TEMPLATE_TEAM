@@ -31,7 +31,8 @@ from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, load_config, p
 from teamlib.control_store import ControlStore, ControlStoreError, SqlControlStore
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.fingerprints import InventoryError, diff_inventory, inventory_from_manifest, load_inventory
-from teamlib.migrate import MigrationRunError, apply_plan
+from teamlib.destructive_confirmation import ConfirmationError, load_confirmation
+from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
 from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
 from teamlib.sqlcl import run_sqlcl
 from teamlib.live_inventory import inventory_target
@@ -47,7 +48,10 @@ from teamlib.trees import TreeError, read_git_tree
 # a production classification. Kept in one place so the parser, the online
 # dispatcher and the tests cannot drift apart.
 PRODUCTION_REFUSED_COMMANDS = frozenset(
-    {"setup-state", "adopt-frontier", "qualify-target", "recover-migration", "register-app", "recover-app-lock"}
+    {
+        "setup-state", "adopt-frontier", "qualify-target", "recover-migration",
+        "register-app", "recover-app-lock", "migrate", "undo-migration", "redo-migration",
+    }
 )
 
 
@@ -77,6 +81,15 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--bootstrap", action="store_true")
     migrate.add_argument("--expected-inventory")
     migrate.add_argument("--actual-inventory")
+    migrate.add_argument("--destructive-confirmation")
+    for name in ("undo-migration", "redo-migration"):
+        lifecycle = sub.add_parser(name, parents=[env_parent])
+        lifecycle.add_argument("migration_id")
+        lifecycle.add_argument("--source", default="migrations")
+        lifecycle.add_argument("--dry-run", action="store_true")
+        lifecycle.add_argument("--expected-inventory")
+        lifecycle.add_argument("--actual-inventory")
+        lifecycle.add_argument("--destructive-confirmation")
     drift = sub.add_parser("check-drift", parents=[env_parent])
     drift.add_argument("--expected-inventory")
     drift.add_argument("--actual-inventory")
@@ -275,6 +288,69 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _migration_drift(args: argparse.Namespace, config: Any, repo: Path) -> str | None:
+    """Validate the reviewed inventory gate shared by every DB migration action."""
+    expected_path = getattr(args, "expected_inventory", None)
+    actual_path = getattr(args, "actual_inventory", None)
+    dry_run = bool(getattr(args, "dry_run", False))
+    if bool(expected_path) != bool(actual_path):
+        raise ConfigError("migration drift gate requires both --expected-inventory and --actual-inventory")
+    if not dry_run and not expected_path:
+        raise ConfigError("migration requires a reviewed drift gate: provide --expected-inventory and --actual-inventory")
+    if not expected_path:
+        return None
+    try:
+        expected = load_inventory(expected_path)
+        actual = load_inventory(actual_path)
+        drift = diff_inventory(expected, actual)
+    except InventoryError as exc:
+        raise ConfigError(str(exc)) from exc
+    if any(drift[key] for key in ("added", "missing", "changed", "invalid")) or drift.get("topology_mismatch"):
+        raise MigrationRunError("migration drift gate is blocked: " + json.dumps(drift, sort_keys=True))
+    return actual.digest
+
+
+def _migration_callbacks(config: Any, repo: Path, schema_set_digest: str):
+    """Create one directional callback set for migrate, undo, and redo."""
+    def execute(migration, action, sql_path):
+        payload_target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
+        run_sqlcl(payload_target, "write", sql_path, repo / "scratch" / "migration-payload" / action / migration.id)
+
+    def verify(migration, action, verify_path):
+        if verify_path is not None and verify_path.is_file() and verify_path.read_bytes().strip():
+            run_sqlcl(profile_target(config, "VERIFY"), "read", verify_path, repo / "scratch" / "migration-verify" / action / migration.id)
+        return True
+
+    def observe(migration, phase):
+        observation_target = profile_target(config, "TABLES")
+        observation_work = repo / "scratch" / "migration-observation" / phase / migration.id
+        return inventory_target(
+            observation_target,
+            config.tables_schema,
+            config.code_schema,
+            observation_work,
+            schema_set_digest=schema_set_digest,
+        )
+
+    return execute, verify, observe
+
+
+def _migration_output(command: str, report: Any, *, dry_run: bool) -> None:
+    _json({
+        "status": "dry-run" if dry_run else "success",
+        "operation": command,
+        "action": report.action,
+        "selected": report.selected,
+        "applied": report.applied,
+        "reverted": report.reverted,
+        "foreign_applied": report.foreign_applied,
+        "foreign_reverted": report.foreign_reverted,
+        "blocked_attempt": report.blocked_attempt,
+        "verified_inventory_digest": report.verified_inventory_digest,
+        "confirmation_template": report.confirmation_template,
+    })
+
+
 def _online(args: argparse.Namespace) -> object:
     repo = _repo_root()
     command = args.command
@@ -350,65 +426,48 @@ def _online(args: argparse.Namespace) -> object:
         write_report(report, args.out)
         _json({"status": report["final_status"], "operation": command, "out": str(args.out)})
         return 0
-    if command == "migrate":
+    if command in {"migrate", "undo-migration", "redo-migration"}:
         config = _config(args, require_verify=True)
-        if bool(args.expected_inventory) != bool(args.actual_inventory):
-            raise ConfigError("migrate drift gate requires both --expected-inventory and --actual-inventory")
-        verified_digest = None
-        if not args.dry_run and not args.expected_inventory:
-            raise ConfigError("migrate requires a reviewed drift gate: provide --expected-inventory and --actual-inventory")
-        if args.expected_inventory:
-            try:
-                drift = diff_inventory(load_inventory(args.expected_inventory), load_inventory(args.actual_inventory))
-            except InventoryError as exc:
-                raise ConfigError(str(exc)) from exc
-            if any(drift[key] for key in ("added", "missing", "changed", "invalid")) or drift.get("topology_mismatch"):
-                raise MigrationRunError("migration drift gate is blocked: " + json.dumps(drift, sort_keys=True))
-            verified_digest = load_inventory(args.actual_inventory).digest
+        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
+            raise ConfigError(f"{command} is refused for production targets")
+        verified_digest = _migration_drift(args, config, repo)
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
         schema_set_digest = hashlib.sha256(
             f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
         ).hexdigest()
-
-        def execute(migration):
-            payload_target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
-            run_sqlcl(payload_target, "write", migration.sql_path, repo / "scratch" / "migration-payload")
-
-        def verify(migration):
-            if migration.verify_path is not None and migration.verify_bytes.strip():
-                run_sqlcl(profile_target(config, "VERIFY"), "read", migration.verify_path, repo / "scratch" / "migration-verify")
-            return True
-
-        def observe(migration, phase):
-            observation_target = profile_target(config, "TABLES")
-            observation_work = repo / "scratch" / "migration-observation" / phase / migration.id
-            return inventory_target(
-                observation_target,
-                config.tables_schema,
-                config.code_schema,
-                observation_work,
-                schema_set_digest=schema_set_digest,
-            )
-
-        report = apply_plan(
-            args.source,
-            {
-                "store": store,
-                "target": metadata,
-                "dry_run": args.dry_run,
-                "bootstrap": args.bootstrap,
-                "schema_set_digest": schema_set_digest,
-                "verified_inventory_digest": verified_digest,
-                "require_observation": True,
-                "observe": observe,
-                "source_commit": _resolved_commit(repo, "HEAD"),
-                "applied_by": os.environ.get("USER", "migration-worker"),
-                "execute": execute,
-                "verify": verify,
+        execute, verify, observe = _migration_callbacks(config, repo, schema_set_digest)
+        confirmation = None
+        if args.destructive_confirmation:
+            try:
+                confirmation, _confirmation_digest = load_confirmation(args.destructive_confirmation)
+            except ConfirmationError as exc:
+                raise ConfigError(str(exc)) from exc
+        profiles = {
+            "store": store,
+            "target": metadata,
+            "payload_targets": {
+                "tables": profile_target(config, "TABLES"),
+                "code": profile_target(config, "CODE"),
             },
-        )
-        _json({"status": "success", "operation": command, "applied": report.applied, "foreign_applied": report.foreign_applied, "blocked_attempt": report.blocked_attempt})
+            "dry_run": args.dry_run,
+            "bootstrap": getattr(args, "bootstrap", False),
+            "schema_set_digest": schema_set_digest,
+            "verified_inventory_digest": verified_digest,
+            "require_observation": True,
+            "observe": observe,
+            "source_commit": _resolved_commit(repo, "HEAD"),
+            "applied_by": os.environ.get("USER", "migration-worker"),
+            "execute": execute,
+            "verify": verify,
+        }
+        if command == "migrate":
+            report = apply_plan(args.source, profiles, confirmation=confirmation)
+        elif command == "undo-migration":
+            report = apply_undo(args.source, args.migration_id, profiles, confirmation=confirmation)
+        else:
+            report = apply_redo(args.source, args.migration_id, profiles, confirmation=confirmation)
+        _migration_output(command, report, dry_run=args.dry_run)
         return 0
     if command == "check-drift":
         config = _config(args, require_verify=True)
