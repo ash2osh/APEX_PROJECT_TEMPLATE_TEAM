@@ -208,5 +208,27 @@ class OfflineErrorContainmentTests(unittest.TestCase):
         self.assertNotIn("Traceback", message)
 
 
+class LauncherConsistencyTests(unittest.TestCase):
+    def test_every_powershell_launcher_uses_the_same_shape(self):
+        from pathlib import Path
+
+        scripts = Path(__file__).resolve().parents[1]
+        wrappers = sorted(
+            path for path in scripts.glob("*.ps1")
+            if path.name not in {"team.ps1", "apply_release.ps1"}
+        )
+        self.assertTrue(wrappers, "expected thin PowerShell wrappers beside team.ps1")
+        for path in wrappers:
+            with self.subTest(script=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("$MyInvocation.MyCommand.Path", text)
+                self.assertIn("scripts/team.ps1", text)
+                self.assertNotIn("scripts\\team.ps1", text)
+                self.assertTrue(
+                    text.rstrip().endswith("exit $LASTEXITCODE"),
+                    "a wrapper must propagate the exit code unconditionally",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

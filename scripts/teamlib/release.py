@@ -248,7 +248,6 @@ def build_release(repo: str | Path, ref: str, version: str, out: str | Path) -> 
                 info.uname = ""
                 info.gname = ""
                 info.mode = 0o644
-                import io
                 tar.addfile(info, io.BytesIO(data))
         staging_dir = output / "release"
         if staging_dir.exists():

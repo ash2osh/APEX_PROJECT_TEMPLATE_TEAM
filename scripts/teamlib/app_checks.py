@@ -217,7 +217,7 @@ def _runner(target: Mapping[str, Any], kind: str) -> Callable[..., Any] | None:
     return value if callable(value) else None
 
 
-def _result(alias: str, check: Mapping[str, Any], callback: Callable[..., Any] | None, content: Any) -> CheckResult:
+def _result(alias: str, check: Mapping[str, Any], callback: Callable[..., Any] | None) -> CheckResult:
     expected = tuple(check.get("expected_objects", ()))
     if callback is None:
         return CheckResult(alias, str(check["id"]), int(check["page_id"]), str(check["kind"]), "UNKNOWN", expected, "qualified check runner is unavailable", {})
@@ -284,8 +284,7 @@ def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str,
             raise AppCheckError(f"candidate application {alias} is missing fixtures: {', '.join(missing_fixtures)}")
         for check in declaration["checks"]:
             kind = str(check["kind"])
-            content = check.get("sql") if kind == "select" else check.get("steps")
-            results.append(_result(alias, check, _runner(replay_target, kind), content))
+            results.append(_result(alias, check, _runner(replay_target, kind)))
     status = "PASS" if results and all(item.status == "PASS" for item in results) else "FAIL"
     source_digest = _digest({"commit": source_commit, "apps": source})
     checks_digest = _digest(normalized)

@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-& (Join-Path $RepoRoot "scripts\team.ps1") build-release @args
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+& (Join-Path $repoRoot 'scripts/team.ps1') build-release @args
+exit $LASTEXITCODE

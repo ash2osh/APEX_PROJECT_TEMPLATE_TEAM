@@ -173,10 +173,9 @@ def inventory_target(
     runner: Callable[..., Any] = run_sqlcl,
     schema_set_digest: str | None = None,
 ) -> Inventory:
-    if target.environment == "production":
-        operation = "read"
-    else:
-        operation = "read"
+    # A schema inventory is read-only for every classification; production is
+    # not a special case here, it is only refused a write elsewhere.
+    operation = "read"
     if not re.fullmatch(r"[A-Z][A-Z0-9_$#]{0,127}", tables_schema) or not re.fullmatch(r"[A-Z][A-Z0-9_$#]{0,127}", code_schema):
         raise InventoryError("inventory schemas must be validated Oracle identifiers")
     template = Path(__file__).resolve().parents[1] / "sql" / "schema_inventory.sql"
