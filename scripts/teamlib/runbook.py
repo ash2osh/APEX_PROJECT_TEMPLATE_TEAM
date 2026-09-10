@@ -13,10 +13,10 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-import re
 from typing import Any
 from collections.abc import Mapping
 
+from .evidence import EvidenceError, validate_test_evidence
 from .release import ReleaseError, ReleasePlan, plan_release, verify_release
 
 
@@ -90,42 +90,6 @@ def _signature_bytes(raw: bytes) -> bytes:
     if len(decoded) != 64:
         raise RunbookError("detached signature must contain 64 Ed25519 signature bytes")
     return decoded
-
-
-def _required_passes(value: Mapping[str, Any]) -> None:
-    required = {
-        "version", "final_status", "source_commit", "archive_digest",
-        "toolchain_digest", "target_identity", "run_identity",
-        "qualification_identity", "application_checks", "results",
-    }
-    if set(value) != required or value.get("version") != 2:
-        raise RunbookError("test evidence has an unsupported format version")
-    if value.get("final_status") != "PASS":
-        raise RunbookError("test evidence is not a successful final result")
-    for field in ("source_commit", "archive_digest", "toolchain_digest"):
-        if not isinstance(value.get(field), str) or not value[field]:
-            raise RunbookError(f"test evidence is missing {field}")
-    if not re.fullmatch(r"[0-9a-f]{64}", value["archive_digest"]):
-        raise RunbookError("test evidence archive digest is malformed")
-    if not re.fullmatch(r"[0-9a-f]{64}", value["toolchain_digest"]):
-        raise RunbookError("test evidence toolchain digest is malformed")
-    for field in ("target_identity", "run_identity"):
-        if not isinstance(value.get(field), Mapping) or not value[field]:
-            raise RunbookError(f"test evidence has an empty {field}")
-    qualification = value.get("qualification_identity")
-    if not isinstance(qualification, Mapping) or qualification.get("target_kind") != "persistent":
-        raise RunbookError("test evidence qualification identity is incomplete")
-    for field in ("observation_digest", "history_digest"):
-        if not isinstance(qualification.get(field), str) or not re.fullmatch(r"[0-9a-f]{64}", qualification[field]):
-            raise RunbookError(f"test evidence {field} is malformed")
-    checks = value.get("application_checks")
-    if not isinstance(checks, Mapping) or checks.get("status") != "PASS":
-        raise RunbookError("candidate application checks did not pass")
-    if checks.get("unknown") or not checks.get("coverage") or not checks.get("checks_digest"):
-        raise RunbookError("candidate application evidence is incomplete or contains UNKNOWN results")
-    results = value.get("results")
-    if results != {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"}:
-        raise RunbookError("test evidence result set is incomplete or contains a failure")
 
 
 def _target_value(target: Mapping[str, Any] | Any, name: str, default: Any = None) -> Any:
@@ -243,8 +207,11 @@ def gen_runbook(
         manifest = verify_release(release_tar)
     except ReleaseError as exc:
         raise RunbookError(str(exc)) from exc
-    evidence_bytes, evidence = _load_json(test_evidence, "test evidence")
-    _required_passes(evidence)
+    evidence_bytes, _ = _load_json(test_evidence, "test evidence")
+    try:
+        evidence = validate_test_evidence(evidence_bytes)
+    except EvidenceError as exc:
+        raise RunbookError(str(exc)) from exc
     if evidence["archive_digest"] != manifest.archive_digest:
         raise RunbookError("test evidence is for a different release archive")
     if evidence["source_commit"] != manifest.source_commit:

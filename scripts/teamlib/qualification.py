@@ -22,6 +22,7 @@ from .app_checks import AppCheckError, AppCheckReport, verify_candidate_apps
 from .assertions import AssertionVerificationError, parse_team_assertions
 from .ci import ci_doctor
 from .config import Config, Target, profile_target
+from .evidence import EvidenceError, canonical_json, validate_test_evidence
 from .migration_store import MigrationStoreError
 from .release import ReleaseError, verify_release
 from .sqlcl import run_sqlcl
@@ -36,12 +37,6 @@ class QualificationError(RuntimeError):
 
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-
-
-def canonical_json(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -161,19 +156,19 @@ def _flow_runner(executable: str, work: Path):
 
 
 def _target_identity(config: Config, targets: Mapping[str, Target]) -> dict[str, Any]:
-    tables = targets["TABLES"]
+    metadata = targets["METADATA"]
     return {
         "project": config.project,
         "role": config.role,
         "environment": config.environment,
         "target_kind": "persistent",
-        "instance_id": tables.instance_id,
-        "db_name": tables.db_name,
-        "service": tables.service,
+        "instance_id": metadata.instance_id,
+        "db_name": metadata.db_name,
+        "service": metadata.service,
         "workspace_id": config.workspace_id,
         "app_ids": dict(sorted(config.apps.items())),
-        "state_key": tables.state_key,
-        "binding_digest": tables.binding_digest,
+        "state_key": metadata.state_key,
+        "binding_digest": metadata.binding_digest,
     }
 
 
@@ -233,7 +228,7 @@ def _base_report(
         "qualification_identity": {
             "target_kind": "persistent",
             "observation_sequence": int(observation["sequence"]),
-            "observation_digest": _sha256_field(observation["evidence"], "observation digest"),
+            "observation_digest": _sha256_field(observation["after"], "observation digest"),
             "history_digest": _sha256_field(history_digest, "history digest"),
         },
         "application_checks": {
@@ -325,7 +320,7 @@ def qualify_target(
     if not observations or not isinstance(observations[-1], Mapping):
         raise QualificationError("qualification requires an accepted observed frontier")
     latest = observations[-1]
-    if latest.get("sequence") is None or latest.get("evidence") is None:
+    if latest.get("sequence") is None or latest.get("after") is None:
         raise QualificationError("accepted observation is incomplete")
     target_identity = _target_identity(config, targets)
     report = _base_report(
@@ -432,36 +427,12 @@ def _private_key(raw: bytes):
     return key
 
 
-def _validate_v2_pass(raw: bytes, value: Mapping[str, Any]) -> None:
-    if raw != canonical_json(dict(value)) + b"\n":
-        raise QualificationError("test evidence is not canonical JSON")
-    if value.get("version") != 2 or value.get("final_status") != "PASS":
-        raise QualificationError("test evidence must be a version-2 PASS document")
-    required = {
-        "version", "final_status", "source_commit", "archive_digest",
-        "toolchain_digest", "target_identity", "run_identity",
-        "qualification_identity", "application_checks", "results",
-    }
-    if set(value) != required:
-        raise QualificationError("test evidence has an unexpected version-2 shape")
-    for field in ("archive_digest", "toolchain_digest"):
-        _sha256_field(value.get(field), f"test evidence {field}")
-    qualification = value["qualification_identity"]
-    if not isinstance(qualification, Mapping) or qualification.get("target_kind") != "persistent":
-        raise QualificationError("test evidence qualification identity is incomplete")
-    for field in ("observation_digest", "history_digest"):
-        _sha256_field(qualification.get(field), f"test evidence {field}")
-    checks = value["application_checks"]
-    if not isinstance(checks, Mapping) or checks.get("status") != "PASS" or checks.get("unknown") != 0:
-        raise QualificationError("test evidence application checks are incomplete")
-    results = value["results"]
-    if results != {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"}:
-        raise QualificationError("test evidence results are incomplete")
-
-
 def sign_test_evidence(evidence: str | Path, private_key: str | Path, signature_out: str | Path) -> str:
-    raw, value = _load_json(evidence, "test evidence")
-    _validate_v2_pass(raw, value)
+    raw, _ = _load_json(evidence, "test evidence")
+    try:
+        validate_test_evidence(raw)
+    except EvidenceError as exc:
+        raise QualificationError(str(exc)) from exc
     key = _private_key(_regular_file(private_key, "signing key").read_bytes())
     destination = Path(signature_out)
     if destination.is_symlink():

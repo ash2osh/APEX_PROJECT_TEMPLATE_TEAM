@@ -39,14 +39,28 @@ class RunbookTests(unittest.TestCase):
             evidence_data = {
                 "version": 2, "final_status": "PASS", "archive_digest": manifest.archive_digest, "source_commit": commit,
                 "toolchain_digest": "b" * 64,
-                "target_identity": {"instance_id": "TEST", "workspace_id": 1},
+                "target_identity": {
+                    "project": "team-template", "role": "test", "environment": "test",
+                    "target_kind": "persistent", "instance_id": "TEST", "db_name": "FREEPDB1",
+                    "service": "freep1", "workspace_id": 1, "app_ids": {"a": 1},
+                    "state_key": "f" * 64, "binding_digest": "e" * 64,
+                },
                 "run_identity": {"run_id": "ci-run-1"},
                 "qualification_identity": {"target_kind": "persistent", "observation_sequence": 1, "observation_digest": "d" * 64, "history_digest": "e" * 64},
-                "application_checks": {"status": "PASS", "checks_digest": "c" * 64, "coverage": {"apps": ["a"], "checks": 1}, "unknown": 0},
+                "application_checks": {
+                    "status": "PASS", "checks_digest": "c" * 64,
+                    "coverage": {"apps": ["a"], "pages": {"a": [1]}, "checks": 1, "unknown": 0},
+                    "unknown": 0,
+                    "results": [{
+                        "alias": "a", "check_id": "objects", "page_id": 1,
+                        "kind": "select", "status": "PASS", "expected_objects": [],
+                        "diagnostic": "", "observed": {"status": "PASS"},
+                    }],
+                },
                 "results": {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"},
             }
             evidence = root / "evidence.json"
-            evidence.write_text(json.dumps(evidence_data, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+            evidence.write_bytes(json.dumps(evidence_data, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
             key = Ed25519PrivateKey.generate()
             public_bytes = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
             (root / "key.pem").write_bytes(public_bytes)
@@ -54,6 +68,30 @@ class RunbookTests(unittest.TestCase):
             runbook = gen_runbook(manifest.archive_path, {}, {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"a": 2}}, evidence, root / "sig", root / "key.pem")
             self.assertIn("PROD", runbook.text)
             self.assertIn(manifest.archive_digest, runbook.text)
+            invalid_identities = (
+                {**evidence_data["target_identity"], "role": "integration"},
+                {**evidence_data["target_identity"], "environment": "staging"},
+                {**evidence_data["target_identity"], "target_kind": "disposable"},
+                {key: value for key, value in evidence_data["target_identity"].items() if key != "state_key"},
+            )
+            for index, identity in enumerate(invalid_identities):
+                with self.subTest(identity=index):
+                    invalid = dict(evidence_data)
+                    invalid["target_identity"] = identity
+                    invalid_path = root / f"invalid-{index}.json"
+                    invalid_raw = json.dumps(invalid, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+                    invalid_path.write_bytes(invalid_raw)
+                    invalid_signature = root / f"invalid-{index}.sig"
+                    invalid_signature.write_bytes(key.sign(invalid_raw))
+                    with self.assertRaises(RunbookError):
+                        gen_runbook(
+                            manifest.archive_path,
+                            {},
+                            {"environment": "production", "instance_id": "PROD"},
+                            invalid_path,
+                            invalid_signature,
+                            root / "key.pem",
+                        )
 
     def test_failed_evidence_refuses(self):
         with tempfile.TemporaryDirectory(prefix="team-runbook-fail-") as directory:
