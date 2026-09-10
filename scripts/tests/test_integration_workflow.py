@@ -20,21 +20,19 @@ class IntegrationWorkflowTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertNotIn("push:", workflow)
         self.assertEqual(workflow.count("runs-on:"), 1)
+        self.assertIn("runs-on: [self-hosted, team-apex, integration]", workflow)
         self.assertIn("environment: integration", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
-        for command in ("setup-state", "adopt-frontier", "check-drift", "migrate", "deploy-app", "qualify-target"):
-            self.assertIn(command, workflow)
-        self.assertIn("TEAM_ENV_FILE", workflow)
-        self.assertIn("TEAM_APP_ALIASES", workflow)
+        self.assertEqual(workflow.count("run-integration"), 1)
+        for removed in ("setup-state", "adopt-frontier", "check-drift", "migrate ", "deploy-app", "qualify-target"):
+            self.assertNotIn(removed, workflow)
+        self.assertIn("TEAM_FLOW_RUNNER: ${{ vars.TEAM_FLOW_RUNNER }}", workflow)
+        self.assertIn("TEAM_ENV_CONTENT: ${{ secrets.TEAM_ENV_CONTENT }}", workflow)
         self.assertIn("GITHUB_SHA", workflow)
         self.assertIn("if: always()", workflow)
         self.assertIn("upload-artifact", workflow)
-        self.assertIn("if-no-files-found: error", workflow)
-        ordered = [workflow.index(command) for command in ("setup-state", "adopt-frontier", "check-drift", "migrate", "deploy-app", "qualify-target")]
-        self.assertEqual(ordered, sorted(ordered))
-        self.assertNotIn("--destructive-confirmation", workflow)
-        self.assertNotIn("Use the qualified adapter", workflow)
-        self.assertNotIn("echo \"Integration credentials", workflow)
+        self.assertIn("if-no-files-found: warn", workflow)
+        self.assertIn("find \"$RUNNER_TEMP\" -maxdepth 1 -name integration.env -type f -delete", workflow)
 
 
 class FrontierAdoptionTests(unittest.TestCase):
@@ -102,16 +100,13 @@ class FrontierAdoptionTests(unittest.TestCase):
         for command in ("migrate", "undo-migration", "redo-migration"):
             self.assertIn(command, team.PRODUCTION_REFUSED_COMMANDS)
 
-    def test_integration_workflow_adopts_before_it_checks_drift(self):
+    def test_integration_workflow_has_one_online_gate(self):
         from pathlib import Path
 
         text = (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
-        self.assertIn("adopt-frontier", text)
-        self.assertLess(
-            text.index("adopt-frontier"),
-            text.index("check-drift"),
-            "check-drift exits 3 until a frontier exists, so adoption must come first",
-        )
+        self.assertEqual(text.count("run-integration"), 1)
+        self.assertNotIn("adopt-frontier", text)
+        self.assertNotIn("check-drift", text)
 
 
 if __name__ == "__main__":

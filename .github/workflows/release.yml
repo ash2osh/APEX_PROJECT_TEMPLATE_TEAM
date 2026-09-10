@@ -36,76 +36,47 @@ jobs:
 
   test-and-handoff:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, team-apex, test]
     environment: test
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install the signed-handoff verification dependency
-        run: |
-          # The promotion handoff verifies a detached Ed25519 signature over
-          # the v2 evidence emitted and signed below.
-          python3 -m pip install --quiet 'cryptography>=41'
       - uses: actions/download-artifact@v4
         with:
           name: release-${{ github.ref_name }}
           path: scratch/release
       - name: Verify downloaded bytes
         run: PYTHONPATH=scripts python3 scripts/team.py verify-release scratch/release/release.tar
-      - name: Require protected test binding and handoff configuration
+      - name: Materialize protected handoff inputs
         env:
-          TEAM_TEST_ENV_FILE: ${{ vars.TEAM_TEST_ENV_FILE }}
-          TEAM_TEST_HISTORY_JSON: ${{ vars.TEAM_TEST_HISTORY_JSON }}
-          TEAM_APP_ALIASES: ${{ vars.TEAM_APP_ALIASES }}
-          TEAM_TRUST_KEY: ${{ vars.TEAM_TRUST_KEY }}
-          TEAM_PRODUCTION_HISTORY_JSON: ${{ vars.TEAM_PRODUCTION_HISTORY_JSON }}
+          TEAM_TEST_ENV_CONTENT: ${{ secrets.TEAM_TEST_ENV_CONTENT }}
           TEAM_TEST_SIGNING_KEY_CONTENT: ${{ secrets.TEAM_TEST_SIGNING_KEY_CONTENT }}
+          TEAM_TRUST_KEY_CONTENT: ${{ vars.TEAM_TRUST_KEY_CONTENT }}
+          TEAM_PRODUCTION_HISTORY_CONTENT: ${{ vars.TEAM_PRODUCTION_HISTORY_CONTENT }}
         run: |
-          test -n "$TEAM_TEST_ENV_FILE" && test -f "$TEAM_TEST_ENV_FILE"
-          test -n "$TEAM_TEST_HISTORY_JSON" && test -f "$TEAM_TEST_HISTORY_JSON"
-          test -n "$TEAM_APP_ALIASES"
-          test -n "$TEAM_TRUST_KEY" && test -f "$TEAM_TRUST_KEY"
-          test -n "$TEAM_PRODUCTION_HISTORY_JSON" && test -f "$TEAM_PRODUCTION_HISTORY_JSON"
+          test -n "$TEAM_TEST_ENV_CONTENT"
           test -n "$TEAM_TEST_SIGNING_KEY_CONTENT"
+          test -n "$TEAM_TRUST_KEY_CONTENT"
+          test -n "$TEAM_PRODUCTION_HISTORY_CONTENT"
+          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
           test ! -e .env
           test ! -e targets/production.env
-      - name: Plan the downloaded artifact for the test target
-        env:
-          TEAM_TEST_HISTORY_JSON: ${{ vars.TEAM_TEST_HISTORY_JSON }}
-        run: |
-          PYTHONPATH=scripts python3 scripts/team.py plan-release scratch/release/release.tar \
-            --history "$TEAM_TEST_HISTORY_JSON" --target targets/test.json --out scratch/test-plan.json
-      - name: Apply only the verified artifact to non-production test
-        env:
-          TEAM_TEST_ENV_FILE: ${{ vars.TEAM_TEST_ENV_FILE }}
-          TEAM_TEST_HISTORY_JSON: ${{ vars.TEAM_TEST_HISTORY_JSON }}
-        run: |
-          scripts/apply_release.sh scratch/release/release.tar \
-            --plan scratch/test-plan.json --history "$TEAM_TEST_HISTORY_JSON" \
-            --target targets/test.json --env "$TEAM_TEST_ENV_FILE" \
-            --out "$RUNNER_TEMP/apply-report.json"
-      - name: Qualify the persistent test target
-        env:
-          TEAM_TEST_ENV_FILE: ${{ vars.TEAM_TEST_ENV_FILE }}
-          TEAM_APP_ALIASES: ${{ vars.TEAM_APP_ALIASES }}
-        run: |
-          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_TEST_ENV_FILE" qualify-target \
-            --source-commit "$GITHUB_SHA" \
-            --aliases "$TEAM_APP_ALIASES" \
-            --release-archive scratch/release/release.tar \
-            --apply-report "$RUNNER_TEMP/apply-report.json" \
-            --out "$RUNNER_TEMP/test-evidence.json"
-      - name: Materialize the protected test signing key
-        env:
-          TEAM_TEST_SIGNING_KEY_CONTENT: ${{ secrets.TEAM_TEST_SIGNING_KEY_CONTENT }}
-        run: |
           umask 077
+          printf '%s\n' "$TEAM_TEST_ENV_CONTENT" > "$RUNNER_TEMP/test.env"
           printf '%s\n' "$TEAM_TEST_SIGNING_KEY_CONTENT" > "$RUNNER_TEMP/test-signing-key.pem"
-          chmod 600 "$RUNNER_TEMP/test-signing-key.pem"
+          printf '%s\n' "$TEAM_TRUST_KEY_CONTENT" > "$RUNNER_TEMP/test-trust-key.pem"
+          printf '%s\n' "$TEAM_PRODUCTION_HISTORY_CONTENT" > "$RUNNER_TEMP/production-history.json"
+          chmod 600 "$RUNNER_TEMP/test.env" "$RUNNER_TEMP/test-signing-key.pem" \
+            "$RUNNER_TEMP/test-trust-key.pem" "$RUNNER_TEMP/production-history.json"
+      - name: Apply and qualify the protected test target
+        env:
+          TEAM_FLOW_RUNNER: ${{ vars.TEAM_FLOW_RUNNER }}
+        run: |
+          PYTHONPATH=scripts python3 scripts/team.py \
+            --env "$RUNNER_TEMP/test.env" run-release-test \
+            scratch/release/release.tar --target targets/test.json \
+            --out "$RUNNER_TEMP/test-evidence.json"
       - name: Sign test evidence
         run: |
           PYTHONPATH=scripts python3 scripts/team.py sign-test-evidence \
@@ -113,26 +84,26 @@ jobs:
             --private-key "$RUNNER_TEMP/test-signing-key.pem" \
             --out "$RUNNER_TEMP/test-evidence.sig"
       - name: Generate the production handoff from signed evidence
-        env:
-          TEAM_PRODUCTION_HISTORY_JSON: ${{ vars.TEAM_PRODUCTION_HISTORY_JSON }}
-          TEAM_TRUST_KEY: ${{ vars.TEAM_TRUST_KEY }}
         run: |
           PYTHONPATH=scripts python3 scripts/team.py gen-runbook scratch/release/release.tar \
-            --history "$TEAM_PRODUCTION_HISTORY_JSON" --target targets/production.json \
+            --history "$RUNNER_TEMP/production-history.json" --target targets/production.json \
             --test-evidence "$RUNNER_TEMP/test-evidence.json" \
             --signature "$RUNNER_TEMP/test-evidence.sig" \
-            --trust-key "$TEAM_TRUST_KEY" --out scratch/PRODUCTION_RUNBOOK.md
+            --trust-key "$RUNNER_TEMP/test-trust-key.pem" --out scratch/PRODUCTION_RUNBOOK.md
           test -s scratch/PRODUCTION_RUNBOOK.md
-      - name: Remove the signing key
+      - name: Remove protected handoff inputs
         if: always()
-        run: rm -f -- "$RUNNER_TEMP/test-signing-key.pem"
+        run: |
+          find "$RUNNER_TEMP" -maxdepth 1 -type f \
+            \( -name test.env -o -name test-signing-key.pem \
+               -o -name test-trust-key.pem -o -name production-history.json \) \
+            -delete
       - name: Retain test qualification diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-qualification-${{ github.ref_name }}
           path: |
-            ${{ runner.temp }}/apply-report.json
             ${{ runner.temp }}/test-evidence.json
             ${{ runner.temp }}/test-evidence.sig
           if-no-files-found: warn

@@ -106,17 +106,18 @@ class DocumentationTests(unittest.TestCase):
 
 
 class ReleaseWorkflowDependencyTests(unittest.TestCase):
-    def test_runbook_job_installs_the_promotion_extra(self):
+    def test_test_runner_declares_the_promotion_dependency(self):
         from pathlib import Path
 
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("gen-runbook", text)
         self.assertIn(
-            "pip install --quiet 'cryptography>=41'",
+            "runs-on: [self-hosted, team-apex, test]",
             text,
-            "gen-runbook verifies an Ed25519 signature and fails without cryptography",
+            "the protected test runner carries the signing and verification dependency",
         )
+        self.assertIn("TEAM_TRUST_KEY_CONTENT", text)
 
 
 if __name__ == "__main__":

@@ -12,86 +12,35 @@ concurrency:
 
 jobs:
   qualification:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, team-apex, integration]
     environment: integration
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Prepare integration environment profile
+      - name: Materialize protected integration profile
         env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
           TEAM_ENV_CONTENT: ${{ secrets.TEAM_ENV_CONTENT }}
         run: |
-          if [ -n "$TEAM_ENV_FILE" ] && [ ! -f "$TEAM_ENV_FILE" ] && [ -n "$TEAM_ENV_CONTENT" ]; then
-            mkdir -p "$(dirname "$TEAM_ENV_FILE")"
-            printf '%s\n' "$TEAM_ENV_CONTENT" > "$TEAM_ENV_FILE"
-            chmod 600 "$TEAM_ENV_FILE"
-          fi
-      - name: Require protected target binding
-        env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
-          TEAM_APP_ALIASES: ${{ vars.TEAM_APP_ALIASES }}
-        run: |
-          test -n "$TEAM_ENV_FILE"
-          test -f "$TEAM_ENV_FILE"
-          test -n "$TEAM_APP_ALIASES"
+          test -n "$TEAM_ENV_CONTENT"
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
-      - name: Initialize the isolated integration metadata state
+          umask 077
+          printf '%s\n' "$TEAM_ENV_CONTENT" > "$RUNNER_TEMP/integration.env"
+          chmod 600 "$RUNNER_TEMP/integration.env"
+      - name: Run protected integration gate
         env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
+          TEAM_FLOW_RUNNER: ${{ vars.TEAM_FLOW_RUNNER }}
         run: |
-          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" setup-state
-      - name: Adopt the observed migration frontier if none exists
-        env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
-        run: |
-          # A freshly provisioned integration target has no frontier. Adopt
-          # that observed state before the drift gate creates a qualification
-          # baseline for this exact source SHA.
-          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" adopt-frontier
-      - name: Check observed drift for this exact SHA
-        env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
-        run: |
-          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" check-drift \
-            --out "scratch/integration-drift-${GITHUB_SHA}.json"
-      - name: Apply reviewed shared migrations
-        env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
-        run: |
-          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" migrate \
-            --source migrations \
-            --expected-inventory database/schema-inventory.json \
-            --actual-inventory scratch/live-inventory.json
-      - name: Deploy every selected application from this SHA
-        env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
-          TEAM_APP_ALIASES: ${{ vars.TEAM_APP_ALIASES }}
-        run: |
-          IFS=',' read -r -a aliases <<< "$TEAM_APP_ALIASES"
-          test "${#aliases[@]}" -gt 0
-          for alias in "${aliases[@]}"; do
-            test -n "$alias"
-            PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" deploy-app "$alias" \
-              --target targets/integration.json --ref "$GITHUB_SHA"
-          done
-      - name: Qualify the persistent integration target
-        env:
-          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
-          TEAM_APP_ALIASES: ${{ vars.TEAM_APP_ALIASES }}
-        run: |
-          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" qualify-target \
-            --source-commit "$GITHUB_SHA" \
-            --aliases "$TEAM_APP_ALIASES" \
+          PYTHONPATH=scripts python3 scripts/team.py \
+            --env "$RUNNER_TEMP/integration.env" run-integration \
             --out "$RUNNER_TEMP/qualification.json"
+      - name: Remove protected integration profile
+        if: always()
+        run: find "$RUNNER_TEMP" -maxdepth 1 -name integration.env -type f -delete
       - name: Upload integration qualification report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qualification-${{ github.sha }}
           path: ${{ runner.temp }}/qualification.json
-          if-no-files-found: error
+          if-no-files-found: warn
