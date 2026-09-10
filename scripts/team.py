@@ -42,6 +42,13 @@ from teamlib.state import StateError, load_baseline
 from teamlib.migration_bundle import BundleError
 from teamlib.trees import TreeError, read_git_tree
 
+# Commands that write controller or metadata state and are therefore refused for
+# a production classification. Kept in one place so the parser, the online
+# dispatcher and the tests cannot drift apart.
+PRODUCTION_REFUSED_COMMANDS = frozenset(
+    {"setup-state", "adopt-frontier", "recover-migration", "register-app", "recover-app-lock"}
+)
+
 
 def _parser() -> argparse.ArgumentParser:
     env_parent = argparse.ArgumentParser(add_help=False)
@@ -56,6 +63,7 @@ def _parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", parents=[env_parent])
     sub.add_parser("setup-state", parents=[env_parent])
+    sub.add_parser("adopt-frontier", parents=[env_parent])
     migrate = sub.add_parser("migrate", parents=[env_parent])
     migrate.add_argument("--source", default="migrations")
     migrate.add_argument("--dry-run", action="store_true")
@@ -269,12 +277,40 @@ def _online(args: argparse.Namespace) -> object:
         return 0
     if command == "setup-state":
         config = _config(args)
-        if config.environment == "production":
-            raise ConfigError("setup-state is refused for production targets")
+        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
+            raise ConfigError(f"{command} is refused for production targets")
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)
         store.setup_state([profile_target(config, "APEX", alias=alias) for alias in config.apps])
         _json({"status": "success", "operation": "setup-state", "targets": sorted(config.apps)})
+        return 0
+    if command == "adopt-frontier":
+        config = _config(args, require_verify=True)
+        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
+            raise ConfigError(f"{command} is refused for production targets")
+        metadata = profile_target(config, "METADATA")
+        store = _sql_migration_store(repo, metadata)
+        schema_set_digest = hashlib.sha256(
+            f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
+        ).hexdigest()
+        store.bootstrap(metadata, schema_set_digest=schema_set_digest)
+        inventory = inventory_target(
+            profile_target(config, "TABLES"),
+            config.tables_schema,
+            config.code_schema,
+            repo / "scratch" / "frontier-inventory",
+            schema_set_digest=schema_set_digest,
+        )
+        run_token = uuid.uuid4().hex
+        store.acquire(metadata, run_token, os.environ.get("USER", "frontier-worker"), socket.gethostname())
+        try:
+            digest = store.record_inventory(metadata, inventory.as_dict(), run_token=run_token)
+            store.ensure_observation(metadata, digest, run_token=run_token)
+        finally:
+            # A failure here leaves the mutex held on purpose; recover-migration
+            # clears it with evidence, exactly as a failed migrate does.
+            store.release(metadata, run_token)
+        _json({"status": "success", "operation": command, "inventory_digest": digest})
         return 0
     if command == "migrate":
         config = _config(args, require_verify=True)
@@ -403,8 +439,8 @@ def _online(args: argparse.Namespace) -> object:
         return 0 if status == "clean" else 3
     if command in {"export-history", "recover-migration"}:
         config = _config(args)
-        if command == "recover-migration" and config.environment == "production":
-            raise ConfigError("recover-migration is refused for production targets")
+        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
+            raise ConfigError(f"{command} is refused for production targets")
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
         if command == "export-history":
@@ -416,7 +452,7 @@ def _online(args: argparse.Namespace) -> object:
         return 0
     if command in {"register-app", "app-status", "recover-app-lock", "capture-app", "bootstrap-app", "adopt-app", "export-app", "import-app"}:
         config, target = _target(args, args.alias)
-        if target.environment == "production" and command in {"register-app", "recover-app-lock"}:
+        if target.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
             raise ConfigError(f"{command} is refused for production targets")
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)

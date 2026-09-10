@@ -57,3 +57,15 @@ Do not run untrusted pull-request code with integration credentials. The
 workflow provisions disposable resources and removes only the exact resource
 whose token it received. Production connections and credentials are excluded
 from CI by contract.
+
+## First run against a new environment
+
+`check-drift` compares live structure against the accepted observed frontier and
+exits 3 while no frontier has been adopted. A new database has none, and a
+migration run creates one only as a side effect of applying a migration — so a
+project with nothing pending can never reach a clean drift check on its own.
+
+Run `team.py adopt-frontier` once, after `setup-state`. It bootstraps the
+migration metadata, takes one read-only inventory through the TABLES profile,
+records it as an immutable manifest and writes the sequence-0 observation. It is
+refused for a production classification, and it does not write any schema object.

@@ -82,6 +82,15 @@ jobs:
           TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
         run: |
           PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" setup-state
+      - name: Adopt the observed migration frontier if none exists
+        env:
+          TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
+        run: |
+          # The drift gate below compares live structure against the accepted
+          # observed frontier and exits 3 when none has been adopted. A freshly
+          # provisioned integration database has no frontier and no pending
+          # migrations to create one, so it is observed here explicitly.
+          PYTHONPATH=scripts python3 scripts/team.py --env "$TEAM_ENV_FILE" adopt-frontier
       - name: Check observed drift for this exact SHA
         env:
           TEAM_ENV_FILE: ${{ vars.TEAM_ENV_FILE }}
