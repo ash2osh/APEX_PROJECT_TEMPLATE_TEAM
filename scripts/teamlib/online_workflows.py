@@ -389,7 +389,10 @@ def run_integration(
     ):
         raise OnlineWorkflowError("integration source must be an exact commit")
     aliases = tuple(sorted(config.apps))
-    runtime = deps.preflight(config, repo_path, flow_executable)
+    try:
+        runtime = deps.preflight(config, repo_path, flow_executable)
+    except RuntimeError as exc:
+        raise OnlineWorkflowError(str(exc)) from exc
     deps.setup_control(repo_path, config)
     store = deps.bootstrap_metadata(repo_path, config)
     metadata = profile_target(config, "METADATA")
@@ -466,7 +469,10 @@ def run_release_test(
         raise OnlineWorkflowError(
             "release archive and test configuration application bindings differ"
         )
-    runtime = deps.preflight(config, repo_path, flow_executable)
+    try:
+        runtime = deps.preflight(config, repo_path, flow_executable)
+    except RuntimeError as exc:
+        raise OnlineWorkflowError(str(exc)) from exc
     apply_report = deps.apply_release_live(
         archive_path,
         target_path,

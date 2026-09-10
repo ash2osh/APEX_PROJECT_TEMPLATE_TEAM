@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ if _SCRIPTS_DIR not in sys.path:
 
 from unittest.mock import patch
 
+import team
 from teamlib.app_checks import AppCheckReport
 from teamlib.config import Config, Profile
 from teamlib.online_workflows import (
@@ -170,6 +172,50 @@ class OnlineWorkflowTests(unittest.TestCase):
                 self.root / "out.json", flow_executable=str(self.flow_runner), dependencies=dependencies,
             )
         self.assertEqual(events, [])
+
+    def test_run_integration_translates_preflight_runtime_errors(self):
+        for message in (
+            "SQLcl executable is unavailable",
+            "TEAM_FLOW_RUNNER is required for declared flow checks",
+            "profile identity probe does not match TABLES",
+            "observed sqlcl version 25.1 does not satisfy required 26.2.1+",
+        ):
+            with self.subTest(message=message):
+                events: list[str] = []
+
+                def failing_preflight(_config, _repo, _flow, _message=message):
+                    events.append("preflight")
+                    raise RuntimeError(_message)
+
+                dependencies, _ = self.dependencies(events)
+                dependencies = OnlineDependencies(**{**dependencies.__dict__, "preflight": failing_preflight})
+                with self.assertRaisesRegex(OnlineWorkflowError, re.escape(message)):
+                    run_integration(
+                        self.root, config_for(), self.root / "out.json",
+                        flow_executable=str(self.flow_runner), dependencies=dependencies,
+                    )
+                self.assertEqual(events, ["preflight"])
+
+    def test_run_release_test_translates_preflight_runtime_errors(self):
+        events: list[str] = []
+
+        def failing_preflight(_config, _repo, _flow):
+            events.append("preflight")
+            raise RuntimeError("JDK executable is unavailable")
+
+        dependencies, manifest = self.release_dependencies(events)
+        dependencies = OnlineDependencies(**{**dependencies.__dict__, "preflight": failing_preflight})
+        archive = self.root / "release.tar"
+        archive.write_bytes(b"verified archive")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir()
+        target.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(OnlineWorkflowError, "JDK executable is unavailable"):
+            run_release_test(
+                self.root, config_for(role="test", environment="test"), archive, target,
+                self.root / "out.json", flow_executable=str(self.flow_runner), dependencies=dependencies,
+            )
+        self.assertEqual(events, ["verify-archive", "preflight"])
 
     def test_existing_frontier_skips_adoption(self):
         events: list[str] = []
@@ -453,6 +499,62 @@ class OnlineWorkflowTests(unittest.TestCase):
                     )
                 self.assertNotIn("write-report", events)
                 self.assertNotIn("qualify-release", events)
+
+
+class PreflightCliTranslationTests(unittest.TestCase):
+    ENV_TEMPLATE = """\
+PROJECT_NAME=team-template
+TARGET_ROLE={role}
+DB_ENVIRONMENT={environment}
+APEX_APPS=employee:101
+TABLES_SCHEMA=APP_DATA
+CODE_SCHEMA=APP_CODE
+APEX_PARSING_SCHEMA=APP
+METADATA_SCHEMA=APP_META
+APP_OWNERSHIP_MODE=shared
+APEX_WORKSPACE_ID=5402650006222933
+{profiles}
+"""
+    PROFILE_BLOCK = """\
+{name}_SQLCL_CONNECTION=docker-demo
+{name}_EXPECTED_USER=DEMO
+{name}_EXPECTED_CURRENT_SCHEMA=DEMO
+{name}_EXPECTED_DB_NAME=FREEPDB1
+{name}_EXPECTED_SERVICE=freep1
+{name}_EXPECTED_INSTANCE_ID=FREEPDB1
+"""
+
+    def env_file(self, root: Path, *, role: str, environment: str) -> Path:
+        profiles = "".join(self.PROFILE_BLOCK.format(name=name) for name in ("TABLES", "CODE", "APEX", "METADATA", "VERIFY"))
+        env_path = root / ".env"
+        env_path.write_text(
+            self.ENV_TEMPLATE.format(role=role, environment=environment, profiles=profiles),
+            encoding="utf-8",
+        )
+        return env_path
+
+    def test_cli_run_integration_rejects_preflight_failure_without_a_traceback(self):
+        with tempfile.TemporaryDirectory(prefix="team-preflight-cli-") as directory:
+            root = Path(directory)
+            env_path = self.env_file(root, role="integration", environment="staging")
+            with patch("teamlib.online_workflows.preflight_online", side_effect=RuntimeError("SQLcl executable is unavailable")):
+                code = team.main(["--env", str(env_path), "run-integration", "--out", str(root / "out.json")])
+        self.assertEqual(code, 3)
+
+    def test_cli_run_release_test_rejects_preflight_failure_without_a_traceback(self):
+        with tempfile.TemporaryDirectory(prefix="team-preflight-cli-") as directory:
+            root = Path(directory)
+            env_path = self.env_file(root, role="test", environment="test")
+            archive = root / "release.tar"
+            archive.write_bytes(b"not a real archive")
+            fake_manifest = SimpleNamespace(app_tree_digests={"employee": "c" * 64}, source_commit="a" * 40)
+            with patch("teamlib.online_workflows.verify_release", return_value=fake_manifest), \
+                    patch("teamlib.online_workflows.preflight_online", side_effect=RuntimeError("JDK executable is unavailable")):
+                code = team.main([
+                    "--env", str(env_path), "run-release-test", str(archive),
+                    "--target", str(root / "target.json"), "--out", str(root / "out.json"),
+                ])
+        self.assertEqual(code, 3)
 
 
 if __name__ == "__main__":
