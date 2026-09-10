@@ -58,6 +58,29 @@ class DocumentationTests(unittest.TestCase):
         ):
             self.assertNotIn(removed.lower(), text.lower())
 
+    def test_migration_lifecycle_documentation_matches_the_contract(self):
+        text = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in ("README.md", "docs/migrations.md", "docs/promotion.md")
+        )
+        for required in (
+            ".down.sql",
+            ".down.verify.sql",
+            "global LIFO",
+            "REVERTED",
+            "applied_sequence",
+            "metadata v2",
+            "--destructive-confirmation",
+            "payload_target_state_key",
+            "confirmed: false",
+            "non-production",
+            "roll back",
+            "APEX Builder import",
+        ):
+            self.assertIn(required, text)
+        for forbidden in ("force flag", "automatically generated rollback"):
+            self.assertNotIn(forbidden.lower(), text.lower())
+
     def test_local_markdown_links_resolve(self):
         pattern = re.compile(r"\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)")
         for path in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]:

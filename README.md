@@ -53,6 +53,36 @@ scripts/team.sh new-migration --author alice --slug add-status --target tables
 scripts/team.sh migration-plan --source migrations --history history.json --mode shared
 ```
 
+To make a migration reversible, author both additional members before its first
+application:
+
+```text
+migrations/<id>.down.sql
+migrations/<id>.down.verify.sql
+```
+
+Down SQL is reviewed deployment code; it is never generated. Undo is global
+LIFO, while redo names one currently `REVERTED` migration and checks its
+dependencies. The metadata v2 event ledger records every `up` and `down`
+operation, so routine `migrate` never silently reapplies a reverted migration.
+
+All three database lifecycle commands are non-production only and share one
+exact destructive-confirmation file. Start with a dry run, review the emitted
+ID, action, bundle checksum and payload target-state key, then set only
+`confirmed` to `true` in the canonical JSON file:
+
+```text
+scripts/team.py --env .env.development migrate --source migrations --dry-run
+scripts/team.py --env .env.development undo-migration <migration-id> --source migrations --dry-run
+scripts/team.py --env .env.development redo-migration <migration-id> --source migrations --dry-run
+```
+
+Pass the reviewed file as `--destructive-confirmation confirmation.json` to
+`migrate`, `undo-migration`, or `redo-migration`. Boolean shortcuts, partial
+documents, stale checksums, and extra entries are refused. Database undo does
+not roll back an APEX Builder import; use the app recovery workflow for that
+boundary.
+
 The manual integration workflow checks an exact commit after applying reviewed
 migrations and deploying the selected applications:
 

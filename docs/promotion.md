@@ -19,6 +19,14 @@ deployment bindings, logs, credentials and sync state never enter it. The
 destination owner supplies exact history; a changed target or history requires
 a new plan. Production `apply-release` is refused.
 
+Each packaged migration retains all authored members, including an optional
+`.down.sql` and `.down.verify.sql` pair. Release application is forward-only:
+an artifact whose latest metadata event is `REVERTED` is not pending, and a
+dependent of a reverted artifact blocks the plan. Use the non-production
+`undo-migration`/`redo-migration` commands with the shared destructive
+confirmation document when a reviewed reversal is needed; release tooling
+never generates rollback SQL or runs database undo.
+
 ## Release-test evidence
 
 The protected test job downloads and verifies the same archive bytes, applies
@@ -113,4 +121,7 @@ evidence, verification queries, partial-failure recovery and
 success-before-log uncertainty. It is a human document, not a production
 apply switch. The owner must re-read identity and history under the metadata
 mutex and record attempts through the isolated metadata schema. Source SQL is
-trusted reviewed deployment code, not a sandbox.
+trusted reviewed deployment code, not a sandbox. Database migration undo does
+not roll back an APEX Builder import; Builder recovery remains a separate
+evidence-driven workflow, and uncaptured edits or arbitrary DML are outside
+the inventory boundary.
