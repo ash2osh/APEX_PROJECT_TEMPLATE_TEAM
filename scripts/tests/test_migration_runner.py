@@ -20,6 +20,7 @@ import team
 from teamlib.config import Target
 from teamlib.fingerprints import inventory_from_rows
 from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
+from teamlib.migration_runtime import migration_callbacks
 from teamlib.migration_store import (
     MigrationSetupRequired,
     MigrationStore,
@@ -101,11 +102,11 @@ class MigrationRunnerTests(unittest.TestCase):
             encoding="utf-8",
         )
         config = SimpleNamespace()
-        with patch("team.profile_target", return_value=self.target), patch(
-            "team.run_sqlcl",
+        with patch("teamlib.migration_runtime.profile_target", return_value=self.target), patch(
+            "teamlib.migration_runtime.run_sqlcl",
             return_value=SimpleNamespace(stdout="TEAM_ASSERT|postcondition|FAIL\n"),
         ):
-            _, verify, _ = team._migration_callbacks(config, self.root, "a" * 64)
+            _, verify, _ = migration_callbacks(config, self.root, "a" * 64)
             with self.assertRaisesRegex(MigrationRunError, "postcondition"):
                 apply_plan(
                     self.migrations,

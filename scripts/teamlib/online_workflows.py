@@ -12,19 +12,18 @@ import subprocess
 from typing import Any
 from collections.abc import Callable, Mapping
 
-from .assertions import run_verification_member
-from .config import Config, Target, profile_target
+from .config import Config, Target, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import DeployReport, deploy_app
 from .fingerprints import Inventory, InventoryError, diff_inventory, load_inventory
 from .live_inventory import inventory_target
 from .migrate import RunReport, apply_plan
+from .migration_runtime import migration_profiles
 from .migration_store import MigrationStoreError, SqlMigrationStore
 from .qualification import qualify_target, write_report
 from .release import ApplyReport, Manifest, verify_release
 from .release_adapter import apply_verified_release_live
 from .runtime import RuntimeReport, preflight_online
-from .sqlcl import run_sqlcl
 from .trees import read_git_tree
 
 
@@ -77,12 +76,6 @@ class OnlineRunResult:
         }
 
 
-def _schema_set_digest(config: Config) -> str:
-    return hashlib.sha256(
-        f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
-    ).hexdigest()
-
-
 def _resolve_head(repo: Path) -> str:
     if repo.is_symlink() or not repo.is_dir():
         raise OnlineWorkflowError(f"integration repository is not a real directory: {repo}")
@@ -115,7 +108,7 @@ def _setup_control(repo: Path, config: Config) -> None:
 def _bootstrap_metadata(repo: Path, config: Config) -> SqlMigrationStore:
     metadata = _metadata(config)
     store = SqlMigrationStore(metadata, work_root=repo / "scratch" / "metadata")
-    store.bootstrap(metadata, schema_set_digest=_schema_set_digest(config))
+    store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
     return store
 
 
@@ -171,7 +164,7 @@ def _capture_inventory(repo: Path, config: Config, phase: str) -> Inventory:
         config.tables_schema,
         config.code_schema,
         repo / "scratch" / "integration" / phase,
-        schema_set_digest=_schema_set_digest(config),
+        schema_set_digest=schema_set_digest(config),
     )
 
 
@@ -192,59 +185,17 @@ def _check_drift(expected_path: Path, before: Any) -> None:
         raise OnlineWorkflowError("migration drift gate is blocked: " + json.dumps(drift, sort_keys=True))
 
 
-def _migration_callbacks(repo: Path, config: Config, schema_set_digest: str):
-    def execute(migration, action, sql_path):
-        target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
-        run_sqlcl(
-            target,
-            "write",
-            sql_path,
-            repo / "scratch" / "integration" / "migration-payload" / action / migration.id,
-        )
-
-    def verify(migration, action, verify_path):
-        run_verification_member(
-            profile_target(config, "VERIFY"),
-            verify_path,
-            repo / "scratch" / "integration" / "migration-verify" / action / migration.id,
-            runner=run_sqlcl,
-        )
-        return True
-
-    def observe(migration, phase):
-        return inventory_target(
-            profile_target(config, "TABLES"),
-            config.tables_schema,
-            config.code_schema,
-            repo / "scratch" / "integration" / "migration-observation" / phase / migration.id,
-            schema_set_digest=schema_set_digest,
-        )
-
-    return execute, verify, observe
-
-
 def _migration_profiles(repo: Path, config: Config, store: Any, *, dry_run: bool, before_digest: str, source_commit: str):
-    metadata = _metadata(config)
-    schema_set_digest = _schema_set_digest(config)
-    execute, verify, observe = _migration_callbacks(repo, config, schema_set_digest)
-    return {
-        "store": store,
-        "target": metadata,
-        "payload_targets": {
-            "tables": profile_target(config, "TABLES"),
-            "code": profile_target(config, "CODE"),
-        },
-        "dry_run": dry_run,
-        "bootstrap": False,
-        "schema_set_digest": schema_set_digest,
-        "verified_inventory_digest": before_digest,
-        "require_observation": True,
-        "observe": observe,
-        "source_commit": source_commit,
-        "applied_by": os.environ.get("USER", "integration-worker"),
-        "execute": execute,
-        "verify": verify,
-    }
+    return migration_profiles(
+        config,
+        _metadata(config),
+        store,
+        repo / "scratch" / "integration",
+        source_commit=source_commit,
+        applied_by=os.environ.get("USER", "integration-worker"),
+        dry_run=dry_run,
+        verified_inventory_digest=before_digest,
+    )
 
 
 def _apply_migrations(repo: Path, config: Config, store: Any, before_digest: str) -> RunReport:

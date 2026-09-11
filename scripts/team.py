@@ -26,16 +26,15 @@ from teamlib.apex import (
 )
 from teamlib.announce import draft_all_clear, draft_import_announcement
 from teamlib.app_checks import AppCheckError
-from teamlib.assertions import run_verification_member
 from teamlib.ci import CIError
-from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, load_config, parse_target_contract, profile_target
+from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, load_config, parse_target_contract, profile_target, schema_set_digest
 from teamlib.control_store import ControlStore, ControlStoreError, SqlControlStore
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.fingerprints import InventoryError, diff_inventory, inventory_from_manifest, load_inventory
 from teamlib.destructive_confirmation import ConfirmationError, load_confirmation
 from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
+from teamlib.migration_runtime import migration_profiles
 from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
-from teamlib.sqlcl import run_sqlcl
 from teamlib.live_inventory import inventory_target
 from teamlib.qualification import QualificationError, qualify_target, write_report
 from teamlib.patch import PatchError, recover_files
@@ -322,35 +321,6 @@ def _migration_drift(args: argparse.Namespace, config: Any, repo: Path) -> str |
     return actual.digest
 
 
-def _migration_callbacks(config: Any, repo: Path, schema_set_digest: str):
-    """Create one directional callback set for migrate, undo, and redo."""
-    def execute(migration, action, sql_path):
-        payload_target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
-        run_sqlcl(payload_target, "write", sql_path, repo / "scratch" / "migration-payload" / action / migration.id)
-
-    def verify(migration, action, verify_path):
-        run_verification_member(
-            profile_target(config, "VERIFY"),
-            verify_path,
-            repo / "scratch" / "migration-verify" / action / migration.id,
-            runner=run_sqlcl,
-        )
-        return True
-
-    def observe(migration, phase):
-        observation_target = profile_target(config, "TABLES")
-        observation_work = repo / "scratch" / "migration-observation" / phase / migration.id
-        return inventory_target(
-            observation_target,
-            config.tables_schema,
-            config.code_schema,
-            observation_work,
-            schema_set_digest=schema_set_digest,
-        )
-
-    return execute, verify, observe
-
-
 def _migration_output(command: str, report: Any, *, dry_run: bool) -> None:
     _json({
         "status": "dry-run" if dry_run else "success",
@@ -389,16 +359,14 @@ def _online(args: argparse.Namespace) -> object:
             raise ConfigError(f"{command} is refused for production targets")
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
-        schema_set_digest = hashlib.sha256(
-            f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
-        ).hexdigest()
-        store.bootstrap(metadata, schema_set_digest=schema_set_digest)
+        digest = schema_set_digest(config)
+        store.bootstrap(metadata, schema_set_digest=digest)
         inventory = inventory_target(
             profile_target(config, "TABLES"),
             config.tables_schema,
             config.code_schema,
             repo / "scratch" / "frontier-inventory",
-            schema_set_digest=schema_set_digest,
+            schema_set_digest=digest,
         )
         run_token = uuid.uuid4().hex
         store.acquire(metadata, run_token, os.environ.get("USER", "frontier-worker"), socket.gethostname())
@@ -480,34 +448,23 @@ def _online(args: argparse.Namespace) -> object:
         verified_digest = _migration_drift(args, config, repo)
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
-        schema_set_digest = hashlib.sha256(
-            f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
-        ).hexdigest()
-        execute, verify, observe = _migration_callbacks(config, repo, schema_set_digest)
         confirmation = None
         if args.destructive_confirmation:
             try:
                 confirmation, _confirmation_digest = load_confirmation(args.destructive_confirmation)
             except ConfirmationError as exc:
                 raise ConfigError(str(exc)) from exc
-        profiles = {
-            "store": store,
-            "target": metadata,
-            "payload_targets": {
-                "tables": profile_target(config, "TABLES"),
-                "code": profile_target(config, "CODE"),
-            },
-            "dry_run": args.dry_run,
-            "bootstrap": getattr(args, "bootstrap", False),
-            "schema_set_digest": schema_set_digest,
-            "verified_inventory_digest": verified_digest,
-            "require_observation": True,
-            "observe": observe,
-            "source_commit": _resolved_commit(repo, "HEAD"),
-            "applied_by": os.environ.get("USER", "migration-worker"),
-            "execute": execute,
-            "verify": verify,
-        }
+        profiles = migration_profiles(
+            config,
+            metadata,
+            store,
+            repo / "scratch",
+            source_commit=_resolved_commit(repo, "HEAD"),
+            applied_by=os.environ.get("USER", "migration-worker"),
+            dry_run=args.dry_run,
+            bootstrap=getattr(args, "bootstrap", False),
+            verified_inventory_digest=verified_digest,
+        )
         if command == "migrate":
             report = apply_plan(args.source, profiles, confirmation=confirmation)
         elif command == "undo-migration":
@@ -522,16 +479,13 @@ def _online(args: argparse.Namespace) -> object:
             raise ConfigError("check-drift requires both --expected-inventory and --actual-inventory")
         if not args.expected_inventory:
             live_target = profile_target(config, "TABLES")
-            schema_set_digest = hashlib.sha256(
-                f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
-            ).hexdigest()
             try:
                 actual_inventory = inventory_target(
                     live_target,
                     config.tables_schema,
                     config.code_schema,
                     repo / "scratch" / "live-inventory",
-                    schema_set_digest=schema_set_digest,
+                    schema_set_digest=schema_set_digest(config),
                 )
             except Exception as exc:
                 raise MigrationRunError(f"live drift inventory failed: {exc}") from exc

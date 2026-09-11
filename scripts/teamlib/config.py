@@ -375,6 +375,20 @@ def load_config(path: str | Path, *, require_verify: bool = False) -> Config:
     )
 
 
+def schema_set_digest(config: Config) -> str:
+    """Identity of the schema set the project's metadata store owns.
+
+    Every inventory recorded through the metadata store carries this digest and
+    TEAM_MIGRATION_META refuses a mismatch, so a second hand-copied definition
+    that drifts by one character makes every later ``record_inventory`` -- and
+    every later ``migrate`` against the same metadata schema -- fail with
+    ORA-20011 SCHEMA_SET_DIGEST_MISMATCH. Compute it here or not at all.
+    """
+    return hashlib.sha256(
+        f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
+    ).hexdigest()
+
+
 def profile_target(
     config: Config,
     profile_name: str,

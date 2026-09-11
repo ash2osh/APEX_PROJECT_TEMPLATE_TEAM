@@ -19,6 +19,8 @@ from teamlib.assertions import AssertionVerificationError
 from teamlib.config import Target
 from teamlib.release import ApplyReport, ReleasePlan
 from teamlib.release_adapter import (
+    _APEX_BINDING_FIELDS,
+    _assert_binding_matches_profile,
     ReleaseAdapterError,
     ReleaseApplyContext,
     apply_verified_release,
@@ -28,6 +30,60 @@ from teamlib.release_adapter import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class ApexBindingGuardTests(unittest.TestCase):
+    """Both apply paths must reject the same set of redirected bindings.
+
+    ``_verify_result_identity`` probes the database session only -- session
+    user, schema, DB name, service, instance -- so nothing downstream notices
+    that a contract named a different workspace or application ID than the
+    environment profile. This comparison is the only guard, and the CLI path
+    used to check six of the ten fields while the live path checked all ten.
+    """
+
+    def profile(self, **overrides) -> Target:
+        values = dict(
+            project="example-team-apex", role="test", environment="test",
+            connection="test-apex", instance_id="INSTANCE", db_name="FREEPDB1",
+            service="test-service", session_user="APP", current_schema="APP",
+            alias="employee", workspace_id=100, app_id=200,
+            parsing_schema="APP", ownership_mode="shared", binding_digest="a" * 64,
+        )
+        values.update(overrides)
+        return Target(**values)
+
+    def test_a_matching_binding_is_accepted(self):
+        _assert_binding_matches_profile(self.profile(), self.profile(), "employee")
+
+    def test_every_binding_field_is_compared(self):
+        replacements = {
+            "connection": "other-apex", "instance_id": "OTHER", "db_name": "OTHERPDB",
+            "service": "other-service", "session_user": "OTHER", "current_schema": "OTHER",
+            "workspace_id": 999, "app_id": 999, "parsing_schema": "OTHER",
+            "ownership_mode": "single",
+        }
+        self.assertEqual(set(replacements), set(_APEX_BINDING_FIELDS))
+        for field, value in replacements.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ReleaseAdapterError, field):
+                    _assert_binding_matches_profile(
+                        self.profile(**{field: value}), self.profile(), "employee"
+                    )
+
+    def test_neither_apply_path_keeps_a_private_field_list(self):
+        import inspect
+
+        from teamlib import release_adapter
+
+        for function in (
+            release_adapter._validated_release_context,
+            release_adapter.apply_verified_release,
+        ):
+            with self.subTest(function=function.__name__):
+                source = inspect.getsource(function)
+                self.assertIn("_assert_binding_matches_profile", source)
+                self.assertNotIn('"session_user", "current_schema"', source)
 
 
 class ReleaseAdapterTests(unittest.TestCase):
@@ -182,6 +238,7 @@ class ReleaseAdapterTests(unittest.TestCase):
                  return_value=SimpleNamespace(source_commit="abc"),
              ), \
              patch("teamlib.release_adapter.profile_target", return_value=profile), \
+             patch("teamlib.migration_runtime.profile_target", return_value=profile), \
              patch(
                  "teamlib.release_adapter.SqlMigrationStore",
                  return_value=migration_store,
@@ -196,7 +253,7 @@ class ReleaseAdapterTests(unittest.TestCase):
                  return_value=migration_files,
              ), \
              patch(
-                 "teamlib.release_adapter.run_sqlcl",
+                 "teamlib.migration_runtime.run_sqlcl",
                  return_value=SimpleNamespace(
                      stdout="TEAM_ASSERT|postcondition|FAIL\n"
                  ),
@@ -214,8 +271,12 @@ class ReleaseAdapterTests(unittest.TestCase):
             ) as directory:
                 archive = Path(directory) / "release.tar"
                 archive.write_bytes(b"fixture")
+                # The failed assertion still names the failing check, but it
+                # now reaches the operator as the adapter's structured refusal
+                # rather than as an AssertionVerificationError traceback --
+                # release_adapter.main() does not catch that class.
                 with self.assertRaisesRegex(
-                    AssertionVerificationError, "postcondition"
+                    ReleaseAdapterError, "postcondition"
                 ):
                     apply_verified_release(
                         archive,
@@ -228,18 +289,46 @@ class ReleaseAdapterTests(unittest.TestCase):
 
 class SchemaSetDigestTests(unittest.TestCase):
     def test_bootstrap_receives_the_computed_schema_set_digest(self):
-        import inspect
+        """apply-release must bootstrap with the real digest, not a literal.
 
-        from teamlib import release_adapter
+        A placeholder is written into TEAM_MIGRATION_META and makes every
+        record_inventory in the run -- and every later migrate against the same
+        metadata schema -- raise ORA-20011 SCHEMA_SET_DIGEST_MISMATCH.
+        """
+        from teamlib.config import schema_set_digest
 
-        source = inspect.getsource(release_adapter.apply_verified_release)
-        self.assertNotIn(
-            'schema_set_digest="release"',
-            source,
-            "apply-release must bootstrap with the computed digest, not a literal; "
-            "a literal makes every record_inventory raise ORA-20011",
+        config = SimpleNamespace(
+            role="test", environment="test", tables_schema="EXAMPLE_APP",
+            code_schema="EXAMPLE_APP", metadata_schema="EXAMPLE_META",
         )
-        self.assertIn("bootstrap(metadata, schema_set_digest=schema_set_digest)", source)
+        expected = schema_set_digest(config)
+        recorded: list[str] = []
+        migration_store = SimpleNamespace(
+            bootstrap=lambda _target, *, schema_set_digest: recorded.append(schema_set_digest)
+        )
+        target_path = ROOT / "targets" / "test.json"
+        metadata = Target(
+            project="example-team-apex", role="test", environment="test", connection="meta",
+            instance_id="EXAMPLE_TEST_INSTANCE", db_name="FREEPDB1", service="test-service",
+            session_user="EXAMPLE_META", current_schema="EXAMPLE_META", alias=None,
+            workspace_id=None, app_id=None, parsing_schema=None, ownership_mode="shared",
+            binding_digest="e" * 64,
+        )
+        with patch("teamlib.release_adapter.load_config", return_value=config), \
+             patch("teamlib.release_adapter.verify_release", return_value=SimpleNamespace(source_commit="abc")), \
+             patch("teamlib.release_adapter.profile_target", return_value=metadata), \
+             patch("teamlib.release_adapter.SqlMigrationStore", return_value=migration_store), \
+             patch("teamlib.release_adapter.SqlControlStore", return_value=SimpleNamespace(setup_state=lambda *_a: None)), \
+             patch("teamlib.release_adapter.release_app_trees", return_value={}), \
+             patch("teamlib.release_adapter._apply_release_context", return_value=None), \
+             tempfile.TemporaryDirectory(prefix="team-release-digest-") as directory:
+            apply_verified_release(
+                Path(directory) / "release.tar", target_path, Path(directory) / "env",
+                ReleasePlan("a" * 64, "b" * 64, (), "c" * 64, {}, "d" * 64), {},
+                root=Path(directory) / "state",
+            )
+        self.assertEqual(recorded, [expected])
+        self.assertNotIn("release", recorded)
 
 
 class LiveReleaseAdapterTests(unittest.TestCase):

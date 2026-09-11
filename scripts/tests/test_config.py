@@ -7,6 +7,7 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve(
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -357,6 +358,48 @@ class OfflineCommandPrefixTests(unittest.TestCase):
     def test_empty_input_is_not_offline(self):
         self.assertFalse(is_offline_command(""))
         self.assertFalse(is_offline_command("   "))
+
+
+class SchemaSetDigestTests(unittest.TestCase):
+    def _config(self, **overrides):
+        from types import SimpleNamespace
+
+        values = {"tables_schema": "TABLES", "code_schema": "CODE", "metadata_schema": "META"}
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_digest_is_the_sha256_of_the_ordered_schema_triple(self):
+        from teamlib.config import schema_set_digest
+
+        expected = hashlib.sha256(b"TABLES|CODE|META").hexdigest()
+        self.assertEqual(schema_set_digest(self._config()), expected)
+
+    def test_each_schema_participates_in_the_identity(self):
+        from teamlib.config import schema_set_digest
+
+        base = schema_set_digest(self._config())
+        for field in ("tables_schema", "code_schema", "metadata_schema"):
+            with self.subTest(field=field):
+                self.assertNotEqual(base, schema_set_digest(self._config(**{field: "OTHER"})))
+
+    def test_no_module_recomputes_the_digest_inline(self):
+        """The digest is an identity; a second definition can drift from it.
+
+        A hand-copied ``sha256(f"{tables}|{code}|{metadata}")`` that differs by
+        one character writes a foreign digest into TEAM_MIGRATION_META and makes
+        every later record_inventory fail with ORA-20011.
+        """
+        root = Path(__file__).resolve().parents[2] / "scripts"
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            if path.name in {"config.py", "test_config.py"}:
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if "code_schema}|{" in line or "{config.code_schema}|" in line:
+                    offenders.append(f"{path.relative_to(root)}:{number}")
+        self.assertEqual(
+            offenders, [], f"call teamlib.config.schema_set_digest instead: {offenders}"
+        )
 
 
 if __name__ == "__main__":

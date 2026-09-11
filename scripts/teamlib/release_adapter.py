@@ -12,12 +12,11 @@ from typing import Any
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .assertions import run_verification_member
-from .config import Config, ConfigError, Target, load_config, parse_target_contract, profile_target
+from .config import Config, ConfigError, Target, load_config, parse_target_contract, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import deploy_app
-from .live_inventory import inventory_target
 from .migrate import apply_plan
+from .migration_runtime import migration_profiles
 from .migration_store import SqlMigrationStore
 from .release import (
     ApplyReport,
@@ -30,7 +29,6 @@ from .release import (
     plan_release,
     verify_release,
 )
-from .sqlcl import run_sqlcl
 
 
 class ReleaseAdapterError(RuntimeError):
@@ -47,6 +45,27 @@ class ReleaseApplyContext:
     control_store: SqlControlStore
     schema_set_digest: str
     app_targets: tuple[Target, ...]
+    applied_by: str = "release-test"
+    deploy_root: Path | None = None
+
+
+# Every field that binds a release target to a physical APEX application. The
+# SQLcl result identity probe checks the database session only -- not the
+# workspace or application ID -- so this comparison is the sole guard that a
+# contract cannot redirect a deployment at a different application than the
+# environment profile names. Both apply paths must check all of it.
+_APEX_BINDING_FIELDS = (
+    "connection", "instance_id", "db_name", "service", "session_user",
+    "current_schema", "workspace_id", "app_id", "parsing_schema", "ownership_mode",
+)
+
+
+def _assert_binding_matches_profile(target: Target, apex_profile: Target, alias: str) -> None:
+    for field in _APEX_BINDING_FIELDS:
+        if getattr(target, field) != getattr(apex_profile, field):
+            raise ReleaseAdapterError(
+                f"release target binding does not match APEX profile {field} for {alias}"
+            )
 
 
 def _target_from_contract(path: str | Path, alias: str, *, expected_role: str | None = None) -> Target:
@@ -137,17 +156,8 @@ def _validated_release_context(
     app_targets: list[Target] = []
     for alias in sorted(contract.app_ids):
         target = _target_from_contract(target_path, alias, expected_role="test")
-        apex_profile = profile_target(config, "APEX", alias=alias)
-        for field in (
-            "connection", "instance_id", "db_name", "service", "session_user",
-            "current_schema", "workspace_id", "app_id", "parsing_schema", "ownership_mode",
-        ):
-            if getattr(target, field) != getattr(apex_profile, field):
-                raise ReleaseAdapterError(f"release target binding does not match APEX profile {field} for {alias}")
+        _assert_binding_matches_profile(target, profile_target(config, "APEX", alias=alias), alias)
         app_targets.append(target)
-    schema_set_digest = hashlib.sha256(
-        f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
-    ).hexdigest()
     return ReleaseApplyContext(
         manifest=manifest,
         target_document=target_document,
@@ -155,8 +165,10 @@ def _validated_release_context(
         metadata=metadata,
         migration_store=migration_store,
         control_store=control_store,
-        schema_set_digest=schema_set_digest,
+        schema_set_digest=schema_set_digest(config),
         app_targets=tuple(app_targets),
+        applied_by="release-test",
+        deploy_root=repo / ".sync-state" / "release" / "application",
     )
 
 
@@ -177,50 +189,21 @@ def _apply_release_context(
             (migration_root / relative).write_bytes(data)
 
         def apply_migrations(_pending: tuple[Mapping[str, Any], ...], reviewed: ReleasePlan) -> None:
-            def execute(migration, action, sql_path):
-                target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
-                run_sqlcl(target, "write", sql_path, work / "payload" / action / migration.id)
-
-            def verify(migration, action, verify_path):
-                run_verification_member(
-                    profile_target(config, "VERIFY"),
-                    verify_path,
-                    work / "verify" / action / migration.id,
-                    runner=run_sqlcl,
-                )
-                return True
-
-            def observe(_migration, phase):
-                return inventory_target(
-                    profile_target(config, "TABLES"),
-                    config.tables_schema,
-                    config.code_schema,
-                    work / "inventory" / phase,
-                    schema_set_digest=context.schema_set_digest,
-                )
-
             apply_plan(
                 migration_root,
-                {
-                    "target": context.metadata,
-                    "payload_targets": {
-                        "tables": profile_target(config, "TABLES"),
-                        "code": profile_target(config, "CODE"),
-                    },
-                    "store": context.migration_store,
-                    "bootstrap": False,
-                    "execute": execute,
-                    "verify": verify,
-                    "observe": observe,
-                    "require_observation": True,
-                    "schema_set_digest": context.schema_set_digest,
-                    "source_commit": context.manifest.source_commit,
-                    "applied_by": "release-test",
-                },
+                migration_profiles(
+                    config,
+                    context.metadata,
+                    context.migration_store,
+                    work,
+                    source_commit=context.manifest.source_commit,
+                    applied_by=context.applied_by,
+                ),
                 expected_plan={"pending": reviewed.pending},
             )
 
         target_by_alias = {target.alias: target for target in context.app_targets}
+        deploy_root = context.deploy_root or (repo / ".sync-state" / "release" / "application")
 
         def deploy_application(alias: str, tree: Mapping[str, bytes], _reviewed: ReleasePlan) -> None:
             target = target_by_alias.get(alias)
@@ -232,7 +215,7 @@ def _apply_release_context(
                 context.manifest.source_commit,
                 {"verified": True, "target_key": target.physical_key},
                 repo=repo,
-                root=(repo / ".sync-state" / "release" / "application"),
+                root=deploy_root,
                 control_store=context.control_store,
             )
 
@@ -324,18 +307,7 @@ def apply_verified_release(
     manifest = verify_release(release_tar)
     repo_path = Path(repo)
     target_path = Path(target_contract)
-    if target_path.is_symlink() or not target_path.is_file():
-        raise ReleaseAdapterError(f"release target contract is not a regular file: {target_path}")
-    try:
-        target_document = json.loads(target_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ReleaseAdapterError("release target contract is unreadable") from exc
-    if not isinstance(target_document, Mapping):
-        raise ReleaseAdapterError("release target contract must contain an object")
-    # plan-release hashes the complete target JSON.  Preserve that exact
-    # document through apply-release; a reduced identity-only mapping would
-    # make every legitimate plan fail its stale-target check.
-    target_document = dict(target_document)
+    target_document = _release_target_document(target_path)
     if target_document.get("role") != contract.role or target_document.get("environment") != contract.environment:
         raise ReleaseAdapterError("release target contract changed while loading")
     state_root = Path(root) if root is not None else repo_path / ".sync-state" / "release"
@@ -346,100 +318,32 @@ def apply_verified_release(
     if contract.instance_id != metadata.instance_id:
         raise ReleaseAdapterError("release target contract and metadata profile identify different instances")
     migration_store = SqlMigrationStore(metadata, work_root=state_root / "metadata")
-    schema_set_digest = hashlib.sha256(
-        f"{config.tables_schema}|{config.code_schema}|{config.metadata_schema}".encode("ascii")
-    ).hexdigest()
     # The digest must be the one the live inventories carry. A placeholder here
     # is written into TEAM_MIGRATION_META and makes every record_inventory in
     # this run -- and every later `migrate` against the same metadata schema --
     # fail with ORA-20011 SCHEMA_SET_DIGEST_MISMATCH.
-    migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest)
+    migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
     control_store = SqlControlStore(metadata, work_root=state_root / "metadata")
-    apps = release_app_trees(release_tar)
     app_targets = []
-    for alias in apps:
+    for alias in release_app_trees(release_tar):
         target = _target_from_contract(target_contract, alias, expected_role=contract.role)
-        apex_profile = profile_target(config, "APEX", alias=alias)
-        if target.connection != apex_profile.connection:
-            raise ReleaseAdapterError(f"release target binding does not match the APEX profile for {alias}")
-        for field in ("instance_id", "db_name", "service", "session_user", "current_schema"):
-            if getattr(target, field) != getattr(apex_profile, field):
-                raise ReleaseAdapterError(f"release target binding does not match APEX profile {field} for {alias}")
+        _assert_binding_matches_profile(target, profile_target(config, "APEX", alias=alias), alias)
         app_targets.append(target)
     control_store.setup_state(app_targets)
 
-    with tempfile.TemporaryDirectory(prefix="team-release-apply-") as directory:
-        work = Path(directory)
-        migration_root = work / "migrations"
-        migration_root.mkdir()
-        for relative, data in release_migration_files(release_tar).items():
-            (migration_root / relative).write_bytes(data)
-
-        def apply_migrations(_pending: tuple[Mapping[str, Any], ...], reviewed: ReleasePlan) -> None:
-            def execute(migration, action, sql_path):
-                target = profile_target(config, "TABLES" if migration.target == "tables" else "CODE")
-                run_sqlcl(target, "write", sql_path, work / "payload" / action / migration.id)
-
-            def verify(migration, action, verify_path):
-                run_verification_member(
-                    profile_target(config, "VERIFY"),
-                    verify_path,
-                    work / "verify" / action / migration.id,
-                    runner=run_sqlcl,
-                )
-                return True
-
-            def observe(_migration, phase):
-                return inventory_target(
-                    profile_target(config, "TABLES"),
-                    config.tables_schema,
-                    config.code_schema,
-                    work / "inventory" / phase,
-                    schema_set_digest=schema_set_digest,
-                )
-
-            apply_plan(
-                migration_root,
-                {
-                    "target": metadata,
-                    "payload_targets": {
-                        "tables": profile_target(config, "TABLES"),
-                        "code": profile_target(config, "CODE"),
-                    },
-                    "store": migration_store,
-                    "bootstrap": False,
-                    "execute": execute,
-                    "verify": verify,
-                    "observe": observe,
-                    "require_observation": True,
-                    "schema_set_digest": schema_set_digest,
-                    "source_commit": manifest.source_commit,
-                    "applied_by": "release-adapter",
-                },
-                expected_plan={"pending": reviewed.pending},
-            )
-
-        def deploy_application(alias: str, tree: Mapping[str, bytes], reviewed: ReleasePlan) -> None:
-            target = _target_from_contract(target_contract, alias, expected_role=contract.role)
-            deploy_app(
-                target,
-                tree,
-                manifest.source_commit,
-                {"verified": True, "target_key": target.physical_key},
-                repo=repo_path,
-                root=state_root / "application",
-                control_store=control_store,
-            )
-
-        return apply_release(
-            release_tar,
-            target_document,
-            plan,
-            history=history,
-            apply_migrations=apply_migrations,
-            deploy_application=deploy_application,
-            target_state_key=metadata.state_key,
-        )
+    context = ReleaseApplyContext(
+        manifest=manifest,
+        target_document=target_document,
+        config=config,
+        metadata=metadata,
+        migration_store=migration_store,
+        control_store=control_store,
+        schema_set_digest=schema_set_digest(config),
+        app_targets=tuple(app_targets),
+        applied_by="release-adapter",
+        deploy_root=state_root / "application",
+    )
+    return _apply_release_context(context, release_tar, plan, history, repo=repo_path)
 
 
 def main(argv: list[str] | None = None) -> int:
