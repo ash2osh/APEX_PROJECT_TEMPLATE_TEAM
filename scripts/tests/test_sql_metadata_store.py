@@ -175,6 +175,62 @@ class SqlMetadataStoreTests(unittest.TestCase):
         self.assertEqual(history["m1"]["sequence"], 2)
 
 
+class StoreParityTests(unittest.TestCase):
+    """The JSON store is a test double for the SQL store, so it must match it.
+
+    Most of the suite exercises the migration lifecycle against
+    :class:`MigrationStore` because it needs no database. That only proves
+    anything about production if the double still offers the same interface as
+    :class:`SqlMigrationStore`; a method added or re-signed on one side alone
+    means those tests are asserting against something the online path is not.
+    """
+
+    @staticmethod
+    def public_methods(store) -> dict[str, str]:
+        import inspect
+
+        return {
+            name: str(inspect.signature(value))
+            for name, value in vars(store).items()
+            if not name.startswith("_") and callable(value)
+        }
+
+    def test_both_stores_expose_the_same_public_interface(self):
+        from teamlib.migration_store import MigrationStore
+
+        sql = self.public_methods(SqlMigrationStore)
+        json_store = self.public_methods(MigrationStore)
+        self.assertEqual(
+            sorted(sql),
+            sorted(json_store),
+            "the JSON test double and the SQL store must offer the same methods",
+        )
+
+    def test_matching_methods_take_matching_arguments(self):
+        from teamlib.migration_store import MigrationStore
+
+        sql = self.public_methods(SqlMigrationStore)
+        json_store = self.public_methods(MigrationStore)
+        for name in sorted(set(sql) & set(json_store)):
+            with self.subTest(method=name):
+                self.assertEqual(sql[name], json_store[name])
+
+    def test_the_lifecycle_contract_migrate_depends_on_is_covered(self):
+        """apply_plan reaches for these by name; both stores must have them."""
+        from teamlib.migration_store import MigrationStore
+
+        required = {
+            "bootstrap", "acquire", "release", "read_history", "read_state",
+            "read_inventories", "record_attempt_start", "record_attempt_state",
+            "record_event", "record_applied", "record_inventory",
+            "ensure_observation", "validate_frontier", "validate_observation_chain",
+            "export_history", "recover",
+        }
+        for store in (SqlMigrationStore, MigrationStore):
+            with self.subTest(store=store.__name__):
+                self.assertEqual(required - set(self.public_methods(store)), set())
+
+
 class GeneratedSqlLineLengthTests(unittest.TestCase):
     MAX_LINE = 1200
 

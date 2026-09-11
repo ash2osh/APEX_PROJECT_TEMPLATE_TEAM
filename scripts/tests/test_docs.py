@@ -109,8 +109,28 @@ class DocumentationTests(unittest.TestCase):
         config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn("[tool.ruff]", config)
         self.assertIn('"F"', config)
-        workflow = (ROOT / ".github/workflows/template-checks.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/database-checks.yml").read_text(encoding="utf-8")
         self.assertIn("ruff check scripts/", workflow)
+
+    def test_one_offline_workflow_owns_the_pull_request_gate(self):
+        """Two workflows both ran the whole suite on every push and PR.
+
+        The offline gate is a single job so the suite runs once; a second
+        workflow that repeats it doubles CI time without adding a check.
+        """
+        workflows = sorted(path.name for path in (ROOT / ".github/workflows").glob("*.yml"))
+        self.assertEqual(workflows, ["database-checks.yml", "integration.yml", "release.yml"])
+        offline = (ROOT / ".github/workflows/database-checks.yml").read_text(encoding="utf-8")
+        for expected in (
+            "ruff check scripts/",
+            "unittest discover -s scripts/tests",
+            "ci-doctor --contract ci/runner-contract.json",
+            "bash -n",
+            "json.tool",
+        ):
+            with self.subTest(step=expected):
+                self.assertIn(expected, offline)
+        self.assertEqual(offline.count("unittest discover"), 1)
 
     def test_no_string_literal_imports_outside_the_command_dispatcher(self):
         offenders = []

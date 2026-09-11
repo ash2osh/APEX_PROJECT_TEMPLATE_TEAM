@@ -1633,13 +1633,13 @@ class MigrationStore:
             "target_state_key": store_target.state_key,
             "history": self.read_history(store_target),
             "observations": self.read_state(store_target)["observations"],
-            "inventories": self._read_inventories(store_target),
+            "inventories": self.read_inventories(store_target),
         }
         path = Path(out)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(envelope, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
 
-    def _read_inventories(self, store_target: Target) -> dict[str, dict[str, Any]]:
+    def read_inventories(self, store_target: Target) -> dict[str, dict[str, Any]]:
         with self._locked() as data:
             self._require(data, store_target)
             return json.loads(json.dumps(data.get("inventories", {})))

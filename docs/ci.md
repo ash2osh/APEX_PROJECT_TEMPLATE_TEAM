@@ -2,8 +2,10 @@
 
 ## Offline pull-request gate
 
-`database-checks.yml` never opens Oracle or loads a target profile. It runs the
-stdlib test suite, static checks, and the closed contract doctor:
+`database-checks.yml` is the whole offline gate and never opens Oracle or loads
+a target profile. One job runs `ruff check scripts/`, `bash -n` over the shell
+launchers, the stdlib test suite, the JSON and line-ending checks, and the
+closed contract doctor:
 
 ```text
 PYTHONPATH=scripts python3 scripts/team.py ci-doctor \
