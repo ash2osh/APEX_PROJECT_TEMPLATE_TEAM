@@ -59,6 +59,16 @@ PRODUCTION_REFUSED_COMMANDS = frozenset(
     }
 )
 
+# Commands that must not reach the database without a validated VERIFY profile.
+# Declared beside the refusal set so that adding a command to the dispatcher is
+# one decision about its privileges, not a guess buried in a branch.
+VERIFY_REQUIRED_COMMANDS = frozenset(
+    {
+        "adopt-frontier", "qualify-target", "run-integration", "run-release-test",
+        "migrate", "undo-migration", "redo-migration", "check-drift", "deploy-app",
+    }
+)
+
 
 def _parser() -> argparse.ArgumentParser:
     env_parent = argparse.ArgumentParser(add_help=False)
@@ -162,15 +172,10 @@ def _env_path(args: argparse.Namespace) -> Path:
     return _repo_root() / ".env"
 
 
-def _config(args: argparse.Namespace, *, require_verify: bool = False):
-    return load_config(_env_path(args), require_verify=require_verify)
-
-
-def _target(args: argparse.Namespace, alias: str, *, require_verify: bool = False):
-    config = _config(args, require_verify=require_verify)
+def _target(config: Any, alias: str) -> Target:
     if alias not in config.apps:
         raise ConfigError(f"unknown application alias: {alias}")
-    return config, profile_target(config, "APEX", alias=alias)
+    return profile_target(config, "APEX", alias=alias)
 
 
 def _store(repo: Path) -> ControlStore:
@@ -340,23 +345,24 @@ def _migration_output(command: str, report: Any, *, dry_run: bool) -> None:
 def _online(args: argparse.Namespace) -> object:
     repo = _repo_root()
     command = args.command
+    config = load_config(_env_path(args), require_verify=command in VERIFY_REQUIRED_COMMANDS)
+    # One gate for every production-refused command. Repeating this per branch
+    # let three spellings of the same rule drift apart -- two consulted the
+    # frozenset, one hand-wrote the command name, and two commands relied on a
+    # guard inside the workflow function instead. Adding a command to
+    # PRODUCTION_REFUSED_COMMANDS must be sufficient to refuse it.
+    if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
+        raise ConfigError(f"{command} is refused for production targets")
     if command == "doctor":
-        config = _config(args)
         _json({"status": "valid", "project": config.project, "role": config.role, "environment": config.environment, "profiles": sorted(config.profiles)})
         return 0
     if command == "setup-state":
-        config = _config(args)
-        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
-            raise ConfigError(f"{command} is refused for production targets")
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)
         store.setup_state([profile_target(config, "APEX", alias=alias) for alias in config.apps])
         _json({"status": "success", "operation": "setup-state", "targets": sorted(config.apps)})
         return 0
     if command == "adopt-frontier":
-        config = _config(args, require_verify=True)
-        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
-            raise ConfigError(f"{command} is refused for production targets")
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
         digest = schema_set_digest(config)
@@ -380,9 +386,6 @@ def _online(args: argparse.Namespace) -> object:
         _json({"status": "success", "operation": command, "inventory_digest": digest})
         return 0
     if command == "qualify-target":
-        config = _config(args, require_verify=True)
-        if config.environment == "production":
-            raise ConfigError("qualify-target is refused for production targets")
         if bool(args.release_archive) != bool(args.apply_report):
             raise ConfigError("--release-archive and --apply-report must be supplied together")
         if _resolved_commit(repo, "HEAD") != args.source_commit:
@@ -420,7 +423,6 @@ def _online(args: argparse.Namespace) -> object:
         _json({"status": report["final_status"], "operation": command, "out": str(args.out)})
         return 0
     if command == "run-integration":
-        config = _config(args, require_verify=True)
         result = run_integration(
             repo,
             config,
@@ -430,7 +432,6 @@ def _online(args: argparse.Namespace) -> object:
         _json({"operation": command, **result.as_dict()})
         return 0 if result.status == "PASS" else 3
     if command == "run-release-test":
-        config = _config(args, require_verify=True)
         result = run_release_test(
             repo,
             config,
@@ -442,9 +443,6 @@ def _online(args: argparse.Namespace) -> object:
         _json({"operation": command, **result.as_dict()})
         return 0 if result.status == "PASS" else 3
     if command in {"migrate", "undo-migration", "redo-migration"}:
-        config = _config(args, require_verify=True)
-        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
-            raise ConfigError(f"{command} is refused for production targets")
         verified_digest = _migration_drift(args, config, repo)
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
@@ -474,7 +472,6 @@ def _online(args: argparse.Namespace) -> object:
         _migration_output(command, report, dry_run=args.dry_run)
         return 0
     if command == "check-drift":
-        config = _config(args, require_verify=True)
         if bool(args.expected_inventory) != bool(args.actual_inventory):
             raise ConfigError("check-drift requires both --expected-inventory and --actual-inventory")
         if not args.expected_inventory:
@@ -536,9 +533,6 @@ def _online(args: argparse.Namespace) -> object:
         _json({"status": status, "operation": command, "diff": result})
         return 0 if status == "clean" else 3
     if command in {"export-history", "recover-migration"}:
-        config = _config(args)
-        if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
-            raise ConfigError(f"{command} is refused for production targets")
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
         if command == "export-history":
@@ -549,9 +543,7 @@ def _online(args: argparse.Namespace) -> object:
             _json({"status": "success", "operation": command})
         return 0
     if command in {"register-app", "app-status", "recover-app-lock", "capture-app", "bootstrap-app", "adopt-app", "export-app", "import-app"}:
-        config, target = _target(args, args.alias)
-        if target.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
-            raise ConfigError(f"{command} is refused for production targets")
+        target = _target(config, args.alias)
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)
         if command == "register-app":
@@ -610,7 +602,6 @@ def _online(args: argparse.Namespace) -> object:
     if command == "resolve-export":
         # Resolve uses the target selected by the environment; the recovery ID
         # itself remains immutable and is checked by the core implementation.
-        config = _config(args)
         if len(config.apps) != 1:
             raise ConfigError("resolve-export requires an explicit single-app environment in this entry point")
         target = profile_target(config, "APEX", alias=next(iter(config.apps)))
@@ -623,7 +614,6 @@ def _online(args: argparse.Namespace) -> object:
         return 0
     if command == "deploy-app":
         target = _target_from_contract(args.target, args.alias)
-        config = _config(args, require_verify=True)
         if config.role != target.role or config.environment != target.environment:
             raise ConfigError("deployment target contract and environment profile roles do not match")
         apex_profile = config.profiles.get("APEX")
@@ -645,7 +635,7 @@ def _online(args: argparse.Namespace) -> object:
         _json({"status": "success", "operation": command, "source_commit": report.source_commit, "tree_digest": report.tree_digest, "verified_tree_digest": report.verified_tree_digest, "recovery_id": report.recovery_id})
         return 0
     if command == "announce-import":
-        config, target = _target(args, args.alias)
+        target = _target(config, args.alias)
         if args.ref:
             metadata = profile_target(config, "METADATA")
             store = _sql_control_store(repo, metadata)

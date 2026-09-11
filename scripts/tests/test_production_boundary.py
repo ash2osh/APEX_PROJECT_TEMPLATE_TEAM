@@ -8,6 +8,8 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from pathlib import Path
+import contextlib
+import io
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -141,6 +143,75 @@ METADATA_EXPECTED_INSTANCE_ID=FREEPDB1
             self.assertEqual(register_result, 2)
             self.assertEqual(result, 2)
             self.assertFalse((root / ".sync-state").exists())
+
+
+class ProductionRefusalCoverageTests(unittest.TestCase):
+    """Every command in the refusal set must actually be refused.
+
+    The dispatcher used to re-check this per branch in three different
+    spellings, so a command could be listed in PRODUCTION_REFUSED_COMMANDS and
+    still run. This drives the check off the frozenset itself.
+    """
+
+    ARGUMENTS = {
+        "setup-state": (),
+        "adopt-frontier": (),
+        "qualify-target": ("--source-commit", "a" * 40, "--aliases", "checkout", "--out", "out.json"),
+        "recover-migration": ("run-1", "--evidence", "evidence.json"),
+        "register-app": ("checkout",),
+        "recover-app-lock": ("checkout", "--evidence", "evidence.json"),
+        "migrate": (),
+        "undo-migration": ("m1",),
+        "redo-migration": ("m1",),
+        "run-integration": ("--out", "out.json"),
+        "run-release-test": ("release.tar", "--target", "targets/test.json", "--out", "out.json"),
+    }
+
+    def env_text(self) -> str:
+        lines = [
+            "PROJECT_NAME=team-template",
+            "TARGET_ROLE=production",
+            "DB_ENVIRONMENT=production",
+            "APEX_APPS=checkout:101",
+            "TABLES_SCHEMA=APP_DATA",
+            "CODE_SCHEMA=APP_CODE",
+            "APEX_PARSING_SCHEMA=APP",
+            "METADATA_SCHEMA=APP_META",
+            "APP_OWNERSHIP_MODE=shared",
+            "APEX_WORKSPACE_ID=5402650006222933",
+        ]
+        for profile in ("TABLES", "CODE", "APEX", "METADATA", "VERIFY"):
+            lines += [
+                f"{profile}_SQLCL_CONNECTION=prod-demo",
+                f"{profile}_EXPECTED_USER=DEMO",
+                f"{profile}_EXPECTED_CURRENT_SCHEMA=DEMO",
+                f"{profile}_EXPECTED_DB_NAME=PRODPDB1",
+                f"{profile}_EXPECTED_SERVICE=prod1",
+                f"{profile}_EXPECTED_INSTANCE_ID=PRODPDB1",
+            ]
+        return "\n".join(lines) + "\n"
+
+    def test_every_refused_command_answers_with_the_production_refusal(self):
+        self.assertTrue(team.PRODUCTION_REFUSED_COMMANDS)
+        self.assertEqual(
+            set(self.ARGUMENTS),
+            set(team.PRODUCTION_REFUSED_COMMANDS),
+            "a command was added to PRODUCTION_REFUSED_COMMANDS without a refusal case here",
+        )
+        with tempfile.TemporaryDirectory(prefix="team-prod-refuse-") as directory:
+            root = Path(directory)
+            env_path = root / ".env"
+            env_path.write_text(self.env_text(), encoding="utf-8")
+            for command, arguments in sorted(self.ARGUMENTS.items()):
+                with self.subTest(command=command):
+                    errors = io.StringIO()
+                    with patch.object(team, "_repo_root", return_value=root), \
+                         contextlib.redirect_stderr(errors):
+                        code = team.main(["--env", str(env_path), command, *arguments])
+                    self.assertEqual(code, 2)
+                    self.assertIn(f"{command} is refused for production targets", errors.getvalue())
+            self.assertFalse((root / ".sync-state").exists())
+            self.assertFalse((root / "scratch").exists())
 
 
 class ProductionReadAllowlistTests(unittest.TestCase):
