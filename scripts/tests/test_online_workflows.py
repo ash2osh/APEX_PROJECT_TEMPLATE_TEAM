@@ -183,8 +183,8 @@ class OnlineWorkflowTests(unittest.TestCase):
             with self.subTest(message=message):
                 events: list[str] = []
 
-                def failing_preflight(_config, _repo, _flow, _message=message):
-                    events.append("preflight")
+                def failing_preflight(_config, _repo, _flow, _message=message, _events=events):
+                    _events.append("preflight")
                     raise RuntimeError(_message)
 
                 dependencies, _ = self.dependencies(events)
