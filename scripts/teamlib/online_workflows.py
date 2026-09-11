@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping
 from .config import Config, Target, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import DeployReport, deploy_app
-from .fingerprints import Inventory, InventoryError, diff_inventory, load_inventory
+from .fingerprints import Inventory, InventoryError, diff_inventory, drift_is_clean, load_inventory
 from .live_inventory import inventory_target
 from .migrate import RunReport, apply_plan
 from .migration_runtime import migration_profiles
@@ -181,7 +181,7 @@ def _check_drift(expected_path: Path, before: Any) -> None:
             f"migration drift gate cannot compare the live inventory ({digest})"
         )
     drift = diff_inventory(expected, before)
-    if any(drift[key] for key in ("added", "missing", "changed", "invalid")) or drift.get("topology_mismatch"):
+    if not drift_is_clean(drift):
         raise OnlineWorkflowError("migration drift gate is blocked: " + json.dumps(drift, sort_keys=True))
 
 

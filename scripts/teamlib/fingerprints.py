@@ -131,6 +131,19 @@ def diff_inventory(expected: Inventory, actual: Inventory) -> dict[str, Any]:
     }
 
 
+_DRIFT_KEYS = ("added", "missing", "changed", "invalid")
+
+
+def drift_is_clean(drift: Mapping[str, Any]) -> bool:
+    """Whether a diff_inventory result reports no drift at all.
+
+    The topology flag matters as much as the four object lists: a topology
+    mismatch reports every object as invalid, but a caller that forgets the
+    flag and happens to see empty lists would read that as clean.
+    """
+    return not any(drift.get(key) for key in _DRIFT_KEYS) and not drift.get("topology_mismatch")
+
+
 def save_inventory(inventory: Inventory, path: str | Path) -> None:
     data = inventory.as_dict()
     destination = Path(path)

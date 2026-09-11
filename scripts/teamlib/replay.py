@@ -68,16 +68,6 @@ def adopt_baseline(migration_id: str, evidence: str | Path, profiles: Mapping[st
     return True
 
 
-def check_history_change(base_commit: str | Path, new_commit: str | Path) -> None:
-    """Offline guard used by CI; callers provide two migration directories."""
-    base = load_bundles(base_commit)
-    new = load_bundles(new_commit)
-    for migration_id, old in base.items():
-        current = new.get(migration_id)
-        if current is None or current.checksum != old.checksum:
-            raise ReplayError(f"canonical migration was edited or removed: {migration_id}")
-
-
 def main(argv: list[str] | None = None) -> int:
     import argparse
     raw_args = list(argv or [])

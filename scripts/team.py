@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,10 +26,11 @@ from teamlib.apex import (
 from teamlib.announce import draft_all_clear, draft_import_announcement
 from teamlib.app_checks import AppCheckError
 from teamlib.ci import CIError
-from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, load_config, parse_target_contract, profile_target, schema_set_digest
+from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, contract_target, load_config, profile_target, schema_set_digest
 from teamlib.control_store import ControlStore, ControlStoreError, SqlControlStore
 from teamlib.deploy import DeployError, deploy_app
-from teamlib.fingerprints import InventoryError, diff_inventory, inventory_from_manifest, load_inventory
+from teamlib.drift import capture_live_inventory, drift_status, observed_frontier_drift
+from teamlib.fingerprints import InventoryError, diff_inventory, drift_is_clean, load_inventory
 from teamlib.destructive_confirmation import ConfirmationError, load_confirmation
 from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
 from teamlib.migration_runtime import migration_profiles
@@ -194,39 +194,6 @@ def _json(value: object) -> None:
     print(json.dumps(value, sort_keys=True, ensure_ascii=False))
 
 
-def _target_from_contract(path: str | Path, alias: str) -> Target:
-    contract = parse_target_contract(path)
-    if contract.role not in {"integration", "test", "replay"}:
-        raise ConfigError("deployment target must be integration, test, or replay")
-    if alias not in contract.app_ids:
-        raise ConfigError(f"target contract has no application binding for {alias}")
-    binding = dict(contract.binding)
-    connection = binding.get("connection") or binding.get("sqlcl_connection")
-    if not isinstance(connection, str) or not connection:
-        raise ConfigError("deployment target binding must name a credential-free SQLcl connection")
-    binding.setdefault("profile", contract.role.upper())
-    binding.setdefault("alias", alias)
-    binding.setdefault("app_id", contract.app_ids[alias])
-    binding_digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-    return Target(
-        project=contract.project,
-        role=contract.role,
-        environment=contract.environment,
-        connection=connection,
-        instance_id=contract.instance_id or "",
-        db_name=contract.db_name or "",
-        service=contract.service or "",
-        session_user=contract.session_user or "",
-        current_schema=contract.current_schema or "",
-        alias=alias,
-        workspace_id=contract.workspace_id,
-        app_id=contract.app_ids[alias],
-        parsing_schema=binding.get("parsing_schema"),
-        ownership_mode=str(binding.get("ownership_mode", "shared")),
-        binding_digest=binding_digest,
-    )
-
-
 def _resolved_commit(repo: Path, ref: str) -> str:
     result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"], capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -321,7 +288,7 @@ def _migration_drift(args: argparse.Namespace, config: Any, repo: Path) -> str |
         drift = diff_inventory(expected, actual)
     except InventoryError as exc:
         raise ConfigError(str(exc)) from exc
-    if any(drift[key] for key in ("added", "missing", "changed", "invalid")) or drift.get("topology_mismatch"):
+    if not drift_is_clean(drift):
         raise MigrationRunError("migration drift gate is blocked: " + json.dumps(drift, sort_keys=True))
     return actual.digest
 
@@ -475,20 +442,10 @@ def _online(args: argparse.Namespace) -> object:
         if bool(args.expected_inventory) != bool(args.actual_inventory):
             raise ConfigError("check-drift requires both --expected-inventory and --actual-inventory")
         if not args.expected_inventory:
-            live_target = profile_target(config, "TABLES")
             try:
-                actual_inventory = inventory_target(
-                    live_target,
-                    config.tables_schema,
-                    config.code_schema,
-                    repo / "scratch" / "live-inventory",
-                    schema_set_digest=schema_set_digest(config),
-                )
+                _actual_inventory, actual_path = capture_live_inventory(repo, config)
             except Exception as exc:
                 raise MigrationRunError(f"live drift inventory failed: {exc}") from exc
-            actual_path = repo / "scratch" / "live-inventory.json"
-            from teamlib.fingerprints import save_inventory
-            save_inventory(actual_inventory, actual_path)
             canonical_path = repo / "database" / "schema-inventory.json"
             if not canonical_path.is_file():
                 _json({"status": "unknown", "operation": command, "project": config.project, "actual_inventory": str(actual_path), "reason": "canonical schema inventory is not adopted"})
@@ -501,35 +458,12 @@ def _online(args: argparse.Namespace) -> object:
         except InventoryError as exc:
             raise ConfigError(str(exc)) from exc
         result = diff_inventory(expected, actual)
-        frontier_result: dict[str, object] = {"status": "unavailable"}
-        try:
-            metadata = profile_target(config, "METADATA")
-            migration_store = _sql_migration_store(repo, metadata)
-            state = migration_store.read_state(metadata)
-            observations = state.get("observations", [])
-            if observations:
-                frontier_digest = observations[-1].get("after")
-                inventories = migration_store.read_inventories(metadata)
-                frontier_manifest = inventories.get(frontier_digest)
-                if not isinstance(frontier_manifest, dict):
-                    frontier_result = {"status": "unknown", "reason": "accepted frontier manifest is missing"}
-                else:
-                    frontier = inventory_from_manifest(frontier_manifest)
-                    frontier_result = {
-                        "status": "clean" if not any(diff_inventory(frontier, actual)[key] for key in ("added", "missing", "changed", "invalid")) else "drift",
-                        "digest": frontier.digest,
-                        "diff": diff_inventory(frontier, actual),
-                    }
-            else:
-                frontier_result = {"status": "unknown", "reason": "no observed migration frontier is adopted"}
-        except (MigrationStoreError, InventoryError) as exc:
-            frontier_result = {"status": "unknown", "reason": str(exc)}
+        metadata = profile_target(config, "METADATA")
+        frontier_result = observed_frontier_drift(_sql_migration_store(repo, metadata), metadata, actual)
         result["observed_frontier"] = frontier_result
         if args.out:
             Path(args.out).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
-        canonical_clean = not any(result[key] for key in ("added", "missing", "changed", "invalid")) and not result.get("topology_mismatch")
-        frontier_clean = frontier_result.get("status") == "clean"
-        status = "clean" if canonical_clean and frontier_clean else "drift" if frontier_result.get("status") == "drift" or not canonical_clean else "unknown"
+        status = drift_status(result, frontier_result)
         _json({"status": status, "operation": command, "diff": result})
         return 0 if status == "clean" else 3
     if command in {"export-history", "recover-migration"}:
@@ -613,7 +547,7 @@ def _online(args: argparse.Namespace) -> object:
         _json({"status": "success", "operation": command, "operation_id": args.operation_id, "action": args.action})
         return 0
     if command == "deploy-app":
-        target = _target_from_contract(args.target, args.alias)
+        target = contract_target(args.target, args.alias)
         if config.role != target.role or config.environment != target.environment:
             raise ConfigError("deployment target contract and environment profile roles do not match")
         apex_profile = config.profiles.get("APEX")

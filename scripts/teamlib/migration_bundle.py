@@ -8,7 +8,6 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any
 from collections.abc import Mapping
 
 from .sql_text import SqlTextError, comment_spans, mask_sql, statement_starts
@@ -360,10 +359,6 @@ def bundle_checksum(directory: str | Path, migration_id: str) -> str:
         return bundles[migration_id].checksum
     except KeyError as exc:
         raise BundleError(f"migration not found: {migration_id}") from exc
-
-
-def history_envelope(history: Mapping[str, Any]) -> dict[str, Any]:
-    return {"version": 1, "history": history}
 
 
 def main(argv: list[str] | None = None) -> int:

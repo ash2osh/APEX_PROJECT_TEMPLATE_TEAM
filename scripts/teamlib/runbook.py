@@ -92,12 +92,6 @@ def _signature_bytes(raw: bytes) -> bytes:
     return decoded
 
 
-def _target_value(target: Mapping[str, Any] | Any, name: str, default: Any = None) -> Any:
-    if isinstance(target, Mapping):
-        return target.get(name, default)
-    return getattr(target, name, default)
-
-
 def _target_document(target: Mapping[str, Any] | Any) -> dict[str, Any]:
     if isinstance(target, Mapping):
         return dict(target)

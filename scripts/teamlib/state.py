@@ -68,11 +68,6 @@ class Capture:
     head_tree: dict[str, bytes] = field(default_factory=dict)
 
 
-def app_lock_key(target: Target) -> str:
-    """Return the physical key used by every cooperating checkout."""
-    return target.physical_key
-
-
 def _state_root(root: str | Path | None) -> Path:
     path = Path(root or ".sync-state")
     if path.exists() and path.is_symlink():

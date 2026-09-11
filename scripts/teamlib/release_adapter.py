@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,7 +11,7 @@ from typing import Any
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .config import Config, ConfigError, Target, load_config, parse_target_contract, profile_target, schema_set_digest
+from .config import Config, ConfigError, Target, contract_target, load_config, parse_target_contract, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import deploy_app
 from .migrate import apply_plan
@@ -69,36 +68,16 @@ def _assert_binding_matches_profile(target: Target, apex_profile: Target, alias:
 
 
 def _target_from_contract(path: str | Path, alias: str, *, expected_role: str | None = None) -> Target:
-    contract = parse_target_contract(path, expected_role=expected_role)
-    if contract.role not in {"integration", "test", "replay"} or contract.environment == "production":
-        raise ReleaseAdapterError("release application targets must be non-production integration, test or replay contracts")
-    if alias not in contract.app_ids:
-        raise ReleaseAdapterError(f"release target has no application binding for {alias}")
-    binding = dict(contract.binding)
-    connection = binding.get("connection") or binding.get("sqlcl_connection")
-    if not isinstance(connection, str) or not connection:
-        raise ReleaseAdapterError("release target binding must provide a credential-free SQLcl connection")
-    binding.setdefault("profile", contract.role.upper())
-    binding.setdefault("alias", alias)
-    binding.setdefault("app_id", contract.app_ids[alias])
-    digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-    return Target(
-        project=contract.project,
-        role=contract.role,
-        environment=contract.environment,
-        connection=connection,
-        instance_id=contract.instance_id or "",
-        db_name=contract.db_name or "",
-        service=contract.service or "",
-        session_user=contract.session_user or "",
-        current_schema=contract.current_schema or "",
-        alias=alias,
-        workspace_id=contract.workspace_id,
-        app_id=contract.app_ids[alias],
-        parsing_schema=binding.get("parsing_schema"),
-        ownership_mode=str(binding.get("ownership_mode", "shared")),
-        binding_digest=digest,
-    )
+    """Bind a contract alias, answering with this module's refusal type.
+
+    The binding itself -- and therefore the binding digest that becomes part of
+    the target's state key -- comes from config.contract_target so the adapter
+    and deploy-app cannot compute two different identities for one target.
+    """
+    try:
+        return contract_target(path, alias, expected_role=expected_role)
+    except ConfigError as exc:
+        raise ReleaseAdapterError(str(exc)) from exc
 
 
 def _release_target_document(path: Path) -> dict[str, Any]:

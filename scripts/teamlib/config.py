@@ -649,6 +649,52 @@ def parse_target_contract(
     )
 
 
+def contract_target(
+    source: Mapping[str, Any] | str | Path,
+    alias: str,
+    *,
+    expected_role: str | None = None,
+) -> Target:
+    """Bind one alias in a tracked target contract to a validated Target.
+
+    Shared by ``deploy-app`` and the release adapters so that the binding
+    digest -- which is part of the target's state key, and therefore of every
+    recovery record keyed by it -- is computed one way. Two copies of this
+    would silently produce two different identities for the same target.
+    """
+    contract = parse_target_contract(source, expected_role=expected_role)
+    if contract.role not in {"integration", "test", "replay"} or contract.environment == "production":
+        raise ConfigError(
+            "target contract must be a non-production integration, test, or replay contract"
+        )
+    if alias not in contract.app_ids:
+        raise ConfigError(f"target contract has no application binding for {alias}")
+    binding = dict(contract.binding)
+    connection = binding.get("connection") or binding.get("sqlcl_connection")
+    if not isinstance(connection, str) or not connection:
+        raise ConfigError("target binding must name a credential-free SQLcl connection")
+    binding.setdefault("profile", contract.role.upper())
+    binding.setdefault("alias", alias)
+    binding.setdefault("app_id", contract.app_ids[alias])
+    return Target(
+        project=contract.project,
+        role=contract.role,
+        environment=contract.environment,
+        connection=connection,
+        instance_id=contract.instance_id or "",
+        db_name=contract.db_name or "",
+        service=contract.service or "",
+        session_user=contract.session_user or "",
+        current_schema=contract.current_schema or "",
+        alias=alias,
+        workspace_id=contract.workspace_id,
+        app_id=contract.app_ids[alias],
+        parsing_schema=binding.get("parsing_schema"),
+        ownership_mode=str(binding.get("ownership_mode", "shared")),
+        binding_digest=_digest(binding),
+    )
+
+
 _LAUNCHER_NAMES = frozenset({"team.py", "team.sh", "team.ps1"})
 
 
