@@ -71,6 +71,22 @@ class AppCheckReport:
         }
 
 
+@dataclass(frozen=True)
+class AppCheckBundle:
+    declarations: Mapping[str, Mapping[str, Any]]
+    members: Mapping[str, bytes]
+    checks_digest: str
+    artifact_digest: str
+
+    def member_bytes(self, relative: str) -> bytes:
+        try:
+            return self.members[relative]
+        except KeyError as exc:
+            raise AppCheckError(
+                f"referenced check member is missing: {relative}"
+            ) from exc
+
+
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _CHECK_ID_RE = re.compile(r"^[a-z][a-z0-9._-]*$")
 _ACTIONS = {"navigate", "fill", "click"}
@@ -188,6 +204,154 @@ def _load_declaration(alias: str, value: Any) -> dict[str, Any]:
     return declaration
 
 
+def _validate_bundle_aliases(aliases: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(aliases, (str, bytes)) or not aliases:
+        raise AppCheckError("application check bundle requires at least one alias")
+    selected = tuple(aliases)
+    if any(not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias) for alias in selected):
+        raise AppCheckError("application check bundle contains an unsafe alias")
+    if len(set(selected)) != len(selected):
+        raise AppCheckError("application check bundle contains duplicate aliases")
+    return tuple(sorted(selected))
+
+
+def _validate_bundle_members(members: Mapping[str, bytes]) -> dict[str, bytes]:
+    if not isinstance(members, Mapping):
+        raise AppCheckError("application check bundle members must be a mapping")
+    validated: dict[str, bytes] = {}
+    folded: dict[str, str] = {}
+    for path, data in members.items():
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or "\\" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
+            raise AppCheckError(f"application check member must be a safe relative path: {path!r}")
+        if not isinstance(data, bytes):
+            raise AppCheckError(f"application check member must contain bytes: {path}")
+        case_key = path.casefold()
+        if case_key in folded and folded[case_key] != path:
+            raise AppCheckError(
+                f"application check members contain case-colliding paths: "
+                f"{folded[case_key]}, {path}"
+            )
+        folded[case_key] = path
+        validated[path] = bytes(data)
+    return dict(sorted(validated.items()))
+
+
+def _normalize_declaration_values(
+    declarations: Mapping[str, Any], aliases: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    selected = set(aliases)
+    supplied = set(declarations)
+    missing = sorted(selected - supplied)
+    extra = sorted(supplied - selected)
+    if missing or extra:
+        details: list[str] = []
+        if missing:
+            details.append("missing declarations: " + ", ".join(missing))
+        if extra:
+            details.append("declarations for unknown applications: " + ", ".join(extra))
+        raise AppCheckError(
+            "candidate application coverage is incomplete (" + "; ".join(details) + ")"
+        )
+    normalized = {
+        alias: _load_declaration(alias, declarations[alias])
+        for alias in sorted(declarations)
+    }
+    # Detach the result from every caller-owned nested list and dictionary.
+    return json.loads(_canonical(normalized).decode("utf-8"))
+
+
+def _normalize_bundle_declarations(
+    members: Mapping[str, bytes], aliases: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    declaration_members = {
+        path.removesuffix(".json"): data
+        for path, data in members.items()
+        if "/" not in path and path.endswith(".json")
+    }
+    decoded: dict[str, Any] = {}
+    for alias, data in declaration_members.items():
+        try:
+            decoded[alias] = json.loads(data.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise AppCheckError(
+                f"candidate declaration is unreadable: {alias}.json"
+            ) from exc
+    return _normalize_declaration_values(decoded, aliases)
+
+
+def _validate_bundle_references(
+    members: Mapping[str, bytes], declarations: Mapping[str, Mapping[str, Any]]
+) -> None:
+    for alias, declaration in declarations.items():
+        for check in declaration["checks"]:
+            field = "verify_sql" if check["kind"] == "select" else "flow"
+            relative = str(check[field])
+            if not relative.startswith(f"{alias}/"):
+                raise AppCheckError(
+                    f"referenced check member must belong to {alias}: {relative}"
+                )
+            if relative not in members:
+                raise AppCheckError(
+                    f"referenced check member is missing: {relative}"
+                )
+            raw = members[relative]
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeError as exc:
+                raise AppCheckError(
+                    f"referenced check member is not UTF-8: {relative}"
+                ) from exc
+            if check["kind"] == "select":
+                try:
+                    _validate_verify(text, f"{alias}/{check['id']}")
+                except BundleError as exc:
+                    raise AppCheckError(str(exc)) from exc
+            else:
+                try:
+                    flow = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise AppCheckError(
+                        f"referenced flow member is unreadable: {relative}"
+                    ) from exc
+                if not isinstance(flow, Mapping):
+                    raise AppCheckError(
+                        f"referenced flow member must be a JSON object: {relative}"
+                    )
+
+
+def _member_digest(members: Mapping[str, bytes]) -> str:
+    records = [
+        {
+            "path": path,
+            "length": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for path, data in sorted(members.items())
+    ]
+    return _digest(records)
+
+
+def build_app_check_bundle(
+    members: Mapping[str, bytes], aliases: Sequence[str]
+) -> AppCheckBundle:
+    selected = _validate_bundle_aliases(aliases)
+    validated_members = _validate_bundle_members(members)
+    declarations = _normalize_bundle_declarations(validated_members, selected)
+    _validate_bundle_references(validated_members, declarations)
+    return AppCheckBundle(
+        declarations=declarations,
+        members=validated_members,
+        checks_digest=_digest(declarations),
+        artifact_digest=_member_digest(validated_members),
+    )
+
+
 def _source_details(source: Any) -> tuple[str, Mapping[str, Any]]:
     if not isinstance(source, Mapping):
         raise AppCheckError("candidate source must include an exact commit and app map")
@@ -270,17 +434,9 @@ def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str,
     else:
         raise AppCheckError("candidate checks must be an alias map or declaration list")
     source_aliases = set(apps)
-    check_aliases = set(raw_declarations)
-    missing = sorted(source_aliases - check_aliases)
-    extra = sorted(check_aliases - source_aliases)
-    if missing or extra:
-        bits = []
-        if missing:
-            bits.append("missing declarations: " + ", ".join(missing))
-        if extra:
-            bits.append("declarations for unknown apps: " + ", ".join(extra))
-        raise AppCheckError("candidate application coverage is incomplete (" + "; ".join(bits) + ")")
-    normalized = {alias: _load_declaration(alias, raw_declarations[alias]) for alias in sorted(raw_declarations)}
+    normalized = _normalize_declaration_values(
+        raw_declarations, tuple(sorted(source_aliases))
+    )
     app_ids = replay_target.get("app_ids")
     if isinstance(app_ids, Mapping) and any(alias not in app_ids for alias in source_aliases):
         raise AppCheckError("replay target has no application binding for every candidate app")

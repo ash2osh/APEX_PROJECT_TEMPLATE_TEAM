@@ -18,7 +18,8 @@ from copy import copy
 from unittest.mock import patch
 
 import teamlib.release as release_module
-from teamlib.release import ReleaseError, apply_release, build_release, plan_release, release_app_order, release_app_trees, release_migration_files, validate_release_identity, verify_release
+from teamlib.app_checks import build_app_check_bundle
+from teamlib.release import ReleaseError, apply_release, build_release, plan_release, release_app_check_bundle, release_app_order, release_app_trees, release_migration_files, validate_release_identity, verify_release
 
 
 class ReleaseTests(unittest.TestCase):
@@ -40,7 +41,45 @@ class ReleaseTests(unittest.TestCase):
         (self.repo / "targets").mkdir()
         (self.repo / "targets" / "masters.json").write_text('{"version":1,"masters":[]}\n', encoding="utf-8")
         (self.repo / "ci" / "app-checks").mkdir(parents=True)
-        (self.repo / "ci" / "app-checks" / "checkout.json").write_text('{"version":1,"alias":"checkout"}\n', encoding="utf-8")
+        declaration = {
+            "version": 1,
+            "alias": "checkout",
+            "page_ids": [1],
+            "checks": [
+                {
+                    "id": "objects",
+                    "page_id": 1,
+                    "kind": "select",
+                    "verify_sql": "checkout/objects.verify.sql",
+                    "expected_objects": ["APP.CHECKOUT"],
+                },
+                {
+                    "id": "login",
+                    "page_id": 1,
+                    "kind": "flow",
+                    "flow": "checkout/login.flow.json",
+                    "steps": [
+                        {
+                            "action": "navigate",
+                            "path": "/ords/r/app/checkout/home",
+                            "expected_visible_text": "Checkout",
+                        }
+                    ],
+                },
+            ],
+        }
+        (self.repo / "ci" / "app-checks" / "checkout.json").write_text(
+            json.dumps(declaration, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        (self.repo / "ci" / "app-checks" / "checkout").mkdir()
+        (self.repo / "ci" / "app-checks" / "checkout" / "objects.verify.sql").write_text(
+            "SELECT 'TEAM_ASSERT|' || assertion_name || '|' || status AS status "
+            "FROM (SELECT 'checkout_table_exists' assertion_name, 'PASS' status FROM dual);\n",
+            encoding="utf-8",
+        )
+        (self.repo / "ci" / "app-checks" / "checkout" / "login.flow.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "release seed"], check=True)
         self.commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
@@ -81,6 +120,26 @@ class ReleaseTests(unittest.TestCase):
             "20260907T100000__alice__one.sql",
             "20260907T100000__alice__one.verify.sql",
         ))
+
+    def test_release_exposes_the_verified_application_check_bundle(self):
+        manifest = build_release(
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "check-bundle-out"
+        )
+        bundle = release_app_check_bundle(manifest.archive_path)
+        source_members = {
+            path.relative_to(self.repo / "ci" / "app-checks").as_posix(): path.read_bytes()
+            for path in (self.repo / "ci" / "app-checks").rglob("*")
+            if path.is_file()
+        }
+
+        self.assertEqual(
+            bundle.checks_digest,
+            build_app_check_bundle(source_members, ("checkout",)).checks_digest,
+        )
+        self.assertEqual(
+            manifest.app_checks_digest,
+            verify_release(manifest.archive_path).app_checks_digest,
+        )
 
     def test_build_self_verifies_the_emitted_archive(self):
         with patch.object(release_module, "verify_release", wraps=release_module.verify_release) as verifier:

@@ -16,6 +16,7 @@ from typing import Any
 from collections.abc import Mapping
 from collections.abc import Callable
 
+from .app_checks import AppCheckBundle, AppCheckError, build_app_check_bundle
 from .migration_bundle import BundleError, Migration, load_bundles
 from .migration_plan import plan_migrations
 from .trees import tree_digest
@@ -38,6 +39,7 @@ class Manifest:
     archive_digest: str
     payload: tuple[dict[str, Any], ...] = ()
     toolchain: Mapping[str, Any] = field(default_factory=dict)
+    app_checks_digest: str | None = None
     staging_dir: Path | None = None
 
 
@@ -197,9 +199,19 @@ def _ustar_split(name: str) -> tuple[str, str]:
 
 def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_digest: str, staging_dir: Path | None = None) -> Manifest:
     return Manifest(
-        int(data["format_version"]), str(data["version"]), str(data["source_commit"]), str(data["source_tree"]),
-        tuple(data.get("migrations", ())), dict(data.get("app_tree_digests", {})), tuple(data.get("payload_paths", ())),
-        archive_path, archive_digest, tuple(data.get("payload", ())), data.get("toolchain", {}), staging_dir,
+        format_version=int(data["format_version"]),
+        version=str(data["version"]),
+        source_commit=str(data["source_commit"]),
+        source_tree=str(data["source_tree"]),
+        migrations=tuple(data.get("migrations", ())),
+        app_tree_digests=dict(data.get("app_tree_digests", {})),
+        payload_paths=tuple(data.get("payload_paths", ())),
+        archive_path=archive_path,
+        archive_digest=archive_digest,
+        payload=tuple(data.get("payload", ())),
+        toolchain=data.get("toolchain", {}),
+        app_checks_digest=data.get("app_checks_digest"),
+        staging_dir=staging_dir,
     )
 
 
@@ -500,6 +512,35 @@ def release_app_trees(release_tar: str | Path) -> dict[str, dict[str, bytes]]:
     archive_digest, members = _read_archive_bytes(archive)
     manifest = _verify_archive_members(archive, archive_digest, members)
     return _release_app_trees_from_members(manifest, members)
+
+
+def release_app_check_bundle(release_tar: str | Path) -> AppCheckBundle:
+    """Return exact packaged application checks after complete verification."""
+    archive = Path(release_tar)
+    if archive.is_symlink() or not archive.is_file():
+        raise ReleaseError("release archive is not a regular file")
+    archive_digest, members = _read_archive_bytes(archive)
+    manifest = _verify_archive_members(archive, archive_digest, members)
+    raw = {
+        path.removeprefix("release/checks/apps/"): data
+        for path, data in members.items()
+        if path.startswith("release/checks/apps/")
+    }
+    try:
+        bundle = build_app_check_bundle(
+            raw, tuple(sorted(manifest.app_tree_digests))
+        )
+    except AppCheckError as exc:
+        raise ReleaseError(str(exc)) from exc
+    archive_records = [
+        record
+        for record in manifest.payload
+        if record["path"].startswith("release/checks/apps/")
+    ]
+    actual = hashlib.sha256(_canonical(archive_records)).hexdigest()
+    if manifest.app_checks_digest != actual:
+        raise ReleaseError("release app-check bundle does not match manifest")
+    return bundle
 
 
 def release_migration_files(release_tar: str | Path) -> dict[str, bytes]:
