@@ -607,6 +607,7 @@ class FakeFixtureAdapter:
         }
         self.schemas = {"DEMO"}
         self.saved_connections = {"docker-demo", "docker-sys"}
+        self.seed_digest = "seed-digest"
 
     def read_identity(self, connection: str) -> dict[str, str]:
         self.events.append(f"read:{connection}-identity")
@@ -630,7 +631,7 @@ class FakeFixtureAdapter:
         tree = destination / "seed-tree"
         tree.mkdir()
         (tree / "application.apx").write_bytes(b"seed")
-        return tree, "seed-digest"
+        return tree, self.seed_digest
 
     def create_metadata_user(self, admin_connection: str, schema: str, password: str) -> None:
         self.events.append("write:create-metadata-user")
@@ -762,6 +763,16 @@ class LocalTeamFixtureLifecycleTests(unittest.TestCase):
         self.assertNotIn(self.manifest.cleanup_targets().saved_connection, adapter.saved_connections)
         self.assertIn(103, adapter.apps)
         self.assertIn("DEMO", adapter.schemas)
+
+    def test_cleanup_refuses_if_seed_changed_before_owned_deletes(self):
+        adapter = FakeFixtureAdapter()
+        evidence = inspect_fixture("docker-demo", "docker-sys", FixtureSpec(), adapter=adapter, run_root=self.root)
+        provision_fixture(evidence, self.manifest, adapter=adapter, password="generated-only-in-memory")
+        adapter.seed_digest = "different-seed"
+        with self.assertRaisesRegex(E2EError, "seed application changed"):
+            cleanup_fixture(self.manifest, evidence, adapter=adapter)
+        self.assertIn(9099, adapter.apps)
+        self.assertIn("TEAM_E2E_META", adapter.schemas)
 
 
 

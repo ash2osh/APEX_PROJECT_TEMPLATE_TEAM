@@ -422,10 +422,29 @@ def cleanup_fixture(
     workspace, raw_apps = adapter.read_workspace_and_apps(live_evidence.payload_connection)
     apps = _validate_apps(raw_apps, manifest.spec, reject_fixture=False)
     fixture = apps.get(manifest.spec.fixture_app_id)
-    if fixture is None or fixture["alias"].casefold() != manifest.spec.apex_alias.casefold():
+    if (
+        fixture is None
+        or fixture["alias"].casefold() != manifest.spec.apex_alias.casefold()
+        or str(fixture.get("parsing_schema", "")).upper() != "DEMO"
+    ):
         raise E2EError("cleanup fixture application identity does not match manifest")
     if int(workspace.get("id", -1)) != live_evidence.workspace_id or str(workspace.get("name")) != live_evidence.workspace_name:
         raise E2EError("cleanup workspace identity does not match manifest")
+
+    def capture_seed_digest(label: str) -> str:
+        destination = manifest.run_root / label
+        if destination.exists() or destination.is_symlink():
+            raise E2EError(f"cleanup seed evidence path already exists: {destination.name}")
+        _seed_path, digest = adapter.capture_seed(
+            live_evidence.payload_connection,
+            manifest.spec.seed_app_id,
+            destination,
+        )
+        return str(digest)
+
+    seed_before_digest = capture_seed_digest("cleanup-seed-before")
+    if seed_before_digest != live_evidence.seed_tree_digest:
+        raise E2EError("seed application changed since preflight")
     marker_verifier = getattr(adapter, "verify_marker", None)
     provision_evidence = manifest.phases.get("provision", {}).get("evidence", {})
     expected_marker_digest = provision_evidence.get("application_tree_digest") if isinstance(provision_evidence, Mapping) else None
@@ -474,6 +493,9 @@ def cleanup_fixture(
         raise E2EError("cleanup verification cannot prove unrelated resources survived")
     if targets.saved_connection in adapter.read_saved_connections():
         raise E2EError("cleanup verification found saved connection still present")
+    seed_after_digest = capture_seed_digest("cleanup-seed-after")
+    if seed_after_digest != live_evidence.seed_tree_digest:
+        raise E2EError("seed application changed during cleanup")
     report = CleanupReport(
         status="PASS",
         removed=(f"application:{manifest.spec.fixture_app_id}", f"schema:{manifest.spec.metadata_schema}", f"connection:{targets.saved_connection}"),
