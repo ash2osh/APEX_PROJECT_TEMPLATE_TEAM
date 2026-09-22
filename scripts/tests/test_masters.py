@@ -54,6 +54,21 @@ class MasterTests(unittest.TestCase):
         self.assertEqual(refs[0].symbol, "opendoor-master")
         self.assertEqual(refs[0].component_type, "authentication")
 
+    def test_parser_treats_apostrophes_in_unquoted_apexlang_text_as_text(self):
+        source = {
+            "shared-components/messages.apx": (
+                "textMessage ERROR_MESSAGE (\n"
+                "  message {\n"
+                "    text: Privilegi insufficienti: l'utente non è un amministratore\n"
+                "    language: it\n"
+                "  }\n"
+                ")\n"
+            ).encode("utf-8"),
+            "shared-components/auth.apx": b"authentication opendoor-master { subscription { master: @/500/opendoor-master } }",
+        }
+        refs = parse_subscriptions(source)
+        self.assertEqual(len(refs), 1)
+
     def test_validates_component_type_and_symbol(self):
         report = validate_masters(
             {"shared-components/auth.apx": b"authentication opendoor-master { subscription { master: @/500/opendoor-master } }"},

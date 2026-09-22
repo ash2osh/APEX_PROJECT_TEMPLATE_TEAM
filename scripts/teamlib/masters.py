@@ -54,6 +54,14 @@ def _mask_comments_and_strings(text: str) -> str:
                 index += 2
                 state = "block-comment"
                 continue
+            # APEXlang exports may contain ordinary apostrophes in unquoted
+            # localized text (for example ``l'utente``).  Treat an apostrophe
+            # embedded in a word as text; only a standalone apostrophe can
+            # open a quoted value.  Double quotes remain unambiguous.
+            if char == "'" and index > 0 and text[index - 1].isalnum():
+                output.append(char)
+                index += 1
+                continue
             if char in {"'", '"'}:
                 quote = char
                 output.append(" ")
