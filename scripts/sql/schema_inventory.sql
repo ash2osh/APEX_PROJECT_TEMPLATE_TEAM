@@ -32,9 +32,12 @@ BEGIN
                            'TYPE', 'TYPE BODY', 'SYNONYM')
        AND object_name NOT LIKE 'ISEQ$$_%'
        AND object_name NOT LIKE 'SYS_%'
+       AND object_name NOT LIKE 'BIN$%'
     UNION ALL
     SELECT 1 FROM all_constraints
      WHERE owner IN ('__TABLES_SCHEMA__', '__CODE_SCHEMA__')
+       AND constraint_name NOT LIKE 'BIN$%'
+       AND table_name NOT LIKE 'BIN$%'
     UNION ALL
     SELECT 1 FROM all_tab_privs
      WHERE table_schema IN ('__TABLES_SCHEMA__', '__CODE_SCHEMA__')
@@ -62,6 +65,7 @@ BEGIN
                            'TYPE', 'TYPE BODY', 'SYNONYM')
        AND object_name NOT LIKE 'ISEQ$$_%'
        AND object_name NOT LIKE 'SYS_%'
+       AND object_name NOT LIKE 'BIN$%'
     UNION ALL
     SELECT c.owner,
            'CONSTRAINT',
@@ -84,6 +88,8 @@ BEGIN
            )
       FROM all_constraints c
      WHERE c.owner IN ('__TABLES_SCHEMA__', '__CODE_SCHEMA__')
+       AND c.constraint_name NOT LIKE 'BIN$%'
+       AND c.table_name NOT LIKE 'BIN$%'
     UNION ALL
     SELECT p.table_schema,
            'GRANT',
@@ -133,6 +139,7 @@ BEGIN
                                'TYPE', 'TYPE BODY', 'SYNONYM')
        AND object_name NOT LIKE 'ISEQ$$_%'
        AND object_name NOT LIKE 'SYS_%'
+       AND object_name NOT LIKE 'BIN$%'
      ORDER BY owner, object_type, object_name
   ) LOOP
     DBMS_OUTPUT.PUT_LINE('TEAM_INVENTORY_UNSUPPORTED|' || unsupported.owner || '|' || unsupported.object_type || '|' || unsupported.object_name);

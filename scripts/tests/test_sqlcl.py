@@ -242,6 +242,8 @@ class ProductionReadOnlyGuardTests(unittest.TestCase):
         text = source.read_text(encoding="utf-8")
         self.assertIn("TEAM_READONLY_INVENTORY_BLOCK", text)
         self.assertNotIn("CROSS JOIN chunk_numbers", text)
+        self.assertIn("object_name NOT LIKE 'BIN$%'", text)
+        self.assertIn("constraint_name NOT LIKE 'BIN$%'", text)
         _assert_production_read_only(text)
 
     def test_inventory_output_block_with_write_token_is_refused(self):
