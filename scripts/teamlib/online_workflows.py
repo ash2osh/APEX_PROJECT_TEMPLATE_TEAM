@@ -16,7 +16,7 @@ from .app_checks import AppCheckBundle
 from .config import Config, Target, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import DeployReport, deploy_app
-from .fingerprints import Inventory, InventoryError, diff_inventory, drift_is_clean, load_inventory
+from .fingerprints import Inventory, diff_inventory, drift_is_clean
 from .live_inventory import inventory_target
 from .migrate import RunReport, apply_plan
 from .migration_runtime import migration_profiles
@@ -25,7 +25,7 @@ from .qualification import qualify_target, write_report
 from .release import ApplyReport, Manifest, release_app_check_bundle, verify_release
 from .release_adapter import apply_verified_release_live
 from .runtime import RuntimeReport, preflight_online
-from .trees import read_git_tree
+from .source_snapshot import IntegrationSource, load_integration_source
 
 
 class OnlineWorkflowError(RuntimeError):
@@ -41,15 +41,16 @@ class OnlineDependencies:
     """Injectable boundaries for testing the online sequence without SQLcl."""
 
     resolve_head: Callable[[Path], str]
+    load_source: Callable[[Path, str, tuple[str, ...]], IntegrationSource]
     preflight: Callable[..., RuntimeReport]
     setup_control: Callable[[Path, Config], None]
     bootstrap_metadata: Callable[[Path, Config], Any]
     read_state: Callable[[Any, Target], Mapping[str, Any]]
     adopt_frontier: Callable[[Path, Config, Any, Target, Any], str]
     capture_inventory: Callable[[Path, Config, str], Any]
-    check_drift: Callable[[Path, Any], None]
-    apply_migrations: Callable[[Path, Config, Any, str], Any]
-    deploy_apps: Callable[[Path, Config, str], tuple[Any, ...]]
+    check_drift: Callable[[Inventory, Any], None]
+    apply_migrations: Callable[[Path, Config, Any, str, IntegrationSource], Any]
+    deploy_apps: Callable[[Path, Config, IntegrationSource], tuple[Any, ...]]
     qualify_integration: Callable[..., Mapping[str, Any]]
     verify_release: Callable[[Path], Manifest]
     release_app_checks: Callable[[Path], AppCheckBundle]
@@ -64,6 +65,7 @@ class OnlineRunResult:
     source_commit: str
     report: Mapping[str, Any] | None
     confirmation_template: Mapping[str, Any] | None = None
+    checkout_diagnostic: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +77,7 @@ class OnlineRunResult:
                 if self.confirmation_template is not None
                 else None
             ),
+            "checkout_diagnostic": self.checkout_diagnostic,
         }
 
 
@@ -170,11 +173,7 @@ def _capture_inventory(repo: Path, config: Config, phase: str) -> Inventory:
     )
 
 
-def _check_drift(expected_path: Path, before: Any) -> None:
-    try:
-        expected = load_inventory(expected_path)
-    except InventoryError as exc:
-        raise OnlineWorkflowError(f"canonical schema inventory is unreadable: {exc}") from exc
+def _check_drift(expected: Inventory, before: Any) -> None:
     if not isinstance(before, Inventory):
         digest = getattr(before, "digest", None)
         if not isinstance(digest, str):
@@ -200,40 +199,62 @@ def _migration_profiles(repo: Path, config: Config, store: Any, *, dry_run: bool
     )
 
 
-def _apply_migrations(repo: Path, config: Config, store: Any, before_digest: str) -> RunReport:
-    source_commit = _resolve_head(repo)
-    migration_root = repo / "migrations"
-    preview = apply_plan(
-        migration_root,
-        _migration_profiles(
-            repo, config, store, dry_run=True,
-            before_digest=before_digest, source_commit=source_commit,
-        ),
-    )
-    if preview.confirmation_template is not None:
-        return preview
-    return apply_plan(
-        migration_root,
-        _migration_profiles(
-            repo, config, store, dry_run=False,
-            before_digest=before_digest, source_commit=source_commit,
-        ),
-        expected_plan={"pending": preview.selected},
-    )
+def _apply_migrations(
+    repo: Path,
+    config: Config,
+    store: Any,
+    before_digest: str,
+    source: IntegrationSource,
+) -> RunReport:
+    with source.materialize_migrations(
+        repo / "scratch" / "integration"
+    ) as migration_root:
+        preview = apply_plan(
+            migration_root,
+            _migration_profiles(
+                repo,
+                config,
+                store,
+                dry_run=True,
+                before_digest=before_digest,
+                source_commit=source.commit,
+            ),
+        )
+        if preview.confirmation_template is not None:
+            return preview
+        return apply_plan(
+            migration_root,
+            _migration_profiles(
+                repo,
+                config,
+                store,
+                dry_run=False,
+                before_digest=before_digest,
+                source_commit=source.commit,
+            ),
+            expected_plan={"pending": preview.selected},
+        )
 
 
-def _deploy_apps(repo: Path, config: Config, source_commit: str) -> tuple[DeployReport, ...]:
+def _deploy_apps(
+    repo: Path, config: Config, source: IntegrationSource
+) -> tuple[DeployReport, ...]:
     metadata = _metadata(config)
     control_store = SqlControlStore(metadata, work_root=repo / "scratch" / "metadata")
     reports: list[DeployReport] = []
     for alias in sorted(config.apps):
         target = profile_target(config, "APEX", alias=alias)
-        tree = read_git_tree(repo, source_commit, alias)
+        try:
+            tree = source.app_trees[alias]
+        except KeyError as exc:
+            raise OnlineWorkflowError(
+                f"integration source is missing application {alias}"
+            ) from exc
         reports.append(
             deploy_app(
                 target,
                 tree,
-                source_commit,
+                source.commit,
                 repo=repo,
                 control_store=control_store,
             )
@@ -248,6 +269,7 @@ def _qualify_integration(
     aliases: tuple[str, ...],
     *,
     store: Any,
+    check_bundle: AppCheckBundle,
     flow_executable: str,
     runtime_report: RuntimeReport,
 ) -> Mapping[str, Any]:
@@ -258,6 +280,7 @@ def _qualify_integration(
         aliases,
         store=store,
         work=repo / "scratch" / "integration" / "qualification",
+        check_bundle=check_bundle,
         flow_executable=flow_executable,
         runner_contract=repo / "ci" / "runner-contract.json",
         runtime_report=runtime_report,
@@ -298,6 +321,7 @@ def _qualify_release(
 def _default_dependencies() -> OnlineDependencies:
     return OnlineDependencies(
         resolve_head=_resolve_head,
+        load_source=load_integration_source,
         preflight=preflight_online,
         setup_control=_setup_control,
         bootstrap_metadata=_bootstrap_metadata,
@@ -324,6 +348,21 @@ def _confirmation_template(report: Any) -> Mapping[str, Any] | None:
     return dict(value) if isinstance(value, Mapping) else None
 
 
+def _checkout_diagnostic(
+    deps: OnlineDependencies, repo: Path, source_commit: str
+) -> str | None:
+    try:
+        current = deps.resolve_head(repo)
+    except Exception as exc:
+        return f"checkout HEAD could not be re-read after source capture: {exc}"
+    if current != source_commit:
+        return (
+            "checkout HEAD changed after source capture; all protected operations "
+            f"continued from immutable source {source_commit}"
+        )
+    return None
+
+
 def run_integration(
     repo: str | Path,
     config: Config,
@@ -346,9 +385,15 @@ def run_integration(
         raise OnlineWorkflowError("integration source must be an exact commit")
     aliases = tuple(sorted(config.apps))
     try:
+        source = deps.load_source(repo_path, source_commit, aliases)
+    except Exception as exc:
+        raise OnlineWorkflowError(f"integration source snapshot failed: {exc}") from exc
+    try:
         runtime = deps.preflight(config, repo_path, flow_executable)
     except RuntimeError as exc:
         raise OnlineWorkflowError(str(exc)) from exc
+    if deps.resolve_head(repo_path) != source.commit:
+        raise OnlineWorkflowError("integration checkout HEAD changed before the first write")
     deps.setup_control(repo_path, config)
     store = deps.bootstrap_metadata(repo_path, config)
     metadata = profile_target(config, "METADATA")
@@ -369,21 +414,28 @@ def run_integration(
         if history:
             raise OnlineWorkflowError("migration history exists without an observed frontier")
         deps.adopt_frontier(repo_path, config, store, metadata, before)
-    deps.check_drift(repo_path / "database" / "schema-inventory.json", before)
+    deps.check_drift(source.canonical_inventory, before)
     migration_report = deps.apply_migrations(
-        repo_path, config, store, str(getattr(before, "digest", ""))
+        repo_path, config, store, str(getattr(before, "digest", "")), source
     )
     confirmation = _confirmation_template(migration_report)
     if confirmation is not None:
-        return OnlineRunResult("maintenance-required", source_commit, None, confirmation)
+        return OnlineRunResult(
+            "maintenance-required",
+            source_commit,
+            None,
+            confirmation,
+            _checkout_diagnostic(deps, repo_path, source.commit),
+        )
     try:
-        deps.deploy_apps(repo_path, config, source_commit)
+        deps.deploy_apps(repo_path, config, source)
         report = deps.qualify_integration(
             repo_path,
             config,
             source_commit,
             aliases,
             store=store,
+            check_bundle=source.check_bundle,
             flow_executable=flow_executable,
             runtime_report=runtime,
         )
@@ -395,7 +447,12 @@ def run_integration(
     if not isinstance(report, Mapping):
         raise OnlineWorkflowError("integration qualification did not return a report")
     deps.write_report(report, Path(out))
-    return OnlineRunResult("PASS", source_commit, report)
+    return OnlineRunResult(
+        "PASS",
+        source_commit,
+        report,
+        checkout_diagnostic=_checkout_diagnostic(deps, repo_path, source.commit),
+    )
 
 
 def run_release_test(

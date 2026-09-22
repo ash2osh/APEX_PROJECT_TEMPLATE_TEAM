@@ -107,13 +107,33 @@ class OnlineWorkflowTests(unittest.TestCase):
     def dependencies(self, events: list[str], *, head: str = "a" * 40, state=None, history=None,
                      drift_error: Exception | None = None, migration_result=None,
                      qualify_result=None, deploy_error: Exception | None = None,
-                     migration_error: Exception | None = None):
+                     migration_error: Exception | None = None,
+                     second_head: str | None = None,
+                     later_head: str | None = None):
         store = FakeStore(events, observations=(state or {}).get("observations", []), history=history)
         inventory = SimpleNamespace(digest="b" * 64, as_dict=lambda: {"inventory_digest": "b" * 64})
         runtime = SimpleNamespace(toolchain_digest="c" * 64)
+        bundle = app_check_bundle()
+        source = SimpleNamespace(
+            commit=head,
+            canonical_inventory=inventory,
+            app_trees={"employee": {"application.apx": b"committed app\n"}},
+            check_bundle=bundle,
+        )
+        resolved = 0
 
         def resolve_head(_repo):
-            return head
+            nonlocal resolved
+            resolved += 1
+            if resolved > 2 and later_head is not None:
+                return later_head
+            return second_head if resolved > 1 and second_head is not None else head
+
+        def load_source(_repo, commit, aliases):
+            events.append("load-source")
+            self.assertEqual(commit, head)
+            self.assertEqual(tuple(aliases), ("employee",))
+            return source
 
         def preflight(_config, _repo, _flow):
             events.append("preflight")
@@ -137,27 +157,31 @@ class OnlineWorkflowTests(unittest.TestCase):
             events.append("capture-before" if phase == "integration-before" else f"capture:{phase}")
             return inventory
 
-        def check_drift(_expected, _before):
+        def check_drift(expected, _before):
+            self.assertIs(expected, source.canonical_inventory)
             events.append("check-drift")
             if drift_error is not None:
                 raise drift_error
 
-        def apply_migrations(_repo, _config, _store, before_digest):
+        def apply_migrations(_repo, _config, _store, before_digest, selected_source):
             self.assertEqual(before_digest, inventory.digest)
+            self.assertIs(selected_source, source)
             events.append("migrate")
             if migration_error is not None:
                 raise migration_error
             return migration_result or SimpleNamespace(confirmation_template=None)
 
-        def deploy_apps(_repo, _config, source_commit):
+        def deploy_apps(_repo, _config, selected_source):
             events.append("deploy:employee")
+            self.assertIs(selected_source, source)
             if deploy_error is not None:
                 raise deploy_error
-            return (SimpleNamespace(source_commit=source_commit),)
+            return (SimpleNamespace(source_commit=selected_source.commit),)
 
         def qualify_integration(*args, **kwargs):
             events.append("qualify")
             self.assertEqual(kwargs["runtime_report"], runtime)
+            self.assertIs(kwargs["check_bundle"], source.check_bundle)
             return qualify_result or {
                 "version": 2, "final_status": "PASS", "source_commit": head,
             }
@@ -168,6 +192,7 @@ class OnlineWorkflowTests(unittest.TestCase):
 
         return OnlineDependencies(
             resolve_head=resolve_head,
+            load_source=load_source,
             preflight=preflight,
             setup_control=setup_control,
             bootstrap_metadata=bootstrap_metadata,
@@ -198,7 +223,7 @@ class OnlineWorkflowTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                "preflight", "setup-control", "bootstrap-metadata",
+                "load-source", "preflight", "setup-control", "bootstrap-metadata",
                 "capture-before", "read-frontier", "adopt-frontier",
                 "check-drift", "migrate", "deploy:employee", "qualify", "write-report",
             ],
@@ -236,7 +261,36 @@ class OnlineWorkflowTests(unittest.TestCase):
                         self.root, config_for(), self.root / "out.json",
                         flow_executable=str(self.flow_runner), dependencies=dependencies,
                     )
-                self.assertEqual(events, ["preflight"])
+                self.assertEqual(events, ["load-source", "preflight"])
+
+    def test_head_change_before_first_write_refuses(self):
+        events: list[str] = []
+        dependencies, _ = self.dependencies(events, second_head="b" * 40)
+        with self.assertRaisesRegex(OnlineWorkflowError, "HEAD changed"):
+            run_integration(
+                self.root,
+                config_for(),
+                self.root / "out.json",
+                flow_executable=str(self.flow_runner),
+                dependencies=dependencies,
+            )
+        self.assertEqual(events, ["load-source", "preflight"])
+
+    def test_later_head_change_is_reported_without_changing_loaded_source(self):
+        events: list[str] = []
+        dependencies, _ = self.dependencies(events, later_head="b" * 40)
+
+        result = run_integration(
+            self.root,
+            config_for(),
+            self.root / "out.json",
+            flow_executable=str(self.flow_runner),
+            dependencies=dependencies,
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("changed after source capture", result.checkout_diagnostic)
+        self.assertEqual(result.source_commit, "a" * 40)
 
     def test_run_release_test_translates_preflight_runtime_errors(self):
         events: list[str] = []
@@ -368,6 +422,7 @@ class OnlineWorkflowTests(unittest.TestCase):
 
         dependencies = OnlineDependencies(
             resolve_head=lambda _repo: manifest.source_commit,
+            load_source=lambda *_args: None,
             preflight=preflight,
             setup_control=lambda *_args: None,
             bootstrap_metadata=lambda *_args: None,
@@ -465,6 +520,7 @@ class OnlineWorkflowTests(unittest.TestCase):
 
         dependencies = OnlineDependencies(
             resolve_head=lambda _repo: manifest.source_commit,
+            load_source=lambda *_args: None,
             preflight=lambda *_args: runtime,
             setup_control=lambda *_args: None,
             bootstrap_metadata=lambda *_args: None,

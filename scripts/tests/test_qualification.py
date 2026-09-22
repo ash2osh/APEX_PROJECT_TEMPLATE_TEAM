@@ -203,6 +203,7 @@ class QualificationTests(unittest.TestCase):
                     ("employee",),
                     store=FakeStore(),
                     work=self.root / "missing-bundle",
+                    check_bundle=None,
                     release_archive=self.root / "release.tar",
                     apply_report=self.apply_report_for(config).as_dict(),
                     runner_contract=Path("ci/runner-contract.json"),
@@ -307,6 +308,7 @@ class QualificationTests(unittest.TestCase):
             qualify_target(
                 self.root, config_for("production", "production"), "a" * 40, ("employee",),
                 store=FakeStore(), work=self.root / "work",
+                check_bundle=self.bundle,
                 runner_contract=Path("ci/runner-contract.json"),
                 runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),

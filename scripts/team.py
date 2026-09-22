@@ -45,6 +45,7 @@ from teamlib.runtime import preflight_online
 from teamlib.online_workflows import OnlineWorkflowError, run_integration, run_release_test
 from teamlib.state import StateError, load_baseline
 from teamlib.migration_bundle import BundleError
+from teamlib.source_snapshot import IntegrationSource, SourceSnapshotError, load_integration_source
 from teamlib.trees import TreeError, read_git_tree
 
 # Commands that write controller or metadata state and are therefore refused for
@@ -199,6 +200,16 @@ def _resolved_commit(repo: Path, ref: str) -> str:
     if result.returncode != 0:
         raise ConfigError(f"could not resolve source ref: {ref}")
     return result.stdout.strip()
+
+
+def _qualification_source(
+    repo: Path, source_commit: str, aliases: tuple[str, ...]
+) -> IntegrationSource:
+    """Load qualification checks only from the caller's exact Git commit."""
+    try:
+        return load_integration_source(repo, source_commit, aliases)
+    except SourceSnapshotError as exc:
+        raise ConfigError(f"qualification source snapshot failed: {exc}") from exc
 
 
 def _import_notice(
@@ -358,6 +369,7 @@ def _online(args: argparse.Namespace) -> object:
         if _resolved_commit(repo, "HEAD") != args.source_commit:
             raise ConfigError("qualification checkout is not the exact source commit")
         aliases = tuple(part.strip() for part in args.aliases.split(",") if part.strip())
+        source = _qualification_source(repo, args.source_commit, aliases)
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
         try:
@@ -376,6 +388,7 @@ def _online(args: argparse.Namespace) -> object:
                 aliases,
                 store=store,
                 work=repo / "scratch" / "qualification",
+                check_bundle=source.check_bundle,
                 release_archive=args.release_archive,
                 apply_report=args.apply_report,
                 flow_executable=os.environ.get("TEAM_FLOW_RUNNER") or None,

@@ -22,7 +22,6 @@ from .app_checks import (
     AppCheckBundle,
     AppCheckError,
     AppCheckReport,
-    build_app_check_bundle,
     verify_candidate_apps,
 )
 from .assertions import AssertionVerificationError, parse_team_assertions
@@ -72,19 +71,6 @@ def _load_json(path: str | Path, label: str) -> tuple[bytes, dict[str, Any]]:
     if not isinstance(value, dict):
         raise QualificationError(f"{label} must contain a JSON object")
     return raw, value
-
-
-def declaration_paths(repo: Path, aliases: Sequence[str]) -> dict[str, Path]:
-    """Resolve one regular declaration file for every selected application."""
-    result: dict[str, Path] = {}
-    for alias in aliases:
-        if not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias):
-            raise QualificationError(f"application alias is unsafe: {alias!r}")
-        path = repo / "ci" / "app-checks" / f"{alias}.json"
-        if path.is_symlink() or not path.is_file():
-            raise QualificationError(f"candidate application declaration is missing: {path}")
-        result[alias] = path
-    return result
 
 
 def _select_runner(
@@ -191,27 +177,6 @@ def _flow_runner(executable: str, work: Path, bundle: AppCheckBundle):
         return _invoke_flow_adapter(executable, alias, payload)
 
     return resolve
-
-
-def _worktree_check_bundle(repo: Path, aliases: Sequence[str]) -> AppCheckBundle:
-    root = repo / "ci" / "app-checks"
-    if root.is_symlink() or not root.is_dir():
-        raise QualificationError(f"candidate application checks are missing: {root}")
-    members: dict[str, bytes] = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise QualificationError(f"candidate application check member is a symlink: {path}")
-        if path.is_file():
-            try:
-                members[path.relative_to(root).as_posix()] = path.read_bytes()
-            except OSError as exc:
-                raise QualificationError(
-                    f"candidate application check member is unreadable: {path}"
-                ) from exc
-    try:
-        return build_app_check_bundle(members, aliases)
-    except AppCheckError as exc:
-        raise QualificationError(str(exc)) from exc
 
 
 def _target_identity(config: Config, targets: Mapping[str, Target]) -> dict[str, Any]:
@@ -326,7 +291,7 @@ def qualify_target(
     *,
     store: Any,
     work: str | Path,
-    check_bundle: AppCheckBundle | None = None,
+    check_bundle: AppCheckBundle,
     release_archive: str | Path | None = None,
     apply_report: str | Path | Mapping[str, Any] | None = None,
     flow_executable: str | None = None,
@@ -348,13 +313,13 @@ def qualify_target(
         raise QualificationError("qualification aliases must exactly match configured application bindings")
     if bool(release_archive) != bool(apply_report):
         raise QualificationError("--release-archive and --apply-report must be supplied together")
-    if release_archive is not None and check_bundle is None:
-        raise QualificationError("release qualification requires an explicit check bundle")
+    if not isinstance(check_bundle, AppCheckBundle):
+        raise QualificationError("qualification requires an explicit check bundle")
 
     repo_path = Path(repo)
     work_path = Path(work)
     work_path.mkdir(parents=True, exist_ok=True)
-    active_bundle = check_bundle or _worktree_check_bundle(repo_path, selected)
+    active_bundle = check_bundle
     if set(active_bundle.declarations) != set(selected):
         raise QualificationError(
             "application check bundle aliases do not match configured application bindings"

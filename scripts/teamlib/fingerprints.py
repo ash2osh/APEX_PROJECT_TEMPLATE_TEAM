@@ -152,10 +152,22 @@ def save_inventory(inventory: Inventory, path: str | Path) -> None:
 
 
 def load_inventory(path: str | Path) -> Inventory:
+    source = Path(path)
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise InventoryError("inventory evidence is unreadable") from exc
+        raw = source.read_bytes()
+    except OSError as exc:
+        raise InventoryError(f"inventory evidence is unreadable: {source}") from exc
+    return load_inventory_bytes(raw, source=str(source))
+
+
+def load_inventory_bytes(raw: bytes, *, source: str) -> Inventory:
+    """Parse canonical inventory from caller-supplied immutable bytes."""
+    if not isinstance(raw, bytes):
+        raise InventoryError(f"inventory evidence is unreadable: {source}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise InventoryError(f"inventory evidence is unreadable: {source}") from exc
     try:
         inventory = Inventory(
             int(data["version"]), data["topology"], data["normalizer_version"],
@@ -163,9 +175,9 @@ def load_inventory(path: str | Path) -> Inventory:
             data.get("schema_set_digest", ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise InventoryError("inventory evidence is malformed") from exc
+        raise InventoryError(f"inventory evidence is malformed: {source}") from exc
     if data.get("inventory_digest") != inventory.digest:
-        raise InventoryError("inventory digest does not match evidence")
+        raise InventoryError(f"inventory digest does not match evidence: {source}")
     return inventory
 
 

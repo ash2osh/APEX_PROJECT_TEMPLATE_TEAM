@@ -9,6 +9,7 @@ if _SCRIPTS_DIR not in sys.path:
 
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,6 +59,14 @@ class FrontierAdoptionTests(unittest.TestCase):
         self.assertEqual(parsed.command, "qualify-target")
         self.assertEqual(parsed.aliases, "employee")
         self.assertIn("qualify-target", team.PRODUCTION_REFUSED_COMMANDS)
+
+    def test_qualify_target_loads_the_exact_source_check_bundle(self):
+        import team
+
+        source = object()
+        with patch.object(team, "load_integration_source", return_value=source) as load:
+            self.assertIs(team._qualification_source(ROOT, "a" * 40, ("employee",)), source)
+        load.assert_called_once_with(ROOT, "a" * 40, ("employee",))
 
     def test_run_integration_has_single_output_argument_and_is_protected(self):
         import team
