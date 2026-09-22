@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,14 +19,17 @@ from teamlib.local_team_e2e import (  # noqa: E402
     FixtureSpec,
     PreflightEvidence,
     RunManifest,
+    create_team_topology,
     assert_safe_argv,
     cleanup_fixture,
     inspect_fixture,
     parse_saved_connections,
     provision_fixture,
     run_command,
+    run_team_command,
     save_connection_script,
 )
+from teamlib.config import load_config  # noqa: E402
 
 
 class LocalTeamManifestTests(unittest.TestCase):
@@ -172,6 +176,128 @@ class LocalTeamCommandTests(unittest.TestCase):
             script,
         )
         self.assertNotIn("\nE2ETest_Abc123_X\n", script)
+
+
+class LocalTeamTopologyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="local-team-topology-")
+        self.root = Path(self.temp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self._git("init", "--initial-branch", "main")
+        self._git("config", "user.name", "Topology Test")
+        self._git("config", "user.email", "topology@example.invalid")
+        scripts = self.source / "scripts"
+        scripts.mkdir()
+        (scripts / "team.py").write_text(
+            "import json, os\n"
+            "print(json.dumps({k: os.environ.get(k) for k in ('USER', 'TEAM_CHECKOUT_UUID', 'PYTHONDONTWRITEBYTECODE')}))\n",
+            encoding="utf-8",
+        )
+        (self.source / "README.md").write_text("topology fixture\n", encoding="utf-8")
+        self._git("add", ".")
+        self._git("commit", "-m", "seed topology")
+        self.commit = subprocess.check_output(
+            ["git", "-C", str(self.source), "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.run_root = self.root / "run"
+        self.manifest = RunManifest.create(
+            self.run_root,
+            FixtureSpec(),
+            self.commit,
+            {
+                "DB_NAME": "FREEPDB1",
+                "SERVICE": "freep1",
+                "INSTANCE_ID": "FREEPDB1@docker",
+                "WORKSPACE_ID": "90000",
+            },
+        )
+        self.env_values = {
+            "payload_connection": "docker-demo",
+            "metadata_connection": "docker-team-e2e-meta-test",
+            "db_name": "FREEPDB1",
+            "service": "freep1",
+            "instance_id": "FREEPDB1@docker",
+            "workspace_id": "90000",
+            "metadata_schema": "TEAM_E2E_META",
+        }
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(self.source), *args],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_topology_creates_three_isolated_local_clones_and_ignored_env(self):
+        topology = create_team_topology(self.manifest, self.env_values, source_repo=self.source)
+        self.assertEqual(topology.source_commit, self.commit)
+        self.assertTrue(topology.remote.is_dir())
+        self.assertEqual([developer.branch for developer in topology.developers], [
+            "e2e/alice", "e2e/bob", "e2e/carol"
+        ])
+        self.assertEqual(len({developer.checkout_uuid for developer in topology.developers}), 3)
+        self.assertEqual(len({developer.git_email for developer in topology.developers}), 3)
+        for developer in topology.developers:
+            self.assertTrue(developer.clone.is_dir())
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(developer.clone), "remote", "get-url", "origin"],
+                    text=True,
+                ).strip(),
+                str(topology.remote),
+            )
+            self.assertNotIn("://", str(topology.remote))
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(developer.clone), "branch", "--show-current"],
+                    text=True,
+                ).strip(),
+                developer.branch,
+            )
+            self.assertEqual(stat.S_IMODE(developer.env_file.stat().st_mode), 0o600)
+            env_text = developer.env_file.read_text(encoding="utf-8")
+            self.assertIn("APEX_APPS=team-e2e:9099", env_text)
+            self.assertIn("TABLES_SCHEMA=DEMO", env_text)
+            self.assertIn("CODE_SCHEMA=DEMO", env_text)
+            self.assertIn("APEX_PARSING_SCHEMA=DEMO", env_text)
+            self.assertIn("METADATA_SCHEMA=TEAM_E2E_META", env_text)
+            self.assertIn("APP_OWNERSHIP_MODE=shared", env_text)
+            config = load_config(developer.env_file, require_verify=True)
+            self.assertEqual(config.apps, {"team-e2e": 9099})
+            self.assertEqual(config.metadata_schema, "TEAM_E2E_META")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(developer.clone), "check-ignore", ".env.local-team-e2e"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                ).returncode,
+                0,
+            )
+        self.assertEqual(self._git("remote"), "")
+
+    def test_run_team_command_scopes_checkout_environment_to_child(self):
+        topology = create_team_topology(self.manifest, self.env_values, source_repo=self.source)
+        developer = topology.developers[0]
+        previous = os.environ.get("TEAM_CHECKOUT_UUID")
+        os.environ.pop("TEAM_CHECKOUT_UUID", None)
+        try:
+            result = run_team_command(developer, "doctor")
+        finally:
+            if previous is not None:
+                os.environ["TEAM_CHECKOUT_UUID"] = previous
+        observed = json.loads(result.stdout_path.read_text(encoding="utf-8"))
+        self.assertEqual(observed["USER"], "alice")
+        self.assertEqual(observed["TEAM_CHECKOUT_UUID"], developer.checkout_uuid)
+        self.assertEqual(observed["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertNotIn("TEAM_CHECKOUT_UUID", os.environ)
 
 
 class FakeFixtureAdapter:

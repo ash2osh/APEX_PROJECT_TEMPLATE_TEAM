@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Mapping, Sequence
+import uuid
 
 
 class E2EError(RuntimeError):
@@ -45,6 +46,7 @@ _SENSITIVE_KEY_RE = re.compile(r"(?:pass(word)?|secret|token|credential|private|
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONNECTION_TREE_RE = re.compile(r"(?:├──|└──)\s+(.+?)\s*$")
 _CONNECTION_PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def _now() -> str:
@@ -1064,6 +1066,213 @@ class RunManifest:
             saved_connection=f"docker-team-e2e-meta-{suffix}",
             run_root=self.run_root,
         )
+
+
+@dataclass(frozen=True)
+class Developer:
+    name: str
+    clone: Path
+    branch: str
+    checkout_uuid: str
+    git_email: str
+    env_file: Path
+
+
+@dataclass(frozen=True)
+class TeamTopology:
+    run_root: Path
+    remote: Path
+    source_commit: str
+    developers: tuple[Developer, ...]
+    env_values: dict[str, str]
+    commands: tuple[CommandResult, ...] = ()
+
+
+def _topology_git(
+    run_root: Path,
+    cwd: Path,
+    arguments: Sequence[str],
+    commands: list[CommandResult],
+) -> str:
+    argv = ["git"]
+    if cwd != run_root:
+        argv.extend(("-C", str(cwd)))
+    argv.extend(arguments)
+    result = run_command(argv, cwd=run_root, run_root=run_root)
+    commands.append(result)
+    stdout = result.stdout_path.read_text(encoding="utf-8")
+    if result.returncode != 0:
+        stderr = result.stderr_path.read_text(encoding="utf-8")
+        detail = stderr.strip() or f"exit code {result.returncode}"
+        raise E2EError(f"Git topology command failed: {detail}; see {result.stderr_path}")
+    return stdout.strip()
+
+
+def _topology_value(values: Mapping[str, Any], *names: str) -> str:
+    for name in names:
+        if name in values:
+            return _safe_text(values[name], label=name)
+    raise E2EError(f"topology environment is missing {names[0]}")
+
+
+def _topology_env(spec: FixtureSpec, values: Mapping[str, Any]) -> dict[str, str]:
+    supplied = {str(key): value for key, value in values.items()}
+    for key in supplied:
+        if _SENSITIVE_KEY_RE.search(key):
+            raise E2EError(f"topology environment contains a sensitive key: {key}")
+    connection = _topology_value(supplied, "payload_connection", "PAYLOAD_CONNECTION")
+    metadata_connection = _topology_value(supplied, "metadata_connection", "METADATA_CONNECTION")
+    db_name = _topology_value(supplied, "db_name", "DB_NAME")
+    service = _topology_value(supplied, "service", "SERVICE")
+    instance_id = _topology_value(supplied, "instance_id", "INSTANCE_ID")
+    workspace_id = _topology_value(supplied, "workspace_id", "APEX_WORKSPACE_ID")
+    metadata_schema = _topology_value(supplied, "metadata_schema", "METADATA_SCHEMA")
+    if not workspace_id.isdigit() or int(workspace_id) <= 0:
+        raise E2EError("topology workspace_id must be a positive integer")
+    if metadata_schema != spec.metadata_schema or not _ORACLE_RE.fullmatch(metadata_schema):
+        raise E2EError("topology metadata schema does not match the fixture specification")
+    for label, value in (
+        ("payload connection", connection),
+        ("metadata connection", metadata_connection),
+        ("database name", db_name),
+        ("service", service),
+        ("instance ID", instance_id),
+    ):
+        if _CONTROL_RE.search(value):
+            raise E2EError(f"topology {label} contains a control character")
+    values_out: dict[str, str] = {
+        "PROJECT_NAME": spec.project_id,
+        "TARGET_ROLE": "developer",
+        "DB_ENVIRONMENT": "development",
+        "APEX_APPS": f"{spec.tracked_alias}:{spec.fixture_app_id}",
+        "TABLES_SCHEMA": "DEMO",
+        "CODE_SCHEMA": "DEMO",
+        "APEX_PARSING_SCHEMA": "DEMO",
+        "METADATA_SCHEMA": metadata_schema,
+        "APEX_WORKSPACE_ID": workspace_id,
+        "APP_OWNERSHIP_MODE": "shared",
+    }
+    profiles = (
+        ("TABLES", connection, "DEMO"),
+        ("CODE", connection, "DEMO"),
+        ("APEX", connection, "DEMO"),
+        ("METADATA", metadata_connection, metadata_schema),
+        ("VERIFY", connection, "DEMO"),
+    )
+    for profile, profile_connection, schema in profiles:
+        values_out.update(
+            {
+                f"{profile}_SQLCL_CONNECTION": profile_connection,
+                f"{profile}_EXPECTED_USER": schema,
+                f"{profile}_EXPECTED_CURRENT_SCHEMA": schema,
+                f"{profile}_EXPECTED_DB_NAME": db_name,
+                f"{profile}_EXPECTED_SERVICE": service,
+                f"{profile}_EXPECTED_INSTANCE_ID": instance_id,
+            }
+        )
+    return values_out
+
+
+def _write_topology_env(path: Path, values: Mapping[str, str]) -> None:
+    if path.exists() or path.is_symlink():
+        raise E2EError(f"topology environment already exists: {path}")
+    if not path.parent.is_dir() or path.parent.is_symlink():
+        raise E2EError("topology environment parent is not a real directory")
+    lines = []
+    for key, value in values.items():
+        if not _ENV_KEY_RE.fullmatch(key):
+            raise E2EError(f"topology environment key is unsafe: {key}")
+        _safe_text(value, label=f"topology environment {key}")
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
+    os.chmod(path, 0o600)
+
+
+def _ignore_topology_env(clone: Path) -> None:
+    exclude = clone / ".git" / "info" / "exclude"
+    if not exclude.is_file() or exclude.is_symlink():
+        raise E2EError("developer clone has no regular Git exclude file")
+    text = exclude.read_text(encoding="utf-8")
+    if ".env.local-team-e2e" not in {line.strip() for line in text.splitlines()}:
+        suffix = "" if not text or text.endswith("\n") else "\n"
+        exclude.write_text(text + suffix + ".env.local-team-e2e\n", encoding="utf-8", newline="")
+
+
+def create_team_topology(
+    manifest: RunManifest,
+    env_values: Mapping[str, Any],
+    *,
+    source_repo: str | Path | None = None,
+) -> TeamTopology:
+    """Create the run-owned bare remote and three local developer clones."""
+
+    root = manifest.run_root.resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise E2EError("topology run root is not a real directory")
+    source = Path(source_repo) if source_repo is not None else Path(
+        subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+    )
+    if source.is_symlink() or not source.is_dir():
+        raise E2EError("topology source repository is not a real directory")
+    source = source.resolve()
+    source_commit = _topology_git(root, root, ["-C", str(source), "rev-parse", "--verify", f"{manifest.source_commit}^{{commit}}"], [])
+    # The first command above is intentionally not retained; all subsequent
+    # commands are durable evidence under the manifest root.
+    if source_commit != manifest.source_commit:
+        raise E2EError("topology source commit does not match the manifest")
+    status_commands: list[CommandResult] = []
+    status = _topology_git(root, root, ["-C", str(source), "status", "--porcelain=v1", "--untracked-files=all"], status_commands)
+    if status:
+        raise E2EError("topology source repository is not clean; commit source changes first")
+    remote = root / "remote.git"
+    dev_root = root / "dev"
+    if remote.exists() or remote.is_symlink() or dev_root.exists() or dev_root.is_symlink():
+        raise E2EError("topology remote or developer root already exists")
+    dev_root.mkdir(mode=0o700)
+    commands = list(status_commands)
+    _topology_git(root, root, ["init", "--bare", str(remote)], commands)
+    _topology_git(root, root, ["--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], commands)
+    _topology_git(root, root, ["-C", str(source), "push", str(remote), f"{manifest.source_commit}:refs/heads/main"], commands)
+    generated_env = _topology_env(manifest.spec, env_values)
+    developers: list[Developer] = []
+    for name in ("alice", "bob", "carol"):
+        clone = dev_root / name
+        branch = f"e2e/{name}"
+        _topology_git(root, root, ["clone", "--no-local", "--no-tags", "--branch", "main", str(remote), str(clone)], commands)
+        _topology_git(root, clone, ["checkout", "-b", branch, "origin/main"], commands)
+        email = f"{name}@local-team-e2e.invalid"
+        _topology_git(root, clone, ["config", "user.name", f"{name.title()} Developer"], commands)
+        _topology_git(root, clone, ["config", "user.email", email], commands)
+        _ignore_topology_env(clone)
+        checkout_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"{manifest.spec.project_id}:{manifest.run_id}:{name}").hex
+        env_file = clone / ".env.local-team-e2e"
+        _write_topology_env(env_file, generated_env)
+        developers.append(Developer(name, clone, branch, checkout_uuid, email, env_file))
+    return TeamTopology(root, remote, manifest.source_commit, tuple(developers), generated_env, tuple(commands))
+
+
+def run_team_command(developer: Developer, *arguments: str, timeout: float | None = None) -> CommandResult:
+    """Run the public team CLI with checkout identity scoped to this child."""
+
+    if not isinstance(developer, Developer) or not developer.clone.is_dir() or developer.clone.is_symlink():
+        raise E2EError("developer clone is not a real directory")
+    script = developer.clone / "scripts" / "team.py"
+    if not script.is_file() or script.is_symlink():
+        raise E2EError("developer clone has no regular scripts/team.py")
+    run_root = developer.clone.parent.parent
+    env_file = developer.env_file
+    result = run_command(
+        [sys.executable, str(script), "--env", str(env_file), *arguments],
+        cwd=developer.clone,
+        run_root=run_root,
+        env={
+            "USER": developer.name,
+            "TEAM_CHECKOUT_UUID": developer.checkout_uuid,
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        timeout=timeout,
+    )
+    return result
 
 
 def build_parser():
