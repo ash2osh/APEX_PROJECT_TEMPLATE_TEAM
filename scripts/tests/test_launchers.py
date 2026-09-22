@@ -18,6 +18,14 @@ from unittest.mock import patch
 import team
 
 
+def command_help(name: str) -> str:
+    parser = team._parser()
+    action = next(
+        item for item in parser._actions if isinstance(item, team.argparse._SubParsersAction)
+    )
+    return action.choices[name].format_help()
+
+
 class LauncherTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -92,6 +100,47 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--confirmation-out", result.stdout)
+
+    def test_top_level_help_categorizes_and_describes_every_command(self):
+        help_text = team._parser().format_help()
+        for label in (
+            "Daily application work",
+            "Protected qualification",
+            "Migration maintenance",
+            "Recovery and diagnosis",
+            "Release and handoff",
+        ):
+            self.assertIn(label, help_text)
+        for command in (
+            "export-app",
+            "run-integration",
+            "migrate",
+            "recover-migration",
+            "build-release",
+            "gen-runbook",
+        ):
+            self.assertRegex(help_text, rf"{command}\s+\S")
+
+        parser = team._parser()
+        action = next(
+            item
+            for item in parser._actions
+            if isinstance(item, team.argparse._SubParsersAction)
+        )
+        self.assertEqual(set(team.COMMAND_HELP), set(action.choices))
+
+    def test_sensitive_command_help_states_effects_and_required_evidence(self):
+        self.assertIn("shared Builder application", command_help("export-app"))
+        self.assertIn("reconciliation", command_help("export-app"))
+        self.assertIn("overwrites the shared application", command_help("import-app"))
+        self.assertIn("posted pause", command_help("import-app"))
+        self.assertIn("non-production writes", command_help("run-integration"))
+        self.assertIn("read-only diagnosis", command_help("qualify-target"))
+        for command in ("migrate", "undo-migration", "redo-migration"):
+            self.assertIn("--confirmation-out", command_help(command))
+            self.assertIn("false-only", command_help(command))
+        self.assertIn("--archive", command_help("sign-test-evidence"))
+        self.assertIn("required", command_help("sign-test-evidence").lower())
 
 
 class OfflineEnvForwardingTests(unittest.TestCase):

@@ -75,6 +75,94 @@ VERIFY_REQUIRED_COMMANDS = frozenset(
 )
 
 
+COMMAND_HELP = {
+    "doctor": ("Daily application work", "validate the selected credential-free target profile"),
+    "export-app": ("Daily application work", "capture and reconcile the shared Builder application"),
+    "import-app": ("Recovery and diagnosis", "coordinated overwrite of the paused shared Builder application"),
+    "run-integration": ("Protected qualification", "apply and qualify one exact commit on protected integration"),
+    "qualify-target": ("Protected qualification", "read-only diagnosis of a persistent qualified target"),
+    "migrate": ("Migration maintenance", "preview or apply reviewed forward migration bundles"),
+    "undo-migration": ("Migration maintenance", "preview or apply one global-LIFO authored down bundle"),
+    "redo-migration": ("Migration maintenance", "preview or reapply one explicitly reverted bundle"),
+    "recover-migration": ("Recovery and diagnosis", "clear a retained migration mutex from reviewed evidence"),
+    "build-release": ("Release and handoff", "build and self-verify one immutable release archive"),
+    "run-release-test": ("Release and handoff", "apply and qualify one archive on the protected test target"),
+    "sign-test-evidence": ("Release and handoff", "bind and sign canonical PASS evidence for one archive"),
+    "gen-runbook": ("Release and handoff", "verify signed evidence and generate the production-owner handoff"),
+    "setup-state": ("Daily application work", "initialize shared application controller metadata"),
+    "register-app": ("Daily application work", "register this checkout for a configured shared application"),
+    "app-status": ("Daily application work", "read current shared application controller status"),
+    "capture-app": ("Daily application work", "capture the shared Builder application without reconciliation"),
+    "bootstrap-app": ("Daily application work", "establish the first verified application baseline"),
+    "adopt-app": ("Daily application work", "adopt an existing shared application with evidence"),
+    "resolve-export": ("Daily application work", "apply a reviewed export conflict resolution"),
+    "announce-import": ("Recovery and diagnosis", "draft a pause or all-clear notice from observed evidence"),
+    "deploy-app": ("Protected qualification", "deploy exact committed application bytes to a qualified target"),
+    "adopt-frontier": ("Migration maintenance", "adopt a sequence-zero observed schema frontier"),
+    "check-drift": ("Migration maintenance", "compare live schema structure and accepted frontier"),
+    "export-history": ("Migration maintenance", "export canonical migration history from metadata"),
+    "new-migration": ("Migration maintenance", "author a new forward migration and verification pair"),
+    "add-dependency": ("Migration maintenance", "add an exact checksum dependency to a migration"),
+    "migration-plan": ("Migration maintenance", "calculate dependency-ordered pending migrations offline"),
+    "recover-app-lock": ("Recovery and diagnosis", "clear an application mutex from reviewed evidence"),
+    "recover-files": ("Recovery and diagnosis", "finish or restore an interrupted file journal"),
+    "explain-conflict": ("Recovery and diagnosis", "explain an immutable export conflict bundle"),
+    "prune-scratch": ("Recovery and diagnosis", "prune bounded disposable scratch outputs"),
+    "snapshot": ("Recovery and diagnosis", "build a canonical schema inventory from framed rows"),
+    "verify-history": ("Recovery and diagnosis", "validate migration bundle history offline"),
+    "replay": ("Recovery and diagnosis", "run deterministic migration replay against an explicit target"),
+    "adopt-baseline": ("Recovery and diagnosis", "adopt reviewed replay output as a baseline"),
+    "verify-release": ("Release and handoff", "verify immutable release archive bytes and manifest"),
+    "plan-release": ("Release and handoff", "plan a verified archive against supplied target history"),
+    "apply-release": ("Release and handoff", "apply a verified archive to a non-production target"),
+    "ci-doctor": ("Release and handoff", "validate the offline runner contract shape"),
+}
+
+COMMAND_DETAILS = {
+    "export-app": (
+        "Captures the shared Builder application and reconciles it with tracked source; "
+        "concurrent Builder changes may require reconciliation."
+    ),
+    "import-app": (
+        "This command overwrites the shared application. Use only after a posted pause, verified "
+        "baseline, and reviewed exact source."
+    ),
+    "run-integration": (
+        "Performs non-production writes while applying and qualifying one immutable Git source."
+    ),
+    "qualify-target": (
+        "Provides read-only diagnosis of the selected persistent target from one exact Git source."
+    ),
+    "sign-test-evidence": "Required argument: --archive RELEASE_TAR.",
+}
+
+_HELP_CATEGORIES = (
+    "Daily application work",
+    "Protected qualification",
+    "Migration maintenance",
+    "Recovery and diagnosis",
+    "Release and handoff",
+)
+
+
+def _top_level_help() -> str:
+    lines = ["Command groups:"]
+    for category in _HELP_CATEGORIES:
+        lines.append(f"\n{category}:")
+        for name, (command_category, description) in COMMAND_HELP.items():
+            if command_category == category:
+                lines.append(f"  {name:<22} {description}")
+    lines.extend(
+        (
+            "\nNormal paths:",
+            "  Daily:       export-app -> review/stage -> commit -> pull/rebase -> push",
+            "  Integration: run-integration",
+            "  Release:     build/verify -> run-release-test -> sign-test-evidence -> gen-runbook",
+        )
+    )
+    return "\n".join(lines)
+
+
 def _parser() -> argparse.ArgumentParser:
     env_parent = argparse.ArgumentParser(add_help=False)
     env_parent.add_argument("--env", dest="env_file", default=argparse.SUPPRESS, help="literal environment profile file")
@@ -83,91 +171,110 @@ def _parser() -> argparse.ArgumentParser:
         prog="team.py",
         description="APEX team round-trip and promotion workflow",
         parents=[env_parent],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_top_level_help(),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("doctor", parents=[env_parent])
-    sub.add_parser("setup-state", parents=[env_parent])
-    sub.add_parser("adopt-frontier", parents=[env_parent])
-    qualify = sub.add_parser("qualify-target", parents=[env_parent])
+    def add_command(name: str, *, online: bool = True) -> argparse.ArgumentParser:
+        _category, description = COMMAND_HELP[name]
+        return sub.add_parser(
+            name,
+            parents=[env_parent] if online else [],
+            help=description,
+            description=description,
+            epilog=COMMAND_DETAILS.get(name),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+
+    add_command("doctor")
+    add_command("setup-state")
+    add_command("adopt-frontier")
+    qualify = add_command("qualify-target")
     qualify.add_argument("--source-commit", required=True)
     qualify.add_argument("--aliases", required=True, help="comma-separated configured application aliases")
     qualify.add_argument("--out", required=True)
     qualify.add_argument("--release-archive")
     qualify.add_argument("--apply-report")
-    integration = sub.add_parser("run-integration", parents=[env_parent])
+    integration = add_command("run-integration")
     integration.add_argument("--out", required=True)
-    release_test = sub.add_parser("run-release-test", parents=[env_parent])
+    release_test = add_command("run-release-test")
     release_test.add_argument("archive")
     release_test.add_argument("--target", required=True)
     release_test.add_argument("--out", required=True)
-    migrate = sub.add_parser("migrate", parents=[env_parent])
+    migrate = add_command("migrate")
     migrate.add_argument("--source", default="migrations")
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--bootstrap", action="store_true")
     migrate.add_argument("--expected-inventory")
     migrate.add_argument("--actual-inventory")
     migrate.add_argument("--destructive-confirmation")
-    migrate.add_argument("--confirmation-out")
+    migrate.add_argument(
+        "--confirmation-out",
+        help="atomically write the false-only destructive review template",
+    )
     for name in ("undo-migration", "redo-migration"):
-        lifecycle = sub.add_parser(name, parents=[env_parent])
+        lifecycle = add_command(name)
         lifecycle.add_argument("migration_id")
         lifecycle.add_argument("--source", default="migrations")
         lifecycle.add_argument("--dry-run", action="store_true")
         lifecycle.add_argument("--expected-inventory")
         lifecycle.add_argument("--actual-inventory")
         lifecycle.add_argument("--destructive-confirmation")
-        lifecycle.add_argument("--confirmation-out")
-    drift = sub.add_parser("check-drift", parents=[env_parent])
+        lifecycle.add_argument(
+            "--confirmation-out",
+            help="atomically write the false-only destructive review template",
+        )
+    drift = add_command("check-drift")
     drift.add_argument("--expected-inventory")
     drift.add_argument("--actual-inventory")
     drift.add_argument("--out")
-    history = sub.add_parser("export-history", parents=[env_parent])
+    history = add_command("export-history")
     history.add_argument("--out", required=True)
-    recover_migration = sub.add_parser("recover-migration", parents=[env_parent])
+    recover_migration = add_command("recover-migration")
     recover_migration.add_argument("run_token")
     recover_migration.add_argument("--attempt")
     recover_migration.add_argument("--evidence", required=True)
-    register = sub.add_parser("register-app", parents=[env_parent])
+    register = add_command("register-app")
     register.add_argument("alias")
     register.add_argument("--transfer-from")
     register.add_argument("--capture-recovery-id")
-    status = sub.add_parser("app-status", parents=[env_parent])
+    status = add_command("app-status")
     status.add_argument("alias")
-    recover_lock = sub.add_parser("recover-app-lock", parents=[env_parent])
+    recover_lock = add_command("recover-app-lock")
     recover_lock.add_argument("alias")
     recover_lock.add_argument("--run-token")
     recover_lock.add_argument("--evidence", required=True)
-    capture = sub.add_parser("capture-app", parents=[env_parent])
+    capture = add_command("capture-app")
     capture.add_argument("alias")
     for name in ("bootstrap-app", "adopt-app", "export-app"):
-        command = sub.add_parser(name, parents=[env_parent])
+        command = add_command(name)
         command.add_argument("alias")
-    resolve = sub.add_parser("resolve-export", parents=[env_parent])
+    resolve = add_command("resolve-export")
     resolve.add_argument("recovery_id")
     resolve.add_argument("--resolved", required=True)
-    imp = sub.add_parser("import-app", parents=[env_parent])
+    imp = add_command("import-app")
     imp.add_argument("alias")
     imp.add_argument("--ref", default="HEAD")
     imp.add_argument("--replace-from")
     imp.add_argument("--confirm-pause", action="store_true", help="confirm the independently posted team pause notice")
-    announce = sub.add_parser("announce-import", parents=[env_parent])
+    announce = add_command("announce-import")
     announce.add_argument("alias")
     announce_choice = announce.add_mutually_exclusive_group(required=True)
     announce_choice.add_argument("--ref")
     announce_choice.add_argument("--all-clear")
-    deploy = sub.add_parser("deploy-app", parents=[env_parent])
+    deploy = add_command("deploy-app")
     deploy.add_argument("alias")
     deploy.add_argument("--target", required=True)
     deploy.add_argument("--ref", required=True)
-    files = sub.add_parser("recover-files", parents=[env_parent])
+    files = add_command("recover-files")
     files.add_argument("operation_id")
     files.add_argument("--action", choices=("finish", "restore"), required=True)
 
     # Offline commands deliberately have no --env dependency. Their concrete
     # options are parsed by their owning modules when those modules exist.
     for name in sorted(OFFLINE_COMMANDS):
-        command = sub.add_parser(name)
+        command = add_command(name, online=False)
         command.add_argument("args", nargs=argparse.REMAINDER)
     return parser
 
