@@ -24,6 +24,8 @@ from teamlib.local_team_e2e import (  # noqa: E402
     FixtureMutationEvidence,
     ExportConflictEvidence,
     ReviewedExportResolution,
+    ConvergenceEvidence,
+    CommandResult,
     SqlclGate,
     PreflightEvidence,
     RunManifest,
@@ -43,6 +45,8 @@ from teamlib.local_team_e2e import (  # noqa: E402
     start_team_command,
     run_team_command,
     save_connection_script,
+    verify_convergence,
+    write_report,
 )
 from teamlib.config import load_config  # noqa: E402
 from teamlib.config import Target  # noqa: E402
@@ -782,6 +786,157 @@ class LocalTeamCliTests(unittest.TestCase):
             "20260922T120000-12345678",
         ])
         self.assertEqual(args.confirm_run_id, "20260922T120000-12345678")
+
+
+class LocalTeamConvergenceAndReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="local-team-report-")
+        self.root = Path(self.temp.name) / "run"
+        self.manifest = RunManifest.create(
+            self.root,
+            FixtureSpec(),
+            "a" * 40,
+            {
+                "DB_NAME": "FREEPDB1",
+                "SERVICE": "freep1",
+                "INSTANCE_ID": "FREEPDB1@docker",
+                "SESSION_USER": "DEMO",
+                "CURRENT_SCHEMA": "DEMO",
+            },
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    @staticmethod
+    def _phases():
+        return {
+            "preflight": {"status": "PASS", "evidence": {"identity": "verified"}},
+            "provision": {
+                "status": "PASS",
+                "evidence": {
+                    "application_id": 9099,
+                    "application_alias": "TEAM-E2E-9099",
+                    "application_tree_digest": "d" * 64,
+                    "metadata_schema": "TEAM_E2E_META",
+                },
+            },
+            "topology": {
+                "status": "PASS",
+                "evidence": {
+                    "developers": [
+                        {"name": name, "checkout_uuid": letter * 32, "head": "b" * 40, "tree_digest": "c" * 64}
+                        for name, letter in (("alice", "a"), ("bob", "b"), ("carol", "c"))
+                    ],
+                },
+            },
+            "scenario": {
+                "status": "PASS",
+                "evidence": {
+                    "migration_frontier_digest": "e" * 64,
+                    "migration_history_digest": "f" * 64,
+                    "mutex_states": {"application": {"is_uncertain": False}, "migration": {"is_uncertain": False}},
+                },
+            },
+            "convergence": {
+                "status": "PASS",
+                "evidence": {
+                    "clone_heads": {name: "b" * 40 for name in ("alice", "bob", "carol")},
+                    "clone_tree_digests": {name: "d" * 64 for name in ("alice", "bob", "carol")},
+                    "live_tree_digest": "d" * 64,
+                    "runtime_url": "http://127.0.0.1:8181/ords/r/team-e2e/9099",
+                    "runtime_status": "UNKNOWN",
+                    "coverage_limits": ["ORDS runtime was not available in this synthetic evidence"],
+                },
+            },
+            "cleanup": {"status": "PASS", "evidence": {"removed": ["application:9099"]}},
+        }
+
+    def test_convergence_evidence_has_closed_status_and_report_shape(self):
+        evidence = ConvergenceEvidence(
+            status="UNKNOWN",
+            source_commit="a" * 40,
+            clone_heads={"alice": "b" * 40, "bob": "b" * 40, "carol": "b" * 40},
+            clone_tree_digests={"alice": "d" * 64, "bob": "d" * 64, "carol": "d" * 64},
+            live_tree_digest="d" * 64,
+            migration_frontier_digest="e" * 64,
+            migration_history_digest="f" * 64,
+            mutex_states={"application": {"is_uncertain": False}},
+            roster=("a" * 32, "b" * 32, "c" * 32),
+            runtime_url="http://127.0.0.1:8181/ords/r/team-e2e/9099",
+            runtime_status="UNKNOWN",
+            coverage_limits=("Builder UI is not observed",),
+        )
+        self.assertEqual(evidence.status, "UNKNOWN")
+        self.assertIn("runtime_status", evidence.to_dict())
+        with self.assertRaises(E2EError):
+            ConvergenceEvidence(
+                status="OK",
+                source_commit="a" * 40,
+                clone_heads={},
+                clone_tree_digests={},
+                live_tree_digest=None,
+                migration_frontier_digest=None,
+                migration_history_digest=None,
+                mutex_states={},
+                roster=(),
+                runtime_url=None,
+                runtime_status="UNKNOWN",
+            )
+
+    def test_write_report_is_redacted_atomic_and_bound_to_run_root(self):
+        report_path = write_report(self.manifest, self._phases(), {"status": "PASS", "removed": ["application:9099"]})
+        self.assertEqual(report_path, self.root / "report.json")
+        document = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(document["source_commit"], "a" * 40)
+        self.assertEqual(document["run_id"], self.manifest.run_id)
+        self.assertEqual(document["status"], "PASS")
+        self.assertIn("coverage_limits", document)
+        encoded = json.dumps(document)
+        self.assertNotIn("password", encoded.casefold())
+        self.assertNotIn("raw_environment", encoded.casefold())
+        self.assertNotIn(str(self.root.parent), encoded)
+
+        phases = self._phases()
+        phases["scenario"]["evidence"]["password"] = "must-not-appear"
+        with self.assertRaises(E2EError):
+            write_report(self.manifest, phases, {"status": "PASS"})
+        phases = self._phases()
+        phases["scenario"]["evidence"]["outside_path"] = "/etc/passwd"
+        with self.assertRaises(E2EError):
+            write_report(self.manifest, phases, {"status": "PASS"})
+
+    def test_write_report_normalizes_command_results_and_rejects_raw_environment(self):
+        commands = self.root / "commands"
+        commands.mkdir(mode=0o700)
+        result = CommandResult(
+            argv=("git", "status"),
+            cwd=self.root,
+            returncode=0,
+            stdout_path=commands / "stdout",
+            stderr_path=commands / "stderr",
+            started_at="2026-09-22T12:00:00+00:00",
+            finished_at="2026-09-22T12:00:01+00:00",
+            stdout_sha256="a" * 64,
+            stderr_sha256="b" * 64,
+        )
+        phases = self._phases()
+        phases["convergence"]["commands"] = [result]
+        report_path = write_report(self.manifest, phases, {"status": "PASS"})
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["command_evidence"][0]["argv"], ["git", "status"])
+        phases = self._phases()
+        phases["scenario"]["evidence"]["environment"] = {"HOME": "/tmp"}
+        with self.assertRaises(E2EError):
+            write_report(self.manifest, phases, {"status": "PASS"})
+
+    def test_runbook_documents_safe_lifecycle_and_runtime_limit(self):
+        runbook = Path(__file__).resolve().parents[2] / "docs" / "local-three-developer-e2e.md"
+        text = runbook.read_text(encoding="utf-8")
+        for marker in ("preflight", "run", "status", "cleanup", "--confirm-run-id", "9099", "TEAM_E2E_META", "retains", "Builder"):
+            self.assertIn(marker, text)
+        readme = (Path(__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
+        self.assertIn("local-three-developer-e2e.md", readme)
 
 
 if __name__ == "__main__":

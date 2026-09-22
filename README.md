@@ -126,3 +126,6 @@ production-owner runbook. Automated production writes remain refused.
 See [docs/ci.md](docs/ci.md), [docs/migrations.md](docs/migrations.md),
 [docs/promotion.md](docs/promotion.md), and
 [docs/app-recovery.md](docs/app-recovery.md) for the detailed contracts.
+
+For a disposable local Alice/Bob/Carol acceptance run, see
+[docs/local-three-developer-e2e.md](docs/local-three-developer-e2e.md).

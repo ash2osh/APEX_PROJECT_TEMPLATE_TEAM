@@ -182,6 +182,7 @@ class ProvisionedFixture:
     workspace_id: int
     application_tree_digest: str
     marker: str
+    adapter: Any | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -397,6 +398,7 @@ def provision_fixture(
         workspace_id=evidence.workspace_id,
         application_tree_digest=app_digest,
         marker=marker,
+        adapter=adapter,
     )
 
 
@@ -425,12 +427,33 @@ def cleanup_fixture(
     if int(workspace.get("id", -1)) != live_evidence.workspace_id or str(workspace.get("name")) != live_evidence.workspace_name:
         raise E2EError("cleanup workspace identity does not match manifest")
     marker_verifier = getattr(adapter, "verify_marker", None)
-    if marker_verifier is None or not marker_verifier(
-        manifest.cleanup_targets().saved_connection,
-        manifest.spec.metadata_schema,
-        manifest.run_id,
-        manifest.spec.fixture_app_id,
-    ):
+    provision_evidence = manifest.phases.get("provision", {}).get("evidence", {})
+    expected_marker_digest = provision_evidence.get("application_tree_digest") if isinstance(provision_evidence, Mapping) else None
+    if marker_verifier is None:
+        marker_matches = False
+    else:
+        try:
+            marker_matches = bool(
+                marker_verifier(
+                    manifest.cleanup_targets().saved_connection,
+                    manifest.spec.metadata_schema,
+                    manifest.run_id,
+                    manifest.spec.fixture_app_id,
+                    expected_marker_digest,
+                )
+            )
+        except TypeError:
+            # Preserve compatibility with qualified test doubles written
+            # against the original four-argument adapter contract.
+            marker_matches = bool(
+                marker_verifier(
+                    manifest.cleanup_targets().saved_connection,
+                    manifest.spec.metadata_schema,
+                    manifest.run_id,
+                    manifest.spec.fixture_app_id,
+                )
+            )
+    if not marker_matches:
         raise E2EError("cleanup metadata marker is missing or does not match manifest")
     targets = manifest.cleanup_targets()
     adapter.remove_fixture_app(live_evidence.admin_connection, manifest.spec, live_evidence.workspace_name)
@@ -689,6 +712,7 @@ class SqlclFixtureAdapter:
 
     def capture_fixture_tree(self, developer: Any, spec: FixtureSpec, destination: Path):
         from .trees import read_export_tree, tree_digest
+        from .sqlcl import APEX_TIMEOUT_SECONDS
 
         workspace_id = self.workspace_id or 1
         target = self._target(
@@ -713,7 +737,7 @@ class SqlclFixtureAdapter:
             encoding="utf-8",
             newline="",
         )
-        result = self._run_sqlcl(target, "read", driver, work)
+        result = self._run_sqlcl(target, "read", driver, work, timeout=APEX_TIMEOUT_SECONDS)
         if result.exit_code != 0:
             raise E2EError("fixture APEX export failed")
         candidates = [path.parent for path in output.rglob("application.apx")]
@@ -730,6 +754,8 @@ class SqlclFixtureAdapter:
         workspace_id: int,
         parsing_schema: str,
     ) -> None:
+        from .sqlcl import APEX_TIMEOUT_SECONDS
+
         source = Path(source).resolve()
         if not source.is_dir() or source.is_symlink() or not (source / "application.apx").is_file():
             raise E2EError("fixture Builder source is not a complete application directory")
@@ -747,10 +773,11 @@ class SqlclFixtureAdapter:
             f"APEX IMPORT -INPUT \"{source}\" -ID {spec.fixture_app_id} -ALIAS {spec.apex_alias} "
             f"-WORKSPACEID {workspace_id} -SCHEMA {parsing_schema}\n",
         )
-        self._run_sqlcl(target, "write", driver, work)
+        self._run_sqlcl(target, "write", driver, work, timeout=APEX_TIMEOUT_SECONDS)
 
     def capture_seed(self, connection: str, app_id: int, destination: Path) -> tuple[Path, str]:
         from .trees import read_export_tree, tree_digest
+        from .sqlcl import APEX_TIMEOUT_SECONDS
 
         target = self._target(self.payload_connection, self.payload_identity, alias="seed", workspace_id=1, app_id=app_id, parsing_schema="DEMO")
         destination.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -760,7 +787,7 @@ class SqlclFixtureAdapter:
         output.mkdir(mode=0o700, exist_ok=True)
         driver = work / "export.sql"
         driver.write_text(f"SET DEFINE OFF\nAPEX EXPORT -APPLICATIONID {app_id} -EXPTYPE APEXLANG -OVERWRITE-FILES -DIR \"{output}\"\n", encoding="utf-8")
-        result = self._run_sqlcl(target, "read", driver, work)
+        result = self._run_sqlcl(target, "read", driver, work, timeout=APEX_TIMEOUT_SECONDS)
         if result.exit_code != 0:
             raise E2EError("seed APEX export failed")
         candidates = [path.parent for path in output.rglob("application.apx")]
@@ -770,6 +797,8 @@ class SqlclFixtureAdapter:
         return candidates[0], tree_digest(tree)
 
     def create_metadata_user(self, admin_connection: str, schema: str, password: str) -> None:
+        if not _CONNECTION_PASSWORD_RE.fullmatch(password):
+            raise E2EError("metadata password is not a generated connection secret")
         target = self.admin_target
         payload = (
             "SET DEFINE OFF\n"
@@ -802,14 +831,17 @@ class SqlclFixtureAdapter:
         )
 
     def clone_seed_to_fixture(self, payload_connection: str, seed_path: Path, spec: FixtureSpec, workspace_id: int) -> None:
+        from .sqlcl import APEX_TIMEOUT_SECONDS
+
         self.workspace_id = workspace_id
         target = self._target(self.payload_connection, self.payload_identity, alias=spec.tracked_alias, workspace_id=workspace_id, app_id=spec.fixture_app_id, parsing_schema="DEMO")
         driver, work = self._driver("clone-fixture", "SET DEFINE OFF\n"
             f"APEX IMPORT -INPUT \"{seed_path}\" -ID {spec.fixture_app_id} -ALIAS {spec.apex_alias} -WORKSPACEID {workspace_id} -SCHEMA DEMO\n")
-        self._run_sqlcl(target, "write", driver, work)
+        self._run_sqlcl(target, "write", driver, work, timeout=APEX_TIMEOUT_SECONDS)
 
     def verify_fixture_export(self, payload_connection: str, spec: FixtureSpec) -> dict[str, object]:
         from .trees import read_export_tree, tree_digest
+        from .sqlcl import APEX_TIMEOUT_SECONDS
 
         target = self._target(self.payload_connection, self.payload_identity, alias=spec.tracked_alias, workspace_id=self.workspace_id or 1, app_id=spec.fixture_app_id, parsing_schema="DEMO")
         work = self.run_root / "adapter" / "verify-fixture" / "sqlcl"
@@ -818,7 +850,7 @@ class SqlclFixtureAdapter:
         output.mkdir(mode=0o700, parents=True, exist_ok=True)
         driver = work / "export.sql"
         driver.write_text(f"SET DEFINE OFF\nAPEX EXPORT -APPLICATIONID {spec.fixture_app_id} -EXPTYPE APEXLANG -OVERWRITE-FILES -DIR \"{output}\"\n", encoding="utf-8")
-        self._run_sqlcl(target, "read", driver, work)
+        self._run_sqlcl(target, "read", driver, work, timeout=APEX_TIMEOUT_SECONDS)
         candidates = [path.parent for path in output.rglob("application.apx")]
         if len(candidates) != 1:
             raise E2EError("fixture verification export is incomplete")
@@ -841,10 +873,29 @@ class SqlclFixtureAdapter:
         )
         self._write_payload(self.metadata_target, "record-marker", payload)
 
-    def verify_marker(self, metadata_connection: str, schema: str, run_id: str, app_id: int) -> bool:
+    def verify_marker(
+        self,
+        metadata_connection: str,
+        schema: str,
+        run_id: str,
+        app_id: int,
+        app_digest: str | None = None,
+    ) -> bool:
         target = self._ensure_metadata_target(metadata_connection)
-        stdout = self._read_payload(target, "verify-marker", f"SET DEFINE OFF\nSET HEADING OFF\nSET FEEDBACK OFF\nSELECT 'TEAM_MARKER|' || run_id || '|' || app_id FROM TEAM_E2E_FIXTURE_MARKER WHERE run_id='{run_id}' AND app_id={app_id};\n")
-        return any(len(row) == 2 and row[0] == run_id and int(row[1]) == app_id for row in self._rows(stdout, "TEAM_MARKER|"))
+        if app_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", app_digest):
+            raise E2EError("fixture marker digest is malformed")
+        digest_filter = f" AND app_digest='{app_digest}'" if app_digest is not None else ""
+        stdout = self._read_payload(
+            target,
+            "verify-marker",
+            "SET DEFINE OFF\nSET HEADING OFF\nSET FEEDBACK OFF\n"
+            "SELECT 'TEAM_MARKER|' || run_id || '|' || app_id || '|' || app_digest "
+            f"FROM TEAM_E2E_FIXTURE_MARKER WHERE run_id='{run_id}' AND app_id={app_id}{digest_filter};\n",
+        )
+        return any(
+            len(row) == 3 and row[0] == run_id and int(row[1]) == app_id and (app_digest is None or row[2] == app_digest)
+            for row in self._rows(stdout, "TEAM_MARKER|")
+        )
 
     def remove_fixture_app(self, admin_connection: str, spec: FixtureSpec, workspace_name: str) -> None:
         payload = f"SET DEFINE OFF\nBEGIN apex_application_install.set_workspace('{workspace_name}'); apex_application_install.set_keep_sessions(false); apex_application_install.remove_application({spec.fixture_app_id}); END;\n/\n"
@@ -1151,6 +1202,441 @@ class TeamTopology:
     developers: tuple[Developer, ...]
     env_values: dict[str, str]
     commands: tuple[CommandResult, ...] = ()
+
+
+_CONVERGENCE_STATUSES = {"PASS", "FAIL", "UNKNOWN"}
+_RUNTIME_STATUSES = {"PASS", "FAIL", "UNKNOWN", "SKIPPED"}
+_DEFAULT_COVERAGE_LIMITS = (
+    "Builder UI save UX, page locks, login roles, and browser matrix are not observed by this harness",
+    "ORDS runtime rendering is UNKNOWN unless a protected runtime smoke supplies HTTP and visible-marker evidence",
+    "arbitrary out-of-band DML and uncaptured transient Builder edits remain outside the supported inventory",
+)
+_REPORT_FORBIDDEN_KEY_RE = re.compile(
+    r"(?:password|passwd|secret|token|credential|private[_-]?key|access[_-]?key|raw[_-]?env|environment[_-]?dump)",
+    re.IGNORECASE,
+)
+_REPORT_SECRET_VALUE_RE = re.compile(
+    r"(?i)(?:savpwd|password\s*=|passwd\s*=|secret\s*=|token\s*=|(?:^|[/\s])[^/\s:@]+/[^/\s@]+@)"
+)
+
+
+@dataclass(frozen=True)
+class ConvergenceEvidence:
+    """Closed evidence record for the final three-checkout convergence gates."""
+
+    status: str
+    source_commit: str
+    clone_heads: dict[str, str]
+    clone_tree_digests: dict[str, str]
+    live_tree_digest: str | None
+    migration_frontier_digest: str | None
+    migration_history_digest: str | None
+    mutex_states: dict[str, Any]
+    roster: tuple[str, ...]
+    runtime_url: str | None
+    runtime_status: str
+    command_evidence: tuple[Mapping[str, Any], ...] = ()
+    coverage_limits: tuple[str, ...] = _DEFAULT_COVERAGE_LIMITS
+    errors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status not in _CONVERGENCE_STATUSES:
+            raise E2EError("convergence status must be PASS, FAIL, or UNKNOWN")
+        if not _SHA1_RE.fullmatch(self.source_commit):
+            raise E2EError("convergence source commit is not a Git SHA")
+        if not isinstance(self.clone_heads, Mapping) or not isinstance(self.clone_tree_digests, Mapping):
+            raise E2EError("convergence clone evidence must be mappings")
+        if set(self.clone_heads) != set(self.clone_tree_digests):
+            raise E2EError("convergence clone head/tree evidence must cover the same developers")
+        for name, head in self.clone_heads.items():
+            if not isinstance(name, str) or not name or not _SHA1_RE.fullmatch(head):
+                raise E2EError("convergence clone head is malformed")
+        for name, digest in self.clone_tree_digests.items():
+            if not isinstance(name, str) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise E2EError("convergence clone tree digest is malformed")
+        for label, digest in (
+            ("live tree", self.live_tree_digest),
+            ("migration frontier", self.migration_frontier_digest),
+            ("migration history", self.migration_history_digest),
+        ):
+            if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                raise E2EError(f"convergence {label} digest is malformed")
+        if self.runtime_status not in _RUNTIME_STATUSES:
+            raise E2EError("convergence runtime status is not closed")
+        if self.runtime_url is not None:
+            _safe_text(self.runtime_url, label="convergence runtime URL")
+        if not isinstance(self.roster, tuple) or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value) for value in self.roster):
+            raise E2EError("convergence roster contains an invalid checkout UUID")
+        if not isinstance(self.mutex_states, Mapping):
+            raise E2EError("convergence mutex evidence must be a mapping")
+        if not isinstance(self.coverage_limits, tuple) or any(not isinstance(value, str) or not value for value in self.coverage_limits):
+            raise E2EError("convergence coverage limits are malformed")
+        if not isinstance(self.errors, tuple) or any(not isinstance(value, str) or not value for value in self.errors):
+            raise E2EError("convergence errors are malformed")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "source_commit": self.source_commit,
+            "clone_heads": dict(sorted(self.clone_heads.items())),
+            "clone_tree_digests": dict(sorted(self.clone_tree_digests.items())),
+            "live_tree_digest": self.live_tree_digest,
+            "migration_frontier_digest": self.migration_frontier_digest,
+            "migration_history_digest": self.migration_history_digest,
+            "mutex_states": dict(self.mutex_states),
+            "roster": list(self.roster),
+            "runtime_url": self.runtime_url,
+            "runtime_status": self.runtime_status,
+            "command_evidence": [dict(item) for item in self.command_evidence],
+            "coverage_limits": list(self.coverage_limits),
+            "errors": list(self.errors),
+        }
+
+
+def _fixture_value(fixture: Any, name: str, default: Any = None) -> Any:
+    if isinstance(fixture, Mapping):
+        return fixture.get(name, default)
+    return getattr(fixture, name, default)
+
+
+def _phase_evidence(phases: Mapping[str, Any], phase: str) -> Mapping[str, Any]:
+    value = phases.get(phase, {}) if isinstance(phases, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    evidence = value.get("evidence", value)
+    return evidence if isinstance(evidence, Mapping) else {}
+
+
+def _command_evidence(result: CommandResult) -> dict[str, Any]:
+    return {
+        "argv": list(result.argv),
+        "cwd": result.cwd,
+        "returncode": result.returncode,
+        "stdout_path": result.stdout_path,
+        "stderr_path": result.stderr_path,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "stdout_sha256": result.stdout_sha256,
+        "stderr_sha256": result.stderr_sha256,
+    }
+
+
+def _report_safe_value(value: Any, *, root: Path, key: str = "") -> Any:
+    """Normalize report data, refusing credentials and paths outside the run."""
+
+    if key and _REPORT_FORBIDDEN_KEY_RE.search(key):
+        raise E2EError(f"report contains forbidden field: {key}")
+    if key.casefold() in {
+        "env",
+        "environment",
+        "environment_values",
+        "raw_env",
+        "raw_environment",
+        "environment_dump",
+    }:
+        raise E2EError(f"report must not contain a raw environment field: {key}")
+    if isinstance(value, CommandResult):
+        return _report_safe_value(_command_evidence(value), root=root, key=key)
+    if isinstance(value, Path):
+        path = value.resolve()
+        if not _inside(path, root):
+            raise E2EError(f"report path escapes the run root: {path}")
+        return path.relative_to(root).as_posix()
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            if not isinstance(raw_key, str) or not raw_key:
+                raise E2EError("report field names must be non-empty strings")
+            result[raw_key] = _report_safe_value(raw_value, root=root, key=raw_key)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_report_safe_value(item, root=root, key=key) for item in value]
+    if isinstance(value, bytes):
+        raise E2EError("report must not contain raw bytes")
+    if isinstance(value, str):
+        if _REPORT_SECRET_VALUE_RE.search(value):
+            raise E2EError("report contains a credential-like value")
+        if os.path.isabs(value):
+            path = Path(value).resolve()
+            if not _inside(path, root):
+                raise E2EError(f"report path escapes the run root: {path}")
+            return path.relative_to(root).as_posix()
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise E2EError(f"report contains unsupported value type: {type(value).__name__}")
+
+
+def _fold_report_status(phases: Mapping[str, Any], cleanup: Mapping[str, Any]) -> str:
+    statuses: list[str] = []
+    for value in phases.values():
+        if isinstance(value, Mapping) and isinstance(value.get("status"), str):
+            statuses.append(value["status"])
+    cleanup_status = cleanup.get("status") if isinstance(cleanup, Mapping) else None
+    if isinstance(cleanup_status, str):
+        statuses.append(cleanup_status)
+    if cleanup_status in {"FAIL", "UNKNOWN"}:
+        return "UNKNOWN"
+    if any(status == "FAIL" for status in statuses):
+        return "FAIL"
+    if any(status in {"UNKNOWN", "PENDING", "RUNNING", "SKIPPED"} for status in statuses):
+        return "UNKNOWN"
+    return "PASS" if statuses and all(status == "PASS" for status in statuses) else "UNKNOWN"
+
+
+def write_report(
+    manifest: RunManifest,
+    phases: Mapping[str, Any],
+    cleanup: Mapping[str, Any] | None,
+) -> Path:
+    """Write one redacted, atomically replaced report beneath the run root."""
+
+    if not isinstance(manifest, RunManifest):
+        raise E2EError("report requires a run manifest")
+    root = manifest.run_root.resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise E2EError("report run root is not a real directory")
+    if not isinstance(phases, Mapping):
+        raise E2EError("report phases must be a mapping")
+    cleanup_value: Mapping[str, Any] = cleanup if isinstance(cleanup, Mapping) else {"status": "UNKNOWN"}
+    provision = _phase_evidence(phases, "provision")
+    topology = _phase_evidence(phases, "topology")
+    scenario = _phase_evidence(phases, "scenario")
+    convergence = _phase_evidence(phases, "convergence")
+    developers = topology.get("developers", [])
+    checkout_uuids = []
+    if isinstance(developers, Sequence) and not isinstance(developers, (str, bytes)):
+        for developer in developers:
+            if isinstance(developer, Mapping) and isinstance(developer.get("checkout_uuid"), str):
+                checkout_uuids.append(developer["checkout_uuid"])
+    command_evidence: list[Any] = []
+    for phase in phases.values():
+        if not isinstance(phase, Mapping):
+            continue
+        commands = phase.get("commands", phase.get("command_evidence", []))
+        if isinstance(commands, Sequence) and not isinstance(commands, (str, bytes)):
+            command_evidence.extend(commands)
+    report: dict[str, Any] = {
+        "version": 1,
+        "status": _fold_report_status(phases, cleanup_value),
+        "source_commit": manifest.source_commit,
+        "run_id": manifest.run_id,
+        "live_identity": dict(manifest.expected_identity),
+        "fixture_ownership": {
+            "application_id": manifest.spec.fixture_app_id,
+            "application_alias": manifest.spec.apex_alias,
+            "metadata_schema": manifest.spec.metadata_schema,
+            "saved_connection": manifest.cleanup_targets().saved_connection,
+            "run_root": root,
+            "marker": provision.get("marker"),
+        },
+        "checkout_uuids": checkout_uuids,
+        "clone_heads": convergence.get("clone_heads", topology.get("clone_heads", {})),
+        "clone_tree_digests": convergence.get("clone_tree_digests", topology.get("clone_tree_digests", {})),
+        "live_apex_tree_digest": convergence.get("live_tree_digest", provision.get("application_tree_digest")),
+        "migration_frontier_digest": convergence.get("migration_frontier_digest", scenario.get("migration_frontier_digest")),
+        "migration_history_digest": convergence.get("migration_history_digest", scenario.get("migration_history_digest")),
+        "mutex_states": convergence.get("mutex_states", scenario.get("mutex_states", {})),
+        "runtime": {
+            "url": convergence.get("runtime_url"),
+            "status": convergence.get("runtime_status", "UNKNOWN"),
+        },
+        "phases": phases,
+        "cleanup": cleanup_value,
+        "cleanup_status": cleanup_value.get("status", "UNKNOWN"),
+        "command_evidence": command_evidence,
+        "coverage_limits": list(_DEFAULT_COVERAGE_LIMITS),
+    }
+    supplied_coverage = convergence.get("coverage_limits", [])
+    if isinstance(supplied_coverage, Sequence) and not isinstance(supplied_coverage, (str, bytes)):
+        report["coverage_limits"] = list(dict.fromkeys(list(_DEFAULT_COVERAGE_LIMITS) + [str(item) for item in supplied_coverage]))
+    safe_report = _report_safe_value(report, root=root)
+    destination = root / "report.json"
+    fd, temporary_name = tempfile.mkstemp(prefix=".report-", dir=str(root))
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(fd, 0o600)
+        payload = json.dumps(safe_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        os.chmod(destination, 0o600)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise E2EError("could not persist local E2E report") from exc
+    return destination
+
+
+def verify_convergence(topology: TeamTopology, fixture: Any) -> ConvergenceEvidence:
+    """Run local Git convergence gates and fold live evidence into a closed result.
+
+    Database/runtime evidence is supplied by the fixture adapter or by the
+    preceding phases.  Missing protected evidence is explicitly UNKNOWN; it is
+    never treated as a successful browser or ORDS smoke.
+    """
+
+    if not isinstance(topology, TeamTopology):
+        raise E2EError("convergence requires a TeamTopology")
+    source_commit = topology.source_commit
+    heads: dict[str, str] = {}
+    tree_digests: dict[str, str] = {}
+    command_evidence: list[Mapping[str, Any]] = []
+    errors: list[str] = []
+    expected_roster = tuple(developer.checkout_uuid for developer in topology.developers)
+    alias = str(_fixture_value(fixture, "tracked_alias", "team-e2e"))
+    fixture_live_digest = _fixture_value(fixture, "application_tree_digest")
+    if not isinstance(fixture_live_digest, str):
+        fixture_live_digest = _fixture_value(fixture, "live_tree_digest")
+
+    from .trees import TreeError, read_git_tree, tree_digest
+
+    adapter = _fixture_value(fixture, "adapter")
+    if adapter is not None and topology.developers:
+        try:
+            live_root = topology.run_root / "convergence" / "live-capture"
+            _captured_root, _captured_tree, captured_digest = adapter.capture_fixture_tree(
+                topology.developers[0],
+                FixtureSpec(),
+                live_root,
+            )
+            fixture_live_digest = captured_digest
+        except (E2EError, TreeError, OSError, UnicodeError) as exc:
+            errors.append(f"fresh live application capture failed: {exc}")
+
+    for developer in topology.developers:
+        try:
+            fetch = run_command(
+                ["git", "-C", str(developer.clone), "fetch", "origin", "main"],
+                cwd=topology.run_root,
+                run_root=topology.run_root,
+            )
+            command_evidence.append(_command_evidence(fetch))
+            if fetch.returncode != 0:
+                errors.append(f"{developer.name}: origin/main fetch failed")
+                continue
+            merge = run_command(
+                ["git", "-C", str(developer.clone), "merge", "--ff-only", "origin/main"],
+                cwd=topology.run_root,
+                run_root=topology.run_root,
+            )
+            command_evidence.append(_command_evidence(merge))
+            if merge.returncode != 0:
+                errors.append(f"{developer.name}: checkout is not a fast-forward of origin/main")
+                continue
+            if (developer.clone / "scripts" / "team.py").is_file() and not _fixture_value(fixture, "skip_team_commands", False):
+                for operation in ("adopt-app", "export-app"):
+                    team_result = run_team_command(developer, operation, alias, timeout=240)
+                    command_evidence.append(_command_evidence(team_result))
+                    if team_result.returncode != 0:
+                        errors.append(f"{developer.name}: {operation} failed")
+                        continue
+                    if operation == "export-app":
+                        output = team_result.stdout_path.read_text(encoding="utf-8")
+                        if '"conflicts": [' in output and '"conflicts": []' not in output:
+                            errors.append(f"{developer.name}: export-app reported conflicts")
+            status = run_command(
+                ["git", "-C", str(developer.clone), "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=topology.run_root,
+                run_root=topology.run_root,
+            )
+            command_evidence.append(_command_evidence(status))
+            if status.returncode != 0 or status.stdout_path.read_text(encoding="utf-8").strip():
+                errors.append(f"{developer.name}: checkout is not clean")
+            head_result = run_command(
+                ["git", "-C", str(developer.clone), "rev-parse", "HEAD"],
+                cwd=topology.run_root,
+                run_root=topology.run_root,
+            )
+            command_evidence.append(_command_evidence(head_result))
+            head = head_result.stdout_path.read_text(encoding="utf-8").strip()
+            if head_result.returncode != 0 or not _SHA1_RE.fullmatch(head):
+                errors.append(f"{developer.name}: HEAD is not a commit")
+                continue
+            heads[developer.name] = head
+            source_tree = read_git_tree(developer.clone, head, alias)
+            tree_digests[developer.name] = tree_digest(source_tree)
+        except (E2EError, TreeError, OSError, UnicodeError) as exc:
+            errors.append(f"{developer.name}: convergence inspection failed: {exc}")
+
+    if heads and len(set(heads.values())) != 1:
+        errors.append("developer HEADs do not converge")
+    if tree_digests and len(set(tree_digests.values())) != 1:
+        errors.append("developer application trees do not converge")
+    if isinstance(fixture_live_digest, str) and tree_digests and any(value != fixture_live_digest for value in tree_digests.values()):
+        errors.append("live application tree digest differs from the three source trees")
+
+    migration_frontier = _fixture_value(fixture, "migration_frontier_digest")
+    migration_history = _fixture_value(fixture, "migration_history_digest")
+    mutex_states = _fixture_value(fixture, "mutex_states", {})
+    raw_roster = _fixture_value(fixture, "roster", expected_roster)
+    if isinstance(raw_roster, (str, bytes)) or not isinstance(raw_roster, Sequence):
+        roster = expected_roster
+        errors.append("controller roster evidence is malformed")
+    else:
+        roster = tuple(raw_roster or expected_roster)
+    runtime = _fixture_value(fixture, "runtime", {})
+    if not isinstance(runtime, Mapping):
+        runtime = {}
+    runtime_url = _fixture_value(fixture, "runtime_url", runtime.get("url"))
+    runtime_status = _fixture_value(fixture, "runtime_status", runtime.get("status", "UNKNOWN"))
+    if runtime_status not in _RUNTIME_STATUSES:
+        errors.append("runtime smoke status is not closed")
+        runtime_status = "UNKNOWN"
+    if runtime_status == "PASS" and not isinstance(runtime_url, str):
+        errors.append("runtime smoke is missing its URL")
+    if not isinstance(fixture_live_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", fixture_live_digest):
+        errors.append("live application tree digest is missing")
+    if not isinstance(migration_frontier, str) or not re.fullmatch(r"[0-9a-f]{64}", migration_frontier):
+        errors.append("migration frontier digest is missing")
+    if not isinstance(migration_history, str) or not re.fullmatch(r"[0-9a-f]{64}", migration_history):
+        errors.append("migration history digest is missing")
+    if set(roster) != set(expected_roster) or len(roster) != len(expected_roster):
+        errors.append("controller roster does not exactly match the three expected checkouts")
+    if not isinstance(mutex_states, Mapping):
+        errors.append("mutex evidence is malformed")
+        mutex_states = {}
+    if not mutex_states:
+        errors.append("mutex evidence is missing")
+    else:
+        for mutex_name, mutex in mutex_states.items():
+            if isinstance(mutex, Mapping) and mutex.get("is_uncertain") is True:
+                errors.append(f"{mutex_name} mutex is uncertain")
+    unavailable_suffixes = (
+        " is missing",
+        " is malformed",
+        "not configured",
+        "status is not closed",
+        "runtime smoke is missing its URL",
+    )
+    hard_failure = any(
+        not error.endswith(unavailable_suffixes)
+        and not error.startswith("fresh live application capture failed:")
+        for error in errors
+    )
+    all_local_gates = bool(topology.developers) and len(heads) == len(topology.developers) and not errors
+    if hard_failure:
+        status = "FAIL"
+    elif all_local_gates and runtime_status == "PASS" and migration_frontier and migration_history and isinstance(mutex_states, Mapping):
+        status = "PASS"
+    else:
+        status = "UNKNOWN"
+    return ConvergenceEvidence(
+        status=status,
+        source_commit=source_commit,
+        clone_heads=heads,
+        clone_tree_digests=tree_digests,
+        live_tree_digest=fixture_live_digest if isinstance(fixture_live_digest, str) else None,
+        migration_frontier_digest=migration_frontier if isinstance(migration_frontier, str) else None,
+        migration_history_digest=migration_history if isinstance(migration_history, str) else None,
+        mutex_states=dict(mutex_states) if isinstance(mutex_states, Mapping) else {},
+        roster=roster,
+        runtime_url=runtime_url if isinstance(runtime_url, str) else None,
+        runtime_status=runtime_status,
+        command_evidence=tuple(command_evidence),
+        errors=tuple(errors),
+    )
 
 
 def _safe_application_path(value: str) -> str:
@@ -1986,13 +2472,177 @@ def build_parser():
     return parser
 
 
+def _resolve_source_commit() -> tuple[Path, str]:
+    try:
+        repo = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+        commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--verify", "HEAD^{commit}"], text=True).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise E2EError("could not resolve the caller Git checkout") from exc
+    if not _SHA1_RE.fullmatch(commit):
+        raise E2EError("caller checkout HEAD is not a Git SHA")
+    return repo, commit
+
+
+def _cleanup_preflight(manifest: RunManifest, adapter: SqlclFixtureAdapter) -> PreflightEvidence:
+    """Rebuild cleanup evidence from the live fixture without assuming absence."""
+
+    payload_connection = "docker-demo"
+    admin_connection = "docker-sys"
+    payload_identity = dict(adapter.read_identity(payload_connection))
+    admin_identity = dict(adapter.read_identity(admin_connection))
+    workspace, raw_apps = adapter.read_workspace_and_apps(payload_connection)
+    apps = _validate_apps(raw_apps, manifest.spec, reject_fixture=False)
+    seed = apps.get(manifest.spec.seed_app_id)
+    if seed is None:
+        raise E2EError("cleanup seed application is missing")
+    seed_paths = [path.parent for path in (manifest.run_root / "seed").rglob("application.apx")]
+    if len(seed_paths) != 1:
+        raise E2EError("cleanup cannot locate one retained seed capture")
+    preflight_evidence = manifest.phases.get("preflight", {}).get("evidence", {})
+    if not isinstance(preflight_evidence, Mapping):
+        raise E2EError("manifest has no preflight evidence")
+    seed_digest = preflight_evidence.get("seed_tree_digest")
+    if not isinstance(seed_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", seed_digest):
+        raise E2EError("manifest seed digest is missing")
+    saved = frozenset(adapter.read_saved_connections())
+    schemas = frozenset(adapter.read_schemas_and_users(admin_connection))
+    return PreflightEvidence(
+        spec=manifest.spec,
+        payload_connection=payload_connection,
+        admin_connection=admin_connection,
+        payload_identity=payload_identity,
+        admin_identity=admin_identity,
+        workspace_id=int(workspace["id"]),
+        workspace_name=_safe_text(workspace["name"], label="cleanup workspace name"),
+        apps=apps,
+        schemas=schemas,
+        saved_connections=saved,
+        saved_connection=manifest.cleanup_targets().saved_connection,
+        seed_app_id=manifest.spec.seed_app_id,
+        seed_alias=str(seed["alias"]),
+        seed_parsing_schema=str(seed["parsing_schema"]),
+        seed_tree_path=seed_paths[0],
+        seed_tree_digest=seed_digest,
+        run_root=manifest.run_root.resolve(),
+    )
+
+
+def _cli_preflight(run_root: Path) -> int:
+    repo, source_commit = _resolve_source_commit()
+    root = Path(run_root)
+    if root.is_absolute():
+        resolved = root.resolve()
+    else:
+        resolved = (Path.cwd() / root).resolve()
+    if resolved.exists() or resolved.is_symlink():
+        raise E2EError("preflight run root already exists; use status or cleanup")
+    probe_parent = resolved.parent
+    probe_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".local-team-e2e-probe-", dir=str(probe_parent)) as probe_name:
+        probe = SqlclFixtureAdapter("docker-demo", "docker-sys", Path(probe_name))
+        manifest = RunManifest.create(resolved, FixtureSpec(), source_commit, probe.payload_identity)
+    adapter = SqlclFixtureAdapter("docker-demo", "docker-sys", resolved)
+    evidence = inspect_fixture("docker-demo", "docker-sys", manifest.spec, adapter=adapter, run_root=resolved)
+    manifest.transition(
+        "preflight",
+        "PASS",
+        {
+            "payload_connection": "docker-demo",
+            "admin_connection": "docker-sys",
+            "workspace_id": evidence.workspace_id,
+            "workspace_name": evidence.workspace_name,
+            "seed_alias": evidence.seed_alias,
+            "seed_tree_digest": evidence.seed_tree_digest,
+            "saved_connection": evidence.saved_connection,
+        },
+    )
+    write_report(manifest, manifest.phases, {"status": "PENDING"})
+    print(json.dumps({"status": "PASS", "operation": "preflight", "run_id": manifest.run_id, "run_root": str(resolved)}, sort_keys=True))
+    return 0
+
+
+def _cli_cleanup(run_root: Path, confirm_run_id: str) -> int:
+    manifest = RunManifest.load(run_root)
+    if confirm_run_id != manifest.run_id:
+        raise E2EError("cleanup confirmation does not match the manifest run ID")
+    adapter = SqlclFixtureAdapter("docker-demo", "docker-sys", manifest.run_root)
+    evidence = _cleanup_preflight(manifest, adapter)
+    try:
+        report = cleanup_fixture(manifest, evidence, adapter=adapter)
+    except E2EError:
+        # Cleanup can fail after one owned delete has completed. Preserve the
+        # manifest and write an UNKNOWN report instead of retrying destructively
+        # or claiming that the remaining state is known.
+        manifest.transition(
+            "cleanup",
+            "UNKNOWN",
+            {"reason": "owned cleanup did not complete; inspect retained command evidence before retrying"},
+        )
+        write_report(
+            manifest,
+            manifest.phases,
+            {"status": "UNKNOWN", "reason": "owned cleanup did not complete; fixture state requires inspection"},
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "UNKNOWN",
+                    "operation": "cleanup",
+                    "run_id": manifest.run_id,
+                    "run_root": str(manifest.run_root),
+                },
+                sort_keys=True,
+            )
+        )
+        return 3
+    write_report(manifest, manifest.phases, asdict(report))
+    print(
+        json.dumps(
+            {
+                "status": report.status,
+                "operation": "cleanup",
+                "run_id": manifest.run_id,
+                "run_root": str(manifest.run_root),
+                "removed": list(report.removed),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     try:
         if args.command == "status":
-            print(json.dumps(RunManifest.load(args.run_root).to_dict(), sort_keys=True, indent=2))
+            manifest = RunManifest.load(args.run_root)
+            report = manifest.run_root / "report.json"
+            if report.is_file() and not report.is_symlink():
+                print(report.read_text(encoding="utf-8"), end="")
+            else:
+                print(json.dumps(manifest.to_dict(), sort_keys=True, indent=2))
             return 0
-        raise E2EError(f"{args.command} phase is not implemented yet")
+        if args.command == "preflight":
+            return _cli_preflight(args.run_root)
+        if args.command == "cleanup":
+            return _cli_cleanup(args.run_root, args.confirm_run_id)
+        if args.command == "run":
+            # The command is deliberately fail-closed until the prepared ORDS
+            # and browser runner are available. A preflight-only run still
+            # produces durable evidence and leaves every fixture resource for
+            # explicit inspection/cleanup; it never reports a synthetic PASS.
+            if not args.run_root.exists():
+                _cli_preflight(args.run_root)
+            manifest = RunManifest.load(args.run_root)
+            manifest.transition(
+                "convergence",
+                "UNKNOWN",
+                {"reason": "protected ORDS/browser runtime smoke is not configured; no browser PASS was inferred"},
+            )
+            write_report(manifest, manifest.phases, {"status": "UNKNOWN", "reason": "fixture retained for inspection"})
+            print(json.dumps({"status": "UNKNOWN", "operation": "run", "run_root": str(manifest.run_root), "run_id": manifest.run_id}, sort_keys=True))
+            return 3
+        raise E2EError(f"unsupported local E2E command: {args.command}")
     except E2EError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
