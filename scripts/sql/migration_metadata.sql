@@ -17,13 +17,6 @@
 -- fill only its empty digest; a non-empty version-2 digest is immutable and
 -- any mismatch must be refused before metadata writes begin.
 DECLARE
-  PROCEDURE create_if_missing(p_sql CLOB) IS
-  BEGIN
-    EXECUTE IMMEDIATE p_sql;
-  EXCEPTION
-    WHEN OTHERS THEN
-      IF SQLCODE != -955 THEN RAISE; END IF;
-  END;
   v_count NUMBER;
   v_pk_count NUMBER;
   v_sequence_pk NUMBER;
@@ -31,6 +24,13 @@ DECLARE
   v_pk_name VARCHAR2(128);
   v_condition VARCHAR2(4000);
   v_duplicate NUMBER;
+  PROCEDURE create_if_missing(p_sql CLOB) IS
+  BEGIN
+    EXECUTE IMMEDIATE p_sql;
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF SQLCODE != -955 THEN RAISE; END IF;
+  END;
 BEGIN
   create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_META (
     version_number NUMBER(10) NOT NULL,
@@ -99,6 +99,19 @@ BEGIN
     CONSTRAINT team_migration_observation_pk PRIMARY KEY (sequence_number)
   )]');
 
+END;
+/
+
+DECLARE
+  v_count NUMBER;
+  v_pk_count NUMBER;
+  v_sequence_pk NUMBER;
+  v_id_pk NUMBER;
+  v_pk_name VARCHAR2(128);
+  v_condition VARCHAR2(4000);
+  v_duplicate NUMBER;
+
+BEGIN
   -- Existing v1 history receives its direction before constraints are checked.
   SELECT COUNT(*) INTO v_count FROM user_tab_columns
    WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND column_name = 'OPERATION';
@@ -122,7 +135,7 @@ BEGIN
   IF v_count = 0 THEN
     EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_HISTORY ADD CONSTRAINT team_migration_history_operation_ck CHECK (operation IN (''up'',''down''))';
   ELSE
-    SELECT DBMS_LOB.SUBSTR(search_condition, 4000, 1) INTO v_condition
+    SELECT search_condition_vc INTO v_condition
       FROM user_constraints
      WHERE table_name = 'TEAM_MIGRATION_HISTORY' AND constraint_name = 'TEAM_MIGRATION_HISTORY_OPERATION_CK';
     IF REGEXP_REPLACE(UPPER(v_condition), '[[:space:]]', '') <> 'OPERATIONIN(''UP'',''DOWN'')' THEN
@@ -183,7 +196,7 @@ BEGIN
   IF v_count = 0 THEN
     EXECUTE IMMEDIATE 'ALTER TABLE TEAM_MIGRATION_ATTEMPT ADD CONSTRAINT team_migration_attempt_action_ck CHECK (action IN (''migrate'',''undo'',''redo''))';
   ELSE
-    SELECT DBMS_LOB.SUBSTR(search_condition, 4000, 1) INTO v_condition
+    SELECT search_condition_vc INTO v_condition
       FROM user_constraints
      WHERE table_name = 'TEAM_MIGRATION_ATTEMPT' AND constraint_name = 'TEAM_MIGRATION_ATTEMPT_ACTION_CK';
     IF REGEXP_REPLACE(UPPER(v_condition), '[[:space:]]', '') <> 'ACTIONIN(''MIGRATE'',''UNDO'',''REDO'')' THEN
