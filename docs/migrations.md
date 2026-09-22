@@ -29,7 +29,8 @@ Destructive `migrate`, `undo-migration`, and `redo-migration` share one
 structured destructive-confirmation convention. Begin with a dry run:
 
 ```text
-scripts/team.py --env .env migrate --source migrations --dry-run
+scripts/team.py --env .env migrate --source migrations --dry-run \
+  --confirmation-out scratch/confirmation.json
 ```
 
 Review the exact migration ID, action, bundle checksum, and
@@ -50,7 +51,9 @@ Review the exact migration ID, action, bundle checksum, and
 }
 ```
 
-Change only `confirmed: false` to `true`, save the canonical JSON, and pass it
+`--confirmation-out` atomically writes the canonical review document and never
+overwrites different existing bytes. The generated document remains false; a
+human reviews it and changes only `confirmed: false` to `true`, then passes it
 with `--destructive-confirmation confirmation.json` to the matching command.
 The same convention covers forward migrate and undo/redo; boolean shortcuts,
 missing or duplicate entries, stale checksums, wrong actions, and extra entries

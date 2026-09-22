@@ -5,6 +5,11 @@ configured application. Declarations are source-controlled, deterministic, and
 must not contain credentials. Missing declarations, members, fixtures, flow
 adapters, or structured results fail closed.
 
+Integration loads declarations and every referenced SQL/flow member from one
+exact Git commit. Release qualification loads the same closed bundle from
+verified archive bytes; neither path reopens working-tree check files after
+selecting its immutable source.
+
 ## SELECT checks
 
 Each SELECT check names a relative `.verify.sql` member and may list expected

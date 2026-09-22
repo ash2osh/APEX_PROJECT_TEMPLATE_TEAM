@@ -30,7 +30,9 @@ PYTHONPATH=scripts python3 scripts/team.py \
   --out "$RUNNER_TEMP/qualification.json"
 ```
 
-The command performs observed runtime/profile preflight before writes, then
+The command first loads migrations, canonical inventory, application trees,
+and the application-check bundle from one exact Git commit. It performs
+observed runtime/profile preflight before writes, then
 sets up controller state, captures one live inventory, adopts a frontier only
 for empty metadata, checks drift, applies ordinary migrations, deploys all
 configured apps, runs checks, and emits the canonical report. A missing or
@@ -63,8 +65,10 @@ are counted and never silently promoted.
 ## Protected release-test
 
 The release job keeps archive build/download/verification offline, then uses a
-prepared `self-hosted` test runner. The test command derives source commit and
-aliases from the verified archive and reads live metadata history:
+prepared `self-hosted` test runner. Its `example-team-apex-test` concurrency
+group never cancels an in-flight protected run. The test command derives source
+commit, aliases, declarations, SELECT SQL, and flow members from the verified
+archive bytes and reads live metadata history:
 
 ```text
 PYTHONPATH=scripts python3 scripts/team.py \
@@ -77,7 +81,19 @@ It requires `role: test` and environment `test`, refuses destructive pending
 migrations before payload execution, and passes an in-memory apply result into
 qualification. No external test-history, plan, or apply-report file is part
 of this flow. Evidence is signed in a separate step with the protected test
-key before the production-owner runbook is generated.
+key before the production-owner runbook is generated:
+
+```text
+scripts/team.py sign-test-evidence \
+  --evidence "$RUNNER_TEMP/test-evidence.json" \
+  --archive scratch/release/release.tar \
+  --private-key "$RUNNER_TEMP/test-signing-key.pem" \
+  --out "$RUNNER_TEMP/test-evidence.sig"
+```
+
+Signing binds `archive_digest`, `source_commit`, and `app_checks_digest`. The
+runbook generator verifies that binding again against the same archive before
+creating the production handoff.
 
 Persistent staging is observational and does not prove a fresh installation,
 isolation, or arbitrary-DML coverage.

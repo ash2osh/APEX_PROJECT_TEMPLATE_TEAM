@@ -6,7 +6,10 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: example-team-apex-test
+  cancel-in-progress: false
 
 jobs:
   build:

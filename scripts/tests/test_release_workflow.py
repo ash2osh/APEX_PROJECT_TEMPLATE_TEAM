@@ -42,6 +42,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("gen-runbook", release)
         self.assertIn("TEAM_FLOW_RUNNER: ${{ vars.TEAM_FLOW_RUNNER }}", release)
         self.assertIn("cancel-in-progress: false", integration)
+        self.assertIn("concurrency:", release)
+        self.assertIn("group: example-team-apex-test", release)
+        self.assertIn("cancel-in-progress: false", release)
+        self.assertNotIn("id-token: write", release)
         self.assertNotIn("production-secrets", release)
 
     def test_release_generates_and_signs_test_evidence_in_order(self):

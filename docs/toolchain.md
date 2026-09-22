@@ -6,14 +6,16 @@ empty stdin file, UTF-8 output, and a generated driver that records identity
 before and after the payload. Shell and PowerShell files are compatibility
 launchers only.
 
-Before a live run, record the outputs of `sql -V`, `java -version`, and
-the APEX release shown by the verified identity/doctor query. The explicit
-Docker qualification is available when the environment owner supplies
-`TEAM_LIVE_ENV`:
+Before a protected online run, record the outputs of `sql -V`, `java -version`,
+and the APEX release shown by the verified identity query. Runtime acceptance
+uses the repository's qualified commands against prepared persistent targets:
 
 ```bash
-TEAM_LIVE_ENV=scratch/live-docker.env \\
-  PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests/live -v
+PYTHONPATH=scripts python3 scripts/team.py --env integration.env \\
+  run-integration --out scratch/integration-evidence.json
+PYTHONPATH=scripts python3 scripts/team.py --env test.env \\
+  run-release-test scratch/release/release.tar --target targets/test.json \\
+  --out scratch/test-evidence.json
 ```
 
 One SQLcl process is bounded by `TEAM_SQLCL_TIMEOUT` seconds, defaulting to 120.
@@ -21,12 +23,11 @@ APEX export and import use a longer built-in budget because a timeout there
 marks the shared application uncertain and pauses the team. Raise the variable
 for a slow link; do not lower it below the time a metadata write needs.
 
-That suite expects the five credential-free profile names to resolve through
-the local SQLcl connection store, exercises the full inventory, Oracle app and
-migration mutexes, and performs only a same-source master import plus a
-temporary table migration. A disposable CI run must still use explicitly
-provisioned application IDs; `docker-demo` is not a default target for
-destructive tests.
+These commands expect the five credential-free profile names to resolve through
+the local SQLcl connection store. They verify identity and versions before any
+write and refuse production. Persistent qualification proves only the observed
+target state; it does not prove a fresh installation or isolation. A local
+`docker-demo` profile is never an implicit destructive-test target.
 
 APEX exports are accepted only when the run has two matching identity
 observations, a positive operation completion record, `application.apx`,
@@ -38,7 +39,7 @@ SELECT-only and all writes are rejected before SQLcl starts.
 is intentional: cloned Oracle Free containers can otherwise all report the
 same `INSTANCE_NAME` (`FREE`) and incorrectly share a physical lock key.
 
-The offline portability gate is:
+Offline portability remains separate and does not claim Oracle acceptance:
 
 ```bash
 for script in scripts/*.sh; do bash -n "$script"; done

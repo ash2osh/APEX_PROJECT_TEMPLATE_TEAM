@@ -1,11 +1,21 @@
 # Design review resolution — 2026-09-07
 
-The seven findings from the project review are addressed in the specifications
-and implementation plans. The offline safety core, SQLcl boundary,
-disposable-runner contract and promotion handoff are implemented in this
-template. The local Docker/APEX qualification below covers read-only identity,
-inventory and APEX export behavior; disposable replay and ORDS/browser checks
-remain environment-specific gates and are never replaced by an offline PASS.
+This file records the evidence and conclusions from the 2026-09-07 review. Its
+Docker and disposable-runner statements are historical; they describe the
+design being reviewed on that date, not the current operator workflow.
+
+## Current state — 2026-09-22
+
+The current implementation uses persistent protected integration and test
+qualification through `run-integration` and `run-release-test`. Integration
+loads all source classes from one exact Git commit. Release qualification and
+signing use one verified archive, including its closed application-check
+bundle. The corrective implementation is defined by
+`docs/superpowers/plans/2026-09-22-trust-bindings-and-operator-simplification.md`.
+Offline checks do not claim live Oracle acceptance, and persistent staging does
+not prove a fresh installation or isolation.
+
+## Historical 2026-09-07 findings
 
 | Finding | Revised contract | Required implementation evidence |
 |---|---|---|

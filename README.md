@@ -11,10 +11,23 @@ commit and push:
 
 ```text
 scripts/team.sh export-app <alias>
-git diff -- apps/<alias>/ .sync-state/
-git commit -am "Describe the Builder change"
+git status --short --untracked-files=all -- apps/<alias>/ migrations/
+git add -- apps/<alias>/
+# If this Builder change needs a schema migration, stage its exact four members:
+git add -- migrations/<migration-id>.sql migrations/<migration-id>.verify.sql \
+  migrations/<migration-id>.down.sql migrations/<migration-id>.down.verify.sql
+git diff --cached -- apps/<alias>/ migrations/
+git commit -m "Describe the shared Builder and schema change"
+git pull --rebase
 git push
 ```
+
+Omit nonexistent optional down members instead of using a broad glob. The
+export is the shared application's observed state, not only your edits, and
+`git status` is required because `git diff` alone hides untracked exported
+components. `.sync-state/` is durable local recovery evidence and is
+intentionally ignored by Git. No tool automatically stages, commits, pulls,
+rebases, pushes, imports, or clears recovery state.
 
 There is no import step in the normal edit loop. `import-app` overwrites the
 shared Builder workspace and requires a separately posted team pause. Transient
@@ -41,7 +54,8 @@ markers, profile identity, and Ed25519 capability.
 ## One normal command per protected target
 
 The offline pull-request gate runs unit tests, static checks, and `ci-doctor`.
-Protected integration derives `HEAD` and the configured aliases itself:
+Protected integration binds migrations, inventory, application trees, and
+checks to one exact Git commit derived from `HEAD` and the configured aliases:
 
 ```text
 scripts/team.py --env "$RUNNER_TEMP/integration.env" run-integration \
@@ -62,7 +76,8 @@ scripts/team.py --env "$RUNNER_TEMP/test.env" run-release-test \
   --out "$RUNNER_TEMP/test-evidence.json"
 ```
 
-The archive supplies the source commit and application aliases. The command
+The verified archive bytes supply the source commit, application aliases, and
+the exact declaration/SQL/flow check bundle. The command
 reads live metadata history, recomputes the plan, refuses destructive pending
 work, deploys exact packaged bytes, and emits unsigned evidence. The target
 must have `role: test`, environment `test`, and matching application bindings.
@@ -87,7 +102,8 @@ action, bundle checksum, and `payload_target_state_key`, then change only
 `confirmed: false` to `true` and pass:
 
 ```text
-scripts/team.py --env .env migrate --source migrations --dry-run
+scripts/team.py --env .env migrate --source migrations --dry-run \
+  --confirmation-out scratch/confirmation.json
 scripts/team.py --env .env migrate --source migrations \
   --destructive-confirmation confirmation.json \
   --expected-inventory database/schema-inventory.json \

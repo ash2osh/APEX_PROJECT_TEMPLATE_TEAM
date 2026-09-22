@@ -16,6 +16,46 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_current_operator_guidance_has_no_retired_or_unsafe_paths(self):
+        operator_paths = [
+            ROOT / "README.md",
+            ROOT / ".env.example",
+            *[
+                path
+                for path in sorted((ROOT / "docs").glob("*.md"))
+                if path.name != "design-review-resolution.md"
+            ],
+            ROOT / "docs" / "working-on-apex-together.html",
+            ROOT / "ci" / "app-checks" / "README.md",
+        ]
+        operator_docs = "\n".join(
+            path.read_text(encoding="utf-8") for path in operator_paths
+        )
+        retired_or_unsafe = (
+            "scripts/tests/live",
+            "ci-replay",
+            "CI therefore builds a disposable schema",
+            "required by migration/replay commands",
+            'git commit -am "Describe the Builder change"',
+            "git diff -- apps/<alias>/ .sync-state/",
+        )
+        for token in retired_or_unsafe:
+            self.assertNotIn(token, operator_docs)
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for token in (
+            "git status --short --untracked-files=all",
+            "git add -- apps/<alias>/",
+            "git diff --cached",
+            "git pull --rebase",
+            "git push",
+        ):
+            self.assertIn(token, readme)
+        self.assertNotIn("git add -A", readme)
+        self.assertIn("TEAM_ASSERT|", operator_docs)
+        self.assertIn("exact Git commit", operator_docs)
+        self.assertIn("verified archive bytes", operator_docs)
+
     def test_required_workflow_documents_and_links_exist(self):
         for relative in (
             "README.md", "docs/ci.md", "docs/promotion.md", "docs/app-recovery.md",

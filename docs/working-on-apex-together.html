@@ -603,7 +603,7 @@
   <!-- ============ THE LOOP ============ -->
   <section>
     <div class="section-mark">The daily loop</div>
-    <h2>Three steps, and there's no "pull" in them</h2>
+    <h2>Export, review, commit, then synchronize Git</h2>
 
     <div class="col">
       <p>
@@ -649,6 +649,29 @@
         no idea what branch you're on, so whatever is in the app lands in
         whichever branch you export to. Migrations are hand-written files, so
         those <em>do</em> stay on their branch.
+      </p>
+    </div>
+
+    <div class="code col">
+<pre>team.py export-app &lt;alias&gt;
+git status --short --untracked-files=all -- apps/&lt;alias&gt;/ migrations/
+git add -- apps/&lt;alias&gt;/
+git add -- migrations/&lt;migration-id&gt;.sql migrations/&lt;migration-id&gt;.verify.sql
+# If authored, stage the optional down pair explicitly too:
+git add -- migrations/&lt;migration-id&gt;.down.sql migrations/&lt;migration-id&gt;.down.verify.sql
+git diff --cached -- apps/&lt;alias&gt;/ migrations/
+git commit -m "Describe the shared Builder and schema change"
+git pull --rebase
+git push</pre>
+    </div>
+    <div class="note col">
+      <div class="note-label">Review tracked and untracked files</div>
+      <p>
+        An export is the shared application's observed state, not only your
+        edits. Status is required because a plain diff hides new exported
+        components. Stage optional down members only when they exist; never use
+        a broad add. Recovery evidence under <em class="term">.sync-state/</em>
+        stays local and is not committed.
       </p>
     </div>
 
@@ -781,8 +804,8 @@ ALTER TABLE hr_leave_requests ADD (delegated_to VARCHAR2(100));</pre>
       <div class="code">
 <pre><span class="c-com">-- …delegation.verify.sql — proof it actually worked</span>
 
-SELECT 'delegated_to exists' AS assertion_name,
-       CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL' END AS status
+SELECT 'TEAM_ASSERT|delegated_to_exists|' ||
+       CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL' END
   FROM user_tab_columns
  WHERE table_name  = 'HR_LEAVE_REQUESTS'
    AND column_name = 'DELEGATED_TO';</pre>
@@ -857,12 +880,12 @@ SELECT 'delegated_to exists' AS assertion_name,
   <section class="col">
     <h2>Check the application against the merged schema</h2>
     <p>
-      Integration may share development's database and already contain an
-      unmerged column. CI therefore builds a disposable schema from the selected
-      commit, imports that commit's applications, and runs declared dependency
-      assertions and page checks there before integration deployment. Missing or
-      skipped checks fail the gate. This validates the declared coverage; matching
-      exported files alone cannot prove that every runtime path works.
+      Protected integration and test use persistent non-production targets.
+      Integration loads migrations, inventory, applications and declared checks
+      from one exact Git commit. Release testing loads those inputs from verified
+      archive bytes. Missing or skipped checks fail the gate. These observations
+      validate declared coverage, but persistent targets do not prove a fresh
+      installation, isolation, or every runtime path.
     </p>
     <p>
       Migration authoring and release inspection work offline without database
@@ -1059,10 +1082,9 @@ SELECT 'delegated_to exists' AS assertion_name,
   <footer class="closer col">
     <h3>Where this stands</h3>
     <p style="color:var(--muted);">
-      Design and implementation plans are written and reviewed; the tooling
-      itself isn't built yet. The three plans build in order — the daily loop
-      first, then migrations, then release and promotion — and the first one is
-      useful on its own, because it's the one that ends the silent deletions.
+      The daily, migration, protected qualification, and release-handoff paths
+      are implemented. The tooling refuses production writes and keeps the
+      unavoidable shared-Builder and persistent-target limitations explicit.
     </p>
   </footer>
 
