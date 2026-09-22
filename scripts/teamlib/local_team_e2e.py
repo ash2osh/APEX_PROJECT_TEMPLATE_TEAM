@@ -1310,7 +1310,17 @@ class SqlclGate:
             raise E2EError("SQLcl gate run root is not a real directory")
         gate_root = root / "sqlcl-gate"
         if gate_root.exists() or gate_root.is_symlink():
-            raise E2EError("SQLcl gate directory already exists")
+            # A single acceptance run may exercise more than one interlock
+            # (for example, a verified import followed by an unknown result).
+            # Keep each wrapper and its markers isolated instead of reusing or
+            # overwriting evidence from the earlier command.
+            for _ in range(32):
+                candidate = root / f"sqlcl-gate-{secrets.token_hex(4)}"
+                if not candidate.exists() and not candidate.is_symlink():
+                    gate_root = candidate
+                    break
+            else:
+                raise E2EError("could not allocate a unique SQLcl gate directory")
         requested = str(real_executable or os.environ.get("TEAM_SQLCL_EXECUTABLE", "sql"))
         resolved = Path(shutil.which(requested) or requested).resolve()
         if resolved.is_symlink() or not resolved.is_file():

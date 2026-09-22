@@ -234,6 +234,13 @@ class LocalTeamGateTests(unittest.TestCase):
         self.assertTrue(gate.payload_started.is_file())
         self.assertNotEqual(result.returncode, 0)
 
+    def test_gate_allows_sequential_interlocks_in_one_run(self):
+        first = SqlclGate.create(self.root, real_executable=self.real)
+        second = SqlclGate.create(self.root, real_executable=self.real)
+        self.assertEqual(first.root, second.root)
+        self.assertNotEqual(first.executable.parent, second.executable.parent)
+        self.assertNotEqual(first.executable, second.executable)
+
     def test_async_team_command_has_bounded_wait_and_durable_output(self):
         clone = self.root / "dev" / "alice"
         (clone / "scripts").mkdir(parents=True)
