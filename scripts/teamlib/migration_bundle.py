@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 from collections.abc import Mapping
 
-from .sql_text import SqlTextError, comment_spans, mask_sql, statement_starts
+from .sql_text import SqlTextError, _scan, comment_spans, mask_sql, statement_starts
 
 
 class BundleError(ValueError):
@@ -200,8 +200,25 @@ def _validate_verify(text: str, migration_id: str) -> None:
     statements = [part.strip() for part in code.split(";") if part.strip()]
     if not statements or any(not statement.upper().startswith("SELECT") for statement in statements):
         raise BundleError(f"verification member is not a SELECT assertion: {migration_id}")
-    if any(not re.search(r"\bASSERTION_NAME\b", statement, re.IGNORECASE) or not re.search(r"\bSTATUS\b", statement, re.IGNORECASE) for statement in statements):
-        raise BundleError(f"verification member must return assertion_name and status: {migration_id}")
+    named_result = all(
+        re.search(r"\bASSERTION_NAME\b", statement, re.IGNORECASE)
+        and re.search(r"\bSTATUS\b", statement, re.IGNORECASE)
+        for statement in statements
+    )
+    if not named_result:
+        # The public migration plan also permits a direct TEAM_ASSERT row.  It
+        # is safe only when the row marker and both closed protocol statuses
+        # are SQL literals; arbitrary dynamic status text is not qualified.
+        spans, _ = _scan(text)
+        literals = [text[start:stop] for kind, start, stop in spans if kind == "literal"]
+        protocol_row = any(re.search(r"TEAM_ASSERT\|", literal, re.IGNORECASE) for literal in literals)
+        protocol_statuses = {
+            literal.strip("'").upper()
+            for literal in literals
+            if literal.startswith("'") and literal.endswith("'")
+        }
+        if not protocol_row or not {"PASS", "FAIL"}.issubset(protocol_statuses):
+            raise BundleError(f"verification member must return assertion_name and status: {migration_id}")
     # A verification result is intentionally constrained to PASS/FAIL literals
     # when present; a dynamic status cannot be qualified by the adapter.
     if re.search(r"(?i)\bstatus\s*=\s*", code):

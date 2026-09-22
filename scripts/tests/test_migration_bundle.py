@@ -57,6 +57,18 @@ class MigrationBundleTests(unittest.TestCase):
         (self.root / f"{migration_id}.verify.sql").write_text("SELECT 'other' assertion_name, 'PASS' status FROM dual;\n", encoding="utf-8")
         self.assertNotEqual(load_bundles(self.root)[migration_id].checksum, checksum)
 
+    def test_accepts_plan_team_assert_case_verification_shape(self):
+        migration_id = "20260907T100000__alice__shared-note"
+        self.write(
+            migration_id,
+            verify=(
+                "SELECT 'TEAM_ASSERT|team_e2e_shared_note|' || "
+                "CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL' END "
+                "FROM USER_TABLES WHERE TABLE_NAME = 'TEAM_E2E_SHARED_NOTE';\n"
+            ),
+        )
+        self.assertIn(migration_id, load_bundles(self.root))
+
     def test_loads_complete_down_pair_and_checksums_both_members(self):
         migration_id = "20260907T100000__alice__reversible"
         self.write(
