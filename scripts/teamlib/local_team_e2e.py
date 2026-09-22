@@ -485,7 +485,7 @@ def cleanup_fixture(
             import shutil
 
             shutil.rmtree(path)
-    workspace_after, raw_apps_after = adapter.read_workspace_and_apps(live_evidence.payload_connection)
+    _workspace_after, raw_apps_after = adapter.read_workspace_and_apps(live_evidence.payload_connection)
     apps_after = _validate_apps(raw_apps_after, manifest.spec)
     if manifest.spec.fixture_app_id in apps_after or manifest.spec.metadata_schema in adapter.read_schemas_and_users(live_evidence.admin_connection):
         raise E2EError("cleanup verification found an owned resource still present")
@@ -2554,7 +2554,7 @@ def _cleanup_preflight(manifest: RunManifest, adapter: SqlclFixtureAdapter) -> P
 
 
 def _cli_preflight(run_root: Path) -> int:
-    repo, source_commit = _resolve_source_commit()
+    _repo, source_commit = _resolve_source_commit()
     root = Path(run_root)
     if root.is_absolute():
         resolved = root.resolve()
