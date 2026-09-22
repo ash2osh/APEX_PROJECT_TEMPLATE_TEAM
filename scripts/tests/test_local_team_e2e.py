@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import secrets
 import stat
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from teamlib.local_team_e2e import (  # noqa: E402
     ApexMutation,
     CapturedTree,
     FixtureMutationEvidence,
+    ExportConflictEvidence,
+    ReviewedExportResolution,
     PreflightEvidence,
     RunManifest,
     create_team_topology,
@@ -27,6 +30,8 @@ from teamlib.local_team_e2e import (  # noqa: E402
     assert_safe_argv,
     cleanup_fixture,
     fixture_builder_save,
+    load_export_conflict,
+    materialize_export_resolution,
     inspect_fixture,
     parse_saved_connections,
     provision_fixture,
@@ -35,6 +40,8 @@ from teamlib.local_team_e2e import (  # noqa: E402
     save_connection_script,
 )
 from teamlib.config import load_config  # noqa: E402
+from teamlib.config import Target  # noqa: E402
+from teamlib.state import save_capture  # noqa: E402
 
 
 class LocalTeamManifestTests(unittest.TestCase):
@@ -381,6 +388,80 @@ class LocalTeamBuilderMutationTests(unittest.TestCase):
         for mutation, message in cases:
             with self.subTest(path=mutation.relative_path), self.assertRaisesRegex(E2EError, message):
                 fixture_builder_save(self.developer, mutation, adapter=self.adapter, spec=FixtureSpec(), workspace_id=90000)
+
+
+class LocalTeamConflictEvidenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="local-team-conflict-")
+        self.root = Path(self.temp.name)
+        self.clone = self.root / "dev" / "carol"
+        self.clone.mkdir(parents=True)
+        self.state = self.clone / ".sync-state"
+        self.developer = type("DeveloperStub", (), {"name": "carol", "clone": self.clone, "run_root": self.root})()
+        self.target = Target(
+            project="local-team-e2e", role="developer", environment="development",
+            connection="docker-demo", instance_id="FREE@docker", db_name="FREEPDB1", service="freep1",
+            session_user="DEMO", current_schema="DEMO", alias="team-e2e",
+            workspace_id=90000, app_id=9099, parsing_schema="DEMO",
+            ownership_mode="shared", binding_digest="a" * 64,
+        )
+        self.base = {
+            "application.apx": b"app TEAM-E2E-9099\n",
+            ".apex/apexlang.json": b"{}\n",
+            "pages/home.apx": b"name: Simple App\nkeep: base\n",
+            "shared-components/messages.apx": b"text: Simple App\n",
+        }
+        self.head = dict(self.base)
+        self.head["pages/home.apx"] = b"name: Simple App - Carol Source\nkeep: base\n"
+        self.mine = dict(self.base)
+        self.mine["pages/home.apx"] = b"name: Simple App - Shared Builder\nkeep: base\n"
+        self.head_commit = "b" * 40
+        self.recovery_id = save_capture(
+            self.target,
+            self.base,
+            self.base,
+            self.head,
+            self.mine,
+            {
+                "kind": "export",
+                "tree_digest": __import__("teamlib.trees", fromlist=["tree_digest"]).tree_digest(self.mine),
+                "conflicts": ["pages/home.apx"],
+                "head_commit": self.head_commit,
+            },
+            root=self.state,
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_loads_closed_four_way_evidence_and_materializes_reviewed_tree(self):
+        evidence = load_export_conflict(self.developer, self.target, self.recovery_id, state_root=self.state)
+        self.assertIsInstance(evidence, ExportConflictEvidence)
+        self.assertEqual(evidence.application_id, 9099)
+        self.assertEqual(evidence.conflicts, ("pages/home.apx",))
+        self.assertEqual(evidence.head_tree["pages/home.apx"], self.head["pages/home.apx"])
+        result = materialize_export_resolution(
+            evidence,
+            {"pages/home.apx": self.mine["pages/home.apx"]},
+            self.root / "reviewed" / "carol",
+        )
+        self.assertIsInstance(result, ReviewedExportResolution)
+        self.assertEqual(result.tree["pages/home.apx"], self.mine["pages/home.apx"])
+        self.assertEqual(result.tree["shared-components/messages.apx"], self.base["shared-components/messages.apx"])
+        self.assertTrue((result.root / "application.apx").is_file())
+        self.assertTrue((result.root / ".apex" / "apexlang.json").is_file())
+
+    def test_review_requires_exact_conflict_choices_and_safe_output(self):
+        evidence = load_export_conflict(self.developer, self.target, self.recovery_id, state_root=self.state)
+        for choices in ({}, {"pages/home.apx": b"x", "extra.apx": b"x"}, {"pages/home.apx": "text"}):
+            with self.subTest(choices=choices), self.assertRaisesRegex(E2EError, "every conflicted path exactly once|path-safe bytes"):
+                materialize_export_resolution(evidence, choices, self.root / "reviewed" / secrets.token_hex(4))
+        with self.assertRaisesRegex(E2EError, "inside the developer run root"):
+            materialize_export_resolution(
+                evidence,
+                {"pages/home.apx": self.mine["pages/home.apx"]},
+                self.root.parent / "outside",
+            )
 
 
 class FakeFixtureAdapter:

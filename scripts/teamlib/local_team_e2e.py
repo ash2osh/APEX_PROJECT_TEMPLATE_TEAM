@@ -1214,6 +1214,154 @@ class FixtureMutationEvidence:
     coverage: str
 
 
+@dataclass(frozen=True)
+class ExportConflictEvidence:
+    """Closed-schema view of one retained Git-versus-live export conflict."""
+
+    developer: Any
+    recovery_id: str
+    state_root: Path
+    target_key: str
+    application_id: int
+    workspace_id: int
+    application_alias: str
+    head_commit: str
+    base: dict[str, bytes]
+    source_base: dict[str, bytes]
+    head_tree: dict[str, bytes]
+    mine: dict[str, bytes]
+    conflicts: tuple[str, ...]
+    base_digest: str
+    source_base_digest: str
+    head_digest: str
+    mine_digest: str
+
+
+@dataclass(frozen=True)
+class ReviewedExportResolution:
+    """A complete, run-owned tree ready for the public resolve-export command."""
+
+    root: Path
+    tree: dict[str, bytes]
+    digest: str
+    conflict_paths: tuple[str, ...]
+
+
+def load_export_conflict(
+    developer: Any,
+    target: Any,
+    recovery_id: str,
+    *,
+    state_root: str | Path | None = None,
+) -> ExportConflictEvidence:
+    """Read a retained export capture without interpreting human output."""
+
+    from .state import StateError, load_capture
+
+    if not isinstance(recovery_id, str) or not re.fullmatch(r"[0-9a-f]{32}", recovery_id):
+        raise E2EError("export recovery ID is malformed")
+    root = Path(state_root or (Path(developer.clone) / ".sync-state")).resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise E2EError("export recovery state root is not a real directory")
+    try:
+        capture = load_capture(target, recovery_id, root=root)
+    except StateError as exc:
+        raise E2EError(f"export recovery is unreadable: {exc}") from exc
+    diagnostics = capture.diagnostics
+    if not isinstance(diagnostics, Mapping) or diagnostics.get("kind") != "export":
+        raise E2EError("retained recovery is not an export capture")
+    raw_conflicts = diagnostics.get("conflicts")
+    if not isinstance(raw_conflicts, list) or not raw_conflicts or any(not isinstance(path, str) or not path for path in raw_conflicts):
+        raise E2EError("export recovery conflict list is malformed")
+    conflicts = tuple(sorted(set(raw_conflicts)))
+    if len(conflicts) != len(raw_conflicts):
+        raise E2EError("export recovery conflict list contains duplicates")
+    if not isinstance(diagnostics.get("head_commit"), str) or diagnostics["head_commit"] != capture.head:
+        raise E2EError("export recovery HEAD is not bound to its diagnostics")
+    application_id = getattr(target, "app_id", None)
+    workspace_id = getattr(target, "workspace_id", None)
+    alias = getattr(target, "alias", None)
+    target_key = getattr(target, "state_key", None)
+    if not isinstance(application_id, int) or application_id <= 0 or not isinstance(workspace_id, int) or workspace_id <= 0:
+        raise E2EError("export recovery target has no verified application identity")
+    if not isinstance(alias, str) or not alias or not isinstance(target_key, str) or not target_key:
+        raise E2EError("export recovery target binding is incomplete")
+    all_paths = set(capture.base) | set(capture.source_base) | set(capture.head_tree) | set(capture.mine)
+    if not set(conflicts) <= all_paths:
+        raise E2EError("export recovery names a conflict outside its retained trees")
+    if diagnostics.get("tree_digest") != _tree_digest(capture.mine):
+        raise E2EError("export recovery live tree digest does not match retained blobs")
+    return ExportConflictEvidence(
+        developer=developer,
+        recovery_id=recovery_id,
+        state_root=root,
+        target_key=target_key,
+        application_id=application_id,
+        workspace_id=workspace_id,
+        application_alias=alias,
+        head_commit=capture.head,
+        base=capture.base,
+        source_base=capture.source_base,
+        head_tree=capture.head_tree,
+        mine=capture.mine,
+        conflicts=conflicts,
+        base_digest=_tree_digest(capture.base),
+        source_base_digest=_tree_digest(capture.source_base),
+        head_digest=_tree_digest(capture.head_tree),
+        mine_digest=_tree_digest(capture.mine),
+    )
+
+
+def materialize_export_resolution(
+    evidence: ExportConflictEvidence,
+    decisions: Mapping[str, bytes],
+    destination: str | Path,
+) -> ReviewedExportResolution:
+    """Materialize a complete reviewed four-way result, preserving safe edits."""
+
+    from .reconcile import reconcile
+    from .trees import TreeError, _validate_tree_paths
+
+    if not isinstance(evidence, ExportConflictEvidence):
+        raise E2EError("reviewed resolution requires export conflict evidence")
+    if not isinstance(decisions, Mapping) or set(decisions) != set(evidence.conflicts):
+        raise E2EError("reviewed resolution must choose every conflicted path exactly once")
+    if any(not isinstance(path, str) or not isinstance(value, bytes) for path, value in decisions.items()):
+        raise E2EError("reviewed resolution values must be path-safe bytes")
+    try:
+        decision = reconcile(evidence.base, evidence.head_tree, evidence.mine, source_base=evidence.source_base)
+        resolved = dict(decision.tree)
+        resolved.update(decisions)
+        _validate_tree_paths(resolved)
+    except (TreeError, ValueError, TypeError) as exc:
+        raise E2EError(f"reviewed resolution tree is invalid: {exc}") from exc
+    if tuple(decision.conflicts) != evidence.conflicts:
+        raise E2EError("retained conflict paths do not match four-way reconciliation")
+    required = {"application.apx", ".apex/apexlang.json"}
+    if not required <= set(resolved):
+        raise E2EError("reviewed resolution is not a complete APEX application tree")
+    for path, value in resolved.items():
+        if Path(path).suffix.casefold() in {".apx", ".json", ".sql", ".js", ".css", ".html", ".txt", ".xml", ".yaml", ".yml"}:
+            if any(marker in value for marker in (b"<<<<<<<", b"=======", b">>>>>>>")):
+                raise E2EError(f"reviewed resolution contains conflict markers: {path}")
+    run_root = Path(getattr(evidence.developer, "run_root", Path(evidence.developer.clone).parent.parent)).resolve()
+    root = Path(destination)
+    if not root.is_absolute():
+        root = (run_root / root).resolve()
+    else:
+        root = root.resolve()
+    if not _inside(root, run_root) or root == run_root or root.exists() or root.is_symlink():
+        raise E2EError("reviewed resolution must be a new directory inside the developer run root")
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    for relative, value in sorted(resolved.items()):
+        path = root / relative
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.is_symlink():
+            raise E2EError(f"reviewed resolution output path is a symlink: {relative}")
+        path.write_bytes(value)
+    return ReviewedExportResolution(root, resolved, _tree_digest(resolved), evidence.conflicts)
+
+
 def _tree_digest(tree: Mapping[str, bytes]) -> str:
     from .trees import tree_digest
 
