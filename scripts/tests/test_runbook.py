@@ -16,7 +16,7 @@ from unittest.mock import patch
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-from teamlib.release import build_release
+from teamlib.release import build_release, release_app_check_bundle
 from teamlib.runbook import RunbookError, gen_runbook
 
 
@@ -32,10 +32,54 @@ class RunbookTests(unittest.TestCase):
             (repo / "apps" / "a" / ".apex").mkdir(parents=True)
             (repo / "apps" / "a" / "application.apx").write_bytes(b"app")
             (repo / "apps" / "a" / ".apex" / "apexlang.json").write_bytes(b"{}")
+            checks = repo / "ci" / "app-checks"
+            checks.mkdir(parents=True)
+            checks.joinpath("a.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "alias": "a",
+                        "page_ids": [1],
+                        "checks": [
+                            {
+                                "id": "objects",
+                                "page_id": 1,
+                                "kind": "select",
+                                "verify_sql": "a/objects.verify.sql",
+                                "expected_objects": [],
+                            },
+                            {
+                                "id": "home",
+                                "page_id": 1,
+                                "kind": "flow",
+                                "flow": "a/home.flow.json",
+                                "steps": [
+                                    {
+                                        "action": "navigate",
+                                        "path": "/ords/r/app/a/home",
+                                        "expected_visible_text": "Home",
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            checks.joinpath("a").mkdir()
+            checks.joinpath("a", "objects.verify.sql").write_text(
+                "SELECT 'TEAM_ASSERT|' || assertion_name || '|' || status AS status "
+                "FROM (SELECT 'objects' assertion_name, 'PASS' status FROM dual);\n",
+                encoding="utf-8",
+            )
+            checks.joinpath("a", "home.flow.json").write_text("{}\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
             manifest = build_release(repo, commit, "1.0.0", root / "out")
+            bundle = release_app_check_bundle(manifest.archive_path)
             evidence_data = {
                 "version": 2, "final_status": "PASS", "archive_digest": manifest.archive_digest, "source_commit": commit,
                 "toolchain_digest": "b" * 64,
@@ -48,7 +92,7 @@ class RunbookTests(unittest.TestCase):
                 "run_identity": {"run_id": "ci-run-1"},
                 "qualification_identity": {"target_kind": "persistent", "observation_sequence": 1, "observation_digest": "d" * 64, "history_digest": "e" * 64},
                 "application_checks": {
-                    "status": "PASS", "checks_digest": "c" * 64,
+                    "status": "PASS", "checks_digest": bundle.checks_digest,
                     "coverage": {"apps": ["a"], "pages": {"a": [1]}, "checks": 1, "unknown": 0},
                     "unknown": 0,
                     "results": [{
@@ -67,6 +111,33 @@ class RunbookTests(unittest.TestCase):
             (root / "sig").write_bytes(key.sign(evidence.read_bytes()))
             runbook = gen_runbook(manifest.archive_path, {}, {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"a": 2}}, evidence, root / "sig", root / "key.pem")
             self.assertIn("PROD", runbook.text)
+
+            mismatched = dict(evidence_data)
+            mismatched["application_checks"] = {
+                **evidence_data["application_checks"],
+                "checks_digest": "c" * 64,
+            }
+            mismatch_path = root / "mismatched-evidence.json"
+            mismatch_path.write_bytes(
+                json.dumps(mismatched, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                + b"\n"
+            )
+            mismatch_signature = root / "mismatched.sig"
+            mismatch_signature.write_bytes(key.sign(mismatch_path.read_bytes()))
+            with self.assertRaisesRegex(RunbookError, "application checks do not match"):
+                gen_runbook(
+                    manifest.archive_path,
+                    {},
+                    {
+                        "environment": "production",
+                        "instance_id": "PROD",
+                        "workspace_id": 1,
+                        "app_ids": {"a": 2},
+                    },
+                    mismatch_path,
+                    mismatch_signature,
+                    root / "key.pem",
+                )
             self.assertIn(manifest.archive_digest, runbook.text)
             invalid_identities = (
                 {**evidence_data["target_identity"], "role": "integration"},

@@ -18,13 +18,24 @@ import tempfile
 from typing import Any
 from collections.abc import Callable, Mapping, Sequence
 
-from .app_checks import AppCheckError, AppCheckReport, verify_candidate_apps
+from .app_checks import (
+    AppCheckBundle,
+    AppCheckError,
+    AppCheckReport,
+    build_app_check_bundle,
+    verify_candidate_apps,
+)
 from .assertions import AssertionVerificationError, parse_team_assertions
 from .ci import ci_doctor
 from .config import Config, Target, profile_target
-from .evidence import EvidenceError, canonical_json, validate_test_evidence
+from .evidence import (
+    EvidenceError,
+    canonical_json,
+    validate_release_evidence_binding,
+    validate_test_evidence,
+)
 from .migration_store import MigrationStoreError
-from .release import ReleaseError, verify_release
+from .release import ReleaseError, release_app_check_bundle, verify_release
 from .runtime import RuntimeReport
 from .sqlcl import run_sqlcl
 
@@ -76,22 +87,23 @@ def declaration_paths(repo: Path, aliases: Sequence[str]) -> dict[str, Path]:
     return result
 
 
-def _select_runner(*, profile: Any, repo: Path, work: Path, run_sqlcl: Callable[..., Any] = run_sqlcl):
+def _select_runner(
+    *,
+    profile: Any,
+    bundle: AppCheckBundle,
+    work: Path,
+    run_sqlcl: Callable[..., Any] = run_sqlcl,
+):
     """Return a SELECT-only assertion adapter bound to the VERIFY profile."""
-    checks_root = Path(repo) / "ci" / "app-checks"
-
     def resolve(alias: str, check: Mapping[str, Any]) -> dict[str, Any]:
         relative = str(check.get("verify_sql", ""))
-        member = checks_root / relative
-        if member.is_symlink() or not member.is_file():
-            return {"status": "FAIL", "diagnostic": f"verification member is missing: {relative}"}
+        try:
+            text = bundle.member_bytes(relative).decode("utf-8")
+        except (AppCheckError, UnicodeError) as exc:
+            return {"status": "FAIL", "diagnostic": str(exc)}
         driver_root = Path(work) / "app-checks" / alias / str(check.get("id", "check"))
         driver_root.mkdir(parents=True, exist_ok=True)
         driver = driver_root / "verify.sql"
-        try:
-            text = member.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            return {"status": "FAIL", "diagnostic": f"verification member is unreadable: {exc}"}
         driver.write_text(
             "SET DEFINE OFF\nSET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n"
             + text,
@@ -130,30 +142,76 @@ def _require_flow_adapter(declarations: Mapping[str, Any], executable: str | Non
         )
 
 
-def _flow_runner(executable: str, work: Path):
+def _invoke_flow_adapter(executable: str, alias: str, payload: Path) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            [executable, "--alias", alias, "--check-json", str(payload)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        return {"status": "FAIL", "diagnostic": f"flow adapter could not start: {exc}"}
+    if result.returncode != 0:
+        return {
+            "status": "FAIL",
+            "diagnostic": result.stderr.strip() or f"flow adapter exit {result.returncode}",
+        }
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {"status": "FAIL", "diagnostic": f"flow adapter did not return JSON: {exc}"}
+    if not isinstance(value, dict):
+        return {"status": "FAIL", "diagnostic": "flow adapter returned a non-object"}
+    return value
+
+
+def _flow_runner(executable: str, work: Path, bundle: AppCheckBundle):
     def resolve(alias: str, check: Mapping[str, Any]) -> dict[str, Any]:
-        payload_root = Path(work) / "flow" / alias
+        relative = str(check.get("flow", ""))
+        try:
+            raw = bundle.member_bytes(relative)
+            flow = json.loads(raw.decode("utf-8"))
+        except (AppCheckError, UnicodeError, json.JSONDecodeError) as exc:
+            return {"status": "FAIL", "diagnostic": f"flow member is unreadable: {exc}"}
+        if not isinstance(flow, Mapping):
+            return {"status": "FAIL", "diagnostic": "flow member must be a JSON object"}
+        payload_root = Path(work) / "flow" / alias / str(check.get("id", "check"))
         payload_root.mkdir(parents=True, exist_ok=True)
-        payload = payload_root / f"{check.get('id', 'check')}.json"
-        payload.write_text(json.dumps(dict(check), sort_keys=True), encoding="utf-8", newline="\n")
-        try:
-            result = subprocess.run(
-                [executable, "--alias", alias, "--check-json", str(payload)],
-                capture_output=True, text=True, check=False,
-            )
-        except OSError as exc:
-            return {"status": "FAIL", "diagnostic": f"flow adapter could not start: {exc}"}
-        if result.returncode != 0:
-            return {"status": "FAIL", "diagnostic": result.stderr.strip() or f"flow adapter exit {result.returncode}"}
-        try:
-            value = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            return {"status": "FAIL", "diagnostic": f"flow adapter did not return JSON: {exc}"}
-        if not isinstance(value, dict):
-            return {"status": "FAIL", "diagnostic": "flow adapter returned a non-object"}
-        return value
+        flow_path = payload_root / "flow.json"
+        flow_path.write_bytes(raw)
+        payload = payload_root / "check.json"
+        executable_check = dict(check)
+        executable_check["flow"] = str(flow_path)
+        payload.write_text(
+            json.dumps(executable_check, sort_keys=True),
+            encoding="utf-8",
+            newline="\n",
+        )
+        return _invoke_flow_adapter(executable, alias, payload)
 
     return resolve
+
+
+def _worktree_check_bundle(repo: Path, aliases: Sequence[str]) -> AppCheckBundle:
+    root = repo / "ci" / "app-checks"
+    if root.is_symlink() or not root.is_dir():
+        raise QualificationError(f"candidate application checks are missing: {root}")
+    members: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise QualificationError(f"candidate application check member is a symlink: {path}")
+        if path.is_file():
+            try:
+                members[path.relative_to(root).as_posix()] = path.read_bytes()
+            except OSError as exc:
+                raise QualificationError(
+                    f"candidate application check member is unreadable: {path}"
+                ) from exc
+    try:
+        return build_app_check_bundle(members, aliases)
+    except AppCheckError as exc:
+        raise QualificationError(str(exc)) from exc
 
 
 def _target_identity(config: Config, targets: Mapping[str, Target]) -> dict[str, Any]:
@@ -268,6 +326,7 @@ def qualify_target(
     *,
     store: Any,
     work: str | Path,
+    check_bundle: AppCheckBundle | None = None,
     release_archive: str | Path | None = None,
     apply_report: str | Path | Mapping[str, Any] | None = None,
     flow_executable: str | None = None,
@@ -289,10 +348,17 @@ def qualify_target(
         raise QualificationError("qualification aliases must exactly match configured application bindings")
     if bool(release_archive) != bool(apply_report):
         raise QualificationError("--release-archive and --apply-report must be supplied together")
+    if release_archive is not None and check_bundle is None:
+        raise QualificationError("release qualification requires an explicit check bundle")
 
     repo_path = Path(repo)
     work_path = Path(work)
     work_path.mkdir(parents=True, exist_ok=True)
+    active_bundle = check_bundle or _worktree_check_bundle(repo_path, selected)
+    if set(active_bundle.declarations) != set(selected):
+        raise QualificationError(
+            "application check bundle aliases do not match configured application bindings"
+        )
     targets = {
         profile: profile_target(config, profile, alias=alias)
         for profile, alias in [("APEX", selected[0])] if selected
@@ -360,28 +426,26 @@ def qualify_target(
             target_state_key=targets["METADATA"].state_key,
         )
 
-    declarations = declaration_paths(repo_path, selected)
-    loaded = {}
-    for alias, path in declarations.items():
-        try:
-            loaded[alias] = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise QualificationError(f"candidate declaration is unreadable: {path}") from exc
+    loaded = active_bundle.declarations
     _require_flow_adapter(loaded, flow_executable)
     target_for_checks = {
         **target_identity,
         "source_commit": source_commit,
         "app_ids": dict(config.apps),
         "select_runner": _select_runner(
-            profile=targets["VERIFY"], repo=repo_path, work=work_path, run_sqlcl=sql_runner
+            profile=targets["VERIFY"], bundle=active_bundle, work=work_path, run_sqlcl=sql_runner
         ),
-        "flow_runner": _flow_runner(flow_executable, work_path) if flow_executable else None,
+        "flow_runner": (
+            _flow_runner(flow_executable, work_path, active_bundle)
+            if flow_executable
+            else None
+        ),
     }
     try:
         app_report: AppCheckReport = verify_candidate_apps(
             {"commit": source_commit, "apps": {alias: {"app_id": config.apps[alias]} for alias in selected}},
             target_for_checks,
-            declarations,
+            loaded,
         )
     except AppCheckError as exc:
         if exc.report is not None:
@@ -395,6 +459,10 @@ def qualify_target(
                 "results": [item.as_dict() for item in exc.report.results],
             }
         raise QualificationError(str(exc), report) from exc
+    if app_report.checks_digest != active_bundle.checks_digest:
+        raise QualificationError(
+            "application check report digest does not match the selected bundle", report
+        )
     report["application_checks"] = {
         "status": app_report.status,
         "checks_digest": app_report.checks_digest,
@@ -439,11 +507,24 @@ def _private_key(raw: bytes):
     return key
 
 
-def sign_test_evidence(evidence: str | Path, private_key: str | Path, signature_out: str | Path) -> str:
+def sign_test_evidence(
+    evidence: str | Path,
+    release_archive: str | Path,
+    private_key: str | Path,
+    signature_out: str | Path,
+) -> str:
     raw, _ = _load_json(evidence, "test evidence")
     try:
-        validate_test_evidence(raw)
-    except EvidenceError as exc:
+        document = validate_test_evidence(raw)
+        manifest = verify_release(release_archive)
+        bundle = release_app_check_bundle(release_archive)
+        validate_release_evidence_binding(
+            document,
+            archive_digest=manifest.archive_digest,
+            source_commit=manifest.source_commit,
+            checks_digest=bundle.checks_digest,
+        )
+    except (EvidenceError, ReleaseError) as exc:
         raise QualificationError(str(exc)) from exc
     key = _private_key(_regular_file(private_key, "signing key").read_bytes())
     destination = Path(signature_out)
@@ -471,11 +552,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sign = sub.add_parser("sign-test-evidence")
     sign.add_argument("--evidence", required=True)
+    sign.add_argument("--archive", required=True)
     sign.add_argument("--private-key", required=True)
     sign.add_argument("--out", required=True)
     args = parser.parse_args(list(argv or []))
     if args.command == "sign-test-evidence":
-        digest = sign_test_evidence(args.evidence, args.private_key, args.out)
+        digest = sign_test_evidence(
+            args.evidence, args.archive, args.private_key, args.out
+        )
         print(json.dumps({"status": "signed", "evidence_digest": digest}, sort_keys=True))
         return 0
     raise SystemExit(f"unsupported qualification command: {args.command}")

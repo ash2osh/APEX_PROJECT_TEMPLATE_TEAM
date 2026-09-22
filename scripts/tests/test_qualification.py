@@ -13,8 +13,9 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve(
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from teamlib.app_checks import AppCheckReport
+from teamlib.app_checks import AppCheckReport, build_app_check_bundle
 from teamlib.config import Config, Profile, profile_target
+from teamlib.evidence import EvidenceError, validate_release_evidence_binding
 from teamlib.qualification import QualificationError, _target_identity, qualify_target, sign_test_evidence, write_report
 from teamlib.release import ApplyReport
 
@@ -61,29 +62,108 @@ def runtime_report():
     return SimpleNamespace(toolchain_digest="f" * 64)
 
 
+def check_bundle():
+    declaration = {
+        "version": 1,
+        "alias": "employee",
+        "page_ids": [1],
+        "checks": [
+            {
+                "id": "objects",
+                "page_id": 1,
+                "kind": "select",
+                "verify_sql": "employee/objects.verify.sql",
+                "expected_objects": ["APP.T"],
+            },
+            {
+                "id": "home",
+                "page_id": 1,
+                "kind": "flow",
+                "flow": "employee/home.flow.json",
+                "steps": [
+                    {
+                        "action": "navigate",
+                        "path": "/ords/r/app/employee/home",
+                        "expected_visible_text": "Employee",
+                    }
+                ],
+            },
+        ],
+    }
+    return build_app_check_bundle(
+        {
+            "employee.json": json.dumps(declaration).encode("utf-8"),
+            "employee/objects.verify.sql": (
+                b"SELECT 'TEAM_ASSERT|' || assertion_name || '|' || status AS status "
+                b"FROM (SELECT 'objects' assertion_name, 'PASS' status FROM dual);\n"
+            ),
+            "employee/home.flow.json": b"{}\n",
+        },
+        ("employee",),
+    )
+
+
 class QualificationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="team-qualification-")
         self.root = Path(self.temp.name)
         (self.root / "ci" / "app-checks").mkdir(parents=True)
+        declaration = check_bundle().declarations["employee"]
         (self.root / "ci" / "app-checks" / "employee.json").write_text(
-            json.dumps({"version": 1, "alias": "employee", "page_ids": [1], "checks": [
-                {"id": "objects", "page_id": 1, "kind": "select", "verify_sql": "employee/objects.verify.sql",
-                 "expected_objects": ["APP.T"], "sql": "SELECT 'objects' assertion_name, 'PASS' status FROM dual"},
-            ]}),
+            json.dumps(declaration),
             encoding="utf-8",
         )
+        check_root = self.root / "ci" / "app-checks" / "employee"
+        check_root.mkdir()
+        check_root.joinpath("objects.verify.sql").write_bytes(
+            check_bundle().member_bytes("employee/objects.verify.sql")
+        )
+        check_root.joinpath("home.flow.json").write_bytes(
+            check_bundle().member_bytes("employee/home.flow.json")
+        )
+        self.bundle = check_bundle()
+        self.flow_runner = self.root / "flow.sh"
+        self.flow_runner.write_text(
+            '#!/usr/bin/env bash\necho \'{"status":"PASS","diagnostic":""}\'\n',
+            encoding="utf-8",
+        )
+        self.flow_runner.chmod(0o755)
 
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_release_evidence_binding_rejects_each_independent_mismatch(self):
+        valid = {
+            "archive_digest": "a" * 64,
+            "source_commit": "b" * 40,
+            "application_checks": {"checks_digest": "c" * 64},
+        }
+        mutations = (
+            ("archive_digest", {**valid, "archive_digest": "0" * 64}, "different release archive"),
+            ("source_commit", {**valid, "source_commit": "0" * 40}, "different source commit"),
+            (
+                "checks_digest",
+                {**valid, "application_checks": {"checks_digest": "0" * 64}},
+                "application checks do not match",
+            ),
+        )
+        for label, evidence, message in mutations:
+            with self.subTest(label=label), self.assertRaisesRegex(EvidenceError, message):
+                validate_release_evidence_binding(
+                    evidence,
+                    archive_digest="a" * 64,
+                    source_commit="b" * 40,
+                    checks_digest="c" * 64,
+                )
+
     def test_persistent_report_has_one_source_commit_and_frontier_identity(self):
+        bundle = self.bundle
         fake_app = AppCheckReport(
             "a" * 40,
             {"target_kind": "persistent", "instance_id": "INSTANCE"},
             (),
             "a" * 64,
-            "b" * 64,
+            bundle.checks_digest,
             {"apps": ["employee"], "checks": 1, "unknown": 0},
             "PASS",
         )
@@ -95,6 +175,8 @@ class QualificationTests(unittest.TestCase):
                 ("employee",),
                 store=FakeStore(),
                 work=self.root / "work",
+                check_bundle=bundle,
+                flow_executable=str(self.flow_runner),
                 runner_contract=Path("ci/runner-contract.json"),
                 runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),
@@ -109,6 +191,25 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(report["application_checks"]["unknown"], 0)
         self.assertEqual(report["results"]["application_checks"], "PASS")
 
+    def test_release_qualification_requires_an_explicit_check_bundle(self):
+        config = config_for(role="test", environment="test")
+        manifest = SimpleNamespace(source_commit="a" * 40, archive_digest="e" * 64)
+        with patch("teamlib.qualification.verify_release", return_value=manifest):
+            with self.assertRaisesRegex(QualificationError, "check bundle"):
+                qualify_target(
+                    self.root,
+                    config,
+                    "a" * 40,
+                    ("employee",),
+                    store=FakeStore(),
+                    work=self.root / "missing-bundle",
+                    release_archive=self.root / "release.tar",
+                    apply_report=self.apply_report_for(config).as_dict(),
+                    runner_contract=Path("ci/runner-contract.json"),
+                    runtime_report=runtime_report(),
+                    sql_runner=lambda *args, **kwargs: object(),
+                )
+
     def apply_report_for(self, config):
         metadata = profile_target(config, "METADATA")
         return ApplyReport(
@@ -121,7 +222,7 @@ class QualificationTests(unittest.TestCase):
         config = config_for()
         fake_app = AppCheckReport(
             "a" * 40, {"target_kind": "persistent", "instance_id": "INSTANCE"}, (),
-            "a" * 64, "b" * 64, {"apps": ["employee"], "checks": 1, "unknown": 0}, "PASS",
+            "a" * 64, self.bundle.checks_digest, {"apps": ["employee"], "checks": 1, "unknown": 0}, "PASS",
         )
         manifest = SimpleNamespace(source_commit="a" * 40, archive_digest="e" * 64)
         apply_report = self.apply_report_for(config)
@@ -132,6 +233,8 @@ class QualificationTests(unittest.TestCase):
                 store=FakeStore(), work=self.root / "work",
                 release_archive=self.root / "release.tar",
                 apply_report=apply_report.as_dict(),
+                check_bundle=self.bundle,
+                flow_executable=str(self.flow_runner),
                 runner_contract=Path("ci/runner-contract.json"),
                 runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),
@@ -143,7 +246,7 @@ class QualificationTests(unittest.TestCase):
         config = config_for()
         fake_app = AppCheckReport(
             "a" * 40, {"target_kind": "persistent", "instance_id": "INSTANCE"}, (),
-            "a" * 64, "b" * 64, {"apps": ["employee"], "checks": 1, "unknown": 0}, "PASS",
+            "a" * 64, self.bundle.checks_digest, {"apps": ["employee"], "checks": 1, "unknown": 0}, "PASS",
         )
         manifest = SimpleNamespace(source_commit="a" * 40, archive_digest="e" * 64)
         apply_report_path = self.root / "apply-report.json"
@@ -157,6 +260,8 @@ class QualificationTests(unittest.TestCase):
                 store=FakeStore(), work=self.root / "work2",
                 release_archive=self.root / "release.tar",
                 apply_report=apply_report_path,
+                check_bundle=self.bundle,
+                flow_executable=str(self.flow_runner),
                 runner_contract=Path("ci/runner-contract.json"),
                 runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),
@@ -173,6 +278,7 @@ class QualificationTests(unittest.TestCase):
                     store=FakeStore(), work=self.root / "work3",
                     release_archive=self.root / "release.tar",
                     apply_report={"version": 1, "status": "pending"},
+                    check_bundle=self.bundle,
                     runner_contract=Path("ci/runner-contract.json"),
                     runtime_report=runtime_report(),
                     sql_runner=lambda *args, **kwargs: object(),
@@ -190,6 +296,7 @@ class QualificationTests(unittest.TestCase):
                     store=FakeStore(), work=self.root / "work4",
                     release_archive=self.root / "release.tar",
                     apply_report=bad_path,
+                    check_bundle=self.bundle,
                     runner_contract=Path("ci/runner-contract.json"),
                     runtime_report=runtime_report(),
                     sql_runner=lambda *args, **kwargs: object(),
@@ -208,6 +315,7 @@ class QualificationTests(unittest.TestCase):
             qualify_target(
                 self.root, config_for(), "a" * 40, ("employee",),
                 store=FakeStore(attempts={"attempt": {"state": "UNKNOWN"}}), work=self.root / "work2",
+                check_bundle=self.bundle,
                 runner_contract=Path("ci/runner-contract.json"),
                 runtime_report=runtime_report(),
                 sql_runner=lambda *args, **kwargs: object(),
@@ -290,9 +398,34 @@ class QualificationTests(unittest.TestCase):
             serialization.NoEncryption(),
         ))
         signature = self.root / "evidence.sig"
-        digest = sign_test_evidence(evidence, private, signature)
+        archive = self.root / "release.tar"
+        archive.write_bytes(b"verified release")
+        manifest = SimpleNamespace(archive_digest="a" * 64, source_commit="a" * 40)
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.release_app_check_bundle",
+            return_value=SimpleNamespace(checks_digest="e" * 64),
+        ):
+            digest = sign_test_evidence(evidence, archive, private, signature)
         self.assertEqual(digest, hashlib.sha256(evidence.read_bytes()).hexdigest())
         key.public_key().verify(signature.read_bytes(), evidence.read_bytes())
+
+        mismatched = dict(report)
+        mismatched["application_checks"] = {
+            **report["application_checks"],
+            "checks_digest": "0" * 64,
+        }
+        mismatched_path = self.root / "mismatched-evidence.json"
+        write_report(mismatched, mismatched_path)
+        refused_signature = self.root / "mismatched-evidence.sig"
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.release_app_check_bundle",
+            return_value=SimpleNamespace(checks_digest="e" * 64),
+        ):
+            with self.assertRaisesRegex(QualificationError, "application checks do not match"):
+                sign_test_evidence(
+                    mismatched_path, archive, private, refused_signature
+                )
+        self.assertFalse(refused_signature.exists())
 
     def test_signing_rejects_non_test_or_incomplete_target_identity(self):
         from cryptography.hazmat.primitives import serialization
@@ -348,7 +481,12 @@ class QualificationTests(unittest.TestCase):
                 evidence = self.root / f"invalid-{index}.json"
                 write_report(document, evidence)
                 with self.assertRaises(QualificationError):
-                    sign_test_evidence(evidence, private, self.root / f"invalid-{index}.sig")
+                    sign_test_evidence(
+                        evidence,
+                        self.root / "release.tar",
+                        private,
+                        self.root / f"invalid-{index}.sig",
+                    )
 
 
 if __name__ == "__main__":

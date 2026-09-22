@@ -204,3 +204,24 @@ def validate_test_evidence(raw: bytes) -> dict[str, Any]:
     _validate_v2_digests(value)
     _validate_v2_results(value)
     return value
+
+
+def validate_release_evidence_binding(
+    evidence: Mapping[str, Any],
+    *,
+    archive_digest: str,
+    source_commit: str,
+    checks_digest: str,
+) -> None:
+    """Require canonical evidence to describe one verified release bundle."""
+    _digest(archive_digest, "verified archive digest")
+    _digest(checks_digest, "verified application checks digest")
+    if evidence.get("archive_digest") != archive_digest:
+        raise EvidenceError("test evidence is for a different release archive")
+    if evidence.get("source_commit") != source_commit:
+        raise EvidenceError("test evidence is for a different source commit")
+    checks = evidence.get("application_checks")
+    if not isinstance(checks, Mapping) or checks.get("checks_digest") != checks_digest:
+        raise EvidenceError(
+            "test evidence application checks do not match the release archive"
+        )

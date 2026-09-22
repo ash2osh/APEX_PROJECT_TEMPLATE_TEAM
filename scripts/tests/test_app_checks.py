@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 from teamlib.app_checks import (
+    AppCheckBundle,
     AppCheckError,
     build_app_check_bundle,
     verify_candidate_apps,
@@ -229,8 +230,15 @@ class SelectRunnerTests(unittest.TestCase):
             encoding="utf-8",
             newline="\n",
         )
+        members = valid_check_members()
+        members["employee/dept.verify.sql"] = members[
+            "employee/employee-table.verify.sql"
+        ]
         runner = _select_runner(
-            profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
+            profile=object(),
+            bundle=build_app_check_bundle(members, ("employee",)),
+            work=root / "work",
+            run_sqlcl=fake_run_sqlcl,
         )
         observed = runner("employee", {"id": "t1", "verify_sql": "employee/employee-table.verify.sql"})
         self.assertEqual(observed["status"], "PASS")
@@ -252,8 +260,15 @@ class SelectRunnerTests(unittest.TestCase):
             encoding="utf-8",
             newline="\n",
         )
+        members = valid_check_members()
+        members["employee/dept.verify.sql"] = members[
+            "employee/employee-table.verify.sql"
+        ]
         runner = _select_runner(
-            profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
+            profile=object(),
+            bundle=build_app_check_bundle(members, ("employee",)),
+            work=root / "work",
+            run_sqlcl=fake_run_sqlcl,
         )
         observed = runner("employee", {"id": "t2", "verify_sql": "employee/dept.verify.sql"})
         self.assertEqual(observed["status"], "FAIL")
@@ -278,8 +293,15 @@ class SelectRunnerTests(unittest.TestCase):
             encoding="utf-8",
             newline="\n",
         )
+        members = valid_check_members()
+        members["employee/dept.verify.sql"] = members[
+            "employee/employee-table.verify.sql"
+        ]
         runner = _select_runner(
-            profile=object(), repo=root, work=root / "work", run_sqlcl=fake_run_sqlcl
+            profile=object(),
+            bundle=build_app_check_bundle(members, ("employee",)),
+            work=root / "work",
+            run_sqlcl=fake_run_sqlcl,
         )
 
         observed = runner(
@@ -293,8 +315,19 @@ class SelectRunnerTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="team-select-missing-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         (root / "ci" / "app-checks").mkdir(parents=True)
+        bundle = build_app_check_bundle(valid_check_members(), ("employee",))
+        missing_members = dict(bundle.members)
+        missing_members.pop("employee/employee-table.verify.sql")
         runner = _select_runner(
-            profile=object(), repo=root, work=root / "work", run_sqlcl=lambda *a, **k: None
+            profile=object(),
+            bundle=AppCheckBundle(
+                bundle.declarations,
+                missing_members,
+                bundle.checks_digest,
+                bundle.artifact_digest,
+            ),
+            work=root / "work",
+            run_sqlcl=lambda *a, **k: None,
         )
         observed = runner("employee", {"id": "t3", "verify_sql": "employee/absent.verify.sql"})
         self.assertEqual(observed["status"], "FAIL")
@@ -326,8 +359,54 @@ class FlowRunnerTests(unittest.TestCase):
             newline="\n",
         )
         adapter.chmod(0o755)
-        runner = _flow_runner(str(adapter), root)
-        self.assertEqual(runner("employee", {"id": "smoke", "kind": "flow"})["status"], "PASS")
+        bundle = build_app_check_bundle(valid_check_members(), ("employee",))
+        runner = _flow_runner(str(adapter), root, bundle)
+        self.assertEqual(
+            runner(
+                "employee",
+                {
+                    "id": "smoke",
+                    "kind": "flow",
+                    "flow": "employee/flows/home.json",
+                },
+            )["status"],
+            "PASS",
+        )
+
+    def test_flow_runner_materializes_bundle_bytes_not_checkout_bytes(self):
+        root = Path(tempfile.mkdtemp(prefix="team-flow-bundle-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        observed = root / "observed.json"
+        adapter = root / "flow.py"
+        adapter.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "payload = pathlib.Path(sys.argv[sys.argv.index('--check-json') + 1])\n"
+            "check = json.loads(payload.read_text())\n"
+            f"pathlib.Path({str(observed)!r}).write_bytes(pathlib.Path(check['flow']).read_bytes())\n"
+            "print(json.dumps({'status': 'PASS', 'diagnostic': ''}))\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        adapter.chmod(0o755)
+        members = valid_check_members()
+        members["employee/flows/home.json"] = b'{"source":"bundle"}\n'
+        bundle = build_app_check_bundle(members, ("employee",))
+        checkout = root / "employee" / "flows"
+        checkout.mkdir(parents=True)
+        (checkout / "home.json").write_text('{"source":"checkout"}\n', encoding="utf-8")
+
+        result = _flow_runner(str(adapter), root / "work", bundle)(
+            "employee",
+            {
+                "id": "smoke",
+                "kind": "flow",
+                "flow": "employee/flows/home.json",
+            },
+        )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(observed.read_bytes(), b'{"source":"bundle"}\n')
 
 
 if __name__ == "__main__":

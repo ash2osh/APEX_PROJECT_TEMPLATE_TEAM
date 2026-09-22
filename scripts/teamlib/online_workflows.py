@@ -12,6 +12,7 @@ import subprocess
 from typing import Any
 from collections.abc import Callable, Mapping
 
+from .app_checks import AppCheckBundle
 from .config import Config, Target, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import DeployReport, deploy_app
@@ -21,7 +22,7 @@ from .migrate import RunReport, apply_plan
 from .migration_runtime import migration_profiles
 from .migration_store import MigrationStoreError, SqlMigrationStore
 from .qualification import qualify_target, write_report
-from .release import ApplyReport, Manifest, verify_release
+from .release import ApplyReport, Manifest, release_app_check_bundle, verify_release
 from .release_adapter import apply_verified_release_live
 from .runtime import RuntimeReport, preflight_online
 from .trees import read_git_tree
@@ -51,6 +52,7 @@ class OnlineDependencies:
     deploy_apps: Callable[[Path, Config, str], tuple[Any, ...]]
     qualify_integration: Callable[..., Mapping[str, Any]]
     verify_release: Callable[[Path], Manifest]
+    release_app_checks: Callable[[Path], AppCheckBundle]
     apply_release_live: Callable[..., ApplyReport]
     qualify_release: Callable[..., Mapping[str, Any]]
     write_report: Callable[[Mapping[str, Any], Path], None]
@@ -270,6 +272,7 @@ def _qualify_release(
     *,
     release_archive: Path,
     apply_report: Mapping[str, Any],
+    check_bundle: AppCheckBundle,
     flow_executable: str,
     runtime_report: RuntimeReport,
 ) -> Mapping[str, Any]:
@@ -285,6 +288,7 @@ def _qualify_release(
         work=repo / "scratch" / "test" / "qualification",
         release_archive=release_archive,
         apply_report=apply_report,
+        check_bundle=check_bundle,
         flow_executable=flow_executable,
         runner_contract=repo / "ci" / "runner-contract.json",
         runtime_report=runtime_report,
@@ -305,6 +309,7 @@ def _default_dependencies() -> OnlineDependencies:
         deploy_apps=_deploy_apps,
         qualify_integration=_qualify_integration,
         verify_release=verify_release,
+        release_app_checks=release_app_check_bundle,
         apply_release_live=apply_verified_release_live,
         qualify_release=_qualify_release,
         write_report=write_report,
@@ -411,6 +416,7 @@ def run_release_test(
     archive_path = Path(release_tar)
     target_path = Path(target_contract)
     manifest = deps.verify_release(archive_path)
+    check_bundle = deps.release_app_checks(archive_path)
     app_digests = getattr(manifest, "app_tree_digests", None)
     if not isinstance(app_digests, Mapping):
         raise OnlineWorkflowError("release manifest application bindings are malformed")
@@ -447,6 +453,7 @@ def run_release_test(
             config_aliases,
             release_archive=archive_path,
             apply_report=apply_document,
+            check_bundle=check_bundle,
             flow_executable=flow_executable,
             runtime_report=runtime,
         )

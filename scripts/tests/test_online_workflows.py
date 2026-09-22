@@ -15,7 +15,7 @@ if _SCRIPTS_DIR not in sys.path:
 from unittest.mock import patch
 
 import team
-from teamlib.app_checks import AppCheckReport
+from teamlib.app_checks import AppCheckReport, build_app_check_bundle
 from teamlib.config import Config, Profile
 from teamlib.online_workflows import (
     OnlineDependencies,
@@ -39,6 +39,47 @@ def config_for(*, role: str = "integration", environment: str = "staging", apps:
         project="team", role=role, environment=environment,
         tables_schema="APP", code_schema="APP_CODE", apex_parsing_schema="APP",
         metadata_schema="APP_META", workspace_id=90001, ownership_mode="shared",
+    )
+
+
+def app_check_bundle():
+    declaration = {
+        "version": 1,
+        "alias": "employee",
+        "page_ids": [1],
+        "checks": [
+            {
+                "id": "objects",
+                "page_id": 1,
+                "kind": "select",
+                "verify_sql": "employee/objects.verify.sql",
+                "expected_objects": ["APP.T"],
+            },
+            {
+                "id": "home",
+                "page_id": 1,
+                "kind": "flow",
+                "flow": "employee/home.flow.json",
+                "steps": [
+                    {
+                        "action": "navigate",
+                        "path": "/ords/r/app/employee/home",
+                        "expected_visible_text": "Employee",
+                    }
+                ],
+            },
+        ],
+    }
+    return build_app_check_bundle(
+        {
+            "employee.json": json.dumps(declaration).encode("utf-8"),
+            "employee/objects.verify.sql": (
+                b"SELECT 'TEAM_ASSERT|' || assertion_name || '|' || status AS status "
+                b"FROM (SELECT 'objects' assertion_name, 'PASS' status FROM dual);\n"
+            ),
+            "employee/home.flow.json": b"{}\n",
+        },
+        ("employee",),
     )
 
 
@@ -138,6 +179,7 @@ class OnlineWorkflowTests(unittest.TestCase):
             deploy_apps=deploy_apps,
             qualify_integration=qualify_integration,
             verify_release=lambda *_args, **_kwargs: None,
+            release_app_checks=lambda *_args, **_kwargs: app_check_bundle(),
             apply_release_live=lambda *_args, **_kwargs: None,
             qualify_release=lambda *_args, **_kwargs: None,
             write_report=write_report,
@@ -215,7 +257,7 @@ class OnlineWorkflowTests(unittest.TestCase):
                 self.root, config_for(role="test", environment="test"), archive, target,
                 self.root / "out.json", flow_executable=str(self.flow_runner), dependencies=dependencies,
             )
-        self.assertEqual(events, ["verify-archive", "preflight"])
+        self.assertEqual(events, ["verify-archive", "load-check-bundle", "preflight"])
 
     def test_existing_frontier_skips_adoption(self):
         events: list[str] = []
@@ -291,10 +333,15 @@ class OnlineWorkflowTests(unittest.TestCase):
             source_commit=manifest.source_commit, target_state_key="f" * 64,
             target_digest="1" * 64, history_digest="2" * 64,
         )
+        bundle = app_check_bundle()
 
         def verify_release(archive):
             events.append("verify-archive")
             return manifest
+
+        def release_app_checks(archive):
+            events.append("load-check-bundle")
+            return bundle
 
         def preflight(_config, _repo, _flow):
             events.append("preflight")
@@ -312,6 +359,7 @@ class OnlineWorkflowTests(unittest.TestCase):
                 raise qualify_error
             self.assertEqual(kwargs["runtime_report"], runtime)
             self.assertEqual(kwargs["apply_report"], apply_report.as_dict())
+            self.assertIs(kwargs["check_bundle"], bundle)
             return {"version": 2, "final_status": "PASS", "source_commit": manifest.source_commit}
 
         def write_report(report, out):
@@ -331,6 +379,7 @@ class OnlineWorkflowTests(unittest.TestCase):
             deploy_apps=lambda *_args: (),
             qualify_integration=lambda *_args, **_kwargs: {},
             verify_release=verify_release,
+            release_app_checks=release_app_checks,
             apply_release_live=apply_live,
             qualify_release=qualify,
             write_report=write_report,
@@ -396,9 +445,11 @@ class OnlineWorkflowTests(unittest.TestCase):
             def read_state(self, target):
                 return {"attempts": {}, "observations": [{"sequence": 3, "after": "c" * 64}]}
 
-        def real_qualify_release(repo, config, source_commit, aliases, *, release_archive, apply_report, flow_executable, runtime_report):
+        bundle = app_check_bundle()
+
+        def real_qualify_release(repo, config, source_commit, aliases, *, release_archive, apply_report, check_bundle, flow_executable, runtime_report):
             fake_app = AppCheckReport(
-                source_commit, {"target_kind": "persistent"}, (), "a" * 64, "b" * 64,
+                source_commit, {"target_kind": "persistent"}, (), "a" * 64, check_bundle.checks_digest,
                 {"apps": list(aliases), "checks": 1, "unknown": 0}, "PASS",
             )
             with patch("teamlib.qualification.verify_candidate_apps", return_value=fake_app), \
@@ -407,6 +458,7 @@ class OnlineWorkflowTests(unittest.TestCase):
                     repo, config, source_commit, aliases,
                     store=FakeMetadataStore(), work=self.root / "qualify-work",
                     release_archive=release_archive, apply_report=apply_report,
+                    check_bundle=check_bundle,
                     flow_executable=flow_executable, runner_contract=Path("ci/runner-contract.json"),
                     runtime_report=runtime_report, sql_runner=lambda *args, **kwargs: object(),
                 )
@@ -424,6 +476,7 @@ class OnlineWorkflowTests(unittest.TestCase):
             deploy_apps=lambda *_args: (),
             qualify_integration=lambda *_args, **_kwargs: {},
             verify_release=lambda _archive: manifest,
+            release_app_checks=lambda _archive: bundle,
             apply_release_live=lambda *_args, **_kwargs: real_apply_report,
             qualify_release=real_qualify_release,
             write_report=lambda report, out: Path(out).write_bytes(
@@ -475,7 +528,7 @@ class OnlineWorkflowTests(unittest.TestCase):
                 self.root / "out.json",
                 flow_executable=str(self.flow_runner), dependencies=dependencies,
             )
-        self.assertEqual(events, ["verify-archive"])
+        self.assertEqual(events, ["verify-archive", "load-check-bundle"])
         self.assertNotIn("preflight", events)
 
     def test_release_test_does_not_emit_pass_evidence_for_destructive_or_failed_apply(self):
@@ -549,6 +602,7 @@ APEX_WORKSPACE_ID=5402650006222933
             archive.write_bytes(b"not a real archive")
             fake_manifest = SimpleNamespace(app_tree_digests={"employee": "c" * 64}, source_commit="a" * 40)
             with patch("teamlib.online_workflows.verify_release", return_value=fake_manifest), \
+                    patch("teamlib.online_workflows.release_app_check_bundle", return_value=app_check_bundle()), \
                     patch("teamlib.online_workflows.preflight_online", side_effect=RuntimeError("JDK executable is unavailable")):
                 code = team.main([
                     "--env", str(env_path), "run-release-test", str(archive),

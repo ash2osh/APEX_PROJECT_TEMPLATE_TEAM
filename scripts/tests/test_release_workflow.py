@@ -37,6 +37,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("test-plan.json", release)
         self.assertNotIn("apply-report.json", release)
         self.assertIn("sign-test-evidence", release)
+        self.assertIn("--archive scratch/release/release.tar", release)
         self.assertIn("TEAM_TEST_ENV_CONTENT: ${{ secrets.TEAM_TEST_ENV_CONTENT }}", release)
         self.assertIn("gen-runbook", release)
         self.assertIn("TEAM_FLOW_RUNNER: ${{ vars.TEAM_FLOW_RUNNER }}", release)

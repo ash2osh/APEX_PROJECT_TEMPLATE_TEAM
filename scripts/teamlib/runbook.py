@@ -16,8 +16,18 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Mapping
 
-from .evidence import EvidenceError, validate_test_evidence
-from .release import ReleaseError, ReleasePlan, plan_release, verify_release
+from .evidence import (
+    EvidenceError,
+    validate_release_evidence_binding,
+    validate_test_evidence,
+)
+from .release import (
+    ReleaseError,
+    ReleasePlan,
+    plan_release,
+    release_app_check_bundle,
+    verify_release,
+)
 
 
 class RunbookError(RuntimeError):
@@ -199,6 +209,7 @@ def gen_runbook(
     """Verify an immutable release and signed evidence, then draft a handoff."""
     try:
         manifest = verify_release(release_tar)
+        bundle = release_app_check_bundle(release_tar)
     except ReleaseError as exc:
         raise RunbookError(str(exc)) from exc
     evidence_bytes, _ = _load_json(test_evidence, "test evidence")
@@ -206,10 +217,15 @@ def gen_runbook(
         evidence = validate_test_evidence(evidence_bytes)
     except EvidenceError as exc:
         raise RunbookError(str(exc)) from exc
-    if evidence["archive_digest"] != manifest.archive_digest:
-        raise RunbookError("test evidence is for a different release archive")
-    if evidence["source_commit"] != manifest.source_commit:
-        raise RunbookError("test evidence is for a different source commit")
+    try:
+        validate_release_evidence_binding(
+            evidence,
+            archive_digest=manifest.archive_digest,
+            source_commit=manifest.source_commit,
+            checks_digest=bundle.checks_digest,
+        )
+    except EvidenceError as exc:
+        raise RunbookError(str(exc)) from exc
     key = _public_key(_read_file(trust_key, "trust key"))
     try:
         key.verify(_signature_bytes(_read_file(signature, "detached signature")), evidence_bytes)
