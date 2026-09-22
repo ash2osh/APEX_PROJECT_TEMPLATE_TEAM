@@ -611,6 +611,7 @@ class SqlclFixtureAdapter:
         work.mkdir(mode=0o700, parents=True, exist_ok=True)
         driver = work / "payload.sql"
         driver.write_text(payload, encoding="utf-8", newline="")
+        os.chmod(driver, 0o600)
         return driver, work
 
     @staticmethod
@@ -629,12 +630,15 @@ class SqlclFixtureAdapter:
             raise E2EError(f"qualified SQLcl read failed for {name}: {exc}") from exc
         return str(result.stdout)
 
-    def _write_payload(self, target: Any, name: str, payload: str) -> str:
+    def _write_payload(self, target: Any, name: str, payload: str, *, secrets_to_scrub: Sequence[str] = ()) -> str:
         driver, work = self._driver(name, payload)
         try:
-            result = self._run_sqlcl(target, "write", driver, work)
+            result = self._run_sqlcl(target, "write", driver, work, secrets=tuple(secrets_to_scrub))
         except Exception as exc:
             raise E2EError(f"qualified SQLcl write failed for {name}: {exc}") from exc
+        finally:
+            if secrets_to_scrub:
+                driver.unlink(missing_ok=True)
         return str(result.stdout)
 
     def read_identity(self, connection: str) -> dict[str, str]:
@@ -805,7 +809,7 @@ class SqlclFixtureAdapter:
             f"CREATE USER {schema} IDENTIFIED BY \"{password}\" DEFAULT TABLESPACE USERS TEMPORARY TABLESPACE TEMP QUOTA 100M ON USERS;\n"
             f"GRANT CREATE SESSION, CREATE TABLE TO {schema};\n"
         )
-        self._write_payload(target, "create-metadata-user", payload)
+        self._write_payload(target, "create-metadata-user", payload, secrets_to_scrub=(password,))
 
     def save_metadata_connection(self, admin_connection: str, name: str, schema: str, password: str) -> None:
         script = self.run_root / "adapter" / "save-metadata-connection.sql"

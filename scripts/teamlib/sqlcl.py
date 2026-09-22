@@ -270,7 +270,10 @@ def _driver_text(payload_name: str, operation: str) -> str:
     )
 
 
-def _redact_output(text: str) -> str:
+def _redact_output(text: str, secrets: tuple[str, ...] = ()) -> str:
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "<redacted>")
     text = re.sub(r"(?i)(password|passphrase)(\s*[:=]\s*)\S+", r"\1\2<redacted>", text)
     text = re.sub(r"(?i)(oracle\.jdbc\.password=)\S+", r"\1<redacted>", text)
     return text
@@ -348,9 +351,12 @@ def run_sqlcl(
     *,
     executable: str | Path | None = None,
     timeout: float | None = None,
+    secrets: tuple[str, ...] = (),
 ) -> SqlResult:
     """Run one verified SQLcl process with a regular empty stdin file."""
     resolved_timeout = _resolve_timeout(timeout)
+    if not isinstance(secrets, tuple) or any(not isinstance(secret, str) or not secret for secret in secrets):
+        raise SqlclError("SQLcl secret scrub values must be non-empty strings")
     if operation not in {"read", "write"}:
         raise SqlclError(f"unsupported SQLcl operation: {operation}")
     if target.environment == "production" and operation != "read":
@@ -383,79 +389,91 @@ def run_sqlcl(
     payload_copy.write_text(payload, encoding="utf-8", newline="")
     generated_driver.write_text(_driver_text(payload_copy.name, operation), encoding="utf-8", newline="")
     stdin_path.touch()
+    for transient in (payload_copy, generated_driver, stdin_path):
+        os.chmod(transient, 0o600)
     if not stat.S_ISREG(stdin_path.stat().st_mode):
         raise SqlclError("SQLcl stdin is not a regular file")
 
     argv = _build_argv(resolved_executable, target, generated_driver)
     try:
-        with stdin_path.open("rb") as empty:
-            completed = subprocess.run(
-                argv,
-                stdin=empty,
-                cwd=work_path,
-                shell=False,
-                capture_output=True,
-                timeout=resolved_timeout,
-            )
-    except subprocess.TimeoutExpired as exc:
-        raise SqlclError("SQLcl timed out; target state is unknown") from exc
-    except OSError as exc:
-        raise SqlclError(f"could not start SQLcl: {exc}") from exc
+        try:
+            with stdin_path.open("rb") as empty:
+                completed = subprocess.run(
+                    argv,
+                    stdin=empty,
+                    cwd=work_path,
+                    shell=False,
+                    capture_output=True,
+                    timeout=resolved_timeout,
+                )
+        except subprocess.TimeoutExpired as exc:
+            raise SqlclError("SQLcl timed out; target state is unknown") from exc
+        except OSError as exc:
+            raise SqlclError(f"could not start SQLcl: {exc}") from exc
 
-    try:
-        stdout = completed.stdout.decode("utf-8")
-        stderr = completed.stderr.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise SqlclError("SQLcl output was not valid UTF-8") from exc
-    stdout = stdout.replace("\r\n", "\n").replace("\r", "\n")
-    stderr = stderr.replace("\r\n", "\n").replace("\r", "\n")
-    safe_log = _redact_output(stdout + ("\n" + stderr if stderr else ""))
-    log_path.write_text(safe_log, encoding="utf-8", newline="")
+        try:
+            stdout = completed.stdout.decode("utf-8")
+            stderr = completed.stderr.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SqlclError("SQLcl output was not valid UTF-8") from exc
+        stdout = stdout.replace("\r\n", "\n").replace("\r", "\n")
+        stderr = stderr.replace("\r\n", "\n").replace("\r", "\n")
+        redacted_stdout = _redact_output(stdout, secrets)
+        redacted_stderr = _redact_output(stderr, secrets)
+        safe_log = redacted_stdout + ("\n" + redacted_stderr if redacted_stderr else "")
+        log_path.write_text(safe_log, encoding="utf-8", newline="")
 
-    if completed.returncode != 0:
-        raise SqlclError(f"SQLcl failed with exit code {completed.returncode}; see {log_path}")
-    diagnostics = _diagnostic_region(stdout)
-    if _OUTPUT_ERROR_RE.search(diagnostics) or _OUTPUT_ERROR_RE.search(stderr):
-        match = _OUTPUT_ERROR_RE.search(diagnostics) or _OUTPUT_ERROR_RE.search(stderr)
-        raise SqlclError(f"SQLcl reported an error ({match.group(0)}); see {log_path}")
+        if completed.returncode != 0:
+            raise SqlclError(f"SQLcl failed with exit code {completed.returncode}; see {log_path}")
+        diagnostics = _diagnostic_region(stdout)
+        if _OUTPUT_ERROR_RE.search(diagnostics) or _OUTPUT_ERROR_RE.search(stderr):
+            match = _OUTPUT_ERROR_RE.search(diagnostics) or _OUTPUT_ERROR_RE.search(stderr)
+            raise SqlclError(f"SQLcl reported an error ({match.group(0)}); see {log_path}")
 
-    observations = _parse_identity_lines(stdout)
-    if len(observations) < 2:
-        raise SqlclError("SQLcl did not provide two identity observations")
-    first = observations[0]
-    if any(observation != first for observation in observations[1:]):
-        raise SqlclError("SQLcl identity changed between observations")
-    expected = {
-        "SESSION_USER": target.session_user,
-        "CURRENT_SCHEMA": target.current_schema,
-        "DB_NAME": target.db_name,
-        "SERVICE": target.service,
-        "INSTANCE_ID": target.instance_id,
-    }
-    for key, value in expected.items():
-        if first.get(key) != value:
-            raise SqlclError(
-                f"SQLcl identity mismatch for {key}: expected {value!r}, found {first.get(key)!r}"
-            )
+        observations = _parse_identity_lines(stdout)
+        if len(observations) < 2:
+            raise SqlclError("SQLcl did not provide two identity observations")
+        first = observations[0]
+        if any(observation != first for observation in observations[1:]):
+            raise SqlclError("SQLcl identity changed between observations")
+        expected = {
+            "SESSION_USER": target.session_user,
+            "CURRENT_SCHEMA": target.current_schema,
+            "DB_NAME": target.db_name,
+            "SERVICE": target.service,
+            "INSTANCE_ID": target.instance_id,
+        }
+        for key, value in expected.items():
+            if first.get(key) != value:
+                raise SqlclError(
+                    f"SQLcl identity mismatch for {key}: expected {value!r}, found {first.get(key)!r}"
+                )
 
-    completion = _parse_completion(stdout)
-    if completion.get("operation") != operation:
-        raise SqlclError("SQLcl completion operation does not match requested operation")
-    result_manifest = {
-        "version": 1,
-        "status": "success",
-        "operation": operation,
-        "identity_digest": _identity_digest(first),
-        "completion": completion,
-    }
-    return SqlResult(
-        identity=first,
-        completion=completion,
-        result_manifest=result_manifest,
-        log_path=log_path,
-        generated_driver=generated_driver,
-        stdout=stdout,
-        stderr=stderr,
-        argv=tuple(argv),
-        exit_code=completed.returncode,
-    )
+        completion = _parse_completion(stdout)
+        if completion.get("operation") != operation:
+            raise SqlclError("SQLcl completion operation does not match requested operation")
+        result_manifest = {
+            "version": 1,
+            "status": "success",
+            "operation": operation,
+            "identity_digest": _identity_digest(first),
+            "completion": completion,
+        }
+        return SqlResult(
+            identity=first,
+            completion=completion,
+            result_manifest=result_manifest,
+            log_path=log_path,
+            generated_driver=generated_driver,
+            stdout=redacted_stdout,
+            stderr=redacted_stderr,
+            argv=tuple(argv),
+            exit_code=completed.returncode,
+        )
+    finally:
+        if secrets:
+            for transient in (payload_copy, generated_driver, stdin_path):
+                try:
+                    transient.unlink(missing_ok=True)
+                except OSError:
+                    pass

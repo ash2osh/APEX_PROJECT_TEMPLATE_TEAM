@@ -91,6 +91,24 @@ class SqlclBoundaryTests(unittest.TestCase):
         self.assertIn("TEAM_IDENTITY", result.generated_driver.read_text(encoding="utf-8"))
         self.assertIn("TEAM_COMPLETION|operation=read", result.generated_driver.read_text(encoding="utf-8"))
 
+    def test_secret_payload_scrubs_output_and_transient_sqlcl_files(self):
+        secret = "secret1234567890"
+        os.environ["FAKE_EXTRA_OUTPUT"] = f"secret={secret}"
+        result = run_sqlcl(
+            self.target(),
+            "read",
+            self.driver,
+            self.work,
+            executable=str(self.fake),
+            secrets=(secret,),
+        )
+        self.assertNotIn(secret, self.log.read_text(encoding="utf-8"))
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+        self.assertFalse(result.generated_driver.exists())
+        self.assertFalse(any(self.work.glob(".team-payload-*.sql")))
+        self.assertFalse(any(self.work.glob(".team-stdin-*.empty")))
+
     def test_refuses_production_write_before_launching_sqlcl(self):
         with self.assertRaises(SqlclError):
             self.execute(target=self.target(environment="production"), operation="write")
