@@ -15,6 +15,7 @@ import unittest
 from teamlib.config import Target
 from teamlib.fingerprints import inventory_from_rows
 from teamlib.migration_store import (
+    _MIGRATION_BOOTSTRAP_SQL,
     MigrationMutexHeld,
     MigrationSetupRequired,
     MigrationStore,
@@ -39,6 +40,12 @@ class MigrationStoreTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_online_bootstrap_declares_variables_before_local_procedure(self):
+        self.assertLess(
+            _MIGRATION_BOOTSTRAP_SQL.index("v_count NUMBER;"),
+            _MIGRATION_BOOTSTRAP_SQL.index("PROCEDURE create_if_missing"),
+        )
 
     def test_bootstrap_acquire_and_release(self):
         with self.assertRaises(MigrationSetupRequired):

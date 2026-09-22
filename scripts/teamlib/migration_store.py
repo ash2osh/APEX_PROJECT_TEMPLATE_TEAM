@@ -82,13 +82,6 @@ _MIGRATION_BOOTSTRAP_SQL = r"""
 -- fill only its empty digest; a non-empty version-2 digest is immutable and
 -- any mismatch must be refused before metadata writes begin.
 DECLARE
-  PROCEDURE create_if_missing(p_sql CLOB) IS
-  BEGIN
-    EXECUTE IMMEDIATE p_sql;
-  EXCEPTION
-    WHEN OTHERS THEN
-      IF SQLCODE != -955 THEN RAISE; END IF;
-  END;
   v_count NUMBER;
   v_pk_count NUMBER;
   v_sequence_pk NUMBER;
@@ -96,6 +89,13 @@ DECLARE
   v_pk_name VARCHAR2(128);
   v_condition VARCHAR2(4000);
   v_duplicate NUMBER;
+  PROCEDURE create_if_missing(p_sql CLOB) IS
+  BEGIN
+    EXECUTE IMMEDIATE p_sql;
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF SQLCODE != -955 THEN RAISE; END IF;
+  END;
 BEGIN
   create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_META (
     version_number NUMBER(10) NOT NULL,
