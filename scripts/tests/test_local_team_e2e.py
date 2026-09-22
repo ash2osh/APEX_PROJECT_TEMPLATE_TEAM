@@ -17,12 +17,14 @@ if _SCRIPTS_DIR not in sys.path:
 
 from teamlib.local_team_e2e import (  # noqa: E402
     E2EError,
+    Developer,
     FixtureSpec,
     ApexMutation,
     CapturedTree,
     FixtureMutationEvidence,
     ExportConflictEvidence,
     ReviewedExportResolution,
+    SqlclGate,
     PreflightEvidence,
     RunManifest,
     create_team_topology,
@@ -36,6 +38,7 @@ from teamlib.local_team_e2e import (  # noqa: E402
     parse_saved_connections,
     provision_fixture,
     run_command,
+    start_team_command,
     run_team_command,
     save_connection_script,
 )
@@ -188,6 +191,60 @@ class LocalTeamCommandTests(unittest.TestCase):
             script,
         )
         self.assertNotIn("\nE2ETest_Abc123_X\n", script)
+
+
+class LocalTeamGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="local-team-gate-")
+        self.root = Path(self.temp.name)
+        self.real = self.root / "real-sqlcl"
+        self.real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(self.real, 0o700)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_gate_signals_import_and_releases_a_waiting_child(self):
+        gate = SqlclGate.create(self.root, real_executable=self.real)
+        driver = self.root / "import.sql"
+        driver.write_text("APEX IMPORT -INPUT /run-owned/app -ID 9099\n", encoding="utf-8")
+        process = subprocess.Popen(
+            [str(gate.executable), "-S", "@" + str(driver)],
+            env={**os.environ, **gate.environment("hold")},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertTrue(gate.wait_for_payload(timeout=3.0))
+        self.assertTrue(gate.payload_started.is_file())
+        gate.release_payload()
+        self.assertEqual(process.wait(timeout=5), 0)
+        process.stdout.close()
+        process.stderr.close()
+
+    def test_gate_unknown_mode_returns_nonzero_after_payload(self):
+        gate = SqlclGate.create(self.root, real_executable=self.real)
+        driver = self.root / "import.sql"
+        driver.write_text("APEX IMPORT -INPUT /run-owned/app -ID 9099\n", encoding="utf-8")
+        result = subprocess.run(
+            [str(gate.executable), "@" + str(driver)],
+            env={**os.environ, **gate.environment("unknown")},
+            capture_output=True,
+            check=False,
+        )
+        self.assertTrue(gate.payload_started.is_file())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_async_team_command_has_bounded_wait_and_durable_output(self):
+        clone = self.root / "dev" / "alice"
+        (clone / "scripts").mkdir(parents=True)
+        script = clone / "scripts" / "team.py"
+        script.write_text("import time; print('started'); time.sleep(0.01)\n", encoding="utf-8")
+        developer = Developer("alice", clone, "e2e/alice", "a" * 32, "alice@example.invalid", clone / ".env")
+        developer.env_file.write_text("", encoding="utf-8")
+        running = start_team_command(developer, "doctor")
+        result = running.wait(timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("started", result.stdout_path.read_text(encoding="utf-8"))
 
 
 class LocalTeamTopologyTests(unittest.TestCase):

@@ -16,9 +16,11 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -1247,6 +1249,170 @@ class ReviewedExportResolution:
     conflict_paths: tuple[str, ...]
 
 
+@dataclass
+class RunningTeamCommand:
+    """A bounded child process whose output remains under the run root."""
+
+    process: subprocess.Popen[bytes]
+    argv: tuple[str, ...]
+    cwd: Path
+    stdout_path: Path
+    stderr_path: Path
+    stdout_handle: Any
+    stderr_handle: Any
+    started_at: str
+    secrets_to_scrub: tuple[str, ...] = ()
+
+    def wait(self, timeout: float | None = None) -> CommandResult:
+        try:
+            returncode = self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            self.process.kill()
+            self.process.wait()
+            self.stdout_handle.close()
+            self.stderr_handle.close()
+            raise E2EError("team subprocess timed out; result is unknown") from exc
+        self.stdout_handle.close()
+        self.stderr_handle.close()
+        stdout_text = _redact(self.stdout_path.read_bytes().decode("utf-8", "replace"), self.secrets_to_scrub)
+        stderr_text = _redact(self.stderr_path.read_bytes().decode("utf-8", "replace"), self.secrets_to_scrub)
+        self.stdout_path.write_text(stdout_text, encoding="utf-8", newline="")
+        self.stderr_path.write_text(stderr_text, encoding="utf-8", newline="")
+        os.chmod(self.stdout_path, 0o600)
+        os.chmod(self.stderr_path, 0o600)
+        return CommandResult(
+            argv=tuple(_redact(value, self.secrets_to_scrub) for value in self.argv),
+            cwd=self.cwd,
+            returncode=returncode,
+            stdout_path=self.stdout_path,
+            stderr_path=self.stderr_path,
+            started_at=self.started_at,
+            finished_at=_now(),
+            stdout_sha256=_sha256_bytes(stdout_text.encode("utf-8")),
+            stderr_sha256=_sha256_bytes(stderr_text.encode("utf-8")),
+        )
+
+
+@dataclass(frozen=True)
+class SqlclGate:
+    """Run-owned SQLcl wrapper for bounded import interlock tests."""
+
+    root: Path
+    executable: Path
+    real_executable: Path
+    payload_started: Path
+    release_marker: Path
+
+    @classmethod
+    def create(cls, run_root: str | Path, *, real_executable: str | Path | None = None) -> "SqlclGate":
+        root = Path(run_root).resolve()
+        if not root.is_dir() or root.is_symlink():
+            raise E2EError("SQLcl gate run root is not a real directory")
+        gate_root = root / "sqlcl-gate"
+        if gate_root.exists() or gate_root.is_symlink():
+            raise E2EError("SQLcl gate directory already exists")
+        requested = str(real_executable or os.environ.get("TEAM_SQLCL_EXECUTABLE", "sql"))
+        resolved = Path(shutil.which(requested) or requested).resolve()
+        if resolved.is_symlink() or not resolved.is_file():
+            raise E2EError("SQLcl gate real executable is not a regular file")
+        gate_root.mkdir(mode=0o700)
+        executable = gate_root / "sqlcl-gate.py"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib, subprocess, sys, time\n"
+            "\n"
+            "def payload_text(arguments):\n"
+            "    seen = set()\n"
+            "    pending = []\n"
+            "    for argument in arguments:\n"
+            "        if argument.startswith('@'):\n"
+            "            pending.append(pathlib.Path(argument[1:]))\n"
+            "    chunks = []\n"
+            "    while pending:\n"
+            "        path = pending.pop()\n"
+            "        if not path.is_absolute():\n"
+            "            path = pathlib.Path.cwd() / path\n"
+            "        path = path.resolve()\n"
+            "        if path in seen or not path.is_file():\n"
+            "            continue\n"
+            "        seen.add(path)\n"
+            "        try:\n"
+            "            text = path.read_text(encoding='utf-8')\n"
+            "        except (OSError, UnicodeError):\n"
+            "            continue\n"
+            "        chunks.append(text)\n"
+            "        for line in text.splitlines():\n"
+            "            stripped = line.strip()\n"
+            "            if stripped.startswith('@') and not stripped.startswith('@' + '@'):\n"
+            "                pending.append(path.parent / stripped[1:].strip().strip('\\\"'))\n"
+            "    return '\\n'.join(chunks)\n"
+            "\n"
+            "arguments = sys.argv[1:]\n"
+            "is_import = 'APEX IMPORT' in payload_text(arguments).upper()\n"
+            "started = pathlib.Path(os.environ.get('TEAM_SQLCL_GATE_STARTED', ''))\n"
+            "release = pathlib.Path(os.environ.get('TEAM_SQLCL_GATE_RELEASE', ''))\n"
+            "mode = os.environ.get('TEAM_SQLCL_GATE_MODE', 'pass')\n"
+            "if is_import and mode in {'hold', 'unknown'}:\n"
+            "    started.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    started.touch()\n"
+            "    if mode == 'hold':\n"
+            "        deadline = time.monotonic() + float(os.environ.get('TEAM_SQLCL_GATE_TIMEOUT', '600'))\n"
+            "        while not release.exists():\n"
+            "            if time.monotonic() >= deadline:\n"
+            "                raise SystemExit(124)\n"
+            "            time.sleep(0.05)\n"
+            "real = os.environ['TEAM_SQLCL_GATE_REAL']\n"
+            "completed = subprocess.run([real, *arguments], check=False)\n"
+            "if is_import and mode == 'unknown':\n"
+            "    os._exit(137)\n"
+            "raise SystemExit(completed.returncode)\n",
+            encoding="utf-8",
+            newline="",
+        )
+        os.chmod(executable, 0o700)
+        payload_started = gate_root / "payload-started"
+        release_marker = gate_root / "release-payload"
+        return cls(root, executable, resolved, payload_started, release_marker)
+
+    def arm(self) -> None:
+        for path in (self.payload_started, self.release_marker):
+            if path.exists() or path.is_symlink():
+                if path.is_symlink() or not path.is_file():
+                    raise E2EError("SQLcl gate marker is not a regular file")
+                path.unlink()
+
+    def environment(self, mode: str, *, timeout: float = 600.0) -> dict[str, str]:
+        if mode not in {"pass", "hold", "unknown"}:
+            raise E2EError("SQLcl gate mode is unsupported")
+        if timeout <= 0:
+            raise E2EError("SQLcl gate timeout must be positive")
+        return {
+            "TEAM_SQLCL_EXECUTABLE": str(self.executable),
+            "TEAM_SQLCL_GATE_REAL": str(self.real_executable),
+            "TEAM_SQLCL_GATE_MODE": mode,
+            "TEAM_SQLCL_GATE_STARTED": str(self.payload_started),
+            "TEAM_SQLCL_GATE_RELEASE": str(self.release_marker),
+            "TEAM_SQLCL_GATE_TIMEOUT": str(timeout),
+        }
+
+    def wait_for_payload(self, *, timeout: float = 30.0) -> bool:
+        if timeout <= 0:
+            raise E2EError("SQLcl gate wait timeout must be positive")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.payload_started.is_file() and not self.payload_started.is_symlink():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def release_payload(self) -> None:
+        if self.release_marker.exists() or self.release_marker.is_symlink():
+            if self.release_marker.is_symlink() or not self.release_marker.is_file():
+                raise E2EError("SQLcl gate release marker is not a regular file")
+        self.release_marker.write_text("release\n", encoding="utf-8", newline="")
+        os.chmod(self.release_marker, 0o600)
+
+
 def load_export_conflict(
     developer: Any,
     target: Any,
@@ -1648,28 +1814,78 @@ def create_team_topology(
     return TeamTopology(root, remote, manifest.source_commit, tuple(developers), generated_env, tuple(commands))
 
 
-def run_team_command(developer: Developer, *arguments: str, timeout: float | None = None) -> CommandResult:
-    """Run the public team CLI with checkout identity scoped to this child."""
+def start_team_command(
+    developer: Developer,
+    *arguments: str,
+    extra_env: Mapping[str, str] | None = None,
+) -> RunningTeamCommand:
+    """Start the public team CLI with checkout identity scoped to this child."""
 
     if not isinstance(developer, Developer) or not developer.clone.is_dir() or developer.clone.is_symlink():
         raise E2EError("developer clone is not a real directory")
     script = developer.clone / "scripts" / "team.py"
     if not script.is_file() or script.is_symlink():
         raise E2EError("developer clone has no regular scripts/team.py")
-    run_root = developer.clone.parent.parent
-    env_file = developer.env_file
-    result = run_command(
-        [sys.executable, str(script), "--env", str(env_file), *arguments],
-        cwd=developer.clone,
-        run_root=run_root,
-        env={
-            "USER": developer.name,
-            "TEAM_CHECKOUT_UUID": developer.checkout_uuid,
-            "PYTHONDONTWRITEBYTECODE": "1",
-        },
-        timeout=timeout,
+    run_root = developer.clone.parent.parent.resolve()
+    if not run_root.is_dir() or run_root.is_symlink():
+        raise E2EError("developer run root is not a real directory")
+    argv = assert_safe_argv([sys.executable, str(script), "--env", str(developer.env_file), *arguments])
+    child_env = os.environ.copy()
+    child_env.update({
+        "USER": developer.name,
+        "TEAM_CHECKOUT_UUID": developer.checkout_uuid,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    if extra_env:
+        for key, value in extra_env.items():
+            _safe_text(key, label="team child environment key")
+            _safe_text(value, label=f"team child environment {key}")
+            child_env[key] = value
+    command_dir = run_root / "commands"
+    command_dir.mkdir(mode=0o700, exist_ok=True)
+    if command_dir.is_symlink():
+        raise E2EError("command output directory must not be a symlink")
+    command_id = secrets_module_token()
+    stdout_path = command_dir / f"{command_id}.stdout"
+    stderr_path = command_dir / f"{command_id}.stderr"
+    stdout_handle = stdout_path.open("wb")
+    stderr_handle = stderr_path.open("wb")
+    os.chmod(stdout_path, 0o600)
+    os.chmod(stderr_path, 0o600)
+    try:
+        process = subprocess.Popen(
+            list(argv),
+            cwd=developer.clone.resolve(),
+            env=child_env,
+            shell=False,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+        )
+    except OSError as exc:
+        stdout_handle.close()
+        stderr_handle.close()
+        raise E2EError(f"could not start team subprocess: {exc}") from exc
+    return RunningTeamCommand(
+        process=process,
+        argv=argv,
+        cwd=developer.clone.resolve(),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        stdout_handle=stdout_handle,
+        stderr_handle=stderr_handle,
+        started_at=_now(),
     )
-    return result
+
+
+def run_team_command(
+    developer: Developer,
+    *arguments: str,
+    timeout: float | None = None,
+    extra_env: Mapping[str, str] | None = None,
+) -> CommandResult:
+    """Run the public team CLI with checkout identity scoped to this child."""
+
+    return start_team_command(developer, *arguments, extra_env=extra_env).wait(timeout=timeout)
 
 
 def build_parser():
