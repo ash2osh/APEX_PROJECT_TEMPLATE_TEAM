@@ -31,6 +31,8 @@ from teamlib.local_team_e2e import (  # noqa: E402
     capture_live_tree,
     assert_safe_argv,
     cleanup_fixture,
+    capture_migration_id,
+    complete_authored_migration,
     fixture_builder_save,
     load_export_conflict,
     materialize_export_resolution,
@@ -252,6 +254,55 @@ class LocalTeamGateTests(unittest.TestCase):
         result = running.wait(timeout=5)
         self.assertEqual(result.returncode, 0)
         self.assertIn("started", result.stdout_path.read_text(encoding="utf-8"))
+
+
+class LocalTeamMigrationAuthoringTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="local-team-migration-authoring-")
+        self.root = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_captures_dynamic_id_and_fills_generated_members(self):
+        migration_id = capture_migration_id("20260923T120000__alice__shared-note\n")
+        self.assertTrue(migration_id.startswith("20260923T"))
+        migrations = self.root / "migrations"
+        migrations.mkdir()
+        (migrations / f"{migration_id}.sql").write_text(
+            "-- migration-version: 1\n-- target: tables\n-- destructive: false\n\n",
+            encoding="utf-8",
+        )
+        (migrations / f"{migration_id}.verify.sql").write_text("", encoding="utf-8")
+        evidence = complete_authored_migration(
+            migrations,
+            migration_id,
+            forward_sql="CREATE TABLE TEAM_E2E_SHARED_NOTE (NOTE_ID NUMBER PRIMARY KEY);",
+            verify_sql="SELECT 'TEAM_ASSERT|team_e2e_shared_note|PASS' FROM DUAL;",
+        )
+        self.assertEqual(evidence.migration_id, migration_id)
+        self.assertIn("-- destructive: false", evidence.sql_path.read_text(encoding="utf-8"))
+        self.assertIn("CREATE TABLE TEAM_E2E_SHARED_NOTE", evidence.sql_path.read_text(encoding="utf-8"))
+        self.assertIn("TEAM_ASSERT|team_e2e_shared_note|PASS", evidence.verify_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(evidence.sql_sha256), 64)
+
+    def test_authoring_helpers_refuse_ambiguous_output_and_destructive_header(self):
+        for output in ("", "20260923T120000__alice__shared-note\nextra\n", "not-a-migration\n"):
+            with self.subTest(output=repr(output)), self.assertRaises(E2EError):
+                capture_migration_id(output)
+        migration_id = "20260923T120000__alice__shared-note"
+        migrations = self.root / "migrations"
+        migrations.mkdir()
+        path = migrations / f"{migration_id}.sql"
+        path.write_text("-- migration-version: 1\n-- target: tables\n-- destructive: true\n\n", encoding="utf-8")
+        (migrations / f"{migration_id}.verify.sql").write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(E2EError, "non-destructive migration header"):
+            complete_authored_migration(
+                migrations,
+                migration_id,
+                forward_sql="CREATE TABLE X (ID NUMBER);",
+                verify_sql="SELECT 1 FROM DUAL;",
+            )
 
 
 class LocalTeamTopologyTests(unittest.TestCase):

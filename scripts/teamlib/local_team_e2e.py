@@ -49,6 +49,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONNECTION_TREE_RE = re.compile(r"(?:├──|└──)\s+(.+?)\s*$")
 _CONNECTION_PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_MIGRATION_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}__[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*$")
 
 
 def _now() -> str:
@@ -1181,6 +1182,74 @@ class ApexMutation:
             _safe_text(value, label=label)
             if "\n" in value or "\r" in value:
                 raise E2EError(f"{label} must be one line")
+
+
+@dataclass(frozen=True)
+class MigrationAuthoringEvidence:
+    """Run-owned evidence for one dynamically authored migration bundle."""
+
+    migration_id: str
+    sql_path: Path
+    verify_path: Path
+    sql_sha256: str
+    verify_sha256: str
+
+
+def capture_migration_id(output: str) -> str:
+    """Extract exactly one migration ID emitted by ``new-migration``."""
+
+    if not isinstance(output, str):
+        raise E2EError("migration authoring output must be text")
+    candidates = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(candidates) != 1 or not _MIGRATION_ID_RE.fullmatch(candidates[0]):
+        raise E2EError("migration authoring output did not contain exactly one safe migration ID")
+    return candidates[0]
+
+
+def complete_authored_migration(
+    migrations_root: str | Path,
+    migration_id: str,
+    *,
+    forward_sql: str,
+    verify_sql: str,
+) -> MigrationAuthoringEvidence:
+    """Fill only the generated members of one run-owned migration.
+
+    The generated header is preserved verbatim.  The helper deliberately does
+    not create or edit destructive-confirmation documents; affirmative
+    confirmation remains a human-only boundary in the public migration CLI.
+    """
+
+    if not isinstance(migration_id, str) or not _MIGRATION_ID_RE.fullmatch(migration_id):
+        raise E2EError("migration ID is malformed")
+    root = Path(migrations_root).resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise E2EError("migration root must be a real directory")
+    sql_path = (root / f"{migration_id}.sql").resolve()
+    verify_path = (root / f"{migration_id}.verify.sql").resolve()
+    if not _inside(sql_path, root) or not _inside(verify_path, root):
+        raise E2EError("migration members escaped the run root")
+    for path in (sql_path, verify_path):
+        if path.is_symlink() or not path.is_file():
+            raise E2EError("generated migration members must already exist as regular files")
+    if not isinstance(forward_sql, str) or not forward_sql.strip() or "\x00" in forward_sql:
+        raise E2EError("forward migration SQL must be non-empty text")
+    if not isinstance(verify_sql, str) or not verify_sql.strip() or "\x00" in verify_sql:
+        raise E2EError("migration verification SQL must be non-empty text")
+    header = sql_path.read_text(encoding="utf-8")
+    if not header.startswith("-- migration-version: 1\n") or "-- target: " not in header:
+        raise E2EError("generated migration header is missing or malformed")
+    if "-- destructive: false" not in header.split("\n\n", 1)[0]:
+        raise E2EError("non-destructive migration header is not intact")
+    sql_path.write_text(header.rstrip("\n") + "\n\n" + forward_sql.strip() + "\n", encoding="utf-8", newline="\n")
+    verify_path.write_text(verify_sql.strip() + "\n", encoding="utf-8", newline="\n")
+    return MigrationAuthoringEvidence(
+        migration_id=migration_id,
+        sql_path=sql_path,
+        verify_path=verify_path,
+        sql_sha256=_sha256_bytes(sql_path.read_bytes()),
+        verify_sha256=_sha256_bytes(verify_path.read_bytes()),
+    )
 
 
 @dataclass(frozen=True)
