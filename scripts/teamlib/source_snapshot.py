@@ -8,8 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tempfile
-from typing import Iterator
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 
 from .app_checks import AppCheckBundle, AppCheckError, build_app_check_bundle
 from .fingerprints import Inventory, InventoryError, load_inventory_bytes

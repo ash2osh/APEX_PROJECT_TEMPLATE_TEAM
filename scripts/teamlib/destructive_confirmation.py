@@ -210,12 +210,12 @@ def _atomic_create_confirmation(encoded: bytes, destination: str | Path) -> Path
             if stat.S_ISLNK(metadata.st_mode):
                 raise ConfirmationError(
                     f"confirmation destination is a symlink: {candidate}"
-                )
+                ) from None
             if not stat.S_ISREG(metadata.st_mode) or candidate.read_bytes() != encoded:
                 raise ConfirmationError(
                     "confirmation destination already exists with different bytes: "
                     f"{candidate}"
-                )
+                ) from None
         directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(directory_fd)
