@@ -79,7 +79,7 @@ def _assert_safe_argument(name: str, value: str) -> None:
 _PRODUCTION_READ_ALLOWED_RE = re.compile(r"^(?:SELECT|WITH)\b", re.IGNORECASE)
 _PRODUCTION_READ_SETTINGS_RE = re.compile(
     r"^SET\s+(?:HEADING|FEEDBACK|LINESIZE|PAGESIZE|LONG|ECHO|VERIFY|DEFINE|ENCODING|"
-    r"TERMOUT|TRIMSPOOL|SQLBLANKLINES|MARKUP)\b",
+    r"TERMOUT|TRIMSPOOL|SQLBLANKLINES|MARKUP|SERVEROUTPUT)\b",
     re.IGNORECASE,
 )
 _PRODUCTION_READ_DIRECTIVE_RE = re.compile(r"^(?:WHENEVER\s+(?:SQLERROR|OSERROR)\b|EXIT\b)", re.IGNORECASE)
@@ -118,6 +118,22 @@ _PRODUCTION_READ_SETUP_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PRODUCTION_READ_INVENTORY_REQUIRED = (
+    "DBMS_METADATA.GET_DDL",
+    "DBMS_LOB.SUBSTR",
+    "DBMS_OUTPUT.PUT_LINE",
+    "UTL_ENCODE.BASE64_ENCODE",
+    "ALL_OBJECTS",
+    "ALL_CONSTRAINTS",
+    "ALL_TAB_PRIVS",
+    "ALL_COL_PRIVS",
+)
+_PRODUCTION_READ_WRITE_RE = re.compile(
+    r"\b(?:EXECUTE\s+IMMEDIATE|INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|"
+    r"GRANT|REVOKE|COMMIT|ROLLBACK|LOCK)\b",
+    re.IGNORECASE,
+)
+
 
 def _blank_metadata_setup_blocks(masked: str) -> str:
     """Blank PL/SQL blocks that only configure DBMS_METADATA session transforms.
@@ -146,6 +162,30 @@ def _blank_metadata_setup_blocks(masked: str) -> str:
     return "".join(output)
 
 
+def _blank_readonly_inventory_blocks(masked: str) -> str:
+    """Blank only the dictionary-to-DBMS_OUTPUT inventory block."""
+
+    lines = masked.splitlines(keepends=True)
+    output = list(lines)
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().upper() != "DECLARE":
+            index += 1
+            continue
+        end = index
+        while end < len(lines) and lines[end].strip() != "/":
+            end += 1
+        body = "".join(lines[index:end]).upper()
+        if (
+            all(token in body for token in _PRODUCTION_READ_INVENTORY_REQUIRED)
+            and not _PRODUCTION_READ_WRITE_RE.search(body)
+        ):
+            for position in range(index, min(end + 1, len(lines))):
+                output[position] = "\n" if lines[position].endswith("\n") else ""
+        index = end + 1
+    return "".join(output)
+
+
 def _assert_production_read_only(driver_text: str) -> None:
     masked, terminated = mask_sql(driver_text)
     if not terminated:
@@ -153,6 +193,7 @@ def _assert_production_read_only(driver_text: str) -> None:
             "production read-only SQLcl operation has an unterminated comment or literal"
         )
     masked = _blank_metadata_setup_blocks(masked)
+    masked = _blank_readonly_inventory_blocks(masked)
     for number, statement in statement_starts(masked):
         if _PRODUCTION_READ_ALLOWED_RE.match(statement):
             continue

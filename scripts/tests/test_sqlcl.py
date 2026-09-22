@@ -239,7 +239,27 @@ class ProductionReadOnlyGuardTests(unittest.TestCase):
         from teamlib.sqlcl import _assert_production_read_only
 
         source = Path(__file__).resolve().parents[1] / "sql" / "schema_inventory.sql"
-        _assert_production_read_only(source.read_text(encoding="utf-8"))
+        text = source.read_text(encoding="utf-8")
+        self.assertIn("TEAM_READONLY_INVENTORY_BLOCK", text)
+        self.assertNotIn("CROSS JOIN chunk_numbers", text)
+        _assert_production_read_only(text)
+
+    def test_inventory_output_block_with_write_token_is_refused(self):
+        from teamlib.sqlcl import SqlclError, _assert_production_read_only
+
+        driver = (
+            "SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WORD_WRAPPED\n"
+            "DECLARE\n"
+            "  v_definition CLOB;\n"
+            "BEGIN\n"
+            "  DBMS_OUTPUT.PUT_LINE('TEAM_INVENTORY_BEGIN|version=2');\n"
+            "  DBMS_METADATA.GET_DDL('TABLE', 'T', 'DEMO');\n"
+            "  INSERT INTO AUDIT_LOG(ID) VALUES (1);\n"
+            "END;\n"
+            "/\n"
+        )
+        with self.assertRaises(SqlclError):
+            _assert_production_read_only(driver)
 
     def test_a_block_that_is_not_pure_metadata_setup_is_refused(self):
         from teamlib.sqlcl import SqlclError, _assert_production_read_only
