@@ -83,6 +83,16 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"status": "valid"', result.stdout)
 
+    def test_migration_help_exposes_confirmation_output_through_the_launcher(self):
+        result = subprocess.run(
+            [str(self.repo / "scripts" / "team.sh"), "migrate", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--confirmation-out", result.stdout)
+
 
 class OfflineEnvForwardingTests(unittest.TestCase):
     def test_global_env_flag_reaches_an_env_aware_offline_handler(self):

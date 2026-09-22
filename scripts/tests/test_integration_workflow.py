@@ -8,6 +8,8 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from pathlib import Path
+from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -100,14 +102,83 @@ class FrontierAdoptionTests(unittest.TestCase):
                 "--source", "migrations", "--dry-run",
                 "--expected-inventory", "expected.json", "--actual-inventory", "actual.json",
                 "--destructive-confirmation", "confirmation.json",
+                "--confirmation-out", "confirmation-template.json",
             ])
             parsed = team._parser().parse_args(argv)
             self.assertEqual(parsed.command, command)
             self.assertEqual(parsed.destructive_confirmation, "confirmation.json")
+            self.assertEqual(parsed.confirmation_out, "confirmation-template.json")
             self.assertTrue(parsed.dry_run)
             self.assertEqual(parsed.source, "migrations")
         for command in ("migrate", "undo-migration", "redo-migration"):
             self.assertIn(command, team.PRODUCTION_REFUSED_COMMANDS)
+
+    def test_confirmation_output_requires_a_destructive_dry_run(self):
+        import team
+
+        from teamlib.config import ConfigError
+
+        report = SimpleNamespace(
+            action="migrate",
+            selected=(),
+            applied=(),
+            reverted=(),
+            foreign_applied=(),
+            foreign_reverted=(),
+            blocked_attempt=None,
+            verified_inventory_digest=None,
+            confirmation_template=None,
+        )
+        with tempfile.TemporaryDirectory(prefix="team-confirmation-cli-") as directory:
+            destination = Path(directory) / "confirmation.json"
+            with self.assertRaisesRegex(ConfigError, "requires --dry-run"):
+                team._migration_output(
+                    "migrate", report, dry_run=False, confirmation_out=destination
+                )
+            with self.assertRaisesRegex(ConfigError, "no destructive"):
+                team._migration_output(
+                    "migrate", report, dry_run=True, confirmation_out=destination
+                )
+
+    def test_confirmation_output_reports_the_written_path_and_false_template(self):
+        import team
+
+        from teamlib.destructive_confirmation import (
+            ConfirmationRequirement,
+            confirmation_template,
+        )
+
+        template = confirmation_template(
+            (
+                ConfirmationRequirement(
+                    "20260922T120000__alice__drop",
+                    "migrate",
+                    "a" * 64,
+                    "b" * 64,
+                ),
+            )
+        )
+        report = SimpleNamespace(
+            action="migrate",
+            selected=("20260922T120000__alice__drop",),
+            applied=(),
+            reverted=(),
+            foreign_applied=(),
+            foreign_reverted=(),
+            blocked_attempt=None,
+            verified_inventory_digest=None,
+            confirmation_template=template,
+        )
+        with tempfile.TemporaryDirectory(prefix="team-confirmation-cli-") as directory:
+            destination = Path(directory) / "confirmation.json"
+            with patch.object(team, "_json") as emit:
+                team._migration_output(
+                    "migrate", report, dry_run=True, confirmation_out=destination
+                )
+            payload = emit.call_args.args[0]
+            self.assertEqual(payload["confirmation_path"], str(destination))
+            self.assertEqual(payload["confirmation_template"], template)
+            self.assertEqual(destination.read_text(encoding="utf-8").count('"confirmed":false'), 1)
 
     def test_integration_workflow_has_one_online_gate(self):
         from pathlib import Path

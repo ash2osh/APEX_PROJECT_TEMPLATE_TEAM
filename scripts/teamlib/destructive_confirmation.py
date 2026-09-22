@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
+import tempfile
 from typing import Any
 from collections.abc import Mapping, Sequence
 
@@ -138,6 +141,113 @@ def confirmation_template(requirements: Sequence[ConfirmationRequirement]) -> di
             "confirmed": False,
         })
     return {"version": 1, "confirmations": entries}
+
+
+def _atomic_create_confirmation(encoded: bytes, destination: str | Path) -> Path:
+    candidate = Path(destination)
+    parent = candidate.parent
+    current = parent
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise ConfirmationError(
+                f"confirmation destination parent is unavailable: {current}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ConfirmationError(
+                f"confirmation destination parent is a symlink: {current}"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ConfirmationError(
+                f"confirmation destination parent is not a directory: {current}"
+            )
+        if current == current.parent:
+            break
+        current = current.parent
+
+    try:
+        existing = candidate.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise ConfirmationError(
+            f"confirmation destination is unavailable: {candidate}"
+        ) from exc
+    if existing is not None:
+        if stat.S_ISLNK(existing.st_mode):
+            raise ConfirmationError(f"confirmation destination is a symlink: {candidate}")
+        if not stat.S_ISREG(existing.st_mode):
+            raise ConfirmationError(
+                f"confirmation destination is not a regular file: {candidate}"
+            )
+        try:
+            if candidate.read_bytes() == encoded:
+                return candidate
+        except OSError as exc:
+            raise ConfirmationError(
+                f"confirmation destination is unreadable: {candidate}"
+            ) from exc
+        raise ConfirmationError(
+            f"confirmation destination already exists with different bytes: {candidate}"
+        )
+
+    descriptor = -1
+    temporary = ""
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{candidate.name}.", dir=str(parent)
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, candidate)
+        except FileExistsError:
+            metadata = candidate.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ConfirmationError(
+                    f"confirmation destination is a symlink: {candidate}"
+                )
+            if not stat.S_ISREG(metadata.st_mode) or candidate.read_bytes() != encoded:
+                raise ConfirmationError(
+                    "confirmation destination already exists with different bytes: "
+                    f"{candidate}"
+                )
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return candidate
+    except ConfirmationError:
+        raise
+    except OSError as exc:
+        raise ConfirmationError(
+            f"could not create confirmation template: {candidate}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def write_confirmation_template(
+    template: Mapping[str, Any], destination: str | Path
+) -> Path:
+    """Atomically create a canonical, false-only operator review document."""
+    document, entries = _validate_document(template)
+    if not entries:
+        raise ConfirmationError("no destructive confirmation is required")
+    if any(confirmed is not False for _key, confirmed in entries):
+        raise ConfirmationError("confirmation template must remain unconfirmed")
+    return _atomic_create_confirmation(_canonical_with_lf(document), destination)
 
 
 def require_confirmations(

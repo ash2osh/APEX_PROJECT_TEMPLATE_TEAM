@@ -31,7 +31,11 @@ from teamlib.control_store import ControlStore, ControlStoreError, SqlControlSto
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.drift import capture_live_inventory, drift_status, observed_frontier_drift
 from teamlib.fingerprints import InventoryError, diff_inventory, drift_is_clean, load_inventory
-from teamlib.destructive_confirmation import ConfirmationError, load_confirmation
+from teamlib.destructive_confirmation import (
+    ConfirmationError,
+    load_confirmation,
+    write_confirmation_template,
+)
 from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
 from teamlib.migration_runtime import migration_profiles
 from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
@@ -104,6 +108,7 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--expected-inventory")
     migrate.add_argument("--actual-inventory")
     migrate.add_argument("--destructive-confirmation")
+    migrate.add_argument("--confirmation-out")
     for name in ("undo-migration", "redo-migration"):
         lifecycle = sub.add_parser(name, parents=[env_parent])
         lifecycle.add_argument("migration_id")
@@ -112,6 +117,7 @@ def _parser() -> argparse.ArgumentParser:
         lifecycle.add_argument("--expected-inventory")
         lifecycle.add_argument("--actual-inventory")
         lifecycle.add_argument("--destructive-confirmation")
+        lifecycle.add_argument("--confirmation-out")
     drift = sub.add_parser("check-drift", parents=[env_parent])
     drift.add_argument("--expected-inventory")
     drift.add_argument("--actual-inventory")
@@ -304,8 +310,26 @@ def _migration_drift(args: argparse.Namespace, config: Any, repo: Path) -> str |
     return actual.digest
 
 
-def _migration_output(command: str, report: Any, *, dry_run: bool) -> None:
-    _json({
+def _migration_output(
+    command: str,
+    report: Any,
+    *,
+    dry_run: bool,
+    confirmation_out: str | Path | None = None,
+) -> None:
+    if confirmation_out and not dry_run:
+        raise ConfigError("--confirmation-out requires --dry-run")
+    confirmation_path = None
+    if confirmation_out:
+        if report.confirmation_template is None:
+            raise ConfigError("no destructive confirmation is required")
+        try:
+            confirmation_path = str(
+                write_confirmation_template(report.confirmation_template, confirmation_out)
+            )
+        except ConfirmationError as exc:
+            raise ConfigError(str(exc)) from exc
+    payload = {
         "status": "dry-run" if dry_run else "success",
         "operation": command,
         "action": report.action,
@@ -317,7 +341,10 @@ def _migration_output(command: str, report: Any, *, dry_run: bool) -> None:
         "blocked_attempt": report.blocked_attempt,
         "verified_inventory_digest": report.verified_inventory_digest,
         "confirmation_template": report.confirmation_template,
-    })
+    }
+    if confirmation_path is not None:
+        payload["confirmation_path"] = confirmation_path
+    _json(payload)
 
 
 def _online(args: argparse.Namespace) -> object:
@@ -423,6 +450,8 @@ def _online(args: argparse.Namespace) -> object:
         _json({"operation": command, **result.as_dict()})
         return 0 if result.status == "PASS" else 3
     if command in {"migrate", "undo-migration", "redo-migration"}:
+        if args.confirmation_out and not args.dry_run:
+            raise ConfigError("--confirmation-out requires --dry-run")
         verified_digest = _migration_drift(args, config, repo)
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
@@ -449,7 +478,12 @@ def _online(args: argparse.Namespace) -> object:
             report = apply_undo(args.source, args.migration_id, profiles, confirmation=confirmation)
         else:
             report = apply_redo(args.source, args.migration_id, profiles, confirmation=confirmation)
-        _migration_output(command, report, dry_run=args.dry_run)
+        _migration_output(
+            command,
+            report,
+            dry_run=args.dry_run,
+            confirmation_out=args.confirmation_out,
+        )
         return 0
     if command == "check-drift":
         if bool(args.expected_inventory) != bool(args.actual_inventory):

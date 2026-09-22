@@ -17,6 +17,7 @@ from teamlib.destructive_confirmation import (
     confirmation_template,
     load_confirmation,
     require_confirmations,
+    write_confirmation_template,
 )
 
 
@@ -97,6 +98,63 @@ class ConfirmationTests(unittest.TestCase):
             path.write_bytes(b"\xff")
             with self.assertRaises(ConfirmationError):
                 load_confirmation(path)
+
+    def test_writer_creates_a_canonical_false_only_template(self):
+        template = confirmation_template(self.requirements)
+        with tempfile.TemporaryDirectory(prefix="team-confirmation-write-") as directory:
+            path = Path(directory) / "confirmation.json"
+
+            written = write_confirmation_template(template, path)
+
+            self.assertEqual(written, path)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), template)
+            self.assertTrue(
+                all(item["confirmed"] is False for item in template["confirmations"])
+            )
+            self.assertTrue(path.read_bytes().endswith(b"\n"))
+
+    def test_writer_refuses_true_empty_or_malformed_templates(self):
+        template = confirmation_template(self.requirements)
+        invalid = (
+            {
+                "version": 1,
+                "confirmations": [
+                    {**template["confirmations"][0], "confirmed": True}
+                ],
+            },
+            {"version": 1, "confirmations": []},
+            {"version": 1, "confirmations": template["confirmations"], "extra": 1},
+        )
+        with tempfile.TemporaryDirectory(prefix="team-confirmation-invalid-") as directory:
+            for index, document in enumerate(invalid):
+                with self.subTest(index=index), self.assertRaises(ConfirmationError):
+                    write_confirmation_template(document, Path(directory) / f"{index}.json")
+
+    def test_writer_never_replaces_a_destination_or_follows_symlinks(self):
+        template = confirmation_template(self.requirements)
+        with tempfile.TemporaryDirectory(prefix="team-confirmation-atomic-") as directory:
+            root = Path(directory)
+            canonical = root / "canonical.json"
+            write_confirmation_template(template, canonical)
+            self.assertEqual(write_confirmation_template(template, canonical), canonical)
+
+            different = root / "different.json"
+            different.write_text("keep me\n", encoding="utf-8")
+            with self.assertRaisesRegex(ConfirmationError, "already exists"):
+                write_confirmation_template(template, different)
+            self.assertEqual(different.read_text(encoding="utf-8"), "keep me\n")
+
+            destination_link = root / "destination-link.json"
+            destination_link.symlink_to(canonical)
+            with self.assertRaisesRegex(ConfirmationError, "symlink"):
+                write_confirmation_template(template, destination_link)
+
+            real_parent = root / "real-parent"
+            real_parent.mkdir()
+            parent_link = root / "parent-link"
+            parent_link.symlink_to(real_parent, target_is_directory=True)
+            with self.assertRaisesRegex(ConfirmationError, "symlink"):
+                write_confirmation_template(template, parent_link / "confirmation.json")
 
 
 if __name__ == "__main__":
