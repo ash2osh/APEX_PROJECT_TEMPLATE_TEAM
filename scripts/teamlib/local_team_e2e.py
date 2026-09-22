@@ -684,6 +684,68 @@ class SqlclFixtureAdapter:
         text = completed.stdout.decode("utf-8", "replace")
         return parse_saved_connections(text)
 
+    def capture_fixture_tree(self, developer: Any, spec: FixtureSpec, destination: Path):
+        from .trees import read_export_tree, tree_digest
+
+        workspace_id = self.workspace_id or 1
+        target = self._target(
+            self.payload_connection,
+            self.payload_identity,
+            alias=spec.tracked_alias,
+            workspace_id=workspace_id,
+            app_id=spec.fixture_app_id,
+            parsing_schema="DEMO",
+        )
+        destination = Path(destination)
+        if destination.exists() or destination.is_symlink():
+            raise E2EError("fixture capture destination already exists")
+        destination.mkdir(mode=0o700, parents=True)
+        work = destination / "sqlcl"
+        output = destination / "export"
+        work.mkdir(mode=0o700)
+        output.mkdir(mode=0o700)
+        driver = work / "export.sql"
+        driver.write_text(
+            f"SET DEFINE OFF\nAPEX EXPORT -APPLICATIONID {spec.fixture_app_id} -EXPTYPE APEXLANG -OVERWRITE-FILES -DIR \"{output}\"\n",
+            encoding="utf-8",
+            newline="",
+        )
+        result = self._run_sqlcl(target, "read", driver, work)
+        if result.exit_code != 0:
+            raise E2EError("fixture APEX export failed")
+        candidates = [path.parent for path in output.rglob("application.apx")]
+        if len(candidates) != 1:
+            raise E2EError("fixture APEX export did not produce one complete application")
+        tree = read_export_tree(candidates[0])
+        return candidates[0], tree, tree_digest(tree)
+
+    def import_fixture_tree(
+        self,
+        developer: Any,
+        spec: FixtureSpec,
+        source: Path,
+        workspace_id: int,
+        parsing_schema: str,
+    ) -> None:
+        source = Path(source).resolve()
+        if not source.is_dir() or source.is_symlink() or not (source / "application.apx").is_file():
+            raise E2EError("fixture Builder source is not a complete application directory")
+        target = self._target(
+            self.payload_connection,
+            self.payload_identity,
+            alias=spec.tracked_alias,
+            workspace_id=workspace_id,
+            app_id=spec.fixture_app_id,
+            parsing_schema=parsing_schema,
+        )
+        driver, work = self._driver(
+            "fixture-builder-save",
+            "SET DEFINE OFF\n"
+            f"APEX IMPORT -INPUT \"{source}\" -ID {spec.fixture_app_id} -ALIAS {spec.apex_alias} "
+            f"-WORKSPACEID {workspace_id} -SCHEMA {parsing_schema}\n",
+        )
+        self._run_sqlcl(target, "write", driver, work)
+
     def capture_seed(self, connection: str, app_id: int, destination: Path) -> tuple[Path, str]:
         from .trees import read_export_tree, tree_digest
 
@@ -1086,6 +1148,193 @@ class TeamTopology:
     developers: tuple[Developer, ...]
     env_values: dict[str, str]
     commands: tuple[CommandResult, ...] = ()
+
+
+def _safe_application_path(value: str) -> str:
+    _safe_text(value, label="application relative path")
+    if "\\" in value:
+        raise E2EError("application relative path must use POSIX separators")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise E2EError("application relative path must stay inside the captured application")
+    return path.as_posix()
+
+
+@dataclass(frozen=True)
+class ApexMutation:
+    relative_path: str
+    expected_old: str
+    replacement: str
+    actor: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "relative_path", _safe_application_path(self.relative_path))
+        for label, value in (
+            ("expected mutation line", self.expected_old),
+            ("replacement mutation line", self.replacement),
+            ("mutation actor", self.actor),
+            ("mutation reason", self.reason),
+        ):
+            _safe_text(value, label=label)
+            if "\n" in value or "\r" in value:
+                raise E2EError(f"{label} must be one line")
+
+
+@dataclass(frozen=True)
+class CapturedTree:
+    developer: Any
+    tree_root: Path
+    tree: dict[str, bytes]
+    digest: str
+    application_id: int
+    workspace_id: int
+    parsing_schema: str
+    capture_id: str
+
+
+@dataclass(frozen=True)
+class FixtureMutationEvidence:
+    developer: Any
+    event: str
+    mutation: ApexMutation
+    before_tree: dict[str, bytes]
+    after_tree: dict[str, bytes]
+    before_digest: str
+    after_digest: str
+    before_member_sha256: str
+    after_member_sha256: str
+    before_line: str
+    after_line: str
+    source_root: Path
+    verified_root: Path
+    application_id: int
+    workspace_id: int
+    parsing_schema: str
+    coverage: str
+
+
+def _tree_digest(tree: Mapping[str, bytes]) -> str:
+    from .trees import tree_digest
+
+    return tree_digest(dict(tree))
+
+
+def _write_mutated_tree(root: Path, tree: Mapping[str, bytes], mutation: ApexMutation) -> tuple[dict[str, bytes], str, str]:
+    if mutation.relative_path not in tree:
+        raise E2EError("mutation path is absent from the captured live application")
+    data = tree[mutation.relative_path]
+    if not isinstance(data, bytes):
+        raise E2EError("captured application member is not bytes")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise E2EError("mutation member is not UTF-8") from exc
+    lines = text.splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == mutation.expected_old]
+    if len(matches) != 1:
+        raise E2EError("mutation expected exactly one matching line")
+    index = matches[0]
+    line = lines[index]
+    ending = line[len(line.rstrip("\r\n")):]
+    lines[index] = mutation.replacement + ending
+    after_member = "".join(lines).encode("utf-8")
+    mutated = dict(tree)
+    mutated[mutation.relative_path] = after_member
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    for relative, member in sorted(mutated.items()):
+        path = root / relative
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.is_symlink():
+            raise E2EError(f"mutation output path is a symlink: {relative}")
+        path.write_bytes(member)
+    return mutated, hashlib.sha256(data).hexdigest(), hashlib.sha256(after_member).hexdigest()
+
+
+def capture_live_tree(
+    developer: Any,
+    *,
+    adapter: Any,
+    spec: FixtureSpec | None = None,
+    workspace_id: int | None = None,
+) -> CapturedTree:
+    """Capture the current shared fixture through the qualified adapter."""
+
+    if adapter is None:
+        raise E2EError("capture_live_tree requires the qualified fixture adapter")
+    fixture_spec = spec or FixtureSpec()
+    run_root = Path(getattr(developer, "run_root", Path(developer.clone).resolve().parent.parent)).resolve()
+    destination = run_root / "builder" / str(developer.name) / f"capture-{secrets.token_hex(8)}"
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    result = adapter.capture_fixture_tree(developer, fixture_spec, destination)
+    if isinstance(result, CapturedTree):
+        return result
+    try:
+        tree_root, tree, digest = result
+    except (TypeError, ValueError) as exc:
+        raise E2EError("fixture capture adapter returned an invalid result") from exc
+    tree_root = Path(tree_root).resolve()
+    if not _inside(tree_root, run_root) or tree_root.is_symlink() or not tree_root.is_dir():
+        raise E2EError("fixture capture escaped the developer run root")
+    if not isinstance(tree, Mapping) or any(not isinstance(path, str) or not isinstance(data, bytes) for path, data in tree.items()):
+        raise E2EError("fixture capture returned a malformed tree")
+    calculated = _tree_digest(tree)
+    if str(digest) != calculated:
+        raise E2EError("fixture capture digest does not match its members")
+    observed_workspace = int(workspace_id if workspace_id is not None else getattr(adapter, "workspace_id", 0))
+    if observed_workspace <= 0:
+        raise E2EError("fixture capture has no verified workspace ID")
+    return CapturedTree(
+        developer=developer,
+        tree_root=tree_root,
+        tree=dict(sorted(tree.items())),
+        digest=calculated,
+        application_id=fixture_spec.fixture_app_id,
+        workspace_id=observed_workspace,
+        parsing_schema="DEMO",
+        capture_id=destination.name,
+    )
+
+
+def fixture_builder_save(
+    developer: Any,
+    mutation: ApexMutation,
+    *,
+    adapter: Any,
+    spec: FixtureSpec | None = None,
+    workspace_id: int | None = None,
+    parsing_schema: str = "DEMO",
+) -> FixtureMutationEvidence:
+    """Emulate one reviewed Builder save using a fresh live capture and import."""
+
+    fixture_spec = spec or FixtureSpec()
+    before = capture_live_tree(developer, adapter=adapter, spec=fixture_spec, workspace_id=workspace_id)
+    root = before.tree_root.parent.parent / "mutations" / str(developer.name) / f"{secrets.token_hex(8)}"
+    after_tree, before_hash, after_hash = _write_mutated_tree(root, before.tree, mutation)
+    verified_workspace = before.workspace_id if workspace_id is None else workspace_id
+    adapter.import_fixture_tree(developer, fixture_spec, root, verified_workspace, parsing_schema)
+    after = capture_live_tree(developer, adapter=adapter, spec=fixture_spec, workspace_id=verified_workspace)
+    if after.tree != after_tree:
+        raise E2EError("fixture Builder save did not round-trip to the intended live tree")
+    return FixtureMutationEvidence(
+        developer=developer,
+        event="fixture_builder_save",
+        mutation=mutation,
+        before_tree=before.tree,
+        after_tree=after.tree,
+        before_digest=before.digest,
+        after_digest=after.digest,
+        before_member_sha256=before_hash,
+        after_member_sha256=after_hash,
+        before_line=mutation.expected_old,
+        after_line=mutation.replacement,
+        source_root=root,
+        verified_root=after.tree_root,
+        application_id=fixture_spec.fixture_app_id,
+        workspace_id=verified_workspace,
+        parsing_schema=parsing_schema,
+        coverage="shared database export state only; not Builder page locks or browser save UX",
+    )
 
 
 def _topology_git(

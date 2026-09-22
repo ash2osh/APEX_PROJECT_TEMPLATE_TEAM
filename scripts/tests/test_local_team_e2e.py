@@ -17,11 +17,16 @@ if _SCRIPTS_DIR not in sys.path:
 from teamlib.local_team_e2e import (  # noqa: E402
     E2EError,
     FixtureSpec,
+    ApexMutation,
+    CapturedTree,
+    FixtureMutationEvidence,
     PreflightEvidence,
     RunManifest,
     create_team_topology,
+    capture_live_tree,
     assert_safe_argv,
     cleanup_fixture,
+    fixture_builder_save,
     inspect_fixture,
     parse_saved_connections,
     provision_fixture,
@@ -298,6 +303,84 @@ class LocalTeamTopologyTests(unittest.TestCase):
         self.assertEqual(observed["TEAM_CHECKOUT_UUID"], developer.checkout_uuid)
         self.assertEqual(observed["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertNotIn("TEAM_CHECKOUT_UUID", os.environ)
+
+
+class FakeBuilderAdapter:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.events: list[object] = []
+        self.workspace_id = 90000
+        self.live_tree: dict[str, bytes] = {
+            "application.apx": b"app TEAM-E2E-9099\n",
+            "shared-components/messages.apx": b"text: Simple App\nother: keep\n",
+            "pages/p00001-home.apx": b"name: Simple App\nother: keep\n",
+        }
+
+    def capture_fixture_tree(self, developer, spec, destination: Path):
+        self.events.append(("capture", developer.name))
+        destination.mkdir(parents=True, exist_ok=True)
+        for relative, data in self.live_tree.items():
+            path = destination / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        from teamlib.trees import tree_digest
+
+        return destination, dict(self.live_tree), tree_digest(self.live_tree)
+
+    def import_fixture_tree(self, developer, spec, source: Path, workspace_id: int, parsing_schema: str):
+        self.events.append(("import", spec.fixture_app_id, workspace_id, parsing_schema))
+        from teamlib.trees import read_export_tree
+
+        self.live_tree = read_export_tree(source)
+
+
+class LocalTeamBuilderMutationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="local-team-builder-")
+        self.root = Path(self.temp.name)
+        self.developer = type("DeveloperStub", (), {"name": "alice", "clone": self.root, "run_root": self.root})()
+        self.adapter = FakeBuilderAdapter(self.root)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def mutation(self, path="shared-components/messages.apx", old="text: Simple App", replacement="text: Simple App - Alice"):
+        return ApexMutation(path, old, replacement, "alice", "test builder save")
+
+    def test_fixture_builder_save_starts_with_fresh_capture_and_binds_import(self):
+        evidence = fixture_builder_save(
+            self.developer,
+            self.mutation(),
+            adapter=self.adapter,
+            spec=FixtureSpec(),
+            workspace_id=90000,
+        )
+        self.assertIsInstance(evidence, FixtureMutationEvidence)
+        self.assertEqual(evidence.event, "fixture_builder_save")
+        self.assertEqual(self.adapter.events, [
+            ("capture", "alice"),
+            ("import", 9099, 90000, "DEMO"),
+            ("capture", "alice"),
+        ])
+        self.assertEqual(evidence.before_line, "text: Simple App")
+        self.assertEqual(evidence.after_line, "text: Simple App - Alice")
+        self.assertEqual(evidence.after_tree["shared-components/messages.apx"], b"text: Simple App - Alice\nother: keep\n")
+        self.assertEqual(evidence.before_tree["pages/p00001-home.apx"], self.adapter.live_tree["pages/p00001-home.apx"])
+
+    def test_mutation_refuses_zero_multiple_binary_stale_and_outside_paths(self):
+        with self.assertRaisesRegex(E2EError, "application relative path"):
+            ApexMutation("../outside.apx", "old", "new", "alice", "unsafe")
+        cases = [
+            (self.mutation(old="not present"), "exactly one"),
+            (self.mutation(path="shared-components/messages.apx", old="other: keep", replacement="other: changed"), "exactly one"),
+            (self.mutation(path="binary.bin"), "UTF-8"),
+            (self.mutation(path="missing.apx"), "captured live application"),
+        ]
+        self.adapter.live_tree["binary.bin"] = b"\xff\x00"
+        self.adapter.live_tree["shared-components/messages.apx"] = b"text: Simple App\nother: keep\nother: keep\n"
+        for mutation, message in cases:
+            with self.subTest(path=mutation.relative_path), self.assertRaisesRegex(E2EError, message):
+                fixture_builder_save(self.developer, mutation, adapter=self.adapter, spec=FixtureSpec(), workspace_id=90000)
 
 
 class FakeFixtureAdapter:
