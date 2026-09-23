@@ -31,6 +31,8 @@ from teamlib.control_store import ControlStore, ControlStoreError, SqlControlSto
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.drift import capture_live_inventory, drift_status, observed_frontier_drift
 from teamlib.fingerprints import InventoryError, diff_inventory, drift_is_clean, load_inventory
+from teamlib.page_locks import LockReport, format_lock_report, load_manual_page_locks, read_page_locks
+from teamlib.publish import PublishError, format_publish_notice, prepare_publish
 from teamlib.destructive_confirmation import (
     ConfirmationError,
     load_confirmation,
@@ -79,6 +81,7 @@ COMMAND_HELP = {
     "doctor": ("Daily application work", "validate the selected credential-free target profile"),
     "export-app": ("Daily application work", "capture and reconcile the shared Builder application"),
     "import-app": ("Recovery and diagnosis", "coordinated overwrite of the paused shared Builder application"),
+    "prepare-publish": ("Daily application work", "prepare an app-scoped pause notice and durable evidence record"),
     "run-integration": ("Protected qualification", "apply and qualify one exact commit on protected integration"),
     "qualify-target": ("Protected qualification", "read-only diagnosis of a persistent qualified target"),
     "migrate": ("Migration maintenance", "preview or apply reviewed forward migration bundles"),
@@ -126,6 +129,14 @@ COMMAND_DETAILS = {
     "import-app": (
         "This command overwrites the shared application. Use only after a posted pause, verified "
         "baseline, and reviewed exact source."
+    ),
+    "announce-import": (
+        "Drafts a diagnostic pause or all-clear notice from observed evidence; "
+        "this command does not authorize or perform a publish."
+    ),
+    "prepare-publish": (
+        "Prepares an app-scoped pause notice and durable evidence record for selected apps; "
+        "read-only, does not modify Builder."
     ),
     "run-integration": (
         "Performs non-production writes while applying and qualifying one immutable Git source."
@@ -263,6 +274,21 @@ def _parser() -> argparse.ArgumentParser:
     announce_choice = announce.add_mutually_exclusive_group(required=True)
     announce_choice.add_argument("--ref")
     announce_choice.add_argument("--all-clear")
+    prep = add_command("prepare-publish")
+    prep.add_argument("aliases", nargs="+", help="one or more configured application aliases to publish")
+    prep.add_argument("--ref", required=True, help="exact 40-character hex commit to publish")
+    prep.add_argument(
+        "--manual-lock-report",
+        action="append",
+        default=[],
+        help="manual page lock report in format <alias>:<path.json>",
+    )
+    prep.add_argument(
+        "--replace-from",
+        action="append",
+        default=[],
+        help="replace from recovery capture in format <alias>:<recovery-id>",
+    )
     deploy = add_command("deploy-app")
     deploy.add_argument("alias")
     deploy.add_argument("--target", required=True)
@@ -629,6 +655,72 @@ def _online(args: argparse.Namespace) -> object:
         else:
             store.recover(metadata, args.run_token, args.evidence, attempt_id=args.attempt)
             _json({"status": "success", "operation": command})
+        return 0
+    if command == "prepare-publish":
+        if config.role != "developer" or config.environment != "development":
+            raise ConfigError("prepare-publish is restricted to the shared development environment")
+        if not args.aliases:
+            raise ConfigError("prepare-publish requires at least one application alias")
+        if len(set(args.aliases)) != len(args.aliases):
+            raise ConfigError("duplicate application aliases specified for prepare-publish")
+        manual_reports: dict[str, Path] = {}
+        for entry in args.manual_lock_report:
+            if ":" not in entry:
+                raise ConfigError(f"invalid --manual-lock-report argument: {entry}; expected <alias>:<path>")
+            alias, path_str = entry.split(":", 1)
+            if alias not in args.aliases:
+                raise ConfigError(f"--manual-lock-report alias '{alias}' is not among selected aliases")
+            manual_reports[alias] = Path(path_str)
+        replace_map: dict[str, str] = {}
+        for entry in args.replace_from:
+            if ":" not in entry:
+                raise ConfigError(f"invalid --replace-from argument: {entry}; expected <alias>:<recovery-id>")
+            alias, rec_id = entry.split(":", 1)
+            if alias not in args.aliases:
+                raise ConfigError(f"--replace-from alias '{alias}' is not among selected aliases")
+            replace_map[alias] = rec_id
+
+        targets: list[Target] = []
+        for alias in args.aliases:
+            targets.append(_target(config, alias))
+
+        lock_reports: dict[str, LockReport] = {}
+        for target in targets:
+            alias = target.alias or ""
+            if alias in manual_reports:
+                report = load_manual_page_locks(manual_reports[alias], target)
+            else:
+                report = read_page_locks(target)
+            lock_reports[alias] = report
+            if report.status == "UNKNOWN":
+                print(format_lock_report(report), file=sys.stderr)
+                raise ConfigError(f"page lock report for '{alias}' is UNKNOWN; publish preparation refused")
+
+        metadata = profile_target(config, "METADATA")
+        store = _sql_control_store(repo, metadata)
+        try:
+            prep = prepare_publish(
+                repo,
+                tuple(targets),
+                args.ref,
+                lock_reports,
+                store,
+                replace_from=replace_map,
+            )
+        except PublishError as exc:
+            raise ConfigError(str(exc)) from exc
+
+        notice = format_publish_notice(prep, operator=os.environ.get("USER", "the import operator"))
+        print(notice)
+        _json({
+            "status": "success",
+            "operation": command,
+            "preparation_id": prep.preparation_id,
+            "record_digest": prep.record_digest,
+            "aliases": list(prep.aliases),
+            "source_commit": prep.source_commit,
+            "record_path": str(prep.path),
+        })
         return 0
     if command in {"register-app", "app-status", "recover-app-lock", "capture-app", "bootstrap-app", "adopt-app", "export-app", "import-app"}:
         target = _target(config, args.alias)

@@ -9,7 +9,14 @@ if _SCRIPTS_DIR not in sys.path:
 
 import unittest
 
-from teamlib.announce import Announcement, draft_all_clear, draft_import_announcement
+from teamlib.announce import (
+    Announcement,
+    draft_all_clear,
+    draft_import_announcement,
+    draft_publish_all_clear,
+    format_publish_notice,
+)
+from teamlib.publish import Preparation
 
 
 class AnnounceTests(unittest.TestCase):
@@ -23,6 +30,49 @@ class AnnounceTests(unittest.TestCase):
         self.assertIn("pages/p1.apx", announcement.text)
         self.assertIn("unknown", announcement.text.lower())
         self.assertIn("may resume", draft_all_clear("checkout", {"verified": True}).lower())
+
+    def test_draft_publish_all_clear_requires_all_apps_verified(self):
+        results = {
+            "hr": {"verified": True, "recovery_path": ".sync-state/recovery/hr-123"},
+            "payroll": {"verified": False, "status": "failed"},
+        }
+        with self.assertRaises(ValueError) as ctx:
+            draft_publish_all_clear(["hr", "payroll"], results)
+        self.assertIn("payroll", str(ctx.exception))
+
+    def test_draft_publish_all_clear_success_names_all_selected_apps(self):
+        results = {
+            "hr": {"verified": True, "recovery_path": ".sync-state/recovery/hr-123"},
+            "payroll": {"verified": True, "recovery_path": ".sync-state/recovery/pay-456"},
+        }
+        text = draft_publish_all_clear(["hr", "payroll"], results)
+        self.assertIn("hr", text)
+        self.assertIn("payroll", text)
+        self.assertIn("hr-123", text)
+        self.assertIn("pay-456", text)
+        self.assertIn("may resume", text.lower())
+
+    def test_format_publish_notice_scoped_to_selected_apps(self):
+        prep = Preparation(
+            preparation_id="test-prep-123",
+            version=1,
+            aliases=("hr",),
+            source_commit="a" * 40,
+            prepared_at_utc="2026-09-23T20:00:00Z",
+            record_digest="b" * 64,
+            apps={
+                "hr": {
+                    "target": {"alias": "hr", "app_id": 101, "workspace_id": 10},
+                    "roster": ["alice-uuid"],
+                    "lock_report": {"alias": "hr", "status": "KNOWN", "source": "APEX_APPLICATION_LOCKED_PAGES", "pages": []},
+                }
+            },
+            path=Path(".sync-state/publish/test-prep-123/prepare.json"),
+        )
+        notice = format_publish_notice(prep)
+        self.assertIn("HR", notice)
+        self.assertNotIn("payroll", notice.lower())
+        self.assertIn("alice-uuid", notice)
 
 
 if __name__ == "__main__":
