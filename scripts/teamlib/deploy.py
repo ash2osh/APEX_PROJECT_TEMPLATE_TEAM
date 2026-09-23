@@ -10,6 +10,7 @@ from typing import Any
 from collections.abc import Callable, Mapping
 
 from .apex import _export_driver, _find_export_dir, _import_driver, _verify_result_identity, _default_repo
+from .app_identity import AppIdentityError, observe_app_identity, require_app_identity
 from .config import Target
 from .control_store import ControlStore, ControlStoreError
 from .masters import MasterError, apex_component_resolver, validate_masters
@@ -81,10 +82,20 @@ def deploy_app(
         store.acquire_app(target.physical_key, token, "deploy-worker", "local", "deploy-worker")
     except ControlStoreError as exc:
         raise DeployError(str(exc)) from exc
+    try:
+        observed = observe_app_identity(target, runner=runner, work_dir=state_root)
+        require_app_identity(target, observed, allow_absent=True)
+    except AppIdentityError as exc:
+        store.release_app(target.physical_key, token, confirmed_success=False)
+        raise DeployError(str(exc)) from exc
     payload_started = False
     try:
-        current, _, _ = _capture_destination(target, repo_path, state_root, store, runner, token)
-        recovery_id = save_capture(target, {}, {}, source_commit, current, {"kind": "deployment", "tree_digest": tree_digest(current)}, root=state_root)
+        if observed.status == "ABSENT":
+            current: dict[str, bytes] = {}
+            recovery_id = save_capture(target, {}, {}, source_commit, current, {"kind": "deployment", "tree_digest": tree_digest(current)}, root=state_root)
+        else:
+            current, _, _ = _capture_destination(target, repo_path, state_root, store, runner, token)
+            recovery_id = save_capture(target, {}, {}, source_commit, current, {"kind": "deployment", "tree_digest": tree_digest(current)}, root=state_root)
         contract_path = repo_path / "targets" / "masters.json"
         if contract_path.is_file():
             try:

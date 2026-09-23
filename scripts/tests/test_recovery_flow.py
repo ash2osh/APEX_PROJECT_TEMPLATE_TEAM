@@ -64,11 +64,18 @@ class RecoveryFlowTests(unittest.TestCase):
             destination = exported / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
+        stdout = (
+            f"TEAM_RESULT_BEGIN\n"
+            f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+            f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+            f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+            f"TEAM_RESULT_END\n"
+        )
         return SimpleNamespace(
             identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREE"},
             completion={"operation": operation}, result_manifest={"status": "success"},
             log_path=Path(work) / "fake.log", generated_driver=Path(driver),
-            stdout="", stderr="", argv=(), exit_code=0,
+            stdout=stdout, stderr="", argv=(), exit_code=0,
         )
 
     def test_conflict_resolve_commit_then_import_uses_resolution_receipt(self):

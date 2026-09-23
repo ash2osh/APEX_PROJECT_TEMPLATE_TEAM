@@ -59,12 +59,19 @@ class ExportTests(unittest.TestCase):
         metadata = export / ".apex" / "apexlang.json"
         metadata.parent.mkdir(parents=True, exist_ok=True)
         metadata.write_text('{"format":"APEXLANG"}\n', encoding="utf-8")
+        stdout = (
+            f"TEAM_RESULT_BEGIN\n"
+            f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+            f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+            f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+            f"TEAM_RESULT_END\n"
+        )
         return SimpleNamespace(
             identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREE"},
             completion={"operation": operation},
             result_manifest={"status": "success"},
             log_path=Path(work) / "fake.log",
-            generated_driver=Path(driver), stdout="", stderr="", argv=(), exit_code=0,
+            generated_driver=Path(driver), stdout=stdout, stderr="", argv=(), exit_code=0,
         )
 
     def test_capture_uses_verified_read_and_finds_one_export(self):

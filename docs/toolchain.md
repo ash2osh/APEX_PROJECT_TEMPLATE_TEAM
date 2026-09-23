@@ -69,3 +69,18 @@ schema definitions:
 Version 1 contracts with a global `binding.parsing_schema` or flat `app_ids` mapping
 are rejected. To convert from version 1, update `"version": 2` and convert `app_ids`
 to `"apps": {"<alias>": {"id": <id>, "parsing_schema": "<SCHEMA>"}}`.
+
+## Application identity and APEX 26.1+ verification
+
+Before any application write (`import_app`, `deploy_app`) or daily export, the
+toolchain observes live application identity from the APEX data dictionary:
+
+- **APEX version**: Must be 26.1 or higher (from `APEX_RELEASE.VERSION_NO`).
+  Versions below 26.1, unknown versions, or malformed markers refuse the operation.
+- **Application presence**: Observed via `APEX_APPLICATIONS` (matching
+  `APPLICATION_ID`, `WORKSPACE_ID`, and parsing schema `OWNER`).
+- **Workspace-schema assignment**: Observed via `APEX_WORKSPACE_SCHEMAS`.
+  The target parsing schema must be explicitly assigned to the target workspace.
+- **First deploy vs. daily import**: `deploy_app` accepts an `ABSENT` app only
+  if the target workspace and its parsing-schema assignment are positively verified.
+  `import_app` and `export_app` strictly require `PRESENT`.

@@ -43,7 +43,19 @@ class DeployTests(unittest.TestCase):
             destination = output / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
-        return SimpleNamespace(identity={"SESSION_USER":"DEMO","CURRENT_SCHEMA":"DEMO","DB_NAME":"FREEPDB1","SERVICE":"freep1","INSTANCE_ID":"FREE"}, completion={"operation":operation}, result_manifest={"status":"success"})
+        stdout = (
+            f"TEAM_RESULT_BEGIN\n"
+            f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+            f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+            f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+            f"TEAM_RESULT_END\n"
+        )
+        return SimpleNamespace(
+            identity={"SESSION_USER":"DEMO","CURRENT_SCHEMA":"DEMO","DB_NAME":"FREEPDB1","SERVICE":"freep1","INSTANCE_ID":"FREE"},
+            completion={"operation":operation},
+            result_manifest={"status":"success"},
+            stdout=stdout,
+        )
 
     def test_deploy_uses_exact_source_and_verifies_reexport(self):
         report = deploy_app(self.target, self.source_tree, "abc123", repo=self.root, control_store=self.store, runner=self.runner)
@@ -61,6 +73,102 @@ class DeployTests(unittest.TestCase):
         target = Target(**{**self.target.__dict__, "role": "replay", "environment": "test"})
         with self.assertRaises(DeployError):
             deploy_app(target, self.source_tree, "abc", repo=self.root, control_store=self.store, runner=self.runner)
+
+    def test_deploy_refuses_when_app_id_mismatches(self):
+        calls = []
+        def runner(target, operation, driver, work, **kwargs):
+            calls.append(operation)
+            if operation == "write":
+                raise AssertionError("write must not be called on identity mismatch")
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+                f"TEAM_APP_ID_APP|{target.workspace_id}|9999|{target.parsing_schema}\n"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER":"DEMO","CURRENT_SCHEMA":"DEMO","DB_NAME":"FREEPDB1","SERVICE":"freep1","INSTANCE_ID":"FREE"},
+                completion={"operation":operation}, result_manifest={"status":"success"},
+                stdout=stdout,
+            )
+        with self.assertRaises(DeployError):
+            deploy_app(self.target, self.source_tree, "abc", repo=self.root, control_store=self.store, runner=runner)
+        self.assertNotIn("write", calls)
+
+    def test_deploy_refuses_when_apex_version_below_26_1(self):
+        calls = []
+        def runner(target, operation, driver, work, **kwargs):
+            calls.append(operation)
+            if operation == "write":
+                raise AssertionError("write must not be called on old APEX version")
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|26.0.0\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+                f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER":"DEMO","CURRENT_SCHEMA":"DEMO","DB_NAME":"FREEPDB1","SERVICE":"freep1","INSTANCE_ID":"FREE"},
+                completion={"operation":operation}, result_manifest={"status":"success"},
+                stdout=stdout,
+            )
+        with self.assertRaises(DeployError):
+            deploy_app(self.target, self.source_tree, "abc", repo=self.root, control_store=self.store, runner=runner)
+        self.assertNotIn("write", calls)
+
+    def test_deploy_allows_first_deploy_of_absent_app_with_verified_schema(self):
+        calls = []
+        def runner(target, operation, driver, work, **kwargs):
+            calls.append(operation)
+            if operation == "write":
+                self.database_tree = dict(self.source_tree)
+            output = Path(work) / "exported"
+            for path, data in self.database_tree.items():
+                destination = output / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
+            app_line = (
+                f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+                if "write" in calls else ""
+            )
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+                f"{app_line}"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER":"DEMO","CURRENT_SCHEMA":"DEMO","DB_NAME":"FREEPDB1","SERVICE":"freep1","INSTANCE_ID":"FREE"},
+                completion={"operation":operation}, result_manifest={"status":"success"},
+                stdout=stdout,
+            )
+        report = deploy_app(self.target, self.source_tree, "abc123", repo=self.root, control_store=self.store, runner=runner)
+        self.assertIn("write", calls)
+        self.assertEqual(report.source_commit, "abc123")
+
+    def test_deploy_refuses_absent_app_with_unassigned_schema(self):
+        calls = []
+        def runner(target, operation, driver, work, **kwargs):
+            calls.append(operation)
+            if operation == "write":
+                raise AssertionError("write must not be called with unassigned schema")
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|OTHER_SCHEMA\n"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER":"DEMO","CURRENT_SCHEMA":"DEMO","DB_NAME":"FREEPDB1","SERVICE":"freep1","INSTANCE_ID":"FREE"},
+                completion={"operation":operation}, result_manifest={"status":"success"},
+                stdout=stdout,
+            )
+        with self.assertRaises(DeployError):
+            deploy_app(self.target, self.source_tree, "abc", repo=self.root, control_store=self.store, runner=runner)
+        self.assertNotIn("write", calls)
 
 
 class DeployTimeoutTests(unittest.TestCase):

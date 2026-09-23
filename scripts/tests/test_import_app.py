@@ -63,11 +63,18 @@ class ImportTests(unittest.TestCase):
             destination = export / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
+        stdout = (
+            f"TEAM_RESULT_BEGIN\n"
+            f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+            f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+            f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+            f"TEAM_RESULT_END\n"
+        )
         return SimpleNamespace(
             identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREE"},
             completion={"operation": operation}, result_manifest={"status": "success"},
             log_path=Path(work) / "fake.log", generated_driver=Path(driver),
-            stdout="", stderr="", argv=(), exit_code=0,
+            stdout=stdout, stderr="", argv=(), exit_code=0,
         )
 
     def commit_new_source(self) -> str:
@@ -130,6 +137,77 @@ class ImportTests(unittest.TestCase):
             self._run_successful_import(announce=notices.append)
         self.assertEqual(buffer.getvalue(), "")
         self.assertTrue(any("PAUSE:" in notice for notice in notices))
+
+    def test_import_refuses_when_app_id_mismatches(self):
+        selected = self.commit_new_source()
+        calls = []
+        def runner(target, operation, driver, work, **kwargs):
+            calls.append(operation)
+            if operation == "write":
+                raise AssertionError("write must not be called on identity mismatch")
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+                f"TEAM_APP_ID_APP|{target.workspace_id}|9999|{target.parsing_schema}\n"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREE"},
+                completion={"operation": operation}, result_manifest={"status": "success"},
+                log_path=Path(work) / "fake.log", generated_driver=Path(driver),
+                stdout=stdout, stderr="", argv=(), exit_code=0,
+            )
+        with self.assertRaises(ApexError):
+            import_app(self.target, selected, repo=self.repo, control_store=self.store, runner=runner)
+        self.assertNotIn("write", calls)
+
+    def test_import_refuses_when_apex_version_below_26_1(self):
+        selected = self.commit_new_source()
+        calls = []
+        def runner(target, operation, driver, work, **kwargs):
+            calls.append(operation)
+            if operation == "write":
+                raise AssertionError("write must not be called on old APEX version")
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|24.2.0\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+                f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREE"},
+                completion={"operation": operation}, result_manifest={"status": "success"},
+                log_path=Path(work) / "fake.log", generated_driver=Path(driver),
+                stdout=stdout, stderr="", argv=(), exit_code=0,
+            )
+        with self.assertRaises(ApexError):
+            import_app(self.target, selected, repo=self.repo, control_store=self.store, runner=runner)
+        self.assertNotIn("write", calls)
+
+    def test_import_refuses_absent_app(self):
+        selected = self.commit_new_source()
+        calls = []
+        def runner(target, operation, driver, work, **kwargs):
+            calls.append(operation)
+            if operation == "write":
+                raise AssertionError("write must not be called on absent app")
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREE"},
+                completion={"operation": operation}, result_manifest={"status": "success"},
+                log_path=Path(work) / "fake.log", generated_driver=Path(driver),
+                stdout=stdout, stderr="", argv=(), exit_code=0,
+            )
+        with self.assertRaises(ApexError):
+            import_app(self.target, selected, repo=self.repo, control_store=self.store, runner=runner)
+        self.assertNotIn("write", calls)
 
 
 if __name__ == "__main__":

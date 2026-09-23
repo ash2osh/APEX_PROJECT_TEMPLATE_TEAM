@@ -11,6 +11,11 @@ import uuid
 from typing import Any
 from collections.abc import Callable, Mapping
 
+from .app_identity import (
+    AppIdentityError,
+    observe_app_identity,
+    require_app_identity,
+)
 from .config import Target
 from .control_store import ControlStore, ControlStoreError
 from .masters import MasterError, apex_component_resolver, validate_masters
@@ -257,6 +262,11 @@ def export_app(
         assert_source_clean(repo_path, target.alias or "")
     except TreeError as exc:
         raise ApexError(str(exc)) from exc
+    try:
+        observed = observe_app_identity(target, runner=runner, work_dir=state_root)
+        require_app_identity(target, observed, allow_absent=False)
+    except AppIdentityError as exc:
+        raise ApexError(str(exc)) from exc
     head = _git_head(repo_path)
     try:
         checkpoint = load_checkpoint(target, head, root=state_root)
@@ -410,6 +420,12 @@ def import_app(
         run_token = uuid.uuid4().hex
         store.acquire_app(target.physical_key, run_token, checkout_uuid, host, user)
     except ControlStoreError as exc:
+        raise ApexError(str(exc)) from exc
+    try:
+        observed = observe_app_identity(target, runner=runner, work_dir=state_root)
+        require_app_identity(target, observed, allow_absent=False)
+    except AppIdentityError as exc:
+        store.release_app(target.physical_key, run_token, confirmed_success=False)
         raise ApexError(str(exc)) from exc
     payload_started = False
     try:
