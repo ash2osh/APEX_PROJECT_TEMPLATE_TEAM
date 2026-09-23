@@ -115,26 +115,43 @@ def save_connection_script(name: str, schema: str, password: str) -> str:
 
 @dataclass(frozen=True)
 class FixtureSpec:
-    """Immutable names for the one disposable Docker/APEX fixture."""
+    """Immutable names for the disposable Docker/APEX fixtures."""
 
     seed_app_id: int = 103
     fixture_app_id: int = 9099
+    payroll_app_id: int = 9100
     tracked_alias: str = "team-e2e"
+    payroll_alias: str = "payroll"
     apex_alias: str = "TEAM-E2E-9099"
+    payroll_apex_alias: str = "PAYROLL-9100"
     project_id: str = "local-team-e2e"
     metadata_schema: str = "TEAM_E2E_META"
+
+    @property
+    def hr_app_id(self) -> int:
+        return self.fixture_app_id
+
+    @property
+    def hr_alias(self) -> str:
+        return self.tracked_alias
 
     def __post_init__(self) -> None:
         if not isinstance(self.seed_app_id, int) or isinstance(self.seed_app_id, bool) or self.seed_app_id <= 0:
             raise E2EError("seed_app_id must be a positive integer")
         if not isinstance(self.fixture_app_id, int) or isinstance(self.fixture_app_id, bool) or self.fixture_app_id <= 0:
             raise E2EError("fixture_app_id must be a positive integer")
-        if self.seed_app_id == self.fixture_app_id:
-            raise E2EError("seed_app_id and fixture_app_id must differ")
+        if not isinstance(self.payroll_app_id, int) or isinstance(self.payroll_app_id, bool) or self.payroll_app_id <= 0:
+            raise E2EError("payroll_app_id must be a positive integer")
+        if len({self.seed_app_id, self.fixture_app_id, self.payroll_app_id}) != 3:
+            raise E2EError("seed_app_id, fixture_app_id, and payroll_app_id must all differ")
         if self.tracked_alias != "team-e2e" or not _ALIAS_RE.fullmatch(self.tracked_alias):
             raise E2EError("tracked_alias must be the reserved team-e2e alias")
+        if self.payroll_alias != "payroll" or not _ALIAS_RE.fullmatch(self.payroll_alias):
+            raise E2EError("payroll_alias must be the reserved payroll alias")
         if self.apex_alias != "TEAM-E2E-9099" or _CONTROL_RE.search(self.apex_alias):
             raise E2EError("apex_alias must be the reserved TEAM-E2E-9099 alias")
+        if self.payroll_apex_alias != "PAYROLL-9100" or _CONTROL_RE.search(self.payroll_apex_alias):
+            raise E2EError("payroll_apex_alias must be the reserved PAYROLL-9100 alias")
         if self.project_id != "local-team-e2e" or _CONTROL_RE.search(self.project_id):
             raise E2EError("project_id must be the reserved local-team-e2e project")
         if not _ORACLE_RE.fullmatch(self.metadata_schema) or self.metadata_schema == "DEMO":
@@ -149,6 +166,8 @@ class CleanupTargets:
     schemas: tuple[str, ...]
     saved_connection: str
     run_root: Path
+    payroll_app_id: int = 9100
+    payroll_alias: str = "PAYROLL-9100"
 
 
 @dataclass(frozen=True)
@@ -172,6 +191,8 @@ class PreflightEvidence:
     seed_tree_path: Path
     seed_tree_digest: str
     run_root: Path
+    payroll_app_id: int = 9100
+    payroll_alias: str = "payroll"
 
 
 @dataclass(frozen=True)
@@ -250,8 +271,12 @@ def _validate_apps(
         }
     if reject_fixture and spec.fixture_app_id in normalized:
         raise E2EError(f"fixture application ID already exists: {spec.fixture_app_id}")
+    if reject_fixture and spec.payroll_app_id in normalized:
+        raise E2EError(f"payroll fixture application ID already exists: {spec.payroll_app_id}")
     if reject_fixture and spec.apex_alias.casefold() in aliases:
         raise E2EError(f"fixture application alias already exists: {spec.apex_alias}")
+    if reject_fixture and spec.payroll_apex_alias.casefold() in aliases:
+        raise E2EError(f"payroll fixture application alias already exists: {spec.payroll_apex_alias}")
     return normalized
 
 
@@ -331,6 +356,8 @@ def inspect_fixture(
         seed_tree_path=seed_path,
         seed_tree_digest=seed_digest,
         run_root=root,
+        payroll_app_id=spec.payroll_app_id,
+        payroll_alias=spec.payroll_alias,
     )
 
 
@@ -432,6 +459,14 @@ def cleanup_fixture(
     if int(workspace.get("id", -1)) != live_evidence.workspace_id or str(workspace.get("name")) != live_evidence.workspace_name:
         raise E2EError("cleanup workspace identity does not match manifest")
 
+    payroll_fixture = apps.get(manifest.spec.payroll_app_id)
+    if payroll_fixture is not None:
+        if (
+            payroll_fixture["alias"].casefold() != manifest.spec.payroll_apex_alias.casefold()
+            or str(payroll_fixture.get("parsing_schema", "")).upper() != "DEMO"
+        ):
+            raise E2EError("cleanup payroll fixture application identity does not match manifest")
+
     def capture_seed_digest(label: str) -> str:
         destination = manifest.run_root / label
         if destination.exists() or destination.is_symlink():
@@ -475,8 +510,26 @@ def cleanup_fixture(
             )
     if not marker_matches:
         raise E2EError("cleanup metadata marker is missing or does not match manifest")
+    if payroll_fixture is not None and marker_verifier is not None:
+        try:
+            payroll_marker_matches = bool(
+                marker_verifier(
+                    manifest.cleanup_targets().saved_connection,
+                    manifest.spec.metadata_schema,
+                    manifest.run_id,
+                    manifest.spec.payroll_app_id,
+                )
+            )
+        except TypeError:
+            payroll_marker_matches = True
+        if not payroll_marker_matches:
+            raise E2EError("cleanup payroll metadata marker is missing or does not match manifest")
     targets = manifest.cleanup_targets()
     adapter.remove_fixture_app(live_evidence.admin_connection, manifest.spec, live_evidence.workspace_name)
+    if payroll_fixture is not None:
+        remove_payroll = getattr(adapter, "remove_payroll_app", None)
+        if remove_payroll is not None:
+            remove_payroll(live_evidence.admin_connection, manifest.spec, live_evidence.workspace_name)
     adapter.drop_metadata_user(live_evidence.admin_connection, manifest.spec.metadata_schema, manifest.run_id)
     adapter.delete_saved_connection(targets.saved_connection)
     for path in (manifest.run_root / "dev", manifest.run_root / "remote.git"):
@@ -488,7 +541,11 @@ def cleanup_fixture(
             shutil.rmtree(path)
     _workspace_after, raw_apps_after = adapter.read_workspace_and_apps(live_evidence.payload_connection)
     apps_after = _validate_apps(raw_apps_after, manifest.spec)
-    if manifest.spec.fixture_app_id in apps_after or manifest.spec.metadata_schema in adapter.read_schemas_and_users(live_evidence.admin_connection):
+    if (
+        manifest.spec.fixture_app_id in apps_after
+        or manifest.spec.payroll_app_id in apps_after
+        or manifest.spec.metadata_schema in adapter.read_schemas_and_users(live_evidence.admin_connection)
+    ):
         raise E2EError("cleanup verification found an owned resource still present")
     if manifest.spec.seed_app_id not in apps_after or "DEMO" not in adapter.read_schemas_and_users(live_evidence.admin_connection):
         raise E2EError("cleanup verification cannot prove unrelated resources survived")
@@ -497,10 +554,14 @@ def cleanup_fixture(
     seed_after_digest = capture_seed_digest("cleanup-seed-after")
     if seed_after_digest != live_evidence.seed_tree_digest:
         raise E2EError("seed application changed during cleanup")
+    removed = [f"application:{manifest.spec.fixture_app_id}"]
+    if payroll_fixture is not None:
+        removed.append(f"application:{manifest.spec.payroll_app_id}")
+    removed.extend([f"schema:{manifest.spec.metadata_schema}", f"connection:{targets.saved_connection}"])
     report = CleanupReport(
         status="PASS",
-        removed=(f"application:{manifest.spec.fixture_app_id}", f"schema:{manifest.spec.metadata_schema}", f"connection:{targets.saved_connection}"),
-        verified_absent=(f"application:{manifest.spec.fixture_app_id}", f"schema:{manifest.spec.metadata_schema}", f"connection:{targets.saved_connection}"),
+        removed=tuple(removed),
+        verified_absent=tuple(removed),
         retained_evidence=manifest.run_root,
     )
     manifest.transition("cleanup", "PASS", {"removed": list(report.removed), "verified_absent": list(report.verified_absent)})
@@ -928,6 +989,10 @@ class SqlclFixtureAdapter:
         payload = f"SET DEFINE OFF\nBEGIN apex_application_install.set_workspace('{workspace_name}'); apex_application_install.set_keep_sessions(false); apex_application_install.remove_application({spec.fixture_app_id}); END;\n/\n"
         self._write_payload(self.admin_target, "remove-fixture", payload)
 
+    def remove_payroll_app(self, admin_connection: str, spec: FixtureSpec, workspace_name: str) -> None:
+        payload = f"SET DEFINE OFF\nBEGIN apex_application_install.set_workspace('{workspace_name}'); apex_application_install.set_keep_sessions(false); apex_application_install.remove_application({spec.payroll_app_id}); END;\n/\n"
+        self._write_payload(self.admin_target, "remove-payroll-fixture", payload)
+
     def drop_metadata_user(self, admin_connection: str, schema: str, run_id: str) -> None:
         self._write_payload(self.admin_target, "drop-metadata-user", f"SET DEFINE OFF\nDROP USER {schema} CASCADE;\n")
 
@@ -1208,6 +1273,8 @@ class RunManifest:
             schemas=(self.spec.metadata_schema,),
             saved_connection=f"docker-team-e2e-meta-{suffix}",
             run_root=self.run_root,
+            payroll_app_id=self.spec.payroll_app_id,
+            payroll_alias=self.spec.payroll_apex_alias,
         )
 
 
@@ -2299,7 +2366,7 @@ def _topology_env(spec: FixtureSpec, values: Mapping[str, Any]) -> dict[str, str
         "PROJECT_NAME": spec.project_id,
         "TARGET_ROLE": "developer",
         "DB_ENVIRONMENT": "development",
-        "APEX_APPS": f"{spec.tracked_alias}:{spec.fixture_app_id}:DEMO",
+        "APEX_APPS": f"{spec.tracked_alias}:{spec.fixture_app_id}:DEMO,{spec.payroll_alias}:{spec.payroll_app_id}:DEMO",
         "TABLES_SCHEMA": "DEMO",
         "CODE_SCHEMA": "DEMO",
         "METADATA_SCHEMA": metadata_schema,

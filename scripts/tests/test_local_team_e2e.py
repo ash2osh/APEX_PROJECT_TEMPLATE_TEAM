@@ -48,9 +48,13 @@ from teamlib.local_team_e2e import (  # noqa: E402
     verify_convergence,
     write_report,
 )
-from teamlib.config import load_config  # noqa: E402
+from teamlib.config import load_config, profile_target  # noqa: E402
 from teamlib.config import Target  # noqa: E402
-from teamlib.state import save_capture  # noqa: E402
+from teamlib.control_store import ControlStore  # noqa: E402
+from teamlib.page_locks import LockReport, PageLock  # noqa: E402
+from teamlib.publish import PublishError, prepare_publish, publish_prepared  # noqa: E402
+from teamlib.state import save_capture, save_verified_baseline  # noqa: E402
+from teamlib.trees import read_git_tree  # noqa: E402
 
 
 class LocalTeamManifestTests(unittest.TestCase):
@@ -400,7 +404,8 @@ class LocalTeamTopologyTests(unittest.TestCase):
             self.assertIn("METADATA_SCHEMA=TEAM_E2E_META", env_text)
             self.assertIn("APP_OWNERSHIP_MODE=shared", env_text)
             config = load_config(developer.env_file, require_verify=True)
-            self.assertEqual(config.apps, {"team-e2e": 9099})
+            self.assertEqual(config.apps, {"team-e2e": 9099, "payroll": 9100})
+            self.assertEqual(config.app_parsing_schemas, {"team-e2e": "DEMO", "payroll": "DEMO"})
             self.assertEqual(config.metadata_schema, "TEAM_E2E_META")
             self.assertEqual(
                 subprocess.run(
@@ -947,6 +952,226 @@ class LocalTeamConvergenceAndReportTests(unittest.TestCase):
             self.assertIn(marker, text)
         readme = (Path(__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
         self.assertIn("local-three-developer-e2e.md", readme)
+
+
+class LocalTeamGuardedPublishTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="local-team-publish-")
+        self.root = Path(self.temp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self._git("init", "--initial-branch", "main")
+        self._git("config", "user.name", "Publish Test")
+        self._git("config", "user.email", "publish@example.invalid")
+        (self.source / "README.md").write_text("e2e fixture\n", encoding="utf-8")
+        hr_app_dir = self.source / "apps" / "team-e2e"
+        hr_app_dir.mkdir(parents=True)
+        (hr_app_dir / "application.apx").write_bytes(b"app TEAM-E2E-9099\n")
+        (hr_app_dir / ".apex").mkdir(parents=True)
+        (hr_app_dir / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
+        (hr_app_dir / "pages").mkdir()
+        (hr_app_dir / "pages" / "p00001-home.apx").write_bytes(b"name: Home\n")
+        pay_app_dir = self.source / "apps" / "payroll"
+        pay_app_dir.mkdir(parents=True)
+        (pay_app_dir / "application.apx").write_bytes(b"app PAYROLL-9100\n")
+        (pay_app_dir / ".apex").mkdir(parents=True)
+        (pay_app_dir / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
+        (pay_app_dir / "pages").mkdir()
+        (pay_app_dir / "pages" / "p00001-home.apx").write_bytes(b"name: Payroll Home\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "initial commit with hr and payroll")
+        self.commit = subprocess.check_output(
+            ["git", "-C", str(self.source), "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.run_root = self.root / "run"
+        self.manifest = RunManifest.create(
+            self.run_root,
+            FixtureSpec(),
+            self.commit,
+            {
+                "DB_NAME": "FREEPDB1",
+                "SERVICE": "freep1",
+                "INSTANCE_ID": "FREEPDB1@docker",
+                "WORKSPACE_ID": "90000",
+            },
+        )
+        self.env_values = {
+            "payload_connection": "docker-demo",
+            "metadata_connection": "docker-team-e2e-meta-test",
+            "db_name": "FREEPDB1",
+            "service": "freep1",
+            "instance_id": "FREEPDB1@docker",
+            "workspace_id": "90000",
+            "metadata_schema": "TEAM_E2E_META",
+        }
+        self.topology = create_team_topology(self.manifest, self.env_values, source_repo=self.source)
+        self.alice = next(d for d in self.topology.developers if d.name == "alice")
+        self.bob = next(d for d in self.topology.developers if d.name == "bob")
+        self.carol = next(d for d in self.topology.developers if d.name == "carol")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _git(self, *args: str, cwd: Path | None = None) -> str:
+        target_dir = cwd or self.source
+        result = subprocess.run(
+            ["git", "-C", str(target_dir), *args],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_two_developer_publish_refusal_reconciliation_and_sibling_app_preservation(self):
+        store_dir = self.root / "store"
+        store = ControlStore(store_dir)
+        config = load_config(self.alice.env_file)
+        hr_target = profile_target(config, "APEX", alias="team-e2e")
+        payroll_target = profile_target(config, "APEX", alias="payroll")
+
+        store.setup_state([hr_target, payroll_target])
+        store.register_app(hr_target, self.alice.checkout_uuid, "host", "alice")
+        store.register_app(hr_target, self.bob.checkout_uuid, "host", "bob")
+        store.register_app(payroll_target, self.carol.checkout_uuid, "host", "carol")
+
+        hr_tree_c0 = read_git_tree(self.alice.clone, self.commit, alias="team-e2e")
+        pay_tree_c0 = read_git_tree(self.alice.clone, self.commit, alias="payroll")
+        state_root = self.alice.clone / ".sync-state"
+        save_verified_baseline(hr_target, self.commit, hr_tree_c0, root=state_root)
+        save_verified_baseline(payroll_target, self.commit, pay_tree_c0, root=state_root)
+
+        carol_initial_gen = store.read_app_sync_state(payroll_target).generation
+
+        # 1. Alice changes HR APEXlang
+        (self.alice.clone / "apps" / "team-e2e" / "pages" / "p00001-home.apx").write_bytes(b"name: Home - Alice\n")
+        self._git("commit", "-am", "Alice edit HR", cwd=self.alice.clone)
+        alice_commit = self._git("rev-parse", "HEAD", cwd=self.alice.clone)
+
+        # 2. Bob exports a saved HR Builder page (which added page 2 and took page lock)
+        bob_live_tree = dict(hr_tree_c0)
+        bob_live_tree["pages/p00002-bob.apx"] = b"name: Bob Page\n"
+        bob_lock = PageLock(2, "Bob Page", "bob", "2026-09-23T20:00:00Z", "Bob working on page 2")
+        hr_lock_report = LockReport("team-e2e", 9099, "KNOWN", (bob_lock,), "APEX_APPLICATION_LOCKED_PAGES")
+
+        live_hr_tree = dict(bob_live_tree)
+        live_pay_tree = dict(pay_tree_c0)
+
+        def fake_runner(target, operation, driver, work, **kwargs):
+            from types import SimpleNamespace
+            if operation == "write":
+                if target.alias == "team-e2e":
+                    live_hr_tree.clear()
+                    live_hr_tree.update(read_git_tree(self.alice.clone, reconciled_commit, alias="team-e2e"))
+            export = Path(work) / "exported-app"
+            tree = live_hr_tree if target.alias == "team-e2e" else live_pay_tree
+            for path, data in tree.items():
+                dest = export / path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+            stdout = (
+                f"TEAM_RESULT_BEGIN\n"
+                f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+                f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+                f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+                f"TEAM_RESULT_END\n"
+            )
+            return SimpleNamespace(
+                identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREEPDB1@docker"},
+                completion={"operation": operation}, result_manifest={"status": "success"},
+                log_path=Path(work) / "fake.log", generated_driver=Path(driver),
+                stdout=stdout, stderr="", argv=(), exit_code=0,
+            )
+
+        def fake_validator(tree, *, sqlcl_bin="sql"):
+            from teamlib.apex_validate import ValidationReport
+            return ValidationReport(True, "SUCCESS", "Validation successful.", ())
+
+        # 3. Carol keeps working in separate selected-out app (payroll)
+        (self.carol.clone / "apps" / "payroll" / "pages" / "p00001-home.apx").write_bytes(b"name: Payroll Home - Carol edit\n")
+
+        # 4. HR preparation sees Bob's lock owner
+        bob_capture_id = save_capture(
+            hr_target,
+            hr_tree_c0,
+            hr_tree_c0,
+            "0" * 40,
+            bob_live_tree,
+            {"head_commit": "0" * 40},
+            root=state_root,
+        )
+        prep = prepare_publish(
+            self.alice.clone,
+            (hr_target,),
+            alice_commit,
+            {"team-e2e": hr_lock_report},
+            store,
+            replace_from={"team-e2e": bob_capture_id},
+            runner=fake_runner,
+            validator=fake_validator,
+        )
+        self.assertEqual(prep.apps["team-e2e"]["lock_report"]["pages"][0]["locked_by"], "bob")
+
+        # 5. Changed HR capture refuses before import
+        live_hr_tree["pages/p00003-extra.apx"] = b"unexpected extra edit in builder\n"
+        acks = {"team-e2e": (self.alice.checkout_uuid, self.bob.checkout_uuid)}
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.alice.clone,
+                prep.preparation_id,
+                acks,
+                confirm_pause=True,
+                config=config,
+                store=store,
+                runner=fake_runner,
+                lock_reader=lambda target, **kwargs: hr_lock_report,
+            )
+        self.assertIn("changed", str(ctx.exception).lower())
+
+        # 6. Reconcile Bob's source and record acknowledgement
+        live_hr_tree.pop("pages/p00003-extra.apx")
+        (self.alice.clone / "apps" / "team-e2e" / "pages" / "p00002-bob.apx").write_bytes(b"name: Bob Page\n")
+        self._git("add", ".", cwd=self.alice.clone)
+        self._git("commit", "-m", "Reconcile Bob page into HR", cwd=self.alice.clone)
+        reconciled_commit = self._git("rev-parse", "HEAD", cwd=self.alice.clone)
+
+        # Fresh preparation at reconciled_commit with updated capture
+        reconciled_capture_id = save_capture(
+            hr_target,
+            hr_tree_c0,
+            hr_tree_c0,
+            "0" * 40,
+            bob_live_tree,
+            {"head_commit": "0" * 40},
+            root=state_root,
+        )
+        prep_reconciled = prepare_publish(
+            self.alice.clone,
+            (hr_target,),
+            reconciled_commit,
+            {"team-e2e": hr_lock_report},
+            store,
+            replace_from={"team-e2e": reconciled_capture_id},
+            runner=fake_runner,
+            validator=fake_validator,
+        )
+
+        # 7. Publish verifies HR while Carol's app generation is unchanged
+        report = publish_prepared(
+            self.alice.clone,
+            prep_reconciled.preparation_id,
+            acks,
+            confirm_pause=True,
+            config=config,
+            store=store,
+            runner=fake_runner,
+            lock_reader=lambda target, **kwargs: hr_lock_report,
+        )
+        self.assertEqual(report.overall_status, "VERIFIED")
+        self.assertEqual(report.app_results["team-e2e"].status, "VERIFIED")
+
+        carol_after_gen = store.read_app_sync_state(payroll_target).generation
+        self.assertEqual(carol_after_gen, carol_initial_gen)
 
 
 if __name__ == "__main__":
