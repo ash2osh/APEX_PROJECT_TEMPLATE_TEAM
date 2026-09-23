@@ -94,10 +94,9 @@ class ProductionBoundaryTests(unittest.TestCase):
 PROJECT_NAME=team-template
 TARGET_ROLE=developer
 DB_ENVIRONMENT=production
-APEX_APPS=checkout:101
+APEX_APPS=checkout:101:APP
 TABLES_SCHEMA=APP_DATA
 CODE_SCHEMA=APP_CODE
-APEX_PARSING_SCHEMA=APP
 METADATA_SCHEMA=APP_META
 APP_OWNERSHIP_MODE=shared
 APEX_WORKSPACE_ID=5402650006222933
@@ -172,10 +171,9 @@ class ProductionRefusalCoverageTests(unittest.TestCase):
             "PROJECT_NAME=team-template",
             "TARGET_ROLE=production",
             "DB_ENVIRONMENT=production",
-            "APEX_APPS=checkout:101",
+            "APEX_APPS=checkout:101:APP",
             "TABLES_SCHEMA=APP_DATA",
             "CODE_SCHEMA=APP_CODE",
-            "APEX_PARSING_SCHEMA=APP",
             "METADATA_SCHEMA=APP_META",
             "APP_OWNERSHIP_MODE=shared",
             "APEX_WORKSPACE_ID=5402650006222933",

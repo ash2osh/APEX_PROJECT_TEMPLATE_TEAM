@@ -15,11 +15,13 @@ import tempfile
 import unittest
 
 from teamlib.config import (
+    AppBinding,
     ConfigError,
     OFFLINE_COMMANDS,
     Target,
     is_offline_command,
     load_config,
+    parse_app_bindings,
     parse_apps,
     parse_env_text,
     parse_target_contract,
@@ -31,10 +33,9 @@ BASE_ENV = """\
 PROJECT_NAME=team-template
 TARGET_ROLE=developer
 DB_ENVIRONMENT=development
-APEX_APPS=checkout:101,admin:102
+APEX_APPS=checkout:101:APP_CODE,admin:102:APP_ADMIN
 TABLES_SCHEMA=APP_DATA
 CODE_SCHEMA=APP_CODE
-APEX_PARSING_SCHEMA=APP
 METADATA_SCHEMA=APP_META
 APP_OWNERSHIP_MODE=shared
 APEX_WORKSPACE_ID=5402650006222933
@@ -73,16 +74,33 @@ VERIFY_EXPECTED_INSTANCE_ID=FREEPDB1
 
 class ParseAppsTests(unittest.TestCase):
     def test_alias_mapping(self):
-        self.assertEqual(parse_apps("checkout:101,admin:102"),
-                         {"checkout": 101, "admin": 102})
+        bindings = parse_app_bindings("hr:100:HR_CODE,payroll:200:FIN_CODE")
+        self.assertEqual(bindings, {
+            "hr": AppBinding(100, "HR_CODE"),
+            "payroll": AppBinding(200, "FIN_CODE"),
+        })
+        self.assertEqual(parse_apps("hr:100:HR_CODE,payroll:200:FIN_CODE"), {"hr": 100, "payroll": 200})
+
+    def test_shared_parsing_schema(self):
+        bindings = parse_app_bindings("hr:100:APP_CODE,payroll:200:APP_CODE")
+        self.assertEqual(bindings, {
+            "hr": AppBinding(100, "APP_CODE"),
+            "payroll": AppBinding(200, "APP_CODE"),
+        })
 
     def test_reject_ambiguous_or_unsafe_mapping(self):
         for value in (
-            "Checkout:101", "../x:101", "x:0", "x:101,x:102",
-            "x:101,y:101", "x:101, y:102", "x:101,",
+            "hr:100",  # missing third field
+            "Checkout:101:APP_CODE", "../x:101:APP_CODE", "x:0:APP_CODE",
+            "x:101:APP_CODE,x:102:APP_CODE",
+            "x:101:APP_CODE,y:101:APP_CODE",  # duplicate ID
+            "x:101:APP_CODE, y:102:APP_CODE", "x:101:APP_CODE,",
+            "hr:100:invalid_schema",  # lowercase identifier
+            "hr:100:123BAD",  # invalid identifier
+            "", "   ",
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                parse_apps(value)
+                parse_app_bindings(value)
 
 
 class EnvParserTests(unittest.TestCase):
@@ -149,9 +167,35 @@ class TargetTests(unittest.TestCase):
         self.assertIsInstance(target, Target)
         self.assertEqual(target.alias, "checkout")
         self.assertEqual(target.app_id, 101)
+        self.assertEqual(target.parsing_schema, "APP_CODE")
         self.assertEqual(target.workspace_id, 5402650006222933)
         self.assertTrue(target.binding_digest)
         self.assertNotEqual(target.state_key, target.physical_key)
+
+        admin_target = profile_target(config, "APEX", alias="admin")
+        self.assertEqual(admin_target.parsing_schema, "APP_ADMIN")
+        self.assertNotEqual(admin_target.parsing_schema, target.parsing_schema)
+
+    def test_profile_target_distinct_and_shared_parsing_schemas(self):
+        env_text = BASE_ENV.replace(
+            "APEX_APPS=checkout:101:APP_CODE,admin:102:APP_ADMIN",
+            "APEX_APPS=hr:100:HR_CODE,payroll:200:FIN_CODE",
+        )
+        config = load_config(self._write_env(env_text))
+        hr = profile_target(config, "APEX", alias="hr")
+        payroll = profile_target(config, "APEX", alias="payroll")
+        self.assertEqual(hr.parsing_schema, "HR_CODE")
+        self.assertEqual(payroll.parsing_schema, "FIN_CODE")
+        self.assertNotEqual(hr.parsing_schema, payroll.parsing_schema)
+
+    def test_tables_and_code_schema_may_be_same_or_different(self):
+        diff_schemas = load_config(self._write_env(BASE_ENV))
+        self.assertEqual(diff_schemas.tables_schema, "APP_DATA")
+        self.assertEqual(diff_schemas.code_schema, "APP_CODE")
+
+        same_schemas = load_config(self._write_env(BASE_ENV.replace("CODE_SCHEMA=APP_CODE", "CODE_SCHEMA=APP_DATA")))
+        self.assertEqual(same_schemas.tables_schema, "APP_DATA")
+        self.assertEqual(same_schemas.code_schema, "APP_DATA")
 
     def test_target_contract_rejects_secret_and_wrong_role(self):
         contract = {

@@ -36,7 +36,6 @@ BASE_KEYS = {
     "APEX_APPS",
     "TABLES_SCHEMA",
     "CODE_SCHEMA",
-    "APEX_PARSING_SCHEMA",
     "METADATA_SCHEMA",
     "APEX_WORKSPACE_ID",
     "APP_OWNERSHIP_MODE",
@@ -91,16 +90,22 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class AppBinding:
+    app_id: int
+    parsing_schema: str
+
+
+@dataclass(frozen=True)
 class Config:
     values: Mapping[str, str]
     profiles: Mapping[str, Profile]
     apps: Mapping[str, int]
+    app_parsing_schemas: Mapping[str, str]
     project: str
     role: str
     environment: str
     tables_schema: str
     code_schema: str
-    apex_parsing_schema: str
     metadata_schema: str
     workspace_id: int
     ownership_mode: str
@@ -215,30 +220,34 @@ def _validate_positive_int(key: str, value: str) -> int:
     return int(value)
 
 
-def parse_apps(value: str) -> dict[str, int]:
-    """Parse the strict lowercase alias-to-positive-ID contract."""
+def parse_app_bindings(value: str) -> dict[str, AppBinding]:
+    """Parse explicit alias:id:PARSING_SCHEMA bindings."""
     if not value or value.strip() != value:
-        raise ValueError("APEX_APPS must not be empty or contain surrounding whitespace")
-    result: dict[str, int] = {}
+        raise ValueError("APEX_APPS must use alias:id:PARSING_SCHEMA")
+    result: dict[str, AppBinding] = {}
     seen_ids: set[int] = set()
     for item in value.split(","):
-        if not item or item.count(":") != 1:
-            raise ValueError("APEX_APPS must be alias:id comma-separated values")
-        alias, raw_id = item.split(":", 1)
-        if not _ALIAS_RE.fullmatch(alias):
-            raise ValueError(f"invalid application alias: {alias!r}")
-        if alias.casefold() in {known.casefold() for known in result}:
-            raise ValueError(f"duplicate application alias: {alias}")
+        parts = item.split(":")
+        if len(parts) != 3:
+            raise ValueError("APEX_APPS must use alias:id:PARSING_SCHEMA")
+        alias, raw_id, schema = parts
+        if not _ALIAS_RE.fullmatch(alias) or alias in result:
+            raise ValueError(f"invalid or duplicate application alias: {alias!r}")
         if not _POSITIVE_INT_RE.fullmatch(raw_id):
             raise ValueError(f"invalid application ID for {alias}: {raw_id!r}")
         app_id = int(raw_id)
         if app_id in seen_ids:
             raise ValueError(f"duplicate application ID: {app_id}")
-        result[alias] = app_id
+        if not _ORACLE_IDENTIFIER_RE.fullmatch(schema):
+            raise ValueError(f"invalid parsing schema for {alias}: {schema!r}")
+        result[alias] = AppBinding(app_id, schema)
         seen_ids.add(app_id)
-    if not result:
-        raise ValueError("APEX_APPS must contain at least one application")
     return result
+
+
+def parse_apps(value: str) -> dict[str, int]:
+    """Parse the strict alias-to-positive-ID mapping from APEX_APPS."""
+    return {alias: binding.app_id for alias, binding in parse_app_bindings(value).items()}
 
 
 def _unquote(value: str) -> str:
@@ -318,16 +327,15 @@ def load_config(path: str | Path, *, require_verify: bool = False) -> Config:
         raise ConfigError(
             "TARGET_ROLE and DB_ENVIRONMENT must both be production or neither"
         )
-    apps = parse_apps(_require_text(values, "APEX_APPS"))
+    app_bindings = parse_app_bindings(_require_text(values, "APEX_APPS"))
+    apps = {alias: b.app_id for alias, b in app_bindings.items()}
+    app_parsing_schemas = {alias: b.parsing_schema for alias, b in app_bindings.items()}
 
     tables_schema = _validate_oracle_identifier(
         "TABLES_SCHEMA", _require_text(values, "TABLES_SCHEMA")
     )
     code_schema = _validate_oracle_identifier(
         "CODE_SCHEMA", _require_text(values, "CODE_SCHEMA")
-    )
-    apex_schema = _validate_oracle_identifier(
-        "APEX_PARSING_SCHEMA", _require_text(values, "APEX_PARSING_SCHEMA")
     )
     metadata_schema = _validate_oracle_identifier(
         "METADATA_SCHEMA", _require_text(values, "METADATA_SCHEMA")
@@ -363,12 +371,12 @@ def load_config(path: str | Path, *, require_verify: bool = False) -> Config:
         values=values,
         profiles=profiles,
         apps=apps,
+        app_parsing_schemas=app_parsing_schemas,
         project=project,
         role=role,
         environment=environment,
         tables_schema=tables_schema,
         code_schema=code_schema,
-        apex_parsing_schema=apex_schema,
         metadata_schema=metadata_schema,
         workspace_id=workspace_id,
         ownership_mode=ownership_mode,
@@ -411,7 +419,7 @@ def profile_target(
             raise ConfigError(f"application ID does not match alias {alias}")
         target_app_id = bound_app_id
         workspace_id: int | None = config.workspace_id
-        parsing_schema: str | None = config.apex_parsing_schema
+        parsing_schema: str | None = config.app_parsing_schemas[alias]
     else:
         if alias is not None or app_id is not None:
             raise ConfigError(f"{name} targets cannot bind an application alias")

@@ -30,9 +30,10 @@ def config_for(*, role: str = "integration", environment: str = "staging", insta
         for name in ("TABLES", "CODE", "APEX", "METADATA", "VERIFY")
     }
     return Config(
-        values={}, profiles=profiles, apps={"employee": 101}, project="team",
+        values={}, profiles=profiles, apps={"employee": 101},
+        app_parsing_schemas={"employee": "APP"}, project="team",
         role=role, environment=environment, tables_schema="APP", code_schema="APP_CODE",
-        apex_parsing_schema="APP", metadata_schema="APP_META", workspace_id=90001,
+        metadata_schema="APP_META", workspace_id=90001,
         ownership_mode="shared",
     )
 
@@ -165,9 +166,10 @@ class RuntimePreflightTests(unittest.TestCase):
             "CODE", "code-connection", "APP", "APP", "FREEPDB1", "service", "OTHER"
         )
         config = Config(
-            values=config.values, profiles=profiles, apps=config.apps, project=config.project,
+            values=config.values, profiles=profiles, apps=config.apps,
+            app_parsing_schemas=config.app_parsing_schemas, project=config.project,
             role=config.role, environment=config.environment, tables_schema=config.tables_schema,
-            code_schema=config.code_schema, apex_parsing_schema=config.apex_parsing_schema,
+            code_schema=config.code_schema,
             metadata_schema=config.metadata_schema, workspace_id=config.workspace_id,
             ownership_mode=config.ownership_mode,
         )

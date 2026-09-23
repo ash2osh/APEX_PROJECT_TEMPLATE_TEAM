@@ -34,10 +34,12 @@ def config_for(*, role: str = "integration", environment: str = "staging", apps:
         )
         for name in ("TABLES", "CODE", "APEX", "METADATA", "VERIFY")
     }
+    resolved_apps = apps if apps is not None else {"employee": 101}
     return Config(
-        values={}, profiles=profiles, apps=apps if apps is not None else {"employee": 101},
+        values={}, profiles=profiles, apps=resolved_apps,
+        app_parsing_schemas={alias: "APP" for alias in resolved_apps},
         project="team", role=role, environment=environment,
-        tables_schema="APP", code_schema="APP_CODE", apex_parsing_schema="APP",
+        tables_schema="APP", code_schema="APP_CODE",
         metadata_schema="APP_META", workspace_id=90001, ownership_mode="shared",
     )
 
@@ -615,10 +617,9 @@ class PreflightCliTranslationTests(unittest.TestCase):
 PROJECT_NAME=team-template
 TARGET_ROLE={role}
 DB_ENVIRONMENT={environment}
-APEX_APPS=employee:101
+APEX_APPS=employee:101:APP
 TABLES_SCHEMA=APP_DATA
 CODE_SCHEMA=APP_CODE
-APEX_PARSING_SCHEMA=APP
 METADATA_SCHEMA=APP_META
 APP_OWNERSHIP_MODE=shared
 APEX_WORKSPACE_ID=5402650006222933
