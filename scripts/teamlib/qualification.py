@@ -309,8 +309,12 @@ def qualify_target(
     runtime_toolchain_digest = getattr(runtime_report, "toolchain_digest", None)
     _sha256_field(runtime_toolchain_digest, "runtime toolchain digest")
     selected = tuple(alias.strip() for alias in aliases if alias and alias.strip())
-    if len(set(selected)) != len(selected) or set(selected) != set(config.apps):
-        raise QualificationError("qualification aliases must exactly match configured application bindings")
+    if release_archive is not None:
+        if len(set(selected)) != len(selected) or not set(selected).issubset(set(config.apps)):
+            raise QualificationError("qualification aliases must be configured application bindings")
+    else:
+        if len(set(selected)) != len(selected) or set(selected) != set(config.apps):
+            raise QualificationError("qualification aliases must exactly match configured application bindings")
     if bool(release_archive) != bool(apply_report):
         raise QualificationError("--release-archive and --apply-report must be supplied together")
     if not isinstance(check_bundle, AppCheckBundle):
@@ -406,35 +410,52 @@ def qualify_target(
             else None
         ),
     }
-    try:
-        app_report: AppCheckReport = verify_candidate_apps(
-            {"commit": source_commit, "apps": {alias: {"app_id": config.apps[alias]} for alias in selected}},
-            target_for_checks,
-            loaded,
-        )
-    except AppCheckError as exc:
-        if exc.report is not None:
-            report["final_status"] = "FAIL"
-            report["results"]["application_checks"] = "FAIL"
-            report["application_checks"] = {
-                "status": exc.report.status,
-                "checks_digest": exc.report.checks_digest,
-                "coverage": dict(exc.report.coverage),
-                "unknown": int(exc.report.coverage.get("unknown", 0)),
-                "results": [item.as_dict() for item in exc.report.results],
-            }
-        raise QualificationError(str(exc), report) from exc
-    if app_report.checks_digest != active_bundle.checks_digest:
-        raise QualificationError(
-            "application check report digest does not match the selected bundle", report
-        )
-    report["application_checks"] = {
-        "status": app_report.status,
-        "checks_digest": app_report.checks_digest,
-        "coverage": dict(app_report.coverage),
-        "unknown": int(app_report.coverage.get("unknown", 0)),
-        "results": [item.as_dict() for item in app_report.results],
-    }
+    if selected:
+        try:
+            app_report: AppCheckReport = verify_candidate_apps(
+                {"commit": source_commit, "apps": {alias: {"app_id": config.apps[alias]} for alias in selected}},
+                target_for_checks,
+                loaded,
+            )
+        except AppCheckError as exc:
+            if exc.report is not None:
+                report["final_status"] = "FAIL"
+                report["results"]["application_checks"] = "FAIL"
+                report["application_checks"] = {
+                    "status": exc.report.status,
+                    "checks_digest": exc.report.checks_digest,
+                    "coverage": dict(exc.report.coverage),
+                    "unknown": int(exc.report.coverage.get("unknown", 0)),
+                    "results": [item.as_dict() for item in exc.report.results],
+                }
+            raise QualificationError(str(exc), report) from exc
+        if app_report.checks_digest != active_bundle.checks_digest:
+            raise QualificationError(
+                "application check report digest does not match the selected bundle", report
+            )
+        report["application_checks"] = {
+            "status": app_report.status,
+            "checks_digest": app_report.checks_digest,
+            "coverage": dict(app_report.coverage),
+            "unknown": int(app_report.coverage.get("unknown", 0)),
+            "results": [item.as_dict() for item in app_report.results],
+        }
+    else:
+        report["application_checks"] = {
+            "status": "PASS",
+            "checks_digest": active_bundle.checks_digest,
+            "coverage": {"apps": [], "pages": {}, "checks": 0, "unknown": 0},
+            "unknown": 0,
+            "results": [],
+        }
+    if release_archive is not None:
+        try:
+            rel_manifest = verify_release(release_archive)
+            if getattr(rel_manifest, "kind", None) is not None:
+                report["kind"] = rel_manifest.kind
+                report["alias"] = rel_manifest.alias
+        except Exception:
+            pass
     return report
 
 

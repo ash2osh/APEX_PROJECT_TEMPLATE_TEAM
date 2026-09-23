@@ -80,10 +80,12 @@ class ProductionBoundaryTests(unittest.TestCase):
             (repo / "apps" / "a" / ".apex").mkdir(parents=True)
             (repo / "apps" / "a" / "application.apx").write_bytes(b"x")
             (repo / "apps" / "a" / ".apex" / "apexlang.json").write_bytes(b"{}")
+            (repo / "app_context" / "a").mkdir(parents=True)
+            (repo / "app_context" / "a" / "release.json").write_text('{"version":1,"requires":[]}\n', encoding="utf-8")
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            manifest = build_release(repo, commit, "1.0.0", root / "out")
+            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="app", alias="a")
             target = {"environment": "production", "role": "production"}
             plan = plan_release(manifest.archive_path, {}, target)
             with self.assertRaises(ReleaseError):

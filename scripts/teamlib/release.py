@@ -41,7 +41,7 @@ class Manifest:
     toolchain: Mapping[str, Any] = field(default_factory=dict)
     app_checks_digest: str | None = None
     staging_dir: Path | None = None
-    kind: str = "schema"
+    kind: str | None = None
     alias: str | None = None
     required_migrations: tuple[dict[str, str], ...] = ()
 
@@ -259,7 +259,7 @@ def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_dig
         toolchain=data.get("toolchain", {}),
         app_checks_digest=data.get("app_checks_digest"),
         staging_dir=staging_dir,
-        kind=str(data.get("kind", "schema")),
+        kind=data.get("kind"),
         alias=data.get("alias"),
         required_migrations=tuple(data.get("required_migrations", ())),
     )
@@ -822,6 +822,14 @@ def _plan_from_manifest(manifest: Manifest, history: Mapping[str, Any], target: 
     history_data = history.get("history", history) if isinstance(history, Mapping) else {}
     if not isinstance(history_data, Mapping):
         raise ReleaseError("target history must contain a mapping")
+    if getattr(manifest, "kind", None) == "app":
+        target_digest = hashlib.sha256(_canonical(target)).hexdigest()
+        artifact_history_digest = hashlib.sha256(_canonical(manifest.required_migrations)).hexdigest()
+        history_digest = hashlib.sha256(_canonical(history_data)).hexdigest()
+        return ReleasePlan(
+            manifest.archive_digest, target_digest, (), artifact_history_digest, target, history_digest,
+            (), (),
+        )
     bundles: dict[str, Migration] = {}
     for item in manifest.migrations:
         if not isinstance(item, Mapping):
@@ -901,6 +909,13 @@ def apply_release(
     current = _plan_from_manifest(manifest, history, target)
     if current.history_digest != plan.history_digest or current.pending != plan.pending or current.target_digest != plan.target_digest:
         raise ReleaseError("target history or pending release work changed after plan generation")
+    if getattr(manifest, "kind", None) == "app":
+        history_data = history.get("history", history) if isinstance(history, Mapping) else {}
+        for item in manifest.required_migrations:
+            migration_id = item["id"]
+            row = history_data.get(migration_id)
+            if row is None or row.get("status") != "APPLIED" or row.get("checksum") != item["checksum"]:
+                raise ReleaseError(f"required migration unavailable: {migration_id}")
     if apply_migrations is None and deploy_application is None:
         return ApplyReport(
             "planned", plan.pending, manifest.archive_digest,
@@ -915,7 +930,7 @@ def apply_release(
     apps = _release_app_trees_from_members(manifest, members)
     if apps and deploy_application is None:
         raise ReleaseError("release contains applications but no non-production deployment adapter was supplied")
-    if apply_migrations is not None:
+    if apply_migrations is not None and pending:
         try:
             apply_migrations(pending, plan)
         except Exception as exc:

@@ -310,7 +310,43 @@ class ReleaseTests(unittest.TestCase):
             deploy_application=lambda alias, tree, reviewed: events.append(("deploy", alias, tree["application.apx"], reviewed.archive_digest)),
         )
         self.assertEqual(report.status, "applied")
+        self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], "migrate")
+
+    def test_apply_release_for_app_executes_only_deploy_after_requirements(self):
+        manifest = build_release(self.repo, self.commit, "1.2.4", Path(self.temp.name) / "apply-app-out", kind="app", alias="hr")
+        target = {"role": "test", "environment": "test", "instance_id": "TEST"}
+        req = manifest.required_migrations[0]
+        history = {req["id"]: {"status": "APPLIED", "checksum": req["checksum"]}}
+        plan = plan_release(manifest.archive_path, history, target)
+        events = []
+        report = apply_release(
+            manifest.archive_path,
+            target,
+            plan,
+            history=history,
+            apply_migrations=lambda pending, reviewed: events.append(("migrate", tuple(pending), reviewed.pending)),
+            deploy_application=lambda alias, tree, reviewed: events.append(("deploy", alias, tree["application.apx"], reviewed.archive_digest)),
+        )
+        self.assertEqual(report.status, "applied")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "deploy")
+        self.assertEqual(events[0][1], "hr")
+
+        # Reverted requirement refuses before any writer
+        bad_history = {req["id"]: {"status": "REVERTED", "checksum": req["checksum"]}}
+        bad_plan = plan_release(manifest.archive_path, bad_history, target)
+        events.clear()
+        with self.assertRaisesRegex(ReleaseError, "required migration unavailable"):
+            apply_release(
+                manifest.archive_path,
+                target,
+                bad_plan,
+                history=bad_history,
+                apply_migrations=lambda *a: events.append("unexpected"),
+                deploy_application=lambda *a: events.append("unexpected"),
+            )
+        self.assertEqual(events, [])
 
     def test_malformed_manifest_payload_is_rejected(self):
         archive = Path(self.temp.name) / "malformed.tar"

@@ -205,8 +205,10 @@ def _load_declaration(alias: str, value: Any) -> dict[str, Any]:
 
 
 def _validate_bundle_aliases(aliases: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(aliases, (str, bytes)) or not aliases:
-        raise AppCheckError("application check bundle requires at least one alias")
+    if isinstance(aliases, (str, bytes)):
+        raise AppCheckError("application check bundle aliases must not be string or bytes")
+    if not aliases:
+        return ()
     selected = tuple(aliases)
     if any(not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias) for alias in selected):
         raise AppCheckError("application check bundle contains an unsafe alias")

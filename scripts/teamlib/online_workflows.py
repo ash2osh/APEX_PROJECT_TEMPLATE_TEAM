@@ -12,7 +12,7 @@ import subprocess
 from typing import Any
 from collections.abc import Callable, Mapping
 
-from .app_checks import AppCheckBundle
+from .app_checks import AppCheckBundle, build_app_check_bundle
 from .config import Config, Target, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import DeployReport, deploy_app
@@ -473,16 +473,29 @@ def run_release_test(
     archive_path = Path(release_tar)
     target_path = Path(target_contract)
     manifest = deps.verify_release(archive_path)
-    check_bundle = deps.release_app_checks(archive_path)
-    app_digests = getattr(manifest, "app_tree_digests", None)
-    if not isinstance(app_digests, Mapping):
-        raise OnlineWorkflowError("release manifest application bindings are malformed")
-    archive_aliases = tuple(sorted(app_digests))
-    config_aliases = tuple(sorted(config.apps))
-    if archive_aliases != config_aliases:
-        raise OnlineWorkflowError(
-            "release archive and test configuration application bindings differ"
-        )
+    if getattr(manifest, "kind", None) == "schema":
+        exercised_aliases: tuple[str, ...] = ()
+        check_bundle = build_app_check_bundle({}, ())
+    elif getattr(manifest, "kind", None) == "app":
+        alias = manifest.alias
+        if not alias or alias not in config.apps:
+            raise OnlineWorkflowError(
+                f"release archive application '{alias}' is not configured in test environment"
+            )
+        exercised_aliases = (alias,)
+        check_bundle = deps.release_app_checks(archive_path)
+    else:
+        check_bundle = deps.release_app_checks(archive_path)
+        app_digests = getattr(manifest, "app_tree_digests", None)
+        if not isinstance(app_digests, Mapping):
+            raise OnlineWorkflowError("release manifest application bindings are malformed")
+        archive_aliases = tuple(sorted(app_digests))
+        config_aliases = tuple(sorted(config.apps))
+        if archive_aliases != config_aliases:
+            raise OnlineWorkflowError(
+                "release archive and test configuration application bindings differ"
+            )
+        exercised_aliases = config_aliases
     try:
         runtime = deps.preflight(config, repo_path, flow_executable)
     except RuntimeError as exc:
@@ -507,7 +520,7 @@ def run_release_test(
             repo_path,
             config,
             source_commit,
-            config_aliases,
+            exercised_aliases,
             release_archive=archive_path,
             apply_report=apply_document,
             check_bundle=check_bundle,
@@ -521,5 +534,9 @@ def run_release_test(
         raise
     if not isinstance(report, Mapping):
         raise OnlineWorkflowError("release qualification did not return a report")
-    deps.write_report(report, Path(out))
-    return OnlineRunResult("PASS", source_commit, report)
+    report_dict = dict(report)
+    if getattr(manifest, "kind", None) is not None:
+        report_dict["kind"] = manifest.kind
+        report_dict["alias"] = manifest.alias
+    deps.write_report(report_dict, Path(out))
+    return OnlineRunResult("PASS", source_commit, report_dict)

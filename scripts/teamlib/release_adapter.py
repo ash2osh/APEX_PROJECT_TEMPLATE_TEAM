@@ -30,8 +30,22 @@ from .release import (
 )
 
 
-class ReleaseAdapterError(RuntimeError):
+class ReleaseAdapterError(ReleaseError):
     pass
+
+
+def verify_required_migrations(
+    required: tuple[Mapping[str, str], ...] | list[Mapping[str, str]],
+    history: Mapping[str, Any],
+) -> None:
+    history_data = history.get("history", history) if isinstance(history, Mapping) else {}
+    if not isinstance(history_data, Mapping):
+        raise ReleaseAdapterError("target history must contain a mapping")
+    for item in required:
+        migration_id = item["id"]
+        row = history_data.get(migration_id)
+        if row is None or row.get("status") != "APPLIED" or row.get("checksum") != item["checksum"]:
+            raise ReleaseAdapterError(f"required migration unavailable: {migration_id}")
 
 
 @dataclass(frozen=True)
@@ -123,20 +137,35 @@ def _validated_release_context(
         raise ReleaseAdapterError("release target contract and metadata profile identify different database services")
     if contract.workspace_id != config.workspace_id:
         raise ReleaseAdapterError("release target contract workspace does not match configuration")
-    if dict(contract.app_ids) != dict(config.apps):
-        raise ReleaseAdapterError("release target contract application bindings differ from configuration")
-    if set(manifest.app_tree_digests) != set(contract.app_ids):
-        raise ReleaseAdapterError("release archive and test target application bindings differ")
     if target_document.get("role") != contract.role or target_document.get("environment") != contract.environment:
         raise ReleaseAdapterError("release target contract changed while loading")
     state_root = root if root is not None else repo / ".sync-state" / "release"
     migration_store = SqlMigrationStore(metadata, work_root=state_root / "metadata")
     control_store = SqlControlStore(metadata, work_root=state_root / "metadata")
-    app_targets: list[Target] = []
-    for alias in sorted(contract.app_ids):
+    if getattr(manifest, "kind", None) == "schema":
+        if manifest.app_tree_digests:
+            raise ReleaseAdapterError("schema release archive must not contain application trees")
+        app_targets: tuple[Target, ...] = ()
+    elif getattr(manifest, "kind", None) == "app":
+        alias = manifest.alias
+        if not alias or alias not in contract.app_ids or alias not in config.apps:
+            raise ReleaseAdapterError(
+                f"release target contract application bindings do not include {alias}"
+            )
         target = _target_from_contract(target_path, alias, expected_role="test")
         _assert_binding_matches_profile(target, profile_target(config, "APEX", alias=alias), alias)
-        app_targets.append(target)
+        app_targets = (target,)
+    else:
+        if dict(contract.app_ids) != dict(config.apps):
+            raise ReleaseAdapterError("release target contract application bindings differ from configuration")
+        if set(manifest.app_tree_digests) != set(contract.app_ids):
+            raise ReleaseAdapterError("release archive and test target application bindings differ")
+        app_targets_list: list[Target] = []
+        for alias in sorted(contract.app_ids):
+            target = _target_from_contract(target_path, alias, expected_role="test")
+            _assert_binding_matches_profile(target, profile_target(config, "APEX", alias=alias), alias)
+            app_targets_list.append(target)
+        app_targets = tuple(app_targets_list)
     return ReleaseApplyContext(
         manifest=manifest,
         target_document=target_document,
@@ -145,7 +174,7 @@ def _validated_release_context(
         migration_store=migration_store,
         control_store=control_store,
         schema_set_digest=schema_set_digest(config),
-        app_targets=tuple(app_targets),
+        app_targets=app_targets,
         applied_by="release-test",
         deploy_root=repo / ".sync-state" / "release" / "application",
     )
@@ -204,14 +233,14 @@ def _apply_release_context(
                 context.target_document,
                 plan,
                 history=history,
-                apply_migrations=apply_migrations,
-                deploy_application=deploy_application,
+                apply_migrations=apply_migrations if getattr(context.manifest, "kind", None) != "app" else None,
+                deploy_application=deploy_application if getattr(context.manifest, "kind", None) != "schema" else None,
                 target_state_key=context.metadata.state_key,
             )
         except ReleaseAdapterError:
             raise
-        except ReleaseError:
-            raise
+        except ReleaseError as exc:
+            raise ReleaseAdapterError(str(exc)) from exc
         except Exception as exc:
             raise ReleaseAdapterError(f"release application failed: {exc}") from exc
 
@@ -238,25 +267,50 @@ def apply_verified_release_live(
     )
     history = context.migration_store.read_history(context.metadata)
     plan = plan_release(release_tar, history, context.target_document)
-    pending_by_id = {
-        item["id"]: item
-        for item in context.manifest.migrations
-        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
-    }
-    missing = [migration_id for migration_id in plan.pending if migration_id not in pending_by_id]
-    if missing:
-        raise ReleaseAdapterError("release plan references missing migration metadata: " + ", ".join(missing))
-    destructive = tuple(
-        migration_id
-        for migration_id in plan.pending
-        if bool(pending_by_id[migration_id].get("destructive"))
-    )
-    if destructive:
-        raise ReleaseAdapterError(
-            "release-test requires reviewed destructive maintenance before apply: "
-            + ", ".join(destructive)
+    if getattr(context.manifest, "kind", None) == "schema":
+        pending_by_id = {
+            item["id"]: item
+            for item in context.manifest.migrations
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        }
+        missing = [migration_id for migration_id in plan.pending if migration_id not in pending_by_id]
+        if missing:
+            raise ReleaseAdapterError("release plan references missing migration metadata: " + ", ".join(missing))
+        destructive = tuple(
+            migration_id
+            for migration_id in plan.pending
+            if bool(pending_by_id[migration_id].get("destructive"))
         )
-    context.control_store.setup_state(context.app_targets)
+        if destructive:
+            raise ReleaseAdapterError(
+                "release-test requires reviewed destructive maintenance before apply: "
+                + ", ".join(destructive)
+            )
+        context.control_store.setup_state(context.app_targets)
+    elif getattr(context.manifest, "kind", None) == "app":
+        verify_required_migrations(context.manifest.required_migrations, history)
+        context.control_store.setup_state(context.app_targets)
+    else:
+        pending_by_id = {
+            item["id"]: item
+            for item in context.manifest.migrations
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        }
+        missing = [migration_id for migration_id in plan.pending if migration_id not in pending_by_id]
+        if missing:
+            raise ReleaseAdapterError("release plan references missing migration metadata: " + ", ".join(missing))
+        destructive = tuple(
+            migration_id
+            for migration_id in plan.pending
+            if bool(pending_by_id[migration_id].get("destructive"))
+        )
+        if destructive:
+            raise ReleaseAdapterError(
+                "release-test requires reviewed destructive maintenance before apply: "
+                + ", ".join(destructive)
+            )
+        context.control_store.setup_state(context.app_targets)
+
     return _apply_release_context(
         context,
         release_tar,
@@ -304,10 +358,23 @@ def apply_verified_release(
     migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
     control_store = SqlControlStore(metadata, work_root=state_root / "metadata")
     app_targets = []
-    for alias in release_app_trees(release_tar):
+    if getattr(manifest, "kind", None) == "schema":
+        pass
+    elif getattr(manifest, "kind", None) == "app":
+        alias = manifest.alias
+        if not alias or alias not in contract.app_ids or alias not in config.apps:
+            raise ReleaseAdapterError(
+                f"release target contract application bindings do not include {alias}"
+            )
         target = _target_from_contract(target_contract, alias, expected_role=contract.role)
         _assert_binding_matches_profile(target, profile_target(config, "APEX", alias=alias), alias)
         app_targets.append(target)
+        verify_required_migrations(manifest.required_migrations, history)
+    else:
+        for alias in release_app_trees(release_tar):
+            target = _target_from_contract(target_contract, alias, expected_role=contract.role)
+            _assert_binding_matches_profile(target, profile_target(config, "APEX", alias=alias), alias)
+            app_targets.append(target)
     control_store.setup_state(app_targets)
 
     context = ReleaseApplyContext(

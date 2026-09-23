@@ -611,6 +611,99 @@ class OnlineWorkflowTests(unittest.TestCase):
                 self.assertNotIn("write-report", events)
                 self.assertNotIn("qualify-release", events)
 
+    def test_run_release_test_schema_archive_emits_schema_report_with_no_app_aliases(self):
+        events: list[str] = []
+        schema_manifest = Manifest(
+            2, "1.0.0", "a" * 40, "b" * 64, (), {},
+            (), self.root / "release.tar", "d" * 64,
+            kind="schema", alias=None, required_migrations=(),
+        )
+        qualified_aliases: list[tuple[str, ...]] = []
+        dependencies, _ = self.release_dependencies(events, manifest=schema_manifest)
+
+        def tracking_qualify(repo, config, source_commit, aliases, **kwargs):
+            qualified_aliases.append(aliases)
+            return {"version": 2, "final_status": "PASS", "source_commit": source_commit}
+
+        dependencies = OnlineDependencies(
+            **{**dependencies.__dict__, "qualify_release": tracking_qualify}
+        )
+        archive = self.root / "release.tar"
+        archive.write_bytes(b"schema archive")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+        out = self.root / "schema-evidence.json"
+        result = run_release_test(
+            self.root,
+            config_for(role="test", environment="test", apps={"employee": 101, "payroll": 201}),
+            archive, target, out,
+            flow_executable=str(self.flow_runner), dependencies=dependencies,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(qualified_aliases, [()])
+        written = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(written["kind"], "schema")
+        self.assertIsNone(written["alias"])
+
+    def test_run_release_test_single_app_archive_exercises_only_selected_alias(self):
+        events: list[str] = []
+        app_manifest = Manifest(
+            2, "1.0.0", "a" * 40, "b" * 64, (), {"employee": "c" * 64},
+            (), self.root / "release.tar", "d" * 64,
+            kind="app", alias="employee", required_migrations=(),
+        )
+        qualified_aliases: list[tuple[str, ...]] = []
+        dependencies, _ = self.release_dependencies(events, manifest=app_manifest)
+        orig_qualify = dependencies.qualify_release
+
+        def tracking_qualify(repo, config, source_commit, aliases, **kwargs):
+            qualified_aliases.append(aliases)
+            return orig_qualify(repo, config, source_commit, aliases, **kwargs)
+
+        dependencies = OnlineDependencies(
+            **{**dependencies.__dict__, "qualify_release": tracking_qualify}
+        )
+        archive = self.root / "release.tar"
+        archive.write_bytes(b"app archive")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+        out = self.root / "app-evidence.json"
+        result = run_release_test(
+            self.root,
+            config_for(role="test", environment="test", apps={"employee": 101, "payroll": 201}),
+            archive, target, out,
+            flow_executable=str(self.flow_runner), dependencies=dependencies,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(qualified_aliases, [("employee",)])
+        written = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(written["kind"], "app")
+        self.assertEqual(written["alias"], "employee")
+
+    def test_run_release_test_app_archive_refuses_when_selected_alias_not_in_config(self):
+        events: list[str] = []
+        app_manifest = Manifest(
+            2, "1.0.0", "a" * 40, "b" * 64, (), {"other": "c" * 64},
+            (), self.root / "release.tar", "d" * 64,
+            kind="app", alias="other", required_migrations=(),
+        )
+        dependencies, _ = self.release_dependencies(events, manifest=app_manifest)
+        archive = self.root / "release.tar"
+        archive.write_bytes(b"app archive")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+        out = self.root / "app-evidence.json"
+        with self.assertRaisesRegex(OnlineWorkflowError, "not configured in test environment"):
+            run_release_test(
+                self.root,
+                config_for(role="test", environment="test", apps={"employee": 101, "payroll": 201}),
+                archive, target, out,
+                flow_executable=str(self.flow_runner), dependencies=dependencies,
+            )
+
 
 class PreflightCliTranslationTests(unittest.TestCase):
     ENV_TEMPLATE = """\

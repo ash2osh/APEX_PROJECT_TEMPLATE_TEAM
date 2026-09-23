@@ -420,6 +420,151 @@ class LiveReleaseAdapterTests(unittest.TestCase):
         # need to prove that the API accepts archive/contract objects directly.
         return Path(name)
 
+    def test_verify_required_migrations(self):
+        from teamlib.release_adapter import verify_required_migrations
+        history = {
+            "m1": {"status": "APPLIED", "checksum": "a" * 64},
+            "m2": {"status": "REVERTED", "checksum": "b" * 64},
+            "m3": {"status": "APPLIED", "checksum": "c" * 64},
+        }
+        # Matching requirements
+        verify_required_migrations(({"id": "m1", "checksum": "a" * 64}, {"id": "m3", "checksum": "c" * 64}), history)
+        # Empty requirements
+        verify_required_migrations((), history)
+        # Missing
+        with self.assertRaisesRegex(ReleaseAdapterError, "required migration unavailable: m_missing"):
+            verify_required_migrations(({"id": "m_missing", "checksum": "a" * 64},), history)
+        # Reverted
+        with self.assertRaisesRegex(ReleaseAdapterError, "required migration unavailable: m2"):
+            verify_required_migrations(({"id": "m2", "checksum": "b" * 64},), history)
+        # Checksum mismatch
+        with self.assertRaisesRegex(ReleaseAdapterError, "required migration unavailable: m1"):
+            verify_required_migrations(({"id": "m1", "checksum": "f" * 64},), history)
+
+    def test_schema_archive_calls_only_migration_apply_spy(self):
+        from teamlib.release_adapter import _apply_release_context
+        manifest = SimpleNamespace(
+            kind="schema", alias=None, source_commit="a" * 40, archive_digest="b" * 64,
+            app_tree_digests={}, migrations=[{"id": "m1", "destructive": False}], required_migrations=(),
+        )
+        migration_spy = []
+        deploy_spy = []
+        context = ReleaseApplyContext(
+            manifest=manifest, target_document={"role": "test", "environment": "test"},
+            config=SimpleNamespace(
+                role="test", environment="test",
+                tables_schema="APP", code_schema="APP", metadata_schema="META",
+            ),
+            metadata=Target("team", "test", "test", "conn", "inst", "db", "svc", "usr", "cur", None, None, None, None, "shared", "a" * 64),
+            migration_store=SimpleNamespace(bootstrap=lambda *a, **kw: None, read_history=lambda *a: {}),
+            control_store=SimpleNamespace(setup_state=lambda *a: None),
+            schema_set_digest="s" * 64, app_targets=(),
+        )
+        plan = ReleasePlan("b" * 64, "t" * 64, ("m1",), "art" * 16, context.target_document, "h" * 64)
+
+        def fake_apply(tar, doc, p, *, history=None, apply_migrations=None, deploy_application=None, target_state_key=None):
+            if apply_migrations:
+                apply_migrations((), p)
+            if deploy_application:
+                deploy_application("hr", {}, p)
+            return ApplyReport("applied", p.pending, manifest.archive_digest)
+
+        with patch("teamlib.release_adapter.release_migration_files", return_value={"m1.sql": b"-- m1"}), \
+             patch("teamlib.release_adapter.migration_profiles", return_value={}), \
+             patch("teamlib.release_adapter.apply_release", side_effect=fake_apply), \
+             patch("teamlib.release_adapter.apply_plan", side_effect=lambda *a, **kw: migration_spy.append("migrate")), \
+             patch("teamlib.release_adapter.deploy_app", side_effect=lambda *a, **kw: deploy_spy.append("deploy")):
+            report = _apply_release_context(context, self.context_file("release.tar"), plan, {}, repo=Path("/tmp"))
+        self.assertEqual(migration_spy, ["migrate"])
+        self.assertEqual(deploy_spy, [])
+        self.assertEqual(report.status, "applied")
+
+    def test_app_archive_calls_only_selected_app_deploy_after_requirements_verified(self):
+        from teamlib.release_adapter import _apply_release_context
+        manifest = SimpleNamespace(
+            kind="app", alias="hr", source_commit="a" * 40, archive_digest="b" * 64,
+            app_tree_digests={"hr": "c" * 64}, migrations=(),
+            required_migrations=({"id": "m1", "checksum": "a" * 64},),
+        )
+        migration_spy = []
+        deploy_spy = []
+        hr_target = Target("team", "test", "test", "conn", "inst", "db", "svc", "usr", "cur", "hr", 100, 200, "HR", "shared", "a" * 64)
+        context = ReleaseApplyContext(
+            manifest=manifest, target_document={"role": "test", "environment": "test", "app_ids": {"hr": 200, "payroll": 300}},
+            config=SimpleNamespace(role="test", environment="test", apps={"hr": 200, "payroll": 300}),
+            metadata=Target("team", "test", "test", "conn", "inst", "db", "svc", "usr", "cur", None, None, None, None, "shared", "a" * 64),
+            migration_store=SimpleNamespace(bootstrap=lambda *a, **kw: None, read_history=lambda *a: {"m1": {"status": "APPLIED", "checksum": "a" * 64}}),
+            control_store=SimpleNamespace(setup_state=lambda *a: None),
+            schema_set_digest="s" * 64, app_targets=(hr_target,),
+        )
+        plan = ReleasePlan("b" * 64, "t" * 64, (), "art" * 16, context.target_document, "h" * 64)
+
+        def fake_apply(tar, doc, p, *, history=None, apply_migrations=None, deploy_application=None, target_state_key=None):
+            if apply_migrations:
+                apply_migrations((), p)
+            if deploy_application:
+                deploy_application("hr", {}, p)
+            return ApplyReport("applied", p.pending, manifest.archive_digest)
+
+        with patch("teamlib.release_adapter.release_migration_files", return_value={}), \
+             patch("teamlib.release_adapter.apply_release", side_effect=fake_apply), \
+             patch("teamlib.release_adapter.apply_plan", side_effect=lambda *a, **kw: migration_spy.append("migrate")), \
+             patch("teamlib.release_adapter.deploy_app", side_effect=lambda target, *a, **kw: deploy_spy.append(target.alias)):
+            report = _apply_release_context(context, self.context_file("release.tar"), plan, {"m1": {"status": "APPLIED", "checksum": "a" * 64}}, repo=Path("/tmp"))
+        self.assertEqual(migration_spy, [])
+        self.assertEqual(deploy_spy, ["hr"])
+        self.assertEqual(report.status, "applied")
+
+    def test_app_archive_refuses_when_requirement_unavailable(self):
+        from teamlib.release_adapter import verify_required_migrations
+        cases = [
+            ("missing", {}),
+            ("reverted", {"m1": {"status": "REVERTED", "checksum": "a" * 64}}),
+            ("checksum", {"m1": {"status": "APPLIED", "checksum": "0" * 64}}),
+        ]
+        for name, history in cases:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ReleaseAdapterError, "required migration unavailable"):
+                    verify_required_migrations(({"id": "m1", "checksum": "a" * 64},), history)
+
+    def test_live_adapter_app_release_refuses_when_requirement_unavailable(self):
+        events: list[str] = []
+        metadata = Target(
+            project="team", role="test", environment="test", connection="meta",
+            instance_id="INSTANCE", db_name="FREEPDB1", service="service",
+            session_user="META", current_schema="META", alias=None, workspace_id=None,
+            app_id=None, parsing_schema=None, ownership_mode="shared", binding_digest="a" * 64,
+        )
+        manifest = SimpleNamespace(
+            kind="app", alias="hr", source_commit="a" * 40, archive_digest="b" * 64,
+            app_tree_digests={"hr": "c" * 64}, migrations=(),
+            required_migrations=({"id": "m1", "checksum": "a" * 64},),
+        )
+        config = SimpleNamespace(role="test", environment="test")
+        plan = ReleasePlan(manifest.archive_digest, "e" * 64, (), "f" * 64, {}, "1" * 64)
+        store = SimpleNamespace(
+            bootstrap=lambda *a, **kw: events.append("bootstrap"),
+            read_history=lambda *a: {"m1": {"status": "REVERTED", "checksum": "a" * 64}},
+        )
+        control = SimpleNamespace(setup_state=lambda *a: events.append("setup-control"))
+        context = ReleaseApplyContext(
+            manifest=manifest, target_document={"role": "test", "environment": "test"},
+            config=config, metadata=metadata, migration_store=store, control_store=control,
+            schema_set_digest="d" * 64, app_targets=(),
+        )
+        with patch("teamlib.release_adapter._validated_release_context", return_value=context), \
+             patch("teamlib.release_adapter.plan_release", return_value=plan), \
+             patch("teamlib.release_adapter._apply_release_context") as applied_context:
+            with self.assertRaisesRegex(ReleaseAdapterError, "required migration unavailable"):
+                apply_verified_release_live(
+                    self.context_file("release.tar"),
+                    self.context_file("targets/test.json"),
+                    config,
+                    repo=self.context_file("repo"),
+                )
+        self.assertEqual(events, ["bootstrap"])
+        applied_context.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
