@@ -20,10 +20,9 @@ from teamlib.apex import (
     bootstrap_app,
     capture_app,
     export_app,
-    import_app,
     resolve_export,
 )
-from teamlib.announce import draft_all_clear, draft_import_announcement
+from teamlib.announce import draft_all_clear, draft_import_announcement, draft_publish_all_clear
 from teamlib.app_checks import AppCheckError
 from teamlib.ci import CIError
 from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, contract_target, load_config, profile_target, schema_set_digest
@@ -32,7 +31,7 @@ from teamlib.deploy import DeployError, deploy_app
 from teamlib.drift import capture_live_inventory, drift_status, observed_frontier_drift
 from teamlib.fingerprints import InventoryError, diff_inventory, drift_is_clean, load_inventory
 from teamlib.page_locks import LockReport, format_lock_report, load_manual_page_locks, read_page_locks
-from teamlib.publish import PublishError, format_publish_notice, prepare_publish
+from teamlib.publish import PublishError, format_publish_notice, prepare_publish, publish_prepared
 from teamlib.destructive_confirmation import (
     ConfirmationError,
     load_confirmation,
@@ -82,6 +81,7 @@ COMMAND_HELP = {
     "export-app": ("Daily application work", "capture and reconcile the shared Builder application"),
     "import-app": ("Recovery and diagnosis", "coordinated overwrite of the paused shared Builder application"),
     "prepare-publish": ("Daily application work", "prepare an app-scoped pause notice and durable evidence record"),
+    "publish-app": ("Daily application work", "publish prepared and acknowledged changes to selected apps"),
     "run-integration": ("Protected qualification", "apply and qualify one exact commit on protected integration"),
     "qualify-target": ("Protected qualification", "read-only diagnosis of a persistent qualified target"),
     "migrate": ("Migration maintenance", "preview or apply reviewed forward migration bundles"),
@@ -137,6 +137,10 @@ COMMAND_DETAILS = {
     "prepare-publish": (
         "Prepares an app-scoped pause notice and durable evidence record for selected apps; "
         "read-only, does not modify Builder."
+    ),
+    "publish-app": (
+        "Publishes prepared and acknowledged changes into shared development applications "
+        "with all-app preflight and verified re-export."
     ),
     "run-integration": (
         "Performs non-production writes while applying and qualifying one immutable Git source."
@@ -288,6 +292,15 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="replace from recovery capture in format <alias>:<recovery-id>",
+    )
+    pub = add_command("publish-app")
+    pub.add_argument("--prepared", required=True, help="preparation ID from prepare-publish")
+    pub.add_argument("--confirm-pause", action="store_true", help="confirm that the publish pause notice has been posted and editors stopped")
+    pub.add_argument(
+        "--ack",
+        action="append",
+        default=[],
+        help="registered teammate checkout acknowledgement in format <alias>:<uuid>",
     )
     deploy = add_command("deploy-app")
     deploy.add_argument("alias")
@@ -722,7 +735,68 @@ def _online(args: argparse.Namespace) -> object:
             "record_path": str(prep.path),
         })
         return 0
+    if command == "publish-app":
+        if config.role != "developer" or config.environment != "development":
+            raise ConfigError("publish-app is restricted to the shared development environment")
+        if not args.confirm_pause:
+            if not sys.stdin.isatty():
+                raise ConfigError("publish-app requires --confirm-pause in a non-interactive session")
+            answer = input("Has the publish pause notice been posted and has everyone acknowledged? Type 'proceed' to continue: ")
+            if answer.strip().casefold() != "proceed":
+                raise ConfigError("publish-app cancelled; explicit pause confirmation was not received")
+        acknowledgements: dict[str, list[str]] = {}
+        for entry in args.ack:
+            if ":" not in entry:
+                raise ConfigError(f"invalid --ack argument: '{entry}'; expected <alias>:<uuid>")
+            alias, ack_uuid = entry.split(":", 1)
+            acknowledgements.setdefault(alias, []).append(ack_uuid)
+
+        metadata = profile_target(config, "METADATA")
+        store = _sql_control_store(repo, metadata)
+        try:
+            report = publish_prepared(
+                repo,
+                args.prepared,
+                acknowledgements,
+                confirm_pause=True,
+                config=config,
+                store=store,
+            )
+        except PublishError as exc:
+            raise ConfigError(str(exc)) from exc
+
+        if report.all_clear_allowed:
+            print(draft_publish_all_clear(
+                list(report.app_results.keys()),
+                {alias: {"verified": r.verified, "recovery_path": r.recovery_path} for alias, r in report.app_results.items()},
+            ))
+
+        _json({
+            "status": "success" if report.overall_status == "VERIFIED" else "partial",
+            "operation": command,
+            "preparation_id": report.preparation_id,
+            "overall_status": report.overall_status,
+            "all_clear_allowed": report.all_clear_allowed,
+            "source_commit": report.source_commit,
+            "apps": {
+                alias: {
+                    "status": r.status,
+                    "verified": r.verified,
+                    "operation_id": r.operation_id,
+                    "recovery_path": r.recovery_path,
+                    "error": r.error,
+                }
+                for alias, r in report.app_results.items()
+            },
+            "journal_path": str(report.journal_path),
+        })
+        return 0
     if command in {"register-app", "app-status", "recover-app-lock", "capture-app", "bootstrap-app", "adopt-app", "export-app", "import-app"}:
+        if command == "import-app":
+            raise ConfigError(
+                "direct import-app is retired to prevent bypassing safety guards; "
+                "use prepare-publish and publish-app"
+            )
         target = _target(config, args.alias)
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)
@@ -762,23 +836,6 @@ def _online(args: argparse.Namespace) -> object:
             decision = export_app(target, repo=repo, control_store=store)
             _json({"status": "success", "operation": command, "changed_paths": sorted(decision.tree), "conflicts": list(decision.conflicts)})
             return 0
-        resolved = _resolved_commit(repo, args.ref)
-        notice = _import_notice(args, target, store, repo, resolved)
-        _confirm_import_pause(args, notice)
-        baseline = import_app(target, args.ref, replace_from=args.replace_from, repo=repo, control_store=store)
-        operation_id = None
-        recovery_path = None
-        for result_path in sorted((repo / ".sync-state" / "recovery").glob("*/result.json"), key=lambda path: path.stat().st_mtime, reverse=True):
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if result.get("verified") is True and result.get("source_commit") == baseline.source_commit:
-                operation_id = result.get("operation_id")
-                recovery_path = result.get("recovery_path")
-                break
-        _json({"status": "success", "operation": command, "source_commit": baseline.source_commit, "verified": True, "operation_id": operation_id, "recovery_path": recovery_path})
-        return 0
     if command == "resolve-export":
         # Resolve uses the target selected by the environment; the recovery ID
         # itself remains immutable and is checked by the core implementation.

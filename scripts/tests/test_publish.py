@@ -14,10 +14,20 @@ from types import SimpleNamespace
 import unittest
 
 from teamlib.apex_validate import ValidationReport
-from teamlib.config import Target
+from teamlib.config import Target, load_config, profile_target
 from teamlib.control_store import ControlStore
 from teamlib.page_locks import LockReport, PageLock
-from teamlib.publish import Preparation, PublishError, format_publish_notice, load_preparation, prepare_publish
+from teamlib.publish import (
+    AppPublishResult,
+    Preparation,
+    PublishError,
+    PublishReport,
+    format_publish_notice,
+    load_preparation,
+    prepare_publish,
+    publish_prepared,
+)
+from teamlib.sqlcl import SqlclError
 from teamlib.state import save_capture, save_verified_baseline
 
 
@@ -391,6 +401,353 @@ class PreparePublishTests(unittest.TestCase):
         raw_text = record_file.read_text(encoding="utf-8")
         for secret_marker in ("password", "secret", "private_key", "token_value", "bearer"):
             self.assertNotIn(secret_marker, raw_text.lower())
+
+
+class PublishPreparedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="team-publish-prepared-test-")
+        self.repo = Path(self.temp.name)
+        subprocess.run(["git", "-C", str(self.repo), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Test Committer"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "committer@example.com"], check=True)
+
+        self.env_path = self.repo / ".env"
+        self.env_path.write_text(
+            "PROJECT_NAME=team\n"
+            "TARGET_ROLE=developer\n"
+            "DB_ENVIRONMENT=development\n"
+            "APEX_APPS=hr:101:HR_DATA,payroll:102:PAYROLL_DATA\n"
+            "TABLES_SCHEMA=APP_DATA\n"
+            "CODE_SCHEMA=APP_CODE\n"
+            "METADATA_SCHEMA=APP_META\n"
+            "APP_OWNERSHIP_MODE=shared\n"
+            "APEX_WORKSPACE_ID=10\n"
+            "TABLES_SQLCL_CONNECTION=fake\n"
+            "TABLES_EXPECTED_USER=DEMO\n"
+            "TABLES_EXPECTED_CURRENT_SCHEMA=DEMO\n"
+            "TABLES_EXPECTED_DB_NAME=FREEPDB1\n"
+            "TABLES_EXPECTED_SERVICE=freep1\n"
+            "TABLES_EXPECTED_INSTANCE_ID=FREE\n"
+            "CODE_SQLCL_CONNECTION=fake\n"
+            "CODE_EXPECTED_USER=DEMO\n"
+            "CODE_EXPECTED_CURRENT_SCHEMA=DEMO\n"
+            "CODE_EXPECTED_DB_NAME=FREEPDB1\n"
+            "CODE_EXPECTED_SERVICE=freep1\n"
+            "CODE_EXPECTED_INSTANCE_ID=FREE\n"
+            "APEX_SQLCL_CONNECTION=fake\n"
+            "APEX_EXPECTED_USER=DEMO\n"
+            "APEX_EXPECTED_CURRENT_SCHEMA=DEMO\n"
+            "APEX_EXPECTED_DB_NAME=FREEPDB1\n"
+            "APEX_EXPECTED_SERVICE=freep1\n"
+            "APEX_EXPECTED_INSTANCE_ID=FREE\n"
+            "METADATA_SQLCL_CONNECTION=fake\n"
+            "METADATA_EXPECTED_USER=DEMO\n"
+            "METADATA_EXPECTED_CURRENT_SCHEMA=DEMO\n"
+            "METADATA_EXPECTED_DB_NAME=FREEPDB1\n"
+            "METADATA_EXPECTED_SERVICE=freep1\n"
+            "METADATA_EXPECTED_INSTANCE_ID=FREE\n"
+            "VERIFY_SQLCL_CONNECTION=fake\n"
+            "VERIFY_EXPECTED_USER=DEMO\n"
+            "VERIFY_EXPECTED_CURRENT_SCHEMA=DEMO\n"
+            "VERIFY_EXPECTED_DB_NAME=FREEPDB1\n"
+            "VERIFY_EXPECTED_SERVICE=freep1\n"
+            "VERIFY_EXPECTED_INSTANCE_ID=FREE\n",
+            encoding="utf-8",
+        )
+        self.config = load_config(self.env_path)
+        self.target_hr = profile_target(self.config, "APEX", alias="hr")
+        self.target_payroll = profile_target(self.config, "APEX", alias="payroll")
+
+        # Create files for both apps
+        (self.repo / "apps" / "hr" / "pages").mkdir(parents=True)
+        (self.repo / "apps" / "hr" / "application.apx").write_bytes(b"app hr\n")
+        (self.repo / "apps" / "hr" / ".apex").mkdir(parents=True)
+        (self.repo / "apps" / "hr" / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
+        (self.repo / "apps" / "hr" / "pages" / "p1.apx").write_bytes(b"p1\n")
+
+        (self.repo / "apps" / "payroll" / "pages").mkdir(parents=True)
+        (self.repo / "apps" / "payroll" / "application.apx").write_bytes(b"app payroll\n")
+        (self.repo / "apps" / "payroll" / ".apex").mkdir(parents=True)
+        (self.repo / "apps" / "payroll" / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
+        (self.repo / "apps" / "payroll" / "pages" / "p10.apx").write_bytes(b"p10\n")
+
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "initial commit"], check=True)
+        self.seed_commit = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        self.store = ControlStore(self.repo / ".sync-state")
+        self.store.setup_state([self.target_hr, self.target_payroll])
+        self.store.register_app(self.target_hr, "hr-uuid-1", "host-1", "alice")
+        self.store.register_app(self.target_payroll, "pay-uuid-2", "host-2", "bob")
+
+        self.hr_tree = {
+            "application.apx": b"app hr\n",
+            ".apex/apexlang.json": b'{"format":"APEXLANG"}\n',
+            "pages/p1.apx": b"p1\n",
+        }
+        self.payroll_tree = {
+            "application.apx": b"app payroll\n",
+            ".apex/apexlang.json": b'{"format":"APEXLANG"}\n',
+            "pages/p10.apx": b"p10\n",
+        }
+
+        save_verified_baseline(self.target_hr, self.seed_commit, self.hr_tree, root=self.repo / ".sync-state")
+        save_verified_baseline(self.target_payroll, self.seed_commit, self.payroll_tree, root=self.repo / ".sync-state")
+
+        self.lock_report_hr = LockReport("hr", 101, "KNOWN", (), "APEX_APPLICATION_LOCKED_PAGES")
+        self.lock_report_payroll = LockReport("payroll", 102, "KNOWN", (), "APEX_APPLICATION_LOCKED_PAGES")
+
+        self.write_calls: list[tuple[str, str]] = []
+        self.timeout_on_payroll = False
+
+        # Prepare both apps
+        self.prep = prepare_publish(
+            self.repo,
+            (self.target_hr, self.target_payroll),
+            self.seed_commit,
+            {"hr": self.lock_report_hr, "payroll": self.lock_report_payroll},
+            self.store,
+            runner=self.fake_runner,
+            validator=lambda tree, **kwargs: ValidationReport(True, "SUCCESS", "ok", ()),
+        )
+        self.acks = {
+            "hr": ("hr-uuid-1",),
+            "payroll": ("pay-uuid-2",),
+        }
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def fake_runner(self, target, operation, driver, work, **kwargs):
+        if operation == "write":
+            if target.alias == "payroll" and self.timeout_on_payroll:
+                raise SqlclError("SQLcl timed out on payroll import; state is unknown")
+            self.write_calls.append((target.alias or "", operation))
+            # simulate updated database tree on write
+            if target.alias == "hr":
+                self.database_hr_tree = dict(self.hr_tree)
+            elif target.alias == "payroll":
+                self.database_payroll_tree = dict(self.payroll_tree)
+
+        export = Path(work) / "exported-app"
+        tree = self.hr_tree if target.alias == "hr" else self.payroll_tree
+        for path, data in tree.items():
+            dest = export / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        stdout = (
+            f"TEAM_RESULT_BEGIN\n"
+            f"TEAM_APP_ID_APEX_VERSION|26.1.4\n"
+            f"TEAM_APP_ID_WS_SCHEMA|{target.workspace_id}|{target.parsing_schema}\n"
+            f"TEAM_APP_ID_APP|{target.workspace_id}|{target.app_id}|{target.parsing_schema}\n"
+            f"TEAM_RESULT_END\n"
+        )
+        return SimpleNamespace(
+            identity={"SESSION_USER": "DEMO", "CURRENT_SCHEMA": "DEMO", "DB_NAME": "FREEPDB1", "SERVICE": "freep1", "INSTANCE_ID": "FREE"},
+            completion={"operation": operation}, result_manifest={"status": "success"},
+            log_path=Path(work) / "fake.log", generated_driver=Path(driver),
+            stdout=stdout, stderr="", argv=(), exit_code=0,
+        )
+
+    def lock_reader(self, target, **kwargs):
+        return self.lock_report_hr if target.alias == "hr" else self.lock_report_payroll
+
+    def test_absent_pause_confirmation_refuses_with_zero_writes(self):
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=False,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("confirm", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_missing_registered_acknowledgement_refuses_with_zero_writes(self):
+        bad_acks = {"hr": (), "payroll": ("pay-uuid-2",)}
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                bad_acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("acknowledgement", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_acknowledgement_for_unselected_alias_refuses_with_zero_writes(self):
+        bad_acks = {"hr": ("hr-uuid-1",), "payroll": ("pay-uuid-2",), "billing": ("bill-uuid",)}
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                bad_acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("billing", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_edited_preparation_json_refuses_with_zero_writes(self):
+        record_file = self.repo / ".sync-state" / "publish" / self.prep.preparation_id / "prepare.json"
+        data = json.loads(record_file.read_text(encoding="utf-8"))
+        data["source_commit"] = "f" * 40
+        record_file.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("tamper", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_changed_target_binding_refuses_with_zero_writes(self):
+        # Alter the workspace_id in the config
+        self.env_path.write_text(self.env_path.read_text(encoding="utf-8").replace("APEX_WORKSPACE_ID=10", "APEX_WORKSPACE_ID=999"), encoding="utf-8")
+        changed_config = load_config(self.env_path)
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=True,
+                config=changed_config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("binding", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_changed_selected_commit_or_dirty_source_refuses_with_zero_writes(self):
+        (self.repo / "apps" / "hr" / "pages" / "p1.apx").write_bytes(b"dirty\n")
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("clean", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_changed_first_app_capture_refuses_all_writes(self):
+        # Change hr capture in Builder
+        self.hr_tree["pages/surprise.apx"] = b"new builder page\n"
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("changed", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_changed_second_app_capture_stops_both_imports_before_any_write(self):
+        # Change payroll capture in Builder before any import occurs
+        self.payroll_tree["pages/surprise.apx"] = b"surprise in payroll\n"
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("changed", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_unknown_lock_report_refuses_with_zero_writes(self):
+        def failing_lock_reader(target, **kwargs):
+            return LockReport(target.alias, 101, "UNKNOWN", (), "APEX_APPLICATION_LOCKED_PAGES")
+
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=failing_lock_reader,
+            )
+        self.assertIn("unknown", str(ctx.exception).lower())
+        self.assertEqual(len(self.write_calls), 0)
+
+    def test_success_both_apps_verified_and_allows_all_clear(self):
+        report = publish_prepared(
+            self.repo,
+            self.prep.preparation_id,
+            self.acks,
+            confirm_pause=True,
+            config=self.config,
+            store=self.store,
+            runner=self.fake_runner,
+            lock_reader=self.lock_reader,
+        )
+        self.assertIsInstance(report, PublishReport)
+        self.assertEqual(report.overall_status, "VERIFIED")
+        self.assertTrue(report.all_clear_allowed)
+        self.assertEqual(report.app_results["hr"].status, "VERIFIED")
+        self.assertEqual(report.app_results["payroll"].status, "VERIFIED")
+        self.assertEqual(len(self.write_calls), 2)
+        # Check journal file exists
+        self.assertTrue(report.journal_path.is_file())
+
+    def test_partial_failure_when_second_app_times_out(self):
+        self.timeout_on_payroll = True
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo,
+                self.prep.preparation_id,
+                self.acks,
+                confirm_pause=True,
+                config=self.config,
+                store=self.store,
+                runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertIn("payroll", str(ctx.exception).lower())
+        # Check result.json was written
+        journal = self.repo / ".sync-state" / "publish" / self.prep.preparation_id / "result.json"
+        self.assertTrue(journal.is_file())
+        data = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall_status"], "UNKNOWN")
+        self.assertFalse(data["all_clear_allowed"])
+        self.assertEqual(data["apps"]["hr"]["status"], "VERIFIED")
+        self.assertEqual(data["apps"]["payroll"]["status"], "UNKNOWN")
 
 
 if __name__ == "__main__":

@@ -13,20 +13,21 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any
-from collections.abc import Callable, Mapping
+from typing import Any, Literal
+from collections.abc import Callable, Mapping, Sequence
 
 from .apex import (
     ApexError,
     _git_head,
     _receipt_allows_import,
     capture_app,
+    import_app,
 )
 from .apex_validate import ValidationReport, validate_apexlang_tree
-from .config import Target
+from .config import Target, profile_target
 from .control_store import ControlStore, SqlControlStore
-from .page_locks import LockReport, PageLock, format_lock_report
-from .sqlcl import run_sqlcl
+from .page_locks import LockReport, PageLock, format_lock_report, read_page_locks
+from .sqlcl import SqlclError, run_sqlcl
 from .state import StateError, _target_descriptor, load_baseline, load_capture
 from .trees import TreeError, assert_source_clean, read_git_tree, tree_digest
 
@@ -45,6 +46,26 @@ class Preparation:
     record_digest: str
     apps: Mapping[str, Any]
     path: Path
+
+
+@dataclass(frozen=True)
+class AppPublishResult:
+    alias: str
+    status: Literal["VERIFIED", "UNCHANGED", "UNKNOWN", "FAILED"]
+    verified: bool
+    operation_id: str | None = None
+    recovery_path: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class PublishReport:
+    preparation_id: str
+    source_commit: str
+    overall_status: Literal["VERIFIED", "PARTIAL", "FAILED", "UNKNOWN"]
+    all_clear_allowed: bool
+    app_results: Mapping[str, AppPublishResult]
+    journal_path: Path
 
 
 def prepare_publish(
@@ -364,3 +385,211 @@ def format_publish_notice(
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"
+
+
+def publish_prepared(
+    repo: Path | str,
+    preparation_id: str,
+    acknowledgements: Mapping[str, tuple[str, ...] | list[str] | set[str] | Sequence[str]],
+    confirm_pause: bool,
+    *,
+    config: Any,
+    store: ControlStore | SqlControlStore,
+    runner: Callable[..., Any] = run_sqlcl,
+    lock_reader: Callable[..., LockReport] = read_page_locks,
+) -> PublishReport:
+    """Execute guarded publish for previously prepared and acknowledged applications."""
+    if not confirm_pause:
+        raise PublishError("Publish cancelled; explicit pause confirmation was not received (--confirm-pause)")
+    if getattr(config, "role", None) != "developer" or getattr(config, "environment", None) != "development":
+        raise PublishError("publish is restricted to shared development targets")
+
+    repo_path = Path(repo)
+    prep = load_preparation(repo_path, preparation_id)
+
+    # 1. Check for unselected acknowledgements
+    for alias in acknowledgements:
+        if alias not in prep.aliases:
+            raise PublishError(f"Acknowledgement provided for unselected application: '{alias}'")
+
+    # 2. Check for required checkout acknowledgements
+    for alias in prep.aliases:
+        app_data = prep.apps.get(alias, {})
+        required_roster = set(app_data.get("roster", []))
+        provided = set(acknowledgements.get(alias, ()))
+        missing = required_roster - provided
+        if missing:
+            raise PublishError(
+                f"Missing required checkout acknowledgements for '{alias}': {', '.join(sorted(missing))}"
+            )
+
+    # 3. All-app preflight: check target binding, source cleanliness, recapture and locks for ALL selected apps before any write
+    preflight_targets: list[Target] = []
+    state_root = repo_path / ".sync-state"
+
+    for alias in prep.aliases:
+        if alias not in config.apps:
+            raise PublishError(f"Application '{alias}' is not configured in environment")
+        target = profile_target(config, "APEX", alias=alias)
+        stored_target = prep.apps[alias]["target"]
+        if target.state_key != prep.apps[alias]["state_key"] or target.binding_digest != stored_target.get("binding_digest"):
+            raise PublishError(f"Target binding for '{alias}' has changed since preparation")
+
+        try:
+            assert_source_clean(repo_path, alias)
+        except (ApexError, TreeError) as exc:
+            raise PublishError(f"Source for '{alias}' is not clean: {exc}") from exc
+
+        # Recapture Builder app
+        try:
+            recapture = capture_app(
+                target,
+                repo=repo_path,
+                root=state_root,
+                persist=False,
+                control_store=store,
+                runner=runner,
+            )
+        except ApexError as exc:
+            raise PublishError(f"Preflight capture failed for '{alias}': {exc}") from exc
+
+        if tree_digest(recapture.tree) != prep.apps[alias]["tree_digest"]:
+            raise PublishError(f"Application '{alias}' changed after preparation; publish refused before write")
+
+        # Refresh lock report
+        refreshed_locks = lock_reader(target, runner=runner)
+        if refreshed_locks.status != "KNOWN":
+            raise PublishError(f"Refreshed page locks for '{alias}' is UNKNOWN; publish refused before write")
+
+        preflight_targets.append(target)
+
+    # 4. Execute sequential imports
+    results: dict[str, AppPublishResult] = {}
+    failed = False
+    failed_alias: str | None = None
+    failed_error: str | None = None
+    first_failure_status: Literal["UNKNOWN", "FAILED"] = "FAILED"
+
+    for target in preflight_targets:
+        alias = target.alias or ""
+        if failed:
+            results[alias] = AppPublishResult(
+                alias=alias,
+                status="UNCHANGED",
+                verified=False,
+            )
+            continue
+
+        replace_id = prep.apps[alias].get("replace_from")
+        try:
+            baseline = import_app(
+                target,
+                prep.source_commit,
+                replace_from=replace_id,
+                repo=repo_path,
+                root=state_root,
+                control_store=store,
+                runner=runner,
+            )
+            op_id = None
+            rec_path = None
+            recovery_dir = state_root / "recovery"
+            if recovery_dir.is_dir():
+                for rpath in sorted(recovery_dir.glob("*/result.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                    try:
+                        rdata = json.loads(rpath.read_text(encoding="utf-8"))
+                        if rdata.get("verified") is True and rdata.get("source_commit") == baseline.source_commit:
+                            op_id = rdata.get("operation_id")
+                            rec_path = rdata.get("recovery_path")
+                            break
+                    except Exception:
+                        continue
+            results[alias] = AppPublishResult(
+                alias=alias,
+                status="VERIFIED",
+                verified=True,
+                operation_id=op_id,
+                recovery_path=rec_path,
+            )
+        except Exception as exc:
+            failed = True
+            failed_alias = alias
+            failed_error = str(exc)
+            is_unknown = (
+                (isinstance(exc, SqlclError) and "timed out" in str(exc).lower())
+                or "unknown" in str(exc).lower()
+                or (exc.__cause__ is not None and "unknown" in str(exc.__cause__).lower())
+            )
+            app_status: Literal["UNKNOWN", "FAILED"] = "UNKNOWN" if is_unknown else "FAILED"
+            first_failure_status = app_status
+            results[alias] = AppPublishResult(
+                alias=alias,
+                status=app_status,
+                verified=False,
+                error=failed_error,
+            )
+
+    # 5. Determine overall status and write durable result journal
+    all_verified = all(r.status == "VERIFIED" for r in results.values())
+    if all_verified:
+        overall_status = "VERIFIED"
+        all_clear_allowed = True
+    elif first_failure_status == "UNKNOWN":
+        overall_status = "UNKNOWN"
+        all_clear_allowed = False
+    elif any(r.status == "VERIFIED" for r in results.values()):
+        overall_status = "PARTIAL"
+        all_clear_allowed = False
+    else:
+        overall_status = "FAILED"
+        all_clear_allowed = False
+
+    prep_dir = state_root / "publish" / prep.preparation_id
+    prep_dir.mkdir(parents=True, exist_ok=True)
+    journal_path = prep_dir / "result.json"
+    journal_payload = {
+        "version": 1,
+        "type": "publish-result",
+        "preparation_id": prep.preparation_id,
+        "published_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_commit": prep.source_commit,
+        "overall_status": overall_status,
+        "all_clear_allowed": all_clear_allowed,
+        "apps": {
+            alias: {
+                "status": r.status,
+                "verified": r.verified,
+                "operation_id": r.operation_id,
+                "recovery_path": r.recovery_path,
+                "error": r.error,
+            }
+            for alias, r in results.items()
+        },
+    }
+    # Atomic write to result.json
+    fd, temp_file_path = tempfile.mkstemp(prefix=".result-", dir=str(prep_dir))
+    final_bytes = json.dumps(journal_payload, sort_keys=True, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(final_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_file_path, journal_path)
+    except OSError as exc:
+        try:
+            Path(temp_file_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise PublishError(f"Could not write publish journal: {exc}") from exc
+
+    if failed:
+        raise PublishError(f"Publish failed during import of '{failed_alias}': {failed_error}")
+
+    return PublishReport(
+        preparation_id=prep.preparation_id,
+        source_commit=prep.source_commit,
+        overall_status=overall_status,
+        all_clear_allowed=all_clear_allowed,
+        app_results=results,
+        journal_path=journal_path,
+    )
