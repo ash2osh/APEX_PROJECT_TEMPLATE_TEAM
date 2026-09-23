@@ -16,8 +16,10 @@ import unittest
 
 from teamlib.config import (
     AppBinding,
+    Config,
     ConfigError,
     OFFLINE_COMMANDS,
+    Profile,
     Target,
     contract_target,
     is_offline_command,
@@ -545,6 +547,107 @@ class TargetContractV2Tests(unittest.TestCase):
         contract3["binding"]["schema"] = "HR_CODE"
         with self.assertRaises(ConfigError):
             parse_target_contract(contract3, expected_role="integration")
+
+
+class AppBindingIdentityBoundaryTests(unittest.TestCase):
+    def _config(self, **overrides) -> Config:
+        profiles = {
+            name: Profile(
+                name,
+                f"{name.lower()}-connection",
+                "APP",
+                "APP",
+                "FREEPDB1",
+                "service",
+                "INSTANCE",
+            )
+            for name in ("TABLES", "CODE", "APEX", "METADATA", "VERIFY")
+        }
+        values = {
+            "values": {},
+            "profiles": profiles,
+            "apps": {"employee": 101, "payroll": 202},
+            "app_parsing_schemas": {"employee": "HR_SCHEMA", "payroll": "PAYROLL_SCHEMA"},
+            "project": "team",
+            "role": "integration",
+            "environment": "staging",
+            "tables_schema": "APP",
+            "code_schema": "APP_CODE",
+            "metadata_schema": "APP_META",
+            "workspace_id": 90001,
+            "ownership_mode": "shared",
+        }
+        values.update(overrides)
+        return Config(**values)
+
+    def test_state_key_changes_when_parsing_schema_changes(self):
+        target1 = Target(
+            project="team", role="integration", environment="staging", connection="conn",
+            instance_id="INST", db_name="DB", service="svc", session_user="APP",
+            current_schema="APP", alias="checkout", workspace_id=1, app_id=101,
+            parsing_schema="SCHEMA_A", ownership_mode="shared", binding_digest="a" * 64,
+        )
+        target2 = Target(
+            project="team", role="integration", environment="staging", connection="conn",
+            instance_id="INST", db_name="DB", service="svc", session_user="APP",
+            current_schema="APP", alias="checkout", workspace_id=1, app_id=101,
+            parsing_schema="SCHEMA_B", ownership_mode="shared", binding_digest="b" * 64,
+        )
+        self.assertNotEqual(target1.state_key, target2.state_key)
+
+        # Even with artificial identical binding_digest, state_key incorporates parsing_schema:
+        target3 = Target(
+            project="team", role="integration", environment="staging", connection="conn",
+            instance_id="INST", db_name="DB", service="svc", session_user="APP",
+            current_schema="APP", alias="checkout", workspace_id=1, app_id=101,
+            parsing_schema="SCHEMA_B", ownership_mode="shared", binding_digest="a" * 64,
+        )
+        self.assertNotEqual(target1.state_key, target3.state_key)
+
+    def test_physical_key_binds_instance_workspace_and_app_id(self):
+        target1 = Target(
+            project="team", role="integration", environment="staging", connection="conn1",
+            instance_id="INST", db_name="DB1", service="svc1", session_user="APP1",
+            current_schema="APP1", alias="checkout", workspace_id=10, app_id=101,
+            parsing_schema="SCHEMA_A", ownership_mode="shared", binding_digest="a" * 64,
+        )
+        target2 = Target(
+            project="other-proj", role="developer", environment="development", connection="conn2",
+            instance_id="INST", db_name="DB2", service="svc2", session_user="APP2",
+            current_schema="APP2", alias="other-alias", workspace_id=10, app_id=101,
+            parsing_schema="SCHEMA_B", ownership_mode="single", binding_digest="b" * 64,
+        )
+        self.assertEqual(target1.physical_key, target2.physical_key)
+
+        target_diff_inst = Target(**{**target1.__dict__, "instance_id": "OTHER_INST"})
+        self.assertNotEqual(target1.physical_key, target_diff_inst.physical_key)
+        target_diff_ws = Target(**{**target1.__dict__, "workspace_id": 99})
+        self.assertNotEqual(target1.physical_key, target_diff_ws.physical_key)
+        target_diff_app = Target(**{**target1.__dict__, "app_id": 999})
+        self.assertNotEqual(target1.physical_key, target_diff_app.physical_key)
+
+    def test_two_apps_with_same_parsing_schema_have_distinct_physical_keys(self):
+        target_hr = Target(
+            project="team", role="integration", environment="staging", connection="conn",
+            instance_id="INST", db_name="DB", service="svc", session_user="APP",
+            current_schema="APP", alias="hr", workspace_id=10, app_id=100,
+            parsing_schema="SHARED_SCHEMA", ownership_mode="shared", binding_digest="a" * 64,
+        )
+        target_payroll = Target(
+            project="team", role="integration", environment="staging", connection="conn",
+            instance_id="INST", db_name="DB", service="svc", session_user="APP",
+            current_schema="APP", alias="payroll", workspace_id=10, app_id=200,
+            parsing_schema="SHARED_SCHEMA", ownership_mode="shared", binding_digest="b" * 64,
+        )
+        self.assertNotEqual(target_hr.physical_key, target_payroll.physical_key)
+        self.assertNotEqual(target_hr.state_key, target_payroll.state_key)
+
+    def test_non_apex_profiles_cannot_bind_an_alias(self):
+        config = self._config()
+        for profile_name in ("TABLES", "CODE", "METADATA", "VERIFY"):
+            with self.subTest(profile=profile_name):
+                with self.assertRaisesRegex(ConfigError, f"{profile_name} targets cannot bind an application alias"):
+                    profile_target(config, profile_name, alias="employee")
 
 
 if __name__ == "__main__":
