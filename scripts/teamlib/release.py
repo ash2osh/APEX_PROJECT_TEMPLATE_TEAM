@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from collections.abc import Callable
 
 from .app_checks import AppCheckBundle, AppCheckError, build_app_check_bundle
-from .migration_bundle import BundleError, Migration, load_bundles
+from .migration_bundle import BundleError, Migration, _validate_id, load_bundles
 from .migration_plan import plan_migrations
 from .trees import tree_digest
 
@@ -41,6 +41,9 @@ class Manifest:
     toolchain: Mapping[str, Any] = field(default_factory=dict)
     app_checks_digest: str | None = None
     staging_dir: Path | None = None
+    kind: str = "schema"
+    alias: str | None = None
+    required_migrations: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,13 +85,17 @@ class ApplyReport:
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
-_MANIFEST_KEYS = {
+_MANIFEST_KEYS_V1 = {
     "format_version", "version", "source_commit", "source_tree", "toolchain",
     "migrations", "app_tree_digests", "master_contract_digest",
     "app_checks_digest", "payload_paths", "payload",
 }
+_MANIFEST_KEYS_V2 = _MANIFEST_KEYS_V1 | {
+    "kind", "alias", "required_migrations",
+}
 _TOOLCHAIN_KEYS = {"python", "archive_format", "normalizer"}
 _PAYLOAD_RECORD_KEYS = {"path", "length", "sha256"}
+_REQUIRED_MIGRATION_RECORD_KEYS = {"id", "checksum"}
 
 
 def validate_release_identity(ref: str, version: str, source_commit: str, records: Mapping[str, Any]) -> None:
@@ -197,6 +204,46 @@ def _ustar_split(name: str) -> tuple[str, str]:
     raise ReleaseError(f"release path cannot be represented in deterministic ustar: {name} ({len(encoded)} bytes)")
 
 
+def _load_app_release_declaration(
+    source_files: Mapping[str, bytes],
+    alias: str,
+    loaded_bundles: Mapping[str, Migration],
+) -> tuple[dict[str, str], ...]:
+    context_path = f"app_context/{alias}/release.json"
+    raw = source_files.get(context_path)
+    if raw is None:
+        raise ReleaseError(f"missing application release declaration: {context_path}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError(f"application release declaration is unreadable: {context_path}") from exc
+    if not isinstance(data, Mapping):
+        raise ReleaseError(f"application release declaration must be a JSON object: {context_path}")
+    if set(data) != {"version", "requires"}:
+        raise ReleaseError(f"application release declaration keys are not closed: {context_path}")
+    if type(data["version"]) is not int or data["version"] != 1:
+        raise ReleaseError(f"unsupported application release declaration version: {context_path}")
+    requires = data["requires"]
+    if not isinstance(requires, list):
+        raise ReleaseError(f"application release declaration requires must be a list: {context_path}")
+    seen: set[str] = set()
+    result: list[dict[str, str]] = []
+    for item in requires:
+        if not isinstance(item, str):
+            raise ReleaseError(f"non-canonical requirement ID: {item}")
+        try:
+            _validate_id(item)
+        except BundleError as exc:
+            raise ReleaseError(f"non-canonical requirement ID: {item}") from exc
+        if item in seen:
+            raise ReleaseError(f"duplicate requirement in {context_path}: {item}")
+        seen.add(item)
+        if item not in loaded_bundles:
+            raise ReleaseError(f"required migration not found in commit: {item}")
+        result.append({"id": item, "checksum": loaded_bundles[item].checksum})
+    return tuple(result)
+
+
 def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_digest: str, staging_dir: Path | None = None) -> Manifest:
     return Manifest(
         format_version=int(data["format_version"]),
@@ -212,10 +259,31 @@ def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_dig
         toolchain=data.get("toolchain", {}),
         app_checks_digest=data.get("app_checks_digest"),
         staging_dir=staging_dir,
+        kind=str(data.get("kind", "schema")),
+        alias=data.get("alias"),
+        required_migrations=tuple(data.get("required_migrations", ())),
     )
 
 
-def build_release(repo: str | Path, ref: str, version: str, out: str | Path) -> Manifest:
+def build_release(
+    repo: str | Path,
+    ref: str,
+    version: str,
+    out: str | Path,
+    *,
+    kind: str | None = None,
+    alias: str | None = None,
+) -> Manifest:
+    if kind is None:
+        raise ReleaseError("release kind must be specified: 'schema' or 'app'")
+    if kind not in ("schema", "app"):
+        raise ReleaseError(f"unsupported release kind: {kind}")
+    if kind == "schema" and alias is not None:
+        raise ReleaseError("schema release cannot specify an application alias")
+    if kind == "app":
+        if not alias or not isinstance(alias, str) or "/" in alias:
+            raise ReleaseError("app release requires an application alias")
+
     repo_path = Path(repo)
     if not repo_path.is_dir() or repo_path.is_symlink():
         raise ReleaseError("release repository is not a real directory")
@@ -233,20 +301,86 @@ def build_release(repo: str | Path, ref: str, version: str, out: str | Path) -> 
     if output.exists() and any(output.iterdir()):
         raise ReleaseError(f"release output directory must be new: {output}")
     source_files = _git_files(repo_path, commit)
+
+    loaded_bundles: dict[str, Migration] = {}
+    migrations_in_commit = {
+        path[len("migrations/"):]: data
+        for path, data in source_files.items()
+        if path.startswith("migrations/") and path.endswith((".sql", ".verify.sql")) and not path.startswith("migrations/operations/")
+    }
+    if migrations_in_commit:
+        with tempfile.TemporaryDirectory(prefix="team-release-bundles-") as tmp_bundles:
+            tmp_root = Path(tmp_bundles)
+            for rel_path, data in migrations_in_commit.items():
+                dest = tmp_root / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+            try:
+                loaded_bundles = dict(load_bundles(tmp_root))
+            except BundleError as exc:
+                raise ReleaseError(str(exc)) from exc
+
     payload: dict[str, bytes] = {}
-    for path, data in source_files.items():
-        if not _allowed(path):
-            continue
-        if path.startswith("apps/") and ("/deployments/" in f"/{path}" or path.endswith("default.json")):
-            continue
-        payload[_payload_path(path)] = data
-    if not payload:
-        raise ReleaseError("release has no allowlisted payload")
+    required_migrations: tuple[dict[str, str], ...] = ()
+    migrations: tuple[dict[str, Any], ...] = ()
+    app_digests: dict[str, str] = {}
+
+    if kind == "schema":
+        for path, data in source_files.items():
+            if path.startswith(("apps/", "ci/app-checks/", "app_context/")):
+                continue
+            if path == "targets/masters.json":
+                continue
+            if "/deployments/" in f"/{path}" or path.endswith("/deployments") or path.endswith("default.json"):
+                continue
+            if not _allowed(path):
+                continue
+            payload[_payload_path(path)] = data
+        if not any(p.startswith("release/migrations/") for p in payload):
+            raise ReleaseError("schema release has no migrations")
+        migrations = _migration_manifest(loaded_bundles)
+
+    elif kind == "app":
+        assert alias is not None
+        required_migrations = _load_app_release_declaration(source_files, alias, loaded_bundles)
+        app_prefix = f"apps/{alias}/"
+        check_prefix = f"ci/app-checks/{alias}"
+        context_file = f"app_context/{alias}/release.json"
+        has_app = False
+        for path, data in source_files.items():
+            if path.startswith("migrations/"):
+                continue
+            if path.startswith("apps/"):
+                if not path.startswith(app_prefix):
+                    continue
+                if path.endswith("/.gitkeep") or "/deployments/" in f"/{path}" or path.endswith("/deployments") or path.endswith("default.json"):
+                    continue
+                has_app = True
+                payload[_payload_path(path)] = data
+                continue
+            if path.startswith("ci/app-checks/"):
+                if path == f"{check_prefix}.json" or path.startswith(f"{check_prefix}/"):
+                    payload[_payload_path(path)] = data
+                continue
+            if path == context_file:
+                payload[_payload_path(path)] = data
+                continue
+            if path == "targets/masters.json":
+                payload[_payload_path(path)] = data
+                continue
+        if not has_app:
+            raise ReleaseError(f"application {alias} not found in commit")
+
+        app_tree = {
+            path[len(f"release/apps/{alias}/"):]: data
+            for path, data in payload.items()
+            if path.startswith(f"release/apps/{alias}/")
+        }
+        app_digests = {alias: tree_digest(app_tree)}
+
     for path in payload:
         _ustar_split(path)
-    # Do all path representability checks before creating the output directory
-    # or opening the archive. A rejected long path therefore cannot leave a
-    # misleading partial artifact behind.
+
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="team-release-stage-") as stage_name:
         stage = Path(stage_name)
@@ -254,40 +388,33 @@ def build_release(repo: str | Path, ref: str, version: str, out: str | Path) -> 
             destination = stage / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
-        migrations_data = {path[len("release/"):]: data for path, data in payload.items() if path.startswith("release/migrations/")}
-        migrations: tuple[dict[str, Any], ...] = ()
-        if migrations_data:
-            migration_root = stage / "migration-input"
-            for relative, data in migrations_data.items():
-                destination = migration_root / relative[len("migrations/"):]
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(data)
-            try:
-                loaded = load_bundles(migration_root)
-            except BundleError as exc:
-                raise ReleaseError(str(exc)) from exc
-            migrations = _migration_manifest(loaded)
-        app_groups: dict[str, dict[str, bytes]] = {}
-        for path, data in payload.items():
-            if path.startswith("release/apps/"):
-                parts = path.split("/", 3)
-                if len(parts) == 4:
-                    app_groups.setdefault(parts[2], {})[parts[3]] = data
-        app_digests = {alias: tree_digest(tree) for alias, tree in sorted(app_groups.items())}
-        payload_records = tuple({"path": path, "length": len(data), "sha256": hashlib.sha256(data).hexdigest()} for path, data in sorted(payload.items()))
+
+        payload_records = tuple(
+            {"path": path, "length": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for path, data in sorted(payload.items())
+        )
         source_tree_digest = hashlib.sha256(_canonical(payload_records)).hexdigest()
         master_contract_digest = None
         if "release/contracts/masters.json" in payload:
             master_contract_digest = hashlib.sha256(payload["release/contracts/masters.json"]).hexdigest()
         app_check_records = [record for record in payload_records if record["path"].startswith("release/checks/apps/")]
         app_checks_digest = hashlib.sha256(_canonical(app_check_records)).hexdigest() if app_check_records else None
+
         manifest_data = {
-            "format_version": 1, "version": version, "source_commit": commit, "source_tree": source_tree_digest,
+            "format_version": 2,
+            "kind": kind,
+            "alias": alias,
+            "version": version,
+            "source_commit": commit,
+            "source_tree": source_tree_digest,
             "toolchain": {"python": "3.10+", "archive_format": "ustar", "normalizer": "team-v1"},
-            "migrations": list(migrations), "app_tree_digests": app_digests,
+            "migrations": list(migrations),
+            "required_migrations": [dict(r) for r in required_migrations],
+            "app_tree_digests": app_digests,
             "master_contract_digest": master_contract_digest,
             "app_checks_digest": app_checks_digest,
-            "payload_paths": list(sorted(payload)), "payload": list(payload_records),
+            "payload_paths": list(sorted(payload)),
+            "payload": list(payload_records),
         }
         manifest_bytes = json.dumps(manifest_data, sort_keys=True, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
         (stage / "release" / "MANIFEST.json").write_bytes(manifest_bytes)
@@ -351,8 +478,14 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         raise ReleaseError("release manifest is unreadable") from exc
     if not isinstance(data, Mapping):
         raise ReleaseError("release manifest must be a JSON object")
-    missing_keys = sorted(_MANIFEST_KEYS - set(data))
-    unknown_keys = sorted(set(data) - _MANIFEST_KEYS)
+
+    format_version = data.get("format_version")
+    if type(format_version) is not int or format_version not in (1, 2):
+        raise ReleaseError("release manifest format version is unsupported")
+
+    allowed_keys = _MANIFEST_KEYS_V2 if format_version == 2 else _MANIFEST_KEYS_V1
+    missing_keys = sorted(allowed_keys - set(data))
+    unknown_keys = sorted(set(data) - allowed_keys)
     if missing_keys or unknown_keys:
         detail = []
         if missing_keys:
@@ -360,8 +493,7 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         if unknown_keys:
             detail.append("unknown=" + ",".join(unknown_keys))
         raise ReleaseError("release manifest keys are not closed: " + "; ".join(detail))
-    if type(data["format_version"]) is not int or data["format_version"] != 1:
-        raise ReleaseError("release manifest format version is unsupported")
+
     if not isinstance(data["version"], str) or not _SEMVER_RE.fullmatch(data["version"]):
         raise ReleaseError("release manifest version is malformed")
     if not isinstance(data["source_commit"], str) or not _COMMIT_RE.fullmatch(data["source_commit"]):
@@ -375,14 +507,81 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         or any(not isinstance(value, str) or not value.strip() for value in toolchain.values())
     ):
         raise ReleaseError("release manifest toolchain is malformed")
+
+    for p in members:
+        if "/deployments/" in f"/{p}" or p.endswith("/deployments") or p.endswith("default.json"):
+            raise ReleaseError(f"rejected path in release archive: {p}")
+
+    kind = data.get("kind", "schema")
+    if format_version == 2:
+        if kind not in ("schema", "app"):
+            raise ReleaseError("release manifest kind is invalid")
+        if kind == "schema":
+            if data["alias"] is not None:
+                raise ReleaseError("schema release manifest alias must be null")
+            if data["required_migrations"] != []:
+                raise ReleaseError("schema release manifest cannot declare required migrations")
+            if data["app_tree_digests"] != {}:
+                raise ReleaseError("schema release manifest cannot contain app trees")
+            if data["app_checks_digest"] is not None:
+                raise ReleaseError("schema release manifest cannot contain app checks")
+            for p in members:
+                if p.startswith(("release/apps/", "release/checks/apps/", "release/app_context/")):
+                    raise ReleaseError(f"cross-kind member in schema archive: {p}")
+        elif kind == "app":
+            alias = data["alias"]
+            if not isinstance(alias, str) or not alias or "/" in alias:
+                raise ReleaseError("app release manifest alias is invalid")
+            if data["migrations"] != []:
+                raise ReleaseError("app release manifest cannot contain migration metadata")
+            req_migs = data["required_migrations"]
+            if not isinstance(req_migs, list):
+                raise ReleaseError("app release manifest required_migrations must be a list")
+            seen_reqs: set[str] = set()
+            for req in req_migs:
+                if not isinstance(req, Mapping) or set(req) != _REQUIRED_MIGRATION_RECORD_KEYS:
+                    raise ReleaseError("invalid required migration record shape")
+                req_id = req.get("id")
+                req_cs = req.get("checksum")
+                if not isinstance(req_id, str) or not isinstance(req_cs, str) or len(req_cs) != 64:
+                    raise ReleaseError("invalid required migration record values")
+                try:
+                    _validate_id(req_id)
+                except BundleError as exc:
+                    raise ReleaseError(f"invalid required migration ID: {req_id}") from exc
+                if req_id in seen_reqs:
+                    raise ReleaseError(f"duplicate required migration: {req_id}")
+                seen_reqs.add(req_id)
+            if set(data["app_tree_digests"].keys()) != {alias}:
+                raise ReleaseError("app release manifest must contain exactly its selected app tree digest")
+            app_prefix = f"release/apps/{alias}/"
+            check_prefix = f"release/checks/apps/{alias}"
+            context_file = f"release/app_context/{alias}/release.json"
+            for p in members:
+                if p == "release/MANIFEST.json":
+                    continue
+                if p.startswith("release/migrations/"):
+                    raise ReleaseError(f"cross-kind member in app archive: {p}")
+                if p.startswith("release/apps/"):
+                    if not p.startswith(app_prefix):
+                        raise ReleaseError(f"cross-kind member in app archive: {p}")
+                elif p.startswith("release/checks/apps/"):
+                    if p != f"{check_prefix}.json" and not p.startswith(f"{check_prefix}/"):
+                        raise ReleaseError(f"cross-kind check in app archive: {p}")
+                elif p.startswith("release/app_context/"):
+                    if p != context_file:
+                        raise ReleaseError(f"cross-kind context in app archive: {p}")
+                elif p != "release/contracts/masters.json":
+                    pass
+
     app_tree_digests = data["app_tree_digests"]
     if not isinstance(app_tree_digests, Mapping):
         raise ReleaseError("release manifest application tree digests are malformed")
-    for alias, digest in app_tree_digests.items():
+    for alias_key, digest in app_tree_digests.items():
         if (
-            not isinstance(alias, str)
-            or not alias
-            or "/" in alias
+            not isinstance(alias_key, str)
+            or not alias_key
+            or "/" in alias_key
             or not isinstance(digest, str)
             or not _DIGEST_RE.fullmatch(digest)
         ):
@@ -458,6 +657,7 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
     actual_checks = hashlib.sha256(_canonical(check_records)).hexdigest() if check_records else None
     if data["app_checks_digest"] != actual_checks:
         raise ReleaseError("release manifest app-check digest does not match payload")
+
     with tempfile.TemporaryDirectory(prefix="team-release-verify-") as directory:
         migration_root = Path(directory)
         for path, member_bytes in members.items():
@@ -473,6 +673,8 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
             raise ReleaseError(f"release manifest migration metadata is invalid: {exc}") from exc
     if tuple(migrations) != derived_migrations:
         raise ReleaseError("release manifest migration metadata does not match payload")
+    if kind == "schema" and not derived_migrations:
+        raise ReleaseError("schema release has no migrations")
     manifest = _manifest_from_data(data, archive, archive_digest)
     _release_app_trees_from_members(manifest, members)
     return manifest
@@ -739,6 +941,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build-release")
     build.add_argument("--repo", default=".")
+    build.add_argument("--kind", required=True, choices=["schema", "app"])
+    build.add_argument("--alias", default=None)
     build.add_argument("--ref", required=True)
     build.add_argument("--version", required=True)
     build.add_argument("--out", required=True)
@@ -757,7 +961,11 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--env", default=None)
     args = parser.parse_args(list(argv or []))
     if args.command == "build-release":
-        result = build_release(args.repo, args.ref, args.version, args.out)
+        if args.kind == "app" and not args.alias:
+            parser.error("--alias is required when --kind is app")
+        if args.kind == "schema" and args.alias:
+            parser.error("--alias cannot be specified when --kind is schema")
+        result = build_release(args.repo, args.ref, args.version, args.out, kind=args.kind, alias=args.alias)
         print(result.archive_digest)
     elif args.command == "verify-release":
         print(verify_release(args.archive).archive_digest)

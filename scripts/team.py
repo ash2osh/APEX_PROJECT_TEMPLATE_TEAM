@@ -149,6 +149,10 @@ COMMAND_DETAILS = {
         "Provides read-only diagnosis of the selected persistent target from one exact Git source."
     ),
     "sign-test-evidence": "Required argument: --archive RELEASE_TAR.",
+    "build-release": (
+        "Required arguments: --kind schema|app, --ref REF, --version SEMVER, --out DIR "
+        "(and --alias for app releases)."
+    ),
 }
 
 _HELP_CATEGORIES = (

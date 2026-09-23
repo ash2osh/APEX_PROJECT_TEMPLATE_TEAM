@@ -33,6 +33,12 @@ class ReleaseTests(unittest.TestCase):
         (self.repo / "apps" / "checkout" / ".apex").mkdir(parents=True)
         (self.repo / "apps" / "checkout" / "application.apx").write_bytes(b"app\n")
         (self.repo / "apps" / "checkout" / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
+        (self.repo / "apps" / "hr" / ".apex").mkdir(parents=True)
+        (self.repo / "apps" / "hr" / "application.apx").write_bytes(b"hr app\n")
+        (self.repo / "apps" / "hr" / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
+        (self.repo / "apps" / "payroll" / ".apex").mkdir(parents=True)
+        (self.repo / "apps" / "payroll" / "application.apx").write_bytes(b"payroll app\n")
+        (self.repo / "apps" / "payroll" / ".apex" / "apexlang.json").write_bytes(b'{"format":"APEXLANG"}\n')
         (self.repo / "apps" / ".gitkeep").write_bytes(b"")
         (self.repo / "migrations").mkdir()
         mid = "20260907T100000__alice__one"
@@ -40,6 +46,18 @@ class ReleaseTests(unittest.TestCase):
         (self.repo / "migrations" / f"{mid}.verify.sql").write_text("", encoding="utf-8")
         (self.repo / "targets").mkdir()
         (self.repo / "targets" / "masters.json").write_text('{"version":1,"masters":[]}\n', encoding="utf-8")
+        (self.repo / "app_context" / "checkout").mkdir(parents=True)
+        (self.repo / "app_context" / "checkout" / "release.json").write_text(
+            '{"version": 1, "requires": ["20260907T100000__alice__one"]}\n', encoding="utf-8"
+        )
+        (self.repo / "app_context" / "hr").mkdir(parents=True)
+        (self.repo / "app_context" / "hr" / "release.json").write_text(
+            '{"version": 1, "requires": ["20260907T100000__alice__one"]}\n', encoding="utf-8"
+        )
+        (self.repo / "app_context" / "payroll").mkdir(parents=True)
+        (self.repo / "app_context" / "payroll" / "release.json").write_text(
+            '{"version": 1, "requires": []}\n', encoding="utf-8"
+        )
         (self.repo / "ci" / "app-checks").mkdir(parents=True)
         declaration = {
             "version": 1,
@@ -80,6 +98,50 @@ class ReleaseTests(unittest.TestCase):
         (self.repo / "ci" / "app-checks" / "checkout" / "login.flow.json").write_text(
             "{}\n", encoding="utf-8"
         )
+        (self.repo / "ci" / "app-checks" / "hr").mkdir()
+        (self.repo / "ci" / "app-checks" / "hr" / "objects.verify.sql").write_text(
+            "SELECT 'TEAM_ASSERT|hr|PASS' AS status FROM dual;\n",
+            encoding="utf-8",
+        )
+        hr_decl = {
+            "version": 1,
+            "alias": "hr",
+            "page_ids": [1],
+            "checks": [
+                {
+                    "id": "hr_objects",
+                    "page_id": 1,
+                    "kind": "select",
+                    "verify_sql": "hr/objects.verify.sql",
+                    "expected_objects": ["HR"],
+                }
+            ],
+        }
+        (self.repo / "ci" / "app-checks" / "hr.json").write_text(
+            json.dumps(hr_decl, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        (self.repo / "ci" / "app-checks" / "payroll").mkdir()
+        (self.repo / "ci" / "app-checks" / "payroll" / "objects.verify.sql").write_text(
+            "SELECT 'TEAM_ASSERT|payroll|PASS' AS status FROM dual;\n",
+            encoding="utf-8",
+        )
+        payroll_decl = {
+            "version": 1,
+            "alias": "payroll",
+            "page_ids": [1],
+            "checks": [
+                {
+                    "id": "payroll_objects",
+                    "page_id": 1,
+                    "kind": "select",
+                    "verify_sql": "payroll/objects.verify.sql",
+                    "expected_objects": ["PAYROLL"],
+                }
+            ],
+        }
+        (self.repo / "ci" / "app-checks" / "payroll.json").write_text(
+            json.dumps(payroll_decl, sort_keys=True) + "\n", encoding="utf-8"
+        )
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "release seed"], check=True)
         self.commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
@@ -106,8 +168,8 @@ class ReleaseTests(unittest.TestCase):
         return destination
 
     def test_deterministic_build_and_complete_verify(self):
-        first = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out1")
-        second = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out2")
+        first = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out1", kind="app", alias="checkout")
+        second = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out2", kind="app", alias="checkout")
         self.assertEqual(first.archive_digest, second.archive_digest)
         verified = verify_release(first.archive_path)
         self.assertEqual(verified.source_commit, self.commit)
@@ -116,20 +178,17 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("release/checks/apps/checkout.json", first.payload_paths)
         self.assertTrue(first.toolchain)
         self.assertEqual(verified.app_tree_digests, first.app_tree_digests)
-        self.assertEqual(tuple(release_migration_files(first.archive_path)), (
-            "20260907T100000__alice__one.sql",
-            "20260907T100000__alice__one.verify.sql",
-        ))
+        self.assertEqual(tuple(release_migration_files(first.archive_path)), ())
 
     def test_release_exposes_the_verified_application_check_bundle(self):
         manifest = build_release(
-            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "check-bundle-out"
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "check-bundle-out", kind="app", alias="checkout"
         )
         bundle = release_app_check_bundle(manifest.archive_path)
         source_members = {
             path.relative_to(self.repo / "ci" / "app-checks").as_posix(): path.read_bytes()
             for path in (self.repo / "ci" / "app-checks").rglob("*")
-            if path.is_file()
+            if path.is_file() and (path.name.startswith("checkout") or "checkout/" in path.as_posix())
         }
 
         self.assertEqual(
@@ -143,7 +202,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_build_self_verifies_the_emitted_archive(self):
         with patch.object(release_module, "verify_release", wraps=release_module.verify_release) as verifier:
-            build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "self-verify-out")
+            build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "self-verify-out", kind="app", alias="checkout")
         self.assertEqual(verifier.call_count, 1)
 
     def test_release_preserves_authored_down_members_and_detects_tampering(self):
@@ -162,7 +221,7 @@ class ReleaseTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "reversible migration"], check=True)
         commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
-        manifest = build_release(self.repo, commit, "1.2.4", Path(self.temp.name) / "reversible-out")
+        manifest = build_release(self.repo, commit, "1.2.4", Path(self.temp.name) / "reversible-out", kind="schema")
         self.assertEqual(tuple(path for path in release_migration_files(manifest.archive_path) if path.startswith(migration_id)), (
             f"{migration_id}.sql", f"{migration_id}.verify.sql", f"{migration_id}.down.sql", f"{migration_id}.down.verify.sql",
         ))
@@ -179,11 +238,11 @@ class ReleaseTests(unittest.TestCase):
 
     def test_dirty_and_untracked_files_do_not_enter_artifact(self):
         (self.repo / "apps" / "checkout" / "evil.apx").write_text("untracked", encoding="utf-8")
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out", kind="app", alias="checkout")
         self.assertNotIn("evil.apx", manifest.payload_paths)
 
     def test_apps_placeholder_is_not_packaged_as_an_application(self):
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "placeholder-out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "placeholder-out", kind="app", alias="checkout")
         self.assertNotIn("release/apps/.gitkeep", manifest.payload_paths)
         self.assertEqual(tuple(release_app_trees(manifest.archive_path)), ("checkout",))
 
@@ -193,7 +252,7 @@ class ReleaseTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "bad"], check=True)
         bad = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
         with self.assertRaises(ReleaseError):
-            build_release(self.repo, bad, "1.2.3", Path(self.temp.name) / "bad-out")
+            build_release(self.repo, bad, "1.2.3", Path(self.temp.name) / "bad-out", kind="app", alias="checkout")
 
     def test_tag_identity_and_release_record_are_immutable(self):
         with self.assertRaises(ReleaseError):
@@ -212,23 +271,23 @@ class ReleaseTests(unittest.TestCase):
         commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
         out = Path(self.temp.name) / "long-out"
         with self.assertRaisesRegex(ReleaseError, "cannot be represented"):
-            build_release(self.repo, commit, "1.2.3", out)
+            build_release(self.repo, commit, "1.2.3", out, kind="app", alias="checkout")
         self.assertFalse(out.exists())
 
     def test_plan_release_uses_artifact_history(self):
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "out", kind="schema")
         plan = plan_release(manifest.archive_path, {}, {"role": "test", "environment": "test", "instance_id": "TEST"})
         self.assertEqual(plan.pending, ("20260907T100000__alice__one",))
 
     def test_plan_release_excludes_reverted_artifacts(self):
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "reverted-out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "reverted-out", kind="schema")
         migration_id = manifest.migrations[0]["id"]
         history = {migration_id: {"status": "REVERTED", "checksum": manifest.migrations[0]["checksum"], "sequence": 2}}
         plan = plan_release(manifest.archive_path, history, {"role": "test", "environment": "test", "instance_id": "TEST"})
         self.assertEqual(plan.pending, ())
 
     def test_plan_release_refuses_unresolved_and_foreign_history(self):
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "history-out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "history-out", kind="schema")
         target = {"role": "test", "environment": "test", "instance_id": "TEST"}
         unresolved = {"20260907T100000__alice__one": {"status": "UNKNOWN"}}
         with self.assertRaisesRegex(ReleaseError, "unresolved"):
@@ -238,7 +297,7 @@ class ReleaseTests(unittest.TestCase):
             plan_release(manifest.archive_path, foreign, target)
 
     def test_apply_release_executes_only_through_explicit_nonproduction_adapters(self):
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "apply-out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "apply-out", kind="schema")
         target = {"role": "test", "environment": "test", "instance_id": "TEST"}
         plan = plan_release(manifest.archive_path, {}, target)
         events = []
@@ -252,7 +311,6 @@ class ReleaseTests(unittest.TestCase):
         )
         self.assertEqual(report.status, "applied")
         self.assertEqual(events[0][0], "migrate")
-        self.assertEqual(events[1][0], "deploy")
 
     def test_malformed_manifest_payload_is_rejected(self):
         archive = Path(self.temp.name) / "malformed.tar"
@@ -266,14 +324,14 @@ class ReleaseTests(unittest.TestCase):
             verify_release(archive)
 
     def test_release_app_order_uses_one_stable_archive_read(self):
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "order-out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "order-out", kind="app", alias="checkout")
         original = release_module._read_archive_bytes
         with patch.object(release_module, "_read_archive_bytes", wraps=original) as reader:
             self.assertEqual(release_app_order(manifest.archive_path), ("checkout",))
             self.assertEqual(reader.call_count, 1)
 
     def test_manifest_contract_and_app_check_digests_are_verified(self):
-        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "digest-out")
+        manifest = build_release(self.repo, self.commit, "1.2.3", Path(self.temp.name) / "digest-out", kind="app", alias="checkout")
         tampered = Path(self.temp.name) / "digest-tampered.tar"
         with tarfile.open(manifest.archive_path, mode="r:") as source, tarfile.open(tampered, mode="w", format=tarfile.USTAR_FORMAT) as destination:
             for member in source.getmembers():
@@ -289,7 +347,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_verify_rejects_migration_manifest_not_derived_from_payload(self):
         manifest = build_release(
-            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "metadata-out"
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "metadata-out", kind="schema"
         )
         mutations = {
             "checksum": "0" * 64,
@@ -311,7 +369,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_verify_rejects_false_source_tree_and_application_tree_digest(self):
         manifest = build_release(
-            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "digest-out"
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "digest-out", kind="app", alias="checkout"
         )
         tampered_source = self.rewrite_manifest(
             manifest.archive_path,
@@ -330,7 +388,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_verify_requires_a_closed_manifest_shape_and_valid_source_commit(self):
         manifest = build_release(
-            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "shape-out"
+            self.repo, self.commit, "1.2.3", Path(self.temp.name) / "shape-out", kind="app", alias="checkout"
         )
         unknown = self.rewrite_manifest(
             manifest.archive_path,
@@ -353,6 +411,133 @@ class ReleaseTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ReleaseError, "source commit"):
             verify_release(bad_commit)
+
+
+    def test_schema_build_and_deterministic_verify(self):
+        first = build_release(self.repo, self.commit, "1.0.0", Path(self.temp.name) / "schema1", kind="schema")
+        second = build_release(self.repo, self.commit, "1.0.0", Path(self.temp.name) / "schema2", kind="schema")
+        self.assertEqual(first.archive_digest, second.archive_digest)
+        self.assertEqual(first.kind, "schema")
+        self.assertIsNone(first.alias)
+        self.assertEqual(first.required_migrations, ())
+        self.assertEqual(first.app_tree_digests, {})
+        self.assertTrue(any(p.startswith("release/migrations/") for p in first.payload_paths))
+        self.assertFalse(any(p.startswith("release/apps/") for p in first.payload_paths))
+        self.assertFalse(any(p.startswith("release/checks/apps/") for p in first.payload_paths))
+        self.assertFalse(any(p.startswith("release/app_context/") for p in first.payload_paths))
+        verified = verify_release(first.archive_path)
+        self.assertEqual(verified.kind, "schema")
+        self.assertIsNone(verified.alias)
+
+    def test_app_build_and_deterministic_verify(self):
+        first = build_release(self.repo, self.commit, "1.0.0", Path(self.temp.name) / "hr1", kind="app", alias="hr")
+        second = build_release(self.repo, self.commit, "1.0.0", Path(self.temp.name) / "hr2", kind="app", alias="hr")
+        self.assertEqual(first.archive_digest, second.archive_digest)
+        self.assertEqual(first.kind, "app")
+        self.assertEqual(first.alias, "hr")
+        self.assertEqual(set(first.app_tree_digests.keys()), {"hr"})
+        self.assertFalse(any(p.startswith("release/migrations/") for p in first.payload_paths))
+        self.assertFalse(any("payroll" in p for p in first.payload_paths))
+        self.assertFalse(any("checkout" in p for p in first.payload_paths))
+        self.assertTrue(any(p.startswith("release/apps/hr/") for p in first.payload_paths))
+        self.assertIn("release/checks/apps/hr.json", first.payload_paths)
+        self.assertIn("release/app_context/hr/release.json", first.payload_paths)
+        self.assertEqual(len(first.required_migrations), 1)
+        self.assertEqual(first.required_migrations[0]["id"], "20260907T100000__alice__one")
+        self.assertEqual(len(first.required_migrations[0]["checksum"]), 64)
+        verified = verify_release(first.archive_path)
+        self.assertEqual(verified.kind, "app")
+        self.assertEqual(verified.alias, "hr")
+        self.assertEqual(verified.required_migrations, first.required_migrations)
+
+    def test_empty_schema_release_refuses(self):
+        empty_repo = Path(self.temp.name) / "empty-repo"
+        empty_repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(empty_repo)], check=True)
+        subprocess.run(["git", "-C", str(empty_repo), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(empty_repo), "config", "user.name", "Test"], check=True)
+        (empty_repo / "apps" / "hr").mkdir(parents=True)
+        (empty_repo / "apps" / "hr" / "application.apx").write_bytes(b"hr")
+        (empty_repo / "apps" / "hr" / ".apex").mkdir()
+        (empty_repo / "apps" / "hr" / ".apex" / "apexlang.json").write_bytes(b"{}")
+        subprocess.run(["git", "-C", str(empty_repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(empty_repo), "commit", "-qm", "no migrations"], check=True)
+        commit = subprocess.check_output(["git", "-C", str(empty_repo), "rev-parse", "HEAD"], text=True).strip()
+        with self.assertRaisesRegex(ReleaseError, "no migrations"):
+            build_release(empty_repo, commit, "1.0.0", Path(self.temp.name) / "empty-out", kind="schema")
+
+    def test_app_build_fails_for_missing_release_json(self):
+        (self.repo / "apps" / "other" / ".apex").mkdir(parents=True)
+        (self.repo / "apps" / "other" / "application.apx").write_bytes(b"other")
+        (self.repo / "apps" / "other" / ".apex" / "apexlang.json").write_bytes(b"{}")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "app without release.json"], check=True)
+        commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        with self.assertRaisesRegex(ReleaseError, "release.json"):
+            build_release(self.repo, commit, "1.0.0", Path(self.temp.name) / "other-out", kind="app", alias="other")
+
+    def test_app_build_fails_for_absent_requirement_id(self):
+        (self.repo / "app_context" / "hr" / "release.json").write_text(
+            '{"version": 1, "requires": ["20260907T100000__alice__absent"]}\n', encoding="utf-8"
+        )
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "bad req"], check=True)
+        commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        with self.assertRaisesRegex(ReleaseError, "required migration not found"):
+            build_release(self.repo, commit, "1.0.0", Path(self.temp.name) / "bad-req-out", kind="app", alias="hr")
+
+    def test_app_build_fails_for_duplicate_requirement_id(self):
+        (self.repo / "app_context" / "hr" / "release.json").write_text(
+            '{"version": 1, "requires": ["20260907T100000__alice__one", "20260907T100000__alice__one"]}\n',
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "dup req"], check=True)
+        commit = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        with self.assertRaisesRegex(ReleaseError, "duplicate requirement"):
+            build_release(self.repo, commit, "1.0.0", Path(self.temp.name) / "dup-req-out", kind="app", alias="hr")
+
+    def test_app_build_succeeds_with_empty_requires(self):
+        manifest = build_release(
+            self.repo, self.commit, "1.0.0", Path(self.temp.name) / "payroll-out", kind="app", alias="payroll"
+        )
+        self.assertEqual(manifest.required_migrations, ())
+        self.assertEqual(manifest.alias, "payroll")
+
+    def test_build_release_without_kind_refuses(self):
+        with self.assertRaisesRegex(ReleaseError, "release kind must be specified"):
+            build_release(self.repo, self.commit, "1.0.0", Path(self.temp.name) / "no-kind-out")
+
+    def test_verify_release_rejects_cross_kind_members(self):
+        schema_manifest = build_release(
+            self.repo, self.commit, "1.0.0", Path(self.temp.name) / "cross-schema-out", kind="schema"
+        )
+        tampered_schema = Path(self.temp.name) / "tampered-schema.tar"
+        with tarfile.open(schema_manifest.archive_path, mode="r:") as source, tarfile.open(
+            tampered_schema, mode="w", format=tarfile.USTAR_FORMAT
+        ) as dest:
+            for member in source.getmembers():
+                dest.addfile(member, source.extractfile(member) if member.isfile() else None)
+            info = tarfile.TarInfo("release/apps/hr/application.apx")
+            info.size = 2
+            dest.addfile(info, io.BytesIO(b"hr"))
+        with self.assertRaisesRegex(ReleaseError, "cross-kind|payload"):
+            verify_release(tampered_schema)
+
+        app_manifest = build_release(
+            self.repo, self.commit, "1.0.0", Path(self.temp.name) / "cross-app-out", kind="app", alias="hr"
+        )
+        tampered_app = Path(self.temp.name) / "tampered-app.tar"
+        with tarfile.open(app_manifest.archive_path, mode="r:") as source, tarfile.open(
+            tampered_app, mode="w", format=tarfile.USTAR_FORMAT
+        ) as dest:
+            for member in source.getmembers():
+                dest.addfile(member, source.extractfile(member) if member.isfile() else None)
+            info = tarfile.TarInfo("release/migrations/20260907T100000__alice__one.sql")
+            info.size = 3
+            dest.addfile(info, io.BytesIO(b"sql"))
+        with self.assertRaisesRegex(ReleaseError, "cross-kind|payload"):
+            verify_release(tampered_app)
 
 
 if __name__ == "__main__":
