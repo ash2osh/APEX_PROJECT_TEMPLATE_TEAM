@@ -21,7 +21,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any
+from collections.abc import Mapping, Sequence
 import uuid
 
 
@@ -933,7 +934,7 @@ class SqlclFixtureAdapter:
     def delete_saved_connection(self, name: str) -> None:
         completed = subprocess.run(
             [self._sql_executable, "-S", "/nolog"],
-            input=f"connmgr delete -conn {name}\nexit\n".encode("utf-8"),
+            input=f"connmgr delete -conn {name}\nexit\n".encode(),
             capture_output=True,
             check=False,
             shell=False,
@@ -1094,7 +1095,7 @@ class RunManifest:
         spec: FixtureSpec,
         source_commit: str,
         expected_identity: Mapping[str, Any],
-    ) -> "RunManifest":
+    ) -> RunManifest:
         root = Path(run_root)
         if any(part in {".", ".."} for part in root.parts):
             raise E2EError("run root must not contain path traversal components")
@@ -1128,7 +1129,7 @@ class RunManifest:
         return manifest
 
     @classmethod
-    def load(cls, run_root: str | Path) -> "RunManifest":
+    def load(cls, run_root: str | Path) -> RunManifest:
         root = Path(run_root).resolve()
         if not root.is_dir() or root.is_symlink():
             raise E2EError("run root is not a real directory")
@@ -1885,7 +1886,7 @@ class SqlclGate:
     release_marker: Path
 
     @classmethod
-    def create(cls, run_root: str | Path, *, real_executable: str | Path | None = None) -> "SqlclGate":
+    def create(cls, run_root: str | Path, *, real_executable: str | Path | None = None) -> SqlclGate:
         root = Path(run_root).resolve()
         if not root.is_dir() or root.is_symlink():
             raise E2EError("SQLcl gate run root is not a real directory")

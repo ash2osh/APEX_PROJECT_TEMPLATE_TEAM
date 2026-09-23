@@ -181,6 +181,7 @@ class TargetContract:
     current_schema: str | None
     workspace_id: int | None
     app_ids: Mapping[str, int]
+    app_parsing_schemas: Mapping[str, str]
     recovery_owner: RecoveryOwner
     binding: Mapping[str, Any]
 
@@ -470,14 +471,14 @@ _TARGET_KEYS = {
     "session_user",
     "current_schema",
     "workspace_id",
-    "app_ids",
+    "apps",
     "recovery_owner",
     "binding",
 }
 _BINDING_KEYS = {
-    "connection", "sqlcl_connection", "profile", "schema", "instance_id",
+    "connection", "sqlcl_connection", "profile", "instance_id",
     "db_name", "service", "session_user", "current_schema", "workspace_id",
-    "app_id", "alias", "parsing_schema", "ownership_mode", "metadata_schema",
+    "app_id", "alias", "ownership_mode", "metadata_schema",
 }
 _SECRET_WORDS = re.compile(r"(?:password|passwd|secret|token|credential|wallet|private[_-]?key)", re.I)
 
@@ -519,11 +520,16 @@ def parse_target_contract(
     if not isinstance(data, dict):
         raise ConfigError("target contract must be a JSON object")
     _reject_secret_keys(data)
+    version = data.get("version")
+    if version == 1:
+        raise ConfigError(
+            "target contract version 1 uses a global app binding; convert app_ids to version-2 apps with id and parsing_schema"
+        )
+    if version != 2:
+        raise ConfigError("target contract version must be 2")
     unknown = sorted(set(data) - _TARGET_KEYS)
     if unknown:
         raise ConfigError(f"unsupported target contract fields: {', '.join(unknown)}")
-    if data.get("version") != 1:
-        raise ConfigError("target contract version must be 1")
 
     project = _contract_text(data, "project")
     role = _contract_text(data, "role")
@@ -576,18 +582,34 @@ def parse_target_contract(
     if not development_env_contract and workspace_id is None:
         raise ConfigError("workspace_id is required for non-development targets")
 
-    app_ids_raw = data.get("app_ids", {})
-    if not isinstance(app_ids_raw, dict):
-        raise ConfigError("app_ids must be an object")
+    apps_raw = data.get("apps", {})
+    if not isinstance(apps_raw, dict):
+        raise ConfigError("apps must be an object")
     app_ids: dict[str, int] = {}
-    for alias, value in app_ids_raw.items():
+    app_parsing_schemas: dict[str, str] = {}
+    for alias, spec in apps_raw.items():
         if not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias):
             raise ConfigError(f"invalid target application alias: {alias!r}")
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        if not isinstance(spec, dict):
+            raise ConfigError(f"apps entry for {alias} must be an object")
+        _reject_secret_keys(spec, f"apps.{alias}")
+        allowed_spec_keys = {"id", "parsing_schema"}
+        extra_keys = sorted(set(spec) - allowed_spec_keys)
+        if extra_keys:
+            raise ConfigError(f"unsupported apps fields for {alias}: {', '.join(extra_keys)}")
+        if "id" not in spec or "parsing_schema" not in spec:
+            raise ConfigError(f"apps entry for {alias} requires id and parsing_schema")
+        raw_id = spec["id"]
+        if not isinstance(raw_id, int) or isinstance(raw_id, bool) or raw_id <= 0:
             raise ConfigError(f"invalid application ID for target alias {alias}")
-        if value in app_ids.values():
-            raise ConfigError(f"duplicate target application ID: {value}")
-        app_ids[alias] = value
+        if raw_id in app_ids.values():
+            raise ConfigError(f"duplicate target application ID: {raw_id}")
+        schema = spec["parsing_schema"]
+        if not isinstance(schema, str):
+            raise ConfigError(f"invalid parsing schema for target alias {alias}")
+        _validate_oracle_identifier(f"apps.{alias}.parsing_schema", schema)
+        app_ids[alias] = raw_id
+        app_parsing_schemas[alias] = schema
     if not development_env_contract and not app_ids:
         raise ConfigError("non-development targets require at least one application ID")
 
@@ -627,13 +649,6 @@ def parse_target_contract(
     ):
         if key in binding and actual is not None and binding[key] != actual:
             raise ConfigError(f"target binding.{key} does not match the target identity")
-    if "schema" in binding:
-        schema = binding["schema"]
-        if not isinstance(schema, str):
-            raise ConfigError("target binding.schema must be an uppercase Oracle identifier")
-        _validate_oracle_identifier("binding.schema", schema)
-        if current_schema is not None and schema != current_schema:
-            raise ConfigError("target binding.schema does not match the target identity")
     if "app_id" in binding:
         alias = binding.get("alias")
         if not isinstance(alias, str) or alias not in app_ids or binding["app_id"] != app_ids[alias]:
@@ -641,7 +656,7 @@ def parse_target_contract(
     if "ownership_mode" in binding and binding["ownership_mode"] not in {"shared", "single"}:
         raise ConfigError("target binding ownership_mode must be shared or single")
     return TargetContract(
-        version=1,
+        version=2,
         project=project,
         role=role,
         environment=environment,
@@ -652,6 +667,7 @@ def parse_target_contract(
         current_schema=current_schema,
         workspace_id=workspace_id,
         app_ids=app_ids,
+        app_parsing_schemas=app_parsing_schemas,
         recovery_owner=RecoveryOwner(owner_role, tuple(members)),
         binding=binding,
     )
@@ -684,6 +700,7 @@ def contract_target(
     binding.setdefault("profile", contract.role.upper())
     binding.setdefault("alias", alias)
     binding.setdefault("app_id", contract.app_ids[alias])
+    binding["parsing_schema"] = contract.app_parsing_schemas[alias]
     return Target(
         project=contract.project,
         role=contract.role,
@@ -697,7 +714,7 @@ def contract_target(
         alias=alias,
         workspace_id=contract.workspace_id,
         app_id=contract.app_ids[alias],
-        parsing_schema=binding.get("parsing_schema"),
+        parsing_schema=contract.app_parsing_schemas[alias],
         ownership_mode=str(binding.get("ownership_mode", "shared")),
         binding_digest=_digest(binding),
     )

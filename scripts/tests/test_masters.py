@@ -63,7 +63,7 @@ class MasterTests(unittest.TestCase):
                 "    language: it\n"
                 "  }\n"
                 ")\n"
-            ).encode("utf-8"),
+            ).encode(),
             "shared-components/auth.apx": b"authentication opendoor-master { subscription { master: @/500/opendoor-master } }",
         }
         refs = parse_subscriptions(source)

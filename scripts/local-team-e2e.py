@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import sys
 
 from teamlib.local_team_e2e import main
 

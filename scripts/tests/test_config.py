@@ -19,6 +19,7 @@ from teamlib.config import (
     ConfigError,
     OFFLINE_COMMANDS,
     Target,
+    contract_target,
     is_offline_command,
     load_config,
     parse_app_bindings,
@@ -199,7 +200,7 @@ class TargetTests(unittest.TestCase):
 
     def test_target_contract_rejects_secret_and_wrong_role(self):
         contract = {
-            "version": 1,
+            "version": 2,
             "project": "team-template",
             "role": "integration",
             "environment": "staging",
@@ -209,7 +210,7 @@ class TargetTests(unittest.TestCase):
             "session_user": "DEMO",
             "current_schema": "APP",
             "workspace_id": 5402650006222933,
-            "app_ids": {"checkout": 201},
+            "apps": {"checkout": {"id": 201, "parsing_schema": "APP"}},
             "recovery_owner": {"role": "apex-recovery", "members": ["a", "b"]},
             "password": "oracle",
         }
@@ -218,7 +219,7 @@ class TargetTests(unittest.TestCase):
 
     def test_target_contract_requires_two_recovery_owner_members(self):
         contract = {
-            "version": 1,
+            "version": 2,
             "project": "team-template",
             "role": "integration",
             "environment": "staging",
@@ -228,7 +229,7 @@ class TargetTests(unittest.TestCase):
             "session_user": "DEMO",
             "current_schema": "APP",
             "workspace_id": 5402650006222933,
-            "app_ids": {"checkout": 201},
+            "apps": {"checkout": {"id": 201, "parsing_schema": "APP"}},
             "recovery_owner": {"role": "apex-recovery", "members": ["a"]},
         }
         with self.assertRaises(ConfigError):
@@ -236,7 +237,7 @@ class TargetTests(unittest.TestCase):
 
     def test_target_contract_accepts_credential_free_schema(self):
         contract = {
-            "version": 1,
+            "version": 2,
             "project": "team-template",
             "role": "integration",
             "environment": "staging",
@@ -246,15 +247,16 @@ class TargetTests(unittest.TestCase):
             "session_user": "DEMO",
             "current_schema": "APP",
             "workspace_id": 5402650006222933,
-            "app_ids": {"checkout": 201},
+            "apps": {"checkout": {"id": 201, "parsing_schema": "APP"}},
             "recovery_owner": {"role": "apex-recovery", "members": ["a", "b"]},
         }
         parsed = parse_target_contract(contract, expected_role="integration")
         self.assertEqual(parsed.app_ids, {"checkout": 201})
+        self.assertEqual(parsed.app_parsing_schemas, {"checkout": "APP"})
 
     def test_target_binding_cannot_override_identity_or_connection(self):
         contract = {
-            "version": 1,
+            "version": 2,
             "project": "team-template",
             "role": "integration",
             "environment": "staging",
@@ -264,7 +266,7 @@ class TargetTests(unittest.TestCase):
             "session_user": "DEMO",
             "current_schema": "APP",
             "workspace_id": 5402650006222933,
-            "app_ids": {"checkout": 201},
+            "apps": {"checkout": {"id": 201, "parsing_schema": "APP"}},
             "recovery_owner": {"role": "apex-recovery", "members": ["a", "b"]},
             "binding": {"connection": "test-apex", "instance_id": "OTHER"},
         }
@@ -273,7 +275,7 @@ class TargetTests(unittest.TestCase):
 
     def test_target_binding_schema_cannot_override_identity(self):
         contract = {
-            "version": 1,
+            "version": 2,
             "project": "team-template",
             "role": "integration",
             "environment": "staging",
@@ -283,7 +285,7 @@ class TargetTests(unittest.TestCase):
             "session_user": "DEMO",
             "current_schema": "APP",
             "workspace_id": 5402650006222933,
-            "app_ids": {"checkout": 201},
+            "apps": {"checkout": {"id": 201, "parsing_schema": "APP"}},
             "recovery_owner": {"role": "apex-recovery", "members": ["a", "b"]},
             "binding": {"schema": "OTHER"},
         }
@@ -293,7 +295,7 @@ class TargetTests(unittest.TestCase):
     def test_development_contract_leaves_binding_identity_in_env(self):
         parsed = parse_target_contract(
             {
-                "version": 1,
+                "version": 2,
                 "project": "team-template",
                 "role": "developer",
                 "environment": "development",
@@ -306,6 +308,7 @@ class TargetTests(unittest.TestCase):
         )
         self.assertIsNone(parsed.workspace_id)
         self.assertEqual(parsed.app_ids, {})
+        self.assertEqual(parsed.app_parsing_schemas, {})
 
     def test_production_target_contract_parses_with_production_role(self):
         parsed = parse_target_contract(
@@ -360,7 +363,7 @@ class RoleEnvironmentInvariantTests(unittest.TestCase):
 class TargetBindingTypeTests(unittest.TestCase):
     def _contract(self, connection):
         return {
-            "version": 1,
+            "version": 2,
             "project": "team",
             "role": "integration",
             "environment": "test",
@@ -370,7 +373,7 @@ class TargetBindingTypeTests(unittest.TestCase):
             "session_user": "APP",
             "current_schema": "APP",
             "workspace_id": 1,
-            "app_ids": {"checkout": 101},
+            "apps": {"checkout": {"id": 101, "parsing_schema": "APP"}},
             "recovery_owner": {"role": "owners", "members": ["a", "b"]},
             "binding": {"connection": connection},
         }
@@ -444,6 +447,104 @@ class SchemaSetDigestTests(unittest.TestCase):
         self.assertEqual(
             offenders, [], f"call teamlib.config.schema_set_digest instead: {offenders}"
         )
+
+
+class TargetContractV2Tests(unittest.TestCase):
+    def base_contract(self) -> dict:
+        return {
+            "version": 2,
+            "project": "team-template",
+            "role": "integration",
+            "environment": "staging",
+            "instance_id": "FREEPDB1",
+            "db_name": "FREEPDB1",
+            "service": "freep1",
+            "session_user": "DEMO",
+            "current_schema": "DEMO",
+            "workspace_id": 5402650006222933,
+            "apps": {
+                "hr": {"id": 100, "parsing_schema": "HR_CODE"},
+                "payroll": {"id": 200, "parsing_schema": "FIN_CODE"},
+            },
+            "recovery_owner": {"role": "apex-recovery", "members": ["a", "b"]},
+            "binding": {"connection": "docker-demo"},
+        }
+
+    def test_version_two_contract_parses_app_bindings_and_targets(self):
+        contract = self.base_contract()
+        parsed = parse_target_contract(contract, expected_role="integration")
+        self.assertEqual(parsed.version, 2)
+        self.assertEqual(parsed.app_ids, {"hr": 100, "payroll": 200})
+        self.assertEqual(parsed.app_parsing_schemas, {"hr": "HR_CODE", "payroll": "FIN_CODE"})
+        hr_target = contract_target(contract, "hr", expected_role="integration")
+        payroll_target = contract_target(contract, "payroll", expected_role="integration")
+        self.assertEqual(hr_target.parsing_schema, "HR_CODE")
+        self.assertEqual(payroll_target.parsing_schema, "FIN_CODE")
+        self.assertNotEqual(hr_target.state_key, payroll_target.state_key)
+
+    def test_version_two_same_parsing_schema(self):
+        contract = self.base_contract()
+        contract["apps"] = {
+            "hr": {"id": 100, "parsing_schema": "APP_CODE"},
+            "payroll": {"id": 200, "parsing_schema": "APP_CODE"},
+        }
+        parsed = parse_target_contract(contract, expected_role="integration")
+        self.assertEqual(parsed.app_parsing_schemas, {"hr": "APP_CODE", "payroll": "APP_CODE"})
+
+    def test_version_two_rejects_missing_or_invalid_schema(self):
+        for bad_app in (
+            {"id": 100},
+            {"id": 100, "parsing_schema": "bad_lowercase"},
+            {"id": 100, "parsing_schema": "123BAD"},
+            {"id": 100, "parsing_schema": ""},
+            {"id": True, "parsing_schema": "HR_CODE"},
+            {"id": 0, "parsing_schema": "HR_CODE"},
+            {"id": 100, "parsing_schema": "HR_CODE", "extra": "field"},
+        ):
+            with self.subTest(bad_app=bad_app):
+                contract = self.base_contract()
+                contract["apps"] = {"hr": bad_app}
+                with self.assertRaises(ConfigError):
+                    parse_target_contract(contract, expected_role="integration")
+
+    def test_version_two_rejects_duplicate_app_ids(self):
+        contract = self.base_contract()
+        contract["apps"] = {
+            "hr": {"id": 100, "parsing_schema": "HR_CODE"},
+            "payroll": {"id": 100, "parsing_schema": "FIN_CODE"},
+        }
+        with self.assertRaises(ConfigError):
+            parse_target_contract(contract, expected_role="integration")
+
+    def test_version_two_rejects_secret_bearing_keys(self):
+        contract = self.base_contract()
+        contract["apps"]["hr"]["password"] = "secret"
+        with self.assertRaises(ConfigError):
+            parse_target_contract(contract, expected_role="integration")
+
+    def test_version_one_contract_refusal_message(self):
+        contract = self.base_contract()
+        contract["version"] = 1
+        contract["app_ids"] = {"hr": 100}
+        del contract["apps"]
+        with self.assertRaisesRegex(ConfigError, "target contract version 1 uses a global app binding; convert app_ids to version-2 apps with id and parsing_schema"):
+            parse_target_contract(contract, expected_role="integration")
+
+    def test_version_two_rejects_global_app_ids_and_binding_parsing_schema(self):
+        contract = self.base_contract()
+        contract["app_ids"] = {"hr": 100}
+        with self.assertRaises(ConfigError):
+            parse_target_contract(contract, expected_role="integration")
+
+        contract2 = self.base_contract()
+        contract2["binding"]["parsing_schema"] = "HR_CODE"
+        with self.assertRaises(ConfigError):
+            parse_target_contract(contract2, expected_role="integration")
+
+        contract3 = self.base_contract()
+        contract3["binding"]["schema"] = "HR_CODE"
+        with self.assertRaises(ConfigError):
+            parse_target_contract(contract3, expected_role="integration")
 
 
 if __name__ == "__main__":

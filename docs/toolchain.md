@@ -45,3 +45,27 @@ Offline portability remains separate and does not claim Oracle acceptance:
 for script in scripts/*.sh; do bash -n "$script"; done
 PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -v
 ```
+
+## Target contracts (version 2)
+
+Target contracts (`targets/*.json`) use version 2 format with per-app parsing
+schema definitions:
+
+```json
+{
+  "version": 2,
+  "project": "example-team-apex",
+  "role": "integration",
+  "environment": "test",
+  "apps": {
+    "employee-self-service": {
+      "id": 101,
+      "parsing_schema": "EXAMPLE_APP"
+    }
+  }
+}
+```
+
+Version 1 contracts with a global `binding.parsing_schema` or flat `app_ids` mapping
+are rejected. To convert from version 1, update `"version": 2` and convert `app_ids`
+to `"apps": {"<alias>": {"id": <id>, "parsing_schema": "<SCHEMA>"}}`.
