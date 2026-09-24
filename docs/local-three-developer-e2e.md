@@ -1,6 +1,7 @@
 # Local three-developer E2E acceptance
 
-This runbook exercises Alice, Bob, and Carol in independent local Git clones
+This runbook exercises Alice, Bob, and Carol in three independent Git repositories
+(seeded from the same template commit, with no shared remote)
 against disposable shared APEX fixtures. It is deliberately bounded to the
 `docker-demo` database, the `docker-sys` administrative connection, HR app `9099`
 (`TEAM-E2E-9099`), reserved Payroll app `9100` (`PAYROLL-9100`), schema `TEAM_E2E_META`,
@@ -54,7 +55,7 @@ python3 scripts/local-team-e2e.py status \
 
 On PASS, the default lifecycle removes only the exact owned app `9099` (and
 reserved app `9100` if created), the run-owned `TEAM_E2E_META` controller
-schema, the generated saved connection, and run-owned clone/remote directories.
+schema, the generated saved connection, and the run-owned developer repositories.
 On FAIL or UNKNOWN, the fixture is retained; the run retains failure evidence
 for inspection. Inspect `status` and the report before deciding whether cleanup
 is safe. Cleanup requires the exact run ID printed by preflight:

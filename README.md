@@ -2,9 +2,12 @@
 
 This repository treats each APEX application as a shared physical Builder resource. The tracked source is `apps/<alias>/`; the database and Builder workspace are identified by validated target profiles, not by a Git branch.
 
+Every developer keeps a **separate Git repository** created from this template. There is no shared remote: the repositories never pull from each other. What the team shares is the development database, and that is where everyone's work meets.
+
 ## 1. What is shared
 
 - **Database and workspace:** The team shares a single development database instance and APEX workspace per environment.
+- **Not Git:** each developer's repository is their own. Colleagues' Builder changes reach your repository through `export-app`, and their migrations are recorded in the shared migration history, not in your `migrations/` folder.
 - **Application source:** APEX edits are tracked as APEXlang source under `apps/<alias>/`.
 - **Database schema stream:** Shared database objects live under `TABLES_SCHEMA` and `CODE_SCHEMA` and are evolved via migrations under `migrations/`.
 - **Parsing schemas:** Each application is bound to exactly one parsing schema in the format `alias:id:PARSING_SCHEMA`.
@@ -38,11 +41,9 @@ git status --short --untracked-files=all -- apps/hr/
 git add -- apps/hr/
 git diff --cached -- apps/hr/
 git commit -m "Capture reviewed HR Builder changes"
-git pull --rebase
-git push
 ```
 
-There is no import in the normal builder-first loop. The export reflects the team's observed application state.
+There is no import in the normal builder-first loop, and no pull or push: the commit stays in your own repository. The export reflects the team's observed application state, including colleagues' saved Builder changes, which is how their work reaches your repository.
 
 ## 4. File-first publish workflow
 
@@ -87,6 +88,8 @@ scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause --ack "
 Add one `--ack` for every registered checkout shown in the selected apps' pause notice.
 
 ## 5. Shared migrations and independent releases
+
+Releases are still built from a Git commit today. Until they are built from the shared development database ([design](docs/superpowers/specs/2026-09-24-dev-database-release-source-design.md)), build every release from one designated repository that holds all migration files; see [docs/promotion.md](docs/promotion.md).
 
 - **Shared schema release:** Migrations under `migrations/` apply once per environment to the shared TABLES/CODE schema:
   ```bash

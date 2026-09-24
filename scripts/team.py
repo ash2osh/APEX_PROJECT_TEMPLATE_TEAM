@@ -26,7 +26,7 @@ from teamlib.announce import draft_publish_all_clear
 from teamlib.app_checks import AppCheckError
 from teamlib.ci import CIError
 from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, contract_target, load_config, profile_target, schema_set_digest
-from teamlib.control_store import ControlStore, ControlStoreError, SqlControlStore
+from teamlib.control_store import ControlStoreError, SqlControlStore
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.drift import capture_live_inventory, drift_status, observed_frontier_drift
 from teamlib.fingerprints import InventoryError, diff_inventory, drift_is_clean, load_inventory
@@ -313,10 +313,6 @@ def _target(config: Any, alias: str) -> Target:
     if alias not in config.apps:
         raise ConfigError(f"unknown application alias: {alias}")
     return profile_target(config, "APEX", alias=alias)
-
-
-def _store(repo: Path) -> ControlStore:
-    return ControlStore(repo / ".sync-state")
 
 
 def _sql_control_store(repo: Path, metadata: Target) -> SqlControlStore:

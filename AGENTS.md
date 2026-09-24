@@ -1,6 +1,6 @@
 # Team APEX agent contract
 
-This repository is a shared-application workflow supporting APEX 26.1+ and APEXlang only. The logical application alias is stable across developers; `apps/<alias>/` is the tracked APEXlang source. The development workspace and application ID are shared by the team, so a Git branch does not isolate Builder state.
+This repository is a shared-application workflow supporting APEX 26.1+ and APEXlang only. The logical application alias is stable across developers; `apps/<alias>/` is the tracked APEXlang source. The development workspace and application ID are shared by the team, so a Git branch does not isolate Builder state. Each developer has a separate Git repository with no shared remote; the repositories meet only in the shared development database. Never pull, push or merge between developer repositories, and never assume a colleague's commits are present locally.
 
 ## Three Authoring Routes
 
@@ -10,7 +10,7 @@ This repository is a shared-application workflow supporting APEX 26.1+ and APEXl
    - Run `scripts/team.sh prepare-publish <alias> --ref HEAD` to generate an app-scoped pause notice and durable evidence.
    - Gather genuine teammate checkout acknowledgements (never invent fictitious acknowledgements or bypass gates).
    - Run `scripts/team.sh publish-app --prepared <id> --confirm-pause --ack <alias>:<uuid>`.
-3. **Schema migration route:** Author immutable pairs under `migrations/`; verify drift and apply only through the qualified METADATA profile. Merged migrations apply to shared TABLES/CODE schemas.
+3. **Schema migration route:** Author immutable pairs under `migrations/`; verify drift and apply only through the qualified METADATA profile. Applied migrations change the shared TABLES/CODE schemas for everyone; a colleague's applied migration appears in the shared history even though its files are not in this repository.
 
 ## Guards, Locks & Boundaries
 

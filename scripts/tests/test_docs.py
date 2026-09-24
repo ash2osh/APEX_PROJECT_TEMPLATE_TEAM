@@ -58,11 +58,18 @@ class DocumentationTests(unittest.TestCase):
             "git status --short --untracked-files=all",
             "git add -- apps/hr/",
             "git diff --cached",
-            "git pull --rebase",
-            "git push",
+            "separate Git repository",
         ):
             self.assertIn(token, readme)
         self.assertNotIn("git add -A", readme)
+        # One repository per developer: operator guidance never tells anyone
+        # to exchange commits with a colleague's repository.
+        agent_docs = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "AGENTS.md", *sorted((ROOT / ".agents").rglob("*.md")))
+        )
+        for shared_remote_step in ("git pull", "git push", "git fetch", "git merge"):
+            self.assertNotIn(shared_remote_step, operator_docs + agent_docs)
         self.assertIn("TEAM_ASSERT|", operator_docs)
         self.assertIn("exact Git commit", operator_docs)
         self.assertIn("verified archive bytes", operator_docs)

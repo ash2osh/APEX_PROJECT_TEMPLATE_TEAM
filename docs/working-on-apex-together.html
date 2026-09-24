@@ -650,6 +650,12 @@
         whichever branch you export to. Migrations are hand-written files, so
         those <em>do</em> stay on their branch.
       </p>
+      <p>
+        <strong>Your repository is yours alone.</strong> Each developer keeps a
+        separate Git repository with no shared remote, so there is nothing to
+        pull or push. Colleagues' work reaches you through the shared app
+        (export it) and the shared migration history.
+      </p>
     </div>
 
     <div class="code col">
@@ -660,9 +666,7 @@ git add -- migrations/&lt;migration-id&gt;.sql migrations/&lt;migration-id&gt;.v
 # If authored, stage the optional down pair explicitly too:
 git add -- migrations/&lt;migration-id&gt;.down.sql migrations/&lt;migration-id&gt;.down.verify.sql
 git diff --cached -- apps/&lt;alias&gt;/ migrations/
-git commit -m "Describe the shared Builder and schema change"
-git pull --rebase
-git push</pre>
+git commit -m "Describe the shared Builder and schema change"</pre>
     </div>
     <div class="note col">
       <div class="note-label">Review tracked and untracked files</div>

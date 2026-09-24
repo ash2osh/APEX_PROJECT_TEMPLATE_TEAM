@@ -1,5 +1,11 @@
 # Promotion and production handoff
 
+> **Planned change:** releases will be built from the shared development database instead of a
+> Git commit, because each developer keeps a separate repository
+> (`docs/superpowers/specs/2026-09-24-dev-database-release-source-design.md`). Until that ships,
+> build every release from **one designated repository** that holds all migration files: test and
+> production refuse a history entry that the archive does not carry.
+
 Promotion moves one immutable `release.tar`. Build it from a resolved Git
 commit and verify the archive bytes offline. Release tags are `schema/v<semver>`
 for shared migrations and `app/<alias>/v<semver>` for single application releases:
