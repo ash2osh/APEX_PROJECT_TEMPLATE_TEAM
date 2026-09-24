@@ -92,3 +92,11 @@ it is an owner-reviewed document, not a production apply switch.
 The production owner re-reads identity and history
 under the metadata mutex before any separately authorized action. Database undo
 does not roll back an APEX Builder import. Production writes remain refused.
+
+## Independent release sequence on shared schema
+
+When multiple applications (such as HR and Payroll) share a single database and TABLES/CODE schema stream:
+1. **Schema release applies once:** `schema/v1.0.0` migrates shared database tables and code. It deploys zero applications and forces no sibling app rebuilds.
+2. **Application releases deploy independently:** `app/hr/v2.0.0` verifies that its required migration IDs and checksums exist in target history before deploying. Payroll remains completely untouched at v1, and its deployment adapter is never called.
+3. **Master component dependencies are qualified without auto-deployment:** If HR declares a master theme or component dependency on Payroll in `targets/masters.json`, the deployment preflight resolves the master component against the target APEX dictionary views. If the master is absent or on the wrong target, HR deployment is refused. If present and qualified, HR deploys while Payroll remains unchanged. There is no automatic dependency deployment.
+4. **Independent evidence and handoff:** Test evidence and runbooks are generated and signed per release kind. If a protected runner or browser check is unavailable in the environment, it is recorded as `UNKNOWN`, never a fake `PASS`.

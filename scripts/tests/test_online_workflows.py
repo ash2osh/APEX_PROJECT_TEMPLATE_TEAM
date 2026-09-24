@@ -704,6 +704,83 @@ class OnlineWorkflowTests(unittest.TestCase):
                 flow_executable=str(self.flow_runner), dependencies=dependencies,
             )
 
+    def test_run_release_test_schema_then_app_release_exercises_only_selected_app_and_leaves_sibling_untouched(self):
+        events: list[str] = []
+        schema_manifest = Manifest(
+            2, "1.1.0", "a" * 40, "b" * 64,
+            ({"id": "m1", "checksum": "1" * 64},),
+            {},
+            (), self.root / "schema.tar", "d" * 64,
+            kind="schema", alias=None,
+        )
+        app_manifest = Manifest(
+            2, "2.0.0", "c" * 40, "e" * 64,
+            (),
+            {"employee": "f" * 64},
+            (), self.root / "app.tar", "g" * 64,
+            kind="app", alias="employee",
+            required_migrations=({"id": "m1", "checksum": "1" * 64},),
+        )
+        qualified_aliases: list[tuple[str, ...]] = []
+        dependencies, _ = self.release_dependencies(events, manifest=schema_manifest)
+        orig_qualify = dependencies.qualify_release
+
+        def tracking_qualify(repo, config, source_commit, aliases, **kwargs):
+            qualified_aliases.append(aliases)
+            if not aliases:
+                self.assertEqual(kwargs["check_bundle"].declarations, {})
+                return {"version": 2, "final_status": "PASS", "source_commit": source_commit}
+            return orig_qualify(repo, config, source_commit, aliases, **kwargs)
+
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+        two_app_config = config_for(role="test", environment="test", apps={"employee": 101, "payroll": 201})
+
+        # 1. Run release-test for schema release
+        schema_archive = self.root / "schema.tar"
+        schema_archive.write_bytes(b"schema archive")
+        schema_out = self.root / "schema-evidence.json"
+        schema_dependencies = OnlineDependencies(
+            **{
+                **dependencies.__dict__,
+                "verify_release": lambda _arch: schema_manifest,
+                "release_app_checks": lambda _arch: build_app_check_bundle({}, ()),
+                "qualify_release": tracking_qualify,
+            }
+        )
+        schema_result = run_release_test(
+            self.root, two_app_config, schema_archive, target, schema_out,
+            flow_executable=str(self.flow_runner), dependencies=schema_dependencies,
+        )
+        self.assertEqual(schema_result.status, "PASS")
+        self.assertEqual(qualified_aliases, [()])
+        schema_evidence = json.loads(schema_out.read_text(encoding="utf-8"))
+        self.assertEqual(schema_evidence["kind"], "schema")
+        self.assertIsNone(schema_evidence["alias"])
+
+        # 2. Run release-test for app release (employee only)
+        app_archive = self.root / "app.tar"
+        app_archive.write_bytes(b"app archive")
+        app_out = self.root / "app-evidence.json"
+        app_dependencies = OnlineDependencies(
+            **{
+                **dependencies.__dict__,
+                "verify_release": lambda _arch: app_manifest,
+                "qualify_release": tracking_qualify,
+            }
+        )
+        app_result = run_release_test(
+            self.root, two_app_config, app_archive, target, app_out,
+            flow_executable=str(self.flow_runner), dependencies=app_dependencies,
+        )
+        self.assertEqual(app_result.status, "PASS")
+        self.assertEqual(qualified_aliases, [(), ("employee",)])
+        app_evidence = json.loads(app_out.read_text(encoding="utf-8"))
+        self.assertEqual(app_evidence["kind"], "app")
+        self.assertEqual(app_evidence["alias"], "employee")
+        self.assertNotIn("payroll", app_evidence.get("apps", []))
+
 
 class PreflightCliTranslationTests(unittest.TestCase):
     ENV_TEMPLATE = """\
