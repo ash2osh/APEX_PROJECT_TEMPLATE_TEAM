@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-24
 
-**Status:** Proposed for owner review; no behavior in this document is implemented merely by writing it.
+**Status:** Decisions 1, 3, 4 accepted by the owner; decision 2 open. No behavior in this document is implemented merely by writing it.
 **Scope:** This repository. Supersedes the Git-commit release source in `teamlib/release.py::build_release`.
 
 ## Why
@@ -108,17 +108,27 @@ bytes; format 2 archives remain verifiable for already-signed handoffs.
 
 The build needs development database access, so it cannot run on a hosted GitHub runner.
 
-- **Proposed:** an operator runs `build-release` locally, the archive digest is recorded in
-  `TEAM_RELEASE`, and `run-release-test` + signing run on the protected test runner from any
-  developer repository via `workflow_dispatch` taking the archive and its recorded digest.
+- **Decided:** an operator runs `build-release` locally and the archive digest is recorded in
+  `TEAM_RELEASE`. `run-release-test`, `sign-test-evidence` and `gen-runbook` also run locally,
+  with the test profile and signing key on the operator's machine.
 - Tag-triggered `release.yml` is retired; tags stop being release identity.
 
-## Decisions for the owner
+## Owner decisions (2026-09-24)
 
-1. **Cut rule:** ship everything APPLIED at head (proposed), or require an explicit per-migration "release-ready" mark?
-2. **Assets:** store app checks/master contracts in METADATA (proposed), or read them from the builder's repository and record only digests?
-3. **Build/test host:** local build + dispatched test job (proposed), or a single self-hosted runner that does both with dev access?
-4. **Legacy path:** remove the Git-commit builder outright (proposed), or keep it behind `--from-git` for single-repository users?
+1. **Cut rule — decided: everything APPLIED at head ships.** No per-migration release mark.
+   Work in progress must be undone in shared dev before a cut.
+2. **Release assets — open.** Store app checks (`ci/app-checks/<alias>*`) and master
+   contracts (`targets/masters.json`) in METADATA, or read them from the builder's repository
+   and record only their digests.
+3. **Build/test host — decided: locally.** The operator builds the archive and runs
+   `run-release-test`, signing and `gen-runbook` locally; the tag-triggered `release.yml`
+   job is retired.
+4. **Legacy path — decided: remove.** The Git-commit builder, `release-record.json`, tag
+   identity and format-2 building are deleted. `verify-release` keeps reading format 2 only
+   so already-signed handoffs stay checkable.
+
+Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 binds the
+`source` block (`history_cut`, `history_digest`, app generation/tree digest) instead.
 
 ## Delivery phases
 
@@ -129,7 +139,7 @@ The build needs development database access, so it cannot run on a hosted GitHub
 | 2 | `TEAM_MIGRATION_MEMBER` + upload in `apply_plan` + backfill command | 1 |
 | 3 | `TEAM_RELEASE` ledger + schema release from the ledger (format 3) | 2 |
 | 4 | App release from paused capture + auto prerequisites + `TEAM_RELEASE_ASSET` | 3 |
-| 5 | Workflow rewiring (dispatch), retire tag trigger, promotion/CI docs | 4 |
+| 5 | Remove the Git-commit builder and `release.yml`; local release runbook; promotion/CI docs | 4 |
 | — | Publish acknowledgement redesign (checkout-issued acks) — independent, high priority | — |
 
 ## Risks
