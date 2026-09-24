@@ -9,12 +9,18 @@ SELECT 'TEAM_PRIV|SYSTEM|' || privilege
 SELECT 'TEAM_PRIV|ROLE|' || role
   FROM SESSION_ROLES
  ORDER BY role;
-SELECT 'TEAM_PRIV|OBJECT|' || privilege || '|' || NVL(type, 'UNKNOWN')
-  FROM ALL_TAB_PRIVS_RECD
- ORDER BY privilege, type;
-SELECT 'TEAM_PRIV|COLUMN|' || privilege
-  FROM ALL_COL_PRIVS_RECD
- ORDER BY privilege;
+-- Grantee and whether the object's owner is Oracle-maintained: grants Oracle
+-- itself makes to PUBLIC on its own objects (EXECUTE on DBMS_METADATA and
+-- friends) are present on every account and are what read-only work uses.
+SELECT 'TEAM_PRIV|OBJECT|' || p.privilege || '|' || NVL(p.type, 'UNKNOWN') || '|'
+       || p.grantee || '|' || NVL(u.oracle_maintained, 'N')
+  FROM ALL_TAB_PRIVS_RECD p
+  LEFT JOIN ALL_USERS u ON u.username = p.owner
+ ORDER BY p.privilege, p.type, p.grantee;
+SELECT 'TEAM_PRIV|COLUMN|' || p.privilege || '|' || p.grantee || '|' || NVL(u.oracle_maintained, 'N')
+  FROM ALL_COL_PRIVS_RECD p
+  LEFT JOIN ALL_USERS u ON u.username = p.owner
+ ORDER BY p.privilege, p.grantee;
 SELECT 'TEAM_PRIV|OWNED|' || object_type
   FROM USER_OBJECTS
  WHERE object_type <> 'SYNONYM'

@@ -5,10 +5,11 @@ happen. Designs live where noted; this file says what is left, who does it, and
 when it is done. Update it in the same commit that closes an item.
 
 Last updated: 2026-09-24. Offline implementation and verification for the open
-release, acknowledgement, and hardening items is present in the current
-`codex/pending-work-execution` worktree; it remains uncommitted pending the
-owner's normal review. The documented virtual-environment install now succeeds;
-the full suite passes 704 tests with one expected skip, and Ruff passes. Live
+release, acknowledgement, and hardening items is on branch
+`codex/pending-work-execution`, under review as a pull request. The review fixed
+the production privilege audit, which refused every real account because of
+Oracle's own grants to PUBLIC. The documented virtual-environment install
+succeeds; the full suite passes with one expected skip, and Ruff passes. Live
 database acceptance and GitHub-side actions remain separate gates and are not
 claimed here.
 
@@ -158,6 +159,12 @@ Spec §6, decision 4.
   holds. Once stored, METADATA can supply those files to format-3 replay.
 - Releases built from different developer repositories may qualify against
   different app checks (decision 2); digests make this visible, not impossible.
+- No transition path yet for a test or production target whose history came
+  from Git-built (format 2) releases: format-3 planning proves the target is an
+  exact prefix of the development ledger, and without replay markers it falls
+  back to local sequence numbers, which will not match. Such a target is refused
+  (fail-closed). If one exists, it needs a reviewed one-time baseline adoption
+  before its first format-3 release.
 
 ## Remaining order
 

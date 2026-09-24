@@ -21,6 +21,8 @@ class ProductionPrivilegeReport:
     roles: tuple[str, ...]
     object_privileges: tuple[str, ...]
     owned_objects: tuple[str, ...]
+    # Oracle's own grants to PUBLIC on Oracle-maintained objects: counted, not judged.
+    public_oracle_grants: int = 0
 
 
 # Use object-level SELECT/READ grants for the required dictionary and APEX
@@ -45,6 +47,7 @@ def parse_production_privileges(stdout: str) -> ProductionPrivilegeReport:
     roles: set[str] = set()
     objects: set[str] = set()
     owned_objects: set[str] = set()
+    public_oracle_grants = 0
     seen_system_marker = False
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
@@ -52,11 +55,23 @@ def parse_production_privileges(stdout: str) -> ProductionPrivilegeReport:
             continue
         fields = line.split("|")
         kind = fields[1] if len(fields) > 1 else ""
-        expected_fields = 4 if kind == "OBJECT" else 3
-        if len(fields) != expected_fields or not fields[2].strip():
+        # OBJECT/COLUMN rows may carry "grantee|oracle_maintained" at the end.
+        # A row without them is judged as a direct grant (fail-closed).
+        expected_fields = {"OBJECT": (4, 6), "COLUMN": (3, 5)}.get(kind, (3,))
+        if len(fields) not in expected_fields or not fields[2].strip():
             raise ProductionPrivilegeError("production privilege query returned a malformed record")
         _marker, kind, value = fields[:3]
         value = value.strip().upper()
+        if kind in {"OBJECT", "COLUMN"} and len(fields) == max(expected_fields):
+            grantee, maintained = fields[-2].strip().upper(), fields[-1].strip().upper()
+            if maintained not in {"Y", "N"} or not grantee:
+                raise ProductionPrivilegeError("production privilege query returned a malformed record")
+            if grantee == "PUBLIC" and maintained == "Y":
+                # Every Oracle account holds these (EXECUTE on DBMS_METADATA,
+                # DBMS_LOB, UTL_ENCODE, ...); production reads need them and the
+                # team cannot revoke them. They do not reach application data.
+                public_oracle_grants += 1
+                continue
         if kind == "SYSTEM":
             seen_system_marker = True
             systems.add(value)
@@ -108,7 +123,8 @@ def parse_production_privileges(stdout: str) -> ProductionPrivilegeReport:
             + ", ".join(sorted(owned_objects))
         )
     return ProductionPrivilegeReport(
-        tuple(sorted(systems)), tuple(sorted(roles)), tuple(sorted(objects)), tuple()
+        tuple(sorted(systems)), tuple(sorted(roles)), tuple(sorted(objects)), tuple(),
+        public_oracle_grants,
     )
 
 

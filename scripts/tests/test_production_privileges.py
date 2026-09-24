@@ -31,6 +31,43 @@ class ProductionPrivilegeParserTests(unittest.TestCase):
         self.assertEqual(report.object_privileges, ("READ", "SELECT"))
         self.assertEqual(report.owned_objects, ())
 
+    def test_oracle_public_grants_on_oracle_objects_are_the_baseline(self):
+        # Every real account receives these from PUBLIC; schema inventory reads
+        # need EXECUTE on DBMS_METADATA, DBMS_LOB and UTL_ENCODE.
+        report = parse_production_privileges(
+            "TEAM_PRIV|SYSTEM|CREATE SESSION\n"
+            "TEAM_PRIV|OBJECT|EXECUTE|PACKAGE|PUBLIC|Y\n"
+            "TEAM_PRIV|OBJECT|EXECUTE|PACKAGE|PUBLIC|Y\n"
+            "TEAM_PRIV|OBJECT|INSERT|TABLE|PUBLIC|Y\n"
+            "TEAM_PRIV|OBJECT|SELECT|VIEW|PUBLIC|Y\n"
+            "TEAM_PRIV|COLUMN|UPDATE|PUBLIC|Y\n"
+            "TEAM_PRIV|OBJECT|SELECT|VIEW|REPORTER|N\n"
+        )
+        self.assertEqual(report.public_oracle_grants, 5)
+        self.assertEqual(report.object_privileges, ("SELECT",))
+
+    def test_public_grants_on_application_objects_are_judged(self):
+        for row in (
+            "TEAM_PRIV|OBJECT|UPDATE|TABLE|PUBLIC|N",
+            "TEAM_PRIV|OBJECT|EXECUTE|PACKAGE|PUBLIC|N",
+            "TEAM_PRIV|COLUMN|INSERT|PUBLIC|N",
+        ):
+            with self.subTest(row=row), self.assertRaises(ProductionPrivilegeError):
+                parse_production_privileges(f"TEAM_PRIV|SYSTEM|CREATE SESSION\n{row}\n")
+
+    def test_direct_or_role_grants_on_oracle_objects_are_still_judged(self):
+        # Only PUBLIC's Oracle baseline is exempt; a grant made to this account
+        # or one of its roles is a deliberate choice and must be read-only.
+        with self.assertRaisesRegex(ProductionPrivilegeError, "EXECUTE"):
+            parse_production_privileges(
+                "TEAM_PRIV|SYSTEM|CREATE SESSION\nTEAM_PRIV|OBJECT|EXECUTE|PACKAGE|EXECUTE_CATALOG_ROLE|Y\n"
+            )
+
+    def test_malformed_grantee_columns_fail_closed(self):
+        for row in ("TEAM_PRIV|OBJECT|SELECT|VIEW|PUBLIC|maybe", "TEAM_PRIV|OBJECT|SELECT|VIEW||Y", "TEAM_PRIV|OBJECT|SELECT|VIEW|PUBLIC"):
+            with self.subTest(row=row), self.assertRaises(ProductionPrivilegeError):
+                parse_production_privileges(f"TEAM_PRIV|SYSTEM|CREATE SESSION\n{row}\n")
+
     def test_write_system_privilege_is_refused(self):
         with self.assertRaisesRegex(ProductionPrivilegeError, "CREATE ANY TABLE"):
             parse_production_privileges(
