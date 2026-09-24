@@ -678,18 +678,25 @@ def _online(args: argparse.Namespace) -> object:
             raise ConfigError(str(exc)) from exc
         metadata = profile_target(config, "METADATA")
         user = os.environ.get("USER", "release-builder")
+        checkout_uuid = os.environ.get("TEAM_CHECKOUT_UUID")
+        if args.kind == "app":
+            if args.alias not in config.apps:
+                raise ConfigError(f"unknown application alias: {args.alias}")
+            if not checkout_uuid:
+                raise ConfigError("app releases require TEAM_CHECKOUT_UUID for this registered checkout")
+        store = _sql_migration_store(repo, metadata)
+        store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
+        # Drift gate for both kinds: the live schema must match the frontier
+        # the ledger last accepted, or an app could depend on unrecorded DDL.
+        try:
+            actual, _actual_path = capture_live_inventory(repo, config)
+        except Exception as exc:
+            raise MigrationRunError(f"live drift inventory failed: {exc}") from exc
+        frontier = observed_frontier_drift(store, metadata, actual)
+        if frontier.get("status") != "clean":
+            _json({"status": "refused", "operation": command, "reason": "live schema does not match the accepted frontier", "observed_frontier": frontier})
+            return 3
         if args.kind == "schema":
-            store = _sql_migration_store(repo, metadata)
-            store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
-            # Drift gate: the live schema must match the frontier the ledger last accepted.
-            try:
-                actual, _actual_path = capture_live_inventory(repo, config)
-            except Exception as exc:
-                raise MigrationRunError(f"live drift inventory failed: {exc}") from exc
-            frontier = observed_frontier_drift(store, metadata, actual)
-            if frontier.get("status") != "clean":
-                _json({"status": "refused", "operation": command, "reason": "live schema does not match the accepted frontier", "observed_frontier": frontier})
-                return 3
             manifest = build_schema_release_from_database(
                 store, metadata, args.version, args.out,
                 built_by=user,
@@ -699,22 +706,16 @@ def _online(args: argparse.Namespace) -> object:
                 expected_frontier=str(frontier.get("digest")),
             )
         else:
-            if args.alias not in config.apps:
-                raise ConfigError(f"unknown application alias: {args.alias}")
-            checkout_uuid = os.environ.get("TEAM_CHECKOUT_UUID")
-            if not checkout_uuid:
-                raise ConfigError("app releases require TEAM_CHECKOUT_UUID for this registered checkout")
             app_target = profile_target(config, "APEX", alias=args.alias)
             app_store = _sql_control_store(repo, metadata)
-            migration_store = _sql_migration_store(repo, metadata)
-            migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
             manifest = build_app_release_from_database(
-                repo, app_target, metadata, app_store, migration_store,
+                repo, app_target, metadata, app_store, store,
                 args.alias, args.version, args.out,
                 sqlcl_build=sqlcl_build,
                 checkout_uuid=checkout_uuid,
                 built_by=user,
                 host=socket.gethostname(),
+                expected_frontier=str(frontier.get("digest")),
             )
         _json({
             "status": "success", "operation": command, "version": manifest.version,

@@ -151,7 +151,7 @@ Spec §6, decision 4.
 | SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | Configuration added; first external Dependabot PR not yet observed. |
 | Release builds need a byte-stable toolchain | exact SQLcl build for schema and app captures | Builders refuse other builds; live capture acceptance remains UNKNOWN. |
 | METADATA is now the release system of record | `docs/metadata-backup-restore.md` | Backup/restore guidance added; live restore exercise remains open under 1.1. |
-| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 724 tests passed with one expected skip, and Ruff passed in the venv. |
+| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 727 tests passed with one expected skip, and Ruff passed in the venv. |
 
 ## 5. Known limitations (tracked, not scheduled)
 

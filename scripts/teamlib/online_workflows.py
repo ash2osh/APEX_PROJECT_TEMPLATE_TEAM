@@ -26,7 +26,7 @@ from .migration_runtime import migration_profiles
 from .migration_store import MigrationStoreError, SqlMigrationStore
 from .qualification import qualify_target, write_report
 from .release import ApplyReport, Manifest, release_app_check_bundle, verify_release
-from .release_adapter import apply_verified_release_live
+from .release_adapter import ReleaseAdapterError, apply_verified_release_live, verify_required_migrations
 from .runtime import RuntimeReport, preflight_online
 from .source_snapshot import IntegrationSource, load_integration_source
 from .trees import tree_digest
@@ -61,9 +61,10 @@ class OnlineDependencies:
     apply_release_live: Callable[..., ApplyReport]
     qualify_release: Callable[..., Mapping[str, Any]]
     write_report: Callable[[Mapping[str, Any], Path], None]
-    # Holds each released app's mutex across qualification after proving the
-    # deployed bytes still equal the archive (alias -> tree digest).
-    hold_release_apps: Callable[[Path, Config, Mapping[str, str]], AbstractContextManager[None]]
+    # Holds the migration mutex (after rechecking the release's required
+    # migrations) and each released app's mutex (after proving the deployed
+    # bytes still equal the archive) across qualification.
+    hold_release_apps: Callable[..., AbstractContextManager[None]]
 
 
 @dataclass(frozen=True)
@@ -331,19 +332,33 @@ def _qualify_release(
 
 
 @contextmanager
-def _hold_release_apps(repo: Path, config: Config, expected: Mapping[str, str]) -> Iterator[None]:
-    """Keep other deployments out while a release's apps are qualified.
+def _hold_release_apps(
+    repo: Path,
+    config: Config,
+    expected: Mapping[str, str],
+    required: tuple[Mapping[str, str], ...] = (),
+) -> Iterator[None]:
+    """Keep deployments and migrations out while a release's apps are qualified.
 
-    deploy_app releases its mutex when the import is verified; another
-    run-release-test could deploy a different archive before the checks run.
+    deploy_app releases its mutex when the import is verified, and migrations
+    use a separate mutex: another run could deploy a different archive or undo
+    a required migration before the checks run.
     """
-    if not expected:
+    if not expected and not required:
         yield
         return
-    store = SqlControlStore(profile_target(config, "METADATA"), work_root=repo / "scratch" / "metadata")
+    metadata = profile_target(config, "METADATA")
+    store = SqlControlStore(metadata, work_root=repo / "scratch" / "metadata")
     token = uuid.uuid4().hex
+    migrations: SqlMigrationStore | None = None
+    migration_held = False
     held: list[Target] = []
     try:
+        if required:
+            migrations = SqlMigrationStore(metadata, work_root=repo / "scratch" / "metadata")
+            migrations.acquire(metadata, token, "release-test", socket.gethostname())
+            migration_held = True
+            verify_required_migrations(required, migrations.read_history(metadata))
         for alias in sorted(expected):
             target = profile_target(config, "APEX", alias=alias)
             store.acquire_app(target.physical_key, token, "release-test", socket.gethostname(), "release-test")
@@ -354,11 +369,13 @@ def _hold_release_apps(repo: Path, config: Config, expected: Mapping[str, str]) 
                     f"application {alias} no longer matches the release archive; another deployment ran, test again"
                 )
         yield
-    except (ApexError, ControlStoreError) as exc:
+    except (ApexError, ControlStoreError, MigrationStoreError, ReleaseAdapterError) as exc:
         raise OnlineWorkflowError(f"release application cannot be held for qualification: {exc}") from exc
     finally:
         for target in held:
             store.release_app(target.physical_key, token, confirmed_success=False)
+        if migrations is not None and migration_held:
+            migrations.release(metadata, token)
 
 
 def _default_dependencies() -> OnlineDependencies:
@@ -578,7 +595,10 @@ def run_release_test(
     if not isinstance(app_digests, Mapping) or not set(exercised_aliases) <= set(app_digests):
         raise OnlineWorkflowError("release manifest application bindings are malformed")
     try:
-        with deps.hold_release_apps(repo_path, config, {alias: app_digests[alias] for alias in exercised_aliases}):
+        required = tuple(getattr(manifest, "required_migrations", None) or ())
+        with deps.hold_release_apps(
+            repo_path, config, {alias: app_digests[alias] for alias in exercised_aliases}, required
+        ):
             report = deps.qualify_release(
                 repo_path,
                 config,

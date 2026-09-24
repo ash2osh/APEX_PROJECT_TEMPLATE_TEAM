@@ -827,6 +827,7 @@ def build_app_release_from_database(
     page_locks: Callable[..., Any] | None = None,
     capture_runner: Callable[..., Any] | None = None,
     page_lock_runner: Callable[..., Any] | None = None,
+    expected_frontier: str | None = None,
 ) -> Manifest:
     """Build a format-3 app release from two stable paused live captures.
 
@@ -900,6 +901,8 @@ def build_app_release_from_database(
             frontier = observations[-1].get("after") if observations and isinstance(observations[-1], Mapping) else None
             if not isinstance(frontier, str) or not _DIGEST_RE.fullmatch(frontier):
                 raise ReleaseError("the development database has no accepted schema frontier for an application release")
+            if expected_frontier is not None and frontier != expected_frontier:
+                raise ReleaseError("the schema frontier moved after the drift check; a migration landed, cut again")
             events = migration_store.read_events(metadata)
             canonical_events = []
             current: dict[str, dict[str, Any]] = {}

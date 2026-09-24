@@ -650,6 +650,18 @@ class AppDatabaseReleaseTests(unittest.TestCase):
                     )
         self.assertEqual(calls["count"], 0)
 
+    def test_app_release_refuses_a_frontier_that_moved_after_the_drift_check(self):
+        capture, calls = self._capture()
+        with self.assertRaisesRegex(ReleaseError, "frontier moved"):
+            build_app_release_from_database(
+                self.repo, self.app, self.metadata, self.app_store, self.migration_store,
+                "hr", "1.2.3", self.root / "out", sqlcl_build="26.2.2.233.1901",
+                checkout_uuid="checkout-a", built_by="builder", host="host-a",
+                capture=capture, page_locks=self._locks(), expected_frontier="f" * 64,
+            )
+        self.assertFalse(self.migration_store.releases)
+        self.assertIsNone(self.app_store.read_app_sync_state(self.app.physical_key).owner_token)
+
     def test_app_release_refuses_changed_capture_and_releases_mutexes(self):
         capture, calls = self._capture(second_tree={**self.tree, "application.apx": b"changed\n"})
         with self.assertRaisesRegex(ReleaseError, "changed between paused captures"):
@@ -782,6 +794,43 @@ class DatabaseReleaseVerificationTests(DatabaseReleaseTests):
             del members["release/frontier/inventory.json"]
         with self.assertRaisesRegex(ReleaseError, "missing its frontier inventory"):
             self.frontier_members(drop)()
+
+class BuildReleaseCommandTests(unittest.TestCase):
+    def test_app_release_runs_the_live_drift_gate_before_cutting(self):
+        import io
+        import os
+        from contextlib import redirect_stdout
+        from unittest.mock import MagicMock, patch
+
+        import team
+
+        config = SimpleNamespace(role="developer", environment="development", apps={"hr": 101})
+        store = SimpleNamespace(bootstrap=lambda *_a, **_kw: None)
+        for status, expected_code in (("drift", 3), ("clean", 0)):
+            with self.subTest(status=status):
+                build = MagicMock(return_value=SimpleNamespace(
+                    version="1.0.0", archive_path=Path("a.tar"), archive_digest="a" * 64, kind="app",
+                    alias="hr", source={}, migrations=(), required_migrations=(),
+                ))
+                out = io.StringIO()
+                with patch.object(team, "load_config", return_value=config), \
+                     patch.object(team, "require_release_sqlcl_build", return_value="26.2.2.233.1901"), \
+                     patch.object(team, "profile_target", return_value=SimpleNamespace()), \
+                     patch.object(team, "schema_set_digest", return_value="s" * 64), \
+                     patch.object(team, "_sql_migration_store", return_value=store), \
+                     patch.object(team, "_sql_control_store", return_value=SimpleNamespace()), \
+                     patch.object(team, "capture_live_inventory", return_value=(object(), Path("x"))), \
+                     patch.object(team, "observed_frontier_drift", return_value={"status": status, "digest": "f" * 64}), \
+                     patch.object(team, "build_app_release_from_database", build), \
+                     patch.dict(os.environ, {"TEAM_CHECKOUT_UUID": "checkout-a"}), \
+                     redirect_stdout(out):
+                    code = team.main(["build-release", "--kind", "app", "--alias", "hr", "--version", "1.0.0", "--out", "rel"])
+                self.assertEqual(code, expected_code, out.getvalue())
+                if status == "drift":
+                    build.assert_not_called()
+                    self.assertIn("live schema does not match the accepted frontier", out.getvalue())
+                else:
+                    self.assertEqual(build.call_args.kwargs["expected_frontier"], "f" * 64)
 
 class ReleaseLedgerStoreTests(unittest.TestCase):
     def setUp(self) -> None:

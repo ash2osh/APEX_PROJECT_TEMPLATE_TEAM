@@ -447,10 +447,11 @@ class OnlineWorkflowTests(unittest.TestCase):
         return dependencies, manifest
 
     @contextmanager
-    def hold_release_apps(self, _repo, _config, expected):
-        """Record which app digests a release test holds during qualification."""
+    def hold_release_apps(self, _repo, _config, expected, required=()):
+        """Record which app digests and prerequisites a release test holds during qualification."""
         holds = self.__dict__.setdefault("holds", [])
         holds.append({"expected": dict(expected), "open": True})
+        self.__dict__.setdefault("held_required", []).append(tuple(required))
         try:
             yield
         finally:
@@ -763,6 +764,7 @@ class OnlineWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "PASS")
         self.assertEqual(qualified_aliases, [("employee",)])
         self.assertEqual(self.holds, [{"expected": {"employee": "c" * 64}, "open": False}])
+        self.assertEqual(self.held_required, [()])
         written = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(written["kind"], "app")
         self.assertEqual(written["alias"], "employee")
@@ -795,6 +797,31 @@ class OnlineWorkflowTests(unittest.TestCase):
         with patch.object(online_workflows, "SqlControlStore", side_effect=AssertionError("no store")):
             with online_workflows._hold_release_apps(self.root, config_for(), {}):
                 pass
+
+    def test_release_prerequisites_are_rechecked_and_held_through_qualification(self):
+        from teamlib import online_workflows
+
+        calls: list[tuple] = []
+        history = {"m1": {"status": "APPLIED", "checksum": "a" * 64}}
+        migrations = SimpleNamespace(
+            acquire=lambda *_a: calls.append(("acquire-migrations",)),
+            release=lambda *_a: calls.append(("release-migrations",)),
+            read_history=lambda *_a: history,
+        )
+        required = ({"id": "m1", "checksum": "a" * 64},)
+        with patch.object(online_workflows, "SqlControlStore", return_value=SimpleNamespace()), \
+             patch.object(online_workflows, "SqlMigrationStore", return_value=migrations), \
+             patch.object(online_workflows, "profile_target", return_value=SimpleNamespace()):
+            with online_workflows._hold_release_apps(self.root, config_for(), {}, required):
+                calls.append(("qualify",))
+            self.assertEqual(calls, [("acquire-migrations",), ("qualify",), ("release-migrations",)])
+            calls.clear()
+            # Another run undid the prerequisite after deployment: refuse, still release.
+            history["m1"] = {"status": "REVERTED", "checksum": "a" * 64}
+            with self.assertRaisesRegex(OnlineWorkflowError, "required migration unavailable: m1"):
+                with online_workflows._hold_release_apps(self.root, config_for(), {}, required):
+                    calls.append(("qualify",))
+            self.assertEqual(calls, [("acquire-migrations",), ("release-migrations",)])
 
     def test_run_release_test_app_archive_refuses_when_selected_alias_not_in_config(self):
         events: list[str] = []
