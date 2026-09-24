@@ -7,6 +7,7 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve(
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import os
@@ -41,14 +42,15 @@ class SqlclBoundaryTests(unittest.TestCase):
         os.environ.pop("FAKE_EXIT_CODE", None)
         os.environ.pop("FAKE_CRLF", None)
         os.environ.pop("FAKE_EXTRA_OUTPUT", None)
+        os.environ.pop("FAKE_GUARD_REFUSE", None)
 
     def tearDown(self) -> None:
         os.environ.clear()
         os.environ.update(self.old_env)
         self.temp.cleanup()
 
-    def target(self, *, environment: str = "development", connection: str = "docker-demo") -> Target:
-        return Target(
+    def target(self, *, environment: str = "development", connection: str = "docker-demo", **overrides: str) -> Target:
+        base = Target(
             project="team-template",
             role="developer",
             environment=environment,
@@ -65,6 +67,7 @@ class SqlclBoundaryTests(unittest.TestCase):
             ownership_mode="shared",
             binding_digest="b" * 64,
         )
+        return replace(base, **overrides)
 
     def execute(self, *, target: Target | None = None, operation: str = "read"):
         return run_sqlcl(
@@ -118,6 +121,34 @@ class SqlclBoundaryTests(unittest.TestCase):
         os.environ["FAKE_IDENTITY"] = "OTHER|DEMO|FREEPDB1|freep1|FREE"
         with self.assertRaisesRegex(SqlclError, "SESSION_USER"):
             self.execute()
+
+    def test_identity_guard_runs_in_session_before_payload(self):
+        result = self.execute()
+        driver = result.generated_driver.read_text(encoding="utf-8")
+        guard = driver.index("RAISE_APPLICATION_ERROR(-20901")
+        self.assertLess(driver.rindex("TEAM_IDENTITY"), guard)
+        self.assertLess(guard, driver.index("PROMPT TEAM_RESULT_BEGIN"))
+        self.assertLess(guard, driver.index("@.team-payload-"))
+        self.assertIn(
+            "'SESSION_USER=DEMO|CURRENT_SCHEMA=DEMO|DB_NAME=FREEPDB1|SERVICE=freep1|INSTANCE_ID=FREE'",
+            driver,
+        )
+
+    def test_identity_guard_quotes_expected_values(self):
+        os.environ["FAKE_IDENTITY"] = "O'HARA|DEMO|FREEPDB1|freep1|FREE"
+        result = self.execute(target=self.target(session_user="O'HARA"))
+        self.assertIn("SESSION_USER=O''HARA|", result.generated_driver.read_text(encoding="utf-8"))
+
+    def test_identity_guard_refusal_is_reported_as_payload_not_run(self):
+        os.environ["FAKE_GUARD_REFUSE"] = "1"
+        with self.assertRaisesRegex(SqlclError, "identity guard refused the session before the payload ran") as caught:
+            self.execute(operation="write")
+        self.assertFalse(result_is_unknown(caught.exception))
+
+    def test_identity_guard_rejects_control_characters_before_launch(self):
+        with self.assertRaisesRegex(SqlclError, "printable"):
+            self.execute(target=self.target(service="freep1\nDROP"))
+        self.assertFalse(self.log.exists())
 
     def test_identity_change_between_observations_is_refused(self):
         os.environ["FAKE_SECOND_IDENTITY"] = "DEMO|DEMO|FREEPDB1|freep1|OTHER"
@@ -280,6 +311,23 @@ class ProductionReadOnlyGuardTests(unittest.TestCase):
         )
         with self.assertRaises(SqlclError):
             _assert_production_read_only(driver)
+
+    def test_inventory_output_block_with_dynamic_sql_is_refused(self):
+        from teamlib.sqlcl import SqlclError, _assert_production_read_only
+
+        source = Path(__file__).resolve().parents[1] / "sql" / "schema_inventory.sql"
+        text = source.read_text(encoding="utf-8")
+        for call in (
+            "  n := DBMS_SQL.EXECUTE(c);\n",
+            "  DBMS_SCHEDULER.RUN_JOB('J');\n",
+            "  UTL_HTTP.REQUEST('http://x');\n",
+        ):
+            with self.subTest(call=call.strip()):
+                body = text.index("BEGIN\n", text.index("DECLARE\n")) + len("BEGIN\n")
+                tampered = text[:body] + call + text[body:]
+                self.assertNotEqual(tampered, text)
+                with self.assertRaises(SqlclError):
+                    _assert_production_read_only(tampered)
 
     def test_a_block_that_is_not_pure_metadata_setup_is_refused(self):
         from teamlib.sqlcl import SqlclError, _assert_production_read_only
