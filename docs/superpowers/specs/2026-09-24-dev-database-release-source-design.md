@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-24
 
-**Status:** Decisions 1, 3, 4 accepted by the owner; decision 2 open. No behavior in this document is implemented merely by writing it.
+**Status:** All four owner decisions recorded (2026-09-24). No behavior in this document is implemented merely by writing it.
 **Scope:** This repository. Supersedes the Git-commit release source in `teamlib/release.py::build_release`.
 
 ## Why
@@ -86,13 +86,12 @@ dev schema already behaves for everyone using it.
    (replaces `app_context/<alias>/release.json`).
 4. Release the mutex; the manifest records the app generation and tree digest.
 
-### 4. Release assets and version ledger in METADATA
+### 4. Release assets and version ledger
 
-- `TEAM_RELEASE_ASSET (kind, name, sha256, content CLOB, published_by, published_at)` holds
-  `ci/app-checks/<alias>` bundles and `targets/masters.json`; `team.sh publish-release-assets`
-  uploads them from a repository, so every developer releases with the same checks.
+- App checks and master contracts come from the builder's repository (decision 2); their
+  digests are recorded with the release.
 - `TEAM_RELEASE (kind, alias, version, archive_digest, history_cut, history_digest,
-  app_generation, app_tree_digest, built_by, built_at)` with a unique key on
+  app_generation, app_tree_digest, app_checks_digest, master_contract_digest, built_by, built_at)` with a unique key on
   `(kind, NVL(alias,'-'), version)`. Replaces `release-record.json`; a version can only
   ever mean one archive, whichever repository built it.
 
@@ -117,9 +116,11 @@ The build needs development database access, so it cannot run on a hosted GitHub
 
 1. **Cut rule — decided: everything APPLIED at head ships.** No per-migration release mark.
    Work in progress must be undone in shared dev before a cut.
-2. **Release assets — open.** Store app checks (`ci/app-checks/<alias>*`) and master
-   contracts (`targets/masters.json`) in METADATA, or read them from the builder's repository
-   and record only their digests.
+2. **Release assets — decided: read from the builder's repository.** App checks
+   (`ci/app-checks/<alias>*`) and master contracts (`targets/masters.json`) are taken from the
+   repository that runs `build-release`, and their digests are recorded in the manifest and in
+   `TEAM_RELEASE`. Accepted trade-off: two developers can release with different checks; the
+   recorded digests make that visible after the fact, but do not prevent it.
 3. **Build/test host — decided: locally.** The operator builds the archive and runs
    `run-release-test`, signing and `gen-runbook` locally; the tag-triggered `release.yml`
    job is retired.
@@ -138,7 +139,7 @@ Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 bind
 | 1 | Docs/README/AGENTS for one-repo-per-developer; e2e with independent repos (no shared bare remote); `.env.example` connection names; drop dead `team.py::_store` | — |
 | 2 | `TEAM_MIGRATION_MEMBER` + upload in `apply_plan` + backfill command | 1 |
 | 3 | `TEAM_RELEASE` ledger + schema release from the ledger (format 3) | 2 |
-| 4 | App release from paused capture + auto prerequisites + `TEAM_RELEASE_ASSET` | 3 |
+| 4 | App release from paused capture + auto prerequisites; asset digests from the builder's repository | 3 |
 | 5 | Remove the Git-commit builder and `release.yml`; local release runbook; promotion/CI docs | 4 |
 | — | Publish acknowledgement redesign (checkout-issued acks) — independent, high priority | — |
 
@@ -147,4 +148,5 @@ Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 bind
 - **The dev database becomes the system of record** for releases: METADATA needs the same backup discipline as production data.
 - **Work-in-progress leakage** through the cut rule (decision 1).
 - **Export determinism:** app trees must be byte-stable across SQLcl versions; the toolchain pin (`sqlcl 26.2.1+`) should become an exact version for release builds.
-- **Metadata upgrade:** existing installations need `setup-state` to add three tables without touching recorded history.
+- **Check drift between repositories** (decision 2): releases built from different repositories may qualify against different checks.
+- **Metadata upgrade:** existing installations need `setup-state` to add two tables without touching recorded history.
