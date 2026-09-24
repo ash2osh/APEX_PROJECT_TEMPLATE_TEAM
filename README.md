@@ -123,3 +123,4 @@ Coding agents follow the exact same public CLI commands and rules as human devel
 - [Conflict resolution](docs/conflict-resolution.md)
 - [Design review resolution](docs/design-review-resolution.md)
 - [Local three-developer acceptance run](docs/local-three-developer-e2e.md)
+- [Live database test plan](docs/live-test-plan.md)
