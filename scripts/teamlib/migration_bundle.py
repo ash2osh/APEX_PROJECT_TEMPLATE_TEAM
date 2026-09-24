@@ -247,6 +247,40 @@ def _bundle_checksum(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def bundle_members(migration: Migration) -> dict[str, bytes]:
+    """Return the exact member bytes a bundle checksum is computed from.
+
+    Members may legitimately be empty; ``store_members`` recomputes the checksum
+    from these bytes, so a bundle whose bytes were never loaded is refused there.
+    """
+    members = {
+        f"{migration.id}.sql": migration.sql_bytes,
+        f"{migration.id}.verify.sql": migration.verify_bytes,
+    }
+    if migration.reversible:
+        members[f"{migration.id}.down.sql"] = migration.down_sql_bytes
+        members[f"{migration.id}.down.verify.sql"] = migration.down_verify_bytes
+    return members
+
+
+def checksum_from_members(migration_id: str, members: Mapping[str, bytes]) -> str:
+    """Recompute a bundle checksum from stored members, refusing any other member set."""
+    _validate_id(migration_id)
+    forward = {f"{migration_id}.sql", f"{migration_id}.verify.sql"}
+    down = {f"{migration_id}.down.sql", f"{migration_id}.down.verify.sql"}
+    names = set(members)
+    if names not in (forward, forward | down):
+        raise BundleError(f"stored migration members are not a complete bundle: {migration_id}")
+    return _bundle_checksum(
+        migration_id,
+        members[f"{migration_id}.sql"],
+        members[f"{migration_id}.verify.sql"],
+        members.get(f"{migration_id}.down.sql", b""),
+        members.get(f"{migration_id}.down.verify.sql", b""),
+        reversible=names == forward | down,
+    )
+
+
 def load_bundles(directory: str | Path) -> dict[str, Migration]:
     root = Path(directory)
     if not root.is_dir() or root.is_symlink():

@@ -45,12 +45,15 @@ where each developer authors and reviews; it is no longer where releases come fr
 
 ### 1. Migration members stored at apply time
 
-New METADATA table `TEAM_MIGRATION_MEMBER (checksum, member_name, sha256, byte_length, content CLOB)`,
-primary key `(checksum, member_name)`. `apply_plan` uploads every member of the
-bundle (forward, verify, and down pair when reversible) inside the attempt,
-before the payload runs; `record_applied` refuses unless the stored members
-recompute to the history `checksum`. Content-addressed, so re-uploading is idempotent
-and two developers applying the same bundle cannot disagree.
+New METADATA tables `TEAM_MIGRATION_BUNDLE (checksum PK, migration_id, member_count, stored_at, stored_by)`
+and `TEAM_MIGRATION_MEMBER (checksum, member_name, byte_length, sha256, content_base64 CLOB)`,
+primary key `(checksum, member_name)`, foreign key to the bundle. The bundle row and all its
+members are written in one transaction. `apply_plan` stores every member (forward, verify, and
+down pair when reversible) under the migration mutex before the attempt starts and before the
+payload runs, then reads them back and recomputes the checksum. `record_event` refuses
+(`MIGRATION_MEMBERS_MISSING`) unless the bundle row for that checksum and ID exists.
+Content-addressed and immutable, so re-uploading is idempotent and two developers applying
+the same bundle cannot disagree. Members are stored base64-encoded so bytes survive exactly.
 
 Backfill: `team.sh adopt-migration-members --source migrations/` uploads members for
 already-applied IDs from whichever repository still has the files, accepted only
@@ -154,8 +157,8 @@ Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 bind
 | Phase | Change | Depends on |
 |---|---|---|
 | 0 | Security fixes (identity guard, signing key, credentials) — PR #1 | — |
-| 1 | Docs/README/AGENTS for one-repo-per-developer; e2e with independent repos (no shared bare remote); `.env.example` connection names; drop dead `team.py::_store` | — |
-| 2 | `TEAM_MIGRATION_MEMBER` + upload in `apply_plan` + backfill command | 1 |
+| 1 | Implemented: Docs/README/AGENTS for one-repo-per-developer; e2e with independent repos (no shared bare remote); `.env.example` connection names; drop dead `team.py::_store` | — |
+| 2 | `TEAM_MIGRATION_MEMBER` + upload in `apply_plan` + backfill command (`adopt-migration-members`) — implemented | 1 |
 | 3 | `TEAM_RELEASE` ledger + schema release from the ledger event sequence (format 3), including down replay in `apply-release` and strict planning for shipped reverts | 2 |
 | 4 | App release from paused capture + auto prerequisites; asset digests from the builder's repository | 3 |
 | 5 | Remove the Git-commit builder and `release.yml`; local release runbook; promotion/CI docs | 4 |

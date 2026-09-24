@@ -59,6 +59,37 @@ The same convention covers forward migrate and undo/redo; boolean shortcuts,
 missing or duplicate entries, stale checksums, wrong actions, and extra entries
 are refused. The orchestrator never creates an affirmative confirmation.
 
+## Migration files are kept in the shared database
+
+Each developer has a separate repository, so a colleague's migration files are
+not in yours. Every `migrate`, `undo-migration` and `redo-migration` therefore
+stores the exact bytes of the bundle it runs (forward pair and, when authored,
+the down pair) in the METADATA tables `TEAM_MIGRATION_BUNDLE` and
+`TEAM_MIGRATION_MEMBER`, keyed by the bundle checksum:
+
+- The files are stored under the migration mutex **before** the payload runs,
+  then read back and checked against the checksum. If storing fails, nothing
+  runs and the mutex is released.
+- Storage is immutable: a checksum already stored must hold identical bytes.
+- A history event is refused (`MIGRATION_MEMBERS_MISSING`) unless its bundle
+  is stored, so from now on every applied or reverted migration can be rebuilt
+  from the database alone.
+
+Metadata created before this change gets the two tables from the idempotent
+bootstrap (`migrate --bootstrap`, `adopt-frontier` or the backfill below).
+Migrations applied before the upgrade have history but no stored files; each
+developer backfills the ones whose files they hold:
+
+```text
+scripts/team.py --env .env adopt-migration-members --source migrations --dry-run
+scripts/team.py --env .env adopt-migration-members --source migrations
+```
+
+Only a local bundle whose checksum equals the recorded one is stored. The
+report lists what was `stored`, `already_stored` and still `missing` (someone
+else holds those files). Local files that disagree with recorded history are
+refused outright.
+
 ## Frontier and recovery
 
 An empty metadata owner may adopt one observed sequence-zero frontier. History

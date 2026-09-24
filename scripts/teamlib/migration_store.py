@@ -10,6 +10,7 @@ try:
     import msvcrt
 except ImportError:
     msvcrt = None  # type: ignore[assignment]
+import base64
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -23,6 +24,7 @@ from collections.abc import Iterable, Mapping
 
 from .config import Target
 from .fingerprints import InventoryError, inventory_from_manifest
+from .migration_bundle import BundleError, Migration, bundle_members, checksum_from_members
 from .sqlcl import SqlclError, run_sqlcl
 from .sql_text import (
     SqlTextError,
@@ -74,6 +76,52 @@ def _inventory_manifest(value: Any) -> tuple[dict[str, Any], str]:
     except InventoryError as exc:
         raise MigrationStoreError(f"inventory evidence is invalid: {exc}") from exc
     return inventory.as_dict(), inventory.digest
+
+
+_CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _member_records(migration: Migration) -> list[dict[str, Any]]:
+    """Canonical member records for storage: name, bytes, length, sha256, base64."""
+    try:
+        members = bundle_members(migration)
+        if checksum_from_members(migration.id, members) != migration.checksum:
+            raise MigrationStoreError(f"migration members do not match their checksum: {migration.id}")
+    except BundleError as exc:
+        raise MigrationStoreError(str(exc)) from exc
+    return [
+        {
+            "name": name,
+            "bytes": data,
+            "length": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "base64": base64.b64encode(data).decode("ascii"),
+        }
+        for name, data in sorted(members.items())
+    ]
+
+
+def _verified_members(
+    checksum: str,
+    migration_id: str,
+    member_count: int,
+    stored: Mapping[str, tuple[int, str, bytes]],
+) -> dict[str, bytes]:
+    """Check stored members byte-for-byte against their recorded lengths, hashes and checksum."""
+    if len(stored) != member_count:
+        raise MigrationStoreError(f"stored migration bundle is incomplete: {migration_id}")
+    members: dict[str, bytes] = {}
+    for name, (length, sha256, data) in stored.items():
+        if len(data) != length or hashlib.sha256(data).hexdigest() != sha256:
+            raise MigrationStoreError(f"stored migration member is corrupt: {name}")
+        members[name] = data
+    try:
+        recomputed = checksum_from_members(migration_id, members)
+    except BundleError as exc:
+        raise MigrationStoreError(str(exc)) from exc
+    if recomputed != checksum:
+        raise MigrationStoreError(f"stored migration members do not match checksum {checksum}")
+    return members
 
 
 _MIGRATION_BOOTSTRAP_SQL = r"""
@@ -162,6 +210,28 @@ BEGIN
     after_digest VARCHAR2(64) NOT NULL,
     evidence_digest VARCHAR2(64) NOT NULL,
     CONSTRAINT team_migration_observation_pk PRIMARY KEY (sequence_number)
+  )]');
+  -- Migration bundle members, content-addressed by bundle checksum. A bundle
+  -- row exists only when every member was written in the same transaction,
+  -- so releases can be rebuilt from this database without any repository.
+  create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_BUNDLE (
+    checksum VARCHAR2(64) NOT NULL,
+    migration_id VARCHAR2(128) NOT NULL,
+    member_count NUMBER(1) NOT NULL,
+    stored_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    stored_by VARCHAR2(256) NOT NULL,
+    CONSTRAINT team_migration_bundle_pk PRIMARY KEY (checksum),
+    CONSTRAINT team_migration_bundle_count_ck CHECK (member_count IN (2, 4))
+  )]');
+  create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_MEMBER (
+    checksum VARCHAR2(64) NOT NULL,
+    member_name VARCHAR2(160) NOT NULL,
+    byte_length NUMBER(12) NOT NULL,
+    sha256 VARCHAR2(64) NOT NULL,
+    content_base64 CLOB NOT NULL,
+    CONSTRAINT team_migration_member_pk PRIMARY KEY (checksum, member_name),
+    CONSTRAINT team_migration_member_bundle_fk FOREIGN KEY (checksum)
+      REFERENCES TEAM_MIGRATION_BUNDLE (checksum)
   )]');
 
 END;
@@ -764,6 +834,7 @@ DECLARE
   v_inventory_count NUMBER;
   v_attempt_count NUMBER;
   v_current_operation VARCHAR2(4);
+  v_bundle_count NUMBER;
   v_dependencies CLOB;
   v_observation CLOB;
 BEGIN
@@ -772,6 +843,9 @@ BEGIN
   SELECT COUNT(*) INTO v_owned FROM TEAM_MIGRATION_MUTEX
    WHERE singleton_id = 1 AND owner_token = {_sql_literal(run_token)};
   IF v_owned = 0 THEN RAISE_APPLICATION_ERROR(-20002, 'HISTORY_WRITE_REFUSED'); END IF;
+  SELECT COUNT(*) INTO v_bundle_count FROM TEAM_MIGRATION_BUNDLE
+   WHERE checksum = {_sql_literal(checksum)} AND migration_id = {_sql_literal(migration_id)};
+  IF v_bundle_count = 0 THEN RAISE_APPLICATION_ERROR(-20042, 'MIGRATION_MEMBERS_MISSING'); END IF;
   SELECT COUNT(DISTINCT inventory_digest) INTO v_inventory_count
     FROM TEAM_MIGRATION_INVENTORY
    WHERE inventory_digest IN ({_sql_literal(before)}, {_sql_literal(after)});
@@ -836,6 +910,189 @@ END;
             store_target, migration_id, checksum, target, dependencies, source_commit,
             applied_by, observation, operation="up", run_token=run_token, attempt_id=attempt_id,
         )
+
+    def store_members(
+        self,
+        store_target: Target,
+        migration: Migration,
+        *,
+        run_token: str,
+        stored_by: str,
+    ) -> None:
+        """Store every bundle member under its checksum, then read them back and verify.
+
+        Idempotent and immutable: a checksum already stored must hold the same
+        members byte-for-byte. Requires the migration mutex.
+        """
+        self._assert_nonproduction(store_target)
+        self._require_sql(store_target)
+        if not run_token:
+            raise MigrationStoreError("migration member writes require a mutex token")
+        if not stored_by:
+            raise MigrationStoreError("migration member writes require an actor")
+        records = _member_records(migration)
+        checksum = _sql_literal(migration.checksum)
+        declarations = "\n".join(f"  v_member_{index} CLOB;" for index in range(len(records)))
+        builders = "\n".join(_clob_builder(f"v_member_{index}", record["base64"]) for index, record in enumerate(records))
+        inserts = "\n".join(
+            f"""    INSERT INTO TEAM_MIGRATION_MEMBER (checksum, member_name, byte_length, sha256, content_base64)
+    VALUES ({checksum}, {_sql_literal(record['name'])}, {record['length']}, {_sql_literal(record['sha256'])}, v_member_{index});"""
+            for index, record in enumerate(records)
+        )
+        comparisons = "\n".join(
+            f"""    BEGIN
+      SELECT byte_length, sha256, DBMS_LOB.COMPARE(content_base64, v_member_{index})
+        INTO v_length, v_sha256, v_compare
+        FROM TEAM_MIGRATION_MEMBER
+       WHERE checksum = {checksum} AND member_name = {_sql_literal(record['name'])};
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        RAISE_APPLICATION_ERROR(-20041, 'MIGRATION_MEMBER_IMMUTABILITY_VIOLATION');
+    END;
+    IF v_length <> {record['length']} OR v_sha256 <> {_sql_literal(record['sha256'])} OR NVL(v_compare, -1) <> 0 THEN
+      RAISE_APPLICATION_ERROR(-20041, 'MIGRATION_MEMBER_IMMUTABILITY_VIOLATION');
+    END IF;"""
+            for index, record in enumerate(records)
+        )
+        payload = f"""
+DECLARE
+  v_owned NUMBER;
+  v_bundles NUMBER;
+  v_migration_id VARCHAR2(128);
+  v_member_count NUMBER;
+  v_stored_count NUMBER;
+  v_length NUMBER;
+  v_sha256 VARCHAR2(64);
+  v_compare INTEGER;
+{declarations}
+BEGIN
+{builders}
+  SELECT COUNT(*) INTO v_owned FROM TEAM_MIGRATION_MUTEX
+   WHERE singleton_id = 1 AND owner_token = {_sql_literal(run_token)};
+  IF v_owned = 0 THEN RAISE_APPLICATION_ERROR(-20002, 'MEMBER_WRITE_REFUSED'); END IF;
+  SELECT COUNT(*) INTO v_bundles FROM TEAM_MIGRATION_BUNDLE WHERE checksum = {checksum};
+  IF v_bundles = 0 THEN
+    INSERT INTO TEAM_MIGRATION_BUNDLE (checksum, migration_id, member_count, stored_at, stored_by)
+    VALUES ({checksum}, {_sql_literal(migration.id)}, {len(records)}, SYSTIMESTAMP, {_sql_literal(stored_by)});
+{inserts}
+  ELSE
+    SELECT migration_id, member_count INTO v_migration_id, v_member_count
+      FROM TEAM_MIGRATION_BUNDLE WHERE checksum = {checksum};
+    SELECT COUNT(*) INTO v_stored_count FROM TEAM_MIGRATION_MEMBER WHERE checksum = {checksum};
+    IF v_migration_id <> {_sql_literal(migration.id)} OR v_member_count <> {len(records)}
+       OR v_stored_count <> {len(records)} THEN
+      RAISE_APPLICATION_ERROR(-20041, 'MIGRATION_MEMBER_IMMUTABILITY_VIOLATION');
+    END IF;
+{comparisons}
+  END IF;
+  COMMIT;
+END;
+/
+"""
+        try:
+            self._run("write", payload)
+        except MigrationStoreError as exc:
+            detail = str(exc)
+            if "MEMBER_WRITE_REFUSED" in detail:
+                raise MigrationMutexHeld("migration member write requires current migration mutex owner") from exc
+            if "ORA-00942" in detail:
+                raise MigrationSetupRequired(
+                    "migration member storage is missing; run `migrate --bootstrap` or `adopt-frontier` "
+                    "to upgrade the metadata schema"
+                ) from exc
+            raise
+        stored = self.read_members(store_target, migration.checksum)
+        if stored != {record["name"]: record["bytes"] for record in records}:
+            raise MigrationStoreError(f"stored migration members differ from the local bundle: {migration.id}")
+
+    def read_members(self, store_target: Target, checksum: str) -> dict[str, bytes]:
+        """Read one stored bundle's members and verify them against its checksum."""
+        self._require_sql(store_target)
+        if not isinstance(checksum, str) or not _CHECKSUM_RE.fullmatch(checksum):
+            raise MigrationStoreError("migration bundle checksum is malformed")
+        literal = _sql_literal(checksum)
+        bundle = self._read_rows(
+            store_target,
+            "SELECT 'TEAM_BUNDLE|' || " + _b64_sql("migration_id") + " || '|' || "
+            + _b64_sql("TO_CHAR(member_count)") + f" FROM TEAM_MIGRATION_BUNDLE WHERE checksum = {literal};",
+            "TEAM_BUNDLE|",
+        )
+        if not bundle:
+            raise MigrationStoreError(f"migration bundle is not stored: {checksum}")
+        if len(bundle) != 1 or len(bundle[0]) != 2:
+            raise MigrationStoreError("migration bundle row is malformed")
+        migration_id, raw_count = bundle[0]
+        headers = self._read_rows(
+            store_target,
+            "SELECT 'TEAM_MEMBER|' || " + " || '|' || ".join(
+                [_b64_sql("member_name"), _b64_sql("TO_CHAR(byte_length)"), _b64_sql("sha256")]
+            ) + f" FROM TEAM_MIGRATION_MEMBER WHERE checksum = {literal} ORDER BY member_name;",
+            "TEAM_MEMBER|",
+        )
+        chunk_limit = (
+            "(SELECT LEVEL part FROM dual CONNECT BY LEVEL <= "
+            "NVL((SELECT MAX(CEIL(DBMS_LOB.GETLENGTH(content_base64) / 900)) "
+            f"FROM TEAM_MIGRATION_MEMBER WHERE checksum = {literal}), 1))"
+        )
+        chunks = self._read_rows(
+            store_target,
+            "SELECT 'TEAM_MEMBER_CLOB|' || " + " || '|' || ".join(
+                [_b64_sql("member_name"), _b64_sql("TO_CHAR(part)"), _b64_sql("TO_CHAR(total)"), _b64_sql("chunk")]
+            ) + " FROM (SELECT m.member_name, c.part, "
+              "GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(m.content_base64) / 900)) total, "
+              "DBMS_LOB.SUBSTR(m.content_base64, 900, (c.part - 1) * 900 + 1) chunk "
+              f"FROM TEAM_MIGRATION_MEMBER m CROSS JOIN {chunk_limit} c "
+              f"WHERE m.checksum = {literal} "
+              "AND c.part <= GREATEST(1, CEIL(DBMS_LOB.GETLENGTH(m.content_base64) / 900)));",
+            "TEAM_MEMBER_CLOB|",
+        )
+        parts: dict[str, dict[int, str]] = {}
+        totals: dict[str, int] = {}
+        for row in chunks:
+            if len(row) != 4:
+                raise MigrationStoreError("malformed migration member CLOB row")
+            name, raw_part, raw_total, chunk = row
+            try:
+                part, total = int(raw_part), int(raw_total)
+            except ValueError as exc:
+                raise MigrationStoreError("migration member CLOB numbering is malformed") from exc
+            if part < 1 or total < part or part in parts.setdefault(name, {}) or totals.setdefault(name, total) != total:
+                raise MigrationStoreError("migration member CLOB chunks are inconsistent")
+            parts[name][part] = chunk
+        stored: dict[str, tuple[int, str, bytes]] = {}
+        for row in headers:
+            if len(row) != 3:
+                raise MigrationStoreError("malformed migration member row")
+            name, raw_length, sha256 = row
+            total = totals.get(name)
+            if total is None or set(parts.get(name, {})) != set(range(1, total + 1)):
+                raise MigrationStoreError(f"migration member CLOB is incomplete: {name}")
+            try:
+                data = base64.b64decode("".join(parts[name][index] for index in range(1, total + 1)), validate=True)
+                length = int(raw_length)
+            except ValueError as exc:
+                raise MigrationStoreError(f"stored migration member is corrupt: {name}") from exc
+            stored[name] = (length, sha256, data)
+        try:
+            member_count = int(raw_count)
+        except ValueError as exc:
+            raise MigrationStoreError("migration bundle member count is malformed") from exc
+        return _verified_members(checksum, migration_id, member_count, stored)
+
+    def list_member_bundles(self, store_target: Target) -> dict[str, str]:
+        """Return every stored bundle as ``{checksum: migration_id}``."""
+        rows = self._read_rows(
+            store_target,
+            "SELECT 'TEAM_BUNDLE_INDEX|' || " + _b64_sql("checksum") + " || '|' || "
+            + _b64_sql("migration_id") + " FROM TEAM_MIGRATION_BUNDLE ORDER BY checksum;",
+            "TEAM_BUNDLE_INDEX|",
+        )
+        index: dict[str, str] = {}
+        for row in rows:
+            if len(row) != 2 or not _CHECKSUM_RE.fullmatch(row[0]) or row[0] in index:
+                raise MigrationStoreError("migration bundle index is malformed")
+            index[row[0]] = row[1]
+        return index
 
     def _read_rows(self, target: Target, payload: str, prefix: str) -> list[list[str]]:
         self._require_sql(target)
@@ -1546,6 +1803,9 @@ class MigrationStore:
         mutex = self._require(data, store_target)
         if run_token is not None and mutex.get("owner_token") != run_token:
             raise MigrationMutexHeld("history write requires current migration mutex owner")
+        bundle = data.get("bundles", {}).get(checksum)
+        if not isinstance(bundle, Mapping) or bundle.get("migration_id") != migration_id:
+            raise MigrationStoreError(f"MIGRATION_MEMBERS_MISSING: members are not stored for {migration_id}")
         if before not in data.get("inventories", {}) or after not in data.get("inventories", {}):
             raise MigrationStoreError("migration event references an unrecorded inventory manifest")
         observations = data.setdefault("observations", [])
@@ -1629,6 +1889,68 @@ class MigrationStore:
             store_target, migration_id, checksum, target, dependencies, source_commit,
             applied_by, observation, operation="up", run_token=run_token, attempt_id=attempt_id,
         )
+
+    def store_members(
+        self,
+        store_target: Target,
+        migration: Migration,
+        *,
+        run_token: str,
+        stored_by: str,
+    ) -> None:
+        self._assert_nonproduction(store_target)
+        if not run_token:
+            raise MigrationStoreError("migration member writes require a mutex token")
+        if not stored_by:
+            raise MigrationStoreError("migration member writes require an actor")
+        records = _member_records(migration)
+        with self._locked() as data:
+            mutex = self._require(data, store_target)
+            if mutex.get("owner_token") != run_token:
+                raise MigrationMutexHeld("migration member write requires current migration mutex owner")
+            bundles = data.setdefault("bundles", {})
+            wanted = {
+                record["name"]: {"length": record["length"], "sha256": record["sha256"], "base64": record["base64"]}
+                for record in records
+            }
+            existing = bundles.get(migration.checksum)
+            if existing is None:
+                bundles[migration.checksum] = {
+                    "migration_id": migration.id,
+                    "member_count": len(records),
+                    "stored_at": _now(),
+                    "stored_by": stored_by,
+                    "members": wanted,
+                }
+            elif (
+                existing.get("migration_id") != migration.id
+                or existing.get("member_count") != len(records)
+                or existing.get("members") != wanted
+            ):
+                raise MigrationStoreError(f"migration member immutability violation: {migration.id}")
+        if self.read_members(store_target, migration.checksum) != {record["name"]: record["bytes"] for record in records}:
+            raise MigrationStoreError(f"stored migration members differ from the local bundle: {migration.id}")
+
+    def read_members(self, store_target: Target, checksum: str) -> dict[str, bytes]:
+        if not isinstance(checksum, str) or not _CHECKSUM_RE.fullmatch(checksum):
+            raise MigrationStoreError("migration bundle checksum is malformed")
+        with self._locked() as data:
+            self._require(data, store_target)
+            bundle = data.get("bundles", {}).get(checksum)
+        if not isinstance(bundle, Mapping):
+            raise MigrationStoreError(f"migration bundle is not stored: {checksum}")
+        stored: dict[str, tuple[int, str, bytes]] = {}
+        for name, member in dict(bundle.get("members") or {}).items():
+            try:
+                stored[name] = (int(member["length"]), str(member["sha256"]), base64.b64decode(member["base64"], validate=True))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise MigrationStoreError(f"stored migration member is corrupt: {name}") from exc
+        return _verified_members(checksum, str(bundle.get("migration_id")), int(bundle.get("member_count", -1)), stored)
+
+    def list_member_bundles(self, store_target: Target) -> dict[str, str]:
+        with self._locked() as data:
+            self._require(data, store_target)
+            return {checksum: str(bundle.get("migration_id")) for checksum, bundle in sorted(data.get("bundles", {}).items())}
 
     def read_history(self, store_target: Target) -> dict[str, Any]:
         with self._locked() as data:

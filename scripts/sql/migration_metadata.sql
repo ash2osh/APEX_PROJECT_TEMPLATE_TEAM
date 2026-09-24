@@ -98,6 +98,28 @@ BEGIN
     evidence_digest VARCHAR2(64) NOT NULL,
     CONSTRAINT team_migration_observation_pk PRIMARY KEY (sequence_number)
   )]');
+  -- Migration bundle members, content-addressed by bundle checksum. A bundle
+  -- row exists only when every member was written in the same transaction,
+  -- so releases can be rebuilt from this database without any repository.
+  create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_BUNDLE (
+    checksum VARCHAR2(64) NOT NULL,
+    migration_id VARCHAR2(128) NOT NULL,
+    member_count NUMBER(1) NOT NULL,
+    stored_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    stored_by VARCHAR2(256) NOT NULL,
+    CONSTRAINT team_migration_bundle_pk PRIMARY KEY (checksum),
+    CONSTRAINT team_migration_bundle_count_ck CHECK (member_count IN (2, 4))
+  )]');
+  create_if_missing(q'[CREATE TABLE TEAM_MIGRATION_MEMBER (
+    checksum VARCHAR2(64) NOT NULL,
+    member_name VARCHAR2(160) NOT NULL,
+    byte_length NUMBER(12) NOT NULL,
+    sha256 VARCHAR2(64) NOT NULL,
+    content_base64 CLOB NOT NULL,
+    CONSTRAINT team_migration_member_pk PRIMARY KEY (checksum, member_name),
+    CONSTRAINT team_migration_member_bundle_fk FOREIGN KEY (checksum)
+      REFERENCES TEAM_MIGRATION_BUNDLE (checksum)
+  )]');
 
 END;
 /

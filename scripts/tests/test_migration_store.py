@@ -38,6 +38,11 @@ class MigrationStoreTests(unittest.TestCase):
     def inventory(self, rows):
         return inventory_from_rows(rows, schema_set_digest=self.schema_set_digest)
 
+    def seed_bundle(self, checksum: str, migration_id: str) -> None:
+        """Ledger tests use synthetic IDs; events now require a stored bundle row."""
+        with self.store._locked() as data:
+            data.setdefault("bundles", {})[checksum] = {"migration_id": migration_id, "member_count": 2, "members": {}}
+
     def tearDown(self) -> None:
         self.temp.cleanup()
 
@@ -66,6 +71,7 @@ class MigrationStoreTests(unittest.TestCase):
         self.store.record_inventory(self.target, before, run_token="run")
         self.store.ensure_observation(self.target, before.digest, run_token="run")
         self.store.record_inventory(self.target, after, run_token="run")
+        self.seed_bundle("a" * 64, "m1")
         self.store.record_applied(self.target, "m1", "a" * 64, "tables", (), "commit", "alice", {"before": before.digest, "after": after.digest})
         self.store.release(self.target, "run")
         history = self.store.read_history(self.target)
@@ -194,6 +200,8 @@ class MigrationStoreTests(unittest.TestCase):
         for inventory in (first, second, third):
             self.store.record_inventory(self.target, inventory, run_token="run")
         self.store.ensure_observation(self.target, first.digest, run_token="run")
+        self.seed_bundle("a" * 64, "a")
+        self.seed_bundle("b" * 64, "b")
 
         self.store.record_attempt_start(self.target, "up-a", "a", "a" * 64, "run")
         self.store.record_event(

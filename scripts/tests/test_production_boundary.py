@@ -157,6 +157,7 @@ class ProductionRefusalCoverageTests(unittest.TestCase):
     ARGUMENTS = {
         "setup-state": (),
         "adopt-frontier": (),
+        "adopt-migration-members": (),
         "qualify-target": ("--source-commit", "a" * 40, "--aliases", "checkout", "--out", "out.json"),
         "recover-migration": ("run-1", "--evidence", "evidence.json"),
         "register-app": ("checkout",),

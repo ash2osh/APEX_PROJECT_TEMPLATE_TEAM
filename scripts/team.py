@@ -37,7 +37,7 @@ from teamlib.destructive_confirmation import (
     load_confirmation,
     write_confirmation_template,
 )
-from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
+from teamlib.migrate import MigrationRunError, adopt_members, apply_plan, apply_redo, apply_undo
 from teamlib.migration_runtime import migration_profiles
 from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
 from teamlib.live_inventory import inventory_target
@@ -49,7 +49,7 @@ from teamlib.runbook import RunbookError
 from teamlib.runtime import preflight_online
 from teamlib.online_workflows import OnlineWorkflowError, run_integration, run_release_test
 from teamlib.state import StateError
-from teamlib.migration_bundle import BundleError
+from teamlib.migration_bundle import BundleError, load_bundles
 from teamlib.source_snapshot import IntegrationSource, SourceSnapshotError, load_integration_source
 from teamlib.trees import TreeError, read_git_tree
 
@@ -58,7 +58,7 @@ from teamlib.trees import TreeError, read_git_tree
 # dispatcher and the tests cannot drift apart.
 PRODUCTION_REFUSED_COMMANDS = frozenset(
     {
-        "setup-state", "adopt-frontier", "qualify-target", "recover-migration",
+        "setup-state", "adopt-frontier", "adopt-migration-members", "qualify-target", "recover-migration",
         "register-app", "recover-app-lock", "migrate", "undo-migration", "redo-migration",
         "run-integration",
         "run-release-test",
@@ -102,6 +102,7 @@ COMMAND_HELP = {
     "adopt-frontier": ("Migration maintenance", "adopt a sequence-zero observed schema frontier"),
     "check-drift": ("Migration maintenance", "compare live schema structure and accepted frontier"),
     "export-history": ("Migration maintenance", "export canonical migration history from metadata"),
+    "adopt-migration-members": ("Migration maintenance", "store local files of already-applied migrations in shared metadata"),
     "new-migration": ("Migration maintenance", "author a new forward migration and verification pair"),
     "add-dependency": ("Migration maintenance", "add an exact checksum dependency to a migration"),
     "migration-plan": ("Migration maintenance", "calculate dependency-ordered pending migrations offline"),
@@ -240,6 +241,9 @@ def _parser() -> argparse.ArgumentParser:
     drift.add_argument("--out")
     history = add_command("export-history")
     history.add_argument("--out", required=True)
+    adopt_members_parser = add_command("adopt-migration-members")
+    adopt_members_parser.add_argument("--source", default="migrations")
+    adopt_members_parser.add_argument("--dry-run", action="store_true")
     recover_migration = add_command("recover-migration")
     recover_migration.add_argument("run_token")
     recover_migration.add_argument("--attempt")
@@ -585,6 +589,22 @@ def _online(args: argparse.Namespace) -> object:
         status = drift_status(result, frontier_result)
         _json({"status": status, "operation": command, "diff": result})
         return 0 if status == "clean" else 3
+    if command == "adopt-migration-members":
+        metadata = profile_target(config, "METADATA")
+        store = _sql_migration_store(repo, metadata)
+        # Bootstrap is idempotent and adds the member tables to an older metadata schema.
+        store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
+        report = adopt_members(
+            store,
+            metadata,
+            load_bundles(args.source),
+            dry_run=args.dry_run,
+            actor=os.environ.get("USER", "member-backfill"),
+            worker_identity=os.environ.get("USER", "member-backfill"),
+            host=socket.gethostname(),
+        )
+        _json({"operation": command, **report})
+        return 0
     if command in {"export-history", "recover-migration"}:
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)
