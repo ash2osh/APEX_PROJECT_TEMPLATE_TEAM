@@ -128,9 +128,13 @@ _PRODUCTION_READ_INVENTORY_REQUIRED = (
     "ALL_TAB_PRIVS",
     "ALL_COL_PRIVS",
 )
+# Besides DML/DDL keywords, refuse the packages that run SQL or leave the
+# session without naming a write keyword: dynamic SQL, jobs, files, network,
+# pipes and autonomous transactions.
 _PRODUCTION_READ_WRITE_RE = re.compile(
     r"\b(?:EXECUTE\s+IMMEDIATE|INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|"
-    r"GRANT|REVOKE|COMMIT|ROLLBACK|LOCK)\b",
+    r"GRANT|REVOKE|COMMIT|ROLLBACK|LOCK|AUTONOMOUS_TRANSACTION|"
+    r"DBMS_SQL|DBMS_JOB|DBMS_SCHEDULER|DBMS_PIPE|DBMS_AQ|UTL_FILE|UTL_HTTP|UTL_TCP|UTL_SMTP|UTL_MAIL)\b",
     re.IGNORECASE,
 )
 
@@ -207,19 +211,56 @@ def _assert_production_read_only(driver_text: str) -> None:
         )
 
 
+IDENTITY_GUARD_CODE = 20901
+# A payload may raise any code in the -20000..-20999 range itself, so the guard
+# is recognised by its code together with this message, never by the code alone.
+IDENTITY_GUARD_MESSAGE = "TEAM identity guard: session does not match the expected target; payload not run"
+
+# INSTANCE_NAME alone is not unique across cloned Docker/Free databases.
+# Pair it with the verified database server host so independent
+# containers cannot share a physical application lock by accident.
+_IDENTITY_EXPRESSION = (
+    "'SESSION_USER=' || REPLACE(SYS_CONTEXT('USERENV','SESSION_USER'),'|','/') || "
+    "'|CURRENT_SCHEMA=' || REPLACE(SYS_CONTEXT('USERENV','CURRENT_SCHEMA'),'|','/') || "
+    "'|DB_NAME=' || REPLACE(SYS_CONTEXT('USERENV','DB_NAME'),'|','/') || "
+    "'|SERVICE=' || REPLACE(SYS_CONTEXT('USERENV','SERVICE_NAME'),'|','/') || "
+    "'|INSTANCE_ID=' || REPLACE(SYS_CONTEXT('USERENV','INSTANCE_NAME'),'|','/') || '@' || "
+    "REPLACE(SYS_CONTEXT('USERENV','SERVER_HOST'),'|','/')"
+)
+
+
 def _sql_marker_query() -> str:
-    # INSTANCE_NAME alone is not unique across cloned Docker/Free databases.
-    # Pair it with the verified database server host so independent
-    # containers cannot share a physical application lock by accident.
+    return "SELECT 'TEAM_IDENTITY|' || " + _IDENTITY_EXPRESSION + " FROM DUAL;"
+
+
+def _sql_literal(value: str) -> str:
+    if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise SqlclError("expected target identity values must be non-empty printable text")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _identity_guard_block(target: Target) -> str:
+    """Refuse inside the SQLcl session before the payload runs.
+
+    The Python comparison of the TEAM_IDENTITY observations only happens after
+    SQLcl exits, which is after a write payload has already executed. This
+    block stops the session on the database side first, so a saved connection
+    that resolves to the wrong user, schema or database never runs the payload.
+    """
+    expected = (
+        f"SESSION_USER={target.session_user}"
+        f"|CURRENT_SCHEMA={target.current_schema}"
+        f"|DB_NAME={target.db_name}"
+        f"|SERVICE={target.service}"
+        f"|INSTANCE_ID={target.instance_id}"
+    )
     return (
-        "SELECT 'TEAM_IDENTITY|' || "
-        "'SESSION_USER=' || REPLACE(SYS_CONTEXT('USERENV','SESSION_USER'),'|','/') || "
-        "'|CURRENT_SCHEMA=' || REPLACE(SYS_CONTEXT('USERENV','CURRENT_SCHEMA'),'|','/') || "
-        "'|DB_NAME=' || REPLACE(SYS_CONTEXT('USERENV','DB_NAME'),'|','/') || "
-        "'|SERVICE=' || REPLACE(SYS_CONTEXT('USERENV','SERVICE_NAME'),'|','/') || "
-        "'|INSTANCE_ID=' || REPLACE(SYS_CONTEXT('USERENV','INSTANCE_NAME'),'|','/') || '@' || "
-        "REPLACE(SYS_CONTEXT('USERENV','SERVER_HOST'),'|','/') "
-        "FROM DUAL;"
+        "BEGIN\n"
+        f"  IF {_IDENTITY_EXPRESSION} <> {_sql_literal(expected)} THEN\n"
+        f"    RAISE_APPLICATION_ERROR(-{IDENTITY_GUARD_CODE}, '{IDENTITY_GUARD_MESSAGE}');\n"
+        "  END IF;\n"
+        "END;\n"
+        "/\n"
     )
 
 
@@ -245,7 +286,7 @@ def _diagnostic_region(stdout: str) -> str:
     return "\n".join(kept)
 
 
-def _driver_text(payload_name: str, operation: str) -> str:
+def _driver_text(payload_name: str, operation: str, target: Target) -> str:
     return (
         "SET DEFINE OFF\n"
         "SET ENCODING UTF-8\n"
@@ -262,6 +303,7 @@ def _driver_text(payload_name: str, operation: str) -> str:
         + "\n"
         + _sql_marker_query()
         + "\n"
+        + _identity_guard_block(target)
         + f"PROMPT {_RESULT_BEGIN}\n"
         + f"@{payload_name}\n"
         + f"PROMPT {_RESULT_END}\n"
@@ -387,7 +429,7 @@ def run_sqlcl(
     stdin_path = work_path / f".team-stdin-{run_id}.empty"
     log_path = work_path / f".team-sqlcl-{run_id}.log"
     payload_copy.write_text(payload, encoding="utf-8", newline="")
-    generated_driver.write_text(_driver_text(payload_copy.name, operation), encoding="utf-8", newline="")
+    generated_driver.write_text(_driver_text(payload_copy.name, operation, target), encoding="utf-8", newline="")
     stdin_path.touch()
     for transient in (payload_copy, generated_driver, stdin_path):
         os.chmod(transient, 0o600)
@@ -424,6 +466,12 @@ def run_sqlcl(
         log_path.write_text(safe_log, encoding="utf-8", newline="")
 
         if completed.returncode != 0:
+            guard_marker = f"ORA-{IDENTITY_GUARD_CODE}: {IDENTITY_GUARD_MESSAGE}"
+            if guard_marker in _diagnostic_region(stdout) or guard_marker in stderr:
+                raise SqlclError(
+                    "SQLcl identity guard refused the session before the payload ran: "
+                    f"connection {target.connection!r} does not reach the expected target; see {log_path}"
+                )
             raise SqlclError(f"SQLcl failed with exit code {completed.returncode}; see {log_path}")
         diagnostics = _diagnostic_region(stdout)
         if _OUTPUT_ERROR_RE.search(diagnostics) or _OUTPUT_ERROR_RE.search(stderr):
