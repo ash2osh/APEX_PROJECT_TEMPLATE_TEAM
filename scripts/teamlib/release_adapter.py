@@ -222,7 +222,7 @@ def _apply_release_context(
                     if isinstance(row, Mapping):
                         marker = _database_release_replay_marker(row.get("source_commit"))
                         if marker is not None:
-                            replay_base = min(replay_base, marker[1])
+                            replay_base = min(replay_base, marker[2])
                 for event in reviewed.events:
                     if source is not None:
                         profiles["source_commit"] = (

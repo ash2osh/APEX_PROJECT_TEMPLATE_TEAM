@@ -1254,6 +1254,12 @@ def _plan_database_release(
     if manifest.kind != "schema" or manifest.source is None or not manifest.events:
         raise ReleaseError("format 3 replay requires a verified database schema ledger")
     event_by_sequence = {int(event["sequence"]): event for event in manifest.events}
+    # A marker's ledger digest must name a prefix of this archive's ledger: the
+    # release that wrote it was cut from the same development history.
+    prefix_cuts = {
+        hashlib.sha256(_canonical(list(manifest.events[:cut]))).hexdigest(): cut
+        for cut in range(1, len(manifest.events) + 1)
+    }
     normalized: dict[str, tuple[str, str, int]] = {}
     replay_markers: list[tuple[int, int]] = []
     cursor = 0
@@ -1276,8 +1282,9 @@ def _plan_database_release(
         if replay_marker is None:
             sequence = local_sequence
         else:
-            sequence, replay_base = replay_marker
-            if sequence > len(manifest.events) or replay_base >= sequence or replay_base > len(manifest.events):
+            ledger_digest, sequence, replay_base = replay_marker
+            ledger_cut = prefix_cuts.get(ledger_digest)
+            if ledger_cut is None or sequence > ledger_cut or replay_base >= sequence:
                 raise ReleaseError("target history is not an exact archive prefix")
             replay_markers.append((sequence, replay_base))
         if sequence > len(manifest.events):
@@ -1362,13 +1369,13 @@ def _plan_database_release(
     )
 
 
-def _database_release_replay_marker(source_commit: Any) -> tuple[int, int] | None:
-    """Read a source event sequence and replay base from a format-3 history row."""
+def _database_release_replay_marker(source_commit: Any) -> tuple[str, int, int] | None:
+    """Read the ledger digest, source event sequence and replay base from a format-3 history row."""
     if not isinstance(source_commit, str) or not source_commit.startswith("db-release:"):
         return None
     match = _DB_RELEASE_REPLAY_SOURCE_RE.fullmatch(source_commit)
     if match is not None:
-        return int(match.group(2)), int(match.group(3))
+        return match.group(1), int(match.group(2)), int(match.group(3))
     if _DB_RELEASE_SOURCE_RE.fullmatch(source_commit):
         # Compatibility with early format-3 replay rows that recorded only the
         # source ledger digest and therefore used local sequence numbers.

@@ -25,8 +25,12 @@ from .migrate import RunReport, apply_plan
 from .migration_runtime import migration_profiles
 from .migration_store import MigrationStoreError, SqlMigrationStore
 from .qualification import qualify_target, write_report
-from .release import ApplyReport, Manifest, release_app_check_bundle, verify_release
-from .release_adapter import ReleaseAdapterError, apply_verified_release_live, verify_required_migrations
+from .release import ApplyReport, Manifest, ReleaseError, plan_release, release_app_check_bundle, verify_release
+from .release_adapter import (
+    _release_target_document,
+    apply_verified_release_live,
+    verify_required_migrations,
+)
 from .runtime import RuntimeReport, preflight_online
 from .source_snapshot import IntegrationSource, load_integration_source
 from .trees import tree_digest
@@ -331,20 +335,28 @@ def _qualify_release(
     )
 
 
+def _require_release_applied(archive: Path, target_contract: Path, history: Mapping[str, Any]) -> None:
+    """Refuse unless the live test history is exactly at the release's cut."""
+    plan = plan_release(archive, history, _release_target_document(target_contract))
+    if plan.pending or plan.events:
+        raise ReleaseError("test target history is not at the release cut; another migration ran, test again")
+
+
 @contextmanager
 def _hold_release_apps(
     repo: Path,
     config: Config,
     expected: Mapping[str, str],
     required: tuple[Mapping[str, str], ...] = (),
+    verify_history: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> Iterator[None]:
-    """Keep deployments and migrations out while a release's apps are qualified.
+    """Keep deployments and migrations out while a release is qualified.
 
-    deploy_app releases its mutex when the import is verified, and migrations
-    use a separate mutex: another run could deploy a different archive or undo
-    a required migration before the checks run.
+    deploy_app and the migration runner release their mutexes when they
+    finish: another run could deploy a different archive, undo a required
+    migration or add a later one before the checks read the target.
     """
-    if not expected and not required:
+    if not expected and not required and verify_history is None:
         yield
         return
     metadata = profile_target(config, "METADATA")
@@ -354,11 +366,15 @@ def _hold_release_apps(
     migration_held = False
     held: list[Target] = []
     try:
-        if required:
+        if required or verify_history is not None:
             migrations = SqlMigrationStore(metadata, work_root=repo / "scratch" / "metadata")
             migrations.acquire(metadata, token, "release-test", socket.gethostname())
             migration_held = True
-            verify_required_migrations(required, migrations.read_history(metadata))
+            history = migrations.read_history(metadata)
+            if required:
+                verify_required_migrations(required, history)
+            if verify_history is not None:
+                verify_history(history)
         for alias in sorted(expected):
             target = profile_target(config, "APEX", alias=alias)
             store.acquire_app(target.physical_key, token, "release-test", socket.gethostname(), "release-test")
@@ -369,7 +385,7 @@ def _hold_release_apps(
                     f"application {alias} no longer matches the release archive; another deployment ran, test again"
                 )
         yield
-    except (ApexError, ControlStoreError, MigrationStoreError, ReleaseAdapterError) as exc:
+    except (ApexError, ControlStoreError, MigrationStoreError, ReleaseError) as exc:
         raise OnlineWorkflowError(f"release application cannot be held for qualification: {exc}") from exc
     finally:
         for target in held:
@@ -596,8 +612,16 @@ def run_release_test(
         raise OnlineWorkflowError("release manifest application bindings are malformed")
     try:
         required = tuple(getattr(manifest, "required_migrations", None) or ())
+        # A schema release is qualified against exactly its own cut: hold the
+        # migration mutex and prove no later transition landed after apply.
+        verify_history = (
+            (lambda history: _require_release_applied(archive_path, target_path, history))
+            if getattr(manifest, "kind", None) == "schema"
+            else None
+        )
         with deps.hold_release_apps(
-            repo_path, config, {alias: app_digests[alias] for alias in exercised_aliases}, required
+            repo_path, config, {alias: app_digests[alias] for alias in exercised_aliases}, required,
+            verify_history,
         ):
             report = deps.qualify_release(
                 repo_path,

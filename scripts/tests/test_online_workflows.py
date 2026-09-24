@@ -447,11 +447,12 @@ class OnlineWorkflowTests(unittest.TestCase):
         return dependencies, manifest
 
     @contextmanager
-    def hold_release_apps(self, _repo, _config, expected, required=()):
+    def hold_release_apps(self, _repo, _config, expected, required=(), verify_history=None):
         """Record which app digests and prerequisites a release test holds during qualification."""
         holds = self.__dict__.setdefault("holds", [])
         holds.append({"expected": dict(expected), "open": True})
         self.__dict__.setdefault("held_required", []).append(tuple(required))
+        self.__dict__.setdefault("held_history_checks", []).append(verify_history)
         try:
             yield
         finally:
@@ -725,6 +726,8 @@ class OnlineWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "PASS")
         self.assertEqual(qualified_aliases, [()])
+        # Schema qualification holds the migration mutex and rechecks the cut.
+        self.assertIsNotNone(self.held_history_checks[-1])
         written = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(written["kind"], "schema")
         self.assertIsNone(written["alias"])
@@ -765,6 +768,7 @@ class OnlineWorkflowTests(unittest.TestCase):
         self.assertEqual(qualified_aliases, [("employee",)])
         self.assertEqual(self.holds, [{"expected": {"employee": "c" * 64}, "open": False}])
         self.assertEqual(self.held_required, [()])
+        self.assertEqual(self.held_history_checks, [None])
         written = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(written["kind"], "app")
         self.assertEqual(written["alias"], "employee")
@@ -822,6 +826,55 @@ class OnlineWorkflowTests(unittest.TestCase):
                 with online_workflows._hold_release_apps(self.root, config_for(), {}, required):
                     calls.append(("qualify",))
             self.assertEqual(calls, [("acquire-migrations",), ("release-migrations",)])
+
+    def test_schema_release_history_is_rechecked_and_held_through_qualification(self):
+        from teamlib import online_workflows
+        from teamlib.release import ReleaseError
+
+        calls: list[tuple] = []
+        migrations = SimpleNamespace(
+            acquire=lambda *_a: calls.append(("acquire-migrations",)),
+            release=lambda *_a: calls.append(("release-migrations",)),
+            read_history=lambda *_a: {"m9": {"status": "APPLIED"}},
+        )
+        seen = []
+
+        def moved(history):
+            seen.append(history)
+            raise ReleaseError("test target history is not at the release cut; another migration ran, test again")
+
+        with patch.object(online_workflows, "SqlControlStore", return_value=SimpleNamespace()), \
+             patch.object(online_workflows, "SqlMigrationStore", return_value=migrations), \
+             patch.object(online_workflows, "profile_target", return_value=SimpleNamespace()):
+            with online_workflows._hold_release_apps(self.root, config_for(), {}, (), seen.append):
+                calls.append(("qualify",))
+            self.assertEqual(calls, [("acquire-migrations",), ("qualify",), ("release-migrations",)])
+            calls.clear()
+            with self.assertRaisesRegex(OnlineWorkflowError, "not at the release cut"):
+                with online_workflows._hold_release_apps(self.root, config_for(), {}, (), moved):
+                    calls.append(("qualify",))
+            self.assertEqual(calls, [("acquire-migrations",), ("release-migrations",)])
+        self.assertEqual(seen[-1], {"m9": {"status": "APPLIED"}})
+
+    def test_release_applied_check_refuses_pending_replay(self):
+        from teamlib import online_workflows
+        from teamlib.release import ReleaseError
+
+        target = self.root / "targets" / "t.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+        for plan, refused in (
+            (SimpleNamespace(pending=(), events=()), False),
+            (SimpleNamespace(pending=("m2",), events=({"id": "m2"},)), True),
+        ):
+            with self.subTest(refused=refused), \
+                 patch.object(online_workflows, "_release_target_document", return_value={}), \
+                 patch.object(online_workflows, "plan_release", return_value=plan):
+                if refused:
+                    with self.assertRaisesRegex(ReleaseError, "not at the release cut"):
+                        online_workflows._require_release_applied(self.root / "r.tar", target, {})
+                else:
+                    online_workflows._require_release_applied(self.root / "r.tar", target, {})
 
     def test_run_release_test_app_archive_refuses_when_selected_alias_not_in_config(self):
         events: list[str] = []

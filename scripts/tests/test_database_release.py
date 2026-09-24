@@ -409,6 +409,20 @@ class DatabaseReleaseTests(unittest.TestCase):
         self.assertEqual(next_replanned.events, ())
         self.assertEqual(next_replanned.replay_from, 5)
 
+        # Markers are bound to a prefix of this archive's ledger: a row from a
+        # foreign ledger, or one claiming an event past its own ledger's cut,
+        # is not an archive prefix even when id, checksum and status match.
+        def with_marker(marker):
+            return {**next_history, D_ID: {**next_history[D_ID], "source_commit": marker}}
+
+        for marker in (
+            f"db-release:{'0' * 64}:5:0",
+            f"db-release:{manifest.source['history_digest']}:5:0",
+        ):
+            with self.subTest(marker=marker):
+                with self.assertRaisesRegex(ReleaseError, "not an exact archive prefix"):
+                    plan_release(next_manifest.archive_path, with_marker(marker), target)
+
     def test_format_three_replay_does_not_skip_down_redo_for_target_applied_migration(self):
         self.ledger_with_a_revert()
         apply_redo(self.migrations, B_ID, self.profiles())
