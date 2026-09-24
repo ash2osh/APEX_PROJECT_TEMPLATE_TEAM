@@ -239,7 +239,7 @@ class RunbookTests(unittest.TestCase):
             (m / "20260907T100000__alice__one.verify.sql").write_text("", encoding="utf-8")
             for alias in ("hr", "payroll"):
                 (repo / "apps" / alias / ".apex").mkdir(parents=True)
-                (repo / "apps" / alias / "application.apx").write_bytes(f"app-{alias}".encode("utf-8"))
+                (repo / "apps" / alias / "application.apx").write_bytes(f"app-{alias}".encode())
                 (repo / "apps" / alias / ".apex" / "apexlang.json").write_bytes(b"{}")
                 (repo / "app_context" / alias).mkdir(parents=True)
             (repo / "app_context" / "hr" / "release.json").write_text(
@@ -350,7 +350,7 @@ class RunbookTests(unittest.TestCase):
             (m / "20260907T100000__alice__one.verify.sql").write_text("", encoding="utf-8")
             for alias in ("hr", "payroll"):
                 (repo / "apps" / alias / ".apex").mkdir(parents=True)
-                (repo / "apps" / alias / "application.apx").write_bytes(f"app-{alias}".encode("utf-8"))
+                (repo / "apps" / alias / "application.apx").write_bytes(f"app-{alias}".encode())
                 (repo / "apps" / alias / ".apex" / "apexlang.json").write_bytes(b"{}")
                 (repo / "app_context" / alias).mkdir(parents=True)
                 (repo / "app_context" / alias / "release.json").write_text('{"version": 1, "requires": []}\n', encoding="utf-8")

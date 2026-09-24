@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from typing import Any
+from typing import Any, Literal
 from collections.abc import Mapping
 from collections.abc import Callable
 

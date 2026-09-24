@@ -8,8 +8,10 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 import json
+import os
 import subprocess
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 
@@ -688,6 +690,41 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertIn("changed", str(ctx.exception).lower())
         self.assertEqual(len(self.write_calls), 0)
 
+    def test_new_checkout_after_preparation_refuses_before_any_write(self):
+        self.store.register_app(self.target_payroll, "pay-uuid-3", "host-3", "carol")
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo, self.prep.preparation_id, self.acks,
+                confirm_pause=True, config=self.config, store=self.store,
+                runner=self.fake_runner, lock_reader=self.lock_reader,
+            )
+        self.assertIn("roster", str(ctx.exception).lower())
+        self.assertEqual(self.write_calls, [])
+
+    def test_missing_second_app_baseline_refuses_before_any_write(self):
+        baseline = self.repo / ".sync-state" / "baselines" / self.target_payroll.state_key / "baseline.json"
+        baseline.unlink()
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo, self.prep.preparation_id, self.acks,
+                confirm_pause=True, config=self.config, store=self.store,
+                runner=self.fake_runner, lock_reader=self.lock_reader,
+            )
+        self.assertIn("baseline", str(ctx.exception).lower())
+        self.assertEqual(self.write_calls, [])
+
+    def test_changed_second_app_generation_refuses_before_any_write(self):
+        self.store.acquire_app(self.target_payroll.physical_key, "other-run", "pay-uuid-2", "host-2", "bob")
+        self.store.release_app(self.target_payroll.physical_key, "other-run", confirmed_success=True)
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo, self.prep.preparation_id, self.acks,
+                confirm_pause=True, config=self.config, store=self.store,
+                runner=self.fake_runner, lock_reader=self.lock_reader,
+            )
+        self.assertIn("generation", str(ctx.exception).lower())
+        self.assertEqual(self.write_calls, [])
+
     def test_unknown_lock_report_refuses_with_zero_writes(self):
         def failing_lock_reader(target, **kwargs):
             return LockReport(target.alias, 101, "UNKNOWN", (), "APEX_APPLICATION_LOCKED_PAGES")
@@ -725,6 +762,33 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertEqual(len(self.write_calls), 2)
         # Check journal file exists
         self.assertTrue(report.journal_path.is_file())
+
+    def test_publish_journal_uses_each_imports_exact_recovery_operation(self):
+        unrelated = self.repo / ".sync-state" / "recovery" / "unrelated-old-run" / "result.json"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text(json.dumps({
+            "verified": True,
+            "source_commit": self.seed_commit,
+            "operation_id": "unrelated-old-run",
+            "recovery_path": str(unrelated.parent),
+        }), encoding="utf-8")
+        future = time.time() + 3600
+        os.utime(unrelated, (future, future))
+
+        report = publish_prepared(
+            self.repo, self.prep.preparation_id, self.acks,
+            confirm_pause=True, config=self.config, store=self.store,
+            runner=self.fake_runner, lock_reader=self.lock_reader,
+        )
+        self.assertEqual(report.overall_status, "VERIFIED")
+        operation_ids = set()
+        for alias in ("hr", "payroll"):
+            result = report.app_results[alias]
+            self.assertNotEqual(result.operation_id, "unrelated-old-run")
+            self.assertIsNotNone(result.operation_id)
+            self.assertEqual(result.recovery_path, str(self.repo / ".sync-state" / "recovery" / result.operation_id))
+            operation_ids.add(result.operation_id)
+        self.assertEqual(len(operation_ids), 2)
 
     def test_partial_failure_when_second_app_times_out(self):
         self.timeout_on_payroll = True

@@ -48,7 +48,7 @@ from teamlib.release_adapter import ReleaseAdapterError
 from teamlib.runbook import RunbookError
 from teamlib.runtime import preflight_online
 from teamlib.online_workflows import OnlineWorkflowError, run_integration, run_release_test
-from teamlib.state import StateError, load_baseline
+from teamlib.state import StateError
 from teamlib.migration_bundle import BundleError
 from teamlib.source_snapshot import IntegrationSource, SourceSnapshotError, load_integration_source
 from teamlib.trees import TreeError, read_git_tree

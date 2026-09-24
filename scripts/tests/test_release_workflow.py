@@ -216,7 +216,7 @@ class IndependentReleaseTwoAppTests(unittest.TestCase):
         # Build schema archive
         scratch = Path(self.temp.name) / "scratch"
         scratch.mkdir()
-        schema_manifest = build_release(self.repo, "HEAD", "1.1.0", scratch / "schema", kind="schema")
+        build_release(self.repo, "HEAD", "1.1.0", scratch / "schema", kind="schema")
         schema_archive = scratch / "schema" / "release.tar"
         verified_schema_manifest = verify_release(schema_archive)
         self.assertEqual(verified_schema_manifest.kind, "schema")
@@ -343,7 +343,7 @@ class IndependentReleaseTwoAppTests(unittest.TestCase):
 
         scratch = Path(self.temp.name) / "scratch"
         scratch.mkdir(exist_ok=True)
-        hr_manifest = build_release(self.repo, "HEAD", "2.0.0", scratch / "hr_master", kind="app", alias="hr")
+        build_release(self.repo, "HEAD", "2.0.0", scratch / "hr_master", kind="app", alias="hr")
         hr_archive = scratch / "hr_master" / "release.tar"
         hr_tree = {"application.apx": (self.repo / "apps" / "hr" / "application.apx").read_bytes()}
 

@@ -9,6 +9,7 @@ if _SCRIPTS_DIR not in sys.path:
 
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
@@ -16,6 +17,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_readme_bash_examples_have_valid_shell_syntax(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"(?ms)^```bash\n(.*?)^```$", readme)
+        self.assertTrue(blocks)
+        for block in blocks:
+            result = subprocess.run(["bash", "-n"], input=block, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_current_operator_guidance_has_no_retired_or_unsafe_paths(self):
         operator_paths = [
             ROOT / "README.md",
@@ -47,7 +56,7 @@ class DocumentationTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for token in (
             "git status --short --untracked-files=all",
-            "git add -- apps/<alias>/",
+            "git add -- apps/hr/",
             "git diff --cached",
             "git pull --rebase",
             "git push",
@@ -83,7 +92,7 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("scripts/team.sh publish-app", readme)
 
         # 3. Omar's explicit pause acknowledgement
-        self.assertIn("--ack hr:<Omar's registered checkout UUID>", readme)
+        self.assertIn('--ack "hr:$OMAR_UUID"', readme)
 
         # 4. Schema-then-HR release
         self.assertIn("build-release --kind schema", readme)

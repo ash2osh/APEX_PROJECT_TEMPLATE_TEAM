@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import shutil
@@ -524,7 +524,7 @@ def import_app(
             newline="\n",
         )
         store.release_app(target.physical_key, run_token, confirmed_success=True)
-        return load_baseline(target, root=state_root)
+        return replace(load_baseline(target, root=state_root), operation_id=current.recovery_id)
     except Exception as exc:
         if payload_started:
             if isinstance(exc, SqlclError):

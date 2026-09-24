@@ -68,6 +68,45 @@ class PublishReport:
     journal_path: Path
 
 
+def _authorize_observed_app(
+    target: Target,
+    observed_tree: Mapping[str, bytes],
+    selected_tree: Mapping[str, bytes],
+    source_commit: str,
+    state_root: Path,
+    replace_id: str | None,
+) -> str | None:
+    """Apply the same baseline, receipt and replacement conditions as import_app."""
+    try:
+        baseline = load_baseline(target, root=state_root)
+    except StateError:
+        baseline = None
+
+    if baseline is None and replace_id is None:
+        raise PublishError(
+            f"Application '{target.alias}' has no verified baseline; capture existing app and use --replace-from"
+        )
+
+    replacement = None
+    if replace_id is not None:
+        try:
+            replacement = load_capture(target, replace_id, root=state_root)
+        except StateError as exc:
+            raise PublishError(f"--replace-from recovery for '{target.alias}' is unreadable: {exc}") from exc
+        if replacement.mine != observed_tree:
+            raise PublishError(f"--replace-from capture for '{target.alias}' does not match observed Builder state")
+
+    if not (
+        (baseline is not None and observed_tree == baseline.tree)
+        or _receipt_allows_import(target, observed_tree, selected_tree, source_commit, state_root)
+        or replacement is not None
+    ):
+        raise PublishError(
+            f"Application '{target.alias}' differs from verified baseline; export-app and reconcile before publishing"
+        )
+    return baseline.tree_digest if baseline is not None else None
+
+
 def prepare_publish(
     repo: Path | str,
     targets: tuple[Target, ...],
@@ -171,35 +210,9 @@ def prepare_publish(
             raise PublishError(f"Cannot read sync state for '{alias}': {exc}") from exc
 
         # 5. Check baseline / receipt / replace-from
-        try:
-            baseline = load_baseline(t, root=state_root)
-        except StateError:
-            baseline = None
-
-        allowed = False
-        baseline_digest = baseline.tree_digest if baseline is not None else None
-        if baseline is not None and observed.tree == baseline.tree:
-            allowed = True
-        elif _receipt_allows_import(t, observed.tree, selected_tree, resolved_commit, state_root):
-            allowed = True
-        elif alias in replace_map:
-            rec_id = replace_map[alias]
-            try:
-                replacement = load_capture(t, rec_id, root=state_root)
-            except StateError as exc:
-                raise PublishError(f"--replace-from recovery for '{alias}' is unreadable: {exc}") from exc
-            if replacement.mine != observed.tree:
-                raise PublishError(f"--replace-from capture for '{alias}' does not match observed Builder state")
-            allowed = True
-
-        if not allowed:
-            if baseline is None:
-                raise PublishError(
-                    f"Application '{alias}' has no verified baseline; capture existing app and use --replace-from"
-                )
-            raise PublishError(
-                f"Application '{alias}' differs from verified baseline; export-app and reconcile before publishing"
-            )
+        baseline_digest = _authorize_observed_app(
+            t, observed.tree, selected_tree, resolved_commit, state_root, replace_map.get(alias)
+        )
 
         # 6. Registered roster
         try:
@@ -453,8 +466,28 @@ def publish_prepared(
         except ApexError as exc:
             raise PublishError(f"Preflight capture failed for '{alias}': {exc}") from exc
 
+        if recapture.after_sync.generation != prep.apps[alias]["generation"]:
+            raise PublishError(f"Application '{alias}' generation changed after preparation; publish refused before write")
         if tree_digest(recapture.tree) != prep.apps[alias]["tree_digest"]:
             raise PublishError(f"Application '{alias}' changed after preparation; publish refused before write")
+
+        try:
+            selected_tree = read_git_tree(repo_path, prep.source_commit, alias)
+        except TreeError as exc:
+            raise PublishError(f"Selected source for '{alias}' is unavailable: {exc}") from exc
+        baseline_digest = _authorize_observed_app(
+            target, recapture.tree, selected_tree, prep.source_commit,
+            state_root, prep.apps[alias].get("replace_from"),
+        )
+        if baseline_digest != prep.apps[alias]["baseline_digest"]:
+            raise PublishError(f"Application '{alias}' baseline changed after preparation; publish refused before write")
+
+        try:
+            current_roster = {entry.checkout_uuid for entry in store.list_registry(target)}
+        except Exception as exc:
+            raise PublishError(f"Cannot refresh checkout roster for '{alias}': {exc}") from exc
+        if current_roster != set(prep.apps[alias]["roster"]):
+            raise PublishError(f"Application '{alias}' checkout roster changed after preparation; prepare again")
 
         # Refresh lock report
         refreshed_locks = lock_reader(target, runner=runner)
@@ -491,19 +524,10 @@ def publish_prepared(
                 control_store=store,
                 runner=runner,
             )
-            op_id = None
-            rec_path = None
-            recovery_dir = state_root / "recovery"
-            if recovery_dir.is_dir():
-                for rpath in sorted(recovery_dir.glob("*/result.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-                    try:
-                        rdata = json.loads(rpath.read_text(encoding="utf-8"))
-                        if rdata.get("verified") is True and rdata.get("source_commit") == baseline.source_commit:
-                            op_id = rdata.get("operation_id")
-                            rec_path = rdata.get("recovery_path")
-                            break
-                    except Exception:
-                        continue
+            op_id = baseline.operation_id
+            if not op_id:
+                raise PublishError(f"Verified import for '{alias}' did not return its recovery operation")
+            rec_path = str(state_root / "recovery" / op_id)
             results[alias] = AppPublishResult(
                 alias=alias,
                 status="VERIFIED",

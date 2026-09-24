@@ -29,6 +29,7 @@ class Baseline:
     tree_digest: str
     blobs: dict[str, str]
     tree: dict[str, bytes] = field(default_factory=dict)
+    operation_id: str | None = None
 
 
 @dataclass(frozen=True)

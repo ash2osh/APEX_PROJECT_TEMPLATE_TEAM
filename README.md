@@ -36,7 +36,6 @@ When working directly in the shared APEX Builder, save your changes, export the 
 scripts/team.sh export-app hr
 git status --short --untracked-files=all -- apps/hr/
 git add -- apps/hr/
-git add -- apps/<alias>/
 git diff --cached -- apps/hr/
 git commit -m "Capture reviewed HR Builder changes"
 git pull --rebase
@@ -55,8 +54,10 @@ When authoring APEXlang files directly or working with an agent, changes must be
 scripts/team.sh prepare-publish hr --ref HEAD
 
 # 3. Post the printed HR pause notice to teammates and gather acknowledgements.
-# 4. Publish only the prepared changes using the printed preparation ID and Omar's explicit acknowledgement:
-scripts/team.sh publish-app --prepared <printed-id> --confirm-pause --ack hr:<Omar's registered checkout UUID>
+# 4. Enter the printed preparation ID and Omar's registered checkout UUID:
+read -r -p "Preparation ID: " PREPARATION_ID
+read -r -p "Omar's checkout UUID: " OMAR_UUID
+scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause --ack "hr:$OMAR_UUID"
 ```
 
 > [!IMPORTANT]
@@ -66,12 +67,24 @@ scripts/team.sh publish-app --prepared <printed-id> --confirm-pause --ack hr:<Om
 
 - **HR-only pause:** When publishing `hr`, only HR is paused; teammates working on `payroll` continue uninterrupted:
   ```bash
-  scripts/team.sh publish-app --prepared <printed-id> --confirm-pause --ack hr:<Omar's registered checkout UUID>
+  scripts/team.sh prepare-publish hr --ref HEAD
+  # After posting the notice and gathering acknowledgements:
+  read -r -p "Preparation ID: " PREPARATION_ID
+  read -r -p "Omar's checkout UUID: " OMAR_UUID
+  scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause --ack "hr:$OMAR_UUID"
   ```
 - **Multiple apps pause:** When publishing both `hr` and `payroll`:
   ```bash
-  scripts/team.sh publish-app --prepared <printed-id> --confirm-pause --ack hr:<Omar's registered checkout UUID> --ack payroll:<Carol's registered checkout UUID>
+  scripts/team.sh prepare-publish hr payroll --ref HEAD
+  # After posting both notices and gathering acknowledgements:
+  read -r -p "Preparation ID: " PREPARATION_ID
+  read -r -p "Omar's checkout UUID: " OMAR_UUID
+  read -r -p "Carol's checkout UUID: " CAROL_UUID
+  scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause \
+    --ack "hr:$OMAR_UUID" --ack "payroll:$CAROL_UUID"
   ```
+
+Add one `--ack` for every registered checkout shown in the selected apps' pause notice.
 
 ## 5. Shared migrations and independent releases
 
