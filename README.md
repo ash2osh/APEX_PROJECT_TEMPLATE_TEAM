@@ -1,131 +1,109 @@
 # APEX project template for teams
 
-This repository treats each APEX application as a shared physical Builder
-resource. The tracked source is `apps/<alias>/`; the database and Builder
-workspace are identified by the validated target profiles, not by a Git branch.
+This repository treats each APEX application as a shared physical Builder resource. The tracked source is `apps/<alias>/`; the database and Builder workspace are identified by validated target profiles, not by a Git branch.
 
-## Daily Builder loop
+## 1. What is shared
 
-Edit in Builder, export the whole application, review the durable evidence, then
-commit and push:
+- **Database and workspace:** The team shares a single development database instance and APEX workspace per environment.
+- **Application source:** APEX edits are tracked as APEXlang source under `apps/<alias>/`.
+- **Database schema stream:** Shared database objects live under `TABLES_SCHEMA` and `CODE_SCHEMA` and are evolved via migrations under `migrations/`.
+- **Parsing schemas:** Each application is bound to exactly one parsing schema in the format `alias:id:PARSING_SCHEMA`.
 
+Applications may share one common parsing schema:
 ```text
-scripts/team.sh export-app <alias>
-git status --short --untracked-files=all -- apps/<alias>/ migrations/
+APEX_APPS=hr:100:APP,payroll:200:APP
+```
+Or applications may use separate parsing schemas:
+```text
+APEX_APPS=hr:100:HR_CODE,payroll:200:FIN_CODE
+```
+
+## 2. Local setup
+
+Copy `.env.example` to the ignored `.env` file, configure your saved SQLcl connection names (credentials remain securely inside SQLcl's wallet/store), and check your environment with `doctor`:
+
+```bash
+cp .env.example .env
+scripts/team.sh doctor
+```
+
+## 3. Builder-first workflow
+
+When working directly in the shared APEX Builder, save your changes, export the application to track the observed state, review the diff, and commit:
+
+```bash
+# Builder-first: capture the shared app after saving in Builder.
+scripts/team.sh export-app hr
+git status --short --untracked-files=all -- apps/hr/
+git add -- apps/hr/
 git add -- apps/<alias>/
-# If this Builder change needs a schema migration, stage its exact four members:
-git add -- migrations/<migration-id>.sql migrations/<migration-id>.verify.sql \
-  migrations/<migration-id>.down.sql migrations/<migration-id>.down.verify.sql
-git diff --cached -- apps/<alias>/ migrations/
-git commit -m "Describe the shared Builder and schema change"
+git diff --cached -- apps/hr/
+git commit -m "Capture reviewed HR Builder changes"
 git pull --rebase
 git push
 ```
 
-Omit nonexistent optional down members instead of using a broad glob. The
-export is the shared application's observed state, not only your edits, and
-`git status` is required because `git diff` alone hides untracked exported
-components. `.sync-state/` is durable local recovery evidence and is
-intentionally ignored by Git. No tool automatically stages, commits, pulls,
-rebases, pushes, imports, or clears recovery state.
+There is no import in the normal builder-first loop. The export reflects the team's observed application state.
 
-There is no import step in the normal edit loop. `import-app` overwrites the
-shared Builder workspace and requires a separately posted team pause. Transient
-Builder edits and arbitrary DML outside the supported inventory remain
-unobservable.
+## 4. File-first publish workflow
 
-## Local setup
+When authoring APEXlang files directly or working with an agent, changes must be committed first. Publishing into the shared Builder workspace is app-scoped and requires an exact preparation and explicit teammate acknowledgements:
 
-Copy `.env.example` to `.env`, fill the credential-free SQLcl connection names
-and expected identities, and validate the profile set:
+```bash
+# 1. Edit apps/hr/, review it, and commit it.
+# 2. Prepare publish for the reviewed commit:
+scripts/team.sh prepare-publish hr --ref HEAD
 
-```text
-scripts/team.sh doctor
-scripts/team.sh setup-state
-scripts/team.sh register-app <alias>
+# 3. Post the printed HR pause notice to teammates and gather acknowledgements.
+# 4. Publish only the prepared changes using the printed preparation ID and Omar's explicit acknowledgement:
+scripts/team.sh publish-app --prepared <printed-id> --confirm-pause --ack hr:<Omar's registered checkout UUID>
 ```
 
-The online integration and test jobs run on prepared `self-hosted` runners.
-`TEAM_FLOW_RUNNER` names the executable browser adapter when a declaration has a
-flow check. It must return one JSON object with `status` `PASS`, `FAIL`, or
-`UNKNOWN`; the runner preflight also verifies SQLcl, JDK, database/APEX version
-markers, profile identity, and Ed25519 capability.
+> [!IMPORTANT]
+> **Page-lock reports are informational:** Page-lock queries report active locks and comments. However, absence of locks does not prove the absence of unsaved or in-progress Builder edits by teammates. Always communicate before publishing. If a pre-publish before-check detects changes, publish halts so you can export and reconcile.
 
-## One normal command per protected target
+### App-scoped pause examples
 
-The offline pull-request gate runs unit tests, static checks, and `ci-doctor`.
-Protected integration binds migrations, inventory, application trees, and
-checks to one exact Git commit derived from `HEAD` and the configured aliases:
+- **HR-only pause:** When publishing `hr`, only HR is paused; teammates working on `payroll` continue uninterrupted:
+  ```bash
+  scripts/team.sh publish-app --prepared <printed-id> --confirm-pause --ack hr:<Omar's registered checkout UUID>
+  ```
+- **Multiple apps pause:** When publishing both `hr` and `payroll`:
+  ```bash
+  scripts/team.sh publish-app --prepared <printed-id> --confirm-pause --ack hr:<Omar's registered checkout UUID> --ack payroll:<Carol's registered checkout UUID>
+  ```
 
-```text
-scripts/team.py --env "$RUNNER_TEMP/integration.env" run-integration \
-  --out "$RUNNER_TEMP/qualification.json"
-```
+## 5. Shared migrations and independent releases
 
-It captures one live inventory, adopts a sequence-zero frontier only for empty
-metadata, checks drift, applies ordinary migrations, deploys every configured
-application, runs declared checks, and writes canonical persistent evidence.
-Destructive pending work returns `maintenance-required` with an exact template;
-the command never invents confirmation.
+- **Shared schema release:** Migrations under `migrations/` apply once per environment to the shared TABLES/CODE schema:
+  ```bash
+  scripts/team.py build-release --kind schema --ref schema/v1.0.0 --version 1.0.0 --out scratch/release
+  scripts/team.py verify-release scratch/release/release.tar
+  ```
+- **Independent application release:** Releasing an application packages only that application and verifies its required migration prerequisites against destination history without deploying sibling apps:
+  ```bash
+  scripts/team.py build-release --kind app --alias hr --ref app/hr/v1.0.0 --version 1.0.0 --out scratch/release
+  scripts/team.py verify-release scratch/release/release.tar
+  ```
+- **Destructive migration confirmation:** Destructive migrations require an explicit `--destructive-confirmation` document reviewed by the migration owner; see [docs/migrations.md](docs/migrations.md).
+- **Persistent qualification:** Protected integration and test runs verify persistent targets (`target_kind: persistent`). Persistent staging does not prove fresh installation or isolation. Use `qualify-target` for read-only target diagnostics; see [docs/ci.md](docs/ci.md).
 
-Release testing uses the verified archive and a protected test-role profile:
+## 6. Asking an AI coding agent
 
-```text
-scripts/team.py --env "$RUNNER_TEMP/test.env" run-release-test \
-  scratch/release/release.tar --target targets/test.json \
-  --out "$RUNNER_TEMP/test-evidence.json"
-```
+Coding agents follow the exact same public CLI commands and rules as human developers:
+1. When asked to author APEXlang, an agent edits `apps/<alias>/`, reviews the diff, and commits.
+2. The agent runs `scripts/team.sh prepare-publish <alias> --ref HEAD`.
+3. The agent must pause and present the pause notice to the human developer. The agent cannot invent teammate acknowledgements or bypass the publish gate.
+4. Once genuine teammate checkout acknowledgements are provided by the user, the agent runs `scripts/team.sh publish-app`.
 
-The verified archive bytes supply the source commit, application aliases, and
-the exact declaration/SQL/flow check bundle. The command
-reads live metadata history, recomputes the plan, refuses destructive pending
-work, deploys exact packaged bytes, and emits unsigned evidence. The target
-must have `role: test`, environment `test`, and matching application bindings.
+## 7. Runbooks and advanced references
 
-`qualify-target` remains the read-only diagnostic primitive when an operator
-needs to inspect a persistent target directly. Version-2 evidence contains
-`target_kind: persistent`, the latest `observation_digest` (the accepted
-after-inventory digest), history, toolchain, target identity, and check
-coverage. Persistent staging does not prove fresh installation or isolation.
-
-## Migrations and recovery
-
-Create migration bundles offline. A reversible migration has authored
-`.down.sql` and `.down.verify.sql` members; down SQL is never generated. Undo
-is global LIFO and redo is explicit for a `REVERTED` migration. All writes use
-the isolated METADATA profile, retain attempt/mutex evidence under
-`.sync-state/`, and refuse production.
-
-Destructive `migrate`, `undo-migration`, and `redo-migration` share one closed
-confirmation document. Start with `--dry-run`, review the exact migration ID,
-action, bundle checksum, and `payload_target_state_key`, then change only
-`confirmed: false` to `true` and pass:
-
-```text
-scripts/team.py --env .env migrate --source migrations --dry-run \
-  --confirmation-out scratch/confirmation.json
-scripts/team.py --env .env migrate --source migrations \
-  --destructive-confirmation confirmation.json \
-  --expected-inventory database/schema-inventory.json \
-  --actual-inventory scratch/live-inventory.json
-```
-
-Stale, partial, boolean-shortcut, or extra confirmation entries are refused.
-An unknown or failed attempt retains the mutex until the named recovery owner
-reviews the evidence and runs an explicit recovery command. Database undo does
-not roll back an APEX Builder import; use the app recovery workflow for that
-separate boundary.
-
-## Promotion
-
-Build and verify one immutable `release.tar` offline. The release workflow then
-downloads and verifies those bytes, runs `run-release-test`, signs the canonical
-test evidence with the protected Ed25519 key, and generates an offline
-production-owner runbook. Automated production writes remain refused.
-
-See [docs/ci.md](docs/ci.md), [docs/migrations.md](docs/migrations.md),
-[docs/promotion.md](docs/promotion.md), and
-[docs/app-recovery.md](docs/app-recovery.md) for the detailed contracts.
-
-For a disposable local Alice/Bob/Carol acceptance run, see
-[docs/local-three-developer-e2e.md](docs/local-three-developer-e2e.md).
+- [Import pause & lock details](docs/import-pause.md)
+- [Application recovery & retained evidence](docs/app-recovery.md)
+- [Database migrations & confirmation](docs/migrations.md)
+- [Promotion, CI & production runbooks](docs/promotion.md)
+- [CI workflows & protected test runs](docs/ci.md)
+- [Toolchain qualification & APEX 26.1+](docs/toolchain.md)
+- [Conflict resolution](docs/conflict-resolution.md)
+- [Design review resolution](docs/design-review-resolution.md)
+- [Local three-developer acceptance run](docs/local-three-developer-e2e.md)

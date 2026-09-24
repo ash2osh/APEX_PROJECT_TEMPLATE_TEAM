@@ -64,9 +64,45 @@ class DocumentationTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("no import step", readme.lower())
+        self.assertIn("no import in the normal builder-first loop", readme.lower())
         self.assertIn("release.tar", (ROOT / "docs/promotion.md").read_text(encoding="utf-8"))
         self.assertIn("UNKNOWN", (ROOT / "docs/ci.md").read_text(encoding="utf-8"))
+
+    def test_readme_structure_and_contract(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        # 1. Environment examples: one same-schema and one split-schema
+        self.assertIn("APEX_APPS=hr:100:APP,payroll:200:APP", readme)
+        self.assertIn("APEX_APPS=hr:100:HR_CODE,payroll:200:FIN_CODE", readme)
+
+        # 2. Daily workflows
+        self.assertIn("scripts/team.sh doctor", readme)
+        self.assertIn("scripts/team.sh export-app hr", readme)
+        self.assertIn("scripts/team.sh prepare-publish hr", readme)
+        self.assertIn("scripts/team.sh publish-app", readme)
+
+        # 3. Omar's explicit pause acknowledgement
+        self.assertIn("--ack hr:<Omar's registered checkout UUID>", readme)
+
+        # 4. Schema-then-HR release
+        self.assertIn("build-release --kind schema", readme)
+        self.assertIn("build-release --kind app --alias hr", readme)
+
+        # 5. Unsaved Builder caveat
+        self.assertIn("unsaved", readme.lower())
+        self.assertIn("informational", readme.lower())
+
+        # 6. Every fenced scripts/team.sh <command> maps to COMMAND_HELP or parser
+        import argparse
+        from team import COMMAND_HELP, _parser
+        parser = _parser()
+        subparsers_action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        subcommands = set(subparsers_action.choices.keys()) | set(COMMAND_HELP.keys())
+        command_pattern = re.compile(r"scripts/team\.(?:sh|py)(?:\s+--env\s+\S+)?\s+([a-z0-9_-]+)")
+        for match in command_pattern.finditer(readme):
+            cmd = match.group(1)
+            if cmd.startswith("-"):
+                continue
+            self.assertIn(cmd, subcommands, f"Command {cmd} found in README is not recognized in team CLI")
 
     def test_persistent_qualification_documentation_matches_the_contract(self):
         paths = (
