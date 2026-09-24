@@ -21,7 +21,7 @@ from .control_store import ControlStore, ControlStoreError
 from .masters import MasterError, apex_component_resolver, validate_masters
 from .patch import PatchError, apply_tree
 from .reconcile import Decision, reconcile
-from .sqlcl import APEX_TIMEOUT_SECONDS, SqlclError, run_sqlcl
+from .sqlcl import APEX_TIMEOUT_SECONDS, run_sqlcl
 from .state import (
     Baseline,
     StateError,
@@ -549,26 +549,22 @@ def import_app(
             encoding="utf-8",
             newline="\n",
         )
+        verified_baseline = load_baseline(target, root=state_root)
         store.release_app(target.physical_key, run_token, confirmed_success=True)
-        return replace(load_baseline(target, root=state_root), operation_id=current.recovery_id)
+        return replace(verified_baseline, operation_id=current.recovery_id)
     except Exception as exc:
         if payload_started:
-            if isinstance(exc, SqlclError):
-                # The SQLcl worker's result is unknown; retain the owner token.
-                raise ImportUnknown(
-                    f"import result is unknown; recover app lock with retained evidence: {exc}",
-                    current.recovery_id,
-                    state_root / "recovery" / current.recovery_id,
-                ) from exc
-            try:
-                store.release_app(target.physical_key, run_token, confirmed_success=False)
-            except ControlStoreError:
-                pass
-        else:
-            try:
-                store.release_app(target.physical_key, run_token, confirmed_success=False)
-            except ControlStoreError:
-                pass
+            # A write may have landed even if its response or subsequent
+            # verification failed. Retain the mutex and exact recovery ID.
+            raise ImportUnknown(
+                f"import result is unknown; recover app lock with retained evidence: {exc}",
+                current.recovery_id,
+                state_root / "recovery" / current.recovery_id,
+            ) from exc
+        try:
+            store.release_app(target.physical_key, run_token, confirmed_success=False)
+        except ControlStoreError:
+            pass
         if isinstance(exc, ApexError):
             raise
         raise ApexError(f"import failed: {exc}") from exc

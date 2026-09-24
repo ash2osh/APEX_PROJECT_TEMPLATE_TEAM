@@ -886,6 +886,33 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertEqual(recovery_path.name, operation_id)
         self.assertTrue(recovery_path.is_dir())
 
+    def test_post_import_export_timeout_keeps_unknown_recovery_evidence(self):
+        payroll_written = False
+
+        def timeout_during_verification(target, operation, driver, work, **kwargs):
+            nonlocal payroll_written
+            if target.alias == "payroll" and operation == "read" and payroll_written and Path(driver).name == "export.sql":
+                raise SqlclError("SQLcl timed out during post-import export")
+            result = self.fake_runner(target, operation, driver, work, **kwargs)
+            if target.alias == "payroll" and operation == "write":
+                payroll_written = True
+            return result
+
+        with self.assertRaises(PublishError):
+            publish_prepared(
+                self.repo, self.prep.preparation_id, self.acks,
+                confirm_pause=True, config=self.config, store=self.store,
+                runner=timeout_during_verification, lock_reader=self.lock_reader,
+            )
+        journal = self.repo / ".sync-state" / "publish" / self.prep.preparation_id / "result.json"
+        data = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall_status"], "UNKNOWN")
+        payroll = data["apps"]["payroll"]
+        self.assertEqual(payroll["status"], "UNKNOWN")
+        self.assertTrue(Path(payroll["recovery_path"]).is_dir())
+        self.assertEqual(Path(payroll["recovery_path"]).name, payroll["operation_id"])
+        self.assertIsNotNone(self.store.read_app_sync_state(self.target_payroll.physical_key).owner_token)
+
 
 
 class RetiredRouteSafetyTests(unittest.TestCase):

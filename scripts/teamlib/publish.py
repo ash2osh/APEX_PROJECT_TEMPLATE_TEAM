@@ -552,7 +552,8 @@ def publish_prepared(
             failed_alias = alias
             failed_error = str(exc)
             is_unknown = (
-                (isinstance(exc, SqlclError) and "timed out" in str(exc).lower())
+                isinstance(exc, ImportUnknown)
+                or (isinstance(exc, SqlclError) and "timed out" in str(exc).lower())
                 or "unknown" in str(exc).lower()
                 or (exc.__cause__ is not None and "unknown" in str(exc.__cause__).lower())
             )
