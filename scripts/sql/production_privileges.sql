@@ -9,18 +9,20 @@ SELECT 'TEAM_PRIV|SYSTEM|' || privilege
 SELECT 'TEAM_PRIV|ROLE|' || role
   FROM SESSION_ROLES
  ORDER BY role;
--- Grantee and whether the object's owner is Oracle-maintained: grants Oracle
--- itself makes to PUBLIC on its own objects (EXECUTE on DBMS_METADATA and
--- friends) are present on every account and are what read-only work uses.
+-- Grantee, whether the owner is Oracle-maintained, the object name and whether
+-- it is a temporary table: Oracle's own grants to PUBLIC (EXECUTE on
+-- DBMS_METADATA and friends, DML on session-private temporary tables) are on
+-- every account; the audit accepts only that named baseline.
 SELECT 'TEAM_PRIV|OBJECT|' || p.privilege || '|' || NVL(p.type, 'UNKNOWN') || '|'
-       || p.grantee || '|' || NVL(u.oracle_maintained, 'N')
+       || p.grantee || '|' || NVL(u.oracle_maintained, 'N') || '|' || p.table_name || '|'
+       || NVL(t.temporary, 'N')
   FROM ALL_TAB_PRIVS_RECD p
   LEFT JOIN ALL_USERS u ON u.username = p.owner
- ORDER BY p.privilege, p.type, p.grantee;
-SELECT 'TEAM_PRIV|COLUMN|' || p.privilege || '|' || p.grantee || '|' || NVL(u.oracle_maintained, 'N')
-  FROM ALL_COL_PRIVS_RECD p
-  LEFT JOIN ALL_USERS u ON u.username = p.owner
- ORDER BY p.privilege, p.grantee;
+  LEFT JOIN ALL_TABLES t ON t.owner = p.owner AND t.table_name = p.table_name
+ ORDER BY p.privilege, p.type, p.grantee, p.table_name;
+SELECT 'TEAM_PRIV|COLUMN|' || privilege
+  FROM ALL_COL_PRIVS_RECD
+ ORDER BY privilege;
 SELECT 'TEAM_PRIV|OWNED|' || object_type
   FROM USER_OBJECTS
  WHERE object_type <> 'SYNONYM'

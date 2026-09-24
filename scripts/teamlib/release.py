@@ -112,6 +112,9 @@ _MANIFEST_KEYS_V2 = _MANIFEST_KEYS_V1 | {
 # from; there is no Git commit.
 _MANIFEST_KEYS_V3 = (_MANIFEST_KEYS_V2 - {"source_commit"}) | {"source", "events"}
 _SCHEMA_SOURCE_KEYS_V3 = {"kind", "instance_id", "history_cut", "history_digest", "frontier_digest"}
+# Format 3 schema releases carry the development frontier inventory manifest so
+# qualification can prove the replayed target has the same structure.
+_FRONTIER_PATH = "release/frontier/inventory.json"
 _APP_SOURCE_KEYS_V3 = _SCHEMA_SOURCE_KEYS_V3 | {
     "app_generation", "app_tree_digest", "app_checks_digest", "master_contract_digest",
 }
@@ -482,7 +485,10 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         raise ReleaseError("schema release has no migrations")
     if format_version == 3 and kind == "schema":
         _verify_database_events(data["events"], data["source"], derived_migrations)
-    elif format_version == 3 and data["events"] != []:
+        _verify_frontier_member(members.get(_FRONTIER_PATH), data["source"])
+    elif _FRONTIER_PATH in members:
+        raise ReleaseError("only format 3 schema releases carry a frontier inventory")
+    if format_version == 3 and kind == "app" and data["events"] != []:
         raise ReleaseError("format 3 app releases cannot contain schema ledger events")
     if format_version == 3 and kind == "app":
         source = data["source"]
@@ -496,6 +502,37 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
     manifest = _manifest_from_data(data, archive, archive_digest)
     _release_app_trees_from_members(manifest, members)
     return manifest
+
+
+def _frontier_inventory(raw: bytes | None) -> Any:
+    from .fingerprints import InventoryError, inventory_from_manifest
+
+    if raw is None:
+        raise ReleaseError("format 3 schema release is missing its frontier inventory")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, Mapping):
+            raise ValueError("not an object")
+        return inventory_from_manifest(data)
+    except (UnicodeError, ValueError, InventoryError) as exc:
+        raise ReleaseError(f"release frontier inventory is malformed: {exc}") from exc
+
+
+def _verify_frontier_member(raw: bytes | None, source: Mapping[str, Any]) -> None:
+    if _frontier_inventory(raw).digest != source["frontier_digest"]:
+        raise ReleaseError("release frontier inventory does not match its frontier digest")
+
+
+def release_frontier_inventory(release_tar: str | Path) -> Any:
+    """Return the verified development frontier inventory of a format 3 schema release."""
+    archive = Path(release_tar)
+    if archive.is_symlink() or not archive.is_file():
+        raise ReleaseError("release archive is not a regular file")
+    archive_digest, members = _read_archive_bytes(archive)
+    manifest = _verify_archive_members(archive, archive_digest, members)
+    if manifest.format_version != 3 or manifest.kind != "schema":
+        raise ReleaseError("only format 3 schema releases carry a frontier inventory")
+    return _frontier_inventory(members.get(_FRONTIER_PATH))
 
 
 def _verify_database_source(source: Any, kind: str) -> None:
@@ -649,6 +686,13 @@ def build_schema_release_from_database(
                 migrations = _migration_manifest(load_bundles(root))
             except BundleError as exc:
                 raise ReleaseError(f"stored migration files do not form valid bundles: {exc}") from exc
+        frontier_manifest = store.read_inventories(metadata).get(frontier)
+        if not isinstance(frontier_manifest, Mapping):
+            raise ReleaseError("the accepted frontier inventory manifest is missing from the development database")
+        payload[_FRONTIER_PATH] = (
+            json.dumps(dict(frontier_manifest), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            + b"\n"
+        )
         source = {
             "kind": "dev-database",
             "instance_id": str(metadata.instance_id),

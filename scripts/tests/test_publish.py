@@ -980,6 +980,28 @@ class PublishPreparedTests(unittest.TestCase):
                 )
         self.assertEqual(self.write_calls, [("hr", "write")])
 
+    def test_identity_change_after_acknowledgement_is_rechecked_under_mutex(self):
+        # The SQL store updates host/user when a checkout re-registers the same
+        # UUID. An acknowledgement given by the old identity must not authorise
+        # the import, so the identity is compared again under the app mutex.
+        from teamlib.apex import import_app as real_import_app
+
+        def reregister_before_import(target, *args, **kwargs):
+            if target.alias == "payroll":
+                entry = self.store.list_registry(self.target_payroll)[0]
+                with self.store._locked() as data:
+                    data["registry"][self.target_payroll.physical_key][entry.checkout_uuid]["host"] = "other-host"
+            return real_import_app(target, *args, **kwargs)
+
+        with patch("teamlib.publish.import_app", side_effect=reregister_before_import):
+            with self.assertRaisesRegex(PublishError, "identity changed after acknowledgement"):
+                publish_prepared(
+                    self.repo, self.prep.preparation_id,
+                    confirm_pause=True, config=self.config, store=self.store,
+                    runner=self.fake_runner, lock_reader=self.lock_reader,
+                )
+        self.assertEqual(self.write_calls, [("hr", "write")])
+
     def test_unknown_lock_report_refuses_with_zero_writes(self):
         def failing_lock_reader(target, **kwargs):
             return LockReport(target.alias, 101, "UNKNOWN", (), "APEX_APPLICATION_LOCKED_PAGES")

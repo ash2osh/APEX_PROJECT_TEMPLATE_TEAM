@@ -562,6 +562,7 @@ def publish_prepared(
     shared_preparation = _verify_shared_preparation_matches_local(prep, config, store)
 
     # 1. Check the acknowledgements written by each registered checkout.
+    acknowledged_identities: dict[str, dict[str, tuple[str, str]]] = {}
     for alias in prep.aliases:
         app_data = prep.apps.get(alias, {})
         required_roster = set(app_data.get("roster", []))
@@ -598,6 +599,10 @@ def publish_prepared(
             raise PublishError(
                 f"Missing required checkout acknowledgements from the control store for '{alias}': {', '.join(sorted(missing))}"
             )
+        acknowledged_identities[alias] = {
+            checkout_uuid: (current_registry[checkout_uuid].host, current_registry[checkout_uuid].registered_by_user)
+            for checkout_uuid in required_roster
+        }
 
     # 3. All-app preflight: check target binding, source cleanliness, recapture and locks for ALL selected apps before any write
     preflight_targets: list[Target] = []
@@ -686,6 +691,7 @@ def publish_prepared(
                 control_store=store,
                 runner=runner,
                 expected_roster=frozenset(prep.apps[alias]["roster"]),
+                expected_identities=acknowledged_identities[alias],
             )
             op_id = baseline.operation_id
             if not op_id:

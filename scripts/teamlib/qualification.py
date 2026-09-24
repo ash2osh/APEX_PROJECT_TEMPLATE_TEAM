@@ -35,7 +35,8 @@ from .evidence import (
     validate_test_evidence,
 )
 from .migration_store import MigrationStoreError
-from .release import ReleaseError, release_app_check_bundle, verify_release
+from .fingerprints import InventoryError, inventory_from_manifest, structural_digest
+from .release import ReleaseError, release_app_check_bundle, release_frontier_inventory, verify_release
 from .runtime import RuntimeReport
 from .sqlcl import run_sqlcl
 
@@ -429,6 +430,21 @@ def qualify_target(
             kind = getattr(manifest, "kind", None)
             if kind == "schema" and selected:
                 raise QualificationError("schema release qualification requires empty application coverage", report)
+            if kind == "schema":
+                # The replayed target must have exactly the structure the release
+                # was cut at; its own schema names differ, so compare structure.
+                try:
+                    expected_frontier = release_frontier_inventory(release_archive)
+                    actual_manifest = store.read_inventories(metadata).get(latest["after"])
+                    if not isinstance(actual_manifest, Mapping):
+                        raise QualificationError("qualified target frontier inventory is missing", report)
+                    actual_frontier = inventory_from_manifest(actual_manifest)
+                except (ReleaseError, MigrationStoreError, InventoryError) as exc:
+                    raise QualificationError(f"release frontier cannot be compared: {exc}", report) from exc
+                if structural_digest(actual_frontier) != structural_digest(expected_frontier):
+                    raise QualificationError(
+                        "qualified target schema does not match the release frontier", report
+                    )
             if kind == "app" and selected != (getattr(manifest, "alias", None),):
                 raise QualificationError("app release qualification requires its selected application only", report)
             if kind not in {"schema", "app"}:

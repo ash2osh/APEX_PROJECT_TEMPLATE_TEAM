@@ -28,6 +28,7 @@ from teamlib.release import (
     build_app_release_from_database,
     apply_release,
     plan_release,
+    release_frontier_inventory,
     release_migration_files,
     verify_release,
 )
@@ -695,6 +696,51 @@ class DatabaseReleaseVerificationTests(DatabaseReleaseTests):
         with self.assertRaisesRegex(ReleaseError, "no ledger event uses"):
             self.tampered(forget_b)()
 
+
+    def test_schema_release_carries_its_verified_frontier_inventory(self):
+        self.ledger_with_a_revert()
+        manifest = self.build()
+        self.assertIn("release/frontier/inventory.json", manifest.payload_paths)
+        self.assertEqual(release_frontier_inventory(manifest.archive_path).digest, manifest.source["frontier_digest"])
+
+    def frontier_members(self, mutate):
+        self.ledger_with_a_revert()
+        manifest = self.build()
+        digest, members = _read_archive_bytes(manifest.archive_path)
+        members = dict(members)
+        mutate(members)
+        # Reseal the payload records so only the frontier check can object.
+        records = [
+            {"path": path, "length": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+            for path, raw in sorted(members.items())
+            if path != "release/MANIFEST.json"
+        ]
+        data = json.loads(members["release/MANIFEST.json"])
+        data["payload"] = records
+        data["payload_paths"] = [record["path"] for record in records]
+        data["source_tree"] = hashlib.sha256(_canonical(records)).hexdigest()
+        members["release/MANIFEST.json"] = json.dumps(data).encode("utf-8")
+        return lambda: _verify_archive_members(manifest.archive_path, digest, members)
+
+    def test_a_tampered_frontier_inventory_is_refused(self):
+        def rewrite(members):
+            data = json.loads(members["release/frontier/inventory.json"])
+            data["schema_set_digest"] = "0" * 64
+            members["release/frontier/inventory.json"] = json.dumps(data).encode("utf-8")
+        with self.assertRaisesRegex(ReleaseError, "frontier inventory is malformed"):
+            self.frontier_members(rewrite)()
+
+    def test_a_frontier_inventory_from_another_state_is_refused(self):
+        def repoint(data):
+            data["source"]["frontier_digest"] = "0" * 64
+        with self.assertRaisesRegex(ReleaseError, "frontier inventory does not match its frontier digest"):
+            self.tampered(repoint)()
+
+    def test_a_missing_frontier_inventory_is_refused(self):
+        def drop(members):
+            del members["release/frontier/inventory.json"]
+        with self.assertRaisesRegex(ReleaseError, "missing its frontier inventory"):
+            self.frontier_members(drop)()
 
 class ReleaseLedgerStoreTests(unittest.TestCase):
     def setUp(self) -> None:

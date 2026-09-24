@@ -8,7 +8,10 @@ Last updated: 2026-09-24. Offline implementation and verification for the open
 release, acknowledgement, and hardening items is on branch
 `codex/pending-work-execution`, under review as a pull request. The review fixed
 the production privilege audit, which refused every real account because of
-Oracle's own grants to PUBLIC. The documented virtual-environment install
+Oracle's own grants to PUBLIC, then narrowed that exemption to a named baseline.
+Format 3 schema archives now carry the development frontier inventory so
+qualification compares the target's structure with it, and publish rechecks
+acknowledged checkout identities under the app mutex. The documented virtual-environment install
 succeeds; the full suite passes with one expected skip, and Ruff passes. Live
 database acceptance and GitHub-side actions remain separate gates and are not
 claimed here.
@@ -148,7 +151,7 @@ Spec §6, decision 4.
 | SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | Configuration added; first external Dependabot PR not yet observed. |
 | Release builds need a byte-stable toolchain | exact SQLcl build for schema and app captures | Builders refuse other builds; live capture acceptance remains UNKNOWN. |
 | METADATA is now the release system of record | `docs/metadata-backup-restore.md` | Backup/restore guidance added; live restore exercise remains open under 1.1. |
-| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 704 tests passed with one expected skip, and Ruff passed in the venv. |
+| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 715 tests passed with one expected skip, and Ruff passed in the venv. |
 
 ## 5. Known limitations (tracked, not scheduled)
 

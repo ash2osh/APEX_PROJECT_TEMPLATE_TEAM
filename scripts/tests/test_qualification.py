@@ -25,12 +25,27 @@ from teamlib.qualification import QualificationError, _target_identity, qualify_
 from teamlib.release import ApplyReport, ReleasePlan
 
 
+def frontier_inventory(definition: str = "stable", schema_set_digest: str = "a" * 64):
+    from teamlib.fingerprints import inventory_from_rows
+
+    return inventory_from_rows(
+        [{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": definition}],
+        schema_set_digest=schema_set_digest,
+    )
+
+
 class FakeStore:
-    def __init__(self, *, attempts=None, observations=None):
+    def __init__(self, *, attempts=None, observations=None, frontier=None):
         self.attempts = attempts or {}
         self.observations = observations if observations is not None else [
             {"sequence": 3, "before": "b" * 64, "after": "c" * 64, "evidence": "d" * 64}
         ]
+        # The target's accepted frontier inventory; its schema names differ from
+        # development's, so only its structure may be compared.
+        self.frontier = frontier or frontier_inventory(schema_set_digest="f" * 64)
+
+    def read_inventories(self, target):
+        return {self.observations[-1]["after"]: self.frontier.as_dict()} if self.observations else {}
 
     def validate_observation_chain(self, target):
         return None
@@ -238,7 +253,9 @@ class QualificationTests(unittest.TestCase):
             "history_digest": "2" * 64,
             "pending": ["20260924T100000__alice__one"],
         }
-        with patch("teamlib.qualification.verify_release", return_value=manifest):
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.release_frontier_inventory", return_value=frontier_inventory()
+        ):
             report = qualify_target(
                 self.root,
                 config,
@@ -337,7 +354,9 @@ class QualificationTests(unittest.TestCase):
                 )
 
         wrong_apply = {**apply_report, "source": {**source, "frontier_digest": "f" * 64}}
-        with patch("teamlib.qualification.verify_release", return_value=manifest):
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.release_frontier_inventory", return_value=frontier_inventory()
+        ):
             with self.assertRaisesRegex(QualificationError, "apply report database source"):
                 qualify_target(
                     self.root,
@@ -354,6 +373,70 @@ class QualificationTests(unittest.TestCase):
                     sql_runner=lambda *args, **kwargs: object(),
                 )
 
+
+    def test_format3_schema_qualification_refuses_a_target_with_a_different_frontier(self):
+        """A replay that produced a different structure must not yield PASS evidence."""
+        config = config_for(role="test", environment="test")
+        metadata = profile_target(config, "METADATA")
+        source = {
+            "kind": "dev-database",
+            "instance_id": "DEV1",
+            "history_cut": 3,
+            "history_digest": "a" * 64,
+            "frontier_digest": "b" * 64,
+        }
+        manifest = SimpleNamespace(
+            format_version=3,
+            kind="schema",
+            alias=None,
+            version="1.0.0",
+            source_commit="",
+            source=source,
+            source_tree="c" * 64,
+            archive_digest="e" * 64,
+            toolchain={"sqlcl": "26.2.2.233.1901"},
+            migrations=({
+                "id": "20260924T100000__alice__one",
+                "checksum": "a" * 64,
+                "target": "tables",
+                "destructive": False,
+                "dependencies": [],
+            },),
+            events=(
+                {"sequence": 1, "id": "20260924T100000__alice__one", "operation": "up", "checksum": "a" * 64},
+                {"sequence": 2, "id": "20260924T100100__alice__two", "operation": "up", "checksum": "b" * 64},
+                {"sequence": 3, "id": "20260924T100000__alice__one", "operation": "down", "checksum": "a" * 64},
+            ),
+        )
+        apply_report = {
+            "version": 1,
+            "status": "applied",
+            "source": source,
+            "archive_digest": manifest.archive_digest,
+            "target_state_key": metadata.state_key,
+            "target_digest": "1" * 64,
+            "history_digest": "2" * 64,
+            "pending": ["20260924T100000__alice__one"],
+        }
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.release_frontier_inventory", return_value=frontier_inventory()
+        ):
+            with self.assertRaisesRegex(QualificationError, "does not match the release frontier"):
+                qualify_target(
+                    self.root,
+                    config,
+                    source,
+                    (),
+                    store=FakeStore(frontier=frontier_inventory(definition="drifted", schema_set_digest="f" * 64)),
+                    work=self.root / "format3-mismatch-work",
+                    check_bundle=build_app_check_bundle({}, ()),
+                    release_archive=self.root / "format3.tar",
+                    apply_report=apply_report,
+                    runner_contract=Path("ci/runner-contract.json"),
+                    runtime_report=runtime_report(),
+                    run_identity={"run_id": "format3-mismatch"},
+                    sql_runner=lambda *args, **kwargs: object(),
+                )
     def test_format3_app_qualification_signs_and_generates_local_handoff(self):
         config = config_for(role="test", environment="test")
         metadata = profile_target(config, "METADATA")
