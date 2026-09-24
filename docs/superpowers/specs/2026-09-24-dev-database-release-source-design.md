@@ -65,7 +65,8 @@ schema inventory does) so no single statement exceeds SQLcl limits.
 
 ### 2. Schema release = a cut of the ledger
 
-`build-release --kind schema --version X` (no `--ref`):
+`build-schema-release --version X --out DIR` (a separate online command until phase 5 retires
+the Git `build-release` path):
 
 1. Read history under the migration mutex; refuse if any attempt is RUNNING/FAILED/UNKNOWN.
 2. Cut = current highest `applied_sequence` (optionally `--through <sequence>`).
@@ -111,16 +112,21 @@ dev schema already behaves for everyone using it.
 
 - App checks and master contracts come from the builder's repository (decision 2); their
   digests are recorded with the release.
-- `TEAM_RELEASE (kind, alias, version, archive_digest, history_cut, history_digest,
-  app_generation, app_tree_digest, app_checks_digest, master_contract_digest, built_by, built_at)` with a unique key on
-  `(kind, NVL(alias,'-'), version)`. Replaces `release-record.json`; a version can only
-  ever mean one archive, whichever repository built it.
+- `TEAM_RELEASE (release_key PK, kind, alias, version, archive_digest, source_json, built_by, built_at)`,
+  where `release_key` is `schema/vX.Y.Z` or `app/<alias>/vX.Y.Z` and `source_json` carries the
+  manifest's `source` block (ledger cut and digests; app generation/tree and asset digests for
+  app releases). Replaces `release-record.json`; a version can only ever mean one archive,
+  whichever repository built it.
 
 ### 5. Manifest format 3
 
 `source_commit` is replaced by
-`"source": {"kind": "dev-database", "instance_id", "history_cut", "history_digest",
-"app_generation", "app_tree_digest"}`. `verify-release`, `apply-release`,
+`"source": {"kind": "dev-database", "instance_id", "history_cut", "history_digest", "frontier_digest"}`
+(app releases add their generation and tree digest in phase 4), and schema archives carry the
+`events` ledger (`sequence`, `id`, `operation`, `checksum`). `verify-release` requires the events to
+be contiguous from 1, valid per migration (up, then down only for reversible bundles), each carried
+by a packaged bundle with the same checksum, no packaged bundle unused, and `history_cut` /
+`history_digest` to match them. `verify-release`, `apply-release`,
 `run-release-test`, `sign-test-evidence` and `gen-runbook` keep working on archive
 bytes; format 2 archives remain verifiable for already-signed handoffs.
 
@@ -159,7 +165,8 @@ Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 bind
 | 0 | Security fixes (identity guard, signing key, credentials) — PR #1 | — |
 | 1 | Implemented: Docs/README/AGENTS for one-repo-per-developer; e2e with independent repos (no shared bare remote); `.env.example` connection names; drop dead `team.py::_store` | — |
 | 2 | `TEAM_MIGRATION_MEMBER` + upload in `apply_plan` + backfill command (`adopt-migration-members`) — implemented | 1 |
-| 3 | `TEAM_RELEASE` ledger + schema release from the ledger event sequence (format 3), including down replay in `apply-release` and strict planning for shipped reverts | 2 |
+| 3a | Implemented: `TEAM_RELEASE` ledger (keyed `schema/vX.Y.Z` / `app/<alias>/vX.Y.Z`) + `build-schema-release` cutting the ledger event sequence into a format 3 archive, with drift gate; `verify-release` checks format 3; plan/apply refuse it | 2 |
+| 3b | Down replay in `apply-release`, strict planning for shipped reverts, format 3 in test evidence, signing and the runbook | 3a |
 | 4 | App release from paused capture + auto prerequisites; asset digests from the builder's repository | 3 |
 | 5 | Remove the Git-commit builder and `release.yml`; local release runbook; promotion/CI docs | 4 |
 | — | Publish acknowledgement redesign (checkout-issued acks) — independent, high priority | — |

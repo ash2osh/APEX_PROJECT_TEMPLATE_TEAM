@@ -43,7 +43,7 @@ from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
 from teamlib.live_inventory import inventory_target
 from teamlib.qualification import QualificationError, qualify_target, write_report
 from teamlib.patch import PatchError, recover_files
-from teamlib.release import ReleaseError
+from teamlib.release import ReleaseError, build_schema_release_from_database
 from teamlib.release_adapter import ReleaseAdapterError
 from teamlib.runbook import RunbookError
 from teamlib.runtime import preflight_online
@@ -58,7 +58,7 @@ from teamlib.trees import TreeError, read_git_tree
 # dispatcher and the tests cannot drift apart.
 PRODUCTION_REFUSED_COMMANDS = frozenset(
     {
-        "setup-state", "adopt-frontier", "adopt-migration-members", "qualify-target", "recover-migration",
+        "setup-state", "adopt-frontier", "adopt-migration-members", "build-schema-release", "qualify-target", "recover-migration",
         "register-app", "recover-app-lock", "migrate", "undo-migration", "redo-migration",
         "run-integration",
         "run-release-test",
@@ -88,6 +88,7 @@ COMMAND_HELP = {
     "redo-migration": ("Migration maintenance", "preview or reapply one explicitly reverted bundle"),
     "recover-migration": ("Recovery and diagnosis", "clear a retained migration mutex from reviewed evidence"),
     "build-release": ("Release and handoff", "build and self-verify one immutable release archive"),
+    "build-schema-release": ("Release and handoff", "cut a schema release from the shared development database"),
     "run-release-test": ("Release and handoff", "apply and qualify one archive on the protected test target"),
     "sign-test-evidence": ("Release and handoff", "bind and sign canonical PASS evidence for one archive"),
     "gen-runbook": ("Release and handoff", "verify signed evidence and generate the production-owner handoff"),
@@ -241,6 +242,9 @@ def _parser() -> argparse.ArgumentParser:
     drift.add_argument("--out")
     history = add_command("export-history")
     history.add_argument("--out", required=True)
+    schema_release = add_command("build-schema-release")
+    schema_release.add_argument("--version", required=True)
+    schema_release.add_argument("--out", required=True)
     adopt_members_parser = add_command("adopt-migration-members")
     adopt_members_parser.add_argument("--source", default="migrations")
     adopt_members_parser.add_argument("--dry-run", action="store_true")
@@ -589,6 +593,34 @@ def _online(args: argparse.Namespace) -> object:
         status = drift_status(result, frontier_result)
         _json({"status": status, "operation": command, "diff": result})
         return 0 if status == "clean" else 3
+    if command == "build-schema-release":
+        if config.role != "developer" or config.environment != "development":
+            raise ConfigError("schema releases are cut from the shared development database only")
+        metadata = profile_target(config, "METADATA")
+        store = _sql_migration_store(repo, metadata)
+        store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
+        # Drift gate: the live schema must match the frontier the ledger last accepted.
+        try:
+            actual, _actual_path = capture_live_inventory(repo, config)
+        except Exception as exc:
+            raise MigrationRunError(f"live drift inventory failed: {exc}") from exc
+        frontier = observed_frontier_drift(store, metadata, actual)
+        if frontier.get("status") != "clean":
+            _json({"status": "refused", "operation": command, "reason": "live schema does not match the accepted frontier", "observed_frontier": frontier})
+            return 3
+        manifest = build_schema_release_from_database(
+            store, metadata, args.version, args.out,
+            built_by=os.environ.get("USER", "release-builder"),
+            worker_identity=os.environ.get("USER", "release-builder"),
+            host=socket.gethostname(),
+            expected_frontier=str(frontier.get("digest")),
+        )
+        _json({
+            "status": "success", "operation": command, "version": manifest.version,
+            "archive": str(manifest.archive_path), "archive_digest": manifest.archive_digest,
+            "source": dict(manifest.source or {}), "migrations": [item["id"] for item in manifest.migrations],
+        })
+        return 0
     if command == "adopt-migration-members":
         metadata = profile_target(config, "METADATA")
         store = _sql_migration_store(repo, metadata)

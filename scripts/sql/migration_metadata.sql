@@ -120,6 +120,20 @@ BEGIN
     CONSTRAINT team_migration_member_bundle_fk FOREIGN KEY (checksum)
       REFERENCES TEAM_MIGRATION_BUNDLE (checksum)
   )]');
+  -- Release version ledger: one archive per release key (schema/vX.Y.Z or
+  -- app/<alias>/vX.Y.Z), whichever developer repository built it.
+  create_if_missing(q'[CREATE TABLE TEAM_RELEASE (
+    release_key VARCHAR2(200) NOT NULL,
+    kind VARCHAR2(8) NOT NULL,
+    alias VARCHAR2(128),
+    version VARCHAR2(64) NOT NULL,
+    archive_digest VARCHAR2(64) NOT NULL,
+    source_json VARCHAR2(900) NOT NULL,
+    built_by VARCHAR2(256) NOT NULL,
+    built_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT team_release_pk PRIMARY KEY (release_key),
+    CONSTRAINT team_release_kind_ck CHECK (kind IN ('schema', 'app'))
+  )]');
 
 END;
 /

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import uuid
 from typing import Any, Literal
 from collections.abc import Mapping
 from collections.abc import Callable
@@ -44,6 +45,9 @@ class Manifest:
     kind: str | None = None
     alias: str | None = None
     required_migrations: tuple[dict[str, str], ...] = ()
+    # Format 3: built from the development database, not a Git commit.
+    source: Mapping[str, Any] | None = None
+    events: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,11 @@ _MANIFEST_KEYS_V1 = {
 _MANIFEST_KEYS_V2 = _MANIFEST_KEYS_V1 | {
     "kind", "alias", "required_migrations",
 }
+# Format 3 identifies its source by the development database ledger it was cut
+# from; there is no Git commit.
+_MANIFEST_KEYS_V3 = (_MANIFEST_KEYS_V2 - {"source_commit"}) | {"source", "events"}
+_SOURCE_KEYS_V3 = {"kind", "instance_id", "history_cut", "history_digest", "frontier_digest"}
+_EVENT_KEYS_V3 = {"sequence", "id", "operation", "checksum"}
 _TOOLCHAIN_KEYS = {"python", "archive_format", "normalizer"}
 _PAYLOAD_RECORD_KEYS = {"path", "length", "sha256"}
 _REQUIRED_MIGRATION_RECORD_KEYS = {"id", "checksum"}
@@ -300,7 +309,7 @@ def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_dig
     return Manifest(
         format_version=int(data["format_version"]),
         version=str(data["version"]),
-        source_commit=str(data["source_commit"]),
+        source_commit=str(data.get("source_commit") or ""),
         source_tree=str(data["source_tree"]),
         migrations=tuple(data.get("migrations", ())),
         app_tree_digests=dict(data.get("app_tree_digests", {})),
@@ -314,6 +323,8 @@ def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_dig
         kind=data.get("kind"),
         alias=data.get("alias"),
         required_migrations=tuple(data.get("required_migrations", ())),
+        source=data.get("source"),
+        events=tuple(data.get("events", ())),
     )
 
 
@@ -430,6 +441,37 @@ def build_release(
         }
         app_digests = {alias: tree_digest(app_tree)}
 
+    master_contract_digest = None
+    if "release/contracts/masters.json" in payload:
+        master_contract_digest = hashlib.sha256(payload["release/contracts/masters.json"]).hexdigest()
+    manifest_fields = {
+        "format_version": 2,
+        "kind": kind,
+        "alias": alias,
+        "version": version,
+        "source_commit": commit,
+        "migrations": list(migrations),
+        "required_migrations": [dict(r) for r in required_migrations],
+        "app_tree_digests": app_digests,
+        "master_contract_digest": master_contract_digest,
+    }
+    return _write_release_archive(output, payload, manifest_fields, records.get(version) if isinstance(records, Mapping) else None, version)
+
+
+def _write_release_archive(
+    output: Path,
+    payload: Mapping[str, bytes],
+    manifest_fields: Mapping[str, Any],
+    existing_record: Any = None,
+    version: str = "",
+) -> Manifest:
+    """Write one deterministic USTAR archive plus its staging copy, then verify it.
+
+    ``manifest_fields`` carries everything except the fields derived from the
+    payload itself (``source_tree``, ``toolchain``, ``app_checks_digest``,
+    ``payload_paths`` and ``payload``), which are computed here so every
+    builder derives them the same way.
+    """
     for path in payload:
         _ustar_split(path)
 
@@ -446,24 +488,13 @@ def build_release(
             for path, data in sorted(payload.items())
         )
         source_tree_digest = hashlib.sha256(_canonical(payload_records)).hexdigest()
-        master_contract_digest = None
-        if "release/contracts/masters.json" in payload:
-            master_contract_digest = hashlib.sha256(payload["release/contracts/masters.json"]).hexdigest()
         app_check_records = [record for record in payload_records if record["path"].startswith("release/checks/apps/")]
         app_checks_digest = hashlib.sha256(_canonical(app_check_records)).hexdigest() if app_check_records else None
 
         manifest_data = {
-            "format_version": 2,
-            "kind": kind,
-            "alias": alias,
-            "version": version,
-            "source_commit": commit,
+            **manifest_fields,
             "source_tree": source_tree_digest,
             "toolchain": {"python": "3.10+", "archive_format": "ustar", "normalizer": "team-v1"},
-            "migrations": list(migrations),
-            "required_migrations": [dict(r) for r in required_migrations],
-            "app_tree_digests": app_digests,
-            "master_contract_digest": master_contract_digest,
             "app_checks_digest": app_checks_digest,
             "payload_paths": list(sorted(payload)),
             "payload": list(payload_records),
@@ -503,7 +534,6 @@ def build_release(
         if staging_dir.exists():
             shutil.rmtree(staging_dir)
         raise ReleaseError("release archive digest changed during verification")
-    existing_record = records.get(version) if isinstance(records, Mapping) else None
     if isinstance(existing_record, Mapping) and existing_record.get("archive_digest") not in (None, "", archive_digest):
         archive.unlink(missing_ok=True)
         if staging_dir.exists():
@@ -532,10 +562,10 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         raise ReleaseError("release manifest must be a JSON object")
 
     format_version = data.get("format_version")
-    if type(format_version) is not int or format_version not in (1, 2):
+    if type(format_version) is not int or format_version not in (1, 2, 3):
         raise ReleaseError("release manifest format version is unsupported")
 
-    allowed_keys = _MANIFEST_KEYS_V2 if format_version == 2 else _MANIFEST_KEYS_V1
+    allowed_keys = {1: _MANIFEST_KEYS_V1, 2: _MANIFEST_KEYS_V2, 3: _MANIFEST_KEYS_V3}[format_version]
     missing_keys = sorted(allowed_keys - set(data))
     unknown_keys = sorted(set(data) - allowed_keys)
     if missing_keys or unknown_keys:
@@ -548,7 +578,11 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
 
     if not isinstance(data["version"], str) or not _SEMVER_RE.fullmatch(data["version"]):
         raise ReleaseError("release manifest version is malformed")
-    if not isinstance(data["source_commit"], str) or not _COMMIT_RE.fullmatch(data["source_commit"]):
+    if format_version == 3:
+        _verify_database_source(data["source"])
+        if data.get("kind") != "schema":
+            raise ReleaseError("format 3 is only defined for schema releases")
+    elif not isinstance(data["source_commit"], str) or not _COMMIT_RE.fullmatch(data["source_commit"]):
         raise ReleaseError("release manifest source commit is malformed")
     if not isinstance(data["source_tree"], str) or not _DIGEST_RE.fullmatch(data["source_tree"]):
         raise ReleaseError("release manifest source tree digest is malformed")
@@ -565,7 +599,7 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
             raise ReleaseError(f"rejected path in release archive: {p}")
 
     kind = data.get("kind", "schema")
-    if format_version == 2:
+    if format_version in (2, 3):
         if kind not in ("schema", "app"):
             raise ReleaseError("release manifest kind is invalid")
         if kind == "schema":
@@ -727,9 +761,178 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         raise ReleaseError("release manifest migration metadata does not match payload")
     if kind == "schema" and not derived_migrations:
         raise ReleaseError("schema release has no migrations")
+    if format_version == 3:
+        _verify_database_events(data["events"], data["source"], derived_migrations)
     manifest = _manifest_from_data(data, archive, archive_digest)
     _release_app_trees_from_members(manifest, members)
     return manifest
+
+
+def _verify_database_source(source: Any) -> None:
+    if not isinstance(source, Mapping) or set(source) != _SOURCE_KEYS_V3:
+        raise ReleaseError("release manifest database source is malformed")
+    cut = source["history_cut"]
+    if (
+        source["kind"] != "dev-database"
+        or not isinstance(source["instance_id"], str)
+        or not source["instance_id"]
+        or type(cut) is not int
+        or cut < 1
+        or not isinstance(source["history_digest"], str)
+        or not _DIGEST_RE.fullmatch(source["history_digest"])
+        or not isinstance(source["frontier_digest"], str)
+        or not _DIGEST_RE.fullmatch(source["frontier_digest"])
+    ):
+        raise ReleaseError("release manifest database source is malformed")
+
+
+def _verify_database_events(events: Any, source: Mapping[str, Any], migrations: tuple[dict[str, Any], ...]) -> None:
+    """The archived ledger must be contiguous, well-ordered and carried by the packaged bundles."""
+    if not isinstance(events, list) or not events:
+        raise ReleaseError("format 3 schema release has no ledger events")
+    packaged = {item["id"]: item for item in migrations}
+    status: dict[str, str] = {}
+    for index, event in enumerate(events, start=1):
+        if not isinstance(event, Mapping) or set(event) != _EVENT_KEYS_V3:
+            raise ReleaseError("release ledger event is malformed")
+        if event["sequence"] != index:
+            raise ReleaseError("release ledger events are not contiguous from sequence 1")
+        migration_id, operation = event["id"], event["operation"]
+        bundle = packaged.get(migration_id)
+        if bundle is None or bundle["checksum"] != event["checksum"]:
+            raise ReleaseError(f"release ledger event is not carried by a packaged bundle: {migration_id}")
+        prior = status.get(migration_id, "")
+        if operation == "up" and prior != "APPLIED":
+            status[migration_id] = "APPLIED"
+        elif operation == "down" and prior == "APPLIED" and bundle["reversible"]:
+            status[migration_id] = "REVERTED"
+        else:
+            raise ReleaseError(f"release ledger event order is invalid: {migration_id} {operation}")
+    if set(status) != set(packaged):
+        raise ReleaseError("release carries migration bundles that no ledger event uses")
+    if source["history_cut"] != len(events):
+        raise ReleaseError("release history cut does not match its ledger events")
+    if source["history_digest"] != hashlib.sha256(_canonical(events)).hexdigest():
+        raise ReleaseError("release history digest does not match its ledger events")
+
+
+def build_schema_release_from_database(
+    store: Any,
+    metadata: Any,
+    version: str,
+    out: str | Path,
+    *,
+    built_by: str,
+    worker_identity: str,
+    host: str,
+    expected_frontier: str | None = None,
+) -> Manifest:
+    """Cut a schema release from the shared development database ledger.
+
+    Everything the ledger records through its latest event ships: every up and
+    down event in order, with each migration's stored files. Runs under the
+    migration mutex so no migration can land mid-cut, refuses while any attempt
+    is unresolved, and binds the version in the release ledger afterwards.
+    """
+    from .migration_store import release_key
+
+    if getattr(metadata, "environment", None) == "production":
+        raise ReleaseError("schema releases are cut from the development database, not production")
+    key = release_key("schema", None, version)
+    output = Path(out)
+    if output.exists() and any(output.iterdir()):
+        raise ReleaseError(f"release output directory must be new: {output}")
+    def unresolved_attempts(state: Mapping[str, Any]) -> list[str]:
+        return sorted(
+            str(attempt_id) for attempt_id, attempt in state.get("attempts", {}).items()
+            if isinstance(attempt, Mapping) and attempt.get("state") in {"RUNNING", "FAILED", "UNKNOWN"}
+        )
+
+    # Refuse before taking the mutex: an unresolved attempt also blocks the
+    # mutex release, so discovering it only after acquiring would strand it.
+    unresolved = unresolved_attempts(store.read_state(metadata))
+    if unresolved:
+        raise ReleaseError("unresolved migration attempts block a release cut: " + ", ".join(unresolved))
+    run_token = uuid.uuid4().hex
+    store.acquire(metadata, run_token, worker_identity, host)
+    try:
+        existing = store.read_releases(metadata).get(key)
+        state = store.read_state(metadata)
+        unresolved = unresolved_attempts(state)
+        if unresolved:
+            raise ReleaseError("unresolved migration attempts block a release cut: " + ", ".join(unresolved))
+        observations = state.get("observations") or []
+        frontier = observations[-1].get("after") if observations and isinstance(observations[-1], Mapping) else None
+        if not isinstance(frontier, str) or not _DIGEST_RE.fullmatch(frontier):
+            raise ReleaseError("the development database has no accepted schema frontier to release")
+        if expected_frontier is not None and frontier != expected_frontier:
+            raise ReleaseError("the schema frontier moved after the drift check; a migration landed, cut again")
+        raw_events = store.read_events(metadata)
+        if not raw_events:
+            raise ReleaseError("the development database ledger has no migrations to release")
+        events = [
+            {"sequence": int(event["sequence"]), "id": str(event["id"]),
+             "operation": str(event["operation"]), "checksum": str(event["checksum"])}
+            for event in raw_events
+        ]
+        payload: dict[str, bytes] = {}
+        checksums: dict[str, str] = {}
+        for event in events:
+            migration_id, checksum = event["id"], event["checksum"]
+            if checksums.setdefault(migration_id, checksum) != checksum:
+                raise ReleaseError(f"ledger records two checksums for one migration: {migration_id}")
+        for migration_id, checksum in sorted(checksums.items()):
+            try:
+                members = store.read_members(metadata, checksum)
+            except Exception as exc:
+                raise ReleaseError(
+                    f"migration files are not stored for {migration_id}; the developer who holds them "
+                    "must run adopt-migration-members"
+                ) from exc
+            for name, data in members.items():
+                if not name.startswith(migration_id + "."):
+                    raise ReleaseError(f"stored member does not belong to {migration_id}: {name}")
+                payload[f"release/migrations/{name}"] = data
+        with tempfile.TemporaryDirectory(prefix="team-release-db-bundles-") as directory:
+            root = Path(directory)
+            for path, data in payload.items():
+                (root / path.removeprefix("release/migrations/")).write_bytes(data)
+            try:
+                migrations = _migration_manifest(load_bundles(root))
+            except BundleError as exc:
+                raise ReleaseError(f"stored migration files do not form valid bundles: {exc}") from exc
+        source = {
+            "kind": "dev-database",
+            "instance_id": str(metadata.instance_id),
+            "history_cut": events[-1]["sequence"],
+            "history_digest": hashlib.sha256(_canonical(events)).hexdigest(),
+            "frontier_digest": frontier,
+        }
+        manifest = _write_release_archive(
+            output,
+            payload,
+            {
+                "format_version": 3,
+                "kind": "schema",
+                "alias": None,
+                "version": version,
+                "source": source,
+                "events": events,
+                "migrations": list(migrations),
+                "required_migrations": [],
+                "app_tree_digests": {},
+                "master_contract_digest": None,
+            },
+            existing,
+            version,
+        )
+        store.record_release(
+            metadata, kind="schema", alias=None, version=version,
+            archive_digest=manifest.archive_digest, source=source, built_by=built_by, run_token=run_token,
+        )
+        return manifest
+    finally:
+        store.release(metadata, run_token)
 
 
 def _read_archive_bytes(archive: Path) -> tuple[str, dict[str, bytes]]:
@@ -874,6 +1077,11 @@ def release_app_order(release_tar: str | Path) -> tuple[str, ...]:
 
 
 def _plan_from_manifest(manifest: Manifest, history: Mapping[str, Any], target: Mapping[str, Any]) -> ReleasePlan:
+    if manifest.format_version == 3:
+        raise ReleaseError(
+            "format 3 schema releases (cut from the development database) can be built and verified; "
+            "planning and applying them is not implemented yet"
+        )
     history_data = history.get("history", history) if isinstance(history, Mapping) else {}
     if not isinstance(history_data, Mapping):
         raise ReleaseError("target history must contain a mapping")

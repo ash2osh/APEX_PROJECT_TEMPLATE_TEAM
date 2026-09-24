@@ -79,6 +79,34 @@ def _inventory_manifest(value: Any) -> tuple[dict[str, Any], str]:
 
 
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
+_SEMVER_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_ALIAS_RE = re.compile(r"[a-z0-9_-]{1,64}")
+_RELEASE_SOURCE_LIMIT = 900
+
+
+def release_key(kind: str, alias: str | None, version: str) -> str:
+    """The one identity a release version has, whichever repository built it."""
+    if not isinstance(version, str) or not _SEMVER_RE.fullmatch(version):
+        raise MigrationStoreError("release version must be semantic MAJOR.MINOR.PATCH")
+    if kind == "schema" and alias is None:
+        return f"schema/v{version}"
+    if kind == "app" and isinstance(alias, str) and _ALIAS_RE.fullmatch(alias):
+        return f"app/{alias}/v{version}"
+    raise MigrationStoreError("release kind/alias is invalid")
+
+
+def _release_record(
+    kind: str, alias: str | None, version: str, archive_digest: str, source: Mapping[str, Any], built_by: str,
+) -> tuple[str, str]:
+    key = release_key(kind, alias, version)
+    if not isinstance(archive_digest, str) or not _CHECKSUM_RE.fullmatch(archive_digest):
+        raise MigrationStoreError("release archive digest is malformed")
+    if not built_by:
+        raise MigrationStoreError("release records require an actor")
+    source_json = json.dumps(dict(source), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    if len(source_json) > _RELEASE_SOURCE_LIMIT:
+        raise MigrationStoreError("release source description is too large")
+    return key, source_json
 
 
 def _member_records(migration: Migration) -> list[dict[str, Any]]:
@@ -232,6 +260,20 @@ BEGIN
     CONSTRAINT team_migration_member_pk PRIMARY KEY (checksum, member_name),
     CONSTRAINT team_migration_member_bundle_fk FOREIGN KEY (checksum)
       REFERENCES TEAM_MIGRATION_BUNDLE (checksum)
+  )]');
+  -- Release version ledger: one archive per release key (schema/vX.Y.Z or
+  -- app/<alias>/vX.Y.Z), whichever developer repository built it.
+  create_if_missing(q'[CREATE TABLE TEAM_RELEASE (
+    release_key VARCHAR2(200) NOT NULL,
+    kind VARCHAR2(8) NOT NULL,
+    alias VARCHAR2(128),
+    version VARCHAR2(64) NOT NULL,
+    archive_digest VARCHAR2(64) NOT NULL,
+    source_json VARCHAR2(900) NOT NULL,
+    built_by VARCHAR2(256) NOT NULL,
+    built_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT team_release_pk PRIMARY KEY (release_key),
+    CONSTRAINT team_release_kind_ck CHECK (kind IN ('schema', 'app'))
   )]');
 
 END;
@@ -1079,6 +1121,95 @@ END;
             raise MigrationStoreError("migration bundle member count is malformed") from exc
         return _verified_members(checksum, migration_id, member_count, stored)
 
+    def record_release(
+        self,
+        store_target: Target,
+        *,
+        kind: str,
+        alias: str | None,
+        version: str,
+        archive_digest: str,
+        source: Mapping[str, Any],
+        built_by: str,
+        run_token: str,
+    ) -> str:
+        """Bind a release version to one archive digest; re-recording the same archive is a no-op."""
+        self._assert_nonproduction(store_target)
+        self._require_sql(store_target)
+        if not run_token:
+            raise MigrationStoreError("release records require a mutex token")
+        key, source_json = _release_record(kind, alias, version, archive_digest, source, built_by)
+        alias_sql = _sql_literal(alias) if alias is not None else "NULL"
+        payload = f"""
+DECLARE
+  v_owned NUMBER;
+  v_existing NUMBER;
+  v_digest VARCHAR2(64);
+BEGIN
+  SELECT COUNT(*) INTO v_owned FROM TEAM_MIGRATION_MUTEX
+   WHERE singleton_id = 1 AND owner_token = {_sql_literal(run_token)};
+  IF v_owned = 0 THEN RAISE_APPLICATION_ERROR(-20002, 'RELEASE_WRITE_REFUSED'); END IF;
+  SELECT COUNT(*) INTO v_existing FROM TEAM_RELEASE WHERE release_key = {_sql_literal(key)};
+  IF v_existing = 0 THEN
+    INSERT INTO TEAM_RELEASE (release_key, kind, alias, version, archive_digest, source_json, built_by, built_at)
+    VALUES ({_sql_literal(key)}, {_sql_literal(kind)}, {alias_sql}, {_sql_literal(version)},
+            {_sql_literal(archive_digest)}, {_sql_literal(source_json)}, {_sql_literal(built_by)}, SYSTIMESTAMP);
+  ELSE
+    SELECT archive_digest INTO v_digest FROM TEAM_RELEASE WHERE release_key = {_sql_literal(key)};
+    IF v_digest <> {_sql_literal(archive_digest)} THEN
+      RAISE_APPLICATION_ERROR(-20043, 'RELEASE_VERSION_TAKEN');
+    END IF;
+  END IF;
+  COMMIT;
+END;
+/
+"""
+        try:
+            self._run("write", payload)
+        except MigrationStoreError as exc:
+            detail = str(exc)
+            if "RELEASE_WRITE_REFUSED" in detail:
+                raise MigrationMutexHeld("release records require the current migration mutex owner") from exc
+            if "RELEASE_VERSION_TAKEN" in detail:
+                raise MigrationStoreError(f"release {key} is already bound to a different archive") from exc
+            if "ORA-00942" in detail:
+                raise MigrationSetupRequired(
+                    "release ledger is missing; run `migrate --bootstrap` or `adopt-frontier` to upgrade the metadata schema"
+                ) from exc
+            raise
+        return key
+
+    def read_releases(self, store_target: Target) -> dict[str, dict[str, Any]]:
+        """Every recorded release, keyed by release key."""
+        columns = ("release_key", "kind", "alias", "version", "archive_digest", "source_json", "built_by")
+        rows = self._read_rows(
+            store_target,
+            "SELECT 'TEAM_RELEASE|' || " + " || '|' || ".join(_b64_sql(column) for column in columns)
+            + " FROM TEAM_RELEASE ORDER BY release_key;",
+            "TEAM_RELEASE|",
+        )
+        releases: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if len(row) != len(columns):
+                raise MigrationStoreError("release ledger row is malformed")
+            values = dict(zip(columns, row, strict=True))
+            try:
+                source = json.loads(values["source_json"])
+            except json.JSONDecodeError as exc:
+                raise MigrationStoreError("release ledger source is malformed") from exc
+            key = values["release_key"]
+            if key in releases or not _CHECKSUM_RE.fullmatch(values["archive_digest"]):
+                raise MigrationStoreError("release ledger row is malformed")
+            releases[key] = {
+                "kind": values["kind"],
+                "alias": values["alias"] or None,
+                "version": values["version"],
+                "archive_digest": values["archive_digest"],
+                "source": source,
+                "built_by": values["built_by"],
+            }
+        return releases
+
     def list_member_bundles(self, store_target: Target) -> dict[str, str]:
         """Return every stored bundle as ``{checksum: migration_id}``."""
         rows = self._read_rows(
@@ -1103,6 +1234,10 @@ END;
             raise MigrationStoreError(str(exc)) from exc
 
     def read_history(self, store_target: Target) -> dict[str, Any]:
+        return _collapse_history(self.read_events(store_target))
+
+    def read_events(self, store_target: Target) -> list[dict[str, Any]]:
+        """Every history event in applied_sequence order, validated as one contiguous ledger."""
         fields = [
             "id", "operation", "checksum", "target", "source_commit",
             "applied_sequence", "applied_at", "applied_by", "run_token", "attempt_id",
@@ -1213,7 +1348,7 @@ END;
             })
         events.sort(key=lambda event: event["sequence"])
         _validate_history_events(events)
-        return _collapse_history(events)
+        return events
 
     def read_inventories(self, store_target: Target) -> dict[str, dict[str, Any]]:
         """Read and verify every immutable complete inventory manifest."""
@@ -1947,6 +2082,42 @@ class MigrationStore:
                 raise MigrationStoreError(f"stored migration member is corrupt: {name}") from exc
         return _verified_members(checksum, str(bundle.get("migration_id")), int(bundle.get("member_count", -1)), stored)
 
+    def record_release(
+        self,
+        store_target: Target,
+        *,
+        kind: str,
+        alias: str | None,
+        version: str,
+        archive_digest: str,
+        source: Mapping[str, Any],
+        built_by: str,
+        run_token: str,
+    ) -> str:
+        self._assert_nonproduction(store_target)
+        if not run_token:
+            raise MigrationStoreError("release records require a mutex token")
+        key, source_json = _release_record(kind, alias, version, archive_digest, source, built_by)
+        with self._locked() as data:
+            mutex = self._require(data, store_target)
+            if mutex.get("owner_token") != run_token:
+                raise MigrationMutexHeld("release records require the current migration mutex owner")
+            releases = data.setdefault("releases", {})
+            existing = releases.get(key)
+            if existing is None:
+                releases[key] = {
+                    "kind": kind, "alias": alias, "version": version, "archive_digest": archive_digest,
+                    "source": json.loads(source_json), "built_by": built_by,
+                }
+            elif existing.get("archive_digest") != archive_digest:
+                raise MigrationStoreError(f"release {key} is already bound to a different archive")
+        return key
+
+    def read_releases(self, store_target: Target) -> dict[str, dict[str, Any]]:
+        with self._locked() as data:
+            self._require(data, store_target)
+            return json.loads(json.dumps(data.get("releases", {})))
+
     def list_member_bundles(self, store_target: Target) -> dict[str, str]:
         with self._locked() as data:
             self._require(data, store_target)
@@ -1956,6 +2127,12 @@ class MigrationStore:
         with self._locked() as data:
             self._require(data, store_target)
             return json.loads(json.dumps(_collapse_history(data["history"])))
+
+    def read_events(self, store_target: Target) -> list[dict[str, Any]]:
+        with self._locked() as data:
+            self._require(data, store_target)
+            _validate_history_events(data["history"])
+            return json.loads(json.dumps(data["history"]))
 
     def read_state(self, store_target: Target) -> dict[str, Any]:
         with self._locked() as data:
