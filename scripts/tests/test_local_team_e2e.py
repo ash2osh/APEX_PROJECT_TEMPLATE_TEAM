@@ -54,7 +54,7 @@ from teamlib.control_store import ControlStore  # noqa: E402
 from teamlib.page_locks import LockReport, PageLock  # noqa: E402
 from teamlib.publish import PublishError, prepare_publish, publish_prepared  # noqa: E402
 from teamlib.state import save_capture, save_verified_baseline  # noqa: E402
-from teamlib.trees import read_git_tree  # noqa: E402
+from teamlib.trees import read_git_tree, tree_digest  # noqa: E402
 
 
 class LocalTeamManifestTests(unittest.TestCase):
@@ -370,10 +370,10 @@ class LocalTeamTopologyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
-    def test_topology_creates_three_isolated_local_clones_and_ignored_env(self):
+    def test_topology_creates_three_independent_repositories_and_ignored_env(self):
         topology = create_team_topology(self.manifest, self.env_values, source_repo=self.source)
         self.assertEqual(topology.source_commit, self.commit)
-        self.assertTrue(topology.remote.is_dir())
+        self.assertFalse((self.run_root / "remote.git").exists())
         self.assertEqual([developer.branch for developer in topology.developers], [
             "e2e/alice", "e2e/bob", "e2e/carol"
         ])
@@ -381,14 +381,22 @@ class LocalTeamTopologyTests(unittest.TestCase):
         self.assertEqual(len({developer.git_email for developer in topology.developers}), 3)
         for developer in topology.developers:
             self.assertTrue(developer.clone.is_dir())
+            # One repository per developer: no shared remote, no seed ref left
+            # behind, and every repository starts at the same template commit.
+            self.assertEqual(
+                subprocess.check_output(["git", "-C", str(developer.clone), "remote"], text=True).strip(),
+                "",
+            )
+            self.assertEqual(
+                subprocess.check_output(["git", "-C", str(developer.clone), "rev-parse", "HEAD"], text=True).strip(),
+                self.commit,
+            )
             self.assertEqual(
                 subprocess.check_output(
-                    ["git", "-C", str(developer.clone), "remote", "get-url", "origin"],
-                    text=True,
-                ).strip(),
-                str(topology.remote),
+                    ["git", "-C", str(developer.clone), "for-each-ref", "--format=%(refname)"], text=True
+                ).split(),
+                [f"refs/heads/{developer.branch}"],
             )
-            self.assertNotIn("://", str(topology.remote))
             self.assertEqual(
                 subprocess.check_output(
                     ["git", "-C", str(developer.clone), "branch", "--show-current"],
@@ -417,6 +425,32 @@ class LocalTeamTopologyTests(unittest.TestCase):
                 0,
             )
         self.assertEqual(self._git("remote"), "")
+
+    def test_convergence_goes_through_the_database_not_a_shared_remote(self):
+        topology = create_team_topology(self.manifest, self.env_values, source_repo=self.source)
+        live_digest = tree_digest(read_git_tree(self.source, self.commit, "team-e2e"))
+        # Bob's own repository has history the others never see.
+        bob = topology.developers[1]
+        (bob.clone / "NOTES.md").write_text("bob only\n", encoding="utf-8")
+        for args in (["add", "NOTES.md"], ["commit", "--quiet", "-m", "Bob's private note"]):
+            subprocess.run(["git", "-C", str(bob.clone), *args], check=True, capture_output=True)
+        evidence = verify_convergence(
+            topology,
+            {
+                "skip_team_commands": True,
+                "application_tree_digest": live_digest,
+                "migration_frontier_digest": "c" * 64,
+                "migration_history_digest": "d" * 64,
+                "mutex_states": {"app": {"is_uncertain": False}},
+            },
+        )
+        self.assertEqual(evidence.errors, ())
+        self.assertEqual(len(set(evidence.clone_heads.values())), 2)
+        self.assertEqual(set(evidence.clone_tree_digests.values()), {live_digest})
+        verbs = {command["argv"][3] for command in evidence.command_evidence if command["argv"][:1] == ["git"]}
+        self.assertNotIn("fetch", verbs)
+        self.assertNotIn("merge", verbs)
+        self.assertNotIn("pull", verbs)
 
     def test_run_team_command_scopes_checkout_environment_to_child(self):
         topology = create_team_topology(self.manifest, self.env_values, source_repo=self.source)

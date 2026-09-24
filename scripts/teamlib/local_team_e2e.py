@@ -1291,7 +1291,6 @@ class Developer:
 @dataclass(frozen=True)
 class TeamTopology:
     run_root: Path
-    remote: Path
     source_commit: str
     developers: tuple[Developer, ...]
     env_values: dict[str, str]
@@ -1599,26 +1598,12 @@ def verify_convergence(topology: TeamTopology, fixture: Any) -> ConvergenceEvide
         except (E2EError, TreeError, OSError, UnicodeError) as exc:
             errors.append(f"fresh live application capture failed: {exc}")
 
+    # Each developer repository is independent: nothing is fetched or merged
+    # between them. They converge only through the shared development
+    # database, by exporting the live application and committing that export
+    # in their own repository (the Builder-first route).
     for developer in topology.developers:
         try:
-            fetch = run_command(
-                ["git", "-C", str(developer.clone), "fetch", "origin", "main"],
-                cwd=topology.run_root,
-                run_root=topology.run_root,
-            )
-            command_evidence.append(_command_evidence(fetch))
-            if fetch.returncode != 0:
-                errors.append(f"{developer.name}: origin/main fetch failed")
-                continue
-            merge = run_command(
-                ["git", "-C", str(developer.clone), "merge", "--ff-only", "origin/main"],
-                cwd=topology.run_root,
-                run_root=topology.run_root,
-            )
-            command_evidence.append(_command_evidence(merge))
-            if merge.returncode != 0:
-                errors.append(f"{developer.name}: checkout is not a fast-forward of origin/main")
-                continue
             if (developer.clone / "scripts" / "team.py").is_file() and not _fixture_value(fixture, "skip_team_commands", False):
                 for operation in ("adopt-app", "export-app"):
                     team_result = run_team_command(developer, operation, alias, timeout=240)
@@ -1630,6 +1615,27 @@ def verify_convergence(topology: TeamTopology, fixture: Any) -> ConvergenceEvide
                         output = team_result.stdout_path.read_text(encoding="utf-8")
                         if '"conflicts": [' in output and '"conflicts": []' not in output:
                             errors.append(f"{developer.name}: export-app reported conflicts")
+                # Commit the export in this developer's own repository; an
+                # export that changed nothing leaves HEAD where it was.
+                for git_args in (
+                    ["add", "--", f"apps/{alias}/"],
+                    ["diff", "--cached", "--quiet"],
+                    ["commit", "--quiet", "-m", f"Capture live {alias} from the shared development database"],
+                ):
+                    capture = run_command(
+                        ["git", "-C", str(developer.clone), *git_args],
+                        cwd=topology.run_root,
+                        run_root=topology.run_root,
+                    )
+                    command_evidence.append(_command_evidence(capture))
+                    if git_args[0] == "diff":
+                        if capture.returncode == 0:
+                            break
+                        if capture.returncode == 1:
+                            continue
+                    if capture.returncode != 0:
+                        errors.append(f"{developer.name}: committing the live export failed")
+                        break
             status = run_command(
                 ["git", "-C", str(developer.clone), "status", "--porcelain=v1", "--untracked-files=all"],
                 cwd=topology.run_root,
@@ -1654,8 +1660,6 @@ def verify_convergence(topology: TeamTopology, fixture: Any) -> ConvergenceEvide
         except (E2EError, TreeError, OSError, UnicodeError) as exc:
             errors.append(f"{developer.name}: convergence inspection failed: {exc}")
 
-    if heads and len(set(heads.values())) != 1:
-        errors.append("developer HEADs do not converge")
     if tree_digests and len(set(tree_digests.values())) != 1:
         errors.append("developer application trees do not converge")
     if isinstance(fixture_live_digest, str) and tree_digests and any(value != fixture_live_digest for value in tree_digests.values()):
@@ -2425,7 +2429,13 @@ def create_team_topology(
     *,
     source_repo: str | Path | None = None,
 ) -> TeamTopology:
-    """Create the run-owned bare remote and three local developer clones."""
+    """Create three independent developer repositories seeded from one commit.
+
+    Each developer owns a separate Git repository with no shared remote, as a
+    real team using this template does: the repositories share only the
+    development database. Every repository starts from the same template
+    commit and never fetches from another.
+    """
 
     root = manifest.run_root.resolve()
     if not root.is_dir() or root.is_symlink():
@@ -2445,22 +2455,21 @@ def create_team_topology(
     status = _topology_git(root, root, ["-C", str(source), "status", "--porcelain=v1", "--untracked-files=all"], status_commands)
     if status:
         raise E2EError("topology source repository is not clean; commit source changes first")
-    remote = root / "remote.git"
     dev_root = root / "dev"
-    if remote.exists() or remote.is_symlink() or dev_root.exists() or dev_root.is_symlink():
-        raise E2EError("topology remote or developer root already exists")
+    if dev_root.exists() or dev_root.is_symlink():
+        raise E2EError("topology developer root already exists")
     dev_root.mkdir(mode=0o700)
     commands = list(status_commands)
-    _topology_git(root, root, ["init", "--bare", str(remote)], commands)
-    _topology_git(root, root, ["--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], commands)
-    _topology_git(root, root, ["-C", str(source), "push", str(remote), f"{manifest.source_commit}:refs/heads/main"], commands)
     generated_env = _topology_env(manifest.spec, env_values)
     developers: list[Developer] = []
     for name in ("alice", "bob", "carol"):
         clone = dev_root / name
         branch = f"e2e/{name}"
-        _topology_git(root, root, ["clone", "--no-local", "--no-tags", "--branch", "main", str(remote), str(clone)], commands)
-        _topology_git(root, clone, ["checkout", "-b", branch, "origin/main"], commands)
+        seed = "refs/team-e2e/seed"
+        _topology_git(root, root, ["init", "--quiet", str(clone)], commands)
+        _topology_git(root, root, ["-C", str(source), "push", "--quiet", str(clone), f"{manifest.source_commit}:{seed}"], commands)
+        _topology_git(root, clone, ["checkout", "--quiet", "-b", branch, seed], commands)
+        _topology_git(root, clone, ["update-ref", "-d", seed], commands)
         email = f"{name}@local-team-e2e.invalid"
         _topology_git(root, clone, ["config", "user.name", f"{name.title()} Developer"], commands)
         _topology_git(root, clone, ["config", "user.email", email], commands)
@@ -2469,7 +2478,7 @@ def create_team_topology(
         env_file = clone / ".env.local-team-e2e"
         _write_topology_env(env_file, generated_env)
         developers.append(Developer(name, clone, branch, checkout_uuid, email, env_file))
-    return TeamTopology(root, remote, manifest.source_commit, tuple(developers), generated_env, tuple(commands))
+    return TeamTopology(root, manifest.source_commit, tuple(developers), generated_env, tuple(commands))
 
 
 def start_team_command(
