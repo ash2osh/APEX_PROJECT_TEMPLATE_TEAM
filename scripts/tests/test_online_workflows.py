@@ -468,6 +468,74 @@ class OnlineWorkflowTests(unittest.TestCase):
         self.assertFalse((self.root / "plan.json").exists())
         self.assertFalse((self.root / "apply-report.json").exists())
 
+    def test_release_test_passes_format3_app_source_and_selected_alias_to_qualification(self):
+        source = {
+            "kind": "dev-database",
+            "instance_id": "DEV1",
+            "history_cut": 1,
+            "history_digest": "a" * 64,
+            "frontier_digest": "b" * 64,
+            "app_generation": 7,
+            "app_tree_digest": "c" * 64,
+            "app_checks_digest": app_check_bundle().checks_digest,
+            "master_contract_digest": "e" * 64,
+        }
+        manifest = SimpleNamespace(
+            format_version=3,
+            kind="app",
+            alias="employee",
+            source_commit="",
+            source=source,
+            archive_digest="d" * 64,
+            app_tree_digests={"employee": "c" * 64},
+        )
+        events: list[str] = []
+        dependencies, _ = self.release_dependencies(events, manifest=manifest)
+        forwarded = []
+        forwarded_confirmation = []
+        def capture_source(repo, config, source_identity, aliases, **kwargs):
+            forwarded.append((source_identity, tuple(aliases)))
+            return {
+                "version": 3,
+                "final_status": "PASS",
+                "source": dict(source_identity),
+            }
+
+        original_apply = dependencies.apply_release_live
+
+        def capture_confirmation(*args, **kwargs):
+            forwarded_confirmation.append(kwargs.get("confirmation"))
+            return original_apply(*args, **kwargs)
+
+        dependencies = OnlineDependencies(
+            **{
+                **dependencies.__dict__,
+                "qualify_release": capture_source,
+                "apply_release_live": capture_confirmation,
+            }
+        )
+        archive = self.root / "format3-release.tar"
+        archive.write_bytes(b"verified database release")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir()
+        target.write_text("{}\n", encoding="utf-8")
+        confirmation = {"version": 1, "confirmations": [{"migration_id": "m1"}]}
+        result = run_release_test(
+            self.root,
+            config_for(role="test", environment="test", apps={"employee": 201}),
+            archive,
+            target,
+            self.root / "format3-evidence.json",
+            flow_executable=str(self.flow_runner),
+            dependencies=dependencies,
+            confirmation=confirmation,
+        )
+        self.assertEqual(forwarded, [(source, ("employee",))])
+        self.assertEqual(forwarded_confirmation, [confirmation])
+        self.assertEqual(result.source_commit, "")
+        self.assertEqual(result.as_dict()["source"], source)
+        self.assertNotIn("source_commit", result.as_dict())
+
     def test_release_test_qualification_validates_a_real_apply_report_through_qualify_target(self):
         from teamlib.config import profile_target
 

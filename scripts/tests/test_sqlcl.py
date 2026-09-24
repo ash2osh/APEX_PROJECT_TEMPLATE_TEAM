@@ -260,11 +260,12 @@ class SqlclBoundaryTests(unittest.TestCase):
 
     def test_wrapped_sqlcl_timeout_is_unknown(self):
         from teamlib.migration_store import MigrationStoreError
+        from teamlib.sqlcl import SqlclUnknownResult
 
         try:
             try:
-                raise SqlclError("SQLcl timed out; target state is unknown")
-            except SqlclError as exc:
+                raise SqlclUnknownResult("SQLcl timed out; target state is unknown")
+            except SqlclUnknownResult as exc:
                 raise MigrationStoreError("metadata write failed") from exc
         except MigrationStoreError as wrapped:
             self.assertTrue(result_is_unknown(wrapped))

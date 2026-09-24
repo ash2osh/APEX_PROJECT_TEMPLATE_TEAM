@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any, Literal
 from collections.abc import Callable, Mapping, Sequence
@@ -26,9 +27,9 @@ from .apex import (
 )
 from .apex_validate import ValidationReport, validate_apexlang_tree
 from .config import Target, profile_target
-from .control_store import ControlStore, SqlControlStore
+from .control_store import ControlStore, PublishPreparationApp, SqlControlStore
 from .page_locks import LockReport, PageLock, format_lock_report, read_page_locks
-from .sqlcl import SqlclError, run_sqlcl
+from .sqlcl import result_is_unknown, run_sqlcl
 from .state import StateError, _target_descriptor, load_baseline, load_capture
 from .trees import TreeError, assert_source_clean, read_git_tree, tree_digest
 
@@ -304,6 +305,18 @@ def prepare_publish(
             pass
         raise PublishError(f"Could not write preparation record: {exc}") from exc
 
+    try:
+        store.register_publish_preparation(
+            prep_id,
+            record_digest,
+            [
+                (target, target.alias or "", tuple(apps_data[target.alias or ""]["roster"]))
+                for target in sorted(targets, key=lambda value: value.alias or "")
+            ],
+        )
+    except Exception as exc:
+        raise PublishError(f"Could not register shared publish preparation: {exc}") from exc
+
     return Preparation(
         preparation_id=prep_id,
         version=1,
@@ -384,7 +397,7 @@ def format_publish_notice(
         lines.append(f"--- Application: {alias} (App {target.get('app_id')}, Workspace {target.get('workspace_id')}) ---")
         roster = app_data.get("roster", [])
         if roster:
-            lines.append("Registered checkouts: " + ", ".join(roster))
+            lines.append(f"Registered checkouts: {len(roster)}")
         else:
             lines.append("Registered checkouts: none")
 
@@ -412,10 +425,125 @@ def format_publish_notice(
     return "\n".join(lines).strip() + "\n"
 
 
+def acknowledge_publish(
+    repo: Path | str,
+    preparation_id: str,
+    checkout_uuid: str,
+    host: str,
+    acknowledged_by_user: str,
+    *,
+    config: Any,
+    store: ControlStore | SqlControlStore,
+) -> tuple[str, ...]:
+    """Record this checkout's acknowledgement for selected apps where it is registered."""
+    if getattr(config, "role", None) != "developer" or getattr(config, "environment", None) != "development":
+        raise PublishError("publish acknowledgement is restricted to shared development targets")
+    if not all((checkout_uuid, host, acknowledged_by_user)):
+        raise PublishError("TEAM_CHECKOUT_UUID, host and user are required to acknowledge publish")
+
+    del repo  # A teammate checkout only needs the shared preparation record.
+    try:
+        shared_preparation = store.list_publish_preparation(preparation_id)
+    except Exception as exc:
+        raise PublishError(f"Cannot read shared publish preparation: {exc}") from exc
+    _validate_shared_preparation(shared_preparation, preparation_id)
+    targets: list[tuple[str, Target, str]] = []
+
+    # Validate all target bindings and checkout identities before writing any
+    # row, so a bad multi-app invocation cannot acknowledge only a prefix.
+    for app in shared_preparation:
+        alias = app.alias
+        if alias not in config.apps:
+            raise PublishError(f"Application '{alias}' is not configured in environment")
+        target = profile_target(config, "APEX", alias=alias)
+        if target.physical_key != app.target_key:
+            raise PublishError(f"Target binding for '{alias}' has changed since preparation")
+        try:
+            roster = store.list_registry(target)
+        except Exception as exc:
+            raise PublishError(f"Cannot read checkout roster for '{alias}': {exc}") from exc
+        current_roster = {entry.checkout_uuid for entry in roster}
+        prepared_roster = set(app.checkout_roster)
+        if current_roster != prepared_roster:
+            raise PublishError(f"Application '{alias}' checkout roster changed after preparation; prepare again")
+        current_checkout = next(
+            (entry for entry in roster if entry.checkout_uuid == checkout_uuid), None
+        )
+        if current_checkout is not None:
+            if current_checkout.host != host or current_checkout.registered_by_user != acknowledged_by_user:
+                raise PublishError(f"Registered host and user for checkout '{checkout_uuid}' do not match this invocation")
+            targets.append((alias, target, app.preparation_digest))
+
+    if not targets:
+        raise PublishError("This checkout is not registered for any application in the preparation")
+
+    acknowledged: list[str] = []
+    for alias, target, preparation_digest in targets:
+        try:
+            store.record_publish_acknowledgement(
+                target,
+                preparation_id,
+                preparation_digest,
+                checkout_uuid,
+                host,
+                acknowledged_by_user,
+            )
+        except Exception as exc:
+            raise PublishError(f"Cannot record publish acknowledgement for '{alias}': {exc}") from exc
+        acknowledged.append(alias)
+    return tuple(acknowledged)
+
+
+def _validate_shared_preparation(
+    apps: Sequence[PublishPreparationApp], preparation_id: str
+) -> tuple[str, tuple[PublishPreparationApp, ...]]:
+    if not apps:
+        raise PublishError(f"Shared preparation '{preparation_id}' is unknown or stale; prepare again")
+    if any(app.preparation_id != preparation_id for app in apps):
+        raise PublishError("Shared preparation metadata is malformed")
+    digests = {app.preparation_digest for app in apps}
+    aliases = [app.alias for app in apps]
+    if len(digests) != 1 or len(aliases) != len(set(aliases)) or not all(aliases):
+        raise PublishError("Shared preparation metadata is inconsistent")
+    digest = next(iter(digests))
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise PublishError("Shared preparation digest is malformed")
+    return digest, tuple(sorted(apps, key=lambda app: app.alias))
+
+
+def _verify_shared_preparation_matches_local(
+    prep: Preparation,
+    config: Any,
+    store: ControlStore | SqlControlStore,
+) -> Mapping[str, PublishPreparationApp]:
+    try:
+        shared_rows = store.list_publish_preparation(prep.preparation_id)
+    except Exception as exc:
+        raise PublishError(f"Cannot read shared publish preparation: {exc}") from exc
+    shared_digest, shared_apps = _validate_shared_preparation(shared_rows, prep.preparation_id)
+    if shared_digest != prep.record_digest:
+        raise PublishError("Shared preparation digest does not match the local preparation record")
+    if tuple(app.alias for app in shared_apps) != tuple(sorted(prep.aliases)):
+        raise PublishError("Shared preparation aliases do not match the local preparation record")
+    by_alias = {app.alias: app for app in shared_apps}
+    for alias in prep.aliases:
+        if alias not in config.apps:
+            raise PublishError(f"Application '{alias}' is not configured in environment")
+        target = profile_target(config, "APEX", alias=alias)
+        app_data = prep.apps.get(alias, {})
+        shared = by_alias[alias]
+        if target.physical_key != shared.target_key:
+            raise PublishError(f"Target binding for '{alias}' has changed since preparation")
+        if tuple(sorted(app_data.get("roster", []))) != shared.checkout_roster:
+            raise PublishError(f"Shared preparation checkout roster does not match local preparation for '{alias}'")
+        if target.state_key != app_data.get("state_key") or target.binding_digest != app_data.get("target", {}).get("binding_digest"):
+            raise PublishError(f"Target binding for '{alias}' has changed since preparation")
+    return by_alias
+
+
 def publish_prepared(
     repo: Path | str,
     preparation_id: str,
-    acknowledgements: Mapping[str, tuple[str, ...] | list[str] | set[str] | Sequence[str]],
     confirm_pause: bool,
     *,
     config: Any,
@@ -431,21 +559,44 @@ def publish_prepared(
 
     repo_path = Path(repo)
     prep = load_preparation(repo_path, preparation_id)
+    shared_preparation = _verify_shared_preparation_matches_local(prep, config, store)
 
-    # 1. Check for unselected acknowledgements
-    for alias in acknowledgements:
-        if alias not in prep.aliases:
-            raise PublishError(f"Acknowledgement provided for unselected application: '{alias}'")
-
-    # 2. Check for required checkout acknowledgements
+    # 1. Check the acknowledgements written by each registered checkout.
     for alias in prep.aliases:
         app_data = prep.apps.get(alias, {})
         required_roster = set(app_data.get("roster", []))
-        provided = set(acknowledgements.get(alias, ()))
+        if alias not in config.apps:
+            raise PublishError(f"Application '{alias}' is not configured in environment")
+        target = profile_target(config, "APEX", alias=alias)
+        stored_target = app_data.get("target", {})
+        if target.state_key != app_data.get("state_key") or target.binding_digest != stored_target.get("binding_digest"):
+            raise PublishError(f"Target binding for '{alias}' has changed since preparation")
+        if target.physical_key != shared_preparation[alias].target_key:
+            raise PublishError(f"Target binding for '{alias}' has changed since preparation")
+        try:
+            stored_acknowledgements = store.list_publish_acknowledgements(
+                target, prep.preparation_id, prep.record_digest
+            )
+        except Exception as exc:
+            raise PublishError(f"Cannot read checkout acknowledgements for '{alias}': {exc}") from exc
+        try:
+            current_registry = {
+                row.checkout_uuid: row for row in store.list_registry(target)
+            }
+        except Exception as exc:
+            raise PublishError(f"Cannot read checkout roster for '{alias}': {exc}") from exc
+        provided = {
+            row.checkout_uuid
+            for row in stored_acknowledgements
+            if row.preparation_digest == prep.record_digest
+            and row.checkout_uuid in current_registry
+            and row.host == current_registry[row.checkout_uuid].host
+            and row.acknowledged_by_user == current_registry[row.checkout_uuid].registered_by_user
+        }
         missing = required_roster - provided
         if missing:
             raise PublishError(
-                f"Missing required checkout acknowledgements for '{alias}': {', '.join(sorted(missing))}"
+                f"Missing required checkout acknowledgements from the control store for '{alias}': {', '.join(sorted(missing))}"
             )
 
     # 3. All-app preflight: check target binding, source cleanliness, recapture and locks for ALL selected apps before any write
@@ -551,12 +702,7 @@ def publish_prepared(
             failed = True
             failed_alias = alias
             failed_error = str(exc)
-            is_unknown = (
-                isinstance(exc, ImportUnknown)
-                or (isinstance(exc, SqlclError) and "timed out" in str(exc).lower())
-                or "unknown" in str(exc).lower()
-                or (exc.__cause__ is not None and "unknown" in str(exc.__cause__).lower())
-            )
+            is_unknown = isinstance(exc, ImportUnknown) or result_is_unknown(exc)
             app_status: Literal["UNKNOWN", "FAILED"] = "UNKNOWN" if is_unknown else "FAILED"
             first_failure_status = app_status
             results[alias] = AppPublishResult(

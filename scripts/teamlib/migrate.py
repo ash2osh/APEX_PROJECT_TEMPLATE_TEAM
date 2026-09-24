@@ -169,8 +169,12 @@ def _selected_plan(
     target: Target,
     profiles: Mapping[str, Any],
 ) -> Plan:
-    if action == "migrate":
+    if action in {"migrate", "forward"}:
         plan = _base_plan(bundles, history, target, profiles)
+        if action == "forward":
+            if len(selected_ids) != 1 or selected_ids[0] not in plan.pending:
+                raise MigrationRunError("selected forward migration is not pending")
+            return Plan((selected_ids[0],), plan.foreign_applied, plan.errors, plan.foreign_reverted)
     else:
         # The forward planner intentionally reports dependents of reverted
         # migrations as blocked.  That diagnostic must not prevent restoring
@@ -291,7 +295,7 @@ def _apply_operation(
     profiles: Mapping[str, Any],
     confirmation: Mapping[str, Any] | None,
 ) -> RunReport:
-    if action not in {"migrate", "undo", "redo"}:
+    if action not in {"migrate", "forward", "undo", "redo"}:
         raise MigrationRunError(f"unsupported migration action: {action}")
     target = _target(profiles)
     if target.environment == "production":
@@ -305,11 +309,12 @@ def _apply_operation(
         plan = _selected_plan(action, selected_ids, bundles, history or {}, target, profiles)
         if action == "migrate":
             selected_ids = plan.pending
-        requirements, _ = _requirements(action, selected_ids, bundles, payload_targets)
+        lifecycle_action = "migrate" if action == "forward" else action
+        requirements, _ = _requirements(lifecycle_action, selected_ids, bundles, payload_targets)
         template = confirmation_template(requirements) if requirements else None
-        return _report("dry-run", action, selected_ids, plan, [], [], None, template)
+        return _report("dry-run", lifecycle_action, selected_ids, plan, [], [], None, template)
 
-    if action != "migrate" or bool(profiles.get("bootstrap", False)):
+    if action not in {"migrate", "forward"} or bool(profiles.get("bootstrap", False)):
         store.bootstrap(target, schema_set_digest=str(profiles.get("schema_set_digest", "")))
     run_token = uuid.uuid4().hex
     worker = str(profiles.get("worker_identity", "migration-worker"))
@@ -335,7 +340,8 @@ def _apply_operation(
                 expected_pending = tuple(expected_plan.pending) if isinstance(expected_plan, Plan) else tuple(expected_plan.get("pending", ()))
                 if expected_pending != plan.pending:
                     raise MigrationRunError("recomputed migration plan differs from expected release plan")
-        requirements, destructive_by_id = _requirements(action, selected_ids, bundles, payload_targets)
+        lifecycle_action = "migrate" if action == "forward" else action
+        requirements, destructive_by_id = _requirements(lifecycle_action, selected_ids, bundles, payload_targets)
         if confirmation is not None and not isinstance(confirmation, Mapping):
             raise MigrationRunError("destructive confirmation must be a version-one document")
         try:
@@ -383,14 +389,14 @@ def _apply_operation(
             destructive_digest = confirmation_digest if destructive_by_id[migration_id] else ""
             store.record_attempt_start(
                 target, attempt_id, migration_id, migration.checksum, run_token,
-                action=action, confirmation_digest=destructive_digest,
+                action=lifecycle_action, confirmation_digest=destructive_digest,
             )
             current_attempt_started = True
             phase = "execute"
             try:
-                _call_callback(execute, (migration, action, sql_path), (migration,))
+                _call_callback(execute, (migration, lifecycle_action, sql_path), (migration,))
                 phase = "verify"
-                verification = _call_callback(verify, (migration, action, verify_path), (migration,))
+                verification = _call_callback(verify, (migration, lifecycle_action, verify_path), (migration,))
                 if callable(verify) and verification is not True:
                     raise MigrationRunError(f"verification failed for {migration_id}")
                 phase = "observe-after"
@@ -476,7 +482,7 @@ def _apply_operation(
                 f"migration mutex release failed for run {run_token}: {exc}",
                 recovery,
             ) from exc
-        return _report(run_token, action, selected_ids, plan, applied, reverted, accepted_frontier, None)
+        return _report(run_token, lifecycle_action, selected_ids, plan, applied, reverted, accepted_frontier, None)
     except Exception:
         # A failure before the current attempt starts is safe to release. Once
         # a payload attempt exists, FAILED/UNKNOWN evidence deliberately keeps
@@ -567,6 +573,20 @@ def apply_plan(
         options["expected_plan"] = expected_plan
     bundles = load_bundles(source)
     return _apply_operation("migrate", (), bundles, options, confirmation)
+
+
+def apply_forward(
+    source: str | Path,
+    migration_id: str,
+    profiles: Mapping[str, Any],
+    *,
+    confirmation: Mapping[str, Any] | None = None,
+) -> RunReport:
+    """Apply exactly one currently pending migration for ordered replay callers."""
+    bundles = load_bundles(source)
+    if migration_id not in bundles:
+        raise MigrationRunError(f"migration is not present locally: {migration_id}")
+    return _apply_operation("forward", (migration_id,), bundles, dict(profiles), confirmation)
 
 
 def _apply_selected(action: str, source: str | Path, migration_id: str, profiles: Mapping[str, Any], confirmation: Mapping[str, Any] | None) -> RunReport:

@@ -9,11 +9,10 @@ import json
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import uuid
-from typing import Any, Literal
+from typing import Any
 from collections.abc import Mapping
 from collections.abc import Callable
 
@@ -21,6 +20,7 @@ from .app_checks import AppCheckBundle, AppCheckError, build_app_check_bundle
 from .migration_bundle import BundleError, Migration, _validate_id, load_bundles
 from .migration_plan import plan_migrations
 from .trees import tree_digest
+from .runtime import RELEASE_SQLCL_BUILD
 
 
 class ReleaseError(RuntimeError):
@@ -60,6 +60,10 @@ class ReleasePlan:
     history_digest: str = ""
     foreign_applied: tuple[str, ...] = ()
     foreign_reverted: tuple[str, ...] = ()
+    # Format 3 retains the exact source-database transition suffix.  A
+    # migration ID can occur more than once here (up, down, then redo).
+    events: tuple[Mapping[str, Any], ...] = ()
+    replay_from: int = 0
 
 
 @dataclass(frozen=True)
@@ -72,23 +76,30 @@ class ApplyReport:
     target_state_key: str = ""
     target_digest: str = ""
     history_digest: str = ""
+    source: Mapping[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "version": self.version,
             "status": self.status,
-            "source_commit": self.source_commit,
             "archive_digest": self.archive_digest,
             "target_state_key": self.target_state_key,
             "target_digest": self.target_digest,
             "history_digest": self.history_digest,
             "pending": list(self.pending),
         }
+        if self.source is None:
+            value["source_commit"] = self.source_commit
+        else:
+            value["source"] = dict(self.source)
+        return value
 
 
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_DB_RELEASE_REPLAY_SOURCE_RE = re.compile(r"^db-release:([0-9a-f]{64}):([1-9][0-9]*):([0-9]+)$")
+_DB_RELEASE_SOURCE_RE = re.compile(r"^db-release:[0-9a-f]{64}$")
 _MANIFEST_KEYS_V1 = {
     "format_version", "version", "source_commit", "source_tree", "toolchain",
     "migrations", "app_tree_digests", "master_contract_digest",
@@ -100,79 +111,15 @@ _MANIFEST_KEYS_V2 = _MANIFEST_KEYS_V1 | {
 # Format 3 identifies its source by the development database ledger it was cut
 # from; there is no Git commit.
 _MANIFEST_KEYS_V3 = (_MANIFEST_KEYS_V2 - {"source_commit"}) | {"source", "events"}
-_SOURCE_KEYS_V3 = {"kind", "instance_id", "history_cut", "history_digest", "frontier_digest"}
+_SCHEMA_SOURCE_KEYS_V3 = {"kind", "instance_id", "history_cut", "history_digest", "frontier_digest"}
+_APP_SOURCE_KEYS_V3 = _SCHEMA_SOURCE_KEYS_V3 | {
+    "app_generation", "app_tree_digest", "app_checks_digest", "master_contract_digest",
+}
 _EVENT_KEYS_V3 = {"sequence", "id", "operation", "checksum"}
-_TOOLCHAIN_KEYS = {"python", "archive_format", "normalizer"}
+_TOOLCHAIN_KEYS_V2 = {"python", "archive_format", "normalizer"}
+_TOOLCHAIN_KEYS_V3 = _TOOLCHAIN_KEYS_V2 | {"sqlcl"}
 _PAYLOAD_RECORD_KEYS = {"path", "length", "sha256"}
 _REQUIRED_MIGRATION_RECORD_KEYS = {"id", "checksum"}
-
-
-def validate_release_identity(
-    ref: str,
-    version: str,
-    source_commit: str,
-    records: Mapping[str, Any],
-    *,
-    kind: Literal["schema", "app"] | None = None,
-    alias: str | None = None,
-) -> None:
-    """Bind a semver tag and immutable version record before artifact build."""
-    if not isinstance(version, str) or not _SEMVER_RE.fullmatch(version):
-        raise ReleaseError("release version must be semantic MAJOR.MINOR.PATCH")
-    ref_text = str(ref)
-    ref_tag = ref_text[len("refs/tags/"):] if ref_text.startswith("refs/tags/") else ref_text
-
-    if kind == "schema":
-        if ref_tag.startswith("app/"):
-            raise ReleaseError(f"tag {ref_tag} does not match release kind schema")
-        if ref_tag.startswith("schema/v"):
-            tag_version = ref_tag[len("schema/v"):]
-            if tag_version != version:
-                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
-        elif ref_tag.startswith("v") and "/" not in ref_tag:
-            if ref_tag[1:] != version:
-                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
-        elif "/" in ref_tag and not ref_tag.startswith(("refs/", "heads/")):
-            raise ReleaseError(f"tag {ref_tag} does not match release kind schema")
-    elif kind == "app":
-        if ref_tag.startswith("schema/"):
-            raise ReleaseError(f"tag {ref_tag} does not match release kind app")
-        if ref_tag.startswith("app/"):
-            parts = ref_tag.split("/")
-            if len(parts) != 3 or not parts[2].startswith("v"):
-                raise ReleaseError(f"tag {ref_tag} has invalid app release tag format")
-            tag_alias = parts[1]
-            tag_version = parts[2][1:]
-            if alias is not None and tag_alias != alias:
-                raise ReleaseError(f"tag application '{tag_alias}' does not match release alias '{alias}'")
-            if tag_version != version:
-                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
-        elif ref_tag.startswith("v") and "/" not in ref_tag:
-            if ref_tag[1:] != version:
-                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
-        elif "/" in ref_tag and not ref_tag.startswith(("refs/", "heads/")):
-            raise ReleaseError(f"tag {ref_tag} does not match release kind app")
-    else:
-        tag = ref_text.rsplit("/", 1)[-1]
-        if tag.startswith("v") and tag[1:] != version:
-            raise ReleaseError(f"tag {tag} does not match release version {version}")
-
-    record_key = (
-        f"schema/v{version}"
-        if kind == "schema"
-        else (f"app/{alias}/v{version}" if kind == "app" and alias else version)
-    )
-    existing = None
-    if isinstance(records, Mapping):
-        if record_key in records:
-            existing = records[record_key]
-        elif version in records and kind is None:
-            existing = records[version]
-    if existing is not None:
-        if not isinstance(existing, Mapping) or existing.get("source_commit") != source_commit:
-            raise ReleaseError(f"release version {version} is already bound to a different source commit")
-        if existing.get("archive_digest") not in (None, "") and len(str(existing["archive_digest"])) != 64:
-            raise ReleaseError(f"release record for {record_key} has an invalid archive digest")
 
 
 def _canonical(value: Any) -> bytes:
@@ -196,63 +143,6 @@ def _migration_manifest(
     )
 
 
-def _git(repo: Path, args: list[str]) -> bytes:
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=False)
-    if result.returncode != 0:
-        raise ReleaseError(result.stderr.decode("utf-8", "replace").strip() or "Git operation failed")
-    return result.stdout
-
-
-def _resolve(repo: Path, ref: str) -> str:
-    try:
-        return _git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"]).decode("ascii").strip()
-    except (UnicodeError, ReleaseError) as exc:
-        raise ReleaseError(f"could not resolve release ref: {ref}") from exc
-
-
-def _git_files(repo: Path, commit: str) -> dict[str, bytes]:
-    raw = _git(repo, ["ls-tree", "-r", "-z", "--full-tree", commit])
-    files: dict[str, bytes] = {}
-    for record in raw.split(b"\0"):
-        if not record:
-            continue
-        try:
-            header, path_raw = record.split(b"\t", 1)
-            mode_raw, object_type, object_id = header.split()
-            path = path_raw.decode("utf-8")
-            mode = int(mode_raw, 8)
-        except (ValueError, UnicodeError) as exc:
-            raise ReleaseError("malformed Git tree entry") from exc
-        if object_type != b"blob":
-            if path.startswith(("apps/", "migrations/", "targets/", "ci/", "evidence/", "app_context/")):
-                raise ReleaseError(f"unsupported non-blob release path: {path}")
-            continue
-        if mode not in {0o100644, 0o100755}:
-            raise ReleaseError(f"unsupported release file mode: {path}")
-        files[path] = _git(repo, ["cat-file", "blob", object_id.decode("ascii")])
-    return files
-
-
-def _allowed(path: str) -> bool:
-    if path.startswith("apps/"):
-        if path.endswith("/.gitkeep"):
-            return False
-        return "/deployments/" not in f"/{path}" and not path.endswith("/deployments")
-    if path.startswith("migrations/"):
-        return path.endswith(".sql") and not path.startswith("migrations/operations/")
-    if path == "targets/masters.json":
-        return True
-    return path.startswith(("contracts/", "evidence/schema/", "ci/app-checks/", "app_context/", "tools/"))
-
-
-def _payload_path(source_path: str) -> str:
-    if source_path == "targets/masters.json":
-        return "release/contracts/masters.json"
-    if source_path.startswith("ci/app-checks/"):
-        return "release/checks/apps/" + source_path[len("ci/app-checks/"):]
-    return "release/" + source_path
-
-
 def _ustar_split(name: str) -> tuple[str, str]:
     encoded = name.encode("utf-8")
     if len(encoded) <= 100:
@@ -263,46 +153,6 @@ def _ustar_split(name: str) -> tuple[str, str]:
         if len(prefix.encode("utf-8")) <= 155 and len(suffix.encode("utf-8")) <= 100:
             return prefix, suffix
     raise ReleaseError(f"release path cannot be represented in deterministic ustar: {name} ({len(encoded)} bytes)")
-
-
-def _load_app_release_declaration(
-    source_files: Mapping[str, bytes],
-    alias: str,
-    loaded_bundles: Mapping[str, Migration],
-) -> tuple[dict[str, str], ...]:
-    context_path = f"app_context/{alias}/release.json"
-    raw = source_files.get(context_path)
-    if raw is None:
-        raise ReleaseError(f"missing application release declaration: {context_path}")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ReleaseError(f"application release declaration is unreadable: {context_path}") from exc
-    if not isinstance(data, Mapping):
-        raise ReleaseError(f"application release declaration must be a JSON object: {context_path}")
-    if set(data) != {"version", "requires"}:
-        raise ReleaseError(f"application release declaration keys are not closed: {context_path}")
-    if type(data["version"]) is not int or data["version"] != 1:
-        raise ReleaseError(f"unsupported application release declaration version: {context_path}")
-    requires = data["requires"]
-    if not isinstance(requires, list):
-        raise ReleaseError(f"application release declaration requires must be a list: {context_path}")
-    seen: set[str] = set()
-    result: list[dict[str, str]] = []
-    for item in requires:
-        if not isinstance(item, str):
-            raise ReleaseError(f"non-canonical requirement ID: {item}")
-        try:
-            _validate_id(item)
-        except BundleError as exc:
-            raise ReleaseError(f"non-canonical requirement ID: {item}") from exc
-        if item in seen:
-            raise ReleaseError(f"duplicate requirement in {context_path}: {item}")
-        seen.add(item)
-        if item not in loaded_bundles:
-            raise ReleaseError(f"required migration not found in commit: {item}")
-        result.append({"id": item, "checksum": loaded_bundles[item].checksum})
-    return tuple(result)
 
 
 def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_digest: str, staging_dir: Path | None = None) -> Manifest:
@@ -328,142 +178,10 @@ def _manifest_from_data(data: Mapping[str, Any], archive_path: Path, archive_dig
     )
 
 
-def build_release(
-    repo: str | Path,
-    ref: str,
-    version: str,
-    out: str | Path,
-    *,
-    kind: str | None = None,
-    alias: str | None = None,
-) -> Manifest:
-    if kind is None:
-        raise ReleaseError("release kind must be specified: 'schema' or 'app'")
-    if kind not in ("schema", "app"):
-        raise ReleaseError(f"unsupported release kind: {kind}")
-    if kind == "schema" and alias is not None:
-        raise ReleaseError("schema release cannot specify an application alias")
-    if kind == "app":
-        if not alias or not isinstance(alias, str) or "/" in alias:
-            raise ReleaseError("app release requires an application alias")
-
-    repo_path = Path(repo)
-    if not repo_path.is_dir() or repo_path.is_symlink():
-        raise ReleaseError("release repository is not a real directory")
-    commit = _resolve(repo_path, ref)
-    record_path = repo_path / "release-record.json"
-    records: Mapping[str, Any] = {}
-    if record_path.is_file():
-        try:
-            raw_records = json.loads(record_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise ReleaseError("release record is unreadable") from exc
-        records = raw_records.get("releases", raw_records) if isinstance(raw_records, Mapping) else {}
-    validate_release_identity(ref, version, commit, records, kind=kind, alias=alias)
-    output = Path(out)
-    if output.exists() and any(output.iterdir()):
-        raise ReleaseError(f"release output directory must be new: {output}")
-    source_files = _git_files(repo_path, commit)
-
-    loaded_bundles: dict[str, Migration] = {}
-    migrations_in_commit = {
-        path[len("migrations/"):]: data
-        for path, data in source_files.items()
-        if path.startswith("migrations/") and path.endswith((".sql", ".verify.sql")) and not path.startswith("migrations/operations/")
-    }
-    if migrations_in_commit:
-        with tempfile.TemporaryDirectory(prefix="team-release-bundles-") as tmp_bundles:
-            tmp_root = Path(tmp_bundles)
-            for rel_path, data in migrations_in_commit.items():
-                dest = tmp_root / rel_path
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(data)
-            try:
-                loaded_bundles = dict(load_bundles(tmp_root))
-            except BundleError as exc:
-                raise ReleaseError(str(exc)) from exc
-
-    payload: dict[str, bytes] = {}
-    required_migrations: tuple[dict[str, str], ...] = ()
-    migrations: tuple[dict[str, Any], ...] = ()
-    app_digests: dict[str, str] = {}
-
-    if kind == "schema":
-        for path, data in source_files.items():
-            if path.startswith(("apps/", "ci/app-checks/", "app_context/")):
-                continue
-            if path == "targets/masters.json":
-                continue
-            if "/deployments/" in f"/{path}" or path.endswith("/deployments") or path.endswith("default.json"):
-                continue
-            if not _allowed(path):
-                continue
-            payload[_payload_path(path)] = data
-        if not any(p.startswith("release/migrations/") for p in payload):
-            raise ReleaseError("schema release has no migrations")
-        migrations = _migration_manifest(loaded_bundles)
-
-    elif kind == "app":
-        assert alias is not None
-        required_migrations = _load_app_release_declaration(source_files, alias, loaded_bundles)
-        app_prefix = f"apps/{alias}/"
-        check_prefix = f"ci/app-checks/{alias}"
-        context_file = f"app_context/{alias}/release.json"
-        has_app = False
-        for path, data in source_files.items():
-            if path.startswith("migrations/"):
-                continue
-            if path.startswith("apps/"):
-                if not path.startswith(app_prefix):
-                    continue
-                if path.endswith("/.gitkeep") or "/deployments/" in f"/{path}" or path.endswith("/deployments") or path.endswith("default.json"):
-                    continue
-                has_app = True
-                payload[_payload_path(path)] = data
-                continue
-            if path.startswith("ci/app-checks/"):
-                if path == f"{check_prefix}.json" or path.startswith(f"{check_prefix}/"):
-                    payload[_payload_path(path)] = data
-                continue
-            if path == context_file:
-                payload[_payload_path(path)] = data
-                continue
-            if path == "targets/masters.json":
-                payload[_payload_path(path)] = data
-                continue
-        if not has_app:
-            raise ReleaseError(f"application {alias} not found in commit")
-
-        app_tree = {
-            path[len(f"release/apps/{alias}/"):]: data
-            for path, data in payload.items()
-            if path.startswith(f"release/apps/{alias}/")
-        }
-        app_digests = {alias: tree_digest(app_tree)}
-
-    master_contract_digest = None
-    if "release/contracts/masters.json" in payload:
-        master_contract_digest = hashlib.sha256(payload["release/contracts/masters.json"]).hexdigest()
-    manifest_fields = {
-        "format_version": 2,
-        "kind": kind,
-        "alias": alias,
-        "version": version,
-        "source_commit": commit,
-        "migrations": list(migrations),
-        "required_migrations": [dict(r) for r in required_migrations],
-        "app_tree_digests": app_digests,
-        "master_contract_digest": master_contract_digest,
-    }
-    return _write_release_archive(output, payload, manifest_fields, records.get(version) if isinstance(records, Mapping) else None, version)
-
-
 def _write_release_archive(
     output: Path,
     payload: Mapping[str, bytes],
     manifest_fields: Mapping[str, Any],
-    existing_record: Any = None,
-    version: str = "",
 ) -> Manifest:
     """Write one deterministic USTAR archive plus its staging copy, then verify it.
 
@@ -491,10 +209,15 @@ def _write_release_archive(
         app_check_records = [record for record in payload_records if record["path"].startswith("release/checks/apps/")]
         app_checks_digest = hashlib.sha256(_canonical(app_check_records)).hexdigest() if app_check_records else None
 
+        toolchain = manifest_fields.get("toolchain", {
+            "python": "3.10+", "archive_format": "ustar", "normalizer": "team-v1",
+        })
+        if not isinstance(toolchain, Mapping):
+            raise ReleaseError("release manifest toolchain is malformed")
         manifest_data = {
             **manifest_fields,
             "source_tree": source_tree_digest,
-            "toolchain": {"python": "3.10+", "archive_format": "ustar", "normalizer": "team-v1"},
+            "toolchain": dict(toolchain),
             "app_checks_digest": app_checks_digest,
             "payload_paths": list(sorted(payload)),
             "payload": list(payload_records),
@@ -534,11 +257,6 @@ def _write_release_archive(
         if staging_dir.exists():
             shutil.rmtree(staging_dir)
         raise ReleaseError("release archive digest changed during verification")
-    if isinstance(existing_record, Mapping) and existing_record.get("archive_digest") not in (None, "", archive_digest):
-        archive.unlink(missing_ok=True)
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-        raise ReleaseError(f"release version {version} is already bound to a different archive digest")
     return replace(verified, staging_dir=staging_dir)
 
 
@@ -579,17 +297,18 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
     if not isinstance(data["version"], str) or not _SEMVER_RE.fullmatch(data["version"]):
         raise ReleaseError("release manifest version is malformed")
     if format_version == 3:
-        _verify_database_source(data["source"])
-        if data.get("kind") != "schema":
-            raise ReleaseError("format 3 is only defined for schema releases")
+        if data.get("kind") not in ("schema", "app"):
+            raise ReleaseError("format 3 release kind is invalid")
+        _verify_database_source(data["source"], data["kind"])
     elif not isinstance(data["source_commit"], str) or not _COMMIT_RE.fullmatch(data["source_commit"]):
         raise ReleaseError("release manifest source commit is malformed")
     if not isinstance(data["source_tree"], str) or not _DIGEST_RE.fullmatch(data["source_tree"]):
         raise ReleaseError("release manifest source tree digest is malformed")
     toolchain = data["toolchain"]
+    expected_toolchain_keys = _TOOLCHAIN_KEYS_V3 if format_version == 3 else _TOOLCHAIN_KEYS_V2
     if (
         not isinstance(toolchain, Mapping)
-        or set(toolchain) != _TOOLCHAIN_KEYS
+        or set(toolchain) != expected_toolchain_keys
         or any(not isinstance(value, str) or not value.strip() for value in toolchain.values())
     ):
         raise ReleaseError("release manifest toolchain is malformed")
@@ -761,15 +480,27 @@ def _verify_archive_members(archive: Path, archive_digest: str, members: Mapping
         raise ReleaseError("release manifest migration metadata does not match payload")
     if kind == "schema" and not derived_migrations:
         raise ReleaseError("schema release has no migrations")
-    if format_version == 3:
+    if format_version == 3 and kind == "schema":
         _verify_database_events(data["events"], data["source"], derived_migrations)
+    elif format_version == 3 and data["events"] != []:
+        raise ReleaseError("format 3 app releases cannot contain schema ledger events")
+    if format_version == 3 and kind == "app":
+        source = data["source"]
+        alias = data["alias"]
+        if (
+            source["app_tree_digest"] != data["app_tree_digests"].get(alias)
+            or source["app_checks_digest"] != data["app_checks_digest"]
+            or source["master_contract_digest"] != data["master_contract_digest"]
+        ):
+            raise ReleaseError("format 3 app source digests do not match the manifest")
     manifest = _manifest_from_data(data, archive, archive_digest)
     _release_app_trees_from_members(manifest, members)
     return manifest
 
 
-def _verify_database_source(source: Any) -> None:
-    if not isinstance(source, Mapping) or set(source) != _SOURCE_KEYS_V3:
+def _verify_database_source(source: Any, kind: str) -> None:
+    keys = _SCHEMA_SOURCE_KEYS_V3 if kind == "schema" else _APP_SOURCE_KEYS_V3
+    if not isinstance(source, Mapping) or set(source) != keys:
         raise ReleaseError("release manifest database source is malformed")
     cut = source["history_cut"]
     if (
@@ -777,13 +508,26 @@ def _verify_database_source(source: Any) -> None:
         or not isinstance(source["instance_id"], str)
         or not source["instance_id"]
         or type(cut) is not int
-        or cut < 1
+        or cut < (1 if kind == "schema" else 0)
         or not isinstance(source["history_digest"], str)
         or not _DIGEST_RE.fullmatch(source["history_digest"])
         or not isinstance(source["frontier_digest"], str)
         or not _DIGEST_RE.fullmatch(source["frontier_digest"])
     ):
         raise ReleaseError("release manifest database source is malformed")
+    if kind == "app":
+        generation = source["app_generation"]
+        if (
+            type(generation) is not int
+            or generation < 1
+            or not isinstance(source["app_tree_digest"], str)
+            or not _DIGEST_RE.fullmatch(source["app_tree_digest"])
+            or any(
+                value is not None and (not isinstance(value, str) or not _DIGEST_RE.fullmatch(value))
+                for value in (source["app_checks_digest"], source["master_contract_digest"])
+            )
+        ):
+            raise ReleaseError("release manifest application source is malformed")
 
 
 def _verify_database_events(events: Any, source: Mapping[str, Any], migrations: tuple[dict[str, Any], ...]) -> None:
@@ -822,6 +566,7 @@ def build_schema_release_from_database(
     version: str,
     out: str | Path,
     *,
+    sqlcl_build: str,
     built_by: str,
     worker_identity: str,
     host: str,
@@ -838,7 +583,11 @@ def build_schema_release_from_database(
 
     if getattr(metadata, "environment", None) == "production":
         raise ReleaseError("schema releases are cut from the development database, not production")
-    key = release_key("schema", None, version)
+    if sqlcl_build != RELEASE_SQLCL_BUILD:
+        raise ReleaseError(
+            f"release builds require SQLcl build {RELEASE_SQLCL_BUILD}; observed {sqlcl_build}"
+        )
+    release_key("schema", None, version)
     output = Path(out)
     if output.exists() and any(output.iterdir()):
         raise ReleaseError(f"release output directory must be new: {output}")
@@ -856,7 +605,6 @@ def build_schema_release_from_database(
     run_token = uuid.uuid4().hex
     store.acquire(metadata, run_token, worker_identity, host)
     try:
-        existing = store.read_releases(metadata).get(key)
         state = store.read_state(metadata)
         unresolved = unresolved_attempts(state)
         if unresolved:
@@ -918,21 +666,287 @@ def build_schema_release_from_database(
                 "version": version,
                 "source": source,
                 "events": events,
+                "toolchain": {
+                    "python": "3.10+", "archive_format": "ustar", "normalizer": "team-v1",
+                    "sqlcl": sqlcl_build,
+                },
                 "migrations": list(migrations),
                 "required_migrations": [],
                 "app_tree_digests": {},
                 "master_contract_digest": None,
             },
-            existing,
-            version,
         )
-        store.record_release(
-            metadata, kind="schema", alias=None, version=version,
-            archive_digest=manifest.archive_digest, source=source, built_by=built_by, run_token=run_token,
-        )
+        try:
+            store.record_release(
+                metadata, kind="schema", alias=None, version=version,
+                archive_digest=manifest.archive_digest, source=source, built_by=built_by, run_token=run_token,
+            )
+        except Exception as exc:
+            manifest.archive_path.unlink(missing_ok=True)
+            if manifest.staging_dir is not None:
+                shutil.rmtree(manifest.staging_dir, ignore_errors=True)
+            raise ReleaseError(str(exc)) from exc
         return manifest
     finally:
         store.release(metadata, run_token)
+
+
+def _read_app_check_assets(repo: Path, alias: str) -> dict[str, bytes]:
+    """Read only the selected app's checked-in release checks, rejecting links."""
+    if (repo / "ci").is_symlink():
+        raise ReleaseError("application check parent cannot be a symlink")
+    root = repo / "ci" / "app-checks"
+    if not root.exists():
+        return {}
+    if root.is_symlink() or not root.is_dir():
+        raise ReleaseError("application check directory must be a real directory")
+    result: dict[str, bytes] = {}
+    candidates = (root / f"{alias}.json", root / alias)
+    for candidate in candidates:
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        if candidate.is_symlink():
+            raise ReleaseError(f"application check source cannot be a symlink: {candidate.relative_to(repo)}")
+        paths = [candidate] if candidate.is_file() else sorted(candidate.rglob("*"))
+        for path in paths:
+            if path.is_symlink():
+                raise ReleaseError(f"application check source cannot contain a symlink: {path.relative_to(repo)}")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise ReleaseError(f"application check source is not a regular file: {path.relative_to(repo)}")
+            result[path.relative_to(root).as_posix()] = path.read_bytes()
+    return result
+
+
+def _read_master_contract(repo: Path) -> bytes | None:
+    if (repo / "targets").is_symlink():
+        raise ReleaseError("master contract parent cannot be a symlink")
+    path = repo / "targets" / "masters.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ReleaseError("master contract must be a regular repository file")
+    return path.read_bytes()
+
+
+def build_app_release_from_database(
+    repo: str | Path,
+    target: Any,
+    metadata: Any,
+    app_store: Any,
+    migration_store: Any,
+    alias: str,
+    version: str,
+    out: str | Path,
+    *,
+    sqlcl_build: str,
+    checkout_uuid: str,
+    built_by: str,
+    host: str,
+    capture: Callable[..., Any] | None = None,
+    page_locks: Callable[..., Any] | None = None,
+    capture_runner: Callable[..., Any] | None = None,
+    page_lock_runner: Callable[..., Any] | None = None,
+) -> Manifest:
+    """Build a format-3 app release from two stable paused live captures.
+
+    Both the application mutex and migration mutex are held across the cut.
+    The app is only read; the only durable write is the release version record
+    in the non-production METADATA store.
+    """
+    from .apex import capture_app as capture_live_app
+    from .migration_store import release_key
+    from .page_locks import read_page_locks as read_live_page_locks
+    from .trees import tree_digest as digest_tree
+    from .app_checks import AppCheckError, build_app_check_bundle
+
+    if not isinstance(alias, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", alias):
+        raise ReleaseError("application alias is malformed")
+    if getattr(target, "alias", None) != alias or getattr(target, "role", None) != "developer" or getattr(target, "environment", None) != "development":
+        raise ReleaseError("application releases require the selected shared development application")
+    if getattr(metadata, "environment", None) != "development" or getattr(metadata, "instance_id", None) != getattr(target, "instance_id", None):
+        raise ReleaseError("application release metadata must be on the same development database instance")
+    if sqlcl_build != RELEASE_SQLCL_BUILD:
+        raise ReleaseError(f"release builds require SQLcl build {RELEASE_SQLCL_BUILD}; observed {sqlcl_build}")
+    if not all(isinstance(value, str) and value.strip() for value in (checkout_uuid, built_by, host)):
+        raise ReleaseError("application release requires checkout, actor and host identities")
+    release_key("app", alias, version)
+    repo_path = Path(repo)
+    if not repo_path.is_dir() or repo_path.is_symlink():
+        raise ReleaseError("release repository is not a real directory")
+    output = Path(out)
+    if output.exists() and (output.is_symlink() or not output.is_dir() or any(output.iterdir())):
+        raise ReleaseError(f"release output directory must be new: {output}")
+
+    capture_fn = capture or capture_live_app
+    lock_fn = page_locks or read_live_page_locks
+    app_token = uuid.uuid4().hex
+    migration_token = uuid.uuid4().hex
+    app_acquired = False
+    migration_acquired = False
+    capture_work: list[Path] = []
+    try:
+        try:
+            roster = app_store.list_registry(target)
+        except Exception as exc:
+            raise ReleaseError(f"could not verify registered release checkout: {exc}") from exc
+        owner = next((entry for entry in roster if entry.checkout_uuid == checkout_uuid), None)
+        if owner is None or owner.host != host or owner.registered_by_user != built_by:
+            raise ReleaseError("application release checkout must match a registered checkout, host and user")
+        app_store.acquire_app(target.physical_key, app_token, checkout_uuid, host, built_by)
+        app_acquired = True
+        app_state = app_store.read_app_sync_state(target.physical_key)
+        generation = app_state.generation
+
+        report = lock_fn(target, runner=page_lock_runner) if page_lock_runner is not None else lock_fn(target)
+        if getattr(report, "status", None) != "KNOWN" or tuple(getattr(report, "pages", ())) != ():
+            raise ReleaseError("application release requires a KNOWN empty page-lock report")
+        if getattr(report, "alias", None) != alias or getattr(report, "app_id", None) != target.app_id:
+            raise ReleaseError("page-lock report identity does not match the selected application")
+
+        try:
+            migration_store.acquire(metadata, migration_token, built_by, host)
+            migration_acquired = True
+            state = migration_store.read_state(metadata)
+            unresolved = sorted(
+                str(attempt_id) for attempt_id, attempt in state.get("attempts", {}).items()
+                if isinstance(attempt, Mapping) and attempt.get("state") in {"RUNNING", "FAILED", "UNKNOWN"}
+            )
+            if unresolved:
+                raise ReleaseError("unresolved migration attempts block an application release: " + ", ".join(unresolved))
+            observations = state.get("observations") or []
+            frontier = observations[-1].get("after") if observations and isinstance(observations[-1], Mapping) else None
+            if not isinstance(frontier, str) or not _DIGEST_RE.fullmatch(frontier):
+                raise ReleaseError("the development database has no accepted schema frontier for an application release")
+            events = migration_store.read_events(metadata)
+            canonical_events = []
+            current: dict[str, dict[str, Any]] = {}
+            for index, event in enumerate(events, start=1):
+                sequence = event.get("sequence", event.get("applied_sequence"))
+                if type(sequence) is not int or sequence != index:
+                    raise ReleaseError("schema history is not contiguous at the application release cut")
+                if event.get("operation") not in {"up", "down"}:
+                    raise ReleaseError("schema history operation is invalid at the application release cut")
+                migration_id = event.get("id", event.get("migration_id"))
+                checksum = event.get("checksum")
+                if not isinstance(migration_id, str) or not isinstance(checksum, str) or not _DIGEST_RE.fullmatch(checksum):
+                    raise ReleaseError("schema history contains an invalid application prerequisite")
+                canonical_events.append({
+                    "sequence": sequence, "id": migration_id,
+                    "operation": event["operation"], "checksum": checksum,
+                })
+                current[migration_id] = {
+                    "id": migration_id, "checksum": checksum,
+                    "status": "APPLIED" if event["operation"] == "up" else "REVERTED",
+                }
+            history_cut = len(canonical_events)
+            if observations[-1].get("sequence") != history_cut:
+                raise ReleaseError("schema observation frontier is not at the application release history cut")
+            required = tuple(
+                {"id": value["id"], "checksum": value["checksum"]}
+                for value in sorted(current.values(), key=lambda item: item["id"])
+                if value["status"] == "APPLIED"
+            )
+            capture_args = {
+                "held_by": app_token, "repo": repo_path,
+                "control_store": app_store, "persist": False,
+            }
+            if capture_runner is not None:
+                capture_args["runner"] = capture_runner
+            first = capture_fn(target, **capture_args)
+            capture_work.append(Path(first.work_dir))
+            second = capture_fn(target, **capture_args)
+            capture_work.append(Path(second.work_dir))
+            if first.tree != second.tree:
+                raise ReleaseError("application changed between paused captures; release was discarded")
+            if first.before_sync.generation != generation or second.after_sync.generation != generation:
+                raise ReleaseError("application generation changed during the release capture")
+
+            report = lock_fn(target, runner=page_lock_runner) if page_lock_runner is not None else lock_fn(target)
+            if getattr(report, "status", None) != "KNOWN" or tuple(getattr(report, "pages", ())) != ():
+                raise ReleaseError("application release requires a KNOWN empty page-lock report throughout capture")
+            if getattr(report, "alias", None) != alias or getattr(report, "app_id", None) != target.app_id:
+                raise ReleaseError("page-lock report identity does not match the selected application")
+            final_app_state = app_store.read_app_sync_state(target.physical_key)
+            if final_app_state.owner_token != app_token or final_app_state.generation != generation or final_app_state.is_uncertain:
+                raise ReleaseError("application mutex or generation changed during the release capture")
+
+            check_members = _read_app_check_assets(repo_path, alias)
+            if not check_members:
+                raise ReleaseError(f"application release requires builder-repository checks for {alias}")
+            try:
+                check_bundle = build_app_check_bundle(check_members, (alias,))
+            except AppCheckError as exc:
+                raise ReleaseError(f"builder repository app checks are invalid: {exc}") from exc
+            validated_checks = dict(check_bundle.members)
+            payload = {
+                f"release/apps/{alias}/{path}": data for path, data in first.tree.items()
+            }
+            payload.update({
+                f"release/checks/apps/{path}": data for path, data in validated_checks.items()
+            })
+            master_bytes = _read_master_contract(repo_path)
+            if master_bytes is not None:
+                payload["release/contracts/masters.json"] = master_bytes
+            tree_digest_value = digest_tree(first.tree)
+            app_checks_digest = hashlib.sha256(_canonical([
+                {"path": path, "length": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                for path, data in sorted(payload.items())
+                if path.startswith("release/checks/apps/")
+            ])).hexdigest()
+            master_digest = hashlib.sha256(master_bytes).hexdigest() if master_bytes is not None else None
+            source = {
+                "kind": "dev-database",
+                "instance_id": str(metadata.instance_id),
+                "history_cut": history_cut,
+                "history_digest": hashlib.sha256(_canonical(canonical_events)).hexdigest(),
+                "frontier_digest": frontier,
+                "app_generation": generation,
+                "app_tree_digest": tree_digest_value,
+                "app_checks_digest": app_checks_digest,
+                "master_contract_digest": master_digest,
+            }
+            manifest = _write_release_archive(
+                output,
+                payload,
+                {
+                    "format_version": 3,
+                    "kind": "app",
+                    "alias": alias,
+                    "version": version,
+                    "source": source,
+                    "events": [],
+                    "toolchain": {
+                        "python": "3.10+", "archive_format": "ustar", "normalizer": "team-v1",
+                        "sqlcl": sqlcl_build,
+                    },
+                    "migrations": [],
+                    "required_migrations": list(required),
+                    "app_tree_digests": {alias: tree_digest_value},
+                    "master_contract_digest": master_digest,
+                },
+            )
+            try:
+                migration_store.record_release(
+                    metadata, kind="app", alias=alias, version=version,
+                    archive_digest=manifest.archive_digest, source=source, built_by=built_by,
+                    run_token=migration_token,
+                )
+            except Exception as exc:
+                manifest.archive_path.unlink(missing_ok=True)
+                if manifest.staging_dir is not None:
+                    shutil.rmtree(manifest.staging_dir, ignore_errors=True)
+                raise ReleaseError(str(exc)) from exc
+            return manifest
+        finally:
+            if migration_acquired:
+                migration_store.release(metadata, migration_token)
+    finally:
+        for work_dir in capture_work:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        if app_acquired:
+            app_store.release_app(target.physical_key, app_token, confirmed_success=False)
 
 
 def _read_archive_bytes(archive: Path) -> tuple[str, dict[str, bytes]]:
@@ -1077,14 +1091,19 @@ def release_app_order(release_tar: str | Path) -> tuple[str, ...]:
 
 
 def _plan_from_manifest(manifest: Manifest, history: Mapping[str, Any], target: Mapping[str, Any]) -> ReleasePlan:
-    if manifest.format_version == 3:
-        raise ReleaseError(
-            "format 3 schema releases (cut from the development database) can be built and verified; "
-            "planning and applying them is not implemented yet"
-        )
     history_data = history.get("history", history) if isinstance(history, Mapping) else {}
     if not isinstance(history_data, Mapping):
         raise ReleaseError("target history must contain a mapping")
+    if manifest.format_version == 3:
+        if manifest.kind == "app":
+            target_digest = hashlib.sha256(_canonical(target)).hexdigest()
+            artifact_history_digest = hashlib.sha256(_canonical(manifest.required_migrations)).hexdigest()
+            history_digest = hashlib.sha256(_canonical(history_data)).hexdigest()
+            return ReleasePlan(
+                manifest.archive_digest, target_digest, (), artifact_history_digest,
+                target, history_digest, (), (), events=(), replay_from=0,
+            )
+        return _plan_database_release(manifest, history_data, target)
     if getattr(manifest, "kind", None) == "app":
         target_digest = hashlib.sha256(_canonical(target)).hexdigest()
         artifact_history_digest = hashlib.sha256(_canonical(manifest.required_migrations)).hexdigest()
@@ -1140,6 +1159,152 @@ def _plan_from_manifest(manifest: Manifest, history: Mapping[str, Any], target: 
     )
 
 
+def _plan_database_release(
+    manifest: Manifest, history: Mapping[str, Any], target: Mapping[str, Any]
+) -> ReleasePlan:
+    """Plan the verified event suffix after proving target history is an exact prefix.
+
+    SQL migration history is a collapsed view (latest event per migration).
+    Format-3 replay rows keep their local execution sequence and also carry
+    the source event sequence plus the target's replay base in ``source_commit``.
+    Those markers account for source no-op pairs omitted during replay while
+    still proving the target state against the immutable ledger prefix.
+    """
+    if manifest.kind != "schema" or manifest.source is None or not manifest.events:
+        raise ReleaseError("format 3 replay requires a verified database schema ledger")
+    event_by_sequence = {int(event["sequence"]): event for event in manifest.events}
+    normalized: dict[str, tuple[str, str, int]] = {}
+    replay_markers: list[tuple[int, int]] = []
+    cursor = 0
+    for migration_id, raw in history.items():
+        if not isinstance(migration_id, str) or not isinstance(raw, Mapping):
+            raise ReleaseError("target history is malformed and is not an exact archive prefix")
+        status = raw.get("status")
+        checksum = raw.get("checksum")
+        local_sequence = raw.get("sequence", raw.get("applied_sequence"))
+        if (
+            status not in {"APPLIED", "REVERTED"}
+            or not isinstance(checksum, str)
+            or type(local_sequence) is not int
+            or local_sequence < 1
+        ):
+            raise ReleaseError("target history is not an exact archive prefix")
+        if "sequence" in raw and "applied_sequence" in raw and raw["sequence"] != raw["applied_sequence"]:
+            raise ReleaseError("target history is not an exact archive prefix")
+        replay_marker = _database_release_replay_marker(raw.get("source_commit"))
+        if replay_marker is None:
+            sequence = local_sequence
+        else:
+            sequence, replay_base = replay_marker
+            if sequence > len(manifest.events) or replay_base >= sequence or replay_base > len(manifest.events):
+                raise ReleaseError("target history is not an exact archive prefix")
+            replay_markers.append((sequence, replay_base))
+        if sequence > len(manifest.events):
+            raise ReleaseError("target history is not an exact archive prefix")
+        event = event_by_sequence.get(sequence)
+        expected_status = "APPLIED" if event and event.get("operation") == "up" else "REVERTED"
+        if (
+            event is None
+            or event.get("id") != migration_id
+            or event.get("checksum") != checksum
+            or expected_status != status
+        ):
+            raise ReleaseError("target history is not an exact archive prefix")
+        normalized[migration_id] = (status, checksum, sequence)
+        cursor = max(cursor, sequence)
+
+    expected: dict[str, tuple[str, str, int]] = {}
+    for event in manifest.events[:cursor]:
+        expected[event["id"]] = (
+            "APPLIED" if event["operation"] == "up" else "REVERTED",
+            event["checksum"],
+            event["sequence"],
+        )
+    if set(normalized) - set(expected):
+        raise ReleaseError("target history is not an exact archive prefix")
+    for migration_id, source_state in expected.items():
+        target_state = normalized.get(migration_id)
+        if target_state == source_state:
+            continue
+        if target_state is not None or source_state[0] != "REVERTED":
+            raise ReleaseError("target history is not an exact archive prefix")
+        # A release replay can intentionally omit an up/down pair when the
+        # migration was absent at the start of that replay and reverted before
+        # a later retained event. The later event's source marker proves that
+        # the no-op pair was consumed even though target history has no row for
+        # it. Other missing REVERTED rows still refuse as non-prefix history.
+        down_sequence = int(source_state[2])
+        skipped_as_noop = any(
+            replay_base < down_sequence < sequence
+            and _release_state_at(manifest.events, migration_id, replay_base) is None
+            for sequence, replay_base in replay_markers
+        )
+        if not skipped_as_noop:
+            raise ReleaseError("target history is not an exact archive prefix")
+
+    # Opposite transitions cancel only for a migration absent from target
+    # history: its up/down pair has no target effect. Existing target rows must
+    # replay down/redo transitions even when their final status is unchanged,
+    # so each source sequence is consumed and each authored operation runs.
+    retained: list[dict[str, Any] | None] = []
+    stacks: dict[str, list[int]] = {}
+    for event in manifest.events[cursor:]:
+        migration_id = str(event["id"])
+        index = len(retained)
+        retained.append(dict(event))
+        stack = stacks.setdefault(migration_id, [])
+        if (
+            migration_id not in normalized
+            and stack
+            and retained[stack[-1]] is not None
+            and retained[stack[-1]]["operation"] != event["operation"]
+        ):
+            previous = stack.pop()
+            retained[previous] = None
+            retained[index] = None
+        else:
+            stack.append(index)
+    replay = tuple(event for event in retained if event is not None)
+    pending = tuple(dict.fromkeys(str(event["id"]) for event in replay))
+    target_digest = hashlib.sha256(_canonical(target)).hexdigest()
+    artifact_history_digest = hashlib.sha256(_canonical(list(manifest.events))).hexdigest()
+    history_digest = hashlib.sha256(_canonical(history)).hexdigest()
+    return ReleasePlan(
+        archive_digest=manifest.archive_digest,
+        target_digest=target_digest,
+        pending=pending,
+        artifact_history_digest=artifact_history_digest,
+        target=target,
+        history_digest=history_digest,
+        events=replay,
+        replay_from=cursor,
+    )
+
+
+def _database_release_replay_marker(source_commit: Any) -> tuple[int, int] | None:
+    """Read a source event sequence and replay base from a format-3 history row."""
+    if not isinstance(source_commit, str) or not source_commit.startswith("db-release:"):
+        return None
+    match = _DB_RELEASE_REPLAY_SOURCE_RE.fullmatch(source_commit)
+    if match is not None:
+        return int(match.group(2)), int(match.group(3))
+    if _DB_RELEASE_SOURCE_RE.fullmatch(source_commit):
+        # Compatibility with early format-3 replay rows that recorded only the
+        # source ledger digest and therefore used local sequence numbers.
+        return None
+    raise ReleaseError("target history is not an exact archive prefix")
+
+
+def _release_state_at(events: tuple[Mapping[str, Any], ...], migration_id: str, sequence: int) -> str | None:
+    state = None
+    for event in events:
+        if int(event["sequence"]) > sequence:
+            break
+        if event["id"] == migration_id:
+            state = "APPLIED" if event["operation"] == "up" else "REVERTED"
+    return state
+
+
 def plan_release(release_tar: str | Path, history: Mapping[str, Any], target: Mapping[str, Any]) -> ReleasePlan:
     manifest = verify_release(release_tar)
     return _plan_from_manifest(manifest, history, target)
@@ -1170,7 +1335,13 @@ def apply_release(
     if history is None:
         raise ReleaseError("apply-release requires a fresh owner-supplied target history")
     current = _plan_from_manifest(manifest, history, target)
-    if current.history_digest != plan.history_digest or current.pending != plan.pending or current.target_digest != plan.target_digest:
+    if (
+        current.history_digest != plan.history_digest
+        or current.pending != plan.pending
+        or current.target_digest != plan.target_digest
+        or current.events != plan.events
+        or current.replay_from != plan.replay_from
+    ):
         raise ReleaseError("target history or pending release work changed after plan generation")
     if getattr(manifest, "kind", None) == "app":
         history_data = history.get("history", history) if isinstance(history, Mapping) else {}
@@ -1186,6 +1357,7 @@ def apply_release(
             target_state_key=target_state_key or (str(target.get("state_key", "")) if isinstance(target, Mapping) else ""),
             target_digest=plan.target_digest,
             history_digest=plan.history_digest,
+            source=manifest.source,
         )
     pending = tuple(item for item in manifest.migrations if item.get("id") in plan.pending)
     if pending and apply_migrations is None:
@@ -1210,6 +1382,7 @@ def apply_release(
         target_state_key=target_state_key or (str(target.get("state_key", "")) if isinstance(target, Mapping) else ""),
         target_digest=plan.target_digest,
         history_digest=plan.history_digest,
+        source=manifest.source,
     )
 
 
@@ -1217,13 +1390,6 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     parser = argparse.ArgumentParser(prog="release")
     sub = parser.add_subparsers(dest="command", required=True)
-    build = sub.add_parser("build-release")
-    build.add_argument("--repo", default=".")
-    build.add_argument("--kind", required=True, choices=["schema", "app"])
-    build.add_argument("--alias", default=None)
-    build.add_argument("--ref", required=True)
-    build.add_argument("--version", required=True)
-    build.add_argument("--out", required=True)
     verify = sub.add_parser("verify-release")
     verify.add_argument("archive")
     plan_parser = sub.add_parser("plan-release")
@@ -1238,14 +1404,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--history", required=True)
     apply_parser.add_argument("--env", default=None)
     args = parser.parse_args(list(argv or []))
-    if args.command == "build-release":
-        if args.kind == "app" and not args.alias:
-            parser.error("--alias is required when --kind is app")
-        if args.kind == "schema" and args.alias:
-            parser.error("--alias cannot be specified when --kind is schema")
-        result = build_release(args.repo, args.ref, args.version, args.out, kind=args.kind, alias=args.alias)
-        print(result.archive_digest)
-    elif args.command == "verify-release":
+    if args.command == "verify-release":
         print(verify_release(args.archive).archive_digest)
     elif args.command == "plan-release":
         history_raw = json.loads(Path(args.history).read_text(encoding="utf-8"))
@@ -1260,6 +1419,8 @@ def main(argv: list[str] | None = None) -> int:
             "artifact_history_digest": result.artifact_history_digest,
             "history_digest": result.history_digest,
             "target": dict(result.target),
+            "events": [dict(event) for event in result.events],
+            "replay_from": result.replay_from,
         }
         Path(args.out).write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
         print(json.dumps(data, sort_keys=True))
@@ -1271,6 +1432,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = ReleasePlan(
             plan_raw["archive_digest"], plan_raw["target_digest"], tuple(plan_raw.get("pending", ())),
             plan_raw["artifact_history_digest"], plan_raw.get("target", target), plan_raw.get("history_digest", ""),
+            events=tuple(plan_raw.get("events", ())), replay_from=plan_raw.get("replay_from", 0),
         )
         if getattr(args, "env", None):
             from .release_adapter import apply_verified_release

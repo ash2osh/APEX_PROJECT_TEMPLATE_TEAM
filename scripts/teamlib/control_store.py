@@ -25,7 +25,7 @@ import re
 import tempfile
 import uuid
 from typing import Any
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from .config import Target
 from .sqlcl import SqlclError, run_sqlcl
@@ -76,6 +76,26 @@ class RegistryEntry:
     registered_at: str
 
 
+@dataclass(frozen=True)
+class PublishAcknowledgement:
+    preparation_id: str
+    preparation_digest: str
+    target_key: str
+    checkout_uuid: str
+    host: str
+    acknowledged_by_user: str
+    acknowledged_at: str
+
+
+@dataclass(frozen=True)
+class PublishPreparationApp:
+    preparation_id: str
+    preparation_digest: str
+    target_key: str
+    alias: str
+    checkout_roster: tuple[str, ...]
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -87,6 +107,25 @@ def _target_key(value: Target | str) -> str:
 def _assert_nonproduction(target: Target) -> None:
     if target.environment == "production":
         raise ControlStoreError("production control-store writes are refused")
+
+
+def _validate_publish_ack_fields(
+    preparation_id: str,
+    preparation_digest: str,
+    checkout_uuid: str,
+    host: str,
+    acknowledged_by_user: str,
+) -> None:
+    _validate_preparation_fields(preparation_id, preparation_digest)
+    if not all((checkout_uuid, host, acknowledged_by_user)):
+        raise ControlStoreError("checkout UUID, host and user are required for publish acknowledgement")
+
+
+def _validate_preparation_fields(preparation_id: str, preparation_digest: str) -> None:
+    if not isinstance(preparation_id, str) or not preparation_id:
+        raise ControlStoreError("preparation ID is required")
+    if not isinstance(preparation_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", preparation_digest):
+        raise ControlStoreError("preparation digest must be a 64-character lowercase SHA-256 value")
 
 
 class ControlStore:
@@ -106,7 +145,14 @@ class ControlStore:
         self.path = self.root / "control-store.json"
         self.lock_path = self.root / "control-store.lock"
         if not self.path.exists():
-            self._write({"version": 1, "mutexes": {}, "registry": {}, "transfers": []})
+            self._write({
+                "version": 1,
+                "mutexes": {},
+                "registry": {},
+                "transfers": [],
+                "publish_preparations": [],
+                "publish_acknowledgements": [],
+            })
 
     def _locked(self):
         class _Lock:
@@ -152,6 +198,8 @@ class ControlStore:
         data.setdefault("mutexes", {})
         data.setdefault("registry", {})
         data.setdefault("transfers", [])
+        data.setdefault("publish_preparations", [])
+        data.setdefault("publish_acknowledgements", [])
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -251,6 +299,153 @@ class ControlStore:
         with self._locked() as data:
             values = data["registry"].get(key, {})
             return [RegistryEntry(**value) for value in values.values()]
+
+    def register_publish_preparation(
+        self,
+        preparation_id: str,
+        preparation_digest: str,
+        apps: Sequence[tuple[Target, str, Iterable[str]]],
+    ) -> None:
+        _validate_preparation_fields(preparation_id, preparation_digest)
+        if not apps:
+            raise ControlStoreError("publish preparation must select at least one application")
+        normalized: list[dict[str, Any]] = []
+        seen_aliases: set[str] = set()
+        seen_targets: set[str] = set()
+        target_by_alias: dict[str, Target] = {}
+        for target, alias, roster_values in apps:
+            _assert_nonproduction(target)
+            key = target.physical_key
+            roster_values = tuple(roster_values)
+            roster = tuple(sorted(roster_values))
+            if not alias or alias != target.alias or not key:
+                raise ControlStoreError("publish preparation application binding is invalid")
+            if alias in seen_aliases or key in seen_targets:
+                raise ControlStoreError("publish preparation applications must be unique")
+            if any(not isinstance(item, str) or not item for item in roster):
+                raise ControlStoreError("publish preparation checkout roster contains an empty UUID")
+            if len(roster) != len(set(roster)):
+                raise ControlStoreError("publish preparation checkout roster contains duplicate UUIDs")
+            seen_aliases.add(alias)
+            seen_targets.add(key)
+            target_by_alias[alias] = target
+            normalized.append({
+                "preparation_id": preparation_id,
+                "preparation_digest": preparation_digest,
+                "target_key": key,
+                "alias": alias,
+                "checkout_roster": list(roster),
+            })
+        normalized.sort(key=lambda row: row["alias"])
+
+        with self._locked() as data:
+            existing = [
+                row for row in data["publish_preparations"]
+                if row.get("preparation_id") == preparation_id
+            ]
+            if existing:
+                if sorted(existing, key=lambda row: row["alias"]) == normalized:
+                    return
+                raise ControlStoreError("publish preparation registration is immutable")
+
+            for expected in normalized:
+                alias = expected["alias"]
+                target = target_by_alias[alias]
+                self._require_mutex(data, target.physical_key)
+                current_roster = sorted(data["registry"].get(target.physical_key, {}))
+                if current_roster != expected["checkout_roster"]:
+                    raise ControlStoreError(
+                        f"Application '{alias}' checkout roster changed while preparation was being registered"
+                    )
+            data["publish_preparations"].extend(normalized)
+
+    def list_publish_preparation(self, preparation_id: str) -> list[PublishPreparationApp]:
+        with self._locked() as data:
+            rows = [
+                row for row in data["publish_preparations"]
+                if row.get("preparation_id") == preparation_id
+            ]
+            return [
+                PublishPreparationApp(
+                    preparation_id=row["preparation_id"],
+                    preparation_digest=row["preparation_digest"],
+                    target_key=row["target_key"],
+                    alias=row["alias"],
+                    checkout_roster=tuple(row["checkout_roster"]),
+                )
+                for row in sorted(rows, key=lambda value: value["alias"])
+            ]
+
+    def record_publish_acknowledgement(
+        self,
+        target: Target,
+        preparation_id: str,
+        preparation_digest: str,
+        checkout_uuid: str,
+        host: str,
+        acknowledged_by_user: str,
+    ) -> PublishAcknowledgement:
+        _assert_nonproduction(target)
+        _validate_publish_ack_fields(
+            preparation_id, preparation_digest, checkout_uuid, host, acknowledged_by_user
+        )
+        key = target.physical_key
+        with self._locked() as data:
+            self._require_mutex(data, key)
+            registered = data["registry"].get(key, {}).get(checkout_uuid)
+            if not isinstance(registered, dict):
+                raise ControlStoreError("publish acknowledgement requires a registered checkout")
+            if registered.get("host") != host or registered.get("registered_by_user") != acknowledged_by_user:
+                raise ControlStoreError("publish acknowledgement host and user must match the registered checkout identity")
+            preparation = next(
+                (
+                    row for row in data["publish_preparations"]
+                    if row.get("preparation_id") == preparation_id
+                    and row.get("preparation_digest") == preparation_digest
+                    and row.get("target_key") == key
+                ),
+                None,
+            )
+            if preparation is None or checkout_uuid not in preparation.get("checkout_roster", []):
+                raise ControlStoreError("publish acknowledgement preparation is unknown or does not include this checkout")
+
+            ack = {
+                "preparation_id": preparation_id,
+                "preparation_digest": preparation_digest,
+                "target_key": key,
+                "checkout_uuid": checkout_uuid,
+                "host": host,
+                "acknowledged_by_user": acknowledged_by_user,
+                "acknowledged_at": _now(),
+            }
+            acknowledgements = data["publish_acknowledgements"]
+            identity = (preparation_id, preparation_digest, key, checkout_uuid)
+            for index, previous in enumerate(acknowledgements):
+                if (
+                    previous.get("preparation_id"), previous.get("preparation_digest"),
+                    previous.get("target_key"), previous.get("checkout_uuid"),
+                ) == identity:
+                    acknowledgements[index] = ack
+                    break
+            else:
+                acknowledgements.append(ack)
+            return PublishAcknowledgement(**ack)
+
+    def list_publish_acknowledgements(
+        self, target: Target | str, preparation_id: str, preparation_digest: str
+    ) -> list[PublishAcknowledgement]:
+        key = _target_key(target)
+        with self._locked() as data:
+            rows = [
+                row for row in data["publish_acknowledgements"]
+                if row.get("target_key") == key
+                and row.get("preparation_id") == preparation_id
+                and row.get("preparation_digest") == preparation_digest
+            ]
+            return [
+                PublishAcknowledgement(**row)
+                for row in sorted(rows, key=lambda value: value["checkout_uuid"])
+            ]
 
     def acquire_app(
         self,
@@ -408,6 +603,30 @@ BEGIN
     capture_recovery_id VARCHAR2(128) NOT NULL,
     transferred_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     CONSTRAINT team_app_transfer_pk PRIMARY KEY (transfer_id)
+  )]');
+  create_if_missing(q'[CREATE TABLE TEAM_APP_PUBLISH_ACK (
+    preparation_id VARCHAR2(128) NOT NULL,
+    preparation_digest VARCHAR2(64) NOT NULL,
+    target_key VARCHAR2(64) NOT NULL,
+    checkout_uuid VARCHAR2(128) NOT NULL,
+    host VARCHAR2(512) NOT NULL,
+    acknowledged_by_user VARCHAR2(256) NOT NULL,
+    acknowledged_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+    CONSTRAINT team_app_publish_ack_pk PRIMARY KEY
+      (preparation_id, preparation_digest, target_key, checkout_uuid)
+  )]');
+  create_if_missing(q'[CREATE TABLE TEAM_APP_PUBLISH_PREP (
+    preparation_id VARCHAR2(128) NOT NULL,
+    preparation_digest VARCHAR2(64) NOT NULL,
+    target_key VARCHAR2(64) NOT NULL,
+    app_alias VARCHAR2(128) NOT NULL,
+    roster_position NUMBER(10) NOT NULL,
+    checkout_uuid VARCHAR2(128),
+    CONSTRAINT team_app_publish_prep_pk PRIMARY KEY
+      (preparation_id, target_key, roster_position),
+    CONSTRAINT team_app_pub_prep_roster_ck CHECK
+      ((roster_position = 0 AND checkout_uuid IS NULL) OR
+       (roster_position > 0 AND checkout_uuid IS NOT NULL))
   )]');
   COMMIT;
 END;
@@ -584,6 +803,249 @@ COMMIT;
         result = self._run("read", payload)
         rows = _row_lines(getattr(result, "stdout", ""), "TEAM_REGISTRY|")
         return [RegistryEntry(*row) for row in rows if len(row) == 5]
+
+    def register_publish_preparation(
+        self,
+        preparation_id: str,
+        preparation_digest: str,
+        apps: Sequence[tuple[Target, str, Iterable[str]]],
+    ) -> None:
+        _validate_preparation_fields(preparation_id, preparation_digest)
+        if not apps:
+            raise ControlStoreError("publish preparation must select at least one application")
+
+        normalized: list[tuple[Target, str, tuple[str, ...], str]] = []
+        seen_aliases: set[str] = set()
+        seen_targets: set[str] = set()
+        for target, alias, roster_values in apps:
+            self._assert_nonproduction(target)
+            key = self._check_target(target)
+            roster_values = tuple(roster_values)
+            roster = tuple(sorted(roster_values))
+            if not alias or alias != target.alias or not key:
+                raise ControlStoreError("publish preparation application binding is invalid")
+            if alias in seen_aliases or key in seen_targets:
+                raise ControlStoreError("publish preparation applications must be unique")
+            if any(not isinstance(item, str) or not item for item in roster):
+                raise ControlStoreError("publish preparation checkout roster contains an empty UUID")
+            if len(roster) != len(set(roster)):
+                raise ControlStoreError("publish preparation checkout roster contains duplicate UUIDs")
+            seen_aliases.add(alias)
+            seen_targets.add(key)
+            normalized.append((target, alias, roster, key))
+        normalized.sort(key=lambda item: item[1])
+
+        existing = self.list_publish_preparation(preparation_id)
+        if existing:
+            expected_existing = [
+                PublishPreparationApp(
+                    preparation_id=preparation_id,
+                    preparation_digest=preparation_digest,
+                    target_key=key,
+                    alias=alias,
+                    checkout_roster=roster,
+                )
+                for _, alias, roster, key in normalized
+            ]
+            if existing == expected_existing:
+                return
+            raise ControlStoreError("publish preparation registration is immutable")
+
+        checks: list[str] = []
+        inserts: list[str] = []
+        for _target, alias, roster, key in normalized:
+            check_membership = "\n".join(
+                f"  SELECT COUNT(*) INTO v_count FROM TEAM_APP_REGISTRY"
+                f" WHERE target_key = {_sql_literal(key)} AND checkout_uuid = {_sql_literal(checkout_uuid)};"
+                f"\n  IF v_count <> 1 THEN RAISE_APPLICATION_ERROR(-20017, 'PUBLISH_PREP_ROSTER_CHANGED'); END IF;"
+                for checkout_uuid in roster
+            )
+            checks.append(f"""
+  BEGIN
+    SELECT target_key INTO v_target_key FROM TEAM_APP_MUTEX
+     WHERE target_key = {_sql_literal(key)} FOR UPDATE NOWAIT;
+  EXCEPTION WHEN NO_DATA_FOUND THEN RAISE_APPLICATION_ERROR(-20004, 'CONTROL_SETUP_REQUIRED'); END;
+  SELECT COUNT(*) INTO v_count FROM TEAM_APP_REGISTRY WHERE target_key = {_sql_literal(key)};
+  IF v_count <> {len(roster)} THEN RAISE_APPLICATION_ERROR(-20017, 'PUBLISH_PREP_ROSTER_CHANGED'); END IF;
+{check_membership}
+""")
+            roster_rows = list(enumerate(roster, start=1)) or [(0, "")]
+            inserts.extend(
+                f"INSERT INTO TEAM_APP_PUBLISH_PREP "
+                "(preparation_id, preparation_digest, target_key, app_alias, roster_position, checkout_uuid) "
+                f"VALUES ({_sql_literal(preparation_id)}, {_sql_literal(preparation_digest)}, {_sql_literal(key)}, "
+                f"{_sql_literal(alias)}, {position}, "
+                f"{_sql_literal(checkout_uuid) if checkout_uuid else 'NULL'});"
+                for position, checkout_uuid in roster_rows
+            )
+
+        payload = f"""
+DECLARE
+  v_target_key VARCHAR2(64);
+  v_count NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_count FROM TEAM_APP_PUBLISH_PREP
+   WHERE preparation_id = {_sql_literal(preparation_id)};
+  IF v_count > 0 THEN RAISE_APPLICATION_ERROR(-20018, 'PUBLISH_PREPARATION_ID_EXISTS'); END IF;
+{''.join(checks)}
+{chr(10).join(inserts)}
+END;
+/
+COMMIT;
+"""
+        try:
+            self._run("write", payload)
+        except ControlStoreError as exc:
+            text = str(exc)
+            if "CONTROL_SETUP_REQUIRED" in text:
+                raise SetupRequired("publish target has not been bootstrapped; run setup-state") from exc
+            if "PUBLISH_PREP_ROSTER_CHANGED" in text:
+                raise ControlStoreError("checkout roster changed while preparation was being registered") from exc
+            if "PUBLISH_PREPARATION_ID_EXISTS" in text:
+                raise ControlStoreError("publish preparation registration is immutable") from exc
+            raise
+
+    def list_publish_preparation(self, preparation_id: str) -> list[PublishPreparationApp]:
+        payload = "SELECT 'TEAM_PUBLISH_PREP|' || " + " || '|' || ".join(
+            [
+                _b64_sql("preparation_id"),
+                _b64_sql("preparation_digest"),
+                _b64_sql("target_key"),
+                _b64_sql("app_alias"),
+                _b64_sql("TO_CHAR(roster_position)"),
+                _b64_sql("checkout_uuid"),
+            ]
+        ) + (
+            f" FROM TEAM_APP_PUBLISH_PREP WHERE preparation_id = {_sql_literal(preparation_id)}"
+            " ORDER BY app_alias, roster_position;"
+        )
+        result = self._run("read", payload)
+        encoded_rows = _row_lines(getattr(result, "stdout", ""), "TEAM_PUBLISH_PREP|")
+        grouped: dict[tuple[str, str, str, str], list[tuple[int, str]]] = {}
+        for row in encoded_rows:
+            if len(row) != 6:
+                continue
+            prep_id, digest, target_key, alias, position, checkout_uuid = row
+            try:
+                roster_position = int(position)
+            except ValueError as exc:
+                raise ControlStoreError("publish preparation roster metadata is malformed") from exc
+            grouped.setdefault((prep_id, digest, target_key, alias), []).append((roster_position, checkout_uuid))
+        return [
+            PublishPreparationApp(
+                preparation_id=prep_id,
+                preparation_digest=digest,
+                target_key=target_key,
+                alias=alias,
+                checkout_roster=tuple(uuid for _, uuid in sorted(rows) if uuid),
+            )
+            for (prep_id, digest, target_key, alias), rows in sorted(grouped.items(), key=lambda item: item[0][3])
+        ]
+
+    def record_publish_acknowledgement(
+        self,
+        target: Target,
+        preparation_id: str,
+        preparation_digest: str,
+        checkout_uuid: str,
+        host: str,
+        acknowledged_by_user: str,
+    ) -> PublishAcknowledgement:
+        self._assert_nonproduction(target)
+        _validate_publish_ack_fields(
+            preparation_id, preparation_digest, checkout_uuid, host, acknowledged_by_user
+        )
+        key = self._check_target(target)
+        payload = f"""
+DECLARE
+  v_target_key VARCHAR2(64);
+  v_host VARCHAR2(512);
+  v_registered_user VARCHAR2(256);
+  v_prep_count NUMBER;
+BEGIN
+  BEGIN
+    SELECT target_key INTO v_target_key FROM TEAM_APP_MUTEX
+     WHERE target_key = {_sql_literal(key)} FOR UPDATE NOWAIT;
+  EXCEPTION WHEN NO_DATA_FOUND THEN RAISE_APPLICATION_ERROR(-20004, 'CONTROL_SETUP_REQUIRED'); END;
+  BEGIN
+    SELECT host, registered_by_user INTO v_host, v_registered_user FROM TEAM_APP_REGISTRY
+     WHERE target_key = {_sql_literal(key)} AND checkout_uuid = {_sql_literal(checkout_uuid)};
+  EXCEPTION WHEN NO_DATA_FOUND THEN RAISE_APPLICATION_ERROR(-20013, 'PUBLISH_ACK_CHECKOUT_NOT_REGISTERED'); END;
+  IF v_host <> {_sql_literal(host)} OR v_registered_user <> {_sql_literal(acknowledged_by_user)} THEN
+    RAISE_APPLICATION_ERROR(-20014, 'PUBLISH_ACK_IDENTITY_MISMATCH');
+  END IF;
+  SELECT COUNT(*) INTO v_prep_count FROM TEAM_APP_PUBLISH_PREP
+   WHERE preparation_id = {_sql_literal(preparation_id)}
+     AND preparation_digest = {_sql_literal(preparation_digest)}
+     AND target_key = {_sql_literal(key)}
+     AND checkout_uuid = {_sql_literal(checkout_uuid)};
+  IF v_prep_count = 0 THEN
+    RAISE_APPLICATION_ERROR(-20019, 'PUBLISH_ACK_PREPARATION_MISMATCH');
+  END IF;
+END;
+/
+MERGE INTO TEAM_APP_PUBLISH_ACK d
+USING (SELECT {_sql_literal(preparation_id)} preparation_id,
+              {_sql_literal(preparation_digest)} preparation_digest,
+              {_sql_literal(key)} target_key,
+              {_sql_literal(checkout_uuid)} checkout_uuid,
+              {_sql_literal(host)} host,
+              {_sql_literal(acknowledged_by_user)} acknowledged_by_user FROM dual) s
+   ON (d.preparation_id = s.preparation_id
+       AND d.preparation_digest = s.preparation_digest
+       AND d.target_key = s.target_key
+       AND d.checkout_uuid = s.checkout_uuid)
+WHEN MATCHED THEN UPDATE SET d.host = s.host,
+     d.acknowledged_by_user = s.acknowledged_by_user,
+     d.acknowledged_at = SYSTIMESTAMP
+WHEN NOT MATCHED THEN INSERT
+     (preparation_id, preparation_digest, target_key, checkout_uuid, host, acknowledged_by_user)
+VALUES (s.preparation_id, s.preparation_digest, s.target_key, s.checkout_uuid, s.host, s.acknowledged_by_user);
+COMMIT;
+"""
+        try:
+            self._run("write", payload)
+        except ControlStoreError as exc:
+            text = str(exc)
+            if "CONTROL_SETUP_REQUIRED" in text:
+                raise SetupRequired(f"target {key} has not been bootstrapped; run setup-state") from exc
+            if "PUBLISH_ACK_CHECKOUT_NOT_REGISTERED" in text:
+                raise ControlStoreError("publish acknowledgement requires a registered checkout") from exc
+            if "PUBLISH_ACK_IDENTITY_MISMATCH" in text:
+                raise ControlStoreError("publish acknowledgement host and user must match the registered checkout identity") from exc
+            if "PUBLISH_ACK_PREPARATION_MISMATCH" in text:
+                raise ControlStoreError("publish acknowledgement preparation is unknown or does not include this checkout") from exc
+            raise
+
+        rows = self.list_publish_acknowledgements(target, preparation_id, preparation_digest)
+        for row in rows:
+            if row.checkout_uuid == checkout_uuid:
+                return row
+        raise ControlStoreError("controller did not return the recorded publish acknowledgement")
+
+    def list_publish_acknowledgements(
+        self, target: Target | str, preparation_id: str, preparation_digest: str
+    ) -> list[PublishAcknowledgement]:
+        key = target if isinstance(target, str) else self._check_target(target)
+        payload = "SELECT 'TEAM_PUBLISH_ACK|' || " + " || '|' || ".join(
+            [
+                _b64_sql("preparation_id"),
+                _b64_sql("preparation_digest"),
+                _b64_sql("target_key"),
+                _b64_sql("checkout_uuid"),
+                _b64_sql("host"),
+                _b64_sql("acknowledged_by_user"),
+                _b64_sql("TO_CHAR(acknowledged_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')"),
+            ]
+        ) + (
+            f" FROM TEAM_APP_PUBLISH_ACK WHERE target_key = {_sql_literal(key)}"
+            f" AND preparation_id = {_sql_literal(preparation_id)}"
+            f" AND preparation_digest = {_sql_literal(preparation_digest)}"
+            " ORDER BY checkout_uuid;"
+        )
+        result = self._run("read", payload)
+        rows = _row_lines(getattr(result, "stdout", ""), "TEAM_PUBLISH_ACK|")
+        return [PublishAcknowledgement(*row) for row in rows if len(row) == 7]
 
     def acquire_app(self, target_key: str, run_token: str, checkout_uuid: str, host: str, acquired_by_user: str, *, recovery_role: str | None = None) -> SyncState:
         if not all((target_key, run_token, checkout_uuid, host, acquired_by_user)):

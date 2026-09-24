@@ -13,11 +13,16 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve(
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from teamlib.app_checks import AppCheckReport, build_app_check_bundle
+from teamlib.app_checks import AppCheckReport, CheckResult, build_app_check_bundle
 from teamlib.config import Config, Profile, profile_target
-from teamlib.evidence import EvidenceError, validate_release_evidence_binding
+from teamlib.evidence import (
+    EvidenceError,
+    canonical_json,
+    validate_release_evidence_binding,
+    validate_test_evidence,
+)
 from teamlib.qualification import QualificationError, _target_identity, qualify_target, sign_test_evidence, write_report
-from teamlib.release import ApplyReport
+from teamlib.release import ApplyReport, ReleasePlan
 
 
 class FakeStore:
@@ -155,6 +160,344 @@ class QualificationTests(unittest.TestCase):
                     source_commit="b" * 40,
                     checks_digest="c" * 64,
                 )
+
+    def test_release_evidence_binding_requires_exact_database_source(self):
+        source = {
+            "kind": "dev-database",
+            "instance_id": "DEV1",
+            "history_cut": 1,
+            "history_digest": "c" * 64,
+            "frontier_digest": "d" * 64,
+        }
+        evidence = {
+            "version": 3,
+            "source": source,
+            "kind": "schema",
+            "alias": None,
+            "archive_digest": "a" * 64,
+            "application_checks": {"checks_digest": "b" * 64},
+        }
+        validate_release_evidence_binding(
+            evidence,
+            archive_digest="a" * 64,
+            source=source,
+            checks_digest="b" * 64,
+            kind="schema",
+            alias=None,
+        )
+        with self.assertRaisesRegex(EvidenceError, "different database source"):
+            validate_release_evidence_binding(
+                evidence,
+                archive_digest="a" * 64,
+                source={**source, "history_cut": 2},
+                checks_digest="b" * 64,
+                kind="schema",
+                alias=None,
+            )
+
+    def test_format3_schema_qualification_uses_database_source_and_apply_report_binding(self):
+        config = config_for(role="test", environment="test")
+        metadata = profile_target(config, "METADATA")
+        source = {
+            "kind": "dev-database",
+            "instance_id": "DEV1",
+            "history_cut": 3,
+            "history_digest": "a" * 64,
+            "frontier_digest": "b" * 64,
+        }
+        manifest = SimpleNamespace(
+            format_version=3,
+            kind="schema",
+            alias=None,
+            version="1.0.0",
+            source_commit="",
+            source=source,
+            source_tree="c" * 64,
+            archive_digest="e" * 64,
+            toolchain={"sqlcl": "26.2.2.233.1901"},
+            migrations=({
+                "id": "20260924T100000__alice__one",
+                "checksum": "a" * 64,
+                "target": "tables",
+                "destructive": False,
+                "dependencies": [],
+            },),
+            events=(
+                {"sequence": 1, "id": "20260924T100000__alice__one", "operation": "up", "checksum": "a" * 64},
+                {"sequence": 2, "id": "20260924T100100__alice__two", "operation": "up", "checksum": "b" * 64},
+                {"sequence": 3, "id": "20260924T100000__alice__one", "operation": "down", "checksum": "a" * 64},
+            ),
+        )
+        apply_report = {
+            "version": 1,
+            "status": "applied",
+            "source": source,
+            "archive_digest": manifest.archive_digest,
+            "target_state_key": metadata.state_key,
+            "target_digest": "1" * 64,
+            "history_digest": "2" * 64,
+            "pending": ["20260924T100000__alice__one"],
+        }
+        with patch("teamlib.qualification.verify_release", return_value=manifest):
+            report = qualify_target(
+                self.root,
+                config,
+                source,
+                (),
+                store=FakeStore(),
+                work=self.root / "format3-work",
+                check_bundle=build_app_check_bundle({}, ()),
+                release_archive=self.root / "format3.tar",
+                apply_report=apply_report,
+                runner_contract=Path("ci/runner-contract.json"),
+                runtime_report=runtime_report(),
+                run_identity={"run_id": "format3-test"},
+                sql_runner=lambda *args, **kwargs: object(),
+            )
+        self.assertEqual(report["version"], 3)
+        self.assertEqual(report["source"], source)
+        self.assertNotIn("source_commit", report)
+        validate_test_evidence(canonical_json(report) + b"\n")
+
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        evidence_path = self.root / "format3-evidence.json"
+        write_report(report, evidence_path)
+        key = Ed25519PrivateKey.generate()
+        private = self.root / "format3-key.pem"
+        private.write_bytes(key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ))
+        archive = self.root / "format3.tar"
+        archive.write_bytes(b"verified database archive")
+        signature = self.root / "format3-evidence.sig"
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.release_app_check_bundle",
+            return_value=SimpleNamespace(
+                checks_digest=report["application_checks"]["checks_digest"]
+            ),
+        ):
+            sign_test_evidence(evidence_path, archive, private, signature)
+        key.public_key().verify(signature.read_bytes(), evidence_path.read_bytes())
+
+        from teamlib.runbook import gen_runbook
+        from cryptography.hazmat.primitives.serialization import PublicFormat
+
+        public_key = self.root / "format3-key.pub.pem"
+        public_key.write_bytes(key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            PublicFormat.SubjectPublicKeyInfo,
+        ))
+        runbook_plan = ReleasePlan(
+            archive_digest=manifest.archive_digest,
+            target_digest="1" * 64,
+            pending=("20260924T100000__alice__one",),
+            artifact_history_digest=source["history_digest"],
+            target={"environment": "production"},
+            events=(manifest.events[2],),
+            replay_from=2,
+        )
+        with patch("teamlib.runbook.verify_release", return_value=manifest), patch(
+            "teamlib.runbook.release_app_check_bundle",
+            return_value=SimpleNamespace(checks_digest=report["application_checks"]["checks_digest"]),
+        ), patch("teamlib.runbook.plan_release", return_value=runbook_plan):
+            runbook = gen_runbook(
+                archive,
+                {"m1": {"status": "APPLIED", "checksum": "a" * 64, "sequence": 2}},
+                {"environment": "production"},
+                evidence_path,
+                signature,
+                public_key,
+            )
+        self.assertIn("3. REVERT (down): 20260924T100000__alice__one", runbook.text)
+        self.assertIn("- Source history cut: 3", runbook.text)
+
+        wrong_manifest = SimpleNamespace(
+            **{**manifest.__dict__, "source": {**source, "history_cut": 2}}
+        )
+        with patch("teamlib.qualification.verify_release", return_value=wrong_manifest):
+            with self.assertRaisesRegex(QualificationError, "archive database source"):
+                qualify_target(
+                    self.root,
+                    config,
+                    source,
+                    (),
+                    store=FakeStore(),
+                    work=self.root / "format3-wrong-archive",
+                    check_bundle=build_app_check_bundle({}, ()),
+                    release_archive=archive,
+                    apply_report=apply_report,
+                    runner_contract=Path("ci/runner-contract.json"),
+                    runtime_report=runtime_report(),
+                    run_identity={"run_id": "format3-test"},
+                    sql_runner=lambda *args, **kwargs: object(),
+                )
+
+        wrong_apply = {**apply_report, "source": {**source, "frontier_digest": "f" * 64}}
+        with patch("teamlib.qualification.verify_release", return_value=manifest):
+            with self.assertRaisesRegex(QualificationError, "apply report database source"):
+                qualify_target(
+                    self.root,
+                    config,
+                    source,
+                    (),
+                    store=FakeStore(),
+                    work=self.root / "format3-wrong-apply",
+                    check_bundle=build_app_check_bundle({}, ()),
+                    release_archive=self.root / "format3.tar",
+                    apply_report=wrong_apply,
+                    runner_contract=Path("ci/runner-contract.json"),
+                    runtime_report=runtime_report(),
+                    sql_runner=lambda *args, **kwargs: object(),
+                )
+
+    def test_format3_app_qualification_signs_and_generates_local_handoff(self):
+        config = config_for(role="test", environment="test")
+        metadata = profile_target(config, "METADATA")
+        source = {
+            "kind": "dev-database",
+            "instance_id": "DEV1",
+            "history_cut": 0,
+            "history_digest": "a" * 64,
+            "frontier_digest": "b" * 64,
+            "app_generation": 7,
+            "app_tree_digest": "c" * 64,
+            "app_checks_digest": self.bundle.checks_digest,
+            "master_contract_digest": "d" * 64,
+        }
+        manifest = SimpleNamespace(
+            format_version=3, kind="app", alias="employee", version="2.0.0",
+            source_commit="", source=source, source_tree="e" * 64,
+            archive_digest="f" * 64, app_tree_digests={"employee": "c" * 64},
+            app_checks_digest=self.bundle.checks_digest, events=(), required_migrations=(),
+            toolchain={"sqlcl": "26.2.2.233.1901"},
+        )
+        apply_report = {
+            "version": 1, "status": "applied", "source": source,
+            "archive_digest": manifest.archive_digest,
+            "target_state_key": metadata.state_key,
+            "target_digest": "1" * 64, "history_digest": "2" * 64, "pending": [],
+        }
+        fake_app = AppCheckReport(
+            "", {"target_kind": "persistent"},
+            (
+                CheckResult("employee", "objects", 1, "select", "PASS"),
+                CheckResult("employee", "home", 1, "flow", "PASS"),
+            ),
+            "3" * 64, self.bundle.checks_digest,
+            {"apps": ["employee"], "pages": {"employee": [1]}, "checks": 2, "unknown": 0},
+            "PASS", source,
+        )
+        archive = self.root / "format3-app.tar"
+        archive.write_bytes(b"database app release archive")
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.verify_candidate_apps", return_value=fake_app,
+        ):
+            report = qualify_target(
+                self.root, config, source, ("employee",),
+                store=FakeStore(), work=self.root / "format3-app-work",
+                check_bundle=self.bundle, release_archive=archive, apply_report=apply_report,
+                flow_executable=str(self.flow_runner),
+                runner_contract=Path("ci/runner-contract.json"), runtime_report=runtime_report(),
+                run_identity={"run_id": "format3-app-test"},
+                sql_runner=lambda *args, **kwargs: object(),
+            )
+        self.assertEqual(report["kind"], "app")
+        self.assertEqual(report["alias"], "employee")
+        self.assertEqual(report["source"], source)
+        self.assertEqual(report["application_checks"]["coverage"]["apps"], ["employee"])
+        validate_test_evidence(canonical_json(report) + b"\n")
+
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import PublicFormat
+        from teamlib.runbook import gen_runbook
+
+        key = Ed25519PrivateKey.generate()
+        private = self.root / "app-signing-key.pem"
+        private.write_bytes(key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ))
+        evidence = self.root / "app-test-evidence.json"
+        write_report(report, evidence)
+        signature = self.root / "app-test-evidence.sig"
+        public = self.root / "app-trust-key.pem"
+        public.write_bytes(key.public_key().public_bytes(
+            serialization.Encoding.PEM, PublicFormat.SubjectPublicKeyInfo,
+        ))
+        with patch("teamlib.qualification.verify_release", return_value=manifest), patch(
+            "teamlib.qualification.release_app_check_bundle", return_value=self.bundle,
+        ):
+            sign_test_evidence(evidence, archive, private, signature)
+        runbook_plan = ReleasePlan(
+            manifest.archive_digest, "1" * 64, (), source["history_digest"],
+            {"environment": "production"}, history_digest="2" * 64,
+        )
+        with patch("teamlib.runbook.verify_release", return_value=manifest), patch(
+            "teamlib.runbook.release_app_check_bundle", return_value=self.bundle,
+        ), patch("teamlib.runbook.plan_release", return_value=runbook_plan):
+            runbook = gen_runbook(
+                archive, {}, {"environment": "production", "app_ids": {"employee": 901}},
+                evidence, signature, public,
+            )
+        self.assertEqual(runbook.kind, "app")
+        self.assertEqual(runbook.alias, "employee")
+        self.assertIn("Application generation: 7", runbook.text)
+        self.assertIn(self.bundle.checks_digest, runbook.text)
+
+    def test_format3_evidence_rejects_commit_field_and_malformed_source(self):
+        config = config_for(role="test", environment="test")
+        targets = {
+            profile: profile_target(config, profile)
+            for profile in ("TABLES", "CODE", "METADATA", "VERIFY")
+        }
+        source = {
+            "kind": "dev-database",
+            "instance_id": "DEV1",
+            "history_cut": 1,
+            "history_digest": "a" * 64,
+            "frontier_digest": "b" * 64,
+        }
+        report = {
+            "version": 3,
+            "final_status": "PASS",
+            "source": source,
+            "archive_digest": "e" * 64,
+            "toolchain_digest": "f" * 64,
+            "kind": "schema",
+            "alias": None,
+            "target_identity": _target_identity(config, targets),
+            "run_identity": {"run_id": "1"},
+            "qualification_identity": {
+                "target_kind": "persistent",
+                "observation_sequence": 3,
+                "observation_digest": "c" * 64,
+                "history_digest": "d" * 64,
+            },
+            "application_checks": {
+                "status": "PASS",
+                "checks_digest": "0" * 64,
+                "coverage": {"apps": [], "pages": {}, "checks": 0, "unknown": 0},
+                "unknown": 0,
+                "results": [],
+            },
+            "results": {
+                "migrations": "PASS",
+                "application_deploy": "PASS",
+                "application_checks": "PASS",
+            },
+        }
+        validate_test_evidence(canonical_json(report) + b"\n")
+        with_commit = {**report, "source_commit": "a" * 40}
+        with self.assertRaisesRegex(EvidenceError, "unexpected version-3 shape"):
+            validate_test_evidence(canonical_json(with_commit) + b"\n")
+        malformed_source = {**report, "source": {**source, "history_cut": 0}}
+        with self.assertRaisesRegex(EvidenceError, "source history cut"):
+            validate_test_evidence(canonical_json(malformed_source) + b"\n")
 
     def test_persistent_report_has_one_source_commit_and_frontier_identity(self):
         bundle = self.bundle

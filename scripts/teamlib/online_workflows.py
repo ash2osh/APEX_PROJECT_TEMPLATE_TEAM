@@ -66,11 +66,11 @@ class OnlineRunResult:
     report: Mapping[str, Any] | None
     confirmation_template: Mapping[str, Any] | None = None
     checkout_diagnostic: str | None = None
+    source: Mapping[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "status": self.status,
-            "source_commit": self.source_commit,
             "report": dict(self.report) if self.report is not None else None,
             "confirmation_template": (
                 dict(self.confirmation_template)
@@ -79,6 +79,11 @@ class OnlineRunResult:
             ),
             "checkout_diagnostic": self.checkout_diagnostic,
         }
+        if self.source is None:
+            value["source_commit"] = self.source_commit
+        else:
+            value["source"] = dict(self.source)
+        return value
 
 
 def _resolve_head(repo: Path) -> str:
@@ -464,6 +469,7 @@ def run_release_test(
     *,
     flow_executable: str,
     dependencies: OnlineDependencies | None = None,
+    confirmation: Mapping[str, Any] | None = None,
 ) -> OnlineRunResult:
     """Run the protected test qualification from a verified release archive."""
     if config.role != "test" or config.environment != "test":
@@ -505,6 +511,7 @@ def run_release_test(
         target_path,
         config,
         repo=repo_path,
+        confirmation=confirmation,
     )
     if hasattr(apply_report, "as_dict") and callable(apply_report.as_dict):
         apply_document = apply_report.as_dict()
@@ -513,13 +520,26 @@ def run_release_test(
     else:
         raise OnlineWorkflowError("release application did not return a report")
     source_commit = getattr(manifest, "source_commit", None)
-    if not isinstance(source_commit, str) or len(source_commit) != 40:
-        raise OnlineWorkflowError("release manifest source commit is malformed")
+    database_source = None
+    if getattr(manifest, "format_version", None) == 3:
+        source = getattr(manifest, "source", None)
+        if not isinstance(source, Mapping) or source_commit != "":
+            raise OnlineWorkflowError("format-3 release manifest database source is malformed")
+        database_source = dict(source)
+        source_identity: str | Mapping[str, Any] = database_source
+    else:
+        if getattr(manifest, "source", None) is not None:
+            raise OnlineWorkflowError("database source requires a format-3 release manifest")
+        if not isinstance(source_commit, str) or len(source_commit) != 40 or any(
+            char not in "0123456789abcdef" for char in source_commit
+        ):
+            raise OnlineWorkflowError("release manifest source commit is malformed")
+        source_identity = source_commit
     try:
         report = deps.qualify_release(
             repo_path,
             config,
-            source_commit,
+            source_identity,
             exercised_aliases,
             release_archive=archive_path,
             apply_report=apply_document,
@@ -539,4 +559,9 @@ def run_release_test(
         report_dict["kind"] = manifest.kind
         report_dict["alias"] = manifest.alias
     deps.write_report(report_dict, Path(out))
-    return OnlineRunResult("PASS", source_commit, report_dict)
+    return OnlineRunResult(
+        "PASS",
+        source_commit if database_source is None else "",
+        report_dict,
+        source=database_source,
+    )

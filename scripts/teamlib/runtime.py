@@ -15,7 +15,7 @@ from typing import Any
 from collections.abc import Callable, Mapping
 
 from .config import Config, Target, profile_target
-from .sqlcl import run_sqlcl
+from .sqlcl import SqlclError, resolve_sqlcl_executable, run_sqlcl
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ _RUNTIME_RE = re.compile(r"^TEAM_RUNTIME\|([a-z]+)\|([^|\s][^|]*)$")
 _VERSION_RE = re.compile(r"(?<![0-9])([0-9]+(?:\.[0-9]+)*(?:ai)?)(?![A-Za-z0-9])", re.IGNORECASE)
 _REQUIREMENT_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)*)(ai)?\+$", re.IGNORECASE)
 _IDENTITY_KEYS = ("SESSION_USER", "CURRENT_SCHEMA", "DB_NAME", "SERVICE", "INSTANCE_ID")
+RELEASE_SQLCL_BUILD = "26.2.2.233.1901"
 
 
 def _parse_runtime_versions(stdout: str) -> dict[str, str]:
@@ -74,6 +75,40 @@ def _command_version(
     if match is None:
         raise RuntimeError(f"version output from {' '.join(argv)} contains no numeric version")
     return match.group(1).lower()
+
+
+def require_release_sqlcl_build(
+    *,
+    executable_resolver: Callable[[], str] = resolve_sqlcl_executable,
+    command_runner: Callable[..., Any] = subprocess.run,
+) -> str:
+    """Require the exact SQLcl build qualified for reproducible release capture."""
+    try:
+        executable = executable_resolver()
+    except SqlclError as exc:
+        raise RuntimeError("SQLcl executable is unavailable for release capture") from exc
+    if not executable:
+        raise RuntimeError("SQLcl executable is unavailable for release capture")
+    try:
+        result = command_runner(
+            [executable, "-version"], capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        raise RuntimeError("could not observe SQLcl build for release capture") from exc
+    output = "\n".join(
+        part for part in (getattr(result, "stdout", ""), getattr(result, "stderr", "")) if part
+    )
+    if getattr(result, "returncode", 1) != 0:
+        raise RuntimeError("could not observe SQLcl build for release capture")
+    match = re.search(r"Production\s+Build:\s*([0-9]+(?:\.[0-9]+)+)", output, re.IGNORECASE)
+    if match is None:
+        raise RuntimeError("SQLcl version output does not identify its production build")
+    observed = match.group(1)
+    if observed != RELEASE_SQLCL_BUILD:
+        raise RuntimeError(
+            f"release builds require SQLcl build {RELEASE_SQLCL_BUILD}; observed {observed}"
+        )
+    return observed
 
 
 def _numeric_tuple(value: str, label: str) -> tuple[int, ...]:
@@ -179,6 +214,7 @@ def preflight_online(
     flow_executable: str | Path | None,
     *,
     runner: Callable[..., Any] = run_sqlcl,
+    sqlcl_resolver: Callable[[], str] = resolve_sqlcl_executable,
     which: Callable[[str], str | None] = shutil.which,
     command_runner: Callable[..., Any] = subprocess.run,
 ) -> RuntimeReport:
@@ -188,8 +224,10 @@ def preflight_online(
     repo_path = Path(repo)
     if repo_path.is_symlink() or not repo_path.is_dir():
         raise RuntimeError(f"online preflight repository is not a real directory: {repo_path}")
-    requested_sqlcl = os.environ.get("SQLCL_BIN", "sql")
-    sqlcl = which(requested_sqlcl)
+    try:
+        sqlcl = sqlcl_resolver()
+    except SqlclError as exc:
+        raise RuntimeError("SQLcl executable is unavailable") from exc
     java = which("java")
     if not sqlcl:
         raise RuntimeError("SQLcl executable is unavailable")

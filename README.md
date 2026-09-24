@@ -47,18 +47,19 @@ There is no import in the normal builder-first loop, and no pull or push: the co
 
 ## 4. File-first publish workflow
 
-When authoring APEXlang files directly or working with an agent, changes must be committed first. Publishing into the shared Builder workspace is app-scoped and requires an exact preparation and explicit teammate acknowledgements:
+When authoring APEXlang files directly or working with an agent, changes must be committed first. Publishing into the shared Builder workspace is app-scoped. Keep a stable `TEAM_CHECKOUT_UUID` for each repository and use it when registering that checkout; if registration already returned an ID, export that value in this checkout before acknowledging.
 
 ```bash
 # 1. Edit apps/hr/, review it, and commit it.
 # 2. Prepare publish for the reviewed commit:
 scripts/team.sh prepare-publish hr --ref HEAD
 
-# 3. Post the printed HR pause notice to teammates and gather acknowledgements.
-# 4. Enter the printed preparation ID and Omar's registered checkout UUID:
+# 3. Post the printed HR pause notice. Each registered checkout runs the
+#    acknowledgement command from its own repository, including the publisher.
 read -r -p "Preparation ID: " PREPARATION_ID
-read -r -p "Omar's checkout UUID: " OMAR_UUID
-scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause --ack "hr:$OMAR_UUID"
+scripts/team.sh ack-publish "$PREPARATION_ID"
+# 4. After all acknowledgements are recorded, the publisher runs:
+scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause
 ```
 
 > [!IMPORTANT]
@@ -69,48 +70,51 @@ scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause --ack "
 - **HR-only pause:** When publishing `hr`, only HR is paused; teammates working on `payroll` continue uninterrupted:
   ```bash
   scripts/team.sh prepare-publish hr --ref HEAD
-  # After posting the notice and gathering acknowledgements:
+  # From each registered HR checkout, after the notice is posted:
   read -r -p "Preparation ID: " PREPARATION_ID
-  read -r -p "Omar's checkout UUID: " OMAR_UUID
-  scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause --ack "hr:$OMAR_UUID"
+  scripts/team.sh ack-publish "$PREPARATION_ID"
+  # The publisher runs after every registered HR checkout has acknowledged:
+  scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause
   ```
 - **Multiple apps pause:** When publishing both `hr` and `payroll`:
   ```bash
   scripts/team.sh prepare-publish hr payroll --ref HEAD
-  # After posting both notices and gathering acknowledgements:
+  # From each registered checkout for either selected app:
   read -r -p "Preparation ID: " PREPARATION_ID
-  read -r -p "Omar's checkout UUID: " OMAR_UUID
-  read -r -p "Carol's checkout UUID: " CAROL_UUID
-  scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause \
-    --ack "hr:$OMAR_UUID" --ack "payroll:$CAROL_UUID"
+  scripts/team.sh ack-publish "$PREPARATION_ID"
+  # The publisher runs after every registered checkout has acknowledged:
+  scripts/team.sh publish-app --prepared "$PREPARATION_ID" --confirm-pause
   ```
 
-Add one `--ack` for every registered checkout shown in the selected apps' pause notice.
+`ack-publish` records the preparation digest, this checkout's registered UUID, current host and user, and acknowledgement time in shared control metadata. It acknowledges only selected applications where that checkout is registered. The pause notice shows checkout counts, not UUIDs. The command checks host and user against registration, but the UUID is still an environment-provided self-attestation rather than a cryptographic identity.
+
+`prepare-publish` also registers its immutable digest, selected aliases, target keys, and checkout rosters in shared control metadata. This lets teammates acknowledge from separate repositories without copying the publisher's local `.sync-state` files; `publish-app` checks that shared registration against the publisher's durable preparation record.
 
 ## 5. Shared migrations and independent releases
 
-Releases are still built from a Git commit today. Until they are built from the shared development database ([design](docs/superpowers/specs/2026-09-24-dev-database-release-source-design.md)), build every release from one designated repository that holds all migration files; see [docs/promotion.md](docs/promotion.md).
+Build each release from the shared development database at a qualified ledger cut. No repository needs to contain every developer's migration files; the immutable migration bundles are stored in METADATA. See [docs/promotion.md](docs/promotion.md) for the local release runbook.
 
-- **Shared schema release:** Migrations under `migrations/` apply once per environment to the shared TABLES/CODE schema:
+- **Shared schema release:**
   ```bash
-  scripts/team.py build-release --kind schema --ref schema/v1.0.0 --version 1.0.0 --out scratch/release
-  scripts/team.py verify-release scratch/release/release.tar
+  scripts/team.sh --env .env build-release --kind schema --version 1.0.0 --out scratch/release
+  scripts/team.sh verify-release scratch/release/release.tar
   ```
-- **Independent application release:** Releasing an application packages only that application and verifies its required migration prerequisites against destination history without deploying sibling apps:
+- **Independent application release:** capture only the selected app, its required-migration set, checks and master contracts:
   ```bash
-  scripts/team.py build-release --kind app --alias hr --ref app/hr/v1.0.0 --version 1.0.0 --out scratch/release
-  scripts/team.py verify-release scratch/release/release.tar
+  scripts/team.sh --env .env build-release --kind app --alias hr --version 2.0.0 --out scratch/release
+  scripts/team.sh verify-release scratch/release/release.tar
   ```
-- **Destructive migration confirmation:** Destructive migrations require an explicit `--destructive-confirmation` document reviewed by the migration owner; see [docs/migrations.md](docs/migrations.md).
-- **Persistent qualification:** Protected integration and test runs verify persistent targets (`target_kind: persistent`). Persistent staging does not prove fresh installation or isolation. Use `qualify-target` for read-only target diagnostics; see [docs/ci.md](docs/ci.md).
+- **Qualification and handoff:** run the archive on the protected test profile, sign passing evidence with the local test signing key, then generate the owner-reviewed production runbook. Production writes remain refused.
+- **Destructive migration confirmation:** destructive migrations require an explicit `--destructive-confirmation` document reviewed by the migration owner; see [docs/migrations.md](docs/migrations.md).
+- **Persistent qualification:** protected integration and test runs verify persistent targets (`target_kind: persistent`). Persistent staging does not prove fresh installation or isolation. Use `qualify-target` for read-only target diagnostics; see [docs/ci.md](docs/ci.md).
 
 ## 6. Asking an AI coding agent
 
 Coding agents follow the exact same public CLI commands and rules as human developers:
 1. When asked to author APEXlang, an agent edits `apps/<alias>/`, reviews the diff, and commits.
 2. The agent runs `scripts/team.sh prepare-publish <alias> --ref HEAD`.
-3. The agent must pause and present the pause notice to the human developer. The agent cannot invent teammate acknowledgements or bypass the publish gate.
-4. Once genuine teammate checkout acknowledgements are provided by the user, the agent runs `scripts/team.sh publish-app`.
+3. The agent must pause and present the pause notice to the human developer. Each teammate runs `ack-publish` from their own registered checkout; the agent cannot acknowledge for them or bypass the publish gate.
+4. After every required acknowledgement is in shared control metadata, the agent runs `scripts/team.sh publish-app --prepared <id> --confirm-pause`.
 
 ## 7. Runbooks and advanced references
 

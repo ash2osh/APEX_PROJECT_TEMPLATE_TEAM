@@ -22,12 +22,8 @@ class SqlclError(RuntimeError):
     """Raised when SQLcl or the verified session contract fails."""
 
 
-_UNKNOWN_RESULT_MARKERS = (
-    "timed out",
-    "state is unknown",
-    "acknowledg",
-    "lost result",
-)
+class SqlclUnknownResult(SqlclError):
+    """Raised when a write may have completed but its result was not observed."""
 
 
 def result_is_unknown(exc: BaseException) -> bool:
@@ -36,10 +32,8 @@ def result_is_unknown(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, SqlclError):
-            text = str(current).casefold()
-            if any(marker in text for marker in _UNKNOWN_RESULT_MARKERS):
-                return True
+        if isinstance(current, SqlclUnknownResult):
+            return True
         current = current.__cause__ or current.__context__
     return False
 
@@ -361,7 +355,8 @@ def _parse_completion(stdout: str) -> dict[str, str]:
     return completions[0]
 
 
-def _resolve_executable(executable: str | Path | None) -> str:
+def resolve_sqlcl_executable(executable: str | Path | None = None) -> str:
+    """Resolve the SQLcl binary used by every database-facing command."""
     requested = str(executable or os.environ.get("TEAM_SQLCL_EXECUTABLE", "sql"))
     _assert_safe_argument("SQLcl executable", requested)
     resolved = shutil.which(requested) if not Path(requested).is_absolute() else requested
@@ -428,7 +423,7 @@ def run_sqlcl(
     if target.environment == "production" and operation == "read":
         _assert_production_read_only(payload)
 
-    resolved_executable = _resolve_executable(executable)
+    resolved_executable = resolve_sqlcl_executable(executable)
     run_id = uuid.uuid4().hex
     generated_driver = work_path / f".team-driver-{run_id}.sql"
     payload_copy = work_path / f".team-payload-{run_id}.sql"
@@ -455,7 +450,7 @@ def run_sqlcl(
                     timeout=resolved_timeout,
                 )
         except subprocess.TimeoutExpired as exc:
-            raise SqlclError("SQLcl timed out; target state is unknown") from exc
+            raise SqlclUnknownResult("SQLcl timed out; target state is unknown") from exc
         except OSError as exc:
             raise SqlclError(f"could not start SQLcl: {exc}") from exc
 

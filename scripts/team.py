@@ -31,7 +31,13 @@ from teamlib.deploy import DeployError, deploy_app
 from teamlib.drift import capture_live_inventory, drift_status, observed_frontier_drift
 from teamlib.fingerprints import InventoryError, diff_inventory, drift_is_clean, load_inventory
 from teamlib.page_locks import LockReport, format_lock_report, load_manual_page_locks, read_page_locks
-from teamlib.publish import PublishError, format_publish_notice, prepare_publish, publish_prepared
+from teamlib.publish import (
+    PublishError,
+    acknowledge_publish,
+    format_publish_notice,
+    prepare_publish,
+    publish_prepared,
+)
 from teamlib.destructive_confirmation import (
     ConfirmationError,
     load_confirmation,
@@ -42,11 +48,12 @@ from teamlib.migration_runtime import migration_profiles
 from teamlib.migration_store import MigrationStoreError, SqlMigrationStore
 from teamlib.live_inventory import inventory_target
 from teamlib.qualification import QualificationError, qualify_target, write_report
+from teamlib.production_privileges import audit_production_profile
 from teamlib.patch import PatchError, recover_files
-from teamlib.release import ReleaseError, build_schema_release_from_database
+from teamlib.release import ReleaseError, build_app_release_from_database, build_schema_release_from_database
 from teamlib.release_adapter import ReleaseAdapterError
 from teamlib.runbook import RunbookError
-from teamlib.runtime import preflight_online
+from teamlib.runtime import preflight_online, require_release_sqlcl_build
 from teamlib.online_workflows import OnlineWorkflowError, run_integration, run_release_test
 from teamlib.state import StateError
 from teamlib.migration_bundle import BundleError, load_bundles
@@ -58,7 +65,7 @@ from teamlib.trees import TreeError, read_git_tree
 # dispatcher and the tests cannot drift apart.
 PRODUCTION_REFUSED_COMMANDS = frozenset(
     {
-        "setup-state", "adopt-frontier", "adopt-migration-members", "build-schema-release", "qualify-target", "recover-migration",
+        "setup-state", "ack-publish", "adopt-frontier", "adopt-migration-members", "build-release", "qualify-target", "recover-migration",
         "register-app", "recover-app-lock", "migrate", "undo-migration", "redo-migration",
         "run-integration",
         "run-release-test",
@@ -80,6 +87,7 @@ COMMAND_HELP = {
     "doctor": ("Daily application work", "validate the selected credential-free target profile"),
     "export-app": ("Daily application work", "capture and reconcile the shared Builder application"),
     "prepare-publish": ("Daily application work", "prepare an app-scoped pause notice and durable evidence record"),
+    "ack-publish": ("Daily application work", "record this checkout's publish acknowledgement in shared control metadata"),
     "publish-app": ("Daily application work", "publish prepared and acknowledged changes to selected apps"),
     "run-integration": ("Protected qualification", "apply and qualify one exact commit on protected integration"),
     "qualify-target": ("Protected qualification", "read-only diagnosis of a persistent qualified target"),
@@ -88,7 +96,6 @@ COMMAND_HELP = {
     "redo-migration": ("Migration maintenance", "preview or reapply one explicitly reverted bundle"),
     "recover-migration": ("Recovery and diagnosis", "clear a retained migration mutex from reviewed evidence"),
     "build-release": ("Release and handoff", "build and self-verify one immutable release archive"),
-    "build-schema-release": ("Release and handoff", "cut a schema release from the shared development database"),
     "run-release-test": ("Release and handoff", "apply and qualify one archive on the protected test target"),
     "sign-test-evidence": ("Release and handoff", "bind and sign canonical PASS evidence for one archive"),
     "gen-runbook": ("Release and handoff", "verify signed evidence and generate the production-owner handoff"),
@@ -130,6 +137,9 @@ COMMAND_DETAILS = {
         "Prepares an app-scoped pause notice and durable evidence record for selected apps; "
         "read-only, does not modify Builder."
     ),
+    "ack-publish": (
+        "Requires TEAM_CHECKOUT_UUID to identify this registered checkout; records the current host and user."
+    ),
     "publish-app": (
         "Publishes prepared and acknowledged changes into shared development applications "
         "with all-app preflight and verified re-export."
@@ -142,8 +152,8 @@ COMMAND_DETAILS = {
     ),
     "sign-test-evidence": "Required argument: --archive RELEASE_TAR.",
     "build-release": (
-        "Required arguments: --kind schema|app, --ref REF, --version SEMVER, --out DIR "
-        "(and --alias for app releases)."
+        "Required arguments: --kind schema|app, --version SEMVER, --out DIR "
+        "(and --alias for app releases). Builds from the development database."
     ),
 }
 
@@ -199,7 +209,14 @@ def _parser() -> argparse.ArgumentParser:
         )
 
     add_command("doctor")
+    release = add_command("build-release")
+    release.add_argument("--kind", required=True, choices=("schema", "app"))
+    release.add_argument("--alias", default=None)
+    release.add_argument("--version", required=True)
+    release.add_argument("--out", required=True)
     add_command("setup-state")
+    ack = add_command("ack-publish")
+    ack.add_argument("preparation_id", help="preparation ID printed by prepare-publish")
     add_command("adopt-frontier")
     qualify = add_command("qualify-target")
     qualify.add_argument("--source-commit", required=True)
@@ -213,6 +230,7 @@ def _parser() -> argparse.ArgumentParser:
     release_test.add_argument("archive")
     release_test.add_argument("--target", required=True)
     release_test.add_argument("--out", required=True)
+    release_test.add_argument("--destructive-confirmation")
     migrate = add_command("migrate")
     migrate.add_argument("--source", default="migrations")
     migrate.add_argument("--dry-run", action="store_true")
@@ -242,9 +260,6 @@ def _parser() -> argparse.ArgumentParser:
     drift.add_argument("--out")
     history = add_command("export-history")
     history.add_argument("--out", required=True)
-    schema_release = add_command("build-schema-release")
-    schema_release.add_argument("--version", required=True)
-    schema_release.add_argument("--out", required=True)
     adopt_members_parser = add_command("adopt-migration-members")
     adopt_members_parser.add_argument("--source", default="migrations")
     adopt_members_parser.add_argument("--dry-run", action="store_true")
@@ -288,12 +303,6 @@ def _parser() -> argparse.ArgumentParser:
     pub = add_command("publish-app")
     pub.add_argument("--prepared", required=True, help="preparation ID from prepare-publish")
     pub.add_argument("--confirm-pause", action="store_true", help="confirm that the publish pause notice has been posted and editors stopped")
-    pub.add_argument(
-        "--ack",
-        action="append",
-        default=[],
-        help="registered teammate checkout acknowledgement in format <alias>:<uuid>",
-    )
     deploy = add_command("deploy-app")
     deploy.add_argument("alias")
     deploy.add_argument("--target", required=True)
@@ -439,13 +448,69 @@ def _online(args: argparse.Namespace) -> object:
     if config.environment == "production" and command in PRODUCTION_REFUSED_COMMANDS:
         raise ConfigError(f"{command} is refused for production targets")
     if command == "doctor":
-        _json({"status": "valid", "project": config.project, "role": config.role, "environment": config.environment, "profiles": sorted(config.profiles)})
+        report: dict[str, Any] = {
+            "status": "valid",
+            "project": config.project,
+            "role": config.role,
+            "environment": config.environment,
+            "profiles": sorted(config.profiles),
+        }
+        if config.environment == "production":
+            audited = {
+                name: audit_production_profile(
+                    profile_target(
+                        config,
+                        name,
+                        alias=(sorted(config.apps)[0] if name == "APEX" else None),
+                    ),
+                    repo=repo,
+                )
+                for name in sorted(config.profiles)
+            }
+            report["production_privilege_audit"] = "PASS"
+            report["production_profiles"] = {
+                name: {
+                    "system_privileges": list(item.system_privileges),
+                    "enabled_roles": list(item.roles),
+                    "object_privileges": list(item.object_privileges),
+                    "owned_objects": list(item.owned_objects),
+                }
+                for name, item in audited.items()
+            }
+        _json(report)
         return 0
     if command == "setup-state":
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)
         store.setup_state([profile_target(config, "APEX", alias=alias) for alias in config.apps])
         _json({"status": "success", "operation": "setup-state", "targets": sorted(config.apps)})
+        return 0
+    if command == "ack-publish":
+        if config.role != "developer" or config.environment != "development":
+            raise ConfigError("ack-publish is restricted to the shared development environment")
+        checkout_uuid = os.environ.get("TEAM_CHECKOUT_UUID")
+        if not checkout_uuid:
+            raise ConfigError("ack-publish requires TEAM_CHECKOUT_UUID for this registered checkout")
+        metadata = profile_target(config, "METADATA")
+        store = _sql_control_store(repo, metadata)
+        try:
+            aliases = acknowledge_publish(
+                repo,
+                args.preparation_id,
+                checkout_uuid,
+                socket.gethostname(),
+                os.environ.get("USER", "unknown"),
+                config=config,
+                store=store,
+            )
+        except PublishError as exc:
+            raise ConfigError(str(exc)) from exc
+        _json({
+            "status": "success",
+            "operation": command,
+            "preparation_id": args.preparation_id,
+            "acknowledged_aliases": list(aliases),
+        })
         return 0
     if command == "adopt-frontier":
         metadata = profile_target(config, "METADATA")
@@ -519,6 +584,12 @@ def _online(args: argparse.Namespace) -> object:
         _json({"operation": command, **result.as_dict()})
         return 0 if result.status == "PASS" else 3
     if command == "run-release-test":
+        confirmation = None
+        if args.destructive_confirmation:
+            try:
+                confirmation, _confirmation_digest = load_confirmation(args.destructive_confirmation)
+            except ConfirmationError as exc:
+                raise ConfigError(str(exc)) from exc
         result = run_release_test(
             repo,
             config,
@@ -526,6 +597,7 @@ def _online(args: argparse.Namespace) -> object:
             args.target,
             Path(args.out),
             flow_executable=os.environ.get("TEAM_FLOW_RUNNER", ""),
+            confirmation=confirmation,
         )
         _json({"operation": command, **result.as_dict()})
         return 0 if result.status == "PASS" else 3
@@ -593,32 +665,65 @@ def _online(args: argparse.Namespace) -> object:
         status = drift_status(result, frontier_result)
         _json({"status": status, "operation": command, "diff": result})
         return 0 if status == "clean" else 3
-    if command == "build-schema-release":
+    if command == "build-release":
         if config.role != "developer" or config.environment != "development":
-            raise ConfigError("schema releases are cut from the shared development database only")
-        metadata = profile_target(config, "METADATA")
-        store = _sql_migration_store(repo, metadata)
-        store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
-        # Drift gate: the live schema must match the frontier the ledger last accepted.
+            raise ConfigError("releases are built from the shared development database only")
+        if args.kind == "app" and not args.alias:
+            raise ConfigError("--alias is required for an app release")
+        if args.kind == "schema" and args.alias:
+            raise ConfigError("--alias is only valid for an app release")
         try:
-            actual, _actual_path = capture_live_inventory(repo, config)
-        except Exception as exc:
-            raise MigrationRunError(f"live drift inventory failed: {exc}") from exc
-        frontier = observed_frontier_drift(store, metadata, actual)
-        if frontier.get("status") != "clean":
-            _json({"status": "refused", "operation": command, "reason": "live schema does not match the accepted frontier", "observed_frontier": frontier})
-            return 3
-        manifest = build_schema_release_from_database(
-            store, metadata, args.version, args.out,
-            built_by=os.environ.get("USER", "release-builder"),
-            worker_identity=os.environ.get("USER", "release-builder"),
-            host=socket.gethostname(),
-            expected_frontier=str(frontier.get("digest")),
-        )
+            sqlcl_build = require_release_sqlcl_build()
+        except RuntimeError as exc:
+            raise ConfigError(str(exc)) from exc
+        metadata = profile_target(config, "METADATA")
+        user = os.environ.get("USER", "release-builder")
+        if args.kind == "schema":
+            store = _sql_migration_store(repo, metadata)
+            store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
+            # Drift gate: the live schema must match the frontier the ledger last accepted.
+            try:
+                actual, _actual_path = capture_live_inventory(repo, config)
+            except Exception as exc:
+                raise MigrationRunError(f"live drift inventory failed: {exc}") from exc
+            frontier = observed_frontier_drift(store, metadata, actual)
+            if frontier.get("status") != "clean":
+                _json({"status": "refused", "operation": command, "reason": "live schema does not match the accepted frontier", "observed_frontier": frontier})
+                return 3
+            manifest = build_schema_release_from_database(
+                store, metadata, args.version, args.out,
+                built_by=user,
+                worker_identity=user,
+                host=socket.gethostname(),
+                sqlcl_build=sqlcl_build,
+                expected_frontier=str(frontier.get("digest")),
+            )
+        else:
+            if args.alias not in config.apps:
+                raise ConfigError(f"unknown application alias: {args.alias}")
+            checkout_uuid = os.environ.get("TEAM_CHECKOUT_UUID")
+            if not checkout_uuid:
+                raise ConfigError("app releases require TEAM_CHECKOUT_UUID for this registered checkout")
+            app_target = profile_target(config, "APEX", alias=args.alias)
+            app_store = _sql_control_store(repo, metadata)
+            migration_store = _sql_migration_store(repo, metadata)
+            migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
+            manifest = build_app_release_from_database(
+                repo, app_target, metadata, app_store, migration_store,
+                args.alias, args.version, args.out,
+                sqlcl_build=sqlcl_build,
+                checkout_uuid=checkout_uuid,
+                built_by=user,
+                host=socket.gethostname(),
+            )
         _json({
             "status": "success", "operation": command, "version": manifest.version,
             "archive": str(manifest.archive_path), "archive_digest": manifest.archive_digest,
-            "source": dict(manifest.source or {}), "migrations": [item["id"] for item in manifest.migrations],
+            "kind": manifest.kind,
+            "alias": manifest.alias,
+            "source": dict(manifest.source or {}),
+            "migrations": [item["id"] for item in manifest.migrations],
+            "required_migrations": [dict(item) for item in manifest.required_migrations],
         })
         return 0
     if command == "adopt-migration-members":
@@ -722,20 +827,12 @@ def _online(args: argparse.Namespace) -> object:
             answer = input("Has the publish pause notice been posted and has everyone acknowledged? Type 'proceed' to continue: ")
             if answer.strip().casefold() != "proceed":
                 raise ConfigError("publish-app cancelled; explicit pause confirmation was not received")
-        acknowledgements: dict[str, list[str]] = {}
-        for entry in args.ack:
-            if ":" not in entry:
-                raise ConfigError(f"invalid --ack argument: '{entry}'; expected <alias>:<uuid>")
-            alias, ack_uuid = entry.split(":", 1)
-            acknowledgements.setdefault(alias, []).append(ack_uuid)
-
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)
         try:
             report = publish_prepared(
                 repo,
                 args.prepared,
-                acknowledgements,
                 confirm_pause=True,
                 config=config,
                 store=store,
@@ -858,7 +955,6 @@ def _offline(args: argparse.Namespace) -> int:
         "new-migration": "authoring",
         "add-dependency": "authoring",
         "migration-plan": "migration_plan",
-        "build-release": "release",
         "verify-release": "release",
         "plan-release": "release",
         "gen-runbook": "runbook",
@@ -880,7 +976,7 @@ def _offline(args: argparse.Namespace) -> int:
     handler = getattr(module, "main", None)
     if handler is None:
         raise ConfigError(f"offline command has no public handler: {args.command}")
-    command_prefixed = {"new-migration", "add-dependency", "build-release", "verify-release", "plan-release", "apply-release", "adopt-baseline", "ci-doctor", "sign-test-evidence", "prune-scratch"}
+    command_prefixed = {"new-migration", "add-dependency", "verify-release", "plan-release", "apply-release", "adopt-baseline", "ci-doctor", "sign-test-evidence", "prune-scratch"}
     handler_args = [args.command, *args.args] if args.command in command_prefixed else list(args.args)
     env_file = getattr(args, "env_file", None)
     if env_file and args.command in ENV_AWARE_OFFLINE_COMMANDS and "--env" not in handler_args:

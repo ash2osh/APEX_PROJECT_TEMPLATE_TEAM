@@ -48,6 +48,7 @@ class Runbook:
     plan: ReleasePlan
     kind: str | None = None
     alias: str | None = None
+    source: Mapping[str, Any] | None = None
 
 
 def _read_file(path: str | Path, label: str) -> bytes:
@@ -139,11 +140,46 @@ def _pending_lines(manifest: Any, plan: ReleasePlan) -> list[str]:
     return lines
 
 
+def _database_event_lines(manifest: Any) -> list[str]:
+    """Render the verified format-3 development ledger without collapsing transitions."""
+    if getattr(manifest, "format_version", None) != 3 or getattr(manifest, "kind", None) != "schema":
+        return []
+    operation_labels = {"up": "APPLY", "down": "REVERT"}
+    return [
+        f"- {event['sequence']}. {operation_labels[event['operation']]} ({event['operation']}): "
+        f"{event['id']} checksum={event['checksum']}"
+        for event in manifest.events
+    ]
+
+
+def _planned_database_event_lines(plan: ReleasePlan) -> list[str]:
+    labels = {"up": "APPLY", "down": "REVERT"}
+    if not plan.events:
+        return ["- none (the archive suffix is a net no-op for this target history)"]
+    return [
+        f"- {event['sequence']}. {labels[event['operation']]} ({event['operation']}): "
+        f"{event['id']} checksum={event['checksum']}"
+        for event in plan.events
+    ]
+
+
 def _runbook_text(manifest: Any, plan: ReleasePlan, target: Mapping[str, Any], evidence: Mapping[str, Any], evidence_digest: str) -> str:
     target_identity = evidence.get("target_identity", target)
     kind = getattr(manifest, "kind", None)
 
     if kind == "schema":
+        database_events = _database_event_lines(manifest)
+        source_lines = (
+            [
+                "- Source: development database",
+                f"- Source instance: {manifest.source.get('instance_id', '<unknown>')}",
+                f"- Source history cut: {manifest.source.get('history_cut', '<unknown>')}",
+                f"- Source history digest: {manifest.source.get('history_digest', '<unknown>')}",
+                f"- Source frontier digest: {manifest.source.get('frontier_digest', '<unknown>')}",
+            ]
+            if isinstance(getattr(manifest, "source", None), Mapping)
+            else [f"- Source commit: {manifest.source_commit}", f"- Source tree digest: {manifest.source_tree}"]
+        )
         lines = [
             "# Production schema release handoff",
             "",
@@ -156,8 +192,7 @@ def _runbook_text(manifest: Any, plan: ReleasePlan, target: Mapping[str, Any], e
             "",
             "- Release kind: schema",
             f"- Release version: {manifest.version}",
-            f"- Source commit: {manifest.source_commit}",
-            f"- Source tree digest: {manifest.source_tree}",
+            *source_lines,
             f"- Exact release.tar SHA-256: {plan.archive_digest}",
             f"- Signed evidence SHA-256: {evidence_digest}",
             f"- Toolchain declaration: {_display(manifest.toolchain)}",
@@ -176,18 +211,37 @@ def _runbook_text(manifest: Any, plan: ReleasePlan, target: Mapping[str, Any], e
             f"Artifact history digest: {plan.artifact_history_digest}",
             f"Destination target digest: {plan.target_digest}",
             *_pending_lines(manifest, plan),
+        ]
+        if database_events:
+            lines.extend([
+                "",
+                "## Verified source ledger event order",
+                "",
+                "This is the complete archived development ledger. The target replay plan below may omit up/down pairs that are a net no-op for the supplied target history; down events remain explicit.",
+                "",
+                *database_events,
+                "",
+                "## Planned target replay events",
+                "",
+                *_planned_database_event_lines(plan),
+            ])
+        lines.extend([
             "",
             "## Owner checklist",
             "",
             "1. Verify the exact release.tar SHA-256 and the detached evidence signature against the independently held trust key.",
             "2. Confirm backups, restore evidence, maintenance/destructive prerequisites and supported Oracle object types.",
             "3. Re-read destination identity and migration history under the metadata-owner mutex; stop if identity or history changed.",
-            "4. Apply only the listed pending migrations in dependency order. Do not blindly replay the full migration history; DDL rollback is not assumed.",
+            (
+                "4. Apply only the planned target replay events above, in sequence, including each down transition; follow the reviewed confirmation and backup procedure for reversals."
+                if database_events
+                else "4. Apply only the listed pending migrations in dependency order. Do not blindly replay the full migration history; DDL rollback is not assumed."
+            ),
             "5. Record attempts, observations and final status through the isolated metadata schema, including success-before-log uncertainty.",
             "6. If any outcome is uncertain, stop, retain evidence and use the recovery owner procedure before retrying.",
             "",
             "Source SQL is trusted reviewed deployment code, not a sandbox. This handoff supplies no production credential and no repository-side production apply switch.",
-        ]
+        ])
         return "\n".join(lines) + "\n"
 
     if kind == "app":
@@ -197,6 +251,23 @@ def _runbook_text(manifest: Any, plan: ReleasePlan, target: Mapping[str, Any], e
         parsing_schemas = target.get("parsing_schemas", {})
         parsing_schema = parsing_schemas.get(alias) if isinstance(parsing_schemas, Mapping) else target.get("parsing_schema")
         tree_digest = (manifest.app_tree_digests or {}).get(alias, "<unknown>")
+        if getattr(manifest, "format_version", None) == 3 and isinstance(getattr(manifest, "source", None), Mapping):
+            source_lines = [
+                "- Source: development database and paused application capture",
+                f"- Source instance: {manifest.source.get('instance_id', '<unknown>')}",
+                f"- Schema history cut: {manifest.source.get('history_cut', '<unknown>')}",
+                f"- Schema history digest: {manifest.source.get('history_digest', '<unknown>')}",
+                f"- Schema frontier digest: {manifest.source.get('frontier_digest', '<unknown>')}",
+                f"- Application generation: {manifest.source.get('app_generation', '<unknown>')}",
+                f"- Application tree digest: {manifest.source.get('app_tree_digest', '<unknown>')}",
+                f"- App-check digest: {manifest.source.get('app_checks_digest', '<none>')}",
+                f"- Master-contract digest: {manifest.source.get('master_contract_digest', '<none>')}",
+            ]
+        else:
+            source_lines = [
+                f"- Source commit: {manifest.source_commit}",
+                f"- Source tree digest: {manifest.source_tree}",
+            ]
         lines = [
             f"# Production application release handoff ({alias})",
             "",
@@ -210,8 +281,7 @@ def _runbook_text(manifest: Any, plan: ReleasePlan, target: Mapping[str, Any], e
             "- Release kind: app",
             f"- Application alias: {alias}",
             f"- Release version: {manifest.version}",
-            f"- Source commit: {manifest.source_commit}",
-            f"- Source tree digest: {manifest.source_tree}",
+            *source_lines,
             f"- Exact release.tar SHA-256: {plan.archive_digest}",
             f"- Signed evidence SHA-256: {evidence_digest}",
             f"- Toolchain declaration: {_display(manifest.toolchain)}",
@@ -337,7 +407,11 @@ def gen_runbook(
         validate_release_evidence_binding(
             evidence,
             archive_digest=manifest.archive_digest,
-            source_commit=manifest.source_commit,
+            **(
+                {"source": manifest.source}
+                if getattr(manifest, "format_version", None) == 3
+                else {"source_commit": manifest.source_commit}
+            ),
             checks_digest=bundle.checks_digest,
             kind=getattr(manifest, "kind", None),
             alias=getattr(manifest, "alias", None),
@@ -367,6 +441,7 @@ def gen_runbook(
         plan,
         kind=getattr(manifest, "kind", None),
         alias=getattr(manifest, "alias", None),
+        source=getattr(manifest, "source", None),
     )
 
 
@@ -388,7 +463,13 @@ def main(argv: list[str] | None = None) -> int:
         history = history_raw.get("history", history_raw) if isinstance(history_raw, dict) else {}
         runbook = gen_runbook(args.archive, history, target_raw, args.test_evidence, args.signature, args.trust_key)
         Path(args.out).write_text(runbook.text, encoding="utf-8", newline="\n")
-        print(json.dumps({"archive_digest": runbook.archive_digest, "source_commit": runbook.source_commit, "pending": runbook.pending}, sort_keys=True))
+        result = {"archive_digest": runbook.archive_digest, "pending": runbook.pending}
+        result.update(
+            {"source": dict(runbook.source)}
+            if runbook.source is not None
+            else {"source_commit": runbook.source_commit}
+        )
+        print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, UnicodeError, json.JSONDecodeError, RunbookError) as exc:
         raise SystemExit(str(exc)) from exc

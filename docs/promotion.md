@@ -1,158 +1,53 @@
 # Promotion and production handoff
 
-> **Planned change:** releases will be built from the shared development database instead of a
-> Git commit, because each developer keeps a separate repository
-> (`docs/superpowers/specs/2026-09-24-dev-database-release-source-design.md`). Until that ships,
-> build every release from **one designated repository** that holds all migration files: test and
-> production refuse a history entry that the archive does not carry.
+Releases are cut from the shared development database ledger and live Builder state. For app releases, Builder capture supplies the selected application's source; the building checkout supplies checks and master contracts. METADATA supplies the complete migration history and immutable migration bytes. No designated Git repository or release tags are used.
 
-Promotion moves one immutable `release.tar`. Build it from a resolved Git
-commit and verify the archive bytes offline. Release tags are `schema/v<semver>`
-for shared migrations and `app/<alias>/v<semver>` for single application releases:
+## Build locally
+
+Use the registered developer checkout and its development `.env`. The build checks the SQLcl pin, observed schema frontier, migration mutex, registered checkout identity, and (for apps) the app-scoped pause and page-lock report. App capture must be known lock-free and stable across two captures.
 
 ```text
-# Schema release (applies shared migrations once per environment)
-scripts/team.py build-release --kind schema --ref schema/v1.0.0 --version 1.0.0 --out scratch/release
-scripts/team.py verify-release scratch/release/release.tar
+# Shared schema release
+scripts/team.sh --env .env build-release --kind schema --version 1.1.0 --out scratch/release
 
-# Single application release (e.g. hr; checks schema prerequisites without deploying siblings)
-scripts/team.py build-release --kind app --alias hr --ref app/hr/v1.0.0 --version 1.0.0 --out scratch/release
-scripts/team.py verify-release scratch/release/release.tar
+# One application only
+scripts/team.sh --env .env build-release --kind app --alias hr --version 2.0.0 --out scratch/release
+
+scripts/team.sh verify-release scratch/release/release.tar
 ```
 
-The manifest is closed and payload-derived:
-- `kind: schema` packages only migration SQL and schema contracts; it applies once per environment.
-- `kind: app` packages exactly one application tree, its checks and required migration IDs/checksums, without migration SQL or sibling apps.
-Symlinks, credentials, deployment bindings, logs, and sync state are not
-packaged. Production `apply-release` remains refused. No automated production
-write is authorized.
+`TEAM_RELEASE` binds a version to one archive digest. A repeated cut of the same ledger/app source is deterministic; changing the cut or app inputs under an already-used version is refused. Schema releases contain the ordered ledger events and stored migration bundles. App releases contain one captured app, its required migrations at the schema cut, checks and master contract digests. `verify-release` remains offline and can read existing format 2 handoffs as well as format 3 archives.
 
-**Production read-only is enforced by the database, not by this tool.** Before a
-production read, `team.py` refuses any driver statement that is not a query or a
-display setting. That check is a keyword-level safety net: a `SELECT` that calls
-a function with side effects, or a query reaching `DBMS_SQL`, can still pass it.
-Give the production SQLcl connection a dedicated account with `CREATE SESSION` and
-`SELECT`/`READ` on the dictionary and APEX views it needs, and nothing else — no
-`EXECUTE` on packages with side effects, no DML or DDL privileges. With that
-account the guard can only ever be redundant.
+## Run, sign and generate the owner runbook
 
-## Cutting a schema release from the development database (preview)
-
-Schema releases can now be cut from the shared development database, so no
-repository has to hold every migration file:
+Keep the tested archive and evidence together in the operator's local scratch directory. The test profile must identify a non-production `role: test` target. Test qualification uses the archive bytes, current target history and app checks; it refuses destructive work before executing payloads.
 
 ```text
-scripts/team.py --env .env build-schema-release --version 1.1.0 --out scratch/release-db
-scripts/team.py verify-release scratch/release-db/release.tar
-```
-
-- A drift gate runs first: the live schema must match the frontier the
-  migration ledger last accepted, otherwise the command exits `3` with the diff.
-- The cut runs under the migration mutex and refuses while any migration
-  attempt is `RUNNING`, `FAILED` or `UNKNOWN`.
-- Everything the ledger records ships: every `up` and `down` event in order,
-  with each migration's stored files. A migration whose files were never
-  stored is refused with a pointer to `adopt-migration-members`.
-- The archive is manifest **format 3**: a `source` block (instance, ledger
-  cut, ledger digest, schema frontier) replaces the Git `source_commit`.
-- The version is recorded in the metadata release ledger (`TEAM_RELEASE`). A
-  version is bound to one archive digest for the whole team; cutting the same
-  ledger again yields the same bytes, while a different cut under a used
-  version is refused.
-
-Applying a format 3 archive to test (and generating its production runbook)
-is not implemented yet: `plan-release`, `apply-release` and
-`run-release-test` refuse it explicitly. Until then, keep using the Git
-release path below for anything that must be applied.
-
-## Protected test run
-
-The release workflow serializes protected test use with concurrency group
-`example-team-apex-test` and `cancel-in-progress: false`; it never interrupts a
-target between migration, application deployment, and qualification. It
-downloads and verifies the same archive, then runs on
-`runs-on: [self-hosted, team-apex, test]` in environment `test`, in two jobs:
-
-- `qualify` checks out the tag, materializes only the protected profile below
-  `$RUNNER_TEMP` (mode 0600, removed in an `always()` step), runs the one online
-  command below and hands `test-evidence.json` on as an artifact. It never sees
-  the signing key.
-- `sign-and-handoff` checks out the protected **default branch**, never the tag, so
-  the only code that runs next to the key is reviewed code. It verifies the
-  archive again, signs the evidence (the key exists only inside that step and is
-  deleted when it exits) and generates the runbook from the public trust key and
-  production history. A compromised tag can still forge its own run's evidence,
-  since qualifying a release means running it, but it can no longer read the key
-  and forge evidence for other releases. Every action is pinned by
-commit SHA and every checkout sets `persist-credentials: false`, so no GitHub
-token is left in a self-hosted runner's workspace. It invokes exactly one online
-command:
-
-```text
-scripts/team.py --env "$RUNNER_TEMP/test.env" run-release-test \
+scripts/team.sh --env .env.test run-release-test \
   scratch/release/release.tar --target targets/test.json \
-  --out "$RUNNER_TEMP/test-evidence.json"
-```
+  --out scratch/test-evidence.json
 
-The command derives the archive source commit and aliases, verifies that the
-target contract and config have `role: test`, reads live metadata history,
-recomputes pending work, refuses destructive migrations before controller setup,
-applies and verifies non-destructive work under the metadata mutex, deploys
-packaged applications, and emits unsigned evidence. The apply result is passed
-in memory; operators do not transport a plan, history, or intermediate result
-file between steps.
-
-Evidence version 2 is canonical compact UTF-8 JSON with one LF terminator. It
-contains `source_commit`, `archive_digest`, `toolchain_digest`, complete
-`target_identity`, `qualification_identity` with `target_kind: persistent`,
-`observation_sequence`, `observation_digest` from the accepted after inventory,
-`history_digest`, application-check coverage, and PASS/FAIL result fields.
-Staging and test targets are persistent observations; they do not prove a fresh
-installation, isolation, or arbitrary-DML coverage.
-
-## Sign and hand off
-
-Signing is a separate privilege and uses only the protected test private key:
-
-```text
-scripts/team.py sign-test-evidence \
-  --evidence "$RUNNER_TEMP/test-evidence.json" \
+scripts/team.sh sign-test-evidence \
+  --evidence scratch/test-evidence.json \
   --archive scratch/release/release.tar \
-  --private-key "$RUNNER_TEMP/test-signing-key.pem" \
-  --out "$RUNNER_TEMP/test-evidence.sig"
-```
+  --private-key /secure/local/test-signing-key.pem \
+  --out scratch/test-evidence.sig
 
-`sign-test-evidence` rejects non-canonical, failed, incomplete, non-persistent,
-non-`role: test`, or archive/check-binding mismatched evidence. It binds
-the manifest's `kind` and `alias`; a signed test report for HR cannot be reused
-for Payroll or a schema archive. The public trust key is independently supplied;
-it is never derived from the private key. Missing signer or trust material
-leaves diagnostics available but cannot create a handoff.
-
-Generate the offline production-owner runbook:
-
-```text
 scripts/team.sh gen-runbook scratch/release/release.tar \
-  --history "$RUNNER_TEMP/production-history.json" \
+  --history scratch/production-history.json \
   --target targets/production.json \
-  --test-evidence "$RUNNER_TEMP/test-evidence.json" \
-  --signature "$RUNNER_TEMP/test-evidence.sig" \
-  --trust-key "$RUNNER_TEMP/test-trust-key.pem" \
+  --test-evidence scratch/test-evidence.json \
+  --signature scratch/test-evidence.sig \
+  --trust-key /secure/local/test-trust-key.pem \
   --out scratch/PRODUCTION_RUNBOOK.md
 ```
 
-The runbook repeats the archive/source/application-check binding verification;
-it is an owner-reviewed document, not a production apply switch.
-- For a schema release, the runbook lists pending migrations in dependency order and owner checklist steps for migration application only.
-- For an application release, the runbook lists exact prerequisite migrations (verified against destination history) and deployment instructions for the selected application only, with zero sibling app deployments.
-The production owner re-reads identity and history
-under the metadata mutex before any separately authorized action. Database undo
-does not roll back an APEX Builder import. Production writes remain refused.
+Signing and runbook generation run on the operator's machine with local key material. Never put the private key in the repository or an untrusted test process. The signed evidence binds the archive, target, release kind, selected app and app-check digest. `gen-runbook` verifies the trust signature and archive binding, then emits owner-reviewed steps; it does not enable a production write.
 
-## Independent release sequence on shared schema
+A missing test runner, browser flow, trust key or other required evidence is `UNKNOWN` or a refusal, never a synthetic `PASS`. Persistent test qualification does not prove a fresh installation, isolation or arbitrary-DML coverage.
 
-When multiple applications (such as HR and Payroll) share a single database and TABLES/CODE schema stream:
-1. **Schema release applies once:** `schema/v1.0.0` migrates shared database tables and code. It deploys zero applications and forces no sibling app rebuilds.
-2. **Application releases deploy independently:** `app/hr/v2.0.0` verifies that its required migration IDs and checksums exist in target history before deploying. Payroll remains completely untouched at v1, and its deployment adapter is never called.
-3. **Master component dependencies are qualified without auto-deployment:** If HR declares a master theme or component dependency on Payroll in `targets/masters.json`, the deployment preflight resolves the master component against the target APEX dictionary views. If the master is absent or on the wrong target, HR deployment is refused. If present and qualified, HR deploys while Payroll remains unchanged. There is no automatic dependency deployment.
-4. **Independent evidence and handoff:** Test evidence and runbooks are generated and signed per release kind. If a protected runner or browser check is unavailable in the environment, it is recorded as `UNKNOWN`, never a fake `PASS`.
+## Production boundary
+
+Production writes remain strictly refused. Production profile audits require read-only database privileges and refuse incomplete privilege evidence, effective write privileges or owned objects. The keyword-level driver guard is only a safety net; use a dedicated read-only account without side-effect package execution privileges. See [METADATA backup and restore](metadata-backup-restore.md) for release-ledger recovery guidance.
+
+For one shared schema, schema releases apply migrations once per environment and deploy zero apps. An app release verifies its exact required migration IDs and checksums, deploys only its selected application, and never deploys sibling apps. Master component dependencies are qualified against the target and do not trigger sibling deployment.
