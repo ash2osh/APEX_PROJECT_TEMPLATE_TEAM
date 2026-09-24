@@ -750,5 +750,37 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertEqual(data["apps"]["payroll"]["status"], "UNKNOWN")
 
 
+
+class RetiredRouteSafetyTests(unittest.TestCase):
+    def test_retired_routes_not_dispatched_and_perform_no_sqlcl_writes(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+        import team
+
+        sqlcl_calls = []
+
+        def sqlcl_spy(*args, **kwargs):
+            sqlcl_calls.append((args, kwargs))
+            return 0
+
+        with patch("teamlib.sqlcl.run_sqlcl", sqlcl_spy):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as ctx:
+                    team.main(["import-app", "hr"])
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("invalid choice: 'import-app'", stderr.getvalue())
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as ctx:
+                    team.main(["announce-import", "hr", "--ref", "HEAD"])
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("invalid choice: 'announce-import'", stderr.getvalue())
+
+        self.assertEqual(sqlcl_calls, [], "no SQLcl write should have been initiated")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ from teamlib.apex import (
     export_app,
     resolve_export,
 )
-from teamlib.announce import draft_all_clear, draft_import_announcement, draft_publish_all_clear
+from teamlib.announce import draft_publish_all_clear
 from teamlib.app_checks import AppCheckError
 from teamlib.ci import CIError
 from teamlib.config import ConfigError, OFFLINE_COMMANDS, Target, contract_target, load_config, profile_target, schema_set_digest
@@ -79,7 +79,6 @@ VERIFY_REQUIRED_COMMANDS = frozenset(
 COMMAND_HELP = {
     "doctor": ("Daily application work", "validate the selected credential-free target profile"),
     "export-app": ("Daily application work", "capture and reconcile the shared Builder application"),
-    "import-app": ("Recovery and diagnosis", "coordinated overwrite of the paused shared Builder application"),
     "prepare-publish": ("Daily application work", "prepare an app-scoped pause notice and durable evidence record"),
     "publish-app": ("Daily application work", "publish prepared and acknowledged changes to selected apps"),
     "run-integration": ("Protected qualification", "apply and qualify one exact commit on protected integration"),
@@ -99,7 +98,6 @@ COMMAND_HELP = {
     "bootstrap-app": ("Daily application work", "establish the first verified application baseline"),
     "adopt-app": ("Daily application work", "adopt an existing shared application with evidence"),
     "resolve-export": ("Daily application work", "apply a reviewed export conflict resolution"),
-    "announce-import": ("Recovery and diagnosis", "draft a pause or all-clear notice from observed evidence"),
     "deploy-app": ("Protected qualification", "deploy exact committed application bytes to a qualified target"),
     "adopt-frontier": ("Migration maintenance", "adopt a sequence-zero observed schema frontier"),
     "check-drift": ("Migration maintenance", "compare live schema structure and accepted frontier"),
@@ -125,14 +123,6 @@ COMMAND_DETAILS = {
     "export-app": (
         "Captures the shared Builder application and reconciles it with tracked source; "
         "concurrent Builder changes may require reconciliation."
-    ),
-    "import-app": (
-        "This command overwrites the shared application. Use only after a posted pause, verified "
-        "baseline, and reviewed exact source."
-    ),
-    "announce-import": (
-        "Drafts a diagnostic pause or all-clear notice from observed evidence; "
-        "this command does not authorize or perform a publish."
     ),
     "prepare-publish": (
         "Prepares an app-scoped pause notice and durable evidence record for selected apps; "
@@ -272,16 +262,6 @@ def _parser() -> argparse.ArgumentParser:
     resolve = add_command("resolve-export")
     resolve.add_argument("recovery_id")
     resolve.add_argument("--resolved", required=True)
-    imp = add_command("import-app")
-    imp.add_argument("alias")
-    imp.add_argument("--ref", default="HEAD")
-    imp.add_argument("--replace-from")
-    imp.add_argument("--confirm-pause", action="store_true", help="confirm the independently posted team pause notice")
-    announce = add_command("announce-import")
-    announce.add_argument("alias")
-    announce_choice = announce.add_mutually_exclusive_group(required=True)
-    announce_choice.add_argument("--ref")
-    announce_choice.add_argument("--all-clear")
     prep = add_command("prepare-publish")
     prep.add_argument("aliases", nargs="+", help="one or more configured application aliases to publish")
     prep.add_argument("--ref", required=True, help="exact 40-character hex commit to publish")
@@ -366,60 +346,6 @@ def _qualification_source(
         return load_integration_source(repo, source_commit, aliases)
     except SourceSnapshotError as exc:
         raise ConfigError(f"qualification source snapshot failed: {exc}") from exc
-
-
-def _import_notice(
-    args: argparse.Namespace,
-    target: Target,
-    store: Any,
-    repo: Path,
-    commit: str,
-) -> str:
-    """Build the pause notice from a fresh read-only capture and baseline."""
-    try:
-        baseline = load_baseline(target, root=repo / ".sync-state")
-        observed = capture_app(
-            target,
-            repo=repo,
-            root=repo / ".sync-state",
-            control_store=store,
-            persist=False,
-        )
-        selected = read_git_tree(repo, commit, target.alias or "")
-        changed = sorted(
-            path
-            for path in set(baseline.tree) | set(observed.tree)
-            if baseline.tree.get(path) != observed.tree.get(path)
-        )
-        planned = sorted(
-            path
-            for path in set(baseline.tree) | set(selected)
-            if baseline.tree.get(path) != selected.get(path)
-        )
-        roster = [entry.checkout_uuid for entry in store.list_registry(target)]
-    except (ApexError, ControlStoreError, StateError, TreeError) as exc:
-        raise ConfigError(f"cannot draft import pause notice from observed state: {exc}") from exc
-    return draft_import_announcement(
-        target.alias or "",
-        commit,
-        target={"app_id": target.app_id, "workspace_id": target.workspace_id, "instance_id": target.instance_id},
-        roster=roster,
-        changed_paths=changed,
-        planned_paths=planned,
-        operator=os.environ.get("USER", "the import operator"),
-    ).text
-
-
-def _confirm_import_pause(args: argparse.Namespace, notice: str) -> None:
-    print(notice)
-    if args.confirm_pause:
-        print("Import pause confirmed by --confirm-pause.")
-        return
-    if not sys.stdin.isatty():
-        raise ConfigError("import-app requires --confirm-pause in a non-interactive session")
-    answer = input("Has this pause notice been posted and has everyone stopped editing? Type 'proceed' to continue: ")
-    if answer.strip().casefold() != "proceed":
-        raise ConfigError("import-app cancelled; explicit pause confirmation was not received")
 
 
 def _repo_root() -> Path:
@@ -795,12 +721,7 @@ def _online(args: argparse.Namespace) -> object:
             "journal_path": str(report.journal_path),
         })
         return 0
-    if command in {"register-app", "app-status", "recover-app-lock", "capture-app", "bootstrap-app", "adopt-app", "export-app", "import-app"}:
-        if command == "import-app":
-            raise ConfigError(
-                "direct import-app is retired to prevent bypassing safety guards; "
-                "use prepare-publish and publish-app"
-            )
+    if command in {"register-app", "app-status", "recover-app-lock", "capture-app", "bootstrap-app", "adopt-app", "export-app"}:
         target = _target(config, args.alias)
         metadata = profile_target(config, "METADATA")
         store = _sql_control_store(repo, metadata)
@@ -874,22 +795,6 @@ def _online(args: argparse.Namespace) -> object:
         metadata = profile_target(config, "METADATA")
         report = deploy_app(target, tree, commit, repo=repo, control_store=_sql_control_store(repo, metadata))
         _json({"status": "success", "operation": command, "source_commit": report.source_commit, "tree_digest": report.tree_digest, "verified_tree_digest": report.verified_tree_digest, "recovery_id": report.recovery_id})
-        return 0
-    if command == "announce-import":
-        target = _target(config, args.alias)
-        if args.ref:
-            metadata = profile_target(config, "METADATA")
-            store = _sql_control_store(repo, metadata)
-            print(_import_notice(args, target, store, repo, _resolved_commit(repo, args.ref)))
-        else:
-            result_path = repo / ".sync-state" / "recovery" / args.all_clear / "result.json"
-            if not result_path.is_file():
-                raise ConfigError(f"verified import result was not found: {result_path}")
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                raise ConfigError("all-clear result is unreadable") from exc
-            print(draft_all_clear(args.alias, result))
         return 0
     raise ConfigError(f"unsupported online command: {command}")
 

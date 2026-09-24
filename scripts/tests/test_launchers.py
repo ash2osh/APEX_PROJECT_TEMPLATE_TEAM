@@ -132,8 +132,8 @@ class LauncherTests(unittest.TestCase):
     def test_sensitive_command_help_states_effects_and_required_evidence(self):
         self.assertIn("shared Builder application", command_help("export-app"))
         self.assertIn("reconciliation", command_help("export-app"))
-        self.assertIn("overwrites the shared application", command_help("import-app"))
-        self.assertIn("posted pause", command_help("import-app"))
+        self.assertIn("prepare", command_help("prepare-publish").lower())
+        self.assertIn("publish", command_help("publish-app").lower())
         self.assertIn("non-production writes", command_help("run-integration"))
         self.assertIn("read-only diagnosis", command_help("qualify-target"))
         for command in ("migrate", "undo-migration", "redo-migration"):
@@ -141,6 +141,81 @@ class LauncherTests(unittest.TestCase):
             self.assertIn("false-only", command_help(command))
         self.assertIn("--archive", command_help("sign-test-evidence"))
         self.assertIn("required", command_help("sign-test-evidence").lower())
+
+    def test_retired_commands_refuse_as_unknown_with_no_writes(self):
+        parser = team._parser()
+        action = next(
+            item
+            for item in parser._actions
+            if isinstance(item, team.argparse._SubParsersAction)
+        )
+        self.assertNotIn("import-app", action.choices)
+        self.assertNotIn("announce-import", action.choices)
+        self.assertNotIn("import-app", team.COMMAND_HELP)
+        self.assertNotIn("announce-import", team.COMMAND_HELP)
+
+        # Invoking import-app through team.sh returns code 2
+        res_sh_import = subprocess.run(
+            [str(self.repo / "scripts/team.sh"), "import-app", "hr"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res_sh_import.returncode, 2)
+        self.assertIn("invalid choice: 'import-app'", res_sh_import.stderr)
+
+        # Invoking announce-import through team.sh returns code 2
+        res_sh_announce = subprocess.run(
+            [str(self.repo / "scripts/team.sh"), "announce-import", "hr", "--ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res_sh_announce.returncode, 2)
+        self.assertIn("invalid choice: 'announce-import'", res_sh_announce.stderr)
+
+        # Invoking build-release without --kind through team.sh refuses
+        res_sh_build = subprocess.run(
+            [
+                str(self.repo / "scripts/team.sh"),
+                "build-release",
+                "--ref",
+                "HEAD",
+                "--version",
+                "1.0.0",
+                "--out",
+                "/tmp/dummy",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res_sh_build.returncode, 2)
+        self.assertIn("--kind", res_sh_build.stderr)
+
+        # Replacement commands remain reachable
+        res_prep = subprocess.run(
+            [str(self.repo / "scripts/team.sh"), "prepare-publish", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res_prep.returncode, 0)
+        res_pub = subprocess.run(
+            [str(self.repo / "scripts/team.sh"), "publish-app", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res_pub.returncode, 0)
+        res_build_help = subprocess.run(
+            [str(self.repo / "scripts/team.sh"), "build-release", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res_build_help.returncode, 0)
+        self.assertIn("--kind {schema,app}", res_build_help.stdout)
 
 
 class OfflineEnvForwardingTests(unittest.TestCase):

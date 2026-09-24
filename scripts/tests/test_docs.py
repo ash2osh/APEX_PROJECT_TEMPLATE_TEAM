@@ -38,6 +38,8 @@ class DocumentationTests(unittest.TestCase):
             "required by migration/replay commands",
             'git commit -am "Describe the Builder change"',
             "git diff -- apps/<alias>/ .sync-state/",
+            "scripts/team.sh announce-import",
+            "scripts/team.sh import-app",
         )
         for token in retired_or_unsafe:
             self.assertNotIn(token, operator_docs)
