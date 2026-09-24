@@ -158,6 +158,7 @@ class ProductionRefusalCoverageTests(unittest.TestCase):
         "setup-state": (),
         "adopt-frontier": (),
         "adopt-migration-members": (),
+        "build-schema-release": ("--version", "1.0.0", "--out", "release-out"),
         "qualify-target": ("--source-commit", "a" * 40, "--aliases", "checkout", "--out", "out.json"),
         "recover-migration": ("run-1", "--evidence", "evidence.json"),
         "register-app": ("checkout",),

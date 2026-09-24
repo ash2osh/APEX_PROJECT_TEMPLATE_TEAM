@@ -36,6 +36,35 @@ Give the production SQLcl connection a dedicated account with `CREATE SESSION` a
 `EXECUTE` on packages with side effects, no DML or DDL privileges. With that
 account the guard can only ever be redundant.
 
+## Cutting a schema release from the development database (preview)
+
+Schema releases can now be cut from the shared development database, so no
+repository has to hold every migration file:
+
+```text
+scripts/team.py --env .env build-schema-release --version 1.1.0 --out scratch/release-db
+scripts/team.py verify-release scratch/release-db/release.tar
+```
+
+- A drift gate runs first: the live schema must match the frontier the
+  migration ledger last accepted, otherwise the command exits `3` with the diff.
+- The cut runs under the migration mutex and refuses while any migration
+  attempt is `RUNNING`, `FAILED` or `UNKNOWN`.
+- Everything the ledger records ships: every `up` and `down` event in order,
+  with each migration's stored files. A migration whose files were never
+  stored is refused with a pointer to `adopt-migration-members`.
+- The archive is manifest **format 3**: a `source` block (instance, ledger
+  cut, ledger digest, schema frontier) replaces the Git `source_commit`.
+- The version is recorded in the metadata release ledger (`TEAM_RELEASE`). A
+  version is bound to one archive digest for the whole team; cutting the same
+  ledger again yields the same bytes, while a different cut under a used
+  version is refused.
+
+Applying a format 3 archive to test (and generating its production runbook)
+is not implemented yet: `plan-release`, `apply-release` and
+`run-release-test` refuse it explicitly. Until then, keep using the Git
+release path below for anything that must be applied.
+
 ## Protected test run
 
 The release workflow serializes protected test use with concurrency group
