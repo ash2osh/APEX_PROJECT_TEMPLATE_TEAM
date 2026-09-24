@@ -1282,11 +1282,15 @@ def _plan_database_release(
         if replay_marker is None:
             sequence = local_sequence
         else:
-            ledger_digest, sequence, replay_base = replay_marker
+            ledger_digest, marker_sequence, replay_base = replay_marker
             ledger_cut = prefix_cuts.get(ledger_digest)
-            if ledger_cut is None or sequence > ledger_cut or replay_base >= sequence:
+            sequence = local_sequence if marker_sequence is None else marker_sequence
+            if ledger_cut is None or sequence > ledger_cut:
                 raise ReleaseError("target history is not an exact archive prefix")
-            replay_markers.append((sequence, replay_base))
+            if replay_base is not None:
+                if replay_base >= sequence:
+                    raise ReleaseError("target history is not an exact archive prefix")
+                replay_markers.append((sequence, replay_base))
         if sequence > len(manifest.events):
             raise ReleaseError("target history is not an exact archive prefix")
         event = event_by_sequence.get(sequence)
@@ -1369,17 +1373,20 @@ def _plan_database_release(
     )
 
 
-def _database_release_replay_marker(source_commit: Any) -> tuple[str, int, int] | None:
-    """Read the ledger digest, source event sequence and replay base from a format-3 history row."""
+def _database_release_replay_marker(source_commit: Any) -> tuple[str, int | None, int | None] | None:
+    """Read the ledger digest, source event sequence and replay base from a format-3 history row.
+
+    Early format-3 replay rows recorded only the ledger digest and used local
+    sequence numbers; their sequence and replay base are None, but the digest
+    is still returned so it can be bound to the archive ledger.
+    """
     if not isinstance(source_commit, str) or not source_commit.startswith("db-release:"):
         return None
     match = _DB_RELEASE_REPLAY_SOURCE_RE.fullmatch(source_commit)
     if match is not None:
         return match.group(1), int(match.group(2)), int(match.group(3))
     if _DB_RELEASE_SOURCE_RE.fullmatch(source_commit):
-        # Compatibility with early format-3 replay rows that recorded only the
-        # source ledger digest and therefore used local sequence numbers.
-        return None
+        return source_commit[len("db-release:"):], None, None
     raise ReleaseError("target history is not an exact archive prefix")
 
 

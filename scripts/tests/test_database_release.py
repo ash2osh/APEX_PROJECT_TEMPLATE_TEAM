@@ -302,6 +302,13 @@ class DatabaseReleaseTests(unittest.TestCase):
             [(event["sequence"], event["id"], event["operation"]) for event in replay.events],
             [(3, B_ID, "down")],
         )
+        # The early digest-only marker form is still bound to this archive's ledger.
+        foreign = {
+            migration_id: {**row, "source_commit": "db-release:" + "0" * 64}
+            for migration_id, row in earlier.items()
+        }
+        with self.assertRaisesRegex(ReleaseError, "not an exact archive prefix"):
+            plan_release(manifest.archive_path, foreign, target)
         apply_undo(replay_migrations, B_ID, replay_profiles)
         replayed_events = replay_store.read_events(replay_target)
         self.assertEqual(
