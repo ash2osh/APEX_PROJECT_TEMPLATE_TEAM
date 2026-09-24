@@ -108,14 +108,26 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("run-release-test", sign)
         self.assertIn("needs: [build, qualify]", sign)
 
-    def test_actions_are_pinned_by_sha_and_checkouts_drop_credentials(self):
+    def test_actions_are_pinned_by_sha(self):
         import re
         for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
             text = workflow.read_text(encoding="utf-8")
             for ref in re.findall(r"uses:\s*(\S+)", text):
                 self.assertRegex(ref, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$", f"{workflow.name}: {ref}")
-            checkouts = text.count("uses: actions/checkout@")
-            self.assertEqual(text.count("persist-credentials: false"), checkouts, workflow.name)
+
+    def test_signing_key_is_absent_while_the_release_test_runs(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        written = '> "$RUNNER_TEMP/test-signing-key.pem"'
+        self.assertEqual(release.count(written), 1)
+        self.assertLess(release.index("run-release-test \\"), release.index(written))
+        self.assertLess(release.index(written), release.index("sign-test-evidence \\"))
+
+    def test_checkouts_do_not_persist_git_credentials(self):
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            text = workflow.read_text(encoding="utf-8")
+            self.assertEqual(
+                text.count("uses: actions/checkout@"), text.count("persist-credentials: false"), workflow.name
+            )
 
     def test_release_tags_and_namespacing(self):
         from teamlib.release import ReleaseError, validate_release_identity
