@@ -636,6 +636,20 @@ class AppDatabaseReleaseTests(unittest.TestCase):
         self.assertIn("app/hr/v1.2.3", self.migration_store.releases)
         self.assertIsNone(self.app_store.read_app_sync_state(self.app.physical_key).owner_token)
 
+    def test_app_release_refuses_metadata_on_another_service(self):
+        capture, calls = self._capture()
+        for field in ("db_name", "service"):
+            with self.subTest(field=field):
+                metadata = replace(self.metadata, **{field: "OTHER"})
+                with self.assertRaisesRegex(ReleaseError, "same development database service"):
+                    build_app_release_from_database(
+                        self.repo, self.app, metadata, self.app_store, self.migration_store,
+                        "hr", "1.2.3", self.root / "out", sqlcl_build="26.2.2.233.1901",
+                        checkout_uuid="checkout-a", built_by="builder", host="host-a",
+                        capture=capture, page_locks=self._locks(),
+                    )
+        self.assertEqual(calls["count"], 0)
+
     def test_app_release_refuses_changed_capture_and_releases_mutexes(self):
         capture, calls = self._capture(second_tree={**self.tree, "application.apx": b"changed\n"})
         with self.assertRaisesRegex(ReleaseError, "changed between paused captures"):

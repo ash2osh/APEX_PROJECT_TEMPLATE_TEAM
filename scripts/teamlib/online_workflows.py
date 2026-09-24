@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -9,12 +10,14 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import uuid
 from typing import Any
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 
+from .apex import ApexError, capture_app
 from .app_checks import AppCheckBundle, build_app_check_bundle
 from .config import Config, Target, profile_target, schema_set_digest
-from .control_store import SqlControlStore
+from .control_store import ControlStoreError, SqlControlStore
 from .deploy import DeployReport, deploy_app
 from .fingerprints import Inventory, diff_inventory, drift_is_clean
 from .live_inventory import inventory_target
@@ -26,6 +29,7 @@ from .release import ApplyReport, Manifest, release_app_check_bundle, verify_rel
 from .release_adapter import apply_verified_release_live
 from .runtime import RuntimeReport, preflight_online
 from .source_snapshot import IntegrationSource, load_integration_source
+from .trees import tree_digest
 
 
 class OnlineWorkflowError(RuntimeError):
@@ -57,6 +61,9 @@ class OnlineDependencies:
     apply_release_live: Callable[..., ApplyReport]
     qualify_release: Callable[..., Mapping[str, Any]]
     write_report: Callable[[Mapping[str, Any], Path], None]
+    # Holds each released app's mutex across qualification after proving the
+    # deployed bytes still equal the archive (alias -> tree digest).
+    hold_release_apps: Callable[[Path, Config, Mapping[str, str]], AbstractContextManager[None]]
 
 
 @dataclass(frozen=True)
@@ -323,6 +330,37 @@ def _qualify_release(
     )
 
 
+@contextmanager
+def _hold_release_apps(repo: Path, config: Config, expected: Mapping[str, str]) -> Iterator[None]:
+    """Keep other deployments out while a release's apps are qualified.
+
+    deploy_app releases its mutex when the import is verified; another
+    run-release-test could deploy a different archive before the checks run.
+    """
+    if not expected:
+        yield
+        return
+    store = SqlControlStore(profile_target(config, "METADATA"), work_root=repo / "scratch" / "metadata")
+    token = uuid.uuid4().hex
+    held: list[Target] = []
+    try:
+        for alias in sorted(expected):
+            target = profile_target(config, "APEX", alias=alias)
+            store.acquire_app(target.physical_key, token, "release-test", socket.gethostname(), "release-test")
+            held.append(target)
+            captured = capture_app(target, token, repo=repo, control_store=store, persist=False)
+            if tree_digest(captured.tree) != expected[alias]:
+                raise OnlineWorkflowError(
+                    f"application {alias} no longer matches the release archive; another deployment ran, test again"
+                )
+        yield
+    except (ApexError, ControlStoreError) as exc:
+        raise OnlineWorkflowError(f"release application cannot be held for qualification: {exc}") from exc
+    finally:
+        for target in held:
+            store.release_app(target.physical_key, token, confirmed_success=False)
+
+
 def _default_dependencies() -> OnlineDependencies:
     return OnlineDependencies(
         resolve_head=_resolve_head,
@@ -342,6 +380,7 @@ def _default_dependencies() -> OnlineDependencies:
         apply_release_live=apply_verified_release_live,
         qualify_release=_qualify_release,
         write_report=write_report,
+        hold_release_apps=_hold_release_apps,
     )
 
 
@@ -535,18 +574,22 @@ def run_release_test(
         ):
             raise OnlineWorkflowError("release manifest source commit is malformed")
         source_identity = source_commit
+    app_digests = getattr(manifest, "app_tree_digests", None) or {}
+    if not isinstance(app_digests, Mapping) or not set(exercised_aliases) <= set(app_digests):
+        raise OnlineWorkflowError("release manifest application bindings are malformed")
     try:
-        report = deps.qualify_release(
-            repo_path,
-            config,
-            source_identity,
-            exercised_aliases,
-            release_archive=archive_path,
-            apply_report=apply_document,
-            check_bundle=check_bundle,
-            flow_executable=flow_executable,
-            runtime_report=runtime,
-        )
+        with deps.hold_release_apps(repo_path, config, {alias: app_digests[alias] for alias in exercised_aliases}):
+            report = deps.qualify_release(
+                repo_path,
+                config,
+                source_identity,
+                exercised_aliases,
+                release_archive=archive_path,
+                apply_report=apply_document,
+                check_bundle=check_bundle,
+                flow_executable=flow_executable,
+                runtime_report=runtime,
+            )
     except Exception as exc:
         evidence = getattr(exc, "report", None)
         if isinstance(evidence, Mapping):

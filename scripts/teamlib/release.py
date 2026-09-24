@@ -844,8 +844,10 @@ def build_app_release_from_database(
         raise ReleaseError("application alias is malformed")
     if getattr(target, "alias", None) != alias or getattr(target, "role", None) != "developer" or getattr(target, "environment", None) != "development":
         raise ReleaseError("application releases require the selected shared development application")
-    if getattr(metadata, "environment", None) != "development" or getattr(metadata, "instance_id", None) != getattr(target, "instance_id", None):
-        raise ReleaseError("application release metadata must be on the same development database instance")
+    if getattr(metadata, "environment", None) != "development" or any(
+        getattr(metadata, field, None) != getattr(target, field, None) for field in ("instance_id", "db_name", "service")
+    ):
+        raise ReleaseError("application release metadata must be on the same development database service")
     if sqlcl_build != RELEASE_SQLCL_BUILD:
         raise ReleaseError(f"release builds require SQLcl build {RELEASE_SQLCL_BUILD}; observed {sqlcl_build}")
     if not all(isinstance(value, str) and value.strip() for value in (checkout_uuid, built_by, host)):

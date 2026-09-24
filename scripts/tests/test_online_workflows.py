@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -210,6 +211,7 @@ class OnlineWorkflowTests(unittest.TestCase):
             apply_release_live=lambda *_args, **_kwargs: None,
             qualify_release=lambda *_args, **_kwargs: None,
             write_report=write_report,
+            hold_release_apps=self.hold_release_apps,
         ), store
 
     def test_run_integration_derives_head_and_aliases_and_orders_gates(self):
@@ -440,8 +442,19 @@ class OnlineWorkflowTests(unittest.TestCase):
             apply_release_live=apply_live,
             qualify_release=qualify,
             write_report=write_report,
+            hold_release_apps=self.hold_release_apps,
         )
         return dependencies, manifest
+
+    @contextmanager
+    def hold_release_apps(self, _repo, _config, expected):
+        """Record which app digests a release test holds during qualification."""
+        holds = self.__dict__.setdefault("holds", [])
+        holds.append({"expected": dict(expected), "open": True})
+        try:
+            yield
+        finally:
+            holds[-1]["open"] = False
 
     def test_release_test_reads_live_history_and_emits_evidence_without_plan_files(self):
         events: list[str] = []
@@ -608,6 +621,7 @@ class OnlineWorkflowTests(unittest.TestCase):
             write_report=lambda report, out: Path(out).write_bytes(
                 json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
             ),
+            hold_release_apps=self.hold_release_apps,
         )
         archive = self.root / "release.tar"
         archive.write_bytes(b"verified archive")
@@ -727,6 +741,8 @@ class OnlineWorkflowTests(unittest.TestCase):
 
         def tracking_qualify(repo, config, source_commit, aliases, **kwargs):
             qualified_aliases.append(aliases)
+            # Qualification must run while the archived app bytes are held.
+            self.assertEqual(self.holds, [{"expected": {"employee": "c" * 64}, "open": True}])
             return orig_qualify(repo, config, source_commit, aliases, **kwargs)
 
         dependencies = OnlineDependencies(
@@ -746,9 +762,39 @@ class OnlineWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "PASS")
         self.assertEqual(qualified_aliases, [("employee",)])
+        self.assertEqual(self.holds, [{"expected": {"employee": "c" * 64}, "open": False}])
         written = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(written["kind"], "app")
         self.assertEqual(written["alias"], "employee")
+
+    def test_release_app_hold_rechecks_deployed_bytes_and_always_releases(self):
+        from teamlib import online_workflows
+
+        calls: list[tuple] = []
+        store = SimpleNamespace(
+            acquire_app=lambda key, token, *_a: calls.append(("acquire", key)),
+            release_app=lambda key, token, **kw: calls.append(("release", key, kw["confirmed_success"])),
+        )
+        target = SimpleNamespace(alias="employee", physical_key="k-employee")
+        tree = {"application.apx": b"deployed\n"}
+        from teamlib.trees import tree_digest
+
+        with patch.object(online_workflows, "SqlControlStore", return_value=store), \
+             patch.object(online_workflows, "profile_target", return_value=target), \
+             patch.object(online_workflows, "capture_app", return_value=SimpleNamespace(tree=tree)):
+            with online_workflows._hold_release_apps(self.root, config_for(), {"employee": tree_digest(tree)}):
+                calls.append(("qualify",))
+            self.assertEqual(calls, [("acquire", "k-employee"), ("qualify",), ("release", "k-employee", False)])
+            calls.clear()
+            # Another deployment replaced the app before qualification: refuse.
+            with self.assertRaisesRegex(OnlineWorkflowError, "no longer matches the release archive"):
+                with online_workflows._hold_release_apps(self.root, config_for(), {"employee": "0" * 64}):
+                    calls.append(("qualify",))
+            self.assertEqual(calls, [("acquire", "k-employee"), ("release", "k-employee", False)])
+        # A schema release holds nothing.
+        with patch.object(online_workflows, "SqlControlStore", side_effect=AssertionError("no store")):
+            with online_workflows._hold_release_apps(self.root, config_for(), {}):
+                pass
 
     def test_run_release_test_app_archive_refuses_when_selected_alias_not_in_config(self):
         events: list[str] = []
