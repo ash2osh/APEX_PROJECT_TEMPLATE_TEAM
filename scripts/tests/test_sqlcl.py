@@ -43,6 +43,7 @@ class SqlclBoundaryTests(unittest.TestCase):
         os.environ.pop("FAKE_CRLF", None)
         os.environ.pop("FAKE_EXTRA_OUTPUT", None)
         os.environ.pop("FAKE_GUARD_REFUSE", None)
+        os.environ.pop("FAKE_PAYLOAD_20901", None)
 
     def tearDown(self) -> None:
         os.environ.clear()
@@ -144,6 +145,12 @@ class SqlclBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(SqlclError, "identity guard refused the session before the payload ran") as caught:
             self.execute(operation="write")
         self.assertFalse(result_is_unknown(caught.exception))
+
+    def test_payload_raising_the_guard_code_is_not_reported_as_the_guard(self):
+        os.environ["FAKE_PAYLOAD_20901"] = "1"
+        with self.assertRaisesRegex(SqlclError, "SQLcl failed with exit code 165") as caught:
+            self.execute(operation="write")
+        self.assertNotIn("identity guard", str(caught.exception))
 
     def test_identity_guard_rejects_control_characters_before_launch(self):
         with self.assertRaisesRegex(SqlclError, "printable"):

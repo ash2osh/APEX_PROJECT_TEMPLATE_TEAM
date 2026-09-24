@@ -31,6 +31,10 @@ def main() -> int:
     if os.environ.get("FAKE_GUARD_REFUSE") == "1" and "RAISE_APPLICATION_ERROR(-20901" in text:
         print("ORA-20901: TEAM identity guard: session does not match the expected target; payload not run")
         return 165
+    if os.environ.get("FAKE_PAYLOAD_20901") == "1":
+        print("TEAM_RESULT_BEGIN")
+        print("ORA-20901: INVOICE_TOTAL_MISMATCH")
+        return 165
     if os.environ.get("FAKE_ERROR_ZERO") == "1":
         print("ORA-20099: simulated failure")
         return 0

@@ -66,10 +66,28 @@ schema inventory does) so no single statement exceeds SQLcl limits.
 
 1. Read history under the migration mutex; refuse if any attempt is RUNNING/FAILED/UNKNOWN.
 2. Cut = current highest `applied_sequence` (optionally `--through <sequence>`).
-3. Archive every migration whose latest event in the cut is APPLIED, in applied order,
-   with members read back and re-verified by sha256 and bundle checksum.
-4. REVERTED migrations are excluded; the drift gate still requires the observed frontier
-   to equal the frontier recorded at the cut.
+3. Archive the **ledger event sequence** through the cut (every `up` and `down` event, in
+   `applied_sequence` order), with members read back and re-verified by sha256 and bundle
+   checksum. A migration whose latest event is REVERTED ships with its down members too.
+4. The drift gate still requires the observed frontier to equal the frontier recorded at the cut.
+
+Reverted migrations are **not** dropped from the archive. A migration may already have
+shipped in an earlier release and be APPLIED on test/production, then be reverted in
+development; if the next archive omitted it, strict planning would refuse the target's
+history (it rejects both foreign APPLIED and foreign REVERTED entries) and the archive would
+have no down transition to reach the cut. So:
+
+- `apply-release` replays the archive's events past the target's own last event: a `down`
+  event for a migration APPLIED on the target runs its authored down pair; a migration that
+  was applied and reverted entirely after the target's last event is skipped as a net no-op.
+- Strict planning accepts a REVERTED entry only when the archive carries that migration and
+  its down event; anything else in target history that the archive does not carry is still
+  refused.
+- Undo in development already requires an authored down pair, so a reverted migration
+  always has down members to ship. Irreversible migrations cannot be reverted and so never
+  reach this path.
+- A down transition on test is destructive under the existing destructive-confirmation
+  convention; the production runbook lists it explicitly.
 
 Consequence to accept: **whatever is applied in shared dev at the cut ships.** Work in
 progress must be undone (or not yet applied) before cutting. This matches how the shared
@@ -138,7 +156,7 @@ Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 bind
 | 0 | Security fixes (identity guard, signing key, credentials) — PR #1 | — |
 | 1 | Docs/README/AGENTS for one-repo-per-developer; e2e with independent repos (no shared bare remote); `.env.example` connection names; drop dead `team.py::_store` | — |
 | 2 | `TEAM_MIGRATION_MEMBER` + upload in `apply_plan` + backfill command | 1 |
-| 3 | `TEAM_RELEASE` ledger + schema release from the ledger (format 3) | 2 |
+| 3 | `TEAM_RELEASE` ledger + schema release from the ledger event sequence (format 3), including down replay in `apply-release` and strict planning for shipped reverts | 2 |
 | 4 | App release from paused capture + auto prerequisites; asset digests from the builder's repository | 3 |
 | 5 | Remove the Git-commit builder and `release.yml`; local release runbook; promotion/CI docs | 4 |
 | — | Publish acknowledgement redesign (checkout-issued acks) — independent, high priority | — |

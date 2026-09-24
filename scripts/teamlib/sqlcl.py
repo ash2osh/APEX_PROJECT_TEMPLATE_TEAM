@@ -212,6 +212,9 @@ def _assert_production_read_only(driver_text: str) -> None:
 
 
 IDENTITY_GUARD_CODE = 20901
+# A payload may raise any code in the -20000..-20999 range itself, so the guard
+# is recognised by its code together with this message, never by the code alone.
+IDENTITY_GUARD_MESSAGE = "TEAM identity guard: session does not match the expected target; payload not run"
 
 # INSTANCE_NAME alone is not unique across cloned Docker/Free databases.
 # Pair it with the verified database server host so independent
@@ -254,8 +257,7 @@ def _identity_guard_block(target: Target) -> str:
     return (
         "BEGIN\n"
         f"  IF {_IDENTITY_EXPRESSION} <> {_sql_literal(expected)} THEN\n"
-        f"    RAISE_APPLICATION_ERROR(-{IDENTITY_GUARD_CODE}, "
-        "'TEAM identity guard: session does not match the expected target; payload not run');\n"
+        f"    RAISE_APPLICATION_ERROR(-{IDENTITY_GUARD_CODE}, '{IDENTITY_GUARD_MESSAGE}');\n"
         "  END IF;\n"
         "END;\n"
         "/\n"
@@ -464,7 +466,7 @@ def run_sqlcl(
         log_path.write_text(safe_log, encoding="utf-8", newline="")
 
         if completed.returncode != 0:
-            guard_marker = f"ORA-{IDENTITY_GUARD_CODE}"
+            guard_marker = f"ORA-{IDENTITY_GUARD_CODE}: {IDENTITY_GUARD_MESSAGE}"
             if guard_marker in _diagnostic_region(stdout) or guard_marker in stderr:
                 raise SqlclError(
                     "SQLcl identity guard refused the session before the payload ran: "
