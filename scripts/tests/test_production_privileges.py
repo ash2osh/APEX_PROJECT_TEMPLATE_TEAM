@@ -31,6 +31,14 @@ class ProductionPrivilegeParserTests(unittest.TestCase):
         self.assertEqual(report.object_privileges, ("READ", "SELECT"))
         self.assertEqual(report.owned_objects, ())
 
+    def test_granted_roles_must_all_be_enabled_to_be_audited(self):
+        base = "TEAM_PRIV|SYSTEM|CREATE SESSION\nTEAM_PRIV|ROLE|REPORTING_READ\n"
+        report = parse_production_privileges(base + "TEAM_PRIV|GRANTED|REPORTING_READ\n")
+        self.assertEqual(report.roles, ("REPORTING_READ",))
+        # A non-default role is missing from SESSION_ROLES; SET ROLE could enable it later.
+        with self.assertRaisesRegex(ProductionPrivilegeError, "not enabled in this session.*DATA_WRITER"):
+            parse_production_privileges(base + "TEAM_PRIV|GRANTED|REPORTING_READ\nTEAM_PRIV|GRANTED|DATA_WRITER\n")
+
     def test_oracle_public_grants_on_oracle_objects_are_the_baseline(self):
         # Every real account receives these from PUBLIC; schema inventory reads
         # need EXECUTE on DBMS_METADATA, DBMS_LOB and UTL_ENCODE.

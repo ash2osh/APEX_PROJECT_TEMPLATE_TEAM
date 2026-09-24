@@ -9,6 +9,12 @@ SELECT 'TEAM_PRIV|SYSTEM|' || privilege
 SELECT 'TEAM_PRIV|ROLE|' || role
   FROM SESSION_ROLES
  ORDER BY role;
+-- Every role granted to the account or PUBLIC, enabled or not: a non-default
+-- role is absent from SESSION_ROLES and its privileges from the queries below,
+-- yet SET ROLE can enable it later.
+SELECT 'TEAM_PRIV|GRANTED|' || granted_role
+  FROM USER_ROLE_PRIVS
+ ORDER BY granted_role;
 -- Grantee, whether the owner is Oracle-maintained, the object name and whether
 -- it is a temporary table: Oracle's own grants to PUBLIC (EXECUTE on
 -- DBMS_METADATA and friends, DML on session-private temporary tables) are on

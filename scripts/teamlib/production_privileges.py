@@ -72,6 +72,7 @@ def parse_production_privileges(stdout: str) -> ProductionPrivilegeReport:
         raise ProductionPrivilegeError("production privilege query returned non-text output")
     systems: set[str] = set()
     roles: set[str] = set()
+    granted_roles: set[str] = set()
     objects: set[str] = set()
     owned_objects: set[str] = set()
     public_oracle_grants = 0
@@ -106,6 +107,8 @@ def parse_production_privileges(stdout: str) -> ProductionPrivilegeReport:
             systems.add(value)
         elif kind == "ROLE":
             roles.add(value)
+        elif kind == "GRANTED":
+            granted_roles.add(value)
         elif kind == "OBJECT":
             if value not in _READ_ONLY_OBJECT_PRIVILEGES:
                 raise ProductionPrivilegeError(
@@ -133,6 +136,15 @@ def parse_production_privileges(stdout: str) -> ProductionPrivilegeReport:
     if not seen_system_marker or "CREATE SESSION" not in systems:
         raise ProductionPrivilegeError(
             "production privilege query is incomplete or the account lacks CREATE SESSION evidence"
+        )
+    # Only enabled roles contribute to the audited session privileges; a granted
+    # role that is not enabled could be switched on later with SET ROLE.
+    disabled_roles = sorted(granted_roles - roles)
+    if disabled_roles:
+        raise ProductionPrivilegeError(
+            "production account holds role(s) not enabled in this session, whose privileges cannot be audited: "
+            + ", ".join(disabled_roles)
+            + "; revoke them or make them default roles"
         )
     unsafe_system = sorted(systems - _READ_ONLY_SYSTEM_PRIVILEGES)
     if unsafe_system:

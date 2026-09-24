@@ -163,7 +163,7 @@ class ReleaseAdapterTests(unittest.TestCase):
             role="test", environment="test", tables_schema="EXAMPLE_APP", code_schema="EXAMPLE_APP",
             metadata_schema="EXAMPLE_META",
         )
-        migration_store = SimpleNamespace(bootstrap=lambda *args, **kwargs: None)
+        migration_store = SimpleNamespace(bootstrap=lambda *args, **kwargs: None, read_history=lambda *_a: {})
         control_store = SimpleNamespace(setup_state=lambda *args, **kwargs: None)
         observed = {}
 
@@ -178,6 +178,7 @@ class ReleaseAdapterTests(unittest.TestCase):
              patch("teamlib.release_adapter.SqlControlStore", return_value=control_store), \
              patch("teamlib.release_adapter.release_app_trees", return_value={}), \
              patch("teamlib.release_adapter.release_migration_files", return_value={}), \
+             patch("teamlib.release_adapter.plan_release", return_value=plan), \
              patch("teamlib.release_adapter.apply_release", side_effect=capture_apply):
             with tempfile.TemporaryDirectory(prefix="team-release-adapter-positive-") as directory:
                 archive = Path(directory) / "release.tar"
@@ -293,7 +294,7 @@ class ReleaseAdapterTests(unittest.TestCase):
             code_schema="EXAMPLE_APP",
             metadata_schema="EXAMPLE_META",
         )
-        migration_store = SimpleNamespace(bootstrap=lambda *args, **kwargs: None)
+        migration_store = SimpleNamespace(bootstrap=lambda *args, **kwargs: None, read_history=lambda *_a: {})
         control_store = SimpleNamespace(setup_state=lambda *args, **kwargs: None)
 
         def invoke_adapter(archive, target, reviewed, **kwargs):
@@ -337,6 +338,7 @@ class ReleaseAdapterTests(unittest.TestCase):
                  return_value=control_store,
              ), \
              patch("teamlib.release_adapter.release_app_trees", return_value={}), \
+             patch("teamlib.release_adapter.plan_release", return_value=plan), \
              patch(
                  "teamlib.release_adapter.release_migration_files",
                  return_value=migration_files,
@@ -393,7 +395,8 @@ class SchemaSetDigestTests(unittest.TestCase):
         expected = schema_set_digest(config)
         recorded: list[str] = []
         migration_store = SimpleNamespace(
-            bootstrap=lambda _target, *, schema_set_digest: recorded.append(schema_set_digest)
+            bootstrap=lambda _target, *, schema_set_digest: recorded.append(schema_set_digest),
+            read_history=lambda *_a: {},
         )
         target_path = ROOT / "targets" / "test.json"
         metadata = Target(
@@ -410,6 +413,7 @@ class SchemaSetDigestTests(unittest.TestCase):
              patch("teamlib.release_adapter.SqlControlStore", return_value=SimpleNamespace(setup_state=lambda *_a: None)), \
              patch("teamlib.release_adapter.release_app_trees", return_value={}), \
              patch("teamlib.release_adapter._apply_release_context", return_value=None), \
+             patch("teamlib.release_adapter.plan_release", return_value=SimpleNamespace(history_digest="d" * 64)), \
              tempfile.TemporaryDirectory(prefix="team-release-digest-") as directory:
             apply_verified_release(
                 Path(directory) / "release.tar", target_path, Path(directory) / "env",
@@ -418,6 +422,43 @@ class SchemaSetDigestTests(unittest.TestCase):
             )
         self.assertEqual(recorded, [expected])
         self.assertNotIn("release", recorded)
+
+    def test_a_supplied_history_that_differs_from_live_metadata_is_refused(self):
+        live = {"m1": {"status": "REVERTED", "checksum": "a" * 64}}
+        supplied = {"m1": {"status": "APPLIED", "checksum": "a" * 64}}
+        planned_from = []
+
+        def plan_from(_archive, history, _target):
+            planned_from.append(history)
+            return SimpleNamespace(history_digest="live" if history == live else "d" * 64)
+
+        config = SimpleNamespace(
+            role="test", environment="test", tables_schema="EXAMPLE_APP",
+            code_schema="EXAMPLE_APP", metadata_schema="EXAMPLE_META",
+        )
+        metadata = Target(
+            project="example-team-apex", role="test", environment="test", connection="meta",
+            instance_id="EXAMPLE_TEST_INSTANCE", db_name="FREEPDB1", service="test-service",
+            session_user="EXAMPLE_META", current_schema="EXAMPLE_META", alias=None,
+            workspace_id=None, app_id=None, parsing_schema=None, ownership_mode="shared",
+            binding_digest="e" * 64,
+        )
+        store = SimpleNamespace(bootstrap=lambda *_a, **_kw: None, read_history=lambda *_a: live)
+        with patch("teamlib.release_adapter.load_config", return_value=config), \
+             patch("teamlib.release_adapter.verify_release", return_value=SimpleNamespace(source_commit="abc")), \
+             patch("teamlib.release_adapter.profile_target", return_value=metadata), \
+             patch("teamlib.release_adapter.SqlMigrationStore", return_value=store), \
+             patch("teamlib.release_adapter.plan_release", side_effect=plan_from), \
+             patch("teamlib.release_adapter._apply_release_context") as applied, \
+             tempfile.TemporaryDirectory(prefix="team-release-live-") as directory:
+            with self.assertRaisesRegex(ReleaseAdapterError, "does not match the live target history"):
+                apply_verified_release(
+                    Path(directory) / "release.tar", ROOT / "targets" / "test.json", Path(directory) / "env",
+                    ReleasePlan("a" * 64, "b" * 64, (), "c" * 64, {}, "d" * 64), supplied,
+                    root=Path(directory) / "state",
+                )
+        self.assertEqual(planned_from, [live])
+        applied.assert_not_called()
 
 
 class LiveReleaseAdapterTests(unittest.TestCase):

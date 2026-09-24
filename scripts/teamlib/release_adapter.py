@@ -504,6 +504,16 @@ def apply_verified_release(
     # this run -- and every later `migrate` against the same metadata schema --
     # fail with ORA-20011 SCHEMA_SET_DIGEST_MISMATCH.
     migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
+    # Plan against the live metadata history, not only the caller's copy: a
+    # stale or edited --history would skip ledger events on the target.
+    live_history = migration_store.read_history(metadata)
+    try:
+        live_plan = plan_release(release_tar, live_history, target_document)
+    except ReleaseError as exc:
+        raise ReleaseAdapterError(str(exc)) from exc
+    if live_plan.history_digest != plan.history_digest:
+        raise ReleaseAdapterError("supplied history does not match the live target history; plan the release again")
+    history = live_history
     control_store = SqlControlStore(metadata, work_root=state_root / "metadata")
     app_targets = []
     if getattr(manifest, "kind", None) == "schema":

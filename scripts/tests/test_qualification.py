@@ -916,6 +916,17 @@ class QualificationTests(unittest.TestCase):
                         self.root / f"invalid-{index}.sig",
                     )
 
+        # Sequence 0 is the untouched target's observed baseline; negatives are not.
+        from teamlib.evidence import EvidenceError, canonical_json, validate_test_evidence
+
+        def with_sequence(sequence):
+            document = {**valid, "qualification_identity": {**valid["qualification_identity"], "observation_sequence": sequence}}
+            return canonical_json(document) + b"\n"
+
+        self.assertEqual(validate_test_evidence(with_sequence(0))["qualification_identity"]["observation_sequence"], 0)
+        with self.assertRaisesRegex(EvidenceError, "non-negative"):
+            validate_test_evidence(with_sequence(-1))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -149,7 +149,11 @@ def _validate_shape(value: Mapping[str, Any]) -> None:
         raise EvidenceError("test evidence qualification identity is incomplete")
     if qualification["target_kind"] != "persistent":
         raise EvidenceError("test evidence qualification target kind must be persistent")
-    _positive_int(qualification["observation_sequence"], "observation sequence")
+    # Sequence 0 is the observed baseline of a target no migration has touched
+    # yet (an app release cut before any migration ran).
+    sequence = qualification["observation_sequence"]
+    if type(sequence) is not int or sequence < 0:
+        raise EvidenceError("test evidence observation sequence must be a non-negative integer")
 
 
 def _validate_digests(value: Mapping[str, Any]) -> None:
