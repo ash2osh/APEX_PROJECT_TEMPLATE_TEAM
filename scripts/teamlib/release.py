@@ -21,6 +21,7 @@ from .migration_bundle import BundleError, Migration, _validate_id, load_bundles
 from .migration_plan import plan_migrations
 from .trees import tree_digest
 from .runtime import RELEASE_SQLCL_BUILD
+from .sqlcl import result_is_unknown
 
 
 class ReleaseError(RuntimeError):
@@ -535,6 +536,25 @@ def release_frontier_inventory(release_tar: str | Path) -> Any:
     return _frontier_inventory(members.get(_FRONTIER_PATH))
 
 
+def release_master_contract(release_tar: str | Path) -> Mapping[str, Any] | None:
+    """Return the verified master contract packaged in a release, or None when it carries none."""
+    archive = Path(release_tar)
+    if archive.is_symlink() or not archive.is_file():
+        raise ReleaseError("release archive is not a regular file")
+    archive_digest, members = _read_archive_bytes(archive)
+    _verify_archive_members(archive, archive_digest, members)
+    raw = members.get("release/contracts/masters.json")
+    if raw is None:
+        return None
+    try:
+        contract = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError("packaged master contract is unreadable") from exc
+    if not isinstance(contract, Mapping):
+        raise ReleaseError("packaged master contract must be an object")
+    return contract
+
+
 def _verify_database_source(source: Any, kind: str) -> None:
     keys = _SCHEMA_SOURCE_KEYS_V3 if kind == "schema" else _APP_SOURCE_KEYS_V3
     if not isinstance(source, Mapping) or set(source) != keys:
@@ -720,19 +740,34 @@ def build_schema_release_from_database(
                 "master_contract_digest": None,
             },
         )
-        try:
-            store.record_release(
+        _record_or_keep(
+            manifest,
+            lambda: store.record_release(
                 metadata, kind="schema", alias=None, version=version,
                 archive_digest=manifest.archive_digest, source=source, built_by=built_by, run_token=run_token,
-            )
-        except Exception as exc:
-            manifest.archive_path.unlink(missing_ok=True)
-            if manifest.staging_dir is not None:
-                shutil.rmtree(manifest.staging_dir, ignore_errors=True)
-            raise ReleaseError(str(exc)) from exc
+            ),
+        )
         return manifest
     finally:
         store.release(metadata, run_token)
+
+
+def _record_or_keep(manifest: Manifest, record: Callable[[], Any]) -> None:
+    """Record a built release; keep the archive when the record may have committed."""
+    try:
+        record()
+    except Exception as exc:
+        if result_is_unknown(exc):
+            # TEAM_RELEASE may now bind this version to this digest; an app
+            # rebuild would not reproduce it, so the archive must survive.
+            raise ReleaseError(
+                f"release record outcome is unknown; the archive was kept at {manifest.archive_path} "
+                f"(sha256 {manifest.archive_digest}). Check TEAM_RELEASE for this version before building it again"
+            ) from exc
+        manifest.archive_path.unlink(missing_ok=True)
+        if manifest.staging_dir is not None:
+            shutil.rmtree(manifest.staging_dir, ignore_errors=True)
+        raise ReleaseError(str(exc)) from exc
 
 
 def _read_app_check_assets(repo: Path, alias: str) -> dict[str, bytes]:
@@ -971,17 +1006,14 @@ def build_app_release_from_database(
                     "master_contract_digest": master_digest,
                 },
             )
-            try:
-                migration_store.record_release(
+            _record_or_keep(
+                manifest,
+                lambda: migration_store.record_release(
                     metadata, kind="app", alias=alias, version=version,
                     archive_digest=manifest.archive_digest, source=source, built_by=built_by,
                     run_token=migration_token,
-                )
-            except Exception as exc:
-                manifest.archive_path.unlink(missing_ok=True)
-                if manifest.staging_dir is not None:
-                    shutil.rmtree(manifest.staging_dir, ignore_errors=True)
-                raise ReleaseError(str(exc)) from exc
+                ),
+            )
             return manifest
         finally:
             if migration_acquired:

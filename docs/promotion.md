@@ -16,7 +16,7 @@ scripts/team.sh --env .env build-release --kind app --alias hr --version 2.0.0 -
 scripts/team.sh verify-release scratch/release/release.tar
 ```
 
-`TEAM_RELEASE` binds a version to one archive digest. A repeated cut of the same ledger/app source is deterministic; changing the cut or app inputs under an already-used version is refused. Schema releases contain the ordered ledger events and stored migration bundles. App releases contain one captured app, its required migrations at the schema cut, checks and master contract digests. `verify-release` remains offline and can read existing format 2 handoffs as well as format 3 archives.
+`TEAM_RELEASE` binds a version to one archive digest. A repeated cut of the same ledger/app source is deterministic; changing the cut or app inputs under an already-used version is refused. Schema releases contain the ordered ledger events and stored migration bundles. App releases contain one captured app, its required migrations at the schema cut, checks and master contract digests. Release tests validate masters against the contract packaged in the archive, never the operator checkout's `targets/masters.json`. If SQLcl loses the outcome of the `TEAM_RELEASE` write, the builder keeps the archive and reports its path and digest; check `TEAM_RELEASE` for that version before building it again, because an app rebuild will not reproduce the same digest. `verify-release` remains offline and can read existing format 2 handoffs as well as format 3 archives.
 
 ## Run, sign and generate the owner runbook
 

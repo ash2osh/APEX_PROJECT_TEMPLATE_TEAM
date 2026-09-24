@@ -666,13 +666,23 @@ class LiveReleaseAdapterTests(unittest.TestCase):
                 deploy_application("hr", {}, p)
             return ApplyReport("applied", p.pending, manifest.archive_digest)
 
+        packaged = {"masters": [{"alias": "hr"}]}
+        contracts = []
+
+        def fake_deploy(target, *a, **kw):
+            deploy_spy.append(target.alias)
+            contracts.append(kw.get("master_contract"))
+
         with patch("teamlib.release_adapter.release_migration_files", return_value={}), \
+             patch("teamlib.release_adapter.release_master_contract", return_value=packaged), \
              patch("teamlib.release_adapter.apply_release", side_effect=fake_apply), \
              patch("teamlib.release_adapter.apply_plan", side_effect=lambda *a, **kw: migration_spy.append("migrate")), \
-             patch("teamlib.release_adapter.deploy_app", side_effect=lambda target, *a, **kw: deploy_spy.append(target.alias)):
+             patch("teamlib.release_adapter.deploy_app", side_effect=fake_deploy):
             report = _apply_release_context(context, self.context_file("release.tar"), plan, {"m1": {"status": "APPLIED", "checksum": "a" * 64}}, repo=Path("/tmp"))
         self.assertEqual(migration_spy, [])
         self.assertEqual(deploy_spy, ["hr"])
+        # The packaged contract, not the operator repository's copy, is validated.
+        self.assertEqual(contracts, [packaged])
         self.assertEqual(report.status, "applied")
 
     def test_app_archive_refuses_when_requirement_unavailable(self):

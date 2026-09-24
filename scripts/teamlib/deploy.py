@@ -50,6 +50,10 @@ def _capture_destination(target: Target, repo: Path, root: Path, store: ControlS
     return tree, result, work
 
 
+# Default: validate against the operator repository's targets/masters.json.
+_REPO_MASTER_CONTRACT = object()
+
+
 def deploy_app(
     target: Target,
     source_tree: Tree,
@@ -60,7 +64,9 @@ def deploy_app(
     root: str | Path | None = None,
     control_store: ControlStore | None = None,
     runner: Callable[..., Any] = run_sqlcl,
+    master_contract: Mapping[str, Any] | None | object = _REPO_MASTER_CONTRACT,
 ) -> DeployReport:
+    """Deploy an exact tree; a release passes its packaged master contract (or None)."""
     if target.role not in {"integration", "test", "replay"}:
         raise DeployError("deploy-app requires integration, test, or replay role")
     if target.environment == "production":
@@ -97,12 +103,18 @@ def deploy_app(
             current, _, _ = _capture_destination(target, repo_path, state_root, store, runner, token)
             recovery_id = save_capture(target, {}, {}, source_commit, current, {"kind": "deployment", "tree_digest": tree_digest(current)}, root=state_root)
         contract_path = repo_path / "targets" / "masters.json"
-        if contract_path.is_file():
+        contract: Any = master_contract
+        if contract is _REPO_MASTER_CONTRACT:
+            try:
+                contract = json.loads(contract_path.read_text(encoding="utf-8")) if contract_path.is_file() else None
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise DeployError(f"master contract validation failed: {exc}") from exc
+        if contract is not None:
             try:
                 validate_masters(
                     source_tree,
                     target,
-                    json.loads(contract_path.read_text(encoding="utf-8")),
+                    contract,
                     component_resolver=apex_component_resolver(
                         runner=runner,
                         work_root=state_root / "master-checks",

@@ -26,6 +26,7 @@ from .release import (
     _database_release_replay_marker,
     apply_release,
     release_app_trees,
+    release_master_contract,
     release_migration_files,
     plan_release,
     verify_release,
@@ -267,12 +268,20 @@ def _apply_release_context(
             )
 
         target_by_alias = {target.alias: target for target in context.app_targets}
+        # Validate against the contract the release was built with, not the
+        # operator repository's copy, which may differ or be absent.
+        packaged_contract: list[Mapping[str, Any] | None] = []
         deploy_root = context.deploy_root or (repo / ".sync-state" / "release" / "application")
 
         def deploy_application(alias: str, tree: Mapping[str, bytes], _reviewed: ReleasePlan) -> None:
             target = target_by_alias.get(alias)
             if target is None:
                 raise ReleaseAdapterError(f"release application target is missing: {alias}")
+            if not packaged_contract:
+                try:
+                    packaged_contract.append(release_master_contract(release_tar))
+                except ReleaseError as exc:
+                    raise ReleaseAdapterError(str(exc)) from exc
             source_identity = getattr(context.manifest, "source", None)
             deploy_source = context.manifest.source_commit
             if source_identity is not None:
@@ -285,6 +294,7 @@ def _apply_release_context(
                 repo=repo,
                 root=deploy_root,
                 control_store=context.control_store,
+                master_contract=packaged_contract[0],
             )
 
         try:

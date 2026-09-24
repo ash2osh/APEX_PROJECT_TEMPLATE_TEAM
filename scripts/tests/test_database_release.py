@@ -19,6 +19,7 @@ from teamlib.fingerprints import inventory_from_rows
 from teamlib.migrate import apply_forward, apply_plan, apply_redo, apply_undo
 from teamlib.migration_store import MigrationStore, MigrationStoreError
 from teamlib.control_store import ControlStore
+from teamlib.sqlcl import SqlclUnknownResult
 from teamlib.release import (
     ReleaseError,
     _canonical,
@@ -29,6 +30,7 @@ from teamlib.release import (
     apply_release,
     plan_release,
     release_frontier_inventory,
+    release_master_contract,
     release_migration_files,
     verify_release,
 )
@@ -194,6 +196,30 @@ class DatabaseReleaseTests(unittest.TestCase):
             data["bundles"].clear()
         with self.assertRaisesRegex(ReleaseError, "adopt-migration-members"):
             self.build()
+
+    def test_an_unknown_record_outcome_keeps_the_archive(self):
+        self.ledger_with_a_revert()
+
+        def lost(*_args, **_kwargs):
+            raise MigrationStoreError("release record failed") from SqlclUnknownResult("SQLcl timed out; target state is unknown")
+
+        self.store.record_release = lost
+        with self.assertRaisesRegex(ReleaseError, "outcome is unknown; the archive was kept") as caught:
+            self.build()
+        kept = [path for path in (self.root / "out").rglob("*.tar")] if (self.root / "out").exists() else []
+        self.assertTrue(kept, str(caught.exception))
+        self.store.acquire(self.target, "after-unknown", "worker", "host")
+
+    def test_a_refused_record_removes_the_archive(self):
+        self.ledger_with_a_revert()
+
+        def refused(*_args, **_kwargs):
+            raise MigrationStoreError("release schema/v1.0.0 is already bound to a different archive")
+
+        self.store.record_release = refused
+        with self.assertRaisesRegex(ReleaseError, "already bound"):
+            self.build()
+        self.assertEqual(list((self.root / "out").rglob("*.tar")) if (self.root / "out").exists() else [], [])
 
     def test_a_frontier_that_moved_after_the_drift_check_is_refused(self):
         self.ledger_with_a_revert()
@@ -605,6 +631,7 @@ class AppDatabaseReleaseTests(unittest.TestCase):
         self.assertEqual(verified.source["history_cut"], 0)
         self.assertEqual(verified.source["master_contract_digest"], hashlib.sha256((self.repo / "targets" / "masters.json").read_bytes()).hexdigest())
         self.assertEqual(verified.source["app_checks_digest"], verified.app_checks_digest)
+        self.assertEqual(release_master_contract(manifest.archive_path), {"version": 1, "masters": []})
         self.assertEqual(verified.required_migrations, ())
         self.assertIn("app/hr/v1.2.3", self.migration_store.releases)
         self.assertIsNone(self.app_store.read_app_sync_state(self.app.physical_key).owner_token)
