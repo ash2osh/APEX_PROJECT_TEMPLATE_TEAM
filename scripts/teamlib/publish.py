@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from .apex import (
     ApexError,
+    ImportUnknown,
     _git_head,
     _receipt_allows_import,
     capture_app,
@@ -105,6 +106,17 @@ def _authorize_observed_app(
             f"Application '{target.alias}' differs from verified baseline; export-app and reconcile before publishing"
         )
     return baseline.tree_digest if baseline is not None else None
+
+
+def _require_roster_unchanged(
+    store: ControlStore | SqlControlStore, target: Target, expected: Sequence[str]
+) -> None:
+    try:
+        current = {entry.checkout_uuid for entry in store.list_registry(target)}
+    except Exception as exc:
+        raise PublishError(f"Cannot refresh checkout roster for '{target.alias}': {exc}") from exc
+    if current != set(expected):
+        raise PublishError(f"Application '{target.alias}' checkout roster changed after preparation; prepare again")
 
 
 def prepare_publish(
@@ -471,6 +483,12 @@ def publish_prepared(
         if tree_digest(recapture.tree) != prep.apps[alias]["tree_digest"]:
             raise PublishError(f"Application '{alias}' changed after preparation; publish refused before write")
 
+        # Page-lock inspection is an external read. Check authorization and
+        # roster after it so a change during the report cannot pass preflight.
+        refreshed_locks = lock_reader(target, runner=runner)
+        if refreshed_locks.status != "KNOWN":
+            raise PublishError(f"Refreshed page locks for '{alias}' is UNKNOWN; publish refused before write")
+
         try:
             selected_tree = read_git_tree(repo_path, prep.source_commit, alias)
         except TreeError as exc:
@@ -482,17 +500,7 @@ def publish_prepared(
         if baseline_digest != prep.apps[alias]["baseline_digest"]:
             raise PublishError(f"Application '{alias}' baseline changed after preparation; publish refused before write")
 
-        try:
-            current_roster = {entry.checkout_uuid for entry in store.list_registry(target)}
-        except Exception as exc:
-            raise PublishError(f"Cannot refresh checkout roster for '{alias}': {exc}") from exc
-        if current_roster != set(prep.apps[alias]["roster"]):
-            raise PublishError(f"Application '{alias}' checkout roster changed after preparation; prepare again")
-
-        # Refresh lock report
-        refreshed_locks = lock_reader(target, runner=runner)
-        if refreshed_locks.status != "KNOWN":
-            raise PublishError(f"Refreshed page locks for '{alias}' is UNKNOWN; publish refused before write")
+        _require_roster_unchanged(store, target, prep.apps[alias]["roster"])
 
         preflight_targets.append(target)
 
@@ -515,6 +523,9 @@ def publish_prepared(
 
         replace_id = prep.apps[alias].get("replace_from")
         try:
+            # A previous app import takes time; never import this app if a
+            # checkout registered after the all-app preflight.
+            _require_roster_unchanged(store, target, prep.apps[alias]["roster"])
             baseline = import_app(
                 target,
                 prep.source_commit,
@@ -523,6 +534,7 @@ def publish_prepared(
                 root=state_root,
                 control_store=store,
                 runner=runner,
+                expected_roster=frozenset(prep.apps[alias]["roster"]),
             )
             op_id = baseline.operation_id
             if not op_id:
@@ -550,6 +562,8 @@ def publish_prepared(
                 alias=alias,
                 status=app_status,
                 verified=False,
+                operation_id=exc.operation_id if isinstance(exc, ImportUnknown) else None,
+                recovery_path=str(exc.recovery_path) if isinstance(exc, ImportUnknown) else None,
                 error=failed_error,
             )
 

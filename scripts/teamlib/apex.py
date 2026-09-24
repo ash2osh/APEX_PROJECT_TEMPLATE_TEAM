@@ -41,6 +41,15 @@ class ApexError(RuntimeError):
     """Raised when a verified APEX operation cannot safely continue."""
 
 
+class ImportUnknown(ApexError):
+    """An import may have written the target; its recovery capture is retained."""
+
+    def __init__(self, message: str, operation_id: str, recovery_path: Path):
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.recovery_path = recovery_path
+
+
 class ExportConflict(ApexError):
     def __init__(self, message: str, *, decision: Decision, recovery_id: str):
         super().__init__(message)
@@ -401,6 +410,7 @@ def import_app(
     checkout_uuid: str = "local-checkout",
     host: str = "local",
     user: str = "developer",
+    expected_roster: frozenset[str] | None = None,
     announce: Callable[[str], None] = print,
 ) -> Baseline:
     if target.role != "developer" or target.environment != "development":
@@ -415,11 +425,27 @@ def import_app(
         selected_tree = read_git_tree(repo_path, resolved, target.alias or "")
     except (TreeError, ApexError) as exc:
         raise ApexError(str(exc)) from exc
+    acquired = False
     try:
-        store.register_app(target, checkout_uuid, host, user)
+        # A prepared publish already has an acknowledged roster. Do not add a
+        # synthetic checkout that was absent from its pause notice.
+        if expected_roster is None:
+            store.register_app(target, checkout_uuid, host, user)
         run_token = uuid.uuid4().hex
         store.acquire_app(target.physical_key, run_token, checkout_uuid, host, user)
-    except ControlStoreError as exc:
+        acquired = True
+        if expected_roster is not None:
+            current_roster = frozenset(entry.checkout_uuid for entry in store.list_registry(target))
+            if current_roster != expected_roster:
+                raise ApexError("checkout roster changed after publish preflight; prepare again")
+    except (ControlStoreError, ApexError) as exc:
+        if acquired:
+            try:
+                store.release_app(target.physical_key, run_token, confirmed_success=False)
+            except ControlStoreError:
+                pass
+        if isinstance(exc, ApexError):
+            raise
         raise ApexError(str(exc)) from exc
     try:
         observed = observe_app_identity(target, runner=runner, work_dir=state_root)
@@ -529,7 +555,11 @@ def import_app(
         if payload_started:
             if isinstance(exc, SqlclError):
                 # The SQLcl worker's result is unknown; retain the owner token.
-                raise ApexError(f"import result is unknown; recover app lock with retained evidence: {exc}") from exc
+                raise ImportUnknown(
+                    f"import result is unknown; recover app lock with retained evidence: {exc}",
+                    current.recovery_id,
+                    state_root / "recovery" / current.recovery_id,
+                ) from exc
             try:
                 store.release_app(target.physical_key, run_token, confirmed_success=False)
             except ControlStoreError:

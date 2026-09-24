@@ -14,6 +14,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from teamlib.apex_validate import ValidationReport
 from teamlib.config import Target, load_config, profile_target
@@ -725,6 +726,73 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertIn("generation", str(ctx.exception).lower())
         self.assertEqual(self.write_calls, [])
 
+    def test_registration_during_final_lock_report_refuses_before_any_write(self):
+        def registering_lock_reader(target, **kwargs):
+            if target.alias == "payroll":
+                self.store.register_app(self.target_payroll, "late-pay-uuid", "host-3", "carol")
+            return self.lock_reader(target, **kwargs)
+
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo, self.prep.preparation_id, self.acks,
+                confirm_pause=True, config=self.config, store=self.store,
+                runner=self.fake_runner, lock_reader=registering_lock_reader,
+            )
+        self.assertIn("roster", str(ctx.exception).lower())
+        self.assertEqual(self.write_calls, [])
+
+    def test_baseline_removed_during_final_lock_report_refuses_before_any_write(self):
+        def removing_lock_reader(target, **kwargs):
+            if target.alias == "payroll":
+                baseline = self.repo / ".sync-state" / "baselines" / target.state_key / "baseline.json"
+                baseline.unlink()
+            return self.lock_reader(target, **kwargs)
+
+        with self.assertRaises(PublishError) as ctx:
+            publish_prepared(
+                self.repo, self.prep.preparation_id, self.acks,
+                confirm_pause=True, config=self.config, store=self.store,
+                runner=self.fake_runner, lock_reader=removing_lock_reader,
+            )
+        self.assertIn("baseline", str(ctx.exception).lower())
+        self.assertEqual(self.write_calls, [])
+
+    def test_new_checkout_during_first_import_blocks_second_app_import(self):
+        def registering_runner(target, operation, driver, work, **kwargs):
+            result = self.fake_runner(target, operation, driver, work, **kwargs)
+            if operation == "write" and target.alias == "hr":
+                self.store.register_app(self.target_payroll, "late-pay-uuid", "host-3", "carol")
+            return result
+
+        with self.assertRaises(PublishError):
+            publish_prepared(
+                self.repo, self.prep.preparation_id, self.acks,
+                confirm_pause=True, config=self.config, store=self.store,
+                runner=registering_runner, lock_reader=self.lock_reader,
+            )
+        self.assertEqual(self.write_calls, [("hr", "write")])
+        journal = self.repo / ".sync-state" / "publish" / self.prep.preparation_id / "result.json"
+        data = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall_status"], "PARTIAL")
+        self.assertEqual(data["apps"]["payroll"]["status"], "FAILED")
+
+    def test_registration_just_before_second_import_is_rechecked_under_mutex(self):
+        from teamlib.apex import import_app as real_import_app
+
+        def register_before_import(target, *args, **kwargs):
+            if target.alias == "payroll":
+                self.store.register_app(self.target_payroll, "late-pay-uuid", "host-3", "carol")
+            return real_import_app(target, *args, **kwargs)
+
+        with patch("teamlib.publish.import_app", side_effect=register_before_import):
+            with self.assertRaises(PublishError):
+                publish_prepared(
+                    self.repo, self.prep.preparation_id, self.acks,
+                    confirm_pause=True, config=self.config, store=self.store,
+                    runner=self.fake_runner, lock_reader=self.lock_reader,
+                )
+        self.assertEqual(self.write_calls, [("hr", "write")])
+
     def test_unknown_lock_report_refuses_with_zero_writes(self):
         def failing_lock_reader(target, **kwargs):
             return LockReport(target.alias, 101, "UNKNOWN", (), "APEX_APPLICATION_LOCKED_PAGES")
@@ -812,6 +880,11 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertFalse(data["all_clear_allowed"])
         self.assertEqual(data["apps"]["hr"]["status"], "VERIFIED")
         self.assertEqual(data["apps"]["payroll"]["status"], "UNKNOWN")
+        operation_id = data["apps"]["payroll"]["operation_id"]
+        self.assertIsNotNone(operation_id)
+        recovery_path = Path(data["apps"]["payroll"]["recovery_path"])
+        self.assertEqual(recovery_path.name, operation_id)
+        self.assertTrue(recovery_path.is_dir())
 
 
 

@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[2]
 class DocumentationTests(unittest.TestCase):
     def test_readme_bash_examples_have_valid_shell_syntax(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        blocks = re.findall(r"(?ms)^```bash\n(.*?)^```$", readme)
-        self.assertTrue(blocks)
+        blocks = re.findall(r"(?ms)^[ \t]*```bash[ \t]*\n(.*?)^[ \t]*```[ \t]*$", readme)
+        self.assertEqual(len(blocks), 7)
         for block in blocks:
             result = subprocess.run(["bash", "-n"], input=block, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)

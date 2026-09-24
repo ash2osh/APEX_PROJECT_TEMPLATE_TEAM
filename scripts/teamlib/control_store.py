@@ -210,7 +210,9 @@ class ControlStore:
             raise ControlStoreError("checkout UUID, host and user are required")
         key = target.physical_key
         with self._locked() as data:
-            self._require_mutex(data, key)
+            mutex = self._require_mutex(data, key)
+            if mutex.get("owner_token") is not None:
+                raise MutexHeld("cannot register a checkout while the application import mutex is held")
             registry = data["registry"].setdefault(key, {})
             if target.ownership_mode == "single":
                 other = next((value for uuid, value in registry.items() if uuid != checkout_uuid), None)
@@ -529,7 +531,19 @@ BEGIN
           {_sql_literal(checkout_uuid)}, {_sql_literal(registered_by_user)}, {_sql_literal(capture_recovery_id)});
 """
             transfer_sql += "END;\n/"
+        registration_guard = f"""
+DECLARE v_owner VARCHAR2(128);
+BEGIN
+  BEGIN
+    SELECT owner_token INTO v_owner FROM TEAM_APP_MUTEX
+     WHERE target_key = {_sql_literal(key)} FOR UPDATE NOWAIT;
+  EXCEPTION WHEN NO_DATA_FOUND THEN RAISE_APPLICATION_ERROR(-20004, 'CONTROL_SETUP_REQUIRED'); END;
+  IF v_owner IS NOT NULL THEN RAISE_APPLICATION_ERROR(-20001, 'MUTEX_HELD:' || v_owner); END IF;
+END;
+/
+"""
         payload = f"""
+{registration_guard}
 {transfer_sql}
 MERGE INTO TEAM_APP_REGISTRY d
 USING (SELECT {_sql_literal(key)} target_key, {_sql_literal(checkout_uuid)} checkout_uuid,
@@ -549,7 +563,9 @@ COMMIT;
             text = str(exc)
             if "CONTROL_SETUP_REQUIRED" in text:
                 raise SetupRequired(f"target {key} has not been bootstrapped; run setup-state") from exc
-            if "SINGLE_OWNER_HELD:" in text or "ORA-00054" in text:
+            if "MUTEX_HELD:" in text or "ORA-00054" in text:
+                raise MutexHeld("application import mutex is held; retry checkout registration after publish") from exc
+            if "SINGLE_OWNER_HELD:" in text:
                 raise MutexHeld("single-owner target already has a registered checkout") from exc
             if "TRANSFER_SOURCE_MISSING" in text:
                 raise ControlStoreError("single-owner transfer source is not registered") from exc

@@ -10,6 +10,7 @@ if _SCRIPTS_DIR not in sys.path:
 import base64
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -48,6 +49,14 @@ class ControlStoreTests(unittest.TestCase):
         sync = self.store.read_app_sync_state(self.target.physical_key)
         self.assertEqual(sync.generation, 1)
         self.assertIsNone(sync.owner_token)
+
+    def test_registration_refuses_while_app_import_mutex_is_held(self):
+        self.store.setup_state([self.target])
+        self.store.register_app(self.target, "checkout-a", "host-a", "alice")
+        self.store.acquire_app(self.target.physical_key, "run-a", "checkout-a", "host-a", "alice")
+        with self.assertRaises(MutexHeld):
+            self.store.register_app(self.target, "checkout-b", "host-b", "bob")
+        self.assertEqual([entry.checkout_uuid for entry in self.store.list_registry(self.target)], ["checkout-a"])
 
     def test_acquire_release_and_generation(self):
         self.store.setup_state([self.target])
@@ -214,6 +223,30 @@ class SqlControlStoreContractTests(unittest.TestCase):
             "ControlStore.acquire_app and breaks any caller that reads the result",
         )
         self.assertEqual(observed.target_key, "key")
+
+    def test_registration_sql_refuses_an_owned_app_mutex_before_merge(self):
+        target = Target(**{
+            **self.metadata.__dict__,
+            "alias": "checkout", "workspace_id": 10, "app_id": 100,
+            "parsing_schema": "DEMO",
+        })
+        writes = []
+        values = [target.physical_key, "checkout-b", "host-b", "bob", "2026-09-24T00:00:00Z"]
+        encoded = "|".join(base64.b64encode(value.encode()).decode() for value in values)
+
+        def runner(_target, operation, driver, _work, **kwargs):
+            if operation == "write":
+                writes.append(Path(driver).read_text(encoding="utf-8"))
+                return SimpleNamespace(stdout="")
+            return SimpleNamespace(stdout=f"TEAM_REGISTRY|{encoded}\n")
+
+        store = SqlControlStore(self.metadata, runner=runner, work_root=Path(self.temp.name))
+        store.register_app(target, "checkout-b", "host-b", "bob")
+        self.assertEqual(len(writes), 1)
+        guard = writes[0].find("IF v_owner IS NOT NULL THEN RAISE_APPLICATION_ERROR(-20001")
+        merge = writes[0].find("MERGE INTO TEAM_APP_REGISTRY")
+        self.assertGreaterEqual(guard, 0)
+        self.assertGreater(merge, guard)
 
     def test_every_mutex_transition_returns_a_state(self):
         import inspect
