@@ -86,6 +86,22 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("production-history.json", release)
         self.assertIn("Remove protected handoff inputs", release)
 
+    def test_signing_key_only_exists_after_the_evidence_is_produced(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        run_test = release.index("run-release-test")
+        for token in ("TEAM_TEST_SIGNING_KEY_CONTENT", "test-signing-key.pem"):
+            self.assertGreater(release.index(token), run_test, f"{token} must not appear before run-release-test")
+        self.assertIn("trap 'rm -f \"$RUNNER_TEMP/test-signing-key.pem\"' EXIT", release)
+
+    def test_actions_are_pinned_by_sha_and_checkouts_drop_credentials(self):
+        import re
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            text = workflow.read_text(encoding="utf-8")
+            for ref in re.findall(r"uses:\s*(\S+)", text):
+                self.assertRegex(ref, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$", f"{workflow.name}: {ref}")
+            checkouts = text.count("uses: actions/checkout@")
+            self.assertEqual(text.count("persist-credentials: false"), checkouts, workflow.name)
+
     def test_release_tags_and_namespacing(self):
         from teamlib.release import ReleaseError, validate_release_identity
         commit_a = "a" * 40
