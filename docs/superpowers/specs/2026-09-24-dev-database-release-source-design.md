@@ -160,6 +160,8 @@ Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 bind
 
 ## Delivery phases
 
+Open items and their order are tracked in `docs/pending-work.md`.
+
 | Phase | Change | Depends on |
 |---|---|---|
 | 0 | Security fixes (identity guard, signing key, credentials) — PR #1 | — |
@@ -177,4 +179,4 @@ Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 bind
 - **Work-in-progress leakage** through the cut rule (decision 1).
 - **Export determinism:** app trees must be byte-stable across SQLcl versions; the toolchain pin (`sqlcl 26.2.1+`) should become an exact version for release builds.
 - **Check drift between repositories** (decision 2): releases built from different repositories may qualify against different checks.
-- **Metadata upgrade:** existing installations need `setup-state` to add two tables without touching recorded history.
+- **Metadata upgrade:** existing installations get `TEAM_MIGRATION_BUNDLE`, `TEAM_MIGRATION_MEMBER` and `TEAM_RELEASE` from the idempotent migration bootstrap (`migrate --bootstrap`, `adopt-frontier`, `adopt-migration-members`, `build-schema-release`) without touching recorded history.
