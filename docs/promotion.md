@@ -21,16 +21,37 @@ Symlinks, credentials, deployment bindings, logs, and sync state are not
 packaged. Production `apply-release` remains refused. No automated production
 write is authorized.
 
+**Production read-only is enforced by the database, not by this tool.** Before a
+production read, `team.py` refuses any driver statement that is not a query or a
+display setting. That check is a keyword-level safety net: a `SELECT` that calls
+a function with side effects, or a query reaching `DBMS_SQL`, can still pass it.
+Give the production SQLcl connection a dedicated account with `CREATE SESSION` and
+`SELECT`/`READ` on the dictionary and APEX views it needs, and nothing else — no
+`EXECUTE` on packages with side effects, no DML or DDL privileges. With that
+account the guard can only ever be redundant.
+
 ## Protected test run
 
 The release workflow serializes protected test use with concurrency group
 `example-team-apex-test` and `cancel-in-progress: false`; it never interrupts a
 target between migration, application deployment, and qualification. It
 downloads and verifies the same archive, then runs on
-`runs-on: [self-hosted, team-apex, test]` in environment `test`. It materializes
-the protected profile, signing key, public trust key, and production history
-below `$RUNNER_TEMP` with mode 0600, and removes those bounded files in an
-`always()` cleanup step. It invokes exactly one online command:
+`runs-on: [self-hosted, team-apex, test]` in environment `test`, in two jobs:
+
+- `qualify` checks out the tag, materializes only the protected profile below
+  `$RUNNER_TEMP` (mode 0600, removed in an `always()` step), runs the one online
+  command below and hands `test-evidence.json` on as an artifact. It never sees
+  the signing key.
+- `sign-and-handoff` checks out the protected **default branch**, never the tag, so
+  the only code that runs next to the key is reviewed code. It verifies the
+  archive again, signs the evidence (the key exists only inside that step and is
+  deleted when it exits) and generates the runbook from the public trust key and
+  production history. A compromised tag can still forge its own run's evidence,
+  since qualifying a release means running it, but it can no longer read the key
+  and forge evidence for other releases. Every action is pinned by
+commit SHA and every checkout sets `persist-credentials: false`, so no GitHub
+token is left in a self-hosted runner's workspace. It invokes exactly one online
+command:
 
 ```text
 scripts/team.py --env "$RUNNER_TEMP/test.env" run-release-test \

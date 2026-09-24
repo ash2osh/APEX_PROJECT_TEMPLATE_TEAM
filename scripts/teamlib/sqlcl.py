@@ -395,7 +395,13 @@ def run_sqlcl(
     timeout: float | None = None,
     secrets: tuple[str, ...] = (),
 ) -> SqlResult:
-    """Run one verified SQLcl process with a regular empty stdin file."""
+    """Run one verified SQLcl process with a regular empty stdin file.
+
+    The driver, payload copy, stdin placeholder and log stay in ``work`` as run evidence
+    (recovery records may point at them) unless ``secrets`` are given; ``team.py
+    prune-scratch`` applies retention. Production read-only relies on a read-only
+    database account; ``_assert_production_read_only`` is only a keyword safety net.
+    """
     resolved_timeout = _resolve_timeout(timeout)
     if not isinstance(secrets, tuple) or any(not isinstance(secret, str) or not secret for secret in secrets):
         raise SqlclError("SQLcl secret scrub values must be non-empty strings")
