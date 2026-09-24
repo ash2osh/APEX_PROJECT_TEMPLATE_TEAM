@@ -104,6 +104,44 @@ class DocumentationTests(unittest.TestCase):
                 continue
             self.assertIn(cmd, subcommands, f"Command {cmd} found in README is not recognized in team CLI")
 
+    def test_agent_contract_and_runbook_alignment(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        for token in (
+            "APEX 26.1+",
+            "APEXlang",
+            "Builder",
+            "prepare-publish",
+            "publish-app",
+            "app-scoped",
+            "acknowledgement",
+            "lock",
+            "before/after",
+            "selected",
+            "production",
+            ".sync-state/",
+        ):
+            self.assertIn(token.lower(), agents.lower(), f"AGENTS.md missing {token}")
+
+        operator_paths = [
+            ROOT / "README.md",
+            ROOT / ".env.example",
+            *[
+                path
+                for path in sorted((ROOT / "docs").glob("*.md"))
+                if path.name not in {"design-review-resolution.md", "local-three-developer-e2e.md"}
+            ],
+            ROOT / "docs" / "working-on-apex-together.html",
+            ROOT / "ci" / "app-checks" / "README.md",
+        ]
+        operator_docs = "\n".join(path.read_text(encoding="utf-8") for path in operator_paths)
+        for forbidden in (
+            "all apps pause for one import",
+            "all applications pause for one import",
+            "all apps deploy for one app release",
+            "deploys every configured application for a single release",
+        ):
+            self.assertNotIn(forbidden, operator_docs.lower())
+
     def test_persistent_qualification_documentation_matches_the_contract(self):
         paths = (
             ROOT / "README.md",

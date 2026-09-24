@@ -585,7 +585,7 @@
 
 <span class="c-com">// now — git decides, the database follows</span>
    files  ◀──export──  the shared app      <span class="c-good">(merge, never replace)</span>
-   files  ──import──▶  the shared app      <span class="c-warn">(rare, whole team pauses)</span></pre>
+   files  ──publish─▶  the shared app      <span class="c-warn">(rare, selected app pauses)</span></pre>
     </div>
 
     <div class="col">
@@ -678,9 +678,9 @@ git push</pre>
     <div class="note bad col">
       <div class="note-label">Import is not a daily command</div>
       <p>
-        <em class="term">import-app</em> overwrites the application
-        <em>everyone</em> is working in — including unexported work belonging to
-        people who didn't run it. It's a coordinated reset, done with the team
+        <em class="term">publish-app</em> (or recovery <em class="term">import-app</em>) overwrites the application
+        the team is working in — including unexported work belonging to
+        people who didn't run it. It's a coordinated publish, done with the selected app
         paused, not a way to refresh your copy. If anyone has unexported work in
         there, the tool refuses and tells you to export it first. That refusal
         is the most important one in the whole system.

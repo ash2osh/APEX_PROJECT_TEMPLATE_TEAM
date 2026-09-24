@@ -1,30 +1,23 @@
 # Team APEX agent contract
 
-This repository is a shared-application workflow. The logical application
-alias is stable across developers; `apps/<alias>/` is the tracked APEXlang and
-binary source. The development workspace and application ID are shared by the
-team, so a Git branch does not isolate Builder state.
+This repository is a shared-application workflow supporting APEX 26.1+ and APEXlang only. The logical application alias is stable across developers; `apps/<alias>/` is the tracked APEXlang source. The development workspace and application ID are shared by the team, so a Git branch does not isolate Builder state.
 
-- Route APEX edits to `apps/<alias>/`; route schema intent to an immutable pair
-  under `migrations/`; route canonical database evidence to replay output.
-- Check `app_context/<alias>/` before complex app work. Keep deployment bindings
-  credential-free and keep local defaults out of Git.
-- The daily Builder loop is build, `export-app`, review, and commit. There is
-  no import step in the normal edit loop. An export is the team's observed
-  application state, not “my changes”.
-- `import-app` overwrites the shared application. Never use it to refresh,
-  reset, or discard Builder work. It requires a verified baseline/receipt,
-  team pause, exact source, and verified re-export.
-- Before database writes, inspect drift and use the qualified SQLcl adapter.
-  Production writes are refused. Development/test metadata bootstrap, setup,
-  adoption and recovery run only through the isolated METADATA profile and
-  retain their evidence; production-classified versions of those operations
-  remain refused. No command commits or pushes automatically.
-- Recovery captures and journals belong under `.sync-state/` and survive
-  process failure. Do not repair a refusal by importing over the workspace.
-- A migration applied to the shared schema must be merged promptly: a
-  colleague's export can carry a page that depends on an unmerged bundle.
+## Three Authoring Routes
 
-Uncaptured/transient Builder edits and arbitrary DML outside the supported
-inventory remain outside what the tooling can observe. Say that boundary when
-reporting results.
+1. **Builder-first route:** Make edits in Builder, run `scripts/team.sh export-app <alias>`, review changes, and commit. There is no import in the normal Builder-first loop; export reflects the team's observed state.
+2. **File-first / Agent APEXlang route:** When editing APEXlang directly or using an AI coding agent:
+   - Edit `apps/<alias>/`, review, and commit exact source.
+   - Run `scripts/team.sh prepare-publish <alias> --ref HEAD` to generate an app-scoped pause notice and durable evidence.
+   - Gather genuine teammate checkout acknowledgements (never invent fictitious acknowledgements or bypass gates).
+   - Run `scripts/team.sh publish-app --prepared <id> --confirm-pause --ack <alias>:<uuid>`.
+3. **Schema migration route:** Author immutable pairs under `migrations/`; verify drift and apply only through the qualified METADATA profile. Merged migrations apply to shared TABLES/CODE schemas.
+
+## Guards, Locks & Boundaries
+
+- **App-scoped pause:** Publishing pauses only the selected applications. Teammates working on sibling apps continue editing uninterrupted.
+- **Informational page-lock report:** Page-lock reports query `APEX_APPLICATION_LOCKED_PAGES`. The absence of locks does not prove the absence of unsaved or in-progress Builder work. Always communicate before publish.
+- **Before/after check:** Preflight captures live Builder state before writes and halts on unreconciled edits; post-import verifies that re-exported APEXlang matches exact source bytes.
+- **Independent releases:** Release tags are `schema/v<semver>` (applied once to shared schema) and `app/<alias>/v<semver>` (deploys only the selected app after verifying schema prerequisites; zero sibling app deployments).
+- **Production refusal:** Production writes remain strictly refused. CI test runs emit signed evidence and offline owner runbooks; live actions are never automated in production.
+- **Durable recovery:** Recovery captures and journals belong under `.sync-state/` and survive process failure. Never clear locks or repair refusals by importing over the workspace.
+- **Evidence truth:** Never claim unavailable live checks passed. If an environment or flow check is unavailable, record `UNKNOWN`. Never silently commit or push to Git.
