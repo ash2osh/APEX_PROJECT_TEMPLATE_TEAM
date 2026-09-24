@@ -55,7 +55,9 @@ jobs:
           path: scratch/release/release.tar
           if-no-files-found: error
 
-  test-and-handoff:
+  qualify:
+    # Runs the release's own code against the protected test target. It never sees the signing key:
+    # a compromised tag could forge this run's evidence, but it cannot steal the key to forge others.
     needs: build
     runs-on: [self-hosted, team-apex, test]
     environment: test
@@ -70,24 +72,17 @@ jobs:
           path: scratch/release
       - name: Verify downloaded bytes
         run: PYTHONPATH=scripts python3 scripts/team.py verify-release scratch/release/release.tar
-      - name: Materialize protected handoff inputs
+      - name: Materialize protected test profile
         env:
           TEAM_TEST_ENV_CONTENT: ${{ secrets.TEAM_TEST_ENV_CONTENT }}
-          TEAM_TRUST_KEY_CONTENT: ${{ vars.TEAM_TRUST_KEY_CONTENT }}
-          TEAM_PRODUCTION_HISTORY_CONTENT: ${{ vars.TEAM_PRODUCTION_HISTORY_CONTENT }}
         run: |
           test -n "$TEAM_TEST_ENV_CONTENT"
-          test -n "$TEAM_TRUST_KEY_CONTENT"
-          test -n "$TEAM_PRODUCTION_HISTORY_CONTENT"
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
           test ! -e .env
           test ! -e targets/production.env
           umask 077
           printf '%s\n' "$TEAM_TEST_ENV_CONTENT" > "$RUNNER_TEMP/test.env"
-          printf '%s\n' "$TEAM_TRUST_KEY_CONTENT" > "$RUNNER_TEMP/test-trust-key.pem"
-          printf '%s\n' "$TEAM_PRODUCTION_HISTORY_CONTENT" > "$RUNNER_TEMP/production-history.json"
-          chmod 600 "$RUNNER_TEMP/test.env" "$RUNNER_TEMP/test-trust-key.pem" \
-            "$RUNNER_TEMP/production-history.json"
+          chmod 600 "$RUNNER_TEMP/test.env"
       - name: Apply and qualify the protected test target
         env:
           TEAM_FLOW_RUNNER: ${{ vars.TEAM_FLOW_RUNNER }}
@@ -96,9 +91,53 @@ jobs:
             --env "$RUNNER_TEMP/test.env" run-release-test \
             scratch/release/release.tar --target targets/test.json \
             --out "$RUNNER_TEMP/test-evidence.json"
+      - name: Remove protected test profile
+        if: always()
+        run: find "$RUNNER_TEMP" -maxdepth 1 -type f -name test.env -delete
+      - name: Hand the evidence to the signing job
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-evidence-${{ needs.build.outputs.tag_slug }}
+          path: ${{ runner.temp }}/test-evidence.json
+          if-no-files-found: warn
+
+  sign-and-handoff:
+    # Holds the signing key and runs only trusted code: the protected default branch, never the tag.
+    # Release bytes and evidence arrive as data (artifacts) and are verified by that trusted code.
+    needs: [build, qualify]
+    runs-on: [self-hosted, team-apex, test]
+    environment: test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ needs.build.outputs.tag_slug }}
+          path: scratch/release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-evidence-${{ needs.build.outputs.tag_slug }}
+          path: ${{ runner.temp }}
+      - name: Verify downloaded bytes with trusted code
+        run: PYTHONPATH=scripts python3 scripts/team.py verify-release scratch/release/release.tar
+      - name: Materialize public handoff inputs
+        env:
+          TEAM_TRUST_KEY_CONTENT: ${{ vars.TEAM_TRUST_KEY_CONTENT }}
+          TEAM_PRODUCTION_HISTORY_CONTENT: ${{ vars.TEAM_PRODUCTION_HISTORY_CONTENT }}
+        run: |
+          test -n "$TEAM_TRUST_KEY_CONTENT"
+          test -n "$TEAM_PRODUCTION_HISTORY_CONTENT"
+          test ! -e .env
+          test ! -e targets/production.env
+          umask 077
+          printf '%s\n' "$TEAM_TRUST_KEY_CONTENT" > "$RUNNER_TEMP/test-trust-key.pem"
+          printf '%s\n' "$TEAM_PRODUCTION_HISTORY_CONTENT" > "$RUNNER_TEMP/production-history.json"
+          chmod 600 "$RUNNER_TEMP/test-trust-key.pem" "$RUNNER_TEMP/production-history.json"
       - name: Sign test evidence
-        # The signing key exists only inside this step, after the evidence is written, so the code
-        # that produces the evidence can never read the key that vouches for it.
+        # The key exists only inside this step and is deleted when it exits.
         env:
           TEAM_TEST_SIGNING_KEY_CONTENT: ${{ secrets.TEAM_TEST_SIGNING_KEY_CONTENT }}
         run: |

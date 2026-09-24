@@ -82,8 +82,10 @@ PYTHONPATH=scripts python3 scripts/team.py \
 It requires `role: test` and environment `test`, refuses destructive pending
 migrations before payload execution, and passes an in-memory apply result into
 qualification. No external test-history, plan, or apply-report file is part
-of this flow. Evidence is signed in a separate step with the protected test
-key before the production-owner runbook is generated:
+of this flow. Evidence is signed in a separate job, `sign-and-handoff`, which
+checks out the protected default branch rather than the tag, so release code
+never runs next to the protected test key; that job also generates the
+production-owner runbook:
 
 ```text
 scripts/team.py sign-test-evidence \

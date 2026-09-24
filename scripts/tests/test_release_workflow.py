@@ -93,6 +93,21 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertGreater(release.index(token), run_test, f"{token} must not appear before run-release-test")
         self.assertIn("trap 'rm -f \"$RUNNER_TEMP/test-signing-key.pem\"' EXIT", release)
 
+    def test_signing_runs_trusted_code_in_its_own_job(self):
+        import re
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        body = release.split("\njobs:\n", 1)[1]
+        heads = list(re.finditer(r"^  ([a-z][a-z0-9-]*):\n", body, re.M))
+        jobs = {head.group(1): body[head.end():(heads[i + 1].start() if i + 1 < len(heads) else len(body))]
+                for i, head in enumerate(heads)}
+        signer = [name for name, text in jobs.items() if "TEAM_TEST_SIGNING_KEY_CONTENT" in text]
+        self.assertEqual(signer, ["sign-and-handoff"])
+        sign = jobs["sign-and-handoff"]
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", sign)
+        self.assertNotIn("github.sha", sign)
+        self.assertNotIn("run-release-test", sign)
+        self.assertIn("needs: [build, qualify]", sign)
+
     def test_actions_are_pinned_by_sha_and_checkouts_drop_credentials(self):
         import re
         for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):

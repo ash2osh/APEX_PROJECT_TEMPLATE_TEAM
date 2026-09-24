@@ -36,12 +36,19 @@ The release workflow serializes protected test use with concurrency group
 `example-team-apex-test` and `cancel-in-progress: false`; it never interrupts a
 target between migration, application deployment, and qualification. It
 downloads and verifies the same archive, then runs on
-`runs-on: [self-hosted, team-apex, test]` in environment `test`. It materializes
-the protected profile, public trust key, and production history below
-`$RUNNER_TEMP` with mode 0600, and removes those bounded files in an `always()`
-cleanup step. The signing key is written only inside the signing step, after the
-evidence exists, and deleted when that step exits, so the command that produces
-the evidence never runs next to the key that signs it. Every action is pinned by
+`runs-on: [self-hosted, team-apex, test]` in environment `test`, in two jobs:
+
+- `qualify` checks out the tag, materializes only the protected profile below
+  `$RUNNER_TEMP` (mode 0600, removed in an `always()` step), runs the one online
+  command below and hands `test-evidence.json` on as an artifact. It never sees
+  the signing key.
+- `sign-and-handoff` checks out the protected **default branch**, never the tag, so
+  the only code that runs next to the key is reviewed code. It verifies the
+  archive again, signs the evidence (the key exists only inside that step and is
+  deleted when it exits) and generates the runbook from the public trust key and
+  production history. A compromised tag can still forge its own run's evidence,
+  since qualifying a release means running it, but it can no longer read the key
+  and forge evidence for other releases. Every action is pinned by
 commit SHA and every checkout sets `persist-credentials: false`, so no GitHub
 token is left in a self-hosted runner's workspace. It invokes exactly one online
 command:
