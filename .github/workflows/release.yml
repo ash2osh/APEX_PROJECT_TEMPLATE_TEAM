@@ -2,7 +2,9 @@ name: release
 
 on:
   push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    tags:
+      - 'schema/v[0-9]+.[0-9]+.[0-9]+'
+      - 'app/**/v[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: read
@@ -14,6 +16,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      tag_slug: ${{ steps.build_archive.outputs.tag_slug }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,17 +27,30 @@ jobs:
         with:
           python-version: '3.10'
       - name: Build canonical release archive
+        id: build_archive
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          version="${TAG#v}"
-          PYTHONPATH=scripts python3 scripts/team.py build-release --ref "$TAG" --version "$version" --out scratch/release
+          if [[ "$TAG" =~ ^schema/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            cmd_args=(--kind schema --ref "$TAG" --version "$version" --out scratch/release)
+          elif [[ "$TAG" =~ ^app/([a-z0-9_-]+)/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            alias="${BASH_REMATCH[1]}"
+            version="${BASH_REMATCH[2]}"
+            cmd_args=(--kind app --alias "$alias" --ref "$TAG" --version "$version" --out scratch/release)
+          else
+            echo "Invalid release tag format: $TAG" >&2
+            exit 1
+          fi
+          PYTHONPATH=scripts python3 scripts/team.py build-release "${cmd_args[@]}"
           PYTHONPATH=scripts python3 scripts/team.py verify-release scratch/release/release.tar
           sha256sum scratch/release/release.tar | tee scratch/release/release.sha256
+          tag_slug="${TAG//\//-}"
+          echo "tag_slug=${tag_slug}" >> "$GITHUB_OUTPUT"
       - name: Upload immutable release bytes
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ github.ref_name }}
+          name: release-${{ steps.build_archive.outputs.tag_slug }}
           path: scratch/release/release.tar
           if-no-files-found: error
 
@@ -47,7 +64,7 @@ jobs:
           ref: ${{ github.sha }}
       - uses: actions/download-artifact@v4
         with:
-          name: release-${{ github.ref_name }}
+          name: release-${{ needs.build.outputs.tag_slug }}
           path: scratch/release
       - name: Verify downloaded bytes
         run: PYTHONPATH=scripts python3 scripts/team.py verify-release scratch/release/release.tar
@@ -106,7 +123,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-qualification-${{ github.ref_name }}
+          name: test-qualification-${{ needs.build.outputs.tag_slug }}
           path: |
             ${{ runner.temp }}/test-evidence.json
             ${{ runner.temp }}/test-evidence.sig
@@ -115,6 +132,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: production-handoff-${{ github.ref_name }}
+          name: production-handoff-${{ needs.build.outputs.tag_slug }}
           path: scratch/PRODUCTION_RUNBOOK.md
           if-no-files-found: error

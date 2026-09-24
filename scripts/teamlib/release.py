@@ -98,20 +98,72 @@ _PAYLOAD_RECORD_KEYS = {"path", "length", "sha256"}
 _REQUIRED_MIGRATION_RECORD_KEYS = {"id", "checksum"}
 
 
-def validate_release_identity(ref: str, version: str, source_commit: str, records: Mapping[str, Any]) -> None:
+def validate_release_identity(
+    ref: str,
+    version: str,
+    source_commit: str,
+    records: Mapping[str, Any],
+    *,
+    kind: Literal["schema", "app"] | None = None,
+    alias: str | None = None,
+) -> None:
     """Bind a semver tag and immutable version record before artifact build."""
     if not isinstance(version, str) or not _SEMVER_RE.fullmatch(version):
         raise ReleaseError("release version must be semantic MAJOR.MINOR.PATCH")
     ref_text = str(ref)
-    tag = ref_text.rsplit("/", 1)[-1]
-    if tag.startswith("v") and tag[1:] != version:
-        raise ReleaseError(f"tag {tag} does not match release version {version}")
-    existing = records.get(version) if isinstance(records, Mapping) else None
+    ref_tag = ref_text[len("refs/tags/"):] if ref_text.startswith("refs/tags/") else ref_text
+
+    if kind == "schema":
+        if ref_tag.startswith("app/"):
+            raise ReleaseError(f"tag {ref_tag} does not match release kind schema")
+        if ref_tag.startswith("schema/v"):
+            tag_version = ref_tag[len("schema/v"):]
+            if tag_version != version:
+                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
+        elif ref_tag.startswith("v") and "/" not in ref_tag:
+            if ref_tag[1:] != version:
+                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
+        elif "/" in ref_tag and not ref_tag.startswith(("refs/", "heads/")):
+            raise ReleaseError(f"tag {ref_tag} does not match release kind schema")
+    elif kind == "app":
+        if ref_tag.startswith("schema/"):
+            raise ReleaseError(f"tag {ref_tag} does not match release kind app")
+        if ref_tag.startswith("app/"):
+            parts = ref_tag.split("/")
+            if len(parts) != 3 or not parts[2].startswith("v"):
+                raise ReleaseError(f"tag {ref_tag} has invalid app release tag format")
+            tag_alias = parts[1]
+            tag_version = parts[2][1:]
+            if alias is not None and tag_alias != alias:
+                raise ReleaseError(f"tag application '{tag_alias}' does not match release alias '{alias}'")
+            if tag_version != version:
+                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
+        elif ref_tag.startswith("v") and "/" not in ref_tag:
+            if ref_tag[1:] != version:
+                raise ReleaseError(f"tag {ref_tag} does not match release version {version}")
+        elif "/" in ref_tag and not ref_tag.startswith(("refs/", "heads/")):
+            raise ReleaseError(f"tag {ref_tag} does not match release kind app")
+    else:
+        tag = ref_text.rsplit("/", 1)[-1]
+        if tag.startswith("v") and tag[1:] != version:
+            raise ReleaseError(f"tag {tag} does not match release version {version}")
+
+    record_key = (
+        f"schema/v{version}"
+        if kind == "schema"
+        else (f"app/{alias}/v{version}" if kind == "app" and alias else version)
+    )
+    existing = None
+    if isinstance(records, Mapping):
+        if record_key in records:
+            existing = records[record_key]
+        elif version in records and kind is None:
+            existing = records[version]
     if existing is not None:
         if not isinstance(existing, Mapping) or existing.get("source_commit") != source_commit:
             raise ReleaseError(f"release version {version} is already bound to a different source commit")
         if existing.get("archive_digest") not in (None, "") and len(str(existing["archive_digest"])) != 64:
-            raise ReleaseError(f"release record for {version} has an invalid archive digest")
+            raise ReleaseError(f"release record for {record_key} has an invalid archive digest")
 
 
 def _canonical(value: Any) -> bytes:
@@ -296,7 +348,7 @@ def build_release(
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ReleaseError("release record is unreadable") from exc
         records = raw_records.get("releases", raw_records) if isinstance(raw_records, Mapping) else {}
-    validate_release_identity(ref, version, commit, records)
+    validate_release_identity(ref, version, commit, records, kind=kind, alias=alias)
     output = Path(out)
     if output.exists() and any(output.iterdir()):
         raise ReleaseError(f"release output directory must be new: {output}")
@@ -739,7 +791,10 @@ def release_app_check_bundle(release_tar: str | Path) -> AppCheckBundle:
         for record in manifest.payload
         if record["path"].startswith("release/checks/apps/")
     ]
-    actual = hashlib.sha256(_canonical(archive_records)).hexdigest()
+    if not archive_records and manifest.app_checks_digest is None:
+        actual = None
+    else:
+        actual = hashlib.sha256(_canonical(archive_records)).hexdigest()
     if manifest.app_checks_digest != actual:
         raise ReleaseError("release app-check bundle does not match manifest")
     return bundle

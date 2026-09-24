@@ -69,7 +69,13 @@ evidence and the run token, then use the explicit recovery command after the
 named owner reviews the target.
 
 Applying a migration to the shared schema must be merged promptly because a
-colleague's export can depend on it. Database undo does not roll back an APEX
-Builder import; Builder recovery is a separate evidence-driven workflow.
-Production writes remain refused, and uncaptured Builder edits or arbitrary DML
-outside the supported inventory are outside the observed boundary.
+colleague's export can depend on it. In promotion, shared migrations are released
+independently via `schema/v<semver>` tags (`--kind schema`) and apply once per
+environment through the qualified migration path, separately from any application.
+Individual application releases declare their migration prerequisites in
+`app_context/<alias>/release.json`, and those prerequisites are verified against
+target history before any application deployment.
+Database undo does not roll back an APEX Builder import; Builder recovery is a
+separate evidence-driven workflow. Production writes remain refused, and
+uncaptured Builder edits or arbitrary DML outside the supported inventory are
+outside the observed boundary.

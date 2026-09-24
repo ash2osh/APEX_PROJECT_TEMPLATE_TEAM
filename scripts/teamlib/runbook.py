@@ -46,6 +46,8 @@ class Runbook:
     source_commit: str
     evidence_digest: str
     plan: ReleasePlan
+    kind: str | None = None
+    alias: str | None = None
 
 
 def _read_file(path: str | Path, label: str) -> bytes:
@@ -138,8 +140,122 @@ def _pending_lines(manifest: Any, plan: ReleasePlan) -> list[str]:
 
 
 def _runbook_text(manifest: Any, plan: ReleasePlan, target: Mapping[str, Any], evidence: Mapping[str, Any], evidence_digest: str) -> str:
-    app_digests = manifest.app_tree_digests or {}
     target_identity = evidence.get("target_identity", target)
+    kind = getattr(manifest, "kind", None)
+
+    if kind == "schema":
+        lines = [
+            "# Production schema release handoff",
+            "",
+            "This document is an offline handoff for shared schema migrations.",
+            "It is not an automated production apply command.",
+            "A production owner must review the archive, backup/restore evidence, maintenance window,",
+            "supported-object expectations and data checks before writing anything.",
+            "",
+            "## Immutable release identity",
+            "",
+            "- Release kind: schema",
+            f"- Release version: {manifest.version}",
+            f"- Source commit: {manifest.source_commit}",
+            f"- Source tree digest: {manifest.source_tree}",
+            f"- Exact release.tar SHA-256: {plan.archive_digest}",
+            f"- Signed evidence SHA-256: {evidence_digest}",
+            f"- Toolchain declaration: {_display(manifest.toolchain)}",
+            "",
+            "## Destination contract",
+            "",
+            f"- Environment: {_display(target.get('environment'))}",
+            f"- Instance: {_display(target.get('instance_id'))}",
+            f"- Database/service: {_display(target.get('db_name'))} / {_display(target.get('service'))}",
+            f"- Session/current schema: {_display(target.get('session_user'))} / {_display(target.get('current_schema'))}",
+            f"- Metadata owner: {_display(target.get('metadata_schema', target.get('metadata_owner')))}",
+            f"- Evidence target identity: {_display(target_identity)}",
+            "",
+            "## Pending migration plan",
+            "",
+            f"Artifact history digest: {plan.artifact_history_digest}",
+            f"Destination target digest: {plan.target_digest}",
+            *_pending_lines(manifest, plan),
+            "",
+            "## Owner checklist",
+            "",
+            "1. Verify the exact release.tar SHA-256 and the detached evidence signature against the independently held trust key.",
+            "2. Confirm backups, restore evidence, maintenance/destructive prerequisites and supported Oracle object types.",
+            "3. Re-read destination identity and migration history under the metadata-owner mutex; stop if identity or history changed.",
+            "4. Apply only the listed pending migrations in dependency order. Do not blindly replay the full migration history; DDL rollback is not assumed.",
+            "5. Record attempts, observations and final status through the isolated metadata schema, including success-before-log uncertainty.",
+            "6. If any outcome is uncertain, stop, retain evidence and use the recovery owner procedure before retrying.",
+            "",
+            "Source SQL is trusted reviewed deployment code, not a sandbox. This handoff supplies no production credential and no repository-side production apply switch.",
+        ]
+        return "\n".join(lines) + "\n"
+
+    if kind == "app":
+        alias = manifest.alias
+        app_ids = target.get("app_ids", {})
+        target_app_id = app_ids.get(alias) if isinstance(app_ids, Mapping) else target.get("app_id")
+        parsing_schemas = target.get("parsing_schemas", {})
+        parsing_schema = parsing_schemas.get(alias) if isinstance(parsing_schemas, Mapping) else target.get("parsing_schema")
+        tree_digest = (manifest.app_tree_digests or {}).get(alias, "<unknown>")
+        lines = [
+            f"# Production application release handoff ({alias})",
+            "",
+            f"This document is an offline handoff for application '{alias}'.",
+            "It is not an automated production apply command.",
+            "A production owner must review the archive, backup/restore evidence, maintenance window,",
+            "supported-object expectations and data checks before writing anything.",
+            "",
+            "## Immutable release identity",
+            "",
+            "- Release kind: app",
+            f"- Application alias: {alias}",
+            f"- Release version: {manifest.version}",
+            f"- Source commit: {manifest.source_commit}",
+            f"- Source tree digest: {manifest.source_tree}",
+            f"- Exact release.tar SHA-256: {plan.archive_digest}",
+            f"- Signed evidence SHA-256: {evidence_digest}",
+            f"- Toolchain declaration: {_display(manifest.toolchain)}",
+            "",
+            "## Destination contract",
+            "",
+            f"- Environment: {_display(target.get('environment'))}",
+            f"- Instance: {_display(target.get('instance_id'))}",
+            f"- Database/service: {_display(target.get('db_name'))} / {_display(target.get('service'))}",
+            f"- Workspace/application bindings: {_display(target.get('workspace_id'))} / {_display(target_app_id)}",
+            f"- Parsing schema: {_display(parsing_schema)}",
+            f"- Session/current schema: {_display(target.get('session_user'))} / {_display(target.get('current_schema'))}",
+            f"- Metadata owner: {_display(target.get('metadata_schema', target.get('metadata_owner')))}",
+            f"- Evidence target identity: {_display(target_identity)}",
+            "",
+            "## Prerequisite migration requirements",
+            "",
+        ]
+        if manifest.required_migrations:
+            lines.append("The target database history must already contain these migrations in APPLIED status with matching checksums:")
+            for req in manifest.required_migrations:
+                lines.append(f"- {req['id']} checksum={req['checksum']}")
+        else:
+            lines.append("- none declared (no database migration prerequisites)")
+        lines.extend([
+            "",
+            "## Application deployment",
+            "",
+            f"Deploy application {alias} only (tree digest: {tree_digest}).",
+            "Verify packaged application tree against its manifest digest before import.",
+            "",
+            "## Owner checklist",
+            "",
+            "1. Verify the exact release.tar SHA-256 and the detached evidence signature against the independently held trust key.",
+            "2. Verify all required schema migrations are present in destination history in APPLIED status with exact checksums.",
+            "3. Re-read destination identity, workspace, and application bindings under the metadata-owner mutex; stop if changed.",
+            f"4. Import application {alias}, then verify re-exported bytes, subscriptions, structural checks and data checks.",
+            "5. If any outcome is uncertain, stop, retain evidence and use the recovery owner procedure before retrying.",
+            "",
+            "Source SQL is trusted reviewed deployment code, not a sandbox. This handoff supplies no production credential and no repository-side production apply switch.",
+        ])
+        return "\n".join(lines) + "\n"
+
+    app_digests = manifest.app_tree_digests or {}
     lines = [
         "# Production release handoff",
         "",
@@ -223,6 +339,8 @@ def gen_runbook(
             archive_digest=manifest.archive_digest,
             source_commit=manifest.source_commit,
             checks_digest=bundle.checks_digest,
+            kind=getattr(manifest, "kind", None),
+            alias=getattr(manifest, "alias", None),
         )
     except EvidenceError as exc:
         raise RunbookError(str(exc)) from exc
@@ -240,7 +358,16 @@ def gen_runbook(
         raise RunbookError(str(exc)) from exc
     evidence_digest = hashlib.sha256(evidence_bytes).hexdigest()
     text = _runbook_text(manifest, plan, target_document, evidence, evidence_digest)
-    return Runbook(text, plan.pending, manifest.archive_digest, manifest.source_commit, evidence_digest, plan)
+    return Runbook(
+        text,
+        plan.pending,
+        manifest.archive_digest,
+        manifest.source_commit,
+        evidence_digest,
+        plan,
+        kind=getattr(manifest, "kind", None),
+        alias=getattr(manifest, "alias", None),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

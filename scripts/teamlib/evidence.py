@@ -60,7 +60,7 @@ def _nonempty_text(value: Any, label: str) -> None:
 
 
 def _validate_v2_shape(value: Mapping[str, Any]) -> None:
-    if set(value) != _EVIDENCE_KEYS:
+    if set(value) not in (_EVIDENCE_KEYS, _EVIDENCE_KEYS | {"kind", "alias"}):
         raise EvidenceError("test evidence has an unexpected version-2 shape")
     if type(value["version"]) is not int or value["version"] != 2:
         raise EvidenceError("test evidence has an unsupported format version")
@@ -68,6 +68,18 @@ def _validate_v2_shape(value: Mapping[str, Any]) -> None:
         raise EvidenceError("test evidence is not a successful final result")
     if not isinstance(value["source_commit"], str) or not _COMMIT_RE.fullmatch(value["source_commit"]):
         raise EvidenceError("test evidence source commit is malformed")
+
+    if "kind" in value:
+        kind = value["kind"]
+        if kind not in ("schema", "app"):
+            raise EvidenceError("test evidence release kind is invalid")
+        if kind == "schema":
+            if value.get("alias") is not None:
+                raise EvidenceError("test evidence for schema release must have null alias")
+        elif kind == "app":
+            alias = value.get("alias")
+            if not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias):
+                raise EvidenceError("test evidence for app release must have a valid application alias")
 
     identity = value["target_identity"]
     if not isinstance(identity, Mapping) or set(identity) != TARGET_IDENTITY_KEYS:
@@ -129,26 +141,61 @@ def _validate_v2_results(value: Mapping[str, Any]) -> None:
     coverage = checks["coverage"]
     if not isinstance(coverage, Mapping) or set(coverage) != _COVERAGE_KEYS:
         raise EvidenceError("test evidence application coverage is incomplete")
-    if coverage["apps"] != aliases:
-        raise EvidenceError("test evidence application coverage does not match target bindings")
-    if type(coverage["checks"]) is not int or coverage["checks"] <= 0:
-        raise EvidenceError("test evidence application check coverage is empty")
-    if type(coverage["unknown"]) is not int or coverage["unknown"] != 0:
-        raise EvidenceError("test evidence application coverage contains UNKNOWN results")
-    if coverage["unknown"] != checks["unknown"]:
-        raise EvidenceError("test evidence application coverage is inconsistent")
-    pages = coverage["pages"]
-    if not isinstance(pages, Mapping) or set(pages) != set(aliases):
-        raise EvidenceError("test evidence application page coverage is incomplete")
-    for alias in aliases:
-        page_ids = pages[alias]
+
+    kind = value.get("kind")
+    if kind == "schema":
+        if coverage["apps"] != []:
+            raise EvidenceError("test evidence for schema release must have empty app coverage")
+        if coverage["checks"] != 0:
+            raise EvidenceError("test evidence for schema release must have 0 checks")
+        if coverage["unknown"] != 0:
+            raise EvidenceError("test evidence application coverage contains UNKNOWN results")
+        if coverage["pages"] != {}:
+            raise EvidenceError("test evidence for schema release must have empty page coverage")
+    elif kind == "app":
+        selected_alias = value.get("alias")
+        if selected_alias not in app_ids:
+            raise EvidenceError("test evidence application is not in target bindings")
+        if coverage["apps"] != [selected_alias]:
+            raise EvidenceError("test evidence application coverage does not match selected application")
+        if type(coverage["checks"]) is not int or coverage["checks"] <= 0:
+            raise EvidenceError("test evidence application check coverage is empty")
+        if type(coverage["unknown"]) is not int or coverage["unknown"] != 0:
+            raise EvidenceError("test evidence application coverage contains UNKNOWN results")
+        if coverage["unknown"] != checks["unknown"]:
+            raise EvidenceError("test evidence application coverage is inconsistent")
+        pages = coverage["pages"]
+        if not isinstance(pages, Mapping) or set(pages) != {selected_alias}:
+            raise EvidenceError("test evidence application page coverage is incomplete")
+        page_ids = pages[selected_alias]
         if (
             not isinstance(page_ids, list)
             or not page_ids
             or any(type(page_id) is not int or page_id <= 0 for page_id in page_ids)
             or len(set(page_ids)) != len(page_ids)
         ):
-            raise EvidenceError(f"test evidence page coverage is malformed: {alias}")
+            raise EvidenceError(f"test evidence page coverage is malformed: {selected_alias}")
+    else:
+        if coverage["apps"] != aliases:
+            raise EvidenceError("test evidence application coverage does not match target bindings")
+        if type(coverage["checks"]) is not int or coverage["checks"] <= 0:
+            raise EvidenceError("test evidence application check coverage is empty")
+        if type(coverage["unknown"]) is not int or coverage["unknown"] != 0:
+            raise EvidenceError("test evidence application coverage contains UNKNOWN results")
+        if coverage["unknown"] != checks["unknown"]:
+            raise EvidenceError("test evidence application coverage is inconsistent")
+        pages = coverage["pages"]
+        if not isinstance(pages, Mapping) or set(pages) != set(aliases):
+            raise EvidenceError("test evidence application page coverage is incomplete")
+        for alias in aliases:
+            page_ids = pages[alias]
+            if (
+                not isinstance(page_ids, list)
+                or not page_ids
+                or any(type(page_id) is not int or page_id <= 0 for page_id in page_ids)
+                or len(set(page_ids)) != len(page_ids)
+            ):
+                raise EvidenceError(f"test evidence page coverage is malformed: {alias}")
 
     results = checks["results"]
     if not isinstance(results, list) or len(results) != coverage["checks"]:
@@ -212,6 +259,8 @@ def validate_release_evidence_binding(
     archive_digest: str,
     source_commit: str,
     checks_digest: str,
+    kind: str | None = None,
+    alias: str | None = None,
 ) -> None:
     """Require canonical evidence to describe one verified release bundle."""
     _digest(archive_digest, "verified archive digest")
@@ -225,3 +274,17 @@ def validate_release_evidence_binding(
         raise EvidenceError(
             "test evidence application checks do not match the release archive"
         )
+    if kind is not None:
+        evidence_kind = evidence.get("kind")
+        if evidence_kind != kind:
+            raise EvidenceError(
+                f"test evidence kind '{evidence_kind}' does not match release kind '{kind}'"
+            )
+    if alias is not None:
+        evidence_alias = evidence.get("alias")
+        if evidence_alias != alias:
+            raise EvidenceError(
+                f"test evidence application '{evidence_alias}' does not match release application '{alias}'"
+            )
+    elif kind == "schema" and evidence.get("alias") is not None:
+        raise EvidenceError("test evidence application must be null for schema release")

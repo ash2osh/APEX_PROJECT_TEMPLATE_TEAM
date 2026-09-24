@@ -64,11 +64,13 @@ are counted and never silently promoted.
 
 ## Protected release-test
 
-The release job keeps archive build/download/verification offline, then uses a
-prepared `self-hosted` test runner. Its `example-team-apex-test` concurrency
-group never cancels an in-flight protected run. The test command derives source
-commit, aliases, declarations, SELECT SQL, and flow members from the verified
-archive bytes and reads live metadata history:
+The release workflow triggers on push tags formatted as `schema/v<semver>` (shared schema)
+or `app/<alias>/v<semver>` (single application). It builds the selected canonical
+archive offline using `build-release --kind schema` or `build-release --kind app --alias <alias>`,
+verifies the archive bytes, and passes them to a prepared `self-hosted` test runner.
+Its `example-team-apex-test` concurrency group never cancels an in-flight protected run.
+The test command derives source commit, release kind, aliases, declarations, SELECT SQL,
+and flow members from the verified archive bytes and reads live metadata history:
 
 ```text
 PYTHONPATH=scripts python3 scripts/team.py \
@@ -91,9 +93,10 @@ scripts/team.py sign-test-evidence \
   --out "$RUNNER_TEMP/test-evidence.sig"
 ```
 
-Signing binds `archive_digest`, `source_commit`, and `app_checks_digest`. The
-runbook generator verifies that binding again against the same archive before
-creating the production handoff.
+Signing binds `archive_digest`, `source_commit`, `kind`, `alias`, and `app_checks_digest`.
+The runbook generator verifies that binding again against the same archive before
+creating the production handoff. A signed report for one application cannot be reused
+for another application or a schema release.
 
 Persistent staging is observational and does not prove a fresh installation,
 isolation, or arbitrary-DML coverage.

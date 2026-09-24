@@ -509,6 +509,8 @@ def sign_test_evidence(
             archive_digest=manifest.archive_digest,
             source_commit=manifest.source_commit,
             checks_digest=bundle.checks_digest,
+            kind=getattr(manifest, "kind", None),
+            alias=getattr(manifest, "alias", None),
         )
     except (EvidenceError, ReleaseError) as exc:
         raise QualificationError(str(exc)) from exc

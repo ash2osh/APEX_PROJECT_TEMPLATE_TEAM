@@ -1,19 +1,25 @@
 # Promotion and production handoff
 
 Promotion moves one immutable `release.tar`. Build it from a resolved Git
-commit and verify the archive bytes offline:
+commit and verify the archive bytes offline. Release tags are `schema/v<semver>`
+for shared migrations and `app/<alias>/v<semver>` for single application releases:
 
 ```text
-scripts/team.sh build-release --ref v1.2.3 --version 1.2.3 --out scratch/release
-scripts/team.sh verify-release scratch/release/release.tar
+# Schema release (applies shared migrations once per environment)
+scripts/team.py build-release --kind schema --ref schema/v1.0.0 --version 1.0.0 --out scratch/release
+scripts/team.py verify-release scratch/release/release.tar
+
+# Single application release (e.g. hr; checks schema prerequisites without deploying siblings)
+scripts/team.py build-release --kind app --alias hr --ref app/hr/v1.0.0 --version 1.0.0 --out scratch/release
+scripts/team.py verify-release scratch/release/release.tar
 ```
 
-The manifest is closed and payload-derived: migration IDs, checksums,
-dependencies, target, destructive flags, reversibility, application trees,
-master contract, and the declaration/SELECT SQL/flow check bundle are
-reconstructed from verified archive bytes.
+The manifest is closed and payload-derived:
+- `kind: schema` packages only migration SQL and schema contracts; it applies once per environment.
+- `kind: app` packages exactly one application tree, its checks and required migration IDs/checksums, without migration SQL or sibling apps.
 Symlinks, credentials, deployment bindings, logs, and sync state are not
-packaged. Production `apply-release` remains refused.
+packaged. Production `apply-release` remains refused. No automated production
+write is authorized.
 
 ## Protected test run
 
@@ -61,7 +67,9 @@ scripts/team.py sign-test-evidence \
 ```
 
 `sign-test-evidence` rejects non-canonical, failed, incomplete, non-persistent,
-non-`role: test`, or archive/check-binding mismatched evidence. The public trust key is independently supplied;
+non-`role: test`, or archive/check-binding mismatched evidence. It binds
+the manifest's `kind` and `alias`; a signed test report for HR cannot be reused
+for Payroll or a schema archive. The public trust key is independently supplied;
 it is never derived from the private key. Missing signer or trust material
 leaves diagnostics available but cannot create a handoff.
 
@@ -78,9 +86,9 @@ scripts/team.sh gen-runbook scratch/release/release.tar \
 ```
 
 The runbook repeats the archive/source/application-check binding verification;
-it is an owner-reviewed document, not a production apply switch. It
-names source/archive/evidence digests, target identity, pending IDs and
-checksums, application order, verification queries, backup/restore evidence,
-and recovery instructions. The production owner re-reads identity and history
+it is an owner-reviewed document, not a production apply switch.
+- For a schema release, the runbook lists pending migrations in dependency order and owner checklist steps for migration application only.
+- For an application release, the runbook lists exact prerequisite migrations (verified against destination history) and deployment instructions for the selected application only, with zero sibling app deployments.
+The production owner re-reads identity and history
 under the metadata mutex before any separately authorized action. Database undo
-does not roll back an APEX Builder import.
+does not roll back an APEX Builder import. Production writes remain refused.

@@ -32,6 +32,8 @@ class RunbookTests(unittest.TestCase):
             (repo / "apps" / "a" / ".apex").mkdir(parents=True)
             (repo / "apps" / "a" / "application.apx").write_bytes(b"app")
             (repo / "apps" / "a" / ".apex" / "apexlang.json").write_bytes(b"{}")
+            (repo / "app_context" / "a").mkdir(parents=True)
+            (repo / "app_context" / "a" / "release.json").write_text('{"version": 1, "requires": []}\n', encoding="utf-8")
             checks = repo / "ci" / "app-checks"
             checks.mkdir(parents=True)
             checks.joinpath("a.json").write_text(
@@ -78,10 +80,10 @@ class RunbookTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            manifest = build_release(repo, commit, "1.0.0", root / "out")
+            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="app", alias="a")
             bundle = release_app_check_bundle(manifest.archive_path)
             evidence_data = {
-                "version": 2, "final_status": "PASS", "archive_digest": manifest.archive_digest, "source_commit": commit,
+                "version": 2, "kind": "app", "alias": "a", "final_status": "PASS", "archive_digest": manifest.archive_digest, "source_commit": commit,
                 "toolchain_digest": "b" * 64,
                 "target_identity": {
                     "project": "team-template", "role": "test", "environment": "test",
@@ -109,7 +111,7 @@ class RunbookTests(unittest.TestCase):
             public_bytes = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
             (root / "key.pem").write_bytes(public_bytes)
             (root / "sig").write_bytes(key.sign(evidence.read_bytes()))
-            runbook = gen_runbook(manifest.archive_path, {}, {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"a": 2}}, evidence, root / "sig", root / "key.pem")
+            runbook = gen_runbook(manifest.archive_path, {}, {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"a": 2}, "parsing_schemas": {"a": "A_SCHEMA"}}, evidence, root / "sig", root / "key.pem")
             self.assertIn("PROD", runbook.text)
 
             mismatched = dict(evidence_data)
@@ -133,6 +135,7 @@ class RunbookTests(unittest.TestCase):
                         "instance_id": "PROD",
                         "workspace_id": 1,
                         "app_ids": {"a": 2},
+                        "parsing_schemas": {"a": "A_SCHEMA"},
                     },
                     mismatch_path,
                     mismatch_signature,
@@ -158,11 +161,278 @@ class RunbookTests(unittest.TestCase):
                         gen_runbook(
                             manifest.archive_path,
                             {},
-                            {"environment": "production", "instance_id": "PROD"},
+                            {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"a": 2}, "parsing_schemas": {"a": "A_SCHEMA"}},
                             invalid_path,
                             invalid_signature,
                             root / "key.pem",
                         )
+
+    def test_schema_runbook_contains_migrations_only(self):
+        with tempfile.TemporaryDirectory(prefix="team-schema-runbook-") as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            import subprocess
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "x@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "x"], check=True)
+            m = repo / "migrations"
+            m.mkdir(parents=True)
+            (m / "20260907T100000__alice__one.sql").write_text("-- migration-version: 1\n-- target: tables\n-- destructive: false\n\nCREATE TABLE t (id NUMBER);\n", encoding="utf-8")
+            (m / "20260907T100000__alice__one.verify.sql").write_text("", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+            commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="schema")
+            bundle = release_app_check_bundle(manifest.archive_path)
+            evidence_data = {
+                "version": 2, "kind": "schema", "alias": None, "final_status": "PASS",
+                "archive_digest": manifest.archive_digest, "source_commit": commit,
+                "toolchain_digest": "b" * 64,
+                "target_identity": {
+                    "project": "team-template", "role": "test", "environment": "test",
+                    "target_kind": "persistent", "instance_id": "TEST", "db_name": "FREEPDB1",
+                    "service": "freep1", "workspace_id": 1, "app_ids": {"a": 1},
+                    "state_key": "f" * 64, "binding_digest": "e" * 64,
+                },
+                "run_identity": {"run_id": "ci-run-1"},
+                "qualification_identity": {"target_kind": "persistent", "observation_sequence": 1, "observation_digest": "d" * 64, "history_digest": "e" * 64},
+                "application_checks": {
+                    "status": "PASS", "checks_digest": bundle.checks_digest,
+                    "coverage": {"apps": [], "pages": {}, "checks": 0, "unknown": 0},
+                    "unknown": 0,
+                    "results": [],
+                },
+                "results": {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"},
+            }
+            evidence = root / "evidence.json"
+            evidence.write_bytes(json.dumps(evidence_data, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+            key = Ed25519PrivateKey.generate()
+            public_bytes = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+            (root / "key.pem").write_bytes(public_bytes)
+            (root / "sig").write_bytes(key.sign(evidence.read_bytes()))
+            runbook = gen_runbook(
+                manifest.archive_path,
+                {},
+                {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"a": 2}},
+                evidence,
+                root / "sig",
+                root / "key.pem",
+            )
+            self.assertEqual(runbook.kind, "schema")
+            self.assertIsNone(runbook.alias)
+            self.assertIn("20260907T100000__alice__one", runbook.text)
+            self.assertIn("Pending migration plan", runbook.text)
+            self.assertNotIn("Application and master order", runbook.text)
+            self.assertNotIn("Import applications in master-before-subscriber order", runbook.text)
+
+    def test_app_runbook_contains_one_app_and_prerequisites_only(self):
+        with tempfile.TemporaryDirectory(prefix="team-app-runbook-") as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            import subprocess
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "x@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "x"], check=True)
+            m = repo / "migrations"
+            m.mkdir(parents=True)
+            (m / "20260907T100000__alice__one.sql").write_text("-- migration-version: 1\n-- target: tables\n-- destructive: false\n\nCREATE TABLE t (id NUMBER);\n", encoding="utf-8")
+            (m / "20260907T100000__alice__one.verify.sql").write_text("", encoding="utf-8")
+            for alias in ("hr", "payroll"):
+                (repo / "apps" / alias / ".apex").mkdir(parents=True)
+                (repo / "apps" / alias / "application.apx").write_bytes(f"app-{alias}".encode("utf-8"))
+                (repo / "apps" / alias / ".apex" / "apexlang.json").write_bytes(b"{}")
+                (repo / "app_context" / alias).mkdir(parents=True)
+            (repo / "app_context" / "hr" / "release.json").write_text(
+                '{"version": 1, "requires": ["20260907T100000__alice__one"]}\n', encoding="utf-8"
+            )
+            (repo / "app_context" / "payroll" / "release.json").write_text(
+                '{"version": 1, "requires": []}\n', encoding="utf-8"
+            )
+            checks = repo / "ci" / "app-checks"
+            checks.mkdir(parents=True)
+            for alias in ("hr", "payroll"):
+                checks.joinpath(f"{alias}.json").write_text(
+                    json.dumps({
+                        "version": 1, "alias": alias, "page_ids": [1],
+                        "checks": [
+                            {
+                                "id": "c1", "page_id": 1, "kind": "select",
+                                "verify_sql": f"{alias}/c1.verify.sql", "expected_objects": [],
+                            },
+                            {
+                                "id": "home", "page_id": 1, "kind": "flow",
+                                "flow": f"{alias}/home.flow.json",
+                                "steps": [{"action": "navigate", "path": f"/ords/r/app/{alias}/home", "expected_visible_text": "Home"}],
+                            },
+                        ],
+                    }, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                checks.joinpath(alias).mkdir()
+                checks.joinpath(alias, "c1.verify.sql").write_text(
+                    "SELECT 'TEAM_ASSERT|' || assertion_name || '|' || status AS status FROM (SELECT 'c1' assertion_name, 'PASS' status FROM dual);\n",
+                    encoding="utf-8",
+                )
+                checks.joinpath(alias, "home.flow.json").write_text("{}\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+            commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="app", alias="hr")
+            bundle = release_app_check_bundle(manifest.archive_path)
+            evidence_data = {
+                "version": 2, "kind": "app", "alias": "hr", "final_status": "PASS",
+                "archive_digest": manifest.archive_digest, "source_commit": commit,
+                "toolchain_digest": "b" * 64,
+                "target_identity": {
+                    "project": "team-template", "role": "test", "environment": "test",
+                    "target_kind": "persistent", "instance_id": "TEST", "db_name": "FREEPDB1",
+                    "service": "freep1", "workspace_id": 1, "app_ids": {"hr": 100, "payroll": 200},
+                    "state_key": "f" * 64, "binding_digest": "e" * 64,
+                },
+                "run_identity": {"run_id": "ci-run-1"},
+                "qualification_identity": {"target_kind": "persistent", "observation_sequence": 1, "observation_digest": "d" * 64, "history_digest": "e" * 64},
+                "application_checks": {
+                    "status": "PASS", "checks_digest": bundle.checks_digest,
+                    "coverage": {"apps": ["hr"], "pages": {"hr": [1]}, "checks": 2, "unknown": 0},
+                    "unknown": 0,
+                    "results": [
+                        {
+                            "alias": "hr", "check_id": "c1", "page_id": 1,
+                            "kind": "select", "status": "PASS", "expected_objects": [],
+                            "diagnostic": "", "observed": {"status": "PASS"},
+                        },
+                        {
+                            "alias": "hr", "check_id": "home", "page_id": 1,
+                            "kind": "flow", "status": "PASS", "expected_objects": [],
+                            "diagnostic": "", "observed": {"status": "PASS"},
+                        },
+                    ],
+                },
+                "results": {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"},
+            }
+            evidence = root / "evidence.json"
+            evidence.write_bytes(json.dumps(evidence_data, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+            key = Ed25519PrivateKey.generate()
+            public_bytes = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+            (root / "key.pem").write_bytes(public_bytes)
+            (root / "sig").write_bytes(key.sign(evidence.read_bytes()))
+            req_checksum = manifest.required_migrations[0]["checksum"]
+            history = {"20260907T100000__alice__one": {"status": "APPLIED", "checksum": req_checksum}}
+            runbook = gen_runbook(
+                manifest.archive_path,
+                history,
+                {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"hr": 100, "payroll": 200}, "parsing_schemas": {"hr": "HR_SCHEMA", "payroll": "PAY_SCHEMA"}},
+                evidence,
+                root / "sig",
+                root / "key.pem",
+            )
+            self.assertEqual(runbook.kind, "app")
+            self.assertEqual(runbook.alias, "hr")
+            self.assertIn("hr", runbook.text)
+            self.assertIn("20260907T100000__alice__one", runbook.text)
+            self.assertNotIn("Deploy application payroll", runbook.text)
+            self.assertNotIn("Import application payroll", runbook.text)
+            self.assertNotIn("PAY_SCHEMA", runbook.text)
+            self.assertNotIn("Pending migration plan", runbook.text)
+            self.assertIn("Prerequisite migration requirements", runbook.text)
+
+    def test_rejection_of_signed_evidence_for_different_app_or_kind(self):
+        with tempfile.TemporaryDirectory(prefix="team-reject-evidence-") as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            import subprocess
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "x@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "x"], check=True)
+            m = repo / "migrations"
+            m.mkdir(parents=True)
+            (m / "20260907T100000__alice__one.sql").write_text("-- migration-version: 1\n-- target: tables\n-- destructive: false\n\nCREATE TABLE t (id NUMBER);\n", encoding="utf-8")
+            (m / "20260907T100000__alice__one.verify.sql").write_text("", encoding="utf-8")
+            for alias in ("hr", "payroll"):
+                (repo / "apps" / alias / ".apex").mkdir(parents=True)
+                (repo / "apps" / alias / "application.apx").write_bytes(f"app-{alias}".encode("utf-8"))
+                (repo / "apps" / alias / ".apex" / "apexlang.json").write_bytes(b"{}")
+                (repo / "app_context" / alias).mkdir(parents=True)
+                (repo / "app_context" / alias / "release.json").write_text('{"version": 1, "requires": []}\n', encoding="utf-8")
+            checks = repo / "ci" / "app-checks"
+            checks.mkdir(parents=True)
+            for alias in ("hr", "payroll"):
+                checks.joinpath(f"{alias}.json").write_text(
+                    json.dumps({
+                        "version": 1, "alias": alias, "page_ids": [1],
+                        "checks": [
+                            {
+                                "id": "c1", "page_id": 1, "kind": "select",
+                                "verify_sql": f"{alias}/c1.verify.sql", "expected_objects": [],
+                            },
+                            {
+                                "id": "home", "page_id": 1, "kind": "flow",
+                                "flow": f"{alias}/home.flow.json",
+                                "steps": [{"action": "navigate", "path": f"/ords/r/app/{alias}/home", "expected_visible_text": "Home"}],
+                            },
+                        ],
+                    }, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                checks.joinpath(alias).mkdir()
+                checks.joinpath(alias, "c1.verify.sql").write_text(
+                    "SELECT 'TEAM_ASSERT|' || assertion_name || '|' || status AS status FROM (SELECT 'c1' assertion_name, 'PASS' status FROM dual);\n",
+                    encoding="utf-8",
+                )
+                checks.joinpath(alias, "home.flow.json").write_text("{}\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+            commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            manifest_hr = build_release(repo, commit, "1.0.0", root / "out-hr", kind="app", alias="hr")
+            manifest_payroll = build_release(repo, commit, "1.0.0", root / "out-payroll", kind="app", alias="payroll")
+            manifest_schema = build_release(repo, commit, "1.0.0", root / "out-schema", kind="schema")
+            bundle_hr = release_app_check_bundle(manifest_hr.archive_path)
+
+            evidence_data_hr = {
+                "version": 2, "kind": "app", "alias": "hr", "final_status": "PASS",
+                "archive_digest": manifest_hr.archive_digest,
+                "source_commit": commit,
+                "toolchain_digest": "b" * 64,
+                "target_identity": {
+                    "project": "team-template", "role": "test", "environment": "test",
+                    "target_kind": "persistent", "instance_id": "TEST", "db_name": "FREEPDB1",
+                    "service": "freep1", "workspace_id": 1, "app_ids": {"hr": 100, "payroll": 200},
+                    "state_key": "f" * 64, "binding_digest": "e" * 64,
+                },
+                "run_identity": {"run_id": "ci-run-1"},
+                "qualification_identity": {"target_kind": "persistent", "observation_sequence": 1, "observation_digest": "d" * 64, "history_digest": "e" * 64},
+                "application_checks": {
+                    "status": "PASS", "checks_digest": bundle_hr.checks_digest,
+                    "coverage": {"apps": ["hr"], "pages": {"hr": [1]}, "checks": 2, "unknown": 0},
+                    "unknown": 0,
+                    "results": [
+                        {
+                            "alias": "hr", "check_id": "c1", "page_id": 1,
+                            "kind": "select", "status": "PASS", "expected_objects": [],
+                            "diagnostic": "", "observed": {"status": "PASS"},
+                        },
+                        {
+                            "alias": "hr", "check_id": "home", "page_id": 1,
+                            "kind": "flow", "status": "PASS", "expected_objects": [],
+                            "diagnostic": "", "observed": {"status": "PASS"},
+                        },
+                    ],
+                },
+                "results": {"migrations": "PASS", "application_deploy": "PASS", "application_checks": "PASS"},
+            }
+            evidence_hr = root / "evidence-hr.json"
+            evidence_hr.write_bytes(json.dumps(evidence_data_hr, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+            key = Ed25519PrivateKey.generate()
+            public_bytes = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+            (root / "key.pem").write_bytes(public_bytes)
+            sig_hr = root / "evidence-hr.sig"
+            sig_hr.write_bytes(key.sign(evidence_hr.read_bytes()))
+
+            target = {"environment": "production", "instance_id": "PROD", "workspace_id": 1, "app_ids": {"hr": 100, "payroll": 200}, "parsing_schemas": {"hr": "HR_S", "payroll": "PAY_S"}}
+            with self.assertRaises(RunbookError):
+                gen_runbook(manifest_payroll.archive_path, {}, target, evidence_hr, sig_hr, root / "key.pem")
+            with self.assertRaises(RunbookError):
+                gen_runbook(manifest_schema.archive_path, {}, target, evidence_hr, sig_hr, root / "key.pem")
 
     def test_failed_evidence_refuses(self):
         with tempfile.TemporaryDirectory(prefix="team-runbook-fail-") as directory:
