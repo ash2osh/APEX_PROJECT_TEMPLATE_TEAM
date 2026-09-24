@@ -138,7 +138,7 @@ def _payload_targets(profiles: Mapping[str, Any]) -> dict[str, Target]:
 def _store_methods(store: Any) -> None:
     required = (
         "bootstrap", "acquire", "release", "read_history", "record_attempt_start",
-        "record_attempt_state", "record_event",
+        "record_attempt_state", "record_event", "store_members",
     )
     if not all(callable(getattr(store, name, None)) for name in required):
         raise MigrationRunError("migration profiles require a compatible v2 migration metadata store")
@@ -376,6 +376,10 @@ def _apply_operation(
                 ensure_observation(target, before_digest, run_token=run_token)
             if before_digest and callable(validate_frontier):
                 validate_frontier(target, before_digest)
+            # Store every bundle member before any payload runs, so the shared
+            # database can rebuild this migration for a release without the
+            # author's repository. A refusal here is safe: no attempt exists yet.
+            store.store_members(target, migration, run_token=run_token, stored_by=str(profiles.get("applied_by", worker)))
             destructive_digest = confirmation_digest if destructive_by_id[migration_id] else ""
             store.record_attempt_start(
                 target, attempt_id, migration_id, migration.checksum, run_token,
@@ -483,6 +487,70 @@ def _apply_operation(
             except Exception:
                 pass
         raise
+
+
+def adopt_members(
+    store: Any,
+    target: Target,
+    bundles: Mapping[str, Migration],
+    *,
+    dry_run: bool,
+    actor: str,
+    worker_identity: str,
+    host: str,
+) -> dict[str, Any]:
+    """Store bundle members for history entries recorded before members were kept.
+
+    Only a local bundle whose checksum equals the recorded one is stored; a
+    migration another developer authored stays ``missing`` until someone who
+    has its files runs this. A local bundle with a different checksum for a
+    recorded ID is refused outright: history is immutable.
+    """
+    if target.environment == "production":
+        raise MigrationRunError("production migration writes are refused")
+    history = store.read_history(target)
+    stored_index = store.list_member_bundles(target)
+    to_store: list[Migration] = []
+    already: list[str] = []
+    missing: list[str] = []
+    conflicts: list[str] = []
+    for migration_id in sorted(history):
+        entry = history[migration_id]
+        checksum = entry.get("checksum") if isinstance(entry, Mapping) else None
+        if not isinstance(checksum, str):
+            raise MigrationRunError(f"history entry has no checksum: {migration_id}")
+        if stored_index.get(checksum) == migration_id:
+            already.append(migration_id)
+            continue
+        local = bundles.get(migration_id)
+        if local is None:
+            missing.append(migration_id)
+        elif local.checksum != checksum:
+            conflicts.append(migration_id)
+        else:
+            to_store.append(local)
+    if conflicts:
+        raise MigrationRunError(
+            "local migration files differ from recorded history (checksum mismatch): " + ", ".join(conflicts)
+        )
+    stored: list[str] = []
+    if to_store and not dry_run:
+        run_token = uuid.uuid4().hex
+        store.acquire(target, run_token, worker_identity, host)
+        try:
+            for migration in to_store:
+                store.store_members(target, migration, run_token=run_token, stored_by=actor)
+                stored.append(migration.id)
+        finally:
+            store.release(target, run_token)
+    return {
+        "status": "complete" if not missing else "incomplete",
+        "dry_run": dry_run,
+        "stored": stored,
+        "would_store": [migration.id for migration in to_store] if dry_run else [],
+        "already_stored": already,
+        "missing": missing,
+    }
 
 
 def apply_plan(
