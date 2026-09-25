@@ -1,10 +1,8 @@
 # Live database test plan
 
-The offline suite and CI prove the Python contracts; this plan records live
-Oracle/APEX acceptance on the approved disposable `local-26ai` target, using
-**throwaway schemas only**. Current outcomes and evidence are kept in
-`docs/pending-work.md` §1.1. Source migration and schema-release checks passed;
-release replay and app qualification need separate test targets:
+The offline suite and CI prove the Python contracts; none of the following has
+been exercised against a real Oracle database yet. This plan checks, on the
+local `docker-demo` database and with **throwaway schemas only**:
 
 | Stage | Proves | Introduced by |
 |---|---|---|
@@ -76,32 +74,28 @@ acceptance remains open and must use disposable source and test targets only.
 
 ## 2. Migration files stored in the database (PR #4)
 
-1. **Alice authors and applies a reversible migration.**
-
-   ```text
-   scripts/team.py new-migration --author alice --slug accounts --target tables
-   # write CREATE TABLE ACCOUNTS(ID NUMBER), its verify query, and the down pair
-   scripts/team.py --env .env migrate
-   ```
-
-   - Expect `TEAM_MIGRATION_BUNDLE` with one row and `TEAM_MIGRATION_MEMBER`
-     with four rows for its checksum, and one `up` history event.
-2. **Alice checks the backfill.** `adopt-migration-members --dry-run` lists
-   her migration under `already_stored`.
-3. **Bob, who does not have Alice's files,** runs
+1. **Create an applied legacy migration without stored members.** Current
+   migration applies store all four members before running SQL, so they cannot
+   produce the missing-member case. Use a disposable developer checkout of the
+   pre-member-storage runner to apply Alice's reversible `ACCOUNTS` migration
+   and create the legacy history row. Verify the `up` event and table, then
+   restore Alice's current checkout before running current commands.
+2. **Bob, who does not have Alice's files,** runs
    `adopt-migration-members --dry-run`.
-   - Expect Alice's migration under `already_stored` and `"status": "complete"`:
-     a new migration stores its members in METADATA before the payload runs.
-4. **Legacy backfill.** If the target has history from before migration members
-   were stored and has no bundle for that history, run the dry-run as Bob.
-   - Expect that migration under `missing` and `"status": "incomplete"`. If no
-     such legacy history exists on the throwaway target, record this live case
-     as `UNKNOWN`; the offline tests cover the missing-member path. Do not create
-     synthetic history on the shared development database to force this case.
-5. **Tampering.** Bob creates files with Alice's migration ID but different
-   content and runs `adopt-migration-members --dry-run`.
-   - Expect a refusal naming a checksum mismatch. Verify the stored bundle and
-     member bytes remain unchanged.
+   - Expect Alice's migration under `missing` and `"status": "incomplete"`.
+3. **Tampering before backfill.** Bob creates files with Alice's migration ID
+   but different content and runs `adopt-migration-members`.
+   - Expect a refusal naming a checksum mismatch; shared state stays unchanged.
+4. **Alice backfills the legacy bundle.** Alice runs
+   `adopt-migration-members` without `--dry-run`.
+   - Expect all four members stored and their hashes to match Alice's source.
+5. **Bob observes the completed backfill.** With no local Alice files,
+   `adopt-migration-members --dry-run` lists the migration under
+   `already_stored` and reports `complete`.
+6. **Tampering after backfill.** Bob creates conflicting local files with
+   Alice's stored migration ID and runs `adopt-migration-members`.
+   - Expect a checksum-mismatch refusal even though the matching bundle is
+     already stored; compare METADATA before and after to prove no write.
 
 ## 3. Two repositories, one database (PR #3)
 
@@ -119,7 +113,7 @@ acceptance remains open and must use disposable source and test targets only.
 
 ## 4. Cutting and applying a database release (phases 3b–4)
 
-The schema release cut, format 3 replay and paused app capture have offline test coverage. Use the approved disposable `local-26ai` target as the development source from Stage 0. `run-release-test` requires a separate isolated non-production `role: test` profile, schemas and matching target contract; it must not reuse the source profile or target app 102. Live app qualification additionally requires a throwaway APEX workspace/application and target contract. `targets/test.json` is sample data for app 102 and is not an approved live target contract.
+The schema release cut, format 3 replay and paused app capture have offline test coverage. Use only an approved disposable `docker-demo` source/test setup from stage 0; `run-release-test` must target isolated throwaway schemas and a throwaway APEX app, never the development Builder source. No live Oracle acceptance is claimed by this repository change.
 
 1. **Cut and verify a schema release.**
 
@@ -133,18 +127,15 @@ The schema release cut, format 3 replay and paused app capture have offline test
 2. **Deterministic re-cut.** Cut the unchanged ledger as `0.1.0` into `scratch/r2`; expect the same archive digest.
 3. **Version binding.** Change the ledger and attempt `0.1.0` again; expect refusal because the version is already bound. A new version must identify the new cut.
 4. **Drift and unresolved attempts.** Create a rogue object and cut; expect refusal with the drift report. Restore the fixture and clear unresolved migration attempts only through the named recovery owner and reviewed evidence.
-5. **Replay on test histories.** On a separately provisioned isolated test profile, run `plan-release`, `run-release-test` and evidence verification for both an empty history and an earlier release. The test profile and contract must be distinct from the Stage 0 source profiles; do not reuse `targets/test.json` while it references app 102. Expect every up/down transition in order and no payload for an up/down pair that nets to no change.
+5. **Replay on test histories.** Run `plan-release`, `run-release-test` and evidence verification for both an empty history and an earlier release. Expect every up/down transition in order and no payload for an up/down pair that nets to no change.
 6. **Build an app release.** Register the current checkout, ensure the selected source app has a known empty page-lock report, then run `build-release --kind app --alias hr`. Expect two equal capture digests, the APPLIED migration set at the schema cut, and app-check/master-contract digests in the manifest. If exercising `run-release-test` for that app, use a separately provisioned throwaway APEX test app and target contract; do not deploy to `lt-apex`.
 
 Stop and preserve command JSON plus the named `.team-sqlcl-*.log` on any unexpected result. Record a stage as `UNKNOWN` if the approved target, runner, browser checks, or required profile are unavailable; offline tests are not live proof.
 
 ## 5. Clean up
 
-After confirming the expected final frontier, drop the four `LT_*` users and
-delete the exact `lt-tables`, `lt-code`, `lt-meta`, and `lt-verify` saved
-connections. Preserve `lt-apex` as a read-only capture source. Verify container
-health and the absence of the throwaway users/aliases. Restore the snapshot only
-if evidence shows the target needs rollback.
+Drop the `LT_*` users, delete the `lt-*` saved connections, and restore the
+snapshot if anything looks wrong.
 
 ## What to report
 
