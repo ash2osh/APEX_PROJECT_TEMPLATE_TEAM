@@ -248,6 +248,23 @@ class AdoptMembersTests(MigrationMemberTestCase):
             self.adopt()
         self.assertEqual(self.store.list_member_bundles(self.target), {})
 
+    def test_local_files_that_disagree_with_stored_bundle_are_refused(self):
+        self.write_bundle()
+        migration = self.migration()
+        self.store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
+        self.seed_history(migration.id, migration.checksum)
+        self.store.acquire(self.target, "run", "alice", "host")
+        self.store.store_members(self.target, migration, run_token="run", stored_by="alice")
+        self.store.release(self.target, "run")
+        stored_members = self.store.read_members(self.target, migration.checksum)
+
+        self.write_bundle(body="CREATE TABLE M(ID NUMBER, TAMPERED NUMBER);")
+
+        with self.assertRaisesRegex(MigrationRunError, "checksum mismatch"):
+            self.adopt(dry_run=True)
+        self.assertEqual(self.store.list_member_bundles(self.target), {migration.checksum: migration.id})
+        self.assertEqual(self.store.read_members(self.target, migration.checksum), stored_members)
+
 
 class SqlStoreMemberTests(MigrationMemberTestCase):
     def setUp(self) -> None:

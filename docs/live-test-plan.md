@@ -74,24 +74,28 @@ acceptance remains open and must use disposable source and test targets only.
 
 ## 2. Migration files stored in the database (PR #4)
 
-1. **Alice authors and applies a reversible migration.**
-
-   ```text
-   scripts/team.py new-migration --author alice --slug accounts --target tables
-   # write CREATE TABLE ACCOUNTS(ID NUMBER), its verify query, and the down pair
-   scripts/team.py --env .env migrate
-   ```
-
-   - Expect `TEAM_MIGRATION_BUNDLE` with one row and `TEAM_MIGRATION_MEMBER`
-     with four rows for its checksum, and one `up` history event.
-2. **Alice checks the backfill.** `adopt-migration-members --dry-run` lists
-   her migration under `already_stored`.
-3. **Bob, who does not have Alice's files,** runs
+1. **Create an applied legacy migration without stored members.** Current
+   migration applies store all four members before running SQL, so they cannot
+   produce the missing-member case. Use a disposable developer checkout of the
+   pre-member-storage runner to apply Alice's reversible `ACCOUNTS` migration
+   and create the legacy history row. Verify the `up` event and table, then
+   restore Alice's current checkout before running current commands.
+2. **Bob, who does not have Alice's files,** runs
    `adopt-migration-members --dry-run`.
    - Expect Alice's migration under `missing` and `"status": "incomplete"`.
-4. **Tampering.** Bob creates files with Alice's migration ID but different
-   content and runs `adopt-migration-members`.
-   - Expect a refusal naming a checksum mismatch; nothing is stored.
+3. **Tampering before backfill.** Bob creates files with Alice's migration ID
+   but different content and runs `adopt-migration-members`.
+   - Expect a refusal naming a checksum mismatch; shared state stays unchanged.
+4. **Alice backfills the legacy bundle.** Alice runs
+   `adopt-migration-members` without `--dry-run`.
+   - Expect all four members stored and their hashes to match Alice's source.
+5. **Bob observes the completed backfill.** With no local Alice files,
+   `adopt-migration-members --dry-run` lists the migration under
+   `already_stored` and reports `complete`.
+6. **Tampering after backfill.** Bob creates conflicting local files with
+   Alice's stored migration ID and runs `adopt-migration-members`.
+   - Expect a checksum-mismatch refusal even though the matching bundle is
+     already stored; compare METADATA before and after to prove no write.
 
 ## 3. Two repositories, one database (PR #3)
 
