@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 _SCRIPTS_DIR = str(Path(__file__).resolve().parents[1 if Path(__file__).resolve().parent.name == "tests" else 2])
@@ -202,10 +203,15 @@ class ReleaseAdapterTests(unittest.TestCase):
                 "--target", str(ROOT / "targets" / "test.json"),
                 "--out", str(root / "apply-report.json"),
             ]
-            # The environment profile is absent, so main() must fail with the
-            # diagnostic SystemExit -- not with NameError from a missing import.
-            with self.assertRaises(SystemExit) as caught:
-                main(argv)
+            # Resolve the default .env relative to an isolated directory so a
+            # developer's ignored repository profile cannot affect this test.
+            original = Path.cwd()
+            try:
+                os.chdir(root)
+                with self.assertRaises(SystemExit) as caught:
+                    main(argv)
+            finally:
+                os.chdir(original)
             self.assertIn("environment profile file not found", str(caught.exception))
 
     def test_main_writes_a_false_confirmation_template_for_format3_replay(self):
