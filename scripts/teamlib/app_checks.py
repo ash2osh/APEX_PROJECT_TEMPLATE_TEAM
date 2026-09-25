@@ -57,18 +57,23 @@ class AppCheckReport:
     checks_digest: str
     coverage: Mapping[str, Any]
     status: str
+    source: Mapping[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "version": 1,
             "status": self.status,
-            "source_commit": self.source_commit,
             "target_identity": dict(self.target_identity),
             "source_digest": self.source_digest,
             "checks_digest": self.checks_digest,
             "coverage": dict(self.coverage),
             "results": [item.as_dict() for item in self.results],
         }
+        if self.source is None:
+            value["source_commit"] = self.source_commit
+        else:
+            value["source"] = dict(self.source)
+        return value
 
 
 @dataclass(frozen=True)
@@ -354,16 +359,21 @@ def build_app_check_bundle(
     )
 
 
-def _source_details(source: Any) -> tuple[str, Mapping[str, Any]]:
+def _source_details(source: Any) -> tuple[str, Mapping[str, Any], Mapping[str, Any] | None]:
     if not isinstance(source, Mapping):
-        raise AppCheckError("candidate source must include an exact commit and app map")
+        raise AppCheckError("candidate source must include an exact source identity and app map")
     commit = source.get("commit") or source.get("source_commit")
     apps = source.get("apps")
-    if not isinstance(commit, str) or not commit or any(char.isspace() for char in commit):
-        raise AppCheckError("candidate source commit is required")
     if not isinstance(apps, Mapping) or not apps:
         raise AppCheckError("candidate source must contain at least one application")
-    return commit, apps
+    database_source = source.get("source")
+    if database_source is not None:
+        if not isinstance(database_source, Mapping) or database_source.get("kind") != "dev-database":
+            raise AppCheckError("candidate database source identity is malformed")
+        return "", apps, dict(database_source)
+    if not isinstance(commit, str) or not commit or any(char.isspace() for char in commit):
+        raise AppCheckError("candidate source commit is required")
+    return commit, apps, None
 
 
 def _target_details(target: Any) -> tuple[str, dict[str, Any]]:
@@ -420,10 +430,13 @@ def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str,
     or unknown result an :class:`AppCheckError` carries the complete report so
     CI can publish the failed app/page/object identities.
     """
-    source_commit, apps = _source_details(source)
+    source_commit, apps, database_source = _source_details(source)
     _, identity = _target_details(replay_target)
     target_source_commit = replay_target.get("source_commit")
-    if target_source_commit is not None and target_source_commit != source_commit:
+    target_source = replay_target.get("source")
+    if database_source is not None and target_source != database_source:
+        raise AppCheckError("qualification target was not prepared from the selected database source")
+    if database_source is None and target_source_commit is not None and target_source_commit != source_commit:
         raise AppCheckError("qualification target was not prepared from the selected source commit")
     if isinstance(checks, Mapping):
         raw_declarations = dict(checks)
@@ -455,7 +468,11 @@ def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str,
             kind = str(check["kind"])
             results.append(_result(alias, check, _runner(replay_target, kind)))
     status = "PASS" if results and all(item.status == "PASS" for item in results) else "FAIL"
-    source_digest = _digest({"commit": source_commit, "apps": source})
+    source_digest = _digest(
+        {"source": database_source, "apps": source}
+        if database_source is not None
+        else {"commit": source_commit, "apps": source}
+    )
     checks_digest = _digest(normalized)
     coverage = {
         "apps": sorted(source_aliases),
@@ -463,7 +480,10 @@ def verify_candidate_apps(source: Mapping[str, Any], replay_target: Mapping[str,
         "checks": len(results),
         "unknown": sum(item.status == "UNKNOWN" for item in results),
     }
-    report = AppCheckReport(source_commit, identity, tuple(results), source_digest, checks_digest, coverage, status)
+    report = AppCheckReport(
+        source_commit, identity, tuple(results), source_digest, checks_digest,
+        coverage, status, database_source,
+    )
     if status != "PASS":
         failures = [f"{item.alias}/{item.check_id}={item.status}" for item in results if item.status != "PASS"]
         raise AppCheckError("candidate application checks did not pass: " + ", ".join(failures), report)

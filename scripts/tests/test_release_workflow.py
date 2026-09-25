@@ -19,154 +19,67 @@ from teamlib.migration_bundle import bundle_checksum
 from teamlib.release import (
     ReleaseError,
     apply_release,
-    build_release,
     plan_release,
     verify_release,
 )
+from scripts.tests.release_fixtures import _build_git_release_fixture
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_workflows_use_exact_sha_and_never_pull_request_target(self):
-        database = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")
+    def test_ci_has_no_git_tag_release_builder(self):
+        workflows = sorted(path.name for path in (ROOT / ".github" / "workflows").glob("*.yml"))
+        self.assertEqual(workflows, ["database-checks.yml", "integration.yml"])
+        self.assertFalse((ROOT / ".github" / "workflows" / "release.yml").exists())
+        offline = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")
         integration = (ROOT / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
-        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        for workflow in (database, integration, release):
+        for workflow in (offline, integration):
             self.assertNotIn("pull_request_target", workflow)
-            self.assertIn("github.sha", workflow)
-        self.assertEqual(database.count("\n  offline:"), 1)
-        self.assertNotIn("ci-" + "replay", database)
-        self.assertNotIn("docker", database.lower())
-        self.assertNotIn("oracle/free", database.lower())
-        self.assertNotIn("command -v sql", database)
-        self.assertNotIn("upload-artifact", database)
-        self.assertIn("verify-release", release)
-        self.assertIn("release.tar", release)
-        self.assertIn("runs-on: [self-hosted, team-apex, test]", release)
-        self.assertEqual(release.count("run-release-test"), 1)
-        self.assertNotIn("TEAM_TEST_HISTORY_JSON", release)
-        self.assertNotIn("apply_release.sh", release)
-        self.assertNotIn("test-plan.json", release)
-        self.assertNotIn("apply-report.json", release)
-        self.assertIn("sign-test-evidence", release)
-        self.assertIn("--archive scratch/release/release.tar", release)
-        self.assertIn("TEAM_TEST_ENV_CONTENT: ${{ secrets.TEAM_TEST_ENV_CONTENT }}", release)
-        self.assertIn("gen-runbook", release)
-        self.assertIn("TEAM_FLOW_RUNNER: ${{ vars.TEAM_FLOW_RUNNER }}", release)
-        self.assertIn("cancel-in-progress: false", integration)
-        self.assertIn("concurrency:", release)
-        self.assertIn("group: example-team-apex-test", release)
-        self.assertIn("cancel-in-progress: false", release)
-        self.assertNotIn("id-token: write", release)
-        self.assertNotIn("production-secrets", release)
-        self.assertIn("schema/v[0-9]+.[0-9]+.[0-9]+", release)
-        self.assertIn("app/**/v[0-9]+.[0-9]+.[0-9]+", release)
-        self.assertIn("--kind", release)
+            self.assertNotIn("release.tar", workflow)
+            self.assertNotIn("sign-test-evidence", workflow)
+        self.assertEqual(offline.count("\n  offline:"), 1)
+        self.assertIn("github.sha", integration)
 
-    def test_release_generates_and_signs_test_evidence_in_order(self):
-        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        ordered = [release.index(token) for token in ("run-release-test", "sign-test-evidence", "gen-runbook")]
-        self.assertEqual(ordered, sorted(ordered))
-        self.assertIn("TEAM_TEST_SIGNING_KEY_CONTENT: ${{ secrets.TEAM_TEST_SIGNING_KEY_CONTENT }}", release)
-        self.assertIn("$RUNNER_TEMP/test-signing-key.pem", release)
-        self.assertIn("umask 077", release)
-        self.assertIn("chmod 600", release)
-        self.assertIn("if: always()", release)
-        self.assertIn("find \"$RUNNER_TEMP\" -maxdepth 1 -type f", release)
-        self.assertIn("-name test-signing-key.pem", release)
-        self.assertNotIn("TEAM_TEST_EVIDENCE", release)
-        self.assertNotIn("TEAM_TEST_SIGNATURE", release)
-        self.assertIn("$RUNNER_TEMP/test-evidence.json", release)
-        self.assertIn("$RUNNER_TEMP/test-evidence.sig", release)
-        self.assertIn("if-no-files-found: error", release)
-        self.assertIn("test.env", release)
-        self.assertIn("test-trust-key.pem", release)
-        self.assertIn("production-history.json", release)
-        self.assertIn("Remove protected handoff inputs", release)
+    def test_database_release_is_the_public_builder_and_legacy_v2_stays_verifiable(self):
+        import team
+        import teamlib.release as release
+        import argparse
 
-    def test_signing_key_only_exists_after_the_evidence_is_produced(self):
-        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        run_test = release.index("run-release-test")
-        for token in ("TEAM_TEST_SIGNING_KEY_CONTENT", "test-signing-key.pem"):
-            self.assertGreater(release.index(token), run_test, f"{token} must not appear before run-release-test")
-        self.assertIn("trap 'rm -f \"$RUNNER_TEMP/test-signing-key.pem\"' EXIT", release)
+        self.assertFalse(hasattr(release, "build_release"))
+        self.assertFalse(hasattr(release, "validate_release_identity"))
+        parser = team._parser()
+        help_text = parser.format_help()
+        self.assertIn("build-release", help_text)
+        commands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        details = commands.choices["build-release"].format_help()
+        self.assertIn("--kind {schema,app}", details)
+        self.assertNotIn("--ref", details)
+        release_source = (ROOT / "scripts" / "teamlib" / "release.py").read_text(encoding="utf-8")
+        self.assertIn("_MANIFEST_KEYS_V2", release_source)
+        self.assertIn("def verify_release", release_source)
+        self.assertNotIn("release-record.json", release_source)
 
-    def test_signing_runs_trusted_code_in_its_own_job(self):
-        import re
-        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        body = release.split("\njobs:\n", 1)[1]
-        heads = list(re.finditer(r"^  ([a-z][a-z0-9-]*):\n", body, re.M))
-        jobs = {head.group(1): body[head.end():(heads[i + 1].start() if i + 1 < len(heads) else len(body))]
-                for i, head in enumerate(heads)}
-        signer = [name for name, text in jobs.items() if "TEAM_TEST_SIGNING_KEY_CONTENT" in text]
-        self.assertEqual(signer, ["sign-and-handoff"])
-        sign = jobs["sign-and-handoff"]
-        self.assertIn("ref: ${{ github.event.repository.default_branch }}", sign)
-        self.assertNotIn("github.sha", sign)
-        self.assertNotIn("run-release-test", sign)
-        self.assertIn("needs: [build, qualify]", sign)
+    def test_local_release_runbook_documents_build_test_sign_handoff(self):
+        promotion = (ROOT / "docs" / "promotion.md").read_text(encoding="utf-8")
+        ci = (ROOT / "docs" / "ci.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("build-release", readme)
+        for document in (promotion, ci):
+            for required in ("build-release", "run-release-test", "sign-test-evidence"):
+                self.assertIn(required, document)
+            self.assertNotIn("one designated repository", document)
+            self.assertNotIn("schema/v<semver>", document)
+        self.assertIn("gen-runbook", promotion)
 
-    def test_actions_are_pinned_by_sha(self):
+    def test_actions_are_pinned_and_checkouts_drop_credentials(self):
         import re
         for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
             text = workflow.read_text(encoding="utf-8")
             for ref in re.findall(r"uses:\s*(\S+)", text):
                 self.assertRegex(ref, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$", f"{workflow.name}: {ref}")
-
-    def test_signing_key_is_absent_while_the_release_test_runs(self):
-        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        written = '> "$RUNNER_TEMP/test-signing-key.pem"'
-        self.assertEqual(release.count(written), 1)
-        self.assertLess(release.index("run-release-test \\"), release.index(written))
-        self.assertLess(release.index(written), release.index("sign-test-evidence \\"))
-
-    def test_checkouts_do_not_persist_git_credentials(self):
-        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
-            text = workflow.read_text(encoding="utf-8")
-            self.assertEqual(
-                text.count("uses: actions/checkout@"), text.count("persist-credentials: false"), workflow.name
-            )
-
-    def test_release_tags_and_namespacing(self):
-        from teamlib.release import ReleaseError, validate_release_identity
-        commit_a = "a" * 40
-        commit_b = "b" * 40
-        # Valid schema tag
-        validate_release_identity("schema/v1.0.0", "1.0.0", commit_a, {}, kind="schema")
-        validate_release_identity("refs/tags/schema/v1.0.0", "1.0.0", commit_a, {}, kind="schema")
-        # Valid app tag
-        validate_release_identity("app/hr/v1.0.0", "1.0.0", commit_a, {}, kind="app", alias="hr")
-        validate_release_identity("refs/tags/app/hr/v1.0.0", "1.0.0", commit_a, {}, kind="app", alias="hr")
-
-        # Tag / version mismatch
-        with self.assertRaises(ReleaseError):
-            validate_release_identity("schema/v1.0.1", "1.0.0", commit_a, {}, kind="schema")
-        with self.assertRaises(ReleaseError):
-            validate_release_identity("app/hr/v1.0.1", "1.0.0", commit_a, {}, kind="app", alias="hr")
-
-        # Tag / alias mismatch
-        with self.assertRaises(ReleaseError):
-            validate_release_identity("app/payroll/v1.0.0", "1.0.0", commit_a, {}, kind="app", alias="hr")
-
-        # Tag / kind mismatch
-        with self.assertRaises(ReleaseError):
-            validate_release_identity("schema/v1.0.0", "1.0.0", commit_a, {}, kind="app", alias="hr")
-        with self.assertRaises(ReleaseError):
-            validate_release_identity("app/hr/v1.0.0", "1.0.0", commit_a, {}, kind="schema")
-
-        # Namespacing in release records: schema/v1.0.0 and app/hr/v1.0.0 do not collide
-        records = {
-            "schema/v1.0.0": {"source_commit": commit_a, "archive_digest": "1" * 64},
-            "app/hr/v1.0.0": {"source_commit": commit_b, "archive_digest": "2" * 64},
-        }
-        validate_release_identity("schema/v1.0.0", "1.0.0", commit_a, records, kind="schema")
-        validate_release_identity("app/hr/v1.0.0", "1.0.0", commit_b, records, kind="app", alias="hr")
-        with self.assertRaises(ReleaseError):
-            validate_release_identity("schema/v1.0.0", "1.0.0", commit_b, records, kind="schema")
-        with self.assertRaises(ReleaseError):
-            validate_release_identity("app/hr/v1.0.0", "1.0.0", commit_a, records, kind="app", alias="hr")
+            self.assertEqual(text.count("uses: actions/checkout@"), text.count("persist-credentials: false"), workflow.name)
 
 
 class IndependentReleaseTwoAppTests(unittest.TestCase):
@@ -259,7 +172,7 @@ class IndependentReleaseTwoAppTests(unittest.TestCase):
         # Build schema archive
         scratch = Path(self.temp.name) / "scratch"
         scratch.mkdir()
-        build_release(self.repo, "HEAD", "1.1.0", scratch / "schema", kind="schema")
+        _build_git_release_fixture(self.repo, "HEAD", "1.1.0", scratch / "schema", kind="schema")
         schema_archive = scratch / "schema" / "release.tar"
         verified_schema_manifest = verify_release(schema_archive)
         self.assertEqual(verified_schema_manifest.kind, "schema")
@@ -279,7 +192,7 @@ class IndependentReleaseTwoAppTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-m", "HR v2 requires pronouns"], check=True)
 
         # Build HR v2 app archive
-        hr_manifest = build_release(self.repo, "HEAD", "2.0.0", scratch / "hr", kind="app", alias="hr")
+        hr_manifest = _build_git_release_fixture(self.repo, "HEAD", "2.0.0", scratch / "hr", kind="app", alias="hr")
         hr_archive = scratch / "hr" / "release.tar"
         verified_hr_manifest = verify_release(hr_archive)
         self.assertEqual(verified_hr_manifest.kind, "app")
@@ -386,7 +299,7 @@ class IndependentReleaseTwoAppTests(unittest.TestCase):
 
         scratch = Path(self.temp.name) / "scratch"
         scratch.mkdir(exist_ok=True)
-        build_release(self.repo, "HEAD", "2.0.0", scratch / "hr_master", kind="app", alias="hr")
+        _build_git_release_fixture(self.repo, "HEAD", "2.0.0", scratch / "hr_master", kind="app", alias="hr")
         hr_archive = scratch / "hr_master" / "release.tar"
         hr_tree = {"application.apx": (self.repo / "apps" / "hr" / "application.apx").read_bytes()}
 

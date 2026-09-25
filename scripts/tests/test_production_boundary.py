@@ -21,7 +21,8 @@ from teamlib.control_store import ControlStore, ControlStoreError
 from teamlib.deploy import DeployError, deploy_app
 from teamlib.migrate import MigrationRunError, apply_plan
 from teamlib.migration_store import MigrationStore, MigrationStoreError
-from teamlib.release import ReleaseError, apply_release, build_release, plan_release
+from teamlib.release import ReleaseError, apply_release, plan_release
+from scripts.tests.release_fixtures import _build_git_release_fixture
 
 
 class ProductionBoundaryTests(unittest.TestCase):
@@ -85,7 +86,7 @@ class ProductionBoundaryTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="app", alias="a")
+            manifest = _build_git_release_fixture(repo, commit, "1.0.0", root / "out", kind="app", alias="a")
             target = {"environment": "production", "role": "production"}
             plan = plan_release(manifest.archive_path, {}, target)
             with self.assertRaises(ReleaseError):
@@ -156,9 +157,10 @@ class ProductionRefusalCoverageTests(unittest.TestCase):
 
     ARGUMENTS = {
         "setup-state": (),
+        "ack-publish": ("prep-1",),
         "adopt-frontier": (),
         "adopt-migration-members": (),
-        "build-schema-release": ("--version", "1.0.0", "--out", "release-out"),
+        "build-release": ("--kind", "schema", "--version", "1.0.0", "--out", "release-out"),
         "qualify-target": ("--source-commit", "a" * 40, "--aliases", "checkout", "--out", "out.json"),
         "recover-migration": ("run-1", "--evidence", "evidence.json"),
         "register-app": ("checkout",),

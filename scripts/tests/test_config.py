@@ -392,15 +392,21 @@ class TargetBindingTypeTests(unittest.TestCase):
 
 
 class OfflineCommandPrefixTests(unittest.TestCase):
-    def test_bare_command_is_recognised(self):
-        self.assertTrue(is_offline_command("build-release"))
+    def test_database_build_release_is_not_offline(self):
+        for value in (
+            "build-release --kind schema",
+            "team.py build-release --kind app --alias hr",
+            "./scripts/team.py build-release --kind schema",
+            "scripts/team.py build-release --kind app",
+            "team.sh build-release --kind schema",
+            "team.ps1 build-release --kind app",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(is_offline_command(value))
 
-    def test_script_prefixed_command_is_recognised(self):
-        for prefix in ("team.py", "./scripts/team.py", "scripts/team.py", "team.sh", "team.ps1"):
-            with self.subTest(prefix=prefix):
-                self.assertTrue(is_offline_command(f"{prefix} build-release --ref v1.0.0"))
-
-    def test_online_command_is_not_offline_with_any_prefix(self):
+    def test_explicitly_offline_commands_remain_offline(self):
+        self.assertTrue(is_offline_command("verify-release scratch/release.tar"))
+        self.assertTrue(is_offline_command("team.sh plan-release scratch/release.tar"))
         self.assertFalse(is_offline_command("export-app"))
         self.assertFalse(is_offline_command("./scripts/team.py export-app checkout"))
 

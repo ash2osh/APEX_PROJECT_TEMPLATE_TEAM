@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
@@ -179,6 +179,16 @@ def load_inventory_bytes(raw: bytes, *, source: str) -> Inventory:
     if data.get("inventory_digest") != inventory.digest:
         raise InventoryError(f"inventory digest does not match evidence: {source}")
     return inventory
+
+
+def structural_digest(inventory: Inventory) -> str:
+    """Digest of the schema structure alone, independent of which schemas hold it.
+
+    ``Inventory.digest`` includes the schema-set digest, which names the
+    environment's own schemas, so development and test never share it even when
+    their structures match. Object keys already use logical owners.
+    """
+    return replace(inventory, schema_set_digest="").digest
 
 
 def inventory_from_manifest(data: Mapping[str, Any]) -> Inventory:

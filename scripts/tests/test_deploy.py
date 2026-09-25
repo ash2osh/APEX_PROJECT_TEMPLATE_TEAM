@@ -9,8 +9,10 @@ if _SCRIPTS_DIR not in sys.path:
 
 from pathlib import Path
 from types import SimpleNamespace
+import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from teamlib.config import Target
 from teamlib.control_store import ControlStore
@@ -61,6 +63,20 @@ class DeployTests(unittest.TestCase):
         report = deploy_app(self.target, self.source_tree, "abc123", repo=self.root, control_store=self.store, runner=self.runner)
         self.assertEqual(report.source_commit, "abc123")
         self.assertEqual(report.tree_digest, report.verified_tree_digest)
+
+    def test_packaged_master_contract_replaces_the_repository_copy(self):
+        (self.root / "targets").mkdir()
+        (self.root / "targets" / "masters.json").write_text(json.dumps({"from": "repo"}), encoding="utf-8")
+        cases = (
+            ("default reads the repository", {}, [{"from": "repo"}]),
+            ("packaged contract wins", {"master_contract": {"from": "release"}}, [{"from": "release"}]),
+            ("release without a contract skips it", {"master_contract": None}, []),
+        )
+        for name, kwargs, expected in cases:
+            with self.subTest(name=name):
+                with patch("teamlib.deploy.validate_masters") as validate:
+                    deploy_app(self.target, self.source_tree, "abc123", repo=self.root, control_store=self.store, runner=self.runner, **kwargs)
+                self.assertEqual([call.args[2] for call in validate.call_args_list], expected)
 
     def test_production_deploy_refuses_before_runner(self):
         target = Target(**{**self.target.__dict__, "environment": "production"})

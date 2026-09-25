@@ -8,16 +8,18 @@ This repository is a shared-application workflow supporting APEX 26.1+ and APEXl
 2. **File-first / Agent APEXlang route:** When editing APEXlang directly or using an AI coding agent:
    - Edit `apps/<alias>/`, review, and commit exact source.
    - Run `scripts/team.sh prepare-publish <alias> --ref HEAD` to generate an app-scoped pause notice and durable evidence.
-   - Gather genuine teammate checkout acknowledgements (never invent fictitious acknowledgements or bypass gates).
-   - Run `scripts/team.sh publish-app --prepared <id> --confirm-pause --ack <alias>:<uuid>`.
+   - Keep a stable `TEAM_CHECKOUT_UUID` for each repository and use it when registering that checkout.
+   - After the pause notice is posted, each teammate runs `scripts/team.sh ack-publish <id>` from their own registered checkout; it records the preparation digest, checkout UUID, host, user, and time in shared control metadata.
+   - Run `scripts/team.sh publish-app --prepared <id> --confirm-pause` only after all required acknowledgement rows are present. Never invent a teammate acknowledgement or set another checkout's identity.
 3. **Schema migration route:** Author immutable pairs under `migrations/`; verify drift and apply only through the qualified METADATA profile. Applied migrations change the shared TABLES/CODE schemas for everyone; a colleague's applied migration appears in the shared history even though its files are not in this repository.
 
 ## Guards, Locks & Boundaries
 
 - **App-scoped pause:** Publishing pauses only the selected applications. Teammates working on sibling apps continue editing uninterrupted.
+- **Checkout-authored acknowledgement:** `setup-state` creates additive preparation and acknowledgement tables without altering existing metadata tables. `ack-publish` resolves the preparation from shared metadata and writes only for this checkout's registered identity; `publish-app` checks shared preparation and acknowledgement rows bound to the exact preparation digest.
 - **Informational page-lock report:** Page-lock reports query `APEX_APPLICATION_LOCKED_PAGES`. The absence of locks does not prove the absence of unsaved or in-progress Builder work. Always communicate before publish.
 - **Before/after check:** Preflight captures live Builder state before writes and halts on unreconciled edits; post-import verifies that re-exported APEXlang matches exact source bytes.
-- **Independent releases:** Release tags are `schema/v<semver>` (applied once to shared schema) and `app/<alias>/v<semver>` (deploys only the selected app after verifying schema prerequisites; zero sibling app deployments).
-- **Production refusal:** Production writes remain strictly refused. CI test runs emit signed evidence and offline owner runbooks; live actions are never automated in production.
+- **Independent releases:** `build-release --kind schema|app` cuts a release from the shared development database. Schema releases apply once per environment; app releases deploy only the selected application after verifying its schema prerequisites. Release tags do not identify or build releases.
+- **Production refusal:** Production writes remain strictly refused. Local test-profile qualification emits signed evidence and offline owner runbooks; live production actions are never automated.
 - **Durable recovery:** Recovery captures and journals belong under `.sync-state/` and survive process failure. Never clear locks or repair refusals by importing over the workspace.
 - **Evidence truth:** Never claim unavailable live checks passed. If an environment or flow check is unavailable, record `UNKNOWN`. Never silently commit or push to Git.

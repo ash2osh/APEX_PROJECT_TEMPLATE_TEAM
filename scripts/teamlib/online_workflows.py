@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -9,12 +10,14 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import uuid
 from typing import Any
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 
+from .apex import ApexError, capture_app
 from .app_checks import AppCheckBundle, build_app_check_bundle
 from .config import Config, Target, profile_target, schema_set_digest
-from .control_store import SqlControlStore
+from .control_store import ControlStoreError, SqlControlStore
 from .deploy import DeployReport, deploy_app
 from .fingerprints import Inventory, diff_inventory, drift_is_clean
 from .live_inventory import inventory_target
@@ -22,10 +25,15 @@ from .migrate import RunReport, apply_plan
 from .migration_runtime import migration_profiles
 from .migration_store import MigrationStoreError, SqlMigrationStore
 from .qualification import qualify_target, write_report
-from .release import ApplyReport, Manifest, release_app_check_bundle, verify_release
-from .release_adapter import apply_verified_release_live
+from .release import ApplyReport, Manifest, ReleaseError, plan_release, release_app_check_bundle, verify_release
+from .release_adapter import (
+    _release_target_document,
+    apply_verified_release_live,
+    verify_required_migrations,
+)
 from .runtime import RuntimeReport, preflight_online
 from .source_snapshot import IntegrationSource, load_integration_source
+from .trees import tree_digest
 
 
 class OnlineWorkflowError(RuntimeError):
@@ -57,6 +65,10 @@ class OnlineDependencies:
     apply_release_live: Callable[..., ApplyReport]
     qualify_release: Callable[..., Mapping[str, Any]]
     write_report: Callable[[Mapping[str, Any], Path], None]
+    # Holds the migration mutex (after rechecking the release's required
+    # migrations) and each released app's mutex (after proving the deployed
+    # bytes still equal the archive) across qualification.
+    hold_release_apps: Callable[..., AbstractContextManager[None]]
 
 
 @dataclass(frozen=True)
@@ -66,11 +78,11 @@ class OnlineRunResult:
     report: Mapping[str, Any] | None
     confirmation_template: Mapping[str, Any] | None = None
     checkout_diagnostic: str | None = None
+    source: Mapping[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "status": self.status,
-            "source_commit": self.source_commit,
             "report": dict(self.report) if self.report is not None else None,
             "confirmation_template": (
                 dict(self.confirmation_template)
@@ -79,6 +91,11 @@ class OnlineRunResult:
             ),
             "checkout_diagnostic": self.checkout_diagnostic,
         }
+        if self.source is None:
+            value["source_commit"] = self.source_commit
+        else:
+            value["source"] = dict(self.source)
+        return value
 
 
 def _resolve_head(repo: Path) -> str:
@@ -318,6 +335,65 @@ def _qualify_release(
     )
 
 
+def _require_release_applied(archive: Path, target_contract: Path, history: Mapping[str, Any]) -> None:
+    """Refuse unless the live test history is exactly at the release's cut."""
+    plan = plan_release(archive, history, _release_target_document(target_contract))
+    if plan.pending or plan.events:
+        raise ReleaseError("test target history is not at the release cut; another migration ran, test again")
+
+
+@contextmanager
+def _hold_release_apps(
+    repo: Path,
+    config: Config,
+    expected: Mapping[str, str],
+    required: tuple[Mapping[str, str], ...] = (),
+    verify_history: Callable[[Mapping[str, Any]], None] | None = None,
+) -> Iterator[None]:
+    """Keep deployments and migrations out while a release is qualified.
+
+    deploy_app and the migration runner release their mutexes when they
+    finish: another run could deploy a different archive, undo a required
+    migration or add a later one before the checks read the target.
+    """
+    if not expected and not required and verify_history is None:
+        yield
+        return
+    metadata = profile_target(config, "METADATA")
+    store = SqlControlStore(metadata, work_root=repo / "scratch" / "metadata")
+    token = uuid.uuid4().hex
+    migrations: SqlMigrationStore | None = None
+    migration_held = False
+    held: list[Target] = []
+    try:
+        if required or verify_history is not None:
+            migrations = SqlMigrationStore(metadata, work_root=repo / "scratch" / "metadata")
+            migrations.acquire(metadata, token, "release-test", socket.gethostname())
+            migration_held = True
+            history = migrations.read_history(metadata)
+            if required:
+                verify_required_migrations(required, history)
+            if verify_history is not None:
+                verify_history(history)
+        for alias in sorted(expected):
+            target = profile_target(config, "APEX", alias=alias)
+            store.acquire_app(target.physical_key, token, "release-test", socket.gethostname(), "release-test")
+            held.append(target)
+            captured = capture_app(target, token, repo=repo, control_store=store, persist=False)
+            if tree_digest(captured.tree) != expected[alias]:
+                raise OnlineWorkflowError(
+                    f"application {alias} no longer matches the release archive; another deployment ran, test again"
+                )
+        yield
+    except (ApexError, ControlStoreError, MigrationStoreError, ReleaseError) as exc:
+        raise OnlineWorkflowError(f"release application cannot be held for qualification: {exc}") from exc
+    finally:
+        for target in held:
+            store.release_app(target.physical_key, token, confirmed_success=False)
+        if migrations is not None and migration_held:
+            migrations.release(metadata, token)
+
+
 def _default_dependencies() -> OnlineDependencies:
     return OnlineDependencies(
         resolve_head=_resolve_head,
@@ -337,6 +413,7 @@ def _default_dependencies() -> OnlineDependencies:
         apply_release_live=apply_verified_release_live,
         qualify_release=_qualify_release,
         write_report=write_report,
+        hold_release_apps=_hold_release_apps,
     )
 
 
@@ -464,6 +541,7 @@ def run_release_test(
     *,
     flow_executable: str,
     dependencies: OnlineDependencies | None = None,
+    confirmation: Mapping[str, Any] | None = None,
 ) -> OnlineRunResult:
     """Run the protected test qualification from a verified release archive."""
     if config.role != "test" or config.environment != "test":
@@ -505,6 +583,7 @@ def run_release_test(
         target_path,
         config,
         repo=repo_path,
+        confirmation=confirmation,
     )
     if hasattr(apply_report, "as_dict") and callable(apply_report.as_dict):
         apply_document = apply_report.as_dict()
@@ -513,20 +592,48 @@ def run_release_test(
     else:
         raise OnlineWorkflowError("release application did not return a report")
     source_commit = getattr(manifest, "source_commit", None)
-    if not isinstance(source_commit, str) or len(source_commit) != 40:
-        raise OnlineWorkflowError("release manifest source commit is malformed")
+    database_source = None
+    if getattr(manifest, "format_version", None) == 3:
+        source = getattr(manifest, "source", None)
+        if not isinstance(source, Mapping) or source_commit != "":
+            raise OnlineWorkflowError("format-3 release manifest database source is malformed")
+        database_source = dict(source)
+        source_identity: str | Mapping[str, Any] = database_source
+    else:
+        if getattr(manifest, "source", None) is not None:
+            raise OnlineWorkflowError("database source requires a format-3 release manifest")
+        if not isinstance(source_commit, str) or len(source_commit) != 40 or any(
+            char not in "0123456789abcdef" for char in source_commit
+        ):
+            raise OnlineWorkflowError("release manifest source commit is malformed")
+        source_identity = source_commit
+    app_digests = getattr(manifest, "app_tree_digests", None) or {}
+    if not isinstance(app_digests, Mapping) or not set(exercised_aliases) <= set(app_digests):
+        raise OnlineWorkflowError("release manifest application bindings are malformed")
     try:
-        report = deps.qualify_release(
-            repo_path,
-            config,
-            source_commit,
-            exercised_aliases,
-            release_archive=archive_path,
-            apply_report=apply_document,
-            check_bundle=check_bundle,
-            flow_executable=flow_executable,
-            runtime_report=runtime,
+        required = tuple(getattr(manifest, "required_migrations", None) or ())
+        # A schema release is qualified against exactly its own cut: hold the
+        # migration mutex and prove no later transition landed after apply.
+        verify_history = (
+            (lambda history: _require_release_applied(archive_path, target_path, history))
+            if getattr(manifest, "kind", None) == "schema"
+            else None
         )
+        with deps.hold_release_apps(
+            repo_path, config, {alias: app_digests[alias] for alias in exercised_aliases}, required,
+            verify_history,
+        ):
+            report = deps.qualify_release(
+                repo_path,
+                config,
+                source_identity,
+                exercised_aliases,
+                release_archive=archive_path,
+                apply_report=apply_document,
+                check_bundle=check_bundle,
+                flow_executable=flow_executable,
+                runtime_report=runtime,
+            )
     except Exception as exc:
         evidence = getattr(exc, "report", None)
         if isinstance(evidence, Mapping):
@@ -539,4 +646,9 @@ def run_release_test(
         report_dict["kind"] = manifest.kind
         report_dict["alias"] = manifest.alias
     deps.write_report(report_dict, Path(out))
-    return OnlineRunResult("PASS", source_commit, report_dict)
+    return OnlineRunResult(
+        "PASS",
+        source_commit if database_source is None else "",
+        report_dict,
+        source=database_source,
+    )

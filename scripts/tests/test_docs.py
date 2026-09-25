@@ -98,8 +98,13 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("scripts/team.sh prepare-publish hr", readme)
         self.assertIn("scripts/team.sh publish-app", readme)
 
-        # 3. Omar's explicit pause acknowledgement
-        self.assertIn('--ack "hr:$OMAR_UUID"', readme)
+        # 3. Each registered checkout writes its own acknowledgement.
+        self.assertIn('scripts/team.sh ack-publish "$PREPARATION_ID"', readme)
+        self.assertNotIn("--ack", readme)
+        self.assertIn("without copying the publisher's local `.sync-state` files", readme)
+        pause_guide = (ROOT / "docs" / "import-pause.md").read_text(encoding="utf-8")
+        self.assertIn("TEAM_APP_PUBLISH_PREP", pause_guide)
+        self.assertIn("TEAM_APP_PUBLISH_ACK", pause_guide)
 
         # 4. Schema-then-HR release
         self.assertIn("build-release --kind schema", readme)
@@ -139,6 +144,14 @@ class DocumentationTests(unittest.TestCase):
             ".sync-state/",
         ):
             self.assertIn(token.lower(), agents.lower(), f"AGENTS.md missing {token}")
+        self.assertIn("ack-publish", agents)
+        self.assertNotIn("--ack", agents)
+
+        workflow = (ROOT / ".agents" / "workflows" / "team-flow.md").read_text(encoding="utf-8")
+        pause_guide = (ROOT / "docs" / "import-pause.md").read_text(encoding="utf-8")
+        for current_publish_guidance in (workflow, pause_guide):
+            self.assertIn("ack-publish", current_publish_guidance)
+            self.assertNotIn("--ack", current_publish_guidance)
 
         operator_paths = [
             ROOT / "README.md",
@@ -167,7 +180,6 @@ class DocumentationTests(unittest.TestCase):
             ROOT / "docs" / "promotion.md",
             ROOT / "ci" / "app-checks" / "README.md",
             ROOT / ".github" / "workflows" / "integration.yml",
-            ROOT / ".github" / "workflows" / "release.yml",
         )
         text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         for required in (
@@ -244,6 +256,22 @@ class DocumentationTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/database-checks.yml").read_text(encoding="utf-8")
         self.assertIn("ruff check scripts/", workflow)
 
+    def test_editable_install_limits_discovery_to_cli_and_teamlib(self):
+        config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        for expected in (
+            '[build-system]',
+            'requires = ["setuptools>=64"]',
+            'build-backend = "setuptools.build_meta"',
+            '[tool.setuptools]',
+            'package-dir = {"" = "scripts"}',
+            'py-modules = ["team"]',
+            '[tool.setuptools.packages.find]',
+            'where = ["scripts"]',
+            'include = ["teamlib*"]',
+        ):
+            with self.subTest(setting=expected):
+                self.assertIn(expected, config)
+
     def test_one_offline_workflow_owns_the_pull_request_gate(self):
         """Two workflows both ran the whole suite on every push and PR.
 
@@ -251,7 +279,7 @@ class DocumentationTests(unittest.TestCase):
         workflow that repeats it doubles CI time without adding a check.
         """
         workflows = sorted(path.name for path in (ROOT / ".github/workflows").glob("*.yml"))
-        self.assertEqual(workflows, ["database-checks.yml", "integration.yml", "release.yml"])
+        self.assertEqual(workflows, ["database-checks.yml", "integration.yml"])
         offline = (ROOT / ".github/workflows/database-checks.yml").read_text(encoding="utf-8")
         for expected in (
             "ruff check scripts/",
@@ -274,18 +302,15 @@ class DocumentationTests(unittest.TestCase):
 
 
 class ReleaseWorkflowDependencyTests(unittest.TestCase):
-    def test_test_runner_declares_the_promotion_dependency(self):
-        from pathlib import Path
-
-        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
-        text = workflow.read_text(encoding="utf-8")
-        self.assertIn("gen-runbook", text)
-        self.assertIn(
-            "runs-on: [self-hosted, team-apex, test]",
-            text,
-            "the protected test runner carries the signing and verification dependency",
-        )
-        self.assertIn("TEAM_TRUST_KEY_CONTENT", text)
+    def test_release_qualification_is_local_and_no_tag_workflow_remains(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = root / ".github" / "workflows" / "release.yml"
+        self.assertFalse(workflow.exists())
+        promotion = (root / "docs" / "promotion.md").read_text(encoding="utf-8")
+        for command in ("build-release", "run-release-test", "sign-test-evidence", "gen-runbook"):
+            self.assertIn(command, promotion)
+        self.assertIn("operator's machine", promotion)
+        self.assertIn("Production writes remain strictly refused", promotion)
 
 
 if __name__ == "__main__":

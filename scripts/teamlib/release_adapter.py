@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from .config import Config, ConfigError, Target, contract_target, load_config, parse_target_contract, profile_target, schema_set_digest
 from .control_store import SqlControlStore
 from .deploy import deploy_app
-from .migrate import apply_plan
+from .destructive_confirmation import ConfirmationRequirement, require_confirmations
+from .migrate import apply_forward, apply_plan, apply_redo, apply_undo
 from .migration_runtime import migration_profiles
 from .migration_store import SqlMigrationStore
 from .release import (
@@ -22,8 +23,10 @@ from .release import (
     Manifest,
     ReleaseError,
     ReleasePlan,
+    _database_release_replay_marker,
     apply_release,
     release_app_trees,
+    release_master_contract,
     release_migration_files,
     plan_release,
     verify_release,
@@ -187,6 +190,7 @@ def _apply_release_context(
     history: Mapping[str, Any],
     *,
     repo: Path,
+    confirmation: Mapping[str, Any] | None = None,
 ) -> ApplyReport:
     config = context.config
     with tempfile.TemporaryDirectory(prefix="team-release-apply-") as directory:
@@ -197,34 +201,100 @@ def _apply_release_context(
             (migration_root / relative).write_bytes(data)
 
         def apply_migrations(_pending: tuple[Mapping[str, Any], ...], reviewed: ReleasePlan) -> None:
+            source_commit = context.manifest.source_commit
+            source = getattr(context.manifest, "source", None)
+            if source is not None:
+                source_commit = "db-release:" + str(source["history_digest"])
+            profiles = migration_profiles(
+                config,
+                context.metadata,
+                context.migration_store,
+                work,
+                source_commit=source_commit,
+                applied_by=context.applied_by,
+            )
+            if reviewed.events:
+                replay_base = reviewed.replay_from
+                # Carry the original target cut through later release archives.
+                # This proves omitted no-op up/down pairs without changing the
+                # migration store's local applied_sequence values.
+                for row in history.values():
+                    if isinstance(row, Mapping):
+                        marker = _database_release_replay_marker(row.get("source_commit"))
+                        if marker is not None and marker[2] is not None:
+                            replay_base = min(replay_base, marker[2])
+                for event in reviewed.events:
+                    if source is not None:
+                        profiles["source_commit"] = (
+                            f"db-release:{source['history_digest']}:{event['sequence']}:{replay_base}"
+                        )
+                    migration_id = str(event["id"])
+                    current_history = context.migration_store.read_history(context.metadata)
+                    row = current_history.get(migration_id)
+                    operation = event["operation"]
+                    if operation == "up":
+                        if row is not None and row.get("status") == "APPLIED":
+                            raise ReleaseAdapterError(
+                                f"format-3 replay unexpectedly finds {migration_id} already APPLIED"
+                            )
+                        if row is not None and row.get("status") == "REVERTED":
+                            action = "redo"
+                            apply = apply_redo
+                        else:
+                            action = "migrate"
+                            apply = apply_forward
+                    elif operation == "down":
+                        if row is None or row.get("status") != "APPLIED":
+                            raise ReleaseAdapterError(
+                                f"format-3 replay down event requires {migration_id} to be APPLIED"
+                            )
+                        action = "undo"
+                        apply = apply_undo
+                    else:
+                        raise ReleaseAdapterError(f"unsupported format-3 replay operation: {operation}")
+                    operation_confirmation = _operation_confirmation(
+                        confirmation, migration_id, action
+                    )
+                    apply(
+                        migration_root, migration_id, profiles,
+                        confirmation=operation_confirmation,
+                    )
+                return
             apply_plan(
                 migration_root,
-                migration_profiles(
-                    config,
-                    context.metadata,
-                    context.migration_store,
-                    work,
-                    source_commit=context.manifest.source_commit,
-                    applied_by=context.applied_by,
-                ),
+                profiles,
+                confirmation=confirmation,
                 expected_plan={"pending": reviewed.pending},
             )
 
         target_by_alias = {target.alias: target for target in context.app_targets}
+        # Validate against the contract the release was built with, not the
+        # operator repository's copy, which may differ or be absent.
+        packaged_contract: list[Mapping[str, Any] | None] = []
         deploy_root = context.deploy_root or (repo / ".sync-state" / "release" / "application")
 
         def deploy_application(alias: str, tree: Mapping[str, bytes], _reviewed: ReleasePlan) -> None:
             target = target_by_alias.get(alias)
             if target is None:
                 raise ReleaseAdapterError(f"release application target is missing: {alias}")
+            if not packaged_contract:
+                try:
+                    packaged_contract.append(release_master_contract(release_tar))
+                except ReleaseError as exc:
+                    raise ReleaseAdapterError(str(exc)) from exc
+            source_identity = getattr(context.manifest, "source", None)
+            deploy_source = context.manifest.source_commit
+            if source_identity is not None:
+                deploy_source = "db-release:" + str(source_identity.get("history_digest", ""))
             deploy_app(
                 target,
                 tree,
-                context.manifest.source_commit,
+                deploy_source,
                 {"verified": True, "target_key": target.physical_key},
                 repo=repo,
                 root=deploy_root,
                 control_store=context.control_store,
+                master_contract=packaged_contract[0],
             )
 
         try:
@@ -252,6 +322,7 @@ def apply_verified_release_live(
     *,
     repo: str | Path = ".",
     root: str | Path | None = None,
+    confirmation: Mapping[str, Any] | None = None,
 ) -> ApplyReport:
     """Apply a verified release against the live test metadata history."""
     context = _validated_release_context(
@@ -267,6 +338,12 @@ def apply_verified_release_live(
     )
     history = context.migration_store.read_history(context.metadata)
     plan = plan_release(release_tar, history, context.target_document)
+    if getattr(context.manifest, "format_version", None) == 3:
+        requirements = _format3_confirmation_requirements(context.manifest, plan, history, config)
+        try:
+            require_confirmations(requirements, confirmation)
+        except ValueError as exc:
+            raise ReleaseAdapterError(str(exc)) from exc
     if getattr(context.manifest, "kind", None) == "schema":
         pending_by_id = {
             item["id"]: item
@@ -281,7 +358,7 @@ def apply_verified_release_live(
             for migration_id in plan.pending
             if bool(pending_by_id[migration_id].get("destructive"))
         )
-        if destructive:
+        if destructive and getattr(context.manifest, "format_version", None) != 3:
             raise ReleaseAdapterError(
                 "release-test requires reviewed destructive maintenance before apply: "
                 + ", ".join(destructive)
@@ -317,7 +394,77 @@ def apply_verified_release_live(
         plan,
         history,
         repo=Path(repo),
+        confirmation=confirmation,
     )
+
+
+def _format3_confirmation_requirements(
+    manifest: Manifest,
+    plan: ReleasePlan,
+    history: Mapping[str, Any],
+    config: Config,
+) -> tuple[ConfirmationRequirement, ...]:
+    """Bind destructive replay confirmations to the exact payload target identities."""
+    by_id = {item["id"]: item for item in manifest.migrations}
+    state = {
+        migration_id: (row.get("status") if isinstance(row, Mapping) else "")
+        for migration_id, row in history.items()
+    }
+    requirements: list[ConfirmationRequirement] = []
+    for event in plan.events:
+        migration_id = str(event["id"])
+        item = by_id.get(migration_id)
+        if item is None:
+            raise ReleaseAdapterError(f"format-3 replay migration metadata is missing: {migration_id}")
+        if event["operation"] == "down":
+            action = "undo"
+            destructive = bool(item.get("down_destructive"))
+        else:
+            action = "redo" if state.get(migration_id) == "REVERTED" else "migrate"
+            destructive = bool(item.get("destructive"))
+        if destructive:
+            profile = "TABLES" if item.get("target") == "tables" else "CODE"
+            requirements.append(ConfirmationRequirement(
+                migration_id=migration_id,
+                action=action,
+                bundle_checksum=str(item["checksum"]),
+                payload_target_state_key=profile_target(config, profile).state_key,
+            ))
+        state[migration_id] = "APPLIED" if event["operation"] == "up" else "REVERTED"
+    # The confirmation format intentionally admits one stable operation tuple
+    # per migration. Reject repeated destructive tuple keys rather than claim
+    # to distinguish identical operations that the document cannot represent.
+    keys = [
+        (item.migration_id, item.action, item.bundle_checksum, item.payload_target_state_key)
+        for item in requirements
+    ]
+    if len(keys) != len(set(keys)):
+        raise ReleaseAdapterError("format-3 replay repeats a destructive operation that its confirmation format cannot distinguish")
+    return tuple(requirements)
+
+
+def _operation_confirmation(
+    confirmation: Mapping[str, Any] | None,
+    migration_id: str,
+    action: str,
+) -> Mapping[str, Any] | None:
+    """Pass a validated release confirmation's exact entry to one migration."""
+    if confirmation is None:
+        return None
+    entries = confirmation.get("confirmations")
+    if not isinstance(entries, list):
+        raise ReleaseAdapterError("destructive confirmation must be a version-one document")
+    selected = [
+        entry for entry in entries
+        if isinstance(entry, Mapping)
+        and entry.get("migration_id") == migration_id
+        and entry.get("action") == action
+    ]
+    if len(selected) > 1:
+        raise ReleaseAdapterError(f"multiple confirmations match {migration_id}/{action}")
+    if not selected:
+        return None
+    return {"version": confirmation.get("version"), "confirmations": selected}
 
 
 def apply_verified_release(
@@ -329,6 +476,7 @@ def apply_verified_release(
     *,
     repo: str | Path = ".",
     root: str | Path | None = None,
+    confirmation: Mapping[str, Any] | None = None,
 ) -> ApplyReport:
     """Apply one planned release through non-production SQLcl adapters only."""
     contract = parse_target_contract(target_contract)
@@ -356,6 +504,16 @@ def apply_verified_release(
     # this run -- and every later `migrate` against the same metadata schema --
     # fail with ORA-20011 SCHEMA_SET_DIGEST_MISMATCH.
     migration_store.bootstrap(metadata, schema_set_digest=schema_set_digest(config))
+    # Plan against the live metadata history, not only the caller's copy: a
+    # stale or edited --history would skip ledger events on the target.
+    live_history = migration_store.read_history(metadata)
+    try:
+        live_plan = plan_release(release_tar, live_history, target_document)
+    except ReleaseError as exc:
+        raise ReleaseAdapterError(str(exc)) from exc
+    if live_plan.history_digest != plan.history_digest:
+        raise ReleaseAdapterError("supplied history does not match the live target history; plan the release again")
+    history = live_history
     control_store = SqlControlStore(metadata, work_root=state_root / "metadata")
     app_targets = []
     if getattr(manifest, "kind", None) == "schema":
@@ -389,7 +547,15 @@ def apply_verified_release(
         applied_by="release-adapter",
         deploy_root=state_root / "application",
     )
-    return _apply_release_context(context, release_tar, plan, history, repo=repo_path)
+    if getattr(manifest, "format_version", None) == 3:
+        requirements = _format3_confirmation_requirements(manifest, plan, history, config)
+        try:
+            require_confirmations(requirements, confirmation)
+        except ValueError as exc:
+            raise ReleaseAdapterError(str(exc)) from exc
+    return _apply_release_context(
+        context, release_tar, plan, history, repo=repo_path, confirmation=confirmation
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -403,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env", default=None, help="environment profile file")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--state-root")
+    parser.add_argument("--destructive-confirmation")
+    parser.add_argument("--confirmation-out", help="write a false-only template for format-3 destructive replay")
     parser.add_argument("--out", required=True, help="canonical apply report output")
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if raw_args and raw_args[0] == "apply-release":
@@ -419,10 +587,33 @@ def main(argv: list[str] | None = None) -> int:
         plan = ReleasePlan(
             plan_raw["archive_digest"], plan_raw["target_digest"], tuple(plan_raw.get("pending", ())),
             plan_raw["artifact_history_digest"], target, plan_raw.get("history_digest", ""),
+            events=tuple(plan_raw.get("events", ())), replay_from=plan_raw.get("replay_from", 0),
         )
+        if args.confirmation_out:
+            config = load_config(env_file, require_verify=True)
+            manifest = verify_release(args.archive)
+            current = plan_release(args.archive, history, target)
+            if (
+                current.archive_digest != plan.archive_digest
+                or current.history_digest != plan.history_digest
+                or current.events != plan.events
+                or current.pending != plan.pending
+            ):
+                raise ReleaseAdapterError("plan or target history changed; regenerate the release plan")
+            requirements = _format3_confirmation_requirements(manifest, current, history, config)
+            if not requirements:
+                raise ReleaseAdapterError("no destructive format-3 replay confirmation is required")
+            from .destructive_confirmation import confirmation_template, write_confirmation_template
+            destination = write_confirmation_template(confirmation_template(requirements), args.confirmation_out)
+            print(json.dumps({"status": "confirmation_required", "path": str(destination)}, sort_keys=True))
+            return 0
+        confirmation = None
+        if args.destructive_confirmation:
+            from .destructive_confirmation import load_confirmation
+            confirmation, _ = load_confirmation(args.destructive_confirmation)
         report = apply_verified_release(
             args.archive, args.target, env_file, plan, history,
-            repo=args.repo, root=args.state_root,
+            repo=args.repo, root=args.state_root, confirmation=confirmation,
         )
         destination = Path(args.out)
         if destination.is_symlink():

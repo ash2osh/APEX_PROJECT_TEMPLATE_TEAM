@@ -1,6 +1,6 @@
 # Team workflow
 
 1. **Builder route:** Edit in APEX Builder, run `scripts/team.sh export-app <alias>`, review `git status` and diff, and commit. There is no import in the normal Builder loop.
-2. **File-first / Agent route:** Edit `apps/<alias>/`, review, and commit. Prepare publish with `scripts/team.sh prepare-publish <alias> --ref HEAD`. Post the printed app-scoped pause notice and obtain explicit teammate checkout acknowledgements. Publish with `scripts/team.sh publish-app --prepared <id> --confirm-pause --ack <alias>:<uuid>`. Only selected apps pause.
+2. **File-first / Agent route:** Edit `apps/<alias>/`, review, and commit. Prepare publish with `scripts/team.sh prepare-publish <alias> --ref HEAD`. Post the printed app-scoped pause notice. Each registered teammate runs `scripts/team.sh ack-publish <id>` from their own checkout using its stable `TEAM_CHECKOUT_UUID`; the command records the preparation digest, UUID, host, user, and time in shared control metadata. Publish with `scripts/team.sh publish-app --prepared <id> --confirm-pause`, which reads and verifies those rows. Never acknowledge for another checkout. Only selected apps pause.
 3. **Schema work:** Author migration pairs under `migrations/`, check drift, apply through the isolated METADATA profile, and merge promptly.
 4. **Promotion:** Build kind-bound immutable archives (`schema/v<semver>` once for shared migrations; `app/<alias>/v<semver>` for single application releases). Test on protected test target and hand off an offline production-owner runbook. Production writes remain refused.

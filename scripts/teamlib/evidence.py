@@ -22,6 +22,13 @@ _EVIDENCE_KEYS = {
     "toolchain_digest", "target_identity", "run_identity",
     "qualification_identity", "application_checks", "results",
 }
+_DATABASE_EVIDENCE_KEYS = (_EVIDENCE_KEYS - {"source_commit"}) | {"source"}
+_SCHEMA_DATABASE_SOURCE_KEYS = {
+    "kind", "instance_id", "history_cut", "history_digest", "frontier_digest",
+}
+_APP_DATABASE_SOURCE_KEYS = _SCHEMA_DATABASE_SOURCE_KEYS | {
+    "app_generation", "app_tree_digest", "app_checks_digest", "master_contract_digest",
+}
 _QUALIFICATION_KEYS = {
     "target_kind", "observation_sequence", "observation_digest", "history_digest",
 }
@@ -59,15 +66,44 @@ def _nonempty_text(value: Any, label: str) -> None:
         raise EvidenceError(f"test evidence {label} is missing")
 
 
-def _validate_v2_shape(value: Mapping[str, Any]) -> None:
-    if set(value) not in (_EVIDENCE_KEYS, _EVIDENCE_KEYS | {"kind", "alias"}):
-        raise EvidenceError("test evidence has an unexpected version-2 shape")
-    if type(value["version"]) is not int or value["version"] != 2:
+def validate_database_source(value: Any) -> dict[str, Any]:
+    """Validate and copy the database-ledger source identity used by format 3."""
+    if not isinstance(value, Mapping) or set(value) not in (_SCHEMA_DATABASE_SOURCE_KEYS, _APP_DATABASE_SOURCE_KEYS):
+        raise EvidenceError("test evidence database source is incomplete")
+    is_app_source = set(value) == _APP_DATABASE_SOURCE_KEYS
+    if value["kind"] != "dev-database":
+        raise EvidenceError("test evidence database source kind is invalid")
+    _nonempty_text(value["instance_id"], "database source instance ID")
+    history_cut = value["history_cut"]
+    if type(history_cut) is not int or history_cut < (0 if is_app_source else 1):
+        raise EvidenceError("test evidence database source history cut is malformed")
+    _digest(value["history_digest"], "database source history digest")
+    _digest(value["frontier_digest"], "database source frontier digest")
+    if is_app_source:
+        _positive_int(value["app_generation"], "database source application generation")
+        _digest(value["app_tree_digest"], "database source application tree digest")
+        for field, label in (("app_checks_digest", "application checks"), ("master_contract_digest", "master contract")):
+            if value[field] is not None:
+                _digest(value[field], f"database source {label} digest")
+    return dict(value)
+
+
+def _validate_shape(value: Mapping[str, Any]) -> None:
+    version = value.get("version")
+    if type(version) is not int or version not in (2, 3):
         raise EvidenceError("test evidence has an unsupported format version")
+    if version == 2:
+        if set(value) not in (_EVIDENCE_KEYS, _EVIDENCE_KEYS | {"kind", "alias"}):
+            raise EvidenceError("test evidence has an unexpected version-2 shape")
+    elif set(value) != _DATABASE_EVIDENCE_KEYS | {"kind", "alias"}:
+        raise EvidenceError("test evidence has an unexpected version-3 shape")
     if value["final_status"] != "PASS":
         raise EvidenceError("test evidence is not a successful final result")
-    if not isinstance(value["source_commit"], str) or not _COMMIT_RE.fullmatch(value["source_commit"]):
-        raise EvidenceError("test evidence source commit is malformed")
+    if version == 2:
+        if not isinstance(value["source_commit"], str) or not _COMMIT_RE.fullmatch(value["source_commit"]):
+            raise EvidenceError("test evidence source commit is malformed")
+    else:
+        validate_database_source(value["source"])
 
     if "kind" in value:
         kind = value["kind"]
@@ -113,12 +149,18 @@ def _validate_v2_shape(value: Mapping[str, Any]) -> None:
         raise EvidenceError("test evidence qualification identity is incomplete")
     if qualification["target_kind"] != "persistent":
         raise EvidenceError("test evidence qualification target kind must be persistent")
-    _positive_int(qualification["observation_sequence"], "observation sequence")
+    # Sequence 0 is the observed baseline of a target no migration has touched
+    # yet (an app release cut before any migration ran).
+    sequence = qualification["observation_sequence"]
+    if type(sequence) is not int or sequence < 0:
+        raise EvidenceError("test evidence observation sequence must be a non-negative integer")
 
 
-def _validate_v2_digests(value: Mapping[str, Any]) -> None:
+def _validate_digests(value: Mapping[str, Any]) -> None:
     _digest(value["archive_digest"], "archive digest")
     _digest(value["toolchain_digest"], "toolchain digest")
+    if value["version"] == 3:
+        validate_database_source(value["source"])
     qualification = value["qualification_identity"]
     _digest(qualification["observation_digest"], "observation digest")
     _digest(qualification["history_digest"], "history digest")
@@ -126,7 +168,7 @@ def _validate_v2_digests(value: Mapping[str, Any]) -> None:
     _digest(value["target_identity"]["binding_digest"], "target binding digest")
 
 
-def _validate_v2_results(value: Mapping[str, Any]) -> None:
+def _validate_results(value: Mapping[str, Any]) -> None:
     checks = value["application_checks"]
     if not isinstance(checks, Mapping) or set(checks) != _CHECKS_KEYS:
         raise EvidenceError("test evidence application checks are incomplete")
@@ -247,9 +289,9 @@ def validate_test_evidence(raw: bytes) -> dict[str, Any]:
         raise EvidenceError("test evidence is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict) or raw != canonical_json(value) + b"\n":
         raise EvidenceError("test evidence is not canonical JSON")
-    _validate_v2_shape(value)
-    _validate_v2_digests(value)
-    _validate_v2_results(value)
+    _validate_shape(value)
+    _validate_digests(value)
+    _validate_results(value)
     return value
 
 
@@ -257,7 +299,8 @@ def validate_release_evidence_binding(
     evidence: Mapping[str, Any],
     *,
     archive_digest: str,
-    source_commit: str,
+    source_commit: str | None = None,
+    source: Mapping[str, Any] | None = None,
     checks_digest: str,
     kind: str | None = None,
     alias: str | None = None,
@@ -267,7 +310,15 @@ def validate_release_evidence_binding(
     _digest(checks_digest, "verified application checks digest")
     if evidence.get("archive_digest") != archive_digest:
         raise EvidenceError("test evidence is for a different release archive")
-    if evidence.get("source_commit") != source_commit:
+    if (source_commit is None) == (source is None):
+        raise EvidenceError("release evidence binding requires exactly one source identity")
+    if source is not None:
+        expected_source = validate_database_source(source)
+        if evidence.get("version") != 3 or evidence.get("source") != expected_source:
+            raise EvidenceError("test evidence is for a different database source")
+        if "source_commit" in evidence:
+            raise EvidenceError("database release evidence must not contain a source commit")
+    elif "source" in evidence or evidence.get("source_commit") != source_commit:
         raise EvidenceError("test evidence is for a different source commit")
     checks = evidence.get("application_checks")
     if not isinstance(checks, Mapping) or checks.get("checks_digest") != checks_digest:

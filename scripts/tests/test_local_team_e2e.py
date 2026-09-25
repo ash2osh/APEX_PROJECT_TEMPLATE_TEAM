@@ -1148,12 +1148,18 @@ class LocalTeamGuardedPublishTests(unittest.TestCase):
 
         # 5. Changed HR capture refuses before import
         live_hr_tree["pages/p00003-extra.apx"] = b"unexpected extra edit in builder\n"
-        acks = {"team-e2e": (self.alice.checkout_uuid, self.bob.checkout_uuid)}
+        for checkout_uuid, user in (
+            (self.alice.checkout_uuid, "alice"),
+            (self.bob.checkout_uuid, "bob"),
+        ):
+            store.record_publish_acknowledgement(
+                hr_target, prep.preparation_id, prep.record_digest,
+                checkout_uuid, "host", user,
+            )
         with self.assertRaises(PublishError) as ctx:
             publish_prepared(
                 self.alice.clone,
                 prep.preparation_id,
-                acks,
                 confirm_pause=True,
                 config=config,
                 store=store,
@@ -1189,12 +1195,19 @@ class LocalTeamGuardedPublishTests(unittest.TestCase):
             runner=fake_runner,
             validator=fake_validator,
         )
+        for checkout_uuid, user in (
+            (self.alice.checkout_uuid, "alice"),
+            (self.bob.checkout_uuid, "bob"),
+        ):
+            store.record_publish_acknowledgement(
+                hr_target, prep_reconciled.preparation_id, prep_reconciled.record_digest,
+                checkout_uuid, "host", user,
+            )
 
         # 7. Publish verifies HR while Carol's app generation is unchanged
         report = publish_prepared(
             self.alice.clone,
             prep_reconciled.preparation_id,
-            acks,
             confirm_pause=True,
             config=config,
             store=store,

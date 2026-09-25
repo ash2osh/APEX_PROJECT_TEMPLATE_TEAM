@@ -4,7 +4,17 @@ Single list of everything still open for this template, in the order it should
 happen. Designs live where noted; this file says what is left, who does it, and
 when it is done. Update it in the same commit that closes an item.
 
-Last updated: 2026-09-24, after PR #5 (`038660d`).
+Last updated: 2026-09-24. Offline implementation and verification for the open
+release, acknowledgement, and hardening items is on branch
+`codex/pending-work-execution`, under review as a pull request. The review fixed
+the production privilege audit, which refused every real account because of
+Oracle's own grants to PUBLIC, then narrowed that exemption to a named baseline.
+Format 3 schema archives now carry the development frontier inventory so
+qualification compares the target's structure with it, and publish rechecks
+acknowledged checkout identities under the app mutex. The documented virtual-environment install
+succeeds; the full suite passes with one expected skip, and Ruff passes. Live
+database acceptance and GitHub-side actions remain separate gates and are not
+claimed here.
 
 ## Where things stand
 
@@ -14,7 +24,7 @@ Last updated: 2026-09-24, after PR #5 (`038660d`).
 | PR #2 | Signing moved to a separate trusted job; GitHub Actions pinned by commit SHA |
 | PR #3 | One Git repository per developer, no shared remote: docs, agent contract, three-repository e2e harness, `.env.example` |
 | PR #4 | Migration files stored in METADATA (`TEAM_MIGRATION_BUNDLE`/`MEMBER`), `adopt-migration-members` backfill |
-| PR #5 | `build-schema-release` cuts format 3 schema releases from the development ledger; `TEAM_RELEASE` version ledger |
+| PR #5 | Original `TEAM_RELEASE` schema-cut groundwork. This execution completes format 3 replay/evidence, paused app cuts, the unified database `build-release`, and the local release runbook in the current worktree. |
 
 Design for the release work: `docs/superpowers/specs/2026-09-24-dev-database-release-source-design.md`
 (owner decisions recorded there). Nothing from PR #1 to #5 has run against a
@@ -22,30 +32,38 @@ live Oracle database yet.
 
 ## 1. Owner actions (no code)
 
-### 1.1 Run the live database test plan — blocks 3b
+### 1.1 Run the live database test plan — OPEN / UNKNOWN
 - **What:** `docs/live-test-plan.md` on `docker-demo` with throwaway schemas.
+- **Current evidence:** not run. SQLcl 26.2.2.233.1901 and a healthy Docker
+  Oracle Free container named `local-26ai` are present, but the plan requires the
+  approved `docker-demo` throwaway target. Neither the original checkout nor this
+  worktree has an `.env` file, and the persistent `oradata-26ai` volume has not
+  been identified as disposable or snapshotted. Do not use it as the test target
+  without the owner's approval and a consistent rollback snapshot.
 - **Done when:** stages 1, 2 and 4 pass, or their failures are reported with the
   command JSON and the named `.team-sqlcl-*.log`.
 
-### 1.2 Delete stale branches
-Branch deletion is blocked from agent sessions; do it in GitHub → Branches.
-- `claude/hopeful-ride-eu60f9` and `claude/determined-hawking-v3qviv`: fully
-  contained in `main`, safe to delete.
-- `codex/p1-remediation-flow-simplification`: **unrelated history** (no common
-  ancestor with `main`, 107 commits, last 2026-09-10). Confirm nothing in it is
-  still needed, or tag it (`archive/p1-remediation`) before deleting.
+### 1.2 Delete stale branches — COMPLETE / VERIFIED ABSENT
+Read-only GitHub API now lists only `main`; all three named refs are absent:
+`claude/determined-hawking-v3qviv`,
+`codex/p1-remediation-flow-simplification`, and `claude/hopeful-ride-eu60f9`.
+PR #5 from `claude/hopeful-ride-eu60f9` is merged (2026-09-24 11:41 UTC).
+No refs were deleted by this agent.
 
-### 1.3 Check GitHub protection settings
-- `test` and `integration` environments require reviewers.
-- Until phase 5 retires tag-triggered releases, `schema/*` and `app/*/v*` tags
-  are protected (Settings → Rules).
+### 1.3 Check GitHub protection settings — REVIEWED / ACTION OPEN
+Current read-only API evidence: zero repository rulesets, no test environment,
+and no required reviewers on the integration environment. The remote `main`
+still contains `.github/workflows/release.yml`; this worktree removes it, but the
+remote tag-triggered workflow remains active until that change is merged. The
+only direct collaborator is `ash2osh`; the owner must decide the reviewer policy
+and apply it in GitHub settings. No settings were changed.
 
 ### 1.4 Optional
 - Codex reviews stopped on usage limits (PRs #3–#5); add credits if wanted.
 
 ## 2. Release from the development database
 
-### 2.1 Phase 3b — apply database-built schema releases
+### 2.1 Phase 3b — COMPLETE OFFLINE; LIVE ACCEPTANCE OPEN
 Spec §2 (reverted migrations), §5 (format 3), delivery table row 3b.
 
 - **Planning (`plan-release`)**
@@ -53,24 +71,33 @@ Spec §2 (reverted migrations), §5 (format 3), delivery table row 3b.
     events for some *k* (the target is behind the cut, never beside it);
     otherwise refuse.
   - Replay events after *k*: `up` of a migration not APPLIED on the target runs
-    forward; `down` of a migration APPLIED on the target runs its down pair; a
-    migration applied and reverted entirely after *k* is a net no-op.
+    forward; `down` of a migration APPLIED on the target runs its down pair.
+    An up/down pair entirely after *k* is a net no-op only when the target has
+    no history row for that migration; existing target rows replay down/redo to
+    consume the source sequence.
   - Strict mode accepts a REVERTED target entry only when the archive carries
     that migration and its `down` event.
 - **Apply (`apply-release`, `run-release-test`)**
-  - Execute the replay in event order through `apply_plan`/`apply_undo`
-    machinery; down transitions go through the destructive-confirmation
-    convention.
+  - Execute retained events in order through the migration runner; each
+    destructive operation receives only its exact confirmation entry.
+  - Store the source event sequence and replay base separately from local
+    `applied_sequence`, so skipped no-op pairs do not break replanning or later
+    releases.
 - **Evidence chain**
   - `evidence.py`, `qualification.py`, `sign-test-evidence` and `gen-runbook`
-    bind `source_commit` today; bind the manifest `source` block
-    (`history_cut`, `history_digest`, `frontier_digest`) for format 3.
+    bind the manifest `source` block (`history_cut`, `history_digest`,
+    `frontier_digest`) for format 3; format 2 keeps its `source_commit` binding.
   - The production runbook lists every down transition explicitly.
 - **Done when:** a format 3 archive with an up/up/down ledger applies to a
   fresh test history and to one that already holds an earlier release, the
   signed evidence verifies, and `gen-runbook` emits the down step.
+- **Offline status:** implemented and covered by synthetic target tests for fresh
+  and earlier histories, signed format 3 evidence, and an explicit down runbook
+  step. Tests also replan after an omitted no-op pair and a later release, and
+  replay down/redo for a migration already present on the target. Live target
+  behavior remains UNKNOWN until 1.1.
 
-### 2.2 Phase 4 — application releases from a paused capture
+### 2.2 Phase 4 — COMPLETE OFFLINE; LIVE ACCEPTANCE OPEN
 Spec §3.
 - App mutex (same app-scoped pause as publish), page locks KNOWN and empty, two
   equal captures, `required_migrations` = the APPLIED set at the schema cut.
@@ -78,8 +105,12 @@ Spec §3.
   digests recorded in the manifest and `TEAM_RELEASE` (decision 2).
 - Manifest format 3 for app releases (`source` adds app generation and tree
   digest).
+- **Offline status:** two equal paused captures, KNOWN-empty lock checks,
+  applied-migration prerequisites, and app/check/master digests are covered.
+  Format 3 app qualification, signed evidence, and local runbook generation are
+  also covered by synthetic tests. No live APEX capture was performed.
 
-### 2.3 Phase 5 — retire the Git release path
+### 2.3 Phase 5 — COMPLETE OFFLINE
 Spec §6, decision 4.
 - Remove the Git-commit builder, `release-record.json`, tag identity and
   `.github/workflows/release.yml`; keep `verify-release` reading format 2 for
@@ -89,8 +120,11 @@ Spec §6, decision 4.
   `gen-runbook`, all on the operator's machine) and update
   `docs/promotion.md`, `docs/ci.md` and the README release section; drop the
   interim "one designated repository" rule.
+- **Offline status:** complete. The public Git builder, release-record and tag
+  identity were removed; format 2 remains verifiable; the tag workflow is
+  deleted. Synthetic format 2 archive creation now lives only in test fixtures.
 
-## 3. Publish acknowledgement redesign — high priority, independent
+## 3. Publish acknowledgement redesign — COMPLETE OFFLINE
 
 - **Problem:** the pause notice prints the registered checkout UUIDs
   (`publish.py`, `format_publish_notice`) and `publish-app --ack` only checks
@@ -104,17 +138,20 @@ Spec §6, decision 4.
 - **Needs:** a control-store table added by `setup-state` without touching
   existing metadata; `publish.py`, `team.py`, `docs/import-pause.md`,
   `AGENTS.md`, tests.
+- **Offline status:** acknowledgements are written by each registered checkout
+  to shared control metadata and `publish-app` verifies that roster. Checkout
+  UUID remains an environment-provided self-attestation, not cryptographic proof.
 
 ## 4. Hardening
 
 | Item | Where | Done when |
 |---|---|---|
-| Production read-only must be enforced by a read-only database account | `doctor`/`qualify-target` query `SESSION_PRIVS`/`SESSION_ROLES` on the production profile; `docs/promotion.md` | a production profile with any write privilege is refused |
-| UNKNOWN publish results are classified by text matching | `scripts/teamlib/publish.py` (`"unknown" in str(exc)`) | typed exceptions decide UNKNOWN vs FAILED |
-| SHA-pinned actions need updates | add `.github/dependabot.yml` (github-actions) | Dependabot opens pin-update PRs |
-| Release builds need a byte-stable toolchain | pin an exact SQLcl version for `build-schema-release` and app captures | builds refuse other SQLcl versions |
-| METADATA is now the release system of record | backup/restore guidance for the METADATA schema | documented and exercised once |
-| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | note added |
+| Production read-only must be enforced by a read-only database account | `doctor`/`qualify-target` query `SESSION_PRIVS`/`SESSION_ROLES` on the production profile; `docs/promotion.md` | Offline synthetic tests refuse write-capable profiles. Live account audit remains UNKNOWN until 1.1. |
+| UNKNOWN publish results are classified by text matching | `scripts/teamlib/publish.py` | Typed exceptions decide UNKNOWN vs FAILED; covered by the full suite. |
+| SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | Configuration added; first external Dependabot PR not yet observed. |
+| Release builds need a byte-stable toolchain | exact SQLcl build for schema and app captures | Builders refuse other builds; live capture acceptance remains UNKNOWN. |
+| METADATA is now the release system of record | `docs/metadata-backup-restore.md` | Backup/restore guidance added; live restore exercise remains open under 1.1. |
+| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 729 tests passed with one expected skip, and Ruff passed in the venv. |
 
 ## 5. Known limitations (tracked, not scheduled)
 
@@ -122,13 +159,24 @@ Spec §6, decision 4.
   ORDS/browser runner exists.
 - Undo is global last-in-first-out: a developer may have to wait for a
   colleague to revert a later migration whose down files only that colleague
-  holds (now also recoverable from METADATA once 3b can apply them).
-- Releases built from different repositories may qualify against different app
-  checks (decision 2); the recorded digests make this visible, not impossible.
+  holds. Once stored, METADATA can supply those files to format-3 replay.
+- Releases built from different developer repositories may qualify against
+  different app checks (decision 2); digests make this visible, not impossible.
+- No transition path yet for a test or production target whose history came
+  from Git-built (format 2) releases: format-3 planning proves the target is an
+  exact prefix of the development ledger, and without replay markers it falls
+  back to local sequence numbers, which will not match. Such a target is refused
+  (fail-closed). If one exists, it needs a reviewed one-time baseline adoption
+  before its first format-3 release.
 
-## Suggested order
+## Remaining order
 
-1. Owner: 1.1 live test plan, 1.2 branches, 1.3 settings.
-2. 3 (publish acknowledgements) and 2.1 (phase 3b) — independent, can overlap.
-3. 2.2 (phase 4), then 2.3 (phase 5).
-4. Hardening items as capacity allows; the read-only production check first.
+1. Owner: run 1.1 on the approved throwaway database and perform the METADATA
+   restore exercise; report command JSON and named SQLcl logs.
+2. Owner: choose and enforce the integration environment reviewer policy in 1.3.
+3. Observe the first Dependabot pin-update PR; then close the external automation
+   acceptance note in 4c.
+
+The remaining gates require an approved database target, an owner decision for
+external refs/reviewers, or external service activity; they are not represented
+as passing offline tests.

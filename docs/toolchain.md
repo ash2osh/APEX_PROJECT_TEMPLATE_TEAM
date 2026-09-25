@@ -29,6 +29,11 @@ write and refuse production. Persistent qualification proves only the observed
 target state; it does not prove a fresh installation or isolation. A local
 `docker-demo` profile is never an implicit destructive-test target.
 
+Database-built release captures require SQLcl production build
+`26.2.2.233.1901`. The version is checked before the schema-release command
+bootstraps metadata or reads the live frontier, and format-3 archives record
+the observed build. Application release captures use the same pin.
+
 APEX exports are accepted only when the run has two matching identity
 observations, a positive operation completion record, `application.apx`,
 `.apex/apexlang.json`, and a complete owned tree. `.apx` and APEXlang metadata
@@ -45,6 +50,22 @@ Offline portability remains separate and does not claim Oracle acceptance:
 for script in scripts/*.sh; do bash -n "$script"; done
 PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -v
 ```
+
+## Local test environment
+
+On Debian, the system `cryptography` package can crash during import in the
+`gen-runbook` signing-verification path. Use a project virtual environment for
+the promotion and development extras instead of the system package:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[promotion,dev]'
+.venv/bin/python -m unittest discover -s scripts/tests -v
+.venv/bin/python -m ruff check scripts/
+```
+
+The daily workflow still uses only the Python standard library; these optional
+packages are needed for signed handoff verification and offline linting.
 
 ## Target contracts (version 2)
 

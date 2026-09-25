@@ -2,8 +2,8 @@
 
 **Date:** 2026-09-24
 
-**Status:** All four owner decisions recorded (2026-09-24). No behavior in this document is implemented merely by writing it.
-**Scope:** This repository. Supersedes the Git-commit release source in `teamlib/release.py::build_release`.
+**Status:** All four owner decisions are recorded. Release phases are implemented and offline-tested in the current worktree; live Oracle/APEX acceptance is still open.
+**Scope:** This repository. Supersedes the former Git-commit release source; Git-backed archive fixtures are test-only, while production releases are cut from the shared database.
 
 ## Why
 
@@ -39,7 +39,7 @@ where each developer authors and reviews; it is no longer where releases come fr
 | Application source | `apps/<alias>/` in the commit | Present — the live APEX app, exported with SQLcl (`capture_app`) |
 | App migration prerequisites | `app_context/<alias>/release.json` | Derivable — the history frontier at capture time |
 | App checks, master contracts | `ci/app-checks/<alias>*`, `targets/masters.json` | **Missing** |
-| Version identity / record | tag + `release-record.json` | **Missing** |
+| Version identity / record | tag + `release-record.json` | `TEAM_RELEASE` binds release key, archive digest, and source metadata |
 
 ## Design
 
@@ -65,11 +65,10 @@ schema inventory does) so no single statement exceeds SQLcl limits.
 
 ### 2. Schema release = a cut of the ledger
 
-`build-schema-release --version X --out DIR` (a separate online command until phase 5 retires
-the Git `build-release` path):
+`build-release --kind schema --version X --out DIR`:
 
 1. Read history under the migration mutex; refuse if any attempt is RUNNING/FAILED/UNKNOWN.
-2. Cut = current highest `applied_sequence` (optionally `--through <sequence>`).
+2. Cut = the current highest `applied_sequence`; everything APPLIED at head ships.
 3. Archive the **ledger event sequence** through the cut (every `up` and `down` event, in
    `applied_sequence` order), with members read back and re-verified by sha256 and bundle
    checksum. A migration whose latest event is REVERTED ships with its down members too.
@@ -82,8 +81,10 @@ history (it rejects both foreign APPLIED and foreign REVERTED entries) and the a
 have no down transition to reach the cut. So:
 
 - `apply-release` replays the archive's events past the target's own last event: a `down`
-  event for a migration APPLIED on the target runs its authored down pair; a migration that
-  was applied and reverted entirely after the target's last event is skipped as a net no-op.
+  event for a migration APPLIED on the target runs its authored down pair. An up/down pair
+  entirely after the target cut is skipped as a net no-op only when that migration has no
+  row in target history; existing target rows replay down/redo transitions to consume the
+  source sequence even if the final status is unchanged.
 - Strict planning accepts a REVERTED entry only when the archive carries that migration and
   its down event; anything else in target history that the archive does not carry is still
   refused.
@@ -155,8 +156,9 @@ The build needs development database access, so it cannot run on a hosted GitHub
    identity and format-2 building are deleted. `verify-release` keeps reading format 2 only
    so already-signed handoffs stay checkable.
 
-Follow-on: signing currently binds `source_commit` (`docs/ci.md`); format 3 binds the
-`source` block (`history_cut`, `history_digest`, app generation/tree digest) instead.
+Evidence, signing, and runbook generation bind the format-3 `source` block
+(`history_cut`, `history_digest`, app generation/tree and asset digests); format 2
+remains verifiable for existing signed handoffs.
 
 ## Delivery phases
 
@@ -167,16 +169,16 @@ Open items and their order are tracked in `docs/pending-work.md`.
 | 0 | Security fixes (identity guard, signing key, credentials) — PR #1 | — |
 | 1 | Implemented: Docs/README/AGENTS for one-repo-per-developer; e2e with independent repos (no shared bare remote); `.env.example` connection names; drop dead `team.py::_store` | — |
 | 2 | `TEAM_MIGRATION_MEMBER` + upload in `apply_plan` + backfill command (`adopt-migration-members`) — implemented | 1 |
-| 3a | Implemented: `TEAM_RELEASE` ledger (keyed `schema/vX.Y.Z` / `app/<alias>/vX.Y.Z`) + `build-schema-release` cutting the ledger event sequence into a format 3 archive, with drift gate; `verify-release` checks format 3; plan/apply refuse it | 2 |
-| 3b | Down replay in `apply-release`, strict planning for shipped reverts, format 3 in test evidence, signing and the runbook | 3a |
-| 4 | App release from paused capture + auto prerequisites; asset digests from the builder's repository | 3 |
-| 5 | Remove the Git-commit builder and `release.yml`; local release runbook; promotion/CI docs | 4 |
-| — | Publish acknowledgement redesign (checkout-issued acks) — independent, high priority | — |
+| 3a | Implemented: `TEAM_RELEASE` ledger and unified `build-release --kind schema` cut with drift gate; `verify-release` checks format 3 | 2 |
+| 3b | Implemented: ordered up/down replay, strict target-prefix planning, format-3 evidence/signing, and explicit down runbook steps; offline tests pass, live acceptance open | 3a |
+| 4 | Implemented: paused app capture, applied prerequisites, app-check/master digests, app format-3 qualification and local handoff; offline tests pass, live APEX capture open | 3b |
+| 5 | Implemented: public Git builder, tag identity, release-record and tag-triggered workflow retired; local release runbook; format-2 verify retained | 4 |
+| — | Implemented: checkout-issued publish acknowledgements; checkout identity remains a non-cryptographic self-attestation | — |
 
 ## Risks
 
 - **The dev database becomes the system of record** for releases: METADATA needs the same backup discipline as production data.
 - **Work-in-progress leakage** through the cut rule (decision 1).
-- **Export determinism:** app trees must be byte-stable across SQLcl versions; the toolchain pin (`sqlcl 26.2.1+`) should become an exact version for release builds.
+- **Export determinism:** app trees must be byte-stable; schema and app release capture now require an exact SQLcl build. The live release path still needs acceptance on the approved target.
 - **Check drift between repositories** (decision 2): releases built from different repositories may qualify against different checks.
-- **Metadata upgrade:** existing installations get `TEAM_MIGRATION_BUNDLE`, `TEAM_MIGRATION_MEMBER` and `TEAM_RELEASE` from the idempotent migration bootstrap (`migrate --bootstrap`, `adopt-frontier`, `adopt-migration-members`, `build-schema-release`) without touching recorded history.
+- **Metadata upgrade:** existing installations get `TEAM_MIGRATION_BUNDLE`, `TEAM_MIGRATION_MEMBER` and `TEAM_RELEASE` from the idempotent migration bootstrap (`migrate --bootstrap`, `adopt-frontier`, `adopt-migration-members`, `build-release`) without touching recorded history.

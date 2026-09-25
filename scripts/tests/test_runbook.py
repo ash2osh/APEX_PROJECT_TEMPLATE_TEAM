@@ -16,11 +16,55 @@ from unittest.mock import patch
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-from teamlib.release import build_release, release_app_check_bundle
-from teamlib.runbook import RunbookError, gen_runbook
+from teamlib.release import release_app_check_bundle
+from scripts.tests.release_fixtures import _build_git_release_fixture
+from teamlib.release import ReleasePlan
+from teamlib.runbook import RunbookError, _runbook_text, gen_runbook
 
 
 class RunbookTests(unittest.TestCase):
+    def test_format3_schema_runbook_preserves_database_event_order(self):
+        events = (
+            {"sequence": 1, "id": "20260907T100000__alice__one", "operation": "up", "checksum": "a" * 64},
+            {"sequence": 2, "id": "20260907T100100__alice__two", "operation": "up", "checksum": "b" * 64},
+            {"sequence": 3, "id": "20260907T100000__alice__one", "operation": "down", "checksum": "a" * 64},
+        )
+        manifest = type("VerifiedDatabaseManifest", (), {
+            "kind": "schema",
+            "format_version": 3,
+            "version": "1.0.0",
+            "source_commit": "",
+            "source_tree": "c" * 64,
+            "toolchain": {"sqlcl": "26.2"},
+            "migrations": (
+                {"id": "20260907T100000__alice__one", "checksum": "a" * 64, "target": "tables", "destructive": False, "dependencies": []},
+                {"id": "20260907T100100__alice__two", "checksum": "b" * 64, "target": "tables", "destructive": False, "dependencies": []},
+            ),
+            "events": events,
+        })()
+        plan = ReleasePlan(
+            archive_digest="d" * 64,
+            target_digest="e" * 64,
+            pending=("20260907T100000__alice__one", "20260907T100100__alice__two"),
+            artifact_history_digest="f" * 64,
+            target={"environment": "production"},
+        )
+
+        text = _runbook_text(
+            manifest,
+            plan,
+            {"environment": "production"},
+            {"target_identity": {"environment": "test"}},
+            "1" * 64,
+        )
+
+        section = text.split("## Verified source ledger event order", 1)[1].split("## Planned target replay events", 1)[0]
+        self.assertLess(section.index("1. APPLY (up): 20260907T100000__alice__one"), section.index("2. APPLY (up): 20260907T100100__alice__two"))
+        self.assertLess(section.index("2. APPLY (up): 20260907T100100__alice__two"), section.index("3. REVERT (down): 20260907T100000__alice__one"))
+        self.assertIn("## Planned target replay events", text)
+        self.assertIn("including each down transition", text)
+        self.assertNotIn("Apply only the listed pending migrations in dependency order", text)
+
     def test_signed_pass_evidence_is_required_for_production_handoff(self):
         with tempfile.TemporaryDirectory(prefix="team-runbook-") as directory:
             root = Path(directory)
@@ -80,7 +124,7 @@ class RunbookTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="app", alias="a")
+            manifest = _build_git_release_fixture(repo, commit, "1.0.0", root / "out", kind="app", alias="a")
             bundle = release_app_check_bundle(manifest.archive_path)
             evidence_data = {
                 "version": 2, "kind": "app", "alias": "a", "final_status": "PASS", "archive_digest": manifest.archive_digest, "source_commit": commit,
@@ -182,7 +226,7 @@ class RunbookTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="schema")
+            manifest = _build_git_release_fixture(repo, commit, "1.0.0", root / "out", kind="schema")
             bundle = release_app_check_bundle(manifest.archive_path)
             evidence_data = {
                 "version": 2, "kind": "schema", "alias": None, "final_status": "PASS",
@@ -222,6 +266,8 @@ class RunbookTests(unittest.TestCase):
             self.assertIsNone(runbook.alias)
             self.assertIn("20260907T100000__alice__one", runbook.text)
             self.assertIn("Pending migration plan", runbook.text)
+            self.assertNotIn("Exact database event replay order", runbook.text)
+            self.assertIn("Apply only the listed pending migrations in dependency order", runbook.text)
             self.assertNotIn("Application and master order", runbook.text)
             self.assertNotIn("Import applications in master-before-subscriber order", runbook.text)
 
@@ -277,7 +323,7 @@ class RunbookTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            manifest = build_release(repo, commit, "1.0.0", root / "out", kind="app", alias="hr")
+            manifest = _build_git_release_fixture(repo, commit, "1.0.0", root / "out", kind="app", alias="hr")
             bundle = release_app_check_bundle(manifest.archive_path)
             evidence_data = {
                 "version": 2, "kind": "app", "alias": "hr", "final_status": "PASS",
@@ -383,9 +429,9 @@ class RunbookTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
             commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            manifest_hr = build_release(repo, commit, "1.0.0", root / "out-hr", kind="app", alias="hr")
-            manifest_payroll = build_release(repo, commit, "1.0.0", root / "out-payroll", kind="app", alias="payroll")
-            manifest_schema = build_release(repo, commit, "1.0.0", root / "out-schema", kind="schema")
+            manifest_hr = _build_git_release_fixture(repo, commit, "1.0.0", root / "out-hr", kind="app", alias="hr")
+            manifest_payroll = _build_git_release_fixture(repo, commit, "1.0.0", root / "out-payroll", kind="app", alias="payroll")
+            manifest_schema = _build_git_release_fixture(repo, commit, "1.0.0", root / "out-schema", kind="schema")
             bundle_hr = release_app_check_bundle(manifest_hr.archive_path)
 
             evidence_data_hr = {

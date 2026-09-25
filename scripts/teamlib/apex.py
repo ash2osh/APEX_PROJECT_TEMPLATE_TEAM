@@ -411,6 +411,7 @@ def import_app(
     host: str = "local",
     user: str = "developer",
     expected_roster: frozenset[str] | None = None,
+    expected_identities: Mapping[str, tuple[str, str]] | None = None,
     announce: Callable[[str], None] = print,
 ) -> Baseline:
     if target.role != "developer" or target.environment != "development":
@@ -434,10 +435,23 @@ def import_app(
         run_token = uuid.uuid4().hex
         store.acquire_app(target.physical_key, run_token, checkout_uuid, host, user)
         acquired = True
-        if expected_roster is not None:
-            current_roster = frozenset(entry.checkout_uuid for entry in store.list_registry(target))
-            if current_roster != expected_roster:
-                raise ApexError("checkout roster changed after publish preflight; prepare again")
+        if expected_roster is not None or expected_identities is not None:
+            registry = store.list_registry(target)
+            if expected_roster is not None:
+                current_roster = frozenset(entry.checkout_uuid for entry in registry)
+                if current_roster != expected_roster:
+                    raise ApexError("checkout roster changed after publish preflight; prepare again")
+            if expected_identities is not None:
+                # Re-registering a checkout can change its host/user while the
+                # mutex is free; an acknowledgement given by the old identity
+                # must not authorise the import. Checked under the mutex.
+                current_identities = {
+                    entry.checkout_uuid: (entry.host, entry.registered_by_user) for entry in registry
+                }
+                if current_identities != dict(expected_identities):
+                    raise ApexError(
+                        "checkout identity changed after acknowledgement; prepare and acknowledge again"
+                    )
     except (ControlStoreError, ApexError) as exc:
         if acquired:
             try:

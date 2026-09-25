@@ -31,10 +31,12 @@ from .evidence import (
     EvidenceError,
     canonical_json,
     validate_release_evidence_binding,
+    validate_database_source,
     validate_test_evidence,
 )
 from .migration_store import MigrationStoreError
-from .release import ReleaseError, release_app_check_bundle, verify_release
+from .fingerprints import InventoryError, inventory_from_manifest, structural_digest
+from .release import ReleaseError, release_app_check_bundle, release_frontier_inventory, verify_release
 from .runtime import RuntimeReport
 from .sqlcl import run_sqlcl
 
@@ -215,20 +217,32 @@ def _sha256_field(value: Any, label: str) -> str:
 def _check_apply_report(
     value: Mapping[str, Any] | str | Path,
     *,
-    source_commit: str,
+    source_commit: str | None = None,
+    source: Mapping[str, Any] | None = None,
     archive_digest: str,
     target_state_key: str,
 ) -> None:
     document = dict(value) if isinstance(value, Mapping) else _load_json(value, "apply report")[1]
-    allowed = {
-        "version", "status", "source_commit", "archive_digest", "target_state_key",
-        "target_digest", "history_digest", "pending",
+    common = {
+        "version", "status", "archive_digest", "target_state_key", "target_digest",
+        "history_digest", "pending",
     }
+    if (source_commit is None) == (source is None):
+        raise QualificationError("qualification requires exactly one apply-report source identity")
+    allowed = common | ({"source"} if source is not None else {"source_commit"})
     if set(document) != allowed:
         raise QualificationError("apply report has an unexpected shape")
     if document["version"] != 1 or document["status"] != "applied":
         raise QualificationError("apply report is not a successful version-1 report")
-    if document["source_commit"] != source_commit:
+    if source is not None:
+        try:
+            expected_source = validate_database_source(source)
+            actual_source = validate_database_source(document["source"])
+        except EvidenceError as exc:
+            raise QualificationError(str(exc)) from exc
+        if actual_source != expected_source:
+            raise QualificationError("apply report database source does not match qualification")
+    elif document["source_commit"] != source_commit:
         raise QualificationError("apply report source commit does not match qualification")
     if document["archive_digest"] != archive_digest:
         raise QualificationError("apply report archive does not match qualification")
@@ -244,7 +258,8 @@ def _check_apply_report(
 
 def _base_report(
     *,
-    source_commit: str,
+    source_commit: str | None,
+    source: Mapping[str, Any] | None,
     archive_digest: str | None,
     toolchain_digest: str,
     target_identity: Mapping[str, Any],
@@ -253,9 +268,8 @@ def _base_report(
     history_digest: str,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
-        "version": 2,
+        "version": 3 if source is not None else 2,
         "final_status": "PASS",
-        "source_commit": source_commit,
         "toolchain_digest": toolchain_digest,
         "target_identity": dict(target_identity),
         "run_identity": dict(run_identity),
@@ -278,6 +292,10 @@ def _base_report(
             "application_checks": "PASS",
         },
     }
+    if source is not None:
+        report["source"] = validate_database_source(source)
+    else:
+        report["source_commit"] = source_commit
     if archive_digest is not None:
         report["archive_digest"] = archive_digest
     return report
@@ -286,7 +304,7 @@ def _base_report(
 def qualify_target(
     repo: str | Path,
     config: Config,
-    source_commit: str,
+    source_commit: str | Mapping[str, Any],
     aliases: Sequence[str],
     *,
     store: Any,
@@ -302,8 +320,20 @@ def qualify_target(
 ) -> dict[str, Any]:
     if config.environment == "production" or config.role not in {"integration", "test"}:
         raise QualificationError("qualification requires a non-production integration or test target")
-    if not source_commit or any(char.isspace() for char in source_commit):
-        raise QualificationError("qualification requires an exact source commit")
+    source_identity: dict[str, Any] | None = None
+    selected_source_commit: str | None
+    if isinstance(source_commit, Mapping):
+        try:
+            source_identity = validate_database_source(source_commit)
+        except EvidenceError as exc:
+            raise QualificationError(str(exc)) from exc
+        selected_source_commit = None
+        if release_archive is None:
+            raise QualificationError("database source qualification requires a verified release archive")
+    elif isinstance(source_commit, str) and source_commit and not any(char.isspace() for char in source_commit):
+        selected_source_commit = source_commit
+    else:
+        raise QualificationError("qualification requires an exact source commit or database source")
     if runtime_report is None:
         raise QualificationError("qualification requires an observed runtime preflight")
     runtime_toolchain_digest = getattr(runtime_report, "toolchain_digest", None)
@@ -328,10 +358,10 @@ def qualify_target(
         raise QualificationError(
             "application check bundle aliases do not match configured application bindings"
         )
-    targets = {
-        profile: profile_target(config, profile, alias=alias)
-        for profile, alias in [("APEX", selected[0])] if selected
-    }
+    targets = (
+        {"APEX": profile_target(config, "APEX", alias=selected[0])}
+        if selected else {}
+    )
     targets.update({profile: profile_target(config, profile) for profile in ("TABLES", "CODE", "METADATA", "VERIFY")})
     metadata = targets["METADATA"]
     identity_driver = repo_path / "scripts" / "sql" / "identity.sql"
@@ -371,7 +401,8 @@ def qualify_target(
         raise QualificationError("accepted observation is incomplete")
     target_identity = _target_identity(config, targets)
     report = _base_report(
-        source_commit=source_commit,
+        source_commit=selected_source_commit,
+        source=source_identity,
         archive_digest=None,
         toolchain_digest=toolchain_digest,
         target_identity=target_identity,
@@ -385,12 +416,53 @@ def qualify_target(
             manifest = verify_release(release_archive)
         except ReleaseError as exc:
             raise QualificationError(str(exc), report) from exc
-        if manifest.source_commit != source_commit:
-            raise QualificationError("release archive source commit does not match qualification", report)
+        if getattr(manifest, "format_version", None) == 3:
+            if source_identity is None:
+                raise QualificationError("format-3 release qualification requires its database source", report)
+            try:
+                manifest_source = validate_database_source(getattr(manifest, "source", None))
+            except EvidenceError as exc:
+                raise QualificationError(str(exc), report) from exc
+            if manifest_source != source_identity:
+                raise QualificationError("release archive database source does not match qualification", report)
+            if manifest.source_commit != "":
+                raise QualificationError("format-3 release must not contain a source commit", report)
+            kind = getattr(manifest, "kind", None)
+            if kind == "schema" and selected:
+                raise QualificationError("schema release qualification requires empty application coverage", report)
+            if kind == "schema":
+                # The replayed target must have exactly the structure the release
+                # was cut at; its own schema names differ, so compare structure.
+                try:
+                    expected_frontier = release_frontier_inventory(release_archive)
+                    actual_manifest = store.read_inventories(metadata).get(latest["after"])
+                    if not isinstance(actual_manifest, Mapping):
+                        raise QualificationError("qualified target frontier inventory is missing", report)
+                    actual_frontier = inventory_from_manifest(actual_manifest)
+                except (ReleaseError, MigrationStoreError, InventoryError) as exc:
+                    raise QualificationError(f"release frontier cannot be compared: {exc}", report) from exc
+                if structural_digest(actual_frontier) != structural_digest(expected_frontier):
+                    raise QualificationError(
+                        "qualified target schema does not match the release frontier", report
+                    )
+            if kind == "app" and selected != (getattr(manifest, "alias", None),):
+                raise QualificationError("app release qualification requires its selected application only", report)
+            if kind not in {"schema", "app"}:
+                raise QualificationError("format-3 release kind is unsupported for qualification", report)
+        else:
+            if source_identity is not None:
+                raise QualificationError("database source identity requires a format-3 release", report)
+            if manifest.source_commit != selected_source_commit:
+                raise QualificationError("release archive source commit does not match qualification", report)
         report["archive_digest"] = manifest.archive_digest
+        apply_binding = (
+            {"source": source_identity}
+            if source_identity is not None
+            else {"source_commit": selected_source_commit}
+        )
         _check_apply_report(
             apply_report,
-            source_commit=source_commit,
+            **apply_binding,
             archive_digest=manifest.archive_digest,
             target_state_key=targets["METADATA"].state_key,
         )
@@ -399,7 +471,11 @@ def qualify_target(
     _require_flow_adapter(loaded, flow_executable)
     target_for_checks = {
         **target_identity,
-        "source_commit": source_commit,
+        **(
+            {"source": dict(source_identity)}
+            if source_identity is not None
+            else {"source_commit": selected_source_commit}
+        ),
         "app_ids": dict(config.apps),
         "select_runner": _select_runner(
             profile=targets["VERIFY"], bundle=active_bundle, work=work_path, run_sqlcl=sql_runner
@@ -412,8 +488,13 @@ def qualify_target(
     }
     if selected:
         try:
+            candidate_source = (
+                {"source": dict(source_identity), "apps": {alias: {"app_id": config.apps[alias]} for alias in selected}}
+                if source_identity is not None
+                else {"commit": selected_source_commit, "apps": {alias: {"app_id": config.apps[alias]} for alias in selected}}
+            )
             app_report: AppCheckReport = verify_candidate_apps(
-                {"commit": source_commit, "apps": {alias: {"app_id": config.apps[alias]} for alias in selected}},
+                candidate_source,
                 target_for_checks,
                 loaded,
             )
@@ -507,7 +588,11 @@ def sign_test_evidence(
         validate_release_evidence_binding(
             document,
             archive_digest=manifest.archive_digest,
-            source_commit=manifest.source_commit,
+            **(
+                {"source": manifest.source}
+                if getattr(manifest, "format_version", None) == 3
+                else {"source_commit": manifest.source_commit}
+            ),
             checks_digest=bundle.checks_digest,
             kind=getattr(manifest, "kind", None),
             alias=getattr(manifest, "alias", None),

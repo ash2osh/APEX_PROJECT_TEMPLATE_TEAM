@@ -19,14 +19,14 @@ from unittest.mock import patch
 import team
 from teamlib.config import Target
 from teamlib.fingerprints import inventory_from_rows
-from teamlib.migrate import MigrationRunError, apply_plan, apply_redo, apply_undo
+from teamlib.migrate import MigrationRunError, apply_forward, apply_plan, apply_redo, apply_undo
 from teamlib.migration_runtime import migration_callbacks
 from teamlib.migration_store import (
     MigrationSetupRequired,
     MigrationStore,
     MigrationStoreError,
 )
-from teamlib.sqlcl import SqlclError
+from teamlib.sqlcl import SqlclError, SqlclUnknownResult
 
 
 class MigrationRunnerTests(unittest.TestCase):
@@ -94,6 +94,30 @@ class MigrationRunnerTests(unittest.TestCase):
         self.assertEqual(report.applied, (self.migration_id,))
         self.assertEqual(calls, [self.migration_id])
         self.assertEqual(self.store.read_history(self.target)[self.migration_id]["status"], "APPLIED")
+
+    def test_apply_forward_replays_one_dependency_ordered_migration_at_a_time(self):
+        from teamlib.migration_bundle import load_bundles
+
+        second_id = "20260907T100100__alice__two"
+        first_checksum = load_bundles(self.migrations)[self.migration_id].checksum
+        self.add_migration(second_id, dependency=(self.migration_id, first_checksum))
+        calls = []
+        inventory = self.inventory([{"owner": "tables", "object_type": "TABLE", "object_name": "T", "definition": "stable"}])
+        common = self.profiles(
+            bootstrap=True,
+            execute=lambda migration, action, _path: calls.append((action, migration.id)),
+            verify=lambda *_args: True,
+            observe=lambda *_args: inventory,
+            require_observation=True,
+        )
+
+        first = apply_forward(self.migrations, self.migration_id, common)
+        second = apply_forward(self.migrations, second_id, {**common, "bootstrap": False})
+
+        self.assertEqual(first.applied, (self.migration_id,))
+        self.assertEqual(second.applied, (second_id,))
+        self.assertEqual(calls, [("migrate", self.migration_id), ("migrate", second_id)])
+        self.assertEqual(self.store.read_history(self.target)[second_id]["status"], "APPLIED")
 
     def test_cli_verification_callback_rejects_a_failed_assertion(self):
         verify_path = self.migrations / f"{self.migration_id}.verify.sql"
@@ -166,7 +190,7 @@ class MigrationRunnerTests(unittest.TestCase):
 
     def test_unknown_payload_failure_reports_unknown_result(self):
         def fail(migration):
-            raise SqlclError("SQLcl timed out; target state is unknown")
+            raise SqlclUnknownResult("SQLcl timed out; target state is unknown")
         try:
             apply_plan(self.migrations, self.profiles(bootstrap=True, execute=fail))
             self.fail("expected MigrationRunError")
@@ -282,10 +306,10 @@ class MigrationRunnerTests(unittest.TestCase):
             def record_event(self, *args, **kwargs):
                 super().record_event(*args, **kwargs)
                 try:
-                    raise SqlclError(
+                    raise SqlclUnknownResult(
                         "SQLcl timed out; target state is unknown"
                     )
-                except SqlclError as exc:
+                except SqlclUnknownResult as exc:
                     raise MigrationStoreError(
                         "metadata result unavailable"
                     ) from exc
@@ -336,10 +360,10 @@ class MigrationRunnerTests(unittest.TestCase):
         class LoseAttemptStateAckStore(MigrationStore):
             def record_attempt_state(self, *args, **kwargs):
                 try:
-                    raise SqlclError(
+                    raise SqlclUnknownResult(
                         "SQLcl timed out; target state is unknown"
                     )
-                except SqlclError as exc:
+                except SqlclUnknownResult as exc:
                     raise MigrationStoreError(
                         "attempt state result unavailable"
                     ) from exc
@@ -387,10 +411,10 @@ class MigrationRunnerTests(unittest.TestCase):
         class LoseReleaseAckStore(MigrationStore):
             def release(self, *args, **kwargs):
                 try:
-                    raise SqlclError(
+                    raise SqlclUnknownResult(
                         "SQLcl timed out; target state is unknown"
                     )
-                except SqlclError as exc:
+                except SqlclUnknownResult as exc:
                     raise MigrationStoreError(
                         "mutex release result unavailable"
                     ) from exc
@@ -587,7 +611,7 @@ class MigrationRunnerTests(unittest.TestCase):
             apply_plan(self.migrations, {
                 **common,
                 "store": second_store,
-                "execute": lambda *_args: (_ for _ in ()).throw(SqlclError("transport timed out")),
+                "execute": lambda *_args: (_ for _ in ()).throw(SqlclUnknownResult("transport timed out")),
             })
         second_store.bootstrap(self.target, schema_set_digest=self.schema_set_digest)
         state = second_store.read_state(self.target)

@@ -8,8 +8,10 @@ dist/
 
 # Local worktree/developer caches
 .worktrees/
+.venv/
 __pycache__/
 *.pyc
+*.egg-info/
 
 # SQLcl deployment bindings may contain local connection names or IDs.
 apps/**/deployments/default.json

@@ -10,9 +10,12 @@ if _SCRIPTS_DIR not in sys.path:
 import tempfile
 import unittest
 import json
+import os
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from teamlib.config import Config, Profile
+from teamlib import runtime
 from teamlib.runtime import preflight_online
 
 
@@ -42,6 +45,11 @@ class RuntimePreflightTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="team-runtime-")
         self.root = Path(self.temp.name)
+        self.previous_sqlcl_executable = os.environ.get("TEAM_SQLCL_EXECUTABLE")
+        self.sqlcl_executable = self.root / "sql"
+        self.sqlcl_executable.touch()
+        self.sqlcl_executable.chmod(0o755)
+        os.environ["TEAM_SQLCL_EXECUTABLE"] = str(self.sqlcl_executable)
         self.flow_runner = self.root / "flow-runner"
         self.flow_runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.flow_runner.chmod(0o755)
@@ -67,6 +75,10 @@ class RuntimePreflightTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        if self.previous_sqlcl_executable is None:
+            os.environ.pop("TEAM_SQLCL_EXECUTABLE", None)
+        else:
+            os.environ["TEAM_SQLCL_EXECUTABLE"] = self.previous_sqlcl_executable
         self.temp.cleanup()
 
     def fake_which(self, name: str) -> str | None:
@@ -98,6 +110,7 @@ class RuntimePreflightTests(unittest.TestCase):
             preflight_online(
                 config_for(), self.root, str(self.root / "missing-flow"),
                 runner=lambda *args, **kwargs: calls.append(args),
+                sqlcl_resolver=lambda: "",
                 which=lambda name: None,
             )
         self.assertEqual(calls, [])
@@ -197,6 +210,58 @@ class RuntimePreflightTests(unittest.TestCase):
                 config_for(), self.root, str(self.flow_runner), runner=malformed_sqlcl,
                 which=self.fake_which, command_runner=self.fake_versions,
             )
+
+    def test_release_sqlcl_build_is_pinned_to_the_exact_production_build(self):
+        check = getattr(runtime, "require_release_sqlcl_build", None)
+        self.assertTrue(callable(check), "release toolchain needs an exact SQLcl build guard")
+        if not callable(check):
+            return
+
+        expected = "26.2.2.233.1901"
+
+        def version_for(build):
+            return lambda _args, **_kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=f"SQLcl: Release 26.2.2.0 Production Build: {build}\n",
+                stderr="",
+            )
+
+        self.assertEqual(
+            check(
+                executable_resolver=lambda: str(self.sqlcl_executable),
+                command_runner=version_for(expected),
+            ),
+            expected,
+        )
+        with self.assertRaisesRegex(RuntimeError, "require SQLcl build"):
+            check(
+                executable_resolver=lambda: str(self.sqlcl_executable),
+                command_runner=version_for("26.2.2.233.1900"),
+            )
+
+    def test_release_sqlcl_pin_checks_the_executable_selected_by_sqlcl_runner(self):
+        check = runtime.require_release_sqlcl_build
+        selected = self.root / "selected-sql"
+        ignored = self.root / "ignored-sql"
+        selected.touch()
+        ignored.touch()
+        calls = []
+
+        def version_runner(args, **_kwargs):
+            calls.append(args[0])
+            return SimpleNamespace(
+                returncode=0,
+                stdout="SQLcl: Release 26.2.2.0 Production Build: 26.2.2.233.1901\n",
+                stderr="",
+            )
+
+        with patch.dict(os.environ, {
+            "TEAM_SQLCL_EXECUTABLE": str(selected),
+            "SQLCL_BIN": str(ignored),
+        }):
+            check(command_runner=version_runner)
+
+        self.assertEqual(calls, [str(selected)])
 
 
 if __name__ == "__main__":

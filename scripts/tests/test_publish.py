@@ -30,7 +30,7 @@ from teamlib.publish import (
     prepare_publish,
     publish_prepared,
 )
-from teamlib.sqlcl import SqlclError
+from teamlib.sqlcl import SqlclUnknownResult
 from teamlib.state import save_capture, save_verified_baseline
 
 
@@ -177,6 +177,8 @@ class PreparePublishTests(unittest.TestCase):
         notice = format_publish_notice(prep)
         self.assertIn("hr", notice.lower())
         self.assertNotIn("payroll", notice.lower())
+        self.assertNotIn("checkout-hr-1", notice)
+        self.assertIn("registered checkouts: 1", notice.lower())
 
     def test_omitted_aliases_refuses(self):
         with self.assertRaises(PublishError) as ctx:
@@ -515,10 +517,14 @@ class PublishPreparedTests(unittest.TestCase):
             runner=self.fake_runner,
             validator=lambda tree, **kwargs: ValidationReport(True, "SUCCESS", "ok", ()),
         )
-        self.acks = {
-            "hr": ("hr-uuid-1",),
-            "payroll": ("pay-uuid-2",),
-        }
+        self.store.record_publish_acknowledgement(
+            self.target_hr, self.prep.preparation_id, self.prep.record_digest,
+            "hr-uuid-1", "host-1", "alice",
+        )
+        self.store.record_publish_acknowledgement(
+            self.target_payroll, self.prep.preparation_id, self.prep.record_digest,
+            "pay-uuid-2", "host-2", "bob",
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -526,7 +532,7 @@ class PublishPreparedTests(unittest.TestCase):
     def fake_runner(self, target, operation, driver, work, **kwargs):
         if operation == "write":
             if target.alias == "payroll" and self.timeout_on_payroll:
-                raise SqlclError("SQLcl timed out on payroll import; state is unknown")
+                raise SqlclUnknownResult("SQLcl timed out on payroll import; state is unknown")
             self.write_calls.append((target.alias or "", operation))
             # simulate updated database tree on write
             if target.alias == "hr":
@@ -562,7 +568,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=False,
                 config=self.config,
                 store=self.store,
@@ -573,12 +578,15 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertEqual(len(self.write_calls), 0)
 
     def test_missing_registered_acknowledgement_refuses_with_zero_writes(self):
-        bad_acks = {"hr": (), "payroll": ("pay-uuid-2",)}
+        with self.store._locked() as data:
+            data["publish_acknowledgements"] = [
+                row for row in data["publish_acknowledgements"]
+                if row["checkout_uuid"] != "hr-uuid-1"
+            ]
         with self.assertRaises(PublishError) as ctx:
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                bad_acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
@@ -588,21 +596,205 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertIn("acknowledgement", str(ctx.exception).lower())
         self.assertEqual(len(self.write_calls), 0)
 
-    def test_acknowledgement_for_unselected_alias_refuses_with_zero_writes(self):
-        bad_acks = {"hr": ("hr-uuid-1",), "payroll": ("pay-uuid-2",), "billing": ("bill-uuid",)}
-        with self.assertRaises(PublishError) as ctx:
+    def test_acknowledgement_for_another_preparation_digest_does_not_count(self):
+        with self.store._locked() as data:
+            for row in data["publish_acknowledgements"]:
+                row["preparation_digest"] = "f" * 64
+
+        with self.assertRaisesRegex(PublishError, "Missing required checkout acknowledgements"):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                bad_acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
                 runner=self.fake_runner,
                 lock_reader=self.lock_reader,
             )
-        self.assertIn("billing", str(ctx.exception).lower())
-        self.assertEqual(len(self.write_calls), 0)
+
+        self.assertEqual(self.write_calls, [])
+
+    def test_ack_publish_records_only_callers_selected_registered_app(self):
+        from teamlib import publish as publish_module
+
+        prep = prepare_publish(
+            self.repo,
+            (self.target_hr,),
+            self.seed_commit,
+            {"hr": self.lock_report_hr},
+            self.store,
+            runner=self.fake_runner,
+            validator=lambda tree, **kwargs: ValidationReport(True, "SUCCESS", "ok", ()),
+        )
+
+        aliases = publish_module.acknowledge_publish(
+            self.repo,
+            prep.preparation_id,
+            "hr-uuid-1",
+            "host-1",
+            "alice",
+            config=self.config,
+            store=self.store,
+        )
+
+        self.assertEqual(aliases, ("hr",))
+        self.assertEqual(
+            len(self.store.list_publish_acknowledgements(
+                self.target_hr, prep.preparation_id, prep.record_digest
+            )),
+            1,
+        )
+        self.assertEqual(
+            self.store.list_publish_acknowledgements(
+                self.target_payroll, prep.preparation_id, prep.record_digest
+            ),
+            [],
+        )
+
+    def test_ack_publish_works_from_another_checkout_without_local_preparation_file(self):
+        from teamlib import publish as publish_module
+
+        prep = prepare_publish(
+            self.repo,
+            (self.target_hr,),
+            self.seed_commit,
+            {"hr": self.lock_report_hr},
+            self.store,
+            runner=self.fake_runner,
+            validator=lambda tree, **kwargs: ValidationReport(True, "SUCCESS", "ok", ()),
+        )
+        other_checkout = self.repo / "other-checkout"
+        other_checkout.mkdir()
+
+        aliases = publish_module.acknowledge_publish(
+            other_checkout,
+            prep.preparation_id,
+            "hr-uuid-1",
+            "host-1",
+            "alice",
+            config=self.config,
+            store=self.store,
+        )
+
+        self.assertEqual(aliases, ("hr",))
+        self.assertFalse((other_checkout / ".sync-state" / "publish").exists())
+        self.assertEqual(
+            len(self.store.list_publish_acknowledgements(
+                self.target_hr, prep.preparation_id, prep.record_digest
+            )),
+            1,
+        )
+
+    def test_ack_publish_refuses_unknown_shared_preparation(self):
+        from teamlib import publish as publish_module
+
+        other_checkout = self.repo / "other-checkout"
+        other_checkout.mkdir()
+        with self.assertRaisesRegex(PublishError, "unknown or stale"):
+            publish_module.acknowledge_publish(
+                other_checkout, "missing-preparation", "hr-uuid-1", "host-1", "alice",
+                config=self.config, store=self.store,
+            )
+
+    def test_ack_publish_refuses_a_changed_checkout_roster_before_writing(self):
+        from teamlib import publish as publish_module
+
+        prep = prepare_publish(
+            self.repo,
+            (self.target_hr,),
+            self.seed_commit,
+            {"hr": self.lock_report_hr},
+            self.store,
+            runner=self.fake_runner,
+            validator=lambda tree, **kwargs: ValidationReport(True, "SUCCESS", "ok", ()),
+        )
+        self.store.register_app(self.target_hr, "late-checkout", "host-3", "carol")
+
+        with self.assertRaisesRegex(PublishError, "roster changed"):
+            publish_module.acknowledge_publish(
+                self.repo, prep.preparation_id, "hr-uuid-1", "host-1", "alice",
+                config=self.config, store=self.store,
+            )
+
+        self.assertEqual(
+            self.store.list_publish_acknowledgements(
+                self.target_hr, prep.preparation_id, prep.record_digest
+            ),
+            [],
+        )
+
+    def test_publish_refuses_when_shared_preparation_is_missing_or_changed(self):
+        with self.store._locked() as data:
+            data["publish_preparations"] = [
+                row for row in data.get("publish_preparations", [])
+                if row["preparation_id"] != self.prep.preparation_id
+            ]
+
+        with self.assertRaisesRegex(PublishError, "(?i)shared preparation"):
+            publish_prepared(
+                self.repo, self.prep.preparation_id, confirm_pause=True,
+                config=self.config, store=self.store, runner=self.fake_runner,
+                lock_reader=self.lock_reader,
+            )
+        self.assertEqual(self.write_calls, [])
+
+    def test_ack_publish_cli_uses_current_checkout_identity(self):
+        import contextlib
+        import io
+        import team
+
+        prep = prepare_publish(
+            self.repo,
+            (self.target_hr,),
+            self.seed_commit,
+            {"hr": self.lock_report_hr},
+            self.store,
+            runner=self.fake_runner,
+            validator=lambda tree, **kwargs: ValidationReport(True, "SUCCESS", "ok", ()),
+        )
+        other_checkout = self.repo / "ack-checkout"
+        other_checkout.mkdir()
+        stdout = io.StringIO()
+        with patch("team._repo_root", return_value=other_checkout), \
+             patch("team._sql_control_store", return_value=self.store), \
+             patch("team.socket.gethostname", return_value="host-1"), \
+             patch.dict(os.environ, {"TEAM_CHECKOUT_UUID": "hr-uuid-1", "USER": "alice"}), \
+             contextlib.redirect_stdout(stdout):
+            status = team.main(["--env", str(self.env_path), "ack-publish", prep.preparation_id])
+
+        self.assertEqual(status, 0)
+        result = json.loads(stdout.getvalue().strip())
+        self.assertEqual(result["acknowledged_aliases"], ["hr"])
+        self.assertEqual(
+            len(self.store.list_publish_acknowledgements(
+                self.target_hr, prep.preparation_id, prep.record_digest
+            )),
+            1,
+        )
+
+    def test_publish_app_cli_removes_publisher_supplied_ack_option(self):
+        import argparse
+        import contextlib
+        import io
+        import team
+
+        parser = team._parser()
+        subparsers = next(
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        self.assertIn("ack-publish", subparsers.choices)
+        ack_args = parser.parse_args(["ack-publish", "prep-1"])
+        self.assertEqual(ack_args.preparation_id, "prep-1")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            parser.parse_args([
+                "publish-app", "--prepared", "prep-1", "--confirm-pause",
+                "--ack", "hr:checkout-a",
+            ])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("unrecognized arguments", stderr.getvalue())
 
     def test_edited_preparation_json_refuses_with_zero_writes(self):
         record_file = self.repo / ".sync-state" / "publish" / self.prep.preparation_id / "prepare.json"
@@ -613,7 +805,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
@@ -631,7 +822,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=True,
                 config=changed_config,
                 store=self.store,
@@ -647,7 +837,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
@@ -664,7 +853,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
@@ -681,7 +869,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
@@ -695,7 +882,7 @@ class PublishPreparedTests(unittest.TestCase):
         self.store.register_app(self.target_payroll, "pay-uuid-3", "host-3", "carol")
         with self.assertRaises(PublishError) as ctx:
             publish_prepared(
-                self.repo, self.prep.preparation_id, self.acks,
+                self.repo, self.prep.preparation_id,
                 confirm_pause=True, config=self.config, store=self.store,
                 runner=self.fake_runner, lock_reader=self.lock_reader,
             )
@@ -707,7 +894,7 @@ class PublishPreparedTests(unittest.TestCase):
         baseline.unlink()
         with self.assertRaises(PublishError) as ctx:
             publish_prepared(
-                self.repo, self.prep.preparation_id, self.acks,
+                self.repo, self.prep.preparation_id,
                 confirm_pause=True, config=self.config, store=self.store,
                 runner=self.fake_runner, lock_reader=self.lock_reader,
             )
@@ -719,7 +906,7 @@ class PublishPreparedTests(unittest.TestCase):
         self.store.release_app(self.target_payroll.physical_key, "other-run", confirmed_success=True)
         with self.assertRaises(PublishError) as ctx:
             publish_prepared(
-                self.repo, self.prep.preparation_id, self.acks,
+                self.repo, self.prep.preparation_id,
                 confirm_pause=True, config=self.config, store=self.store,
                 runner=self.fake_runner, lock_reader=self.lock_reader,
             )
@@ -734,7 +921,7 @@ class PublishPreparedTests(unittest.TestCase):
 
         with self.assertRaises(PublishError) as ctx:
             publish_prepared(
-                self.repo, self.prep.preparation_id, self.acks,
+                self.repo, self.prep.preparation_id,
                 confirm_pause=True, config=self.config, store=self.store,
                 runner=self.fake_runner, lock_reader=registering_lock_reader,
             )
@@ -750,7 +937,7 @@ class PublishPreparedTests(unittest.TestCase):
 
         with self.assertRaises(PublishError) as ctx:
             publish_prepared(
-                self.repo, self.prep.preparation_id, self.acks,
+                self.repo, self.prep.preparation_id,
                 confirm_pause=True, config=self.config, store=self.store,
                 runner=self.fake_runner, lock_reader=removing_lock_reader,
             )
@@ -766,7 +953,7 @@ class PublishPreparedTests(unittest.TestCase):
 
         with self.assertRaises(PublishError):
             publish_prepared(
-                self.repo, self.prep.preparation_id, self.acks,
+                self.repo, self.prep.preparation_id,
                 confirm_pause=True, config=self.config, store=self.store,
                 runner=registering_runner, lock_reader=self.lock_reader,
             )
@@ -787,7 +974,29 @@ class PublishPreparedTests(unittest.TestCase):
         with patch("teamlib.publish.import_app", side_effect=register_before_import):
             with self.assertRaises(PublishError):
                 publish_prepared(
-                    self.repo, self.prep.preparation_id, self.acks,
+                    self.repo, self.prep.preparation_id,
+                    confirm_pause=True, config=self.config, store=self.store,
+                    runner=self.fake_runner, lock_reader=self.lock_reader,
+                )
+        self.assertEqual(self.write_calls, [("hr", "write")])
+
+    def test_identity_change_after_acknowledgement_is_rechecked_under_mutex(self):
+        # The SQL store updates host/user when a checkout re-registers the same
+        # UUID. An acknowledgement given by the old identity must not authorise
+        # the import, so the identity is compared again under the app mutex.
+        from teamlib.apex import import_app as real_import_app
+
+        def reregister_before_import(target, *args, **kwargs):
+            if target.alias == "payroll":
+                entry = self.store.list_registry(self.target_payroll)[0]
+                with self.store._locked() as data:
+                    data["registry"][self.target_payroll.physical_key][entry.checkout_uuid]["host"] = "other-host"
+            return real_import_app(target, *args, **kwargs)
+
+        with patch("teamlib.publish.import_app", side_effect=reregister_before_import):
+            with self.assertRaisesRegex(PublishError, "identity changed after acknowledgement"):
+                publish_prepared(
+                    self.repo, self.prep.preparation_id,
                     confirm_pause=True, config=self.config, store=self.store,
                     runner=self.fake_runner, lock_reader=self.lock_reader,
                 )
@@ -801,7 +1010,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
@@ -815,7 +1023,6 @@ class PublishPreparedTests(unittest.TestCase):
         report = publish_prepared(
             self.repo,
             self.prep.preparation_id,
-            self.acks,
             confirm_pause=True,
             config=self.config,
             store=self.store,
@@ -844,7 +1051,7 @@ class PublishPreparedTests(unittest.TestCase):
         os.utime(unrelated, (future, future))
 
         report = publish_prepared(
-            self.repo, self.prep.preparation_id, self.acks,
+            self.repo, self.prep.preparation_id,
             confirm_pause=True, config=self.config, store=self.store,
             runner=self.fake_runner, lock_reader=self.lock_reader,
         )
@@ -864,7 +1071,6 @@ class PublishPreparedTests(unittest.TestCase):
             publish_prepared(
                 self.repo,
                 self.prep.preparation_id,
-                self.acks,
                 confirm_pause=True,
                 config=self.config,
                 store=self.store,
@@ -886,13 +1092,32 @@ class PublishPreparedTests(unittest.TestCase):
         self.assertEqual(recovery_path.name, operation_id)
         self.assertTrue(recovery_path.is_dir())
 
+    def test_generic_error_containing_unknown_is_recorded_as_failed(self):
+        with patch("teamlib.publish.import_app", side_effect=RuntimeError("unknown application alias")):
+            with self.assertRaises(PublishError):
+                publish_prepared(
+                    self.repo,
+                    self.prep.preparation_id,
+                    confirm_pause=True,
+                    config=self.config,
+                    store=self.store,
+                    runner=self.fake_runner,
+                    lock_reader=self.lock_reader,
+                )
+
+        journal = self.repo / ".sync-state" / "publish" / self.prep.preparation_id / "result.json"
+        data = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall_status"], "FAILED")
+        self.assertEqual(data["apps"]["hr"]["status"], "FAILED")
+        self.assertFalse(data["all_clear_allowed"])
+
     def test_post_import_export_timeout_keeps_unknown_recovery_evidence(self):
         payroll_written = False
 
         def timeout_during_verification(target, operation, driver, work, **kwargs):
             nonlocal payroll_written
             if target.alias == "payroll" and operation == "read" and payroll_written and Path(driver).name == "export.sql":
-                raise SqlclError("SQLcl timed out during post-import export")
+                raise SqlclUnknownResult("SQLcl timed out during post-import export")
             result = self.fake_runner(target, operation, driver, work, **kwargs)
             if target.alias == "payroll" and operation == "write":
                 payroll_written = True
@@ -900,7 +1125,7 @@ class PublishPreparedTests(unittest.TestCase):
 
         with self.assertRaises(PublishError):
             publish_prepared(
-                self.repo, self.prep.preparation_id, self.acks,
+                self.repo, self.prep.preparation_id,
                 confirm_pause=True, config=self.config, store=self.store,
                 runner=timeout_during_verification, lock_reader=self.lock_reader,
             )

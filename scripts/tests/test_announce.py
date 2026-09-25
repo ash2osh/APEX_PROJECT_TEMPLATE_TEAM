@@ -72,7 +72,8 @@ class AnnounceTests(unittest.TestCase):
         notice = format_publish_notice(prep)
         self.assertIn("HR", notice)
         self.assertNotIn("payroll", notice.lower())
-        self.assertIn("alice-uuid", notice)
+        self.assertIn("Registered checkouts: 1", notice)
+        self.assertNotIn("alice-uuid", notice)
 
 
 if __name__ == "__main__":

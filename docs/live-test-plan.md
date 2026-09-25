@@ -9,15 +9,15 @@ local `docker-demo` database and with **throwaway schemas only**:
 | 1 | Identity guard refuses a wrong connection before any SQL runs | PR #1 |
 | 2 | Migration files are stored in METADATA and backfilled | PR #4 |
 | 3 | Two separate repositories share one database safely | PR #3 |
-| 4 | A schema release is cut from the development database | PR #5 |
+| 4 | A schema release is cut, replayed and qualified from the development database; an app is captured while paused | PR #5 and phases 3b–4 |
 
 Budget one to two hours. Stop at the first unexpected result in stages 1, 2
 or 4 and keep its evidence: those block the next release phase. Stage 3 is
 informational.
 
-Still out of scope: applying a database-built (format 3) release to test or
-production and generating its runbook, and application releases. Those are
-not implemented yet.
+Format-3 schema replay, application release capture, signed evidence and
+runbook generation are implemented and have offline tests. Live Oracle/APEX
+acceptance remains open and must use disposable source and test targets only.
 
 ## 0. One-time setup
 
@@ -43,7 +43,10 @@ not implemented yet.
    ```
 
    Add `lt-apex` pointing at the parsing schema of an existing development
-   application; stages 1, 2 and 4 never write to it.
+   application. It is a read-only source for app capture and must never be used
+   as the `run-release-test` deployment target. Any live app qualification needs
+   a separately provisioned throwaway test workspace/application and isolated
+   target contract.
 4. **Read each connection's real identity** and copy the values into the
    matching `*_EXPECTED_*` lines of `.env`:
 
@@ -104,34 +107,26 @@ not implemented yet.
    - Expect `UNKNOWN` from `run` without a protected ORDS/browser runner;
      that is the documented fail-closed result, not a failure.
 
-## 4. Cutting a schema release (PR #5)
+## 4. Cutting and applying a database release (phases 3b–4)
 
-1. **Cut and verify.**
+The schema release cut, format 3 replay and paused app capture have offline test coverage. Use only an approved disposable `docker-demo` source/test setup from stage 0; `run-release-test` must target isolated throwaway schemas and a throwaway APEX app, never the development Builder source. No live Oracle acceptance is claimed by this repository change.
+
+1. **Cut and verify a schema release.**
 
    ```text
-   scripts/team.py --env .env build-schema-release --version 0.1.0 --out scratch/r1
-   scripts/team.py verify-release scratch/r1/release.tar
+   scripts/team.sh --env .env build-release --kind schema --version 0.1.0 --out scratch/r1
+   scripts/team.sh verify-release scratch/r1/release.tar
    ```
 
-   - Expect the manifest `events` to read: Alice `up`, Bob `up`, Bob `down`,
-     with Bob's `.down.sql` files packaged.
+   - Expect format 3 `source` metadata and Alice `up`, Bob `up`, Bob `down` events, with Bob's stored down members packaged.
    - Expect a `schema/v0.1.0` row in `TEAM_RELEASE`.
-2. **Deterministic re-cut.** Cut `0.1.0` again into `scratch/r2`.
-   - Expect the same archive digest as `scratch/r1`.
-3. **A version means one archive.** Alice applies a third migration, then cuts
-   `0.1.0` into `scratch/r3`.
-   - Expect a refusal (`already bound`). Cutting `0.2.0` succeeds with
-     `history_cut` 4.
-4. **Drift gate.** Run `CREATE TABLE LT_DATA.ROGUE (X NUMBER)`, then cut
-   `0.3.0`.
-   - Expect exit code `3` and a diff naming `ROGUE`. Drop the table and the
-     cut succeeds.
-5. **Unresolved migration.** Apply a migration whose SQL fails, then cut.
-   - Expect the cut refused because the migration mutex is held by the failed
-     attempt. Clear it with `recover-migration`.
-6. **Apply is not implemented yet.** `plan-release` on `scratch/r1/release.tar`
-   (with the test target contract and an exported history) refuses with
-   `not implemented yet`.
+2. **Deterministic re-cut.** Cut the unchanged ledger as `0.1.0` into `scratch/r2`; expect the same archive digest.
+3. **Version binding.** Change the ledger and attempt `0.1.0` again; expect refusal because the version is already bound. A new version must identify the new cut.
+4. **Drift and unresolved attempts.** Create a rogue object and cut; expect refusal with the drift report. Restore the fixture and clear unresolved migration attempts only through the named recovery owner and reviewed evidence.
+5. **Replay on test histories.** Run `plan-release`, `run-release-test` and evidence verification for both an empty history and an earlier release. Expect every up/down transition in order and no payload for an up/down pair that nets to no change.
+6. **Build an app release.** Register the current checkout, ensure the selected source app has a known empty page-lock report, then run `build-release --kind app --alias hr`. Expect two equal capture digests, the APPLIED migration set at the schema cut, and app-check/master-contract digests in the manifest. If exercising `run-release-test` for that app, use a separately provisioned throwaway APEX test app and target contract; do not deploy to `lt-apex`.
+
+Stop and preserve command JSON plus the named `.team-sqlcl-*.log` on any unexpected result. Record a stage as `UNKNOWN` if the approved target, runner, browser checks, or required profile are unavailable; offline tests are not live proof.
 
 ## 5. Clean up
 

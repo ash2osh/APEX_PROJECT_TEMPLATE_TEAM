@@ -54,7 +54,6 @@ OFFLINE_COMMANDS = frozenset(
         "new-migration",
         "add-dependency",
         "migration-plan",
-        "build-release",
         "verify-release",
         "plan-release",
         "apply-release",

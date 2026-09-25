@@ -62,43 +62,24 @@ Flow checks invoke `TEAM_FLOW_RUNNER --alias <alias> --check-json <path>` and
 accept only a structured `PASS`, `FAIL`, or `UNKNOWN` result. Unknown checks
 are counted and never silently promoted.
 
-## Protected release-test
+## Local release workflow
 
-The release workflow triggers on push tags formatted as `schema/v<semver>` (shared schema)
-or `app/<alias>/v<semver>` (single application). It builds the selected canonical
-archive offline using `build-release --kind schema` or `build-release --kind app --alias <alias>`,
-verifies the archive bytes, and passes them to a prepared `self-hosted` test runner.
-Its `example-team-apex-test` concurrency group never cancels an in-flight protected run.
-The test command derives source commit, release kind, aliases, declarations, SELECT SQL,
-and flow members from the verified archive bytes and reads live metadata history:
+CI does not build or publish release archives. The operator cuts the archive from the shared development database, then runs test qualification, signing and runbook generation locally; the complete commands and key-handling steps are in [promotion.md](promotion.md).
 
 ```text
-PYTHONPATH=scripts python3 scripts/team.py \
-  --env "$RUNNER_TEMP/test.env" run-release-test \
-  scratch/release/release.tar --target targets/test.json \
-  --out "$RUNNER_TEMP/test-evidence.json"
+scripts/team.sh --env .env build-release --kind schema --version 1.1.0 --out scratch/release
+scripts/team.sh verify-release scratch/release/release.tar
+scripts/team.sh --env .env.test run-release-test \
+  scratch/release/release.tar --target targets/test.json --out scratch/test-evidence.json
+scripts/team.sh sign-test-evidence --evidence scratch/test-evidence.json \
+  --archive scratch/release/release.tar --private-key /secure/local/test-signing-key.pem \
+  --out scratch/test-evidence.sig
+scripts/team.sh gen-runbook scratch/release/release.tar \
+  --history scratch/production-history.json --target targets/production.json \
+  --test-evidence scratch/test-evidence.json --signature scratch/test-evidence.sig \
+  --trust-key /secure/local/test-trust-key.pem --out scratch/PRODUCTION_RUNBOOK.md
 ```
 
-It requires `role: test` and environment `test`, refuses destructive pending
-migrations before payload execution, and passes an in-memory apply result into
-qualification. No external test-history, plan, or apply-report file is part
-of this flow. Evidence is signed in a separate job, `sign-and-handoff`, which
-checks out the protected default branch rather than the tag, so release code
-never runs next to the protected test key; that job also generates the
-production-owner runbook:
+Use `--kind app --alias <alias>` to cut a single-application archive. Test evidence and the generated production-owner runbook bind the same archive digest, target identity and app-check digest. `verify-release` remains offline and supports format 2 signed handoffs already in circulation. The local process never authorizes a production write.
 
-```text
-scripts/team.py sign-test-evidence \
-  --evidence "$RUNNER_TEMP/test-evidence.json" \
-  --archive scratch/release/release.tar \
-  --private-key "$RUNNER_TEMP/test-signing-key.pem" \
-  --out "$RUNNER_TEMP/test-evidence.sig"
-```
-
-Signing binds `archive_digest`, `source_commit`, `kind`, `alias`, and `app_checks_digest`.
-The runbook generator verifies that binding again against the same archive before
-creating the production handoff. A signed report for one application cannot be reused
-for another application or a schema release.
-
-Persistent staging is observational and does not prove a fresh installation,
-isolation, or arbitrary-DML coverage.
+Persistent staging is observational and does not prove a fresh installation, isolation, or arbitrary-DML coverage.

@@ -7,6 +7,18 @@ requires-python = ">=3.10"
 # only and deliberately has no runtime dependencies.
 dependencies = []
 
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "scripts"}
+py-modules = ["team"]
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+include = ["teamlib*"]
+
 [project.optional-dependencies]
 # Required by gen-runbook to verify the signed test evidence on the production
 # handoff path.
