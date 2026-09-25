@@ -165,6 +165,16 @@ class RuntimePreflightTests(unittest.TestCase):
                 which=self.fake_which, command_runner=self.fake_versions,
             )
 
+    def test_schema_release_can_skip_browser_runner_preflight(self):
+        report = preflight_online(
+            config_for(), self.root, None,
+            require_flow_runner=False,
+            runner=self.fake_sqlcl,
+            which=self.fake_which,
+            command_runner=self.fake_versions,
+        )
+        self.assertIn("APEX:employee", report.profiles)
+
     def test_production_config_is_refused_before_executable_probe(self):
         with self.assertRaisesRegex(RuntimeError, "production"):
             preflight_online(

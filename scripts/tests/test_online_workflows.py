@@ -299,7 +299,7 @@ class OnlineWorkflowTests(unittest.TestCase):
     def test_run_release_test_translates_preflight_runtime_errors(self):
         events: list[str] = []
 
-        def failing_preflight(_config, _repo, _flow):
+        def failing_preflight(_config, _repo, _flow, **_kwargs):
             events.append("preflight")
             raise RuntimeError("JDK executable is unavailable")
 
@@ -401,8 +401,11 @@ class OnlineWorkflowTests(unittest.TestCase):
             events.append("load-check-bundle")
             return bundle
 
-        def preflight(_config, _repo, _flow):
+        def preflight(_config, _repo, _flow, *, require_flow_runner=True):
             events.append("preflight")
+            self.__dict__.setdefault("release_preflight_flow_requirements", []).append(
+                require_flow_runner
+            )
             return runtime
 
         def apply_live(archive, target, config, **kwargs):
@@ -482,6 +485,7 @@ class OnlineWorkflowTests(unittest.TestCase):
         self.assertNotIn("read-history-file", events)
         self.assertFalse((self.root / "plan.json").exists())
         self.assertFalse((self.root / "apply-report.json").exists())
+        self.assertEqual(self.release_preflight_flow_requirements, [True])
 
     def test_release_test_passes_format3_app_source_and_selected_alias_to_qualification(self):
         source = {
@@ -606,7 +610,7 @@ class OnlineWorkflowTests(unittest.TestCase):
         dependencies = OnlineDependencies(
             resolve_head=lambda _repo: manifest.source_commit,
             load_source=lambda *_args: None,
-            preflight=lambda *_args: runtime,
+            preflight=lambda *_args, **_kwargs: runtime,
             setup_control=lambda *_args: None,
             bootstrap_metadata=lambda *_args: None,
             read_state=lambda *_args: {"observations": []},
@@ -731,6 +735,50 @@ class OnlineWorkflowTests(unittest.TestCase):
         written = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(written["kind"], "schema")
         self.assertIsNone(written["alias"])
+        self.assertEqual(self.release_preflight_flow_requirements, [False])
+
+    def test_schema_release_preflight_does_not_require_browser_flow_runner(self):
+        events: list[str] = []
+        schema_manifest = Manifest(
+            2, "1.0.0", "a" * 40, "b" * 64, (), {},
+            (), self.root / "release.tar", "d" * 64,
+            kind="schema", alias=None, required_migrations=(),
+        )
+        dependencies, _ = self.release_dependencies(events, manifest=schema_manifest)
+        observed_requirements: list[bool] = []
+
+        def preflight(_config, _repo, _flow, *, require_flow_runner=True):
+            observed_requirements.append(require_flow_runner)
+            return SimpleNamespace(toolchain_digest="e" * 64)
+
+        def qualify(*_args, **_kwargs):
+            return {"version": 2, "final_status": "PASS", "source_commit": "a" * 40}
+
+        dependencies = OnlineDependencies(
+            **{
+                **dependencies.__dict__,
+                "preflight": preflight,
+                "qualify_release": qualify,
+            }
+        )
+        archive = self.root / "schema-without-flow-runner.tar"
+        archive.write_bytes(b"schema archive")
+        target = self.root / "targets" / "test.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+
+        result = run_release_test(
+            self.root,
+            config_for(role="test", environment="test", apps={"employee": 101}),
+            archive,
+            target,
+            self.root / "schema-without-flow-runner.json",
+            flow_executable="",
+            dependencies=dependencies,
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(observed_requirements, [False])
 
     def test_run_release_test_single_app_archive_exercises_only_selected_alias(self):
         events: list[str] = []

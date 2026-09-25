@@ -213,6 +213,7 @@ def preflight_online(
     repo: str | Path,
     flow_executable: str | Path | None,
     *,
+    require_flow_runner: bool = True,
     runner: Callable[..., Any] = run_sqlcl,
     sqlcl_resolver: Callable[[], str] = resolve_sqlcl_executable,
     which: Callable[[str], str | None] = shutil.which,
@@ -233,7 +234,7 @@ def preflight_online(
         raise RuntimeError("SQLcl executable is unavailable")
     if not java:
         raise RuntimeError("JDK executable is unavailable")
-    if config.apps:
+    if require_flow_runner and config.apps:
         if not flow_executable:
             raise RuntimeError("TEAM_FLOW_RUNNER is required for declared flow checks")
         flow = Path(flow_executable)

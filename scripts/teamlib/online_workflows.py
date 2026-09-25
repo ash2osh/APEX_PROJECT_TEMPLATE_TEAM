@@ -575,7 +575,12 @@ def run_release_test(
             )
         exercised_aliases = config_aliases
     try:
-        runtime = deps.preflight(config, repo_path, flow_executable)
+        runtime = deps.preflight(
+            config,
+            repo_path,
+            flow_executable,
+            require_flow_runner=bool(exercised_aliases),
+        )
     except RuntimeError as exc:
         raise OnlineWorkflowError(str(exc)) from exc
     apply_report = deps.apply_release_live(
