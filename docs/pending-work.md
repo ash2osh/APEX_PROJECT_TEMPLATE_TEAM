@@ -9,7 +9,9 @@ acknowledgement and hardening items is merged to `main` (PR #6), including
 fixes for 17 review findings. The offline gate passed on `main` at
 `4669d29f7dccd178d3f31bc29400827640c69b72`. Live testing began on the approved
 throwaway `local-26ai` target; stage 2 stopped on a migration verification
-failure. The failed state and its evidence are preserved pending owner review.
+failure. The failed state and its evidence are preserved. The approved snapshot
+was restored after that failure; Stage 0 is being re-established before any
+stage 1–4 rerun.
 
 ## Where things stand
 
@@ -34,24 +36,32 @@ acceptance against an Oracle/APEX database.
   729 unit tests, `ci-doctor` (`valid: true`), `git diff --check`, and a tracked
   file CRLF scan. SQLcl is `26.2.2.233.1901`; Java is `21.0.12.1`. Read-only
   inspection of `local-26ai` reported database `FREE`, PDB `FREEPDB1`, APEX
-  `26.1.4`, and `USERS`. Its persistent `oradata-26ai` volume was copied to
+  `26.1.4` (`APEX` registry status `VALID`), and `USERS`. Its persistent
+  `oradata-26ai` volume was copied to
   `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25`
-  (33 files, 7.0 GB); the container resumed and all 33 snapshot hashes still
-  pass. The owner approved `local-26ai` as the throwaway target. Four LT_* users,
-  SQLcl saved connections, credential-free profiles and separate Alice/Bob
-  clones were prepared; `doctor` was valid in both. The APEX capture connection
-  remains read-only and no APEX app was deployed.
+  (33 files, 7.0 GB). After the Stage 2 failure, the owner-approved snapshot was
+  restored to the volume; the restore helper found an empty file diff, the
+  snapshot hash manifest passed, and the container is healthy. A read-only
+  post-restore query confirmed `FREEPDB1` and no LT_* users before provisioning
+  resumed. Four LT_* users and their expected grants/quotas now exist, but their
+  fresh saved SQLcl connections are not yet usable; `doctor` must be rerun in
+  Alice and Bob after Stage 0 is complete. The credential-free profiles and
+  separate clones remain in scratch. The APEX capture connection remains
+  read-only and no APEX app was deployed.
 - **Results:**
 
   | Stage / step | Expected | Actual | Status | Evidence |
   |---|---|---|---|---|
   | Offline baseline | All offline gates pass | Ruff, shell syntax, 729 tests (1 skipped), `ci-doctor`, `git diff --check`, and CRLF scan passed on the recorded baseline | PASS | `scratch/live-test-2026-09-25/initial-evidence.json` |
-  | 0 — snapshot | Consistent rollback copy before writes | Snapshot copied; all 33 hashes pass; container healthy | PASS | `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25.sha256`; `scratch/live-test-2026-09-25/stage2/snapshot-manifest-recheck.json` |
-  | 0 — profiles and `.env` | LT_* users, saved SQLcl profiles, valid doctor | Provisioned; identities verified; Alice/Bob `doctor` both valid | PASS | `scratch/live-test-2026-09-25/stage0/` |
-  | 1 — wrong connection | Refuse before payload; no LT_DATA metadata objects | Exit 3 with ORA-20901 before payload; no TEAM_* tables in LT_DATA | PASS | `scratch/live-test-2026-09-25/stage1/wrong-connection.json`; `scratch/live-test-2026-09-25/stage1/wrong-connection-no-tables.json` |
-  | 1 — right connection | Adopt sequence-zero frontier and create expected METADATA objects | Succeeded in LT_META; frontier digest `4363cf31…e0e5f6` | PASS | `scratch/live-test-2026-09-25/stage1/right-connection.json`; `scratch/live-test-2026-09-25/stage1/right-connection-objects.json` |
+  | 0 — snapshot | Consistent rollback copy before writes | Snapshot restored after Stage 2; file diff empty, all 33 hashes pass, container healthy | PASS | `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25.sha256`; `scratch/live-test-2026-09-25/stage2/restore-copy-attempt2.json`; `scratch/live-test-2026-09-25/stage2/restore-postcheck.json` |
+  | 0 — APEX installation | APEX available on target | `DBA_REGISTRY` reports APEX `26.1.4`, status `VALID` | PASS | `scratch/live-test-2026-09-25/stage0/apex-installed-check.json` |
+  | 0 — LT users | Least-privilege throwaway users and quotas | Four users are OPEN; expected system/role grants and 100 MB quotas verified | PASS | `scratch/live-test-2026-09-25/stage0/verify-lt-users-after-creation.json` |
+  | 0 — saved SQLcl connections | Four fresh `-savepwd` aliases connect as the matching LT_* user | **FAIL:** prior alias-save attempts used invalid SQLcl option ordering; fresh `sql -L -name` checks for all four aliases failed. Correct command syntax is `CONNECT -SAVE <alias> -SAVEPWD ...`; setup is not complete | FAIL | `scratch/live-test-2026-09-25/stage0/rotate-and-save-lt-connections-attempt3.json`; `scratch/live-test-2026-09-25/stage0/named-connection-check-after-attempt3.json` |
+  | 0 — profiles and `.env` | Credential-free profiles and valid doctor in both clones | Profiles/clones remain in scratch; the earlier doctor passes predate snapshot restore, so rerun is pending | UNKNOWN | `scratch/live-test-2026-09-25/stage0/`; `scratch/live-test-2026-09-25/stage2/restore-postcheck.json` |
+  | 1 — wrong connection | Refuse before payload; no LT_DATA metadata objects | Passed before snapshot restore: exit 3 with ORA-20901 before payload; no TEAM_* tables in LT_DATA. Rerun pending | PASS | `scratch/live-test-2026-09-25/stage1/wrong-connection.json`; `scratch/live-test-2026-09-25/stage1/wrong-connection-no-tables.json` |
+  | 1 — right connection | Adopt sequence-zero frontier and create expected METADATA objects | Passed before snapshot restore in LT_META; frontier digest `4363cf31…e0e5f6`. Rerun pending | PASS | `scratch/live-test-2026-09-25/stage1/right-connection.json`; `scratch/live-test-2026-09-25/stage1/right-connection-objects.json` |
   | 2 — drift preflight | Reviewed inventory matches current schemas and accepted frontier | `check-drift` clean; migration dry run selected Alice's `accounts` migration | PASS | `scratch/live-test-2026-09-25/stage2/alice-accounts-check-drift-command.json`; `scratch/live-test-2026-09-25/stage2/alice-migrate-dry-run-reviewed.json` |
-  | 2 — Alice reversible migration | Store four members, create ACCOUNTS, verify, record one up event and release mutex | **FAIL:** CREATE TABLE succeeded, but verification returned `TEAM_ASSERT|accounts_table_exists|FAIL`; attempt is FAILED, no history event, mutex retained, and live schema drift now includes ACCOUNTS | FAIL | `scratch/live-test-2026-09-25/stage2/alice-migrate-reviewed.json`; `scratch/live-test-2026-09-25/stage2/root-cause.json`; `scratch/live-test-2026-09-25/stage2/accounts-metadata-inspection.json` |
+  | 2 — Alice reversible migration | Store four members, create ACCOUNTS, verify, record one up event and release mutex | **FAIL (pre-restore):** CREATE TABLE succeeded, but verification returned `TEAM_ASSERT|accounts_table_exists|FAIL`; attempt was FAILED, no history event, and the mutex was retained. The snapshot restore removed this failed attempt; Stage 2 rerun is pending | FAIL | `scratch/live-test-2026-09-25/stage2/alice-migrate-reviewed.json`; `scratch/live-test-2026-09-25/stage2/root-cause.json`; `scratch/live-test-2026-09-25/stage2/accounts-metadata-inspection.json` |
   | 2 — backfill and tamper | Alice already_stored; Bob missing; tampered bytes refused | Not run after the first payload verification failure | UNKNOWN | `scratch/live-test-2026-09-25/stage2/root-cause.json` |
   | 3 — shared repositories | Foreign migrations and undo work; browser run may be UNKNOWN | Not run because Stage 2 failed; E2E also lacks a disposable workspace/seed app and protected browser runner | UNKNOWN | `scratch/live-test-2026-09-25/stage2/root-cause.json` |
   | 4 — schema release | Cut, deterministic digest, drift refusal, replay and evidence pass | Not run because Stage 2 failed | UNKNOWN | `scratch/live-test-2026-09-25/stage2/root-cause.json` |
@@ -66,9 +76,9 @@ acceptance against an Oracle/APEX database.
   recorded in `scratch/live-test-2026-09-25/stage2/root-cause.json`.
 
   Stage 2 logs, command outputs and live inventory checks are retained under
-  `scratch/live-test-2026-09-25/stage2/`; `team-sqlcl-logs.json` records their
-  paths and hashes. No cleanup or restore has been run. The snapshot remains
-  available pending owner review of the failed attempt and recovery choice.
+  `scratch/live-test-2026-09-25/stage2/`; `team-sqlcl-logs.json` records the
+  original run's paths and hashes. Snapshot restore is complete. Stage 0 is
+  partially re-provisioned for a rerun; Stage 5 cleanup has not run.
 - **Done when:** stages 1, 2 and 4 pass, or their failures are reported with the
   command JSON and the named `.team-sqlcl-*.log`.
 
@@ -176,20 +186,20 @@ Spec §6, decision 4.
 |---|---|---|
 | Production read-only must be enforced by a read-only database account | `doctor`/`qualify-target` query `SESSION_PRIVS`/`SESSION_ROLES` on the production profile; `docs/promotion.md` | Offline synthetic tests refuse write-capable profiles. Live account audit remains UNKNOWN until 1.1. |
 | UNKNOWN publish results are classified by text matching | `scripts/teamlib/publish.py` | Typed exceptions decide UNKNOWN vs FAILED; covered by the full suite. |
-| SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | PRs #7–#9 observed and reviewed on 2026-09-25; pins match their release tags and the `offline` check passes. #9 merged; #7/#8 remain open because the protected integration runner is unavailable. |
+| SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | PRs #7–#9 reviewed and merged on 2026-09-25; pins match their release tags and their `offline` checks passed. Manual integration remains unrun because the repository has zero registered self-hosted runners. |
 | Release builds need a byte-stable toolchain | exact SQLcl build for schema and app captures | Builders refuse other builds; live capture acceptance remains UNKNOWN. |
 | METADATA is now the release system of record | `docs/metadata-backup-restore.md` | Backup/restore guidance added; live restore exercise remains open under 1.1. |
 | Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 729 tests passed with one expected skip, and Ruff passed in the venv. |
 
-Dependabot review (only the `offline` job has passed):
+Dependabot review (the `offline` checks passed; manual integration remains unrun):
 
 - [#9 setup-python 5.6.0 → 7.0.0](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/9): **merged** by squash on 2026-09-25. Low risk. Its pin `5fda3b9` matches v7.0.0. The action moves from Node 20 to Node 24 (Actions Runner 2.327.1 or newer) and removes the `pip-install` input, which this workflow does not use. It runs in `database-checks` on GitHub-hosted `ubuntu-latest`; the PR's offline check passed.
-- [#8 checkout 4.4.0 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/8): moderate risk pending a manual integration run. Its pin `3d3c42e` matches v7.0.1. Node 24 requires Actions Runner 2.327.1 or newer; `persist-credentials` remains `true` by default, while both workflow call sites explicitly set it to `false`. The safer fork-checkout behavior does not affect this repository's `pull_request` and `workflow_dispatch` triggers. The protected integration job has no available self-hosted runner.
-- [#7 upload-artifact 4.6.2 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/7): moderate risk pending a manual integration run. Its pin `043fb46` matches v7.0.1. It moves to Node 24 (Actions Runner 2.327.1 or newer); direct, unzipped uploads are opt-in (`archive: false`), so the current named ZIP upload retains its name and format. Artifact immutability was already in effect in v4. The protected integration job has no available self-hosted runner.
+- [#8 checkout 4.4.0 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/8): **merged by squash** on 2026-09-25 (`bc5a964`). Its pin `3d3c42e` matches v7.0.1. Moderate integration risk: Node 24 requires Actions Runner 2.327.1 or newer; both workflow call sites set `persist-credentials: false`; the safer fork-checkout behavior does not affect this repository's `pull_request` and `workflow_dispatch` triggers. No self-hosted runner is registered, so manual integration has not run.
+- [#7 upload-artifact 4.6.2 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/7): **merged by squash** on 2026-09-25 (`fd000b4`). Its pin `043fb46` matches v7.0.1. Moderate integration risk: Node 24 requires Actions Runner 2.327.1 or newer; direct, unzipped uploads are opt-in (`archive: false`), so the current named ZIP upload retains its name and format. Artifact immutability was already in effect in v4. No self-hosted runner is registered, so manual integration has not run.
 
-PR #9 was merged. PRs #7/#8 remain open pending the owner's decision and a
-manual integration run when a self-hosted runner is available. No such runner
-was registered during this review.
+PRs #7–#9 are merged, and PR branches #7/#8 were deleted. The repository has
+zero registered self-hosted runners; manually dispatch the integration workflow
+when one is available.
 
 ## 5. Known limitations (tracked, not scheduled)
 
@@ -209,12 +219,11 @@ was registered during this review.
 
 ## Remaining order
 
-1. Owner: review the retained Stage 2 failure and authorize snapshot restore and
-   rerun, or leave the failed target state for manual recovery. Then complete
-   1.1. The METADATA backup/restore rehearsal still needs its separate explicit
-   OK.
-2. Owner: decide whether to merge Dependabot PRs #7/#8. If they are merged and a
-   self-hosted runner becomes available, dispatch the integration workflow.
+1. Complete Stage 0 on the restored target, rerun Stage 1, then resume Stage 2–4
+   with fresh evidence. Stage 5 cleanup follows only after the planned checks.
+   The METADATA backup/restore rehearsal still needs its separate explicit OK.
+2. When a self-hosted runner becomes available, dispatch the integration
+   workflow to qualify the merged #7/#8 action updates.
 3. Owner: choose and enforce the integration environment reviewer policy and
    main ruleset in 1.3.
 
