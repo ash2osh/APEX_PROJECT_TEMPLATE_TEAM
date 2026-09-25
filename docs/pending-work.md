@@ -6,14 +6,13 @@ when it is done. Update it in the same commit that closes an item.
 
 Last updated: 2026-09-25. Offline implementation of the release,
 acknowledgement and hardening items is merged to `main` (PR #6), including
-fixes for 17 review findings. The offline gate passed on `main` at
-`4669d29f7dccd178d3f31bc29400827640c69b72`. On the approved throwaway
-`local-26ai` target, Stage 0 and the Stage 1 rerun passed. The Stage 2
-`ACCOUNTS` migration passed durable database verification, then Stage 2 stopped
-at Bob's missing-member report: the live run reported `already_stored` because
-the new migration flow stored all four members before applying it. The earlier
-failed verifier attempt and the pre-test snapshot restore remain documented
-below. No Stage 3 or 4 actions followed the stop.
+fixes for 17 review findings. Live work on `fix/live-migration-members` has
+completed source Stages 0–3, schema release cuts in Stage 4, and Stage 5 cleanup
+on approved throwaway `local-26ai`. The stored-member tamper bug was fixed with
+a regression test; the offline gate passed at 730 tests. Isolated release
+replay, app release, browser E2E, METADATA backup/restore, and production-profile
+qualification remain UNKNOWN or require a separately supplied target/approval.
+The pre-test snapshot and all live evidence are documented below.
 
 ## Where things stand
 
@@ -32,66 +31,38 @@ acceptance against an Oracle/APEX database.
 
 ## 1. Owner actions (no code)
 
-### 1.1 Run the live database test plan — OPEN / STOPPED AT STAGE 2
-- **What:** `docs/live-test-plan.md` on approved `local-26ai` with throwaway schemas.
-- **Current evidence (2026-09-25):** the offline gate passed: Ruff, shell syntax,
-  729 unit tests (1 skipped), `ci-doctor` (`valid: true`), `git diff --check`,
-  and a tracked-file CRLF scan. SQLcl is `26.2.2.233.1901`; Java is
-  `21.0.12.1`. Read-only inspection of `local-26ai` reported database `FREE`,
-  PDB `FREEPDB1`, APEX `26.1.4` (`APEX` registry status `VALID`), and `USERS`.
-  Its `oradata-26ai` volume was snapshotted at
-  `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25`
-  (33 files, 7.0 GB). That snapshot was restored after the first failed
-  migration attempt; the restore diff was empty, all snapshot hashes passed,
-  and the container is healthy. Stage 0 was then re-established: the four
-  throwaway LT_* users have expected grants and quotas, fresh saved SQLcl
-  aliases connect as the expected identities, and Alice/Bob `doctor` both pass.
-  The APEX capture connection remains read-only; no APEX app was deployed.
+### 1.1 Run the live database test plan — SOURCE ACCEPTANCE COMPLETE / QUALIFICATION OPEN
+- **What:** `docs/live-test-plan.md` against the approved disposable `local-26ai` target. Live database work is complete for source stages 0–3, schema release cuts in Stage 4, and Stage 5 cleanup. Release replay on a separate test target, app release, browser E2E, backup/restore, and production privilege qualification remain open or UNKNOWN.
+- **Current evidence (2026-09-25):** SQLcl is `26.2.2.233.1901`; Java is `21.0.12.1`; Oracle Free is `FREEPDB1`; APEX is `26.1.4` / `VALID`. The pre-test volume snapshot is `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25` (33 files, 7.0 GB). It was restored after the initial verifier failure, and the target was requalified before continuing. The final `local-26ai` container is healthy; ORDS is up. Stage 5 dropped `LT_DATA`, `LT_CODE`, `LT_META`, `LT_VERIFY` and deleted only `lt-tables`, `lt-code`, `lt-meta`, `lt-verify`. `lt-apex` remains read-only. The throwaway `TEAM_RELEASE` rows and migration ledger were removed with `LT_META`; release archives and test evidence remain under `scratch/`. The pre-test snapshot was not restored after the successful run because the final database frontier was checked clean before authorized cleanup.
+- **Offline gate:** Ruff, shell syntax, 730 unit tests, `ci-doctor` (`valid: true`), `git diff --check`, and tracked-file CRLF scan passed after the migration fix. The root `.env` was temporarily hidden on the same filesystem for the unit test run because one test expects no implicit default profile; it was restored automatically. Final gate evidence is `scratch/live-test-2026-09-25/final/offline-gate.json` and `.log`.
 - **Results:**
 
   | Stage / step | Expected | Actual | Status | Evidence |
   |---|---|---|---|---|
-  | Offline baseline | All offline gates pass | Ruff, shell syntax, 729 tests (1 skipped), `ci-doctor`, `git diff --check`, and CRLF scan passed on the recorded baseline | PASS | `scratch/live-test-2026-09-25/initial-evidence.json` |
-  | 0 — snapshot | Consistent rollback copy before writes | Snapshot restored after Stage 2; file diff empty, all 33 hashes pass, container healthy | PASS | `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25.sha256`; `scratch/live-test-2026-09-25/stage2/restore-copy-attempt2.json`; `scratch/live-test-2026-09-25/stage2/restore-postcheck.json` |
-  | 0 — APEX installation | APEX available on target | `DBA_REGISTRY` reports APEX `26.1.4`, status `VALID` | PASS | `scratch/live-test-2026-09-25/stage0/apex-installed-check.json` |
-  | 0 — LT users | Least-privilege throwaway users and quotas | Four users are OPEN; expected system/role grants and 100 MB quotas verified | PASS | `scratch/live-test-2026-09-25/stage0/verify-lt-users-after-creation.json` |
-  | 0 — saved SQLcl connections | Four `-savepwd` aliases connect as their matching LT_* users | Fresh saved aliases verified for LT_DATA, LT_CODE, LT_META and LT_VERIFY | PASS | `scratch/live-test-2026-09-25/stage0/rotate-and-save-lt-connections-corrected.json` |
-  | 0 — profiles and `.env` | Credential-free profiles and valid doctor in both clones | Alice and Bob doctor both valid after the snapshot restore | PASS | `scratch/live-test-2026-09-25/stage0/alice-doctor-after-restore.json`; `scratch/live-test-2026-09-25/stage0/bob-doctor-after-restore.json` |
-  | 1 — wrong connection | Refuse before payload; no LT_DATA metadata objects | After restore, exit 3 with ORA-20901 before payload; no TEAM_* tables appeared in LT_DATA | PASS | `scratch/live-test-2026-09-25/stage1/wrong-connection-after-restore.json`; `scratch/live-test-2026-09-25/stage1/wrong-connection-no-tables-after-restore.json` |
-  | 1 — right connection | Adopt sequence-zero frontier and create expected METADATA objects | After restore, LT_META frontier digest `4363cf314846dc29a8e3c2ce7b84a9a008b8be337340a16bd1eefdd59010e5f6`; all required metadata tables were observed | PASS | `scratch/live-test-2026-09-25/stage1/right-connection-after-restore.json`; `scratch/live-test-2026-09-25/stage1/right-connection-objects-after-restore-corrected.json` |
-  | 2 — drift preflight | Reviewed inventory matches current schemas and accepted frontier | Fresh expected and actual inventories matched the accepted frontier with zero drift; dry run selected only Alice's `accounts` migration | PASS | `scratch/live-test-2026-09-25/stage2/rerun/inventory-preflight.json`; `scratch/live-test-2026-09-25/stage2/rerun/alice-migrate-dry-run.json` |
-  | 2 — Alice reversible migration | Store four members, create ACCOUNTS, verify, record one up event and release mutex | Oracle shows attempt APPLIED, one up event, four members, verifier PASS, ACCOUNTS present and mutex released. The initial CLI stdout/exit capture is UNKNOWN; postchecks prove the database result | PASS (database state) | `scratch/live-test-2026-09-25/stage2/rerun/alice-accounts-apply-observed.json`; `scratch/live-test-2026-09-25/stage2/rerun/post-apply-verification.json`; `scratch/live-test-2026-09-25/stage2/rerun/team-sqlcl-logs.json` |
-  | 2 — Alice backfill preview | Alice's applied migration is already stored | `already_stored` contained Alice's migration; no writes requested | PASS | `scratch/live-test-2026-09-25/stage2/rerun/alice-adopt-members-dry-run.json` |
-  | 2 — Bob missing-member report | Missing local files produce `missing` and `incomplete` | **Unexpected:** Bob returned `already_stored` and `complete`, because the fresh migration flow stored the bundle in shared METADATA before applying it. Stop rule halted Stage 2 here | FAIL (plan scenario mismatch) | `scratch/live-test-2026-09-25/stage2/rerun/bob-adopt-members-dry-run.json`; `scratch/live-test-2026-09-25/stage2/rerun/stop-on-first-unexpected.json` |
-  | 2 — tamper refusal | Conflicting local bytes are refused without writes | Not run after the first unexpected result; source inspection shows an existing bundle is short-circuited before local bytes are compared, so this case remains unproven | UNKNOWN | `scratch/live-test-2026-09-25/stage2/rerun/stop-on-first-unexpected.json`; `scripts/teamlib/migrate.py:528-540` |
-  | 3 — shared repositories | Foreign migrations and undo work; browser run may be UNKNOWN | Not run because Stage 2 stopped. The E2E browser runner is also unavailable | UNKNOWN | `scratch/live-test-2026-09-25/stage2/rerun/stop-on-first-unexpected.json` |
-  | 4 — schema release | Cut, deterministic digest, drift refusal, replay and evidence pass | Not run because Stage 2 stopped | UNKNOWN | `scratch/live-test-2026-09-25/stage2/rerun/stop-on-first-unexpected.json` |
-  | 4 — app release | Throwaway app and target contract qualify | Not supplied; app release/deploy not attempted | UNKNOWN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | Offline gate | All required local checks pass | Ruff, shell syntax, 730 unit tests, `ci-doctor`, diff check and tracked CRLF scan passed; `.env` restored | PASS | `scratch/live-test-2026-09-25/final/offline-gate.json` |
+  | 0 — snapshot and target | Recoverable copy and approved disposable target | Snapshot recorded; initial failed verifier restore had an empty diff and passed all hashes. Final target is healthy after cleanup. | PASS | `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25.sha256`; `scratch/live-test-2026-09-25/stage2/restore-postcheck.json`; `scratch/live-test-2026-09-25/stage5/verify-dropped-users.json` |
+  | 0 — APEX and toolchain | APEX 26.1+, pinned SQLcl and Java | APEX 26.1.4 `VALID`; SQLcl `26.2.2.233.1901`; Java `21.0.12.1` | PASS | `scratch/live-test-2026-09-25/stage0/apex-installed-check.json`; `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 0 — profiles and users | Four least-privilege throwaway profiles and valid Alice/Bob clones | LT users, grants, quotas, saved aliases and both `doctor` runs passed; the four users and their four SQLcl profiles were removed in Stage 5 | PASS | `scratch/live-test-2026-09-25/stage0/verify-lt-users-after-creation.json`; `scratch/live-test-2026-09-25/stage0/alice-doctor-after-restore.json`; `scratch/live-test-2026-09-25/stage0/bob-doctor-after-restore.json`; `scratch/live-test-2026-09-25/stage5/connections-delete-and-verify.json` |
+  | 1 — identity guard | Reject wrong profile before payload; adopt the right frontier | Wrong profile refused with ORA-20901 before payload; right profile created expected metadata and sequence-zero frontier | PASS | `scratch/live-test-2026-09-25/stage1/wrong-connection-after-restore.json`; `scratch/live-test-2026-09-25/stage1/right-connection-after-restore.json` |
+  | 2 — Alice migration and stored members | Apply reversible `ACCOUNTS`; store four members and verify | Durable state shows APPLIED, one up event, four bundle members, verifier PASS, table present, mutex clear. Initial CLI stdout/exit capture is UNKNOWN; postchecks establish DB outcome. | PASS (database state) | `scratch/live-test-2026-09-25/stage2/rerun/alice-accounts-apply-observed.json`; `scratch/live-test-2026-09-25/stage2/rerun/post-apply-verification.json` |
+  | 2 — Bob without local files | Matching stored migration reports `already_stored` / `complete` | Observed as expected because new applies persist members before payload execution | PASS | `scratch/live-test-2026-09-25/stage2/rerun/bob-no-local-adopt-members-after-fix.json` |
+  | 2 — tamper refusal | Refuse differing local bytes without changing stored members | Appended-comment fixture refused with `local migration files differ from recorded history (checksum mismatch): 20260925T083338__alice__accounts`; metadata digest and all member hashes were unchanged | PASS | `scratch/live-test-2026-09-25/stage2/rerun/bob-tamper-adopt-members-after-fix.json`; `scratch/live-test-2026-09-25/stage2/rerun/stage2-tamper-check-comparison.json` |
+  | 2 — legacy missing-member backfill | Report pre-member history with no stored bundle as missing/incomplete | No such legacy row existed on `local-26ai`; offline tests cover the missing path | UNKNOWN (live scenario absent) | `scratch/live-test-2026-09-25/stage2/rerun/` |
+  | 3 — separate repositories | Bob migration applies, is foreign to Alice, and can be undone | Bob applied `BALANCES`; Alice saw it as foreign; Bob's undo succeeded. Final source frontier returned to Alice APPLIED / Bob REVERTED. | PASS | `scratch/live-test-2026-09-25/stage3/bob-migrate-balances-apply.json`; `scratch/live-test-2026-09-25/stage3/alice-migrate-dry-run-after-bob-balances.json`; `scratch/live-test-2026-09-25/stage3/bob-undo-balances-apply.json`; `scratch/live-test-2026-09-25/stage3/bob-balances-post-undo-verification.json` |
+  | 3 — three-developer browser harness | Run only against its qualified disposable fixture and protected browser/ORDS runner | Not run: harness is bound to `docker-demo` / `docker-sys`, apps 9099/9100 and `TEAM_E2E_META`, not the approved `local-26ai` target; no protected browser runner contract was available | UNKNOWN / NOT RUN | `scratch/live-test-2026-09-25/stage3/e2e-harness-status.json` |
+  | 4 — source schema release cuts | Cut and verify deterministic ledger releases; bind versions; reject drift | `0.1.0` and `0.2.0` built and verified. Same-ledger recut had identical digest; reused version after ledger change was refused; sentinel drift was refused and then removed. Final sequence 1–5 frontier matched inventory, Alice is APPLIED, Bob REVERTED, no unresolved attempts or mutex. | PASS | `scratch/live-test-2026-09-25/stage4/build-schema-v0.1.0.json`; `scratch/live-test-2026-09-25/stage4/recut-determinism.json`; `scratch/live-test-2026-09-25/stage4/version-binding-refusal-check.json`; `scratch/live-test-2026-09-25/stage4/drift-test/drift-refusal-check.json`; `scratch/live-test-2026-09-25/stage4/final-source-frontier-verification.json` |
+  | 4 — release replay on test histories | Replay empty and earlier-release histories and verify signed evidence | Not run: no isolated `.env.test` / role=`test` contract and schemas were supplied. `targets/test.json` is sample data referencing prohibited app 102, so it was not used. | UNKNOWN / NOT RUN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 4 — app release and APEX test deploy | Capture a selected app twice and qualify against a throwaway APEX test app | No throwaway workspace/app and target contract supplied. `lt-apex` stayed read-only; app capture/deploy was not attempted. | UNKNOWN / NOT RUN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 4 — signing and runbook | Sign verified test evidence and generate owner runbook | Not run without release-test evidence and a qualified test target | UNKNOWN / NOT RUN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 5 — cleanup | Remove test schemas and their saved connections; verify target | SYS preflight passed on `FREEPDB1`; all four LT users dropped; exactly four `lt-*` profiles deleted; no unrelated aliases changed; `local-26ai` and ORDS are up | PASS | `scratch/live-test-2026-09-25/stage5/admin-cleanup-preflight.json`; `scratch/live-test-2026-09-25/stage5/drop-throwaway-users-corrected.json`; `scratch/live-test-2026-09-25/stage5/connections-delete-and-verify.json`; `scratch/live-test-2026-09-25/stage5/container-health.json` |
+  | Evidence secret scan | Scratch output contains no credential strings | Twelve prior credential-bearing artifacts were sanitized; final scanner found no quoted `IDENTIFIED BY`, password assignments, or unredacted `secret_input` fields | PASS | `scratch/live-test-2026-09-25/stage0/evidence-redaction.json`; `scratch/live-test-2026-09-25/final/evidence-secret-scan.json` |
 
-  The first migration attempt failed because its verifier queried
-  `USER_TABLES` as `LT_VERIFY`, which cannot see `LT_DATA.ACCOUNTS`. The scratch
-  verifier was corrected to use `DBA_TABLES` with `OWNER='LT_DATA'`, and the
-  migration then passed database verification. The live-plan apply example
-  also omits the required `--expected-inventory` and `--actual-inventory`
-  arguments; the initial invocation was refused before payload execution.
-  Earlier evidence remains under `scratch/live-test-2026-09-25/stage2/`.
+  The first migration verifier failed because it queried `USER_TABLES` as `LT_VERIFY`, which cannot see `LT_DATA.ACCOUNTS`. The scratch verifier was changed to query `DBA_TABLES` with `OWNER='LT_DATA'`; the migration then passed durable database verification. The initial plan invocation also lacked required `--expected-inventory` and `--actual-inventory` arguments and was refused before payload execution.
 
-  Stage 2 stopped at Bob's missing-member expectation. New applies call
-  `store_members` before executing the payload (`scripts/teamlib/migrate.py:385-388`),
-  while `adopt_members` reports a matching stored bundle as `already_stored`
-  before looking for a local source file (`scripts/teamlib/migrate.py:528-534`).
-  Therefore the `missing` expectation in `docs/live-test-plan.md:89-91` cannot
-  occur after the newly applied Alice migration. The tamper step was not run;
-  the same early branch means local conflicting bytes may not be checked when a
-  matching bundle is already stored. Treat that as UNKNOWN pending a reviewed
-  regression test and corrected test scenario. The command outputs and copied
-  SQLcl logs for this rerun are retained under
-  `scratch/live-test-2026-09-25/stage2/rerun/`. The original apply command's
-  stdout/exit code was not captured; its durable Oracle state was verified
-  independently. Stage 5 cleanup has not run, and the live database currently
-  contains the throwaway LT_* users and Alice's `ACCOUNTS` table.
-- **Done when:** stages 1, 2 and 4 pass, or their failures are reported with the
-  command JSON and the named `.team-sqlcl-*.log`.
+  The Stage 2 plan mismatch exposed a real backfill bug: when a stored bundle existed, `adopt_members` returned before comparing any matching local files. `scripts/teamlib/migrate.py` now verifies local file checksums before the `already_stored` shortcut; `scripts/tests/test_migration_members.py::test_local_files_that_disagree_with_stored_bundle_are_refused` proves the prior behavior fails and stored bytes remain unchanged. The live tamper fixture confirmed the refusal and no-write behavior. The fix is on `fix/live-migration-members`; its code PR is to be reviewed before merge.
+
+  The cleanup's first guarded script refused before DDL because its local guard expected `DB_NAME=FREE`; the read-only diagnostic showed the actual identity is `DB_NAME=FREEPDB1`, `SERVICE_NAME=freepdb1`. The guard was corrected and the cleanup then passed. Both the initial refusal and corrected output are retained. No production profile or app 102 was used; no APEX deploy, backup/restore, or production write was performed.
+- **Done when:** source checks through Stage 5 remain PASS and the remaining isolated release test/app targets, protected browser runner, backup/restore approval, and production-like read-only profile are qualified or explicitly closed as unavailable.
 
 ### 1.2 Delete stale branches — COMPLETE
 The GitHub branch API confirmed `codex/pending-work-execution` is absent
@@ -200,7 +171,7 @@ Spec §6, decision 4.
 | SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | PRs #7–#9 reviewed and merged on 2026-09-25; pins match their release tags and their `offline` checks passed. Manual integration remains unrun because the repository has zero registered self-hosted runners. |
 | Release builds need a byte-stable toolchain | exact SQLcl build for schema and app captures | Builders refuse other builds; live capture acceptance remains UNKNOWN. |
 | METADATA is now the release system of record | `docs/metadata-backup-restore.md` | Backup/restore guidance added; live restore exercise remains open under 1.1. |
-| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 729 tests passed with one expected skip, and Ruff passed in the venv. |
+| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 730 unit tests passed on `fix/live-migration-members`, and Ruff passed in the venv. |
 
 Dependabot review (the `offline` checks passed; manual integration remains unrun):
 
@@ -230,15 +201,14 @@ when one is available.
 
 ## Remaining order
 
-1. Resolve the Stage 2 backfill expectation and review the unproven tamper path;
-   then continue Stage 2–4 with fresh evidence. Stage 5 cleanup follows only
-   after the planned checks. The METADATA backup/restore rehearsal still needs
-   its separate explicit OK.
-2. When a self-hosted runner becomes available, dispatch the integration
-   workflow to qualify the merged #7/#8 action updates.
-3. Owner: choose and enforce the integration environment reviewer policy and
-   main ruleset in 1.3.
+1. Provide a separate non-production `role: test` SQLcl profile, isolated test schemas, and matching target contract for schema `run-release-test` on empty and earlier-release histories. Do not use the sample `targets/test.json` contract (app 102) or the removed Stage 0 LT_* profiles.
+2. Provide a throwaway APEX workspace/application and target contract for live app release/deploy qualification. `lt-apex` remains a read-only source. The `local-three-developer-e2e.py` fixture also needs its documented disposable target and a protected ORDS/browser runner before it can move beyond `UNKNOWN`.
+3. With separate explicit OK, rehearse METADATA backup/restore on an isolated copy and record evidence in `docs/metadata-backup-restore.md`.
+4. Provide a production-like, truly read-only SQLcl profile to qualify the privilege audit. No production profile was used in this run.
+5. When a self-hosted runner becomes available, dispatch the integration workflow to qualify the merged #7/#8 action updates; Node 24 requires Actions Runner 2.327.1 or newer.
+6. Owner: choose and enforce the integration environment reviewer policy and `main` ruleset in 1.3.
+7. Review and approve the `fix/live-migration-members` code PR before merge. Do not merge it automatically.
 
-The remaining gates require an approved database target, an owner decision for
-external refs/reviewers, or external service activity; they are not represented
-as passing offline tests.
+The user-approved Dependabot PRs #7–#9 are already merged; no further merge action is pending for those PRs. Optional Codex reviews remain unrun because review usage limits were reached.
+
+The remaining gates require an approved isolated database/APEX target, explicit recovery approval, a production-like read-only account, external runner availability, or the owner's GitHub settings/PR decision. They are not represented as passing offline tests.
