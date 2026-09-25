@@ -143,7 +143,9 @@ in GitHub settings. No settings were changed. Click paths:
   `Rulesets` → `New ruleset` → `New branch ruleset`**. Target `main`, set
   enforcement to `Active`, and select `Require a pull request before merging`,
   `Block force pushes`, and `Restrict deletions`. Under required status checks,
-  add `database-checks` and select GitHub Actions as its expected source.
+  add `offline` and select GitHub Actions as its expected source. `database-checks`
+  is the workflow name; GitHub exposes the job name `offline` as the required
+  status check.
   [GitHub's environment guide](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
   and [ruleset guide](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository)
   document the current options.
