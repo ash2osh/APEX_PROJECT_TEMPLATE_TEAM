@@ -4,30 +4,26 @@ Single list of everything still open for this template, in the order it should
 happen. Designs live where noted; this file says what is left, who does it, and
 when it is done. Update it in the same commit that closes an item.
 
-Last updated: 2026-09-25. Offline implementation of the release,
-acknowledgement and hardening items is merged to `main` (PR #6), including
-fixes for 17 review findings. The original offline gate passed at
-`4669d29f7dccd178d3f31bc29400827640c69b72`; after the live tamper fix, the full
-suite passed with 730 tests. On approved throwaway target `local-26ai`, Stages
-0–3 and the source-side Stage 4 schema release checks have been exercised.
-Stage 2 passed with a genuine pre-member-storage history, including backfill,
-missing-member reporting, and tamper rejection before and after storage. Stage
-3's two-repository migration and undo passed. Stage 4 cut and verified schema
-release `0.1.0`, recut it with the same digest, refused version reuse after a
-ledger change, and refused an untracked rogue object. The first Stage 5 cleanup
-passed at 15:04 EEST. The LT_* fixture was re-established after the host restart
-to continue Stages 2–4, then final cleanup passed: four LT_* schemas and five
-SQLcl aliases that mapped to those schemas were removed. The `lt-apex` source
-alias and `LT_RELEASE_TEST` workspace remain. That workspace has no app and its
-parsing-schema mapping still names the now-dropped `LT_DATA`; it needs an
-approved throwaway parsing schema before it can host a test app. I did not issue
-a reboot command. The previous boot's journal ends at 17:10 EEST and the next
-boot starts at 17:10:58; the logs do not identify the cause. The snapshotted
-container recovered and all snapshot hashes still match. The boot journal
-observation is saved at
+Last updated: 2026-09-25. PRs #10–#12 are merged to `main`; they fix migration
+member tamper detection, schema-runner preflight and Oracle AI Database version
+detection. Live checks on approved throwaway source `local-26ai` passed Stages
+1–4 schema release cut/verify, and isolated clone `local-26ai-replay` passed
+format-3 replay from both empty and earlier-release histories. Signed evidence
+and offline runbook generation verified for both cases. PR #13 fixes local
+evidence run identity; its updated branch passed the offline gate and remains
+open for review. App release/deploy, METADATA restore, production-account audit
+and manual integration still need their documented inputs or owner action.
+
+The source volume snapshot is
+`.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25`
+(33 files, 7.0 GB); the final hash check passes. Final cleanup removed all four
+source LT_* schemas, their five saved SQLcl aliases and all LT_* objects/users
+from the isolated clone. Both Docker containers remain healthy. The `lt-apex`
+read-only alias and `LT_RELEASE_TEST` workspace remain; the workspace has no app
+and maps parsing schema to dropped `LT_DATA`. I did not issue a reboot command.
+The boot journal has a gap between 17:10 and 17:10:58 EEST and does not identify
+the cause; observation is at
 `scratch/live-test-2026-09-25/restart-continuation/restart-check/host-boot-observation.txt`.
-Isolated release replay, app release/deploy and METADATA restore rehearsal also
-remain open as recorded below.
 
 ## Where things stand
 
@@ -39,19 +35,24 @@ remain open as recorded below.
 | PR #4 | Migration files stored in METADATA (`TEAM_MIGRATION_BUNDLE`/`MEMBER`), `adopt-migration-members` backfill |
 | PR #5 | Original `TEAM_RELEASE` schema-cut groundwork |
 | PR #6 | Format 3 replay and evidence, paused app release cuts, unified database `build-release`, Git release path removed, database-backed publish acknowledgements, production privilege audit and hardening, plus 17 review fixes |
+| PR #10 | Refuse locally tampered migration members and correct the legacy backfill live-test scenario; merged |
+| PR #11 | Skip app flow-runner preflight for schema-only releases; merged |
+| PR #12 | Detect Oracle AI Database runtime version markers; merged |
+| PR #13 | Supply a local evidence run identity outside CI; open for owner review, checks green |
 
 Design for the release work: `docs/superpowers/specs/2026-09-24-dev-database-release-source-design.md`
-(owner decisions recorded there). Live acceptance remains incomplete until an
-isolated schema replay target and a throwaway APEX test app are available.
+(owner decisions recorded there). Schema replay is proven on Docker. Live app
+acceptance remains incomplete until a throwaway APEX source/test app and target
+contract are supplied.
 
 ## 1. Owner actions (no code)
 
-### 1.1 Run the live database test plan — OPEN / SOURCE CHECKS COMPLETE; ISOLATED REPLAY OPEN
+### 1.1 Run the live database test plan — PARTIAL / SCHEMA PATH COMPLETE; APP AND RESTORE OPEN
 - **What:** `docs/live-test-plan.md` on approved `local-26ai` with throwaway schemas.
-- **Current evidence (2026-09-25):** the baseline offline gate passed on
-  `4669d29`; the tamper fix branch then passed Ruff, shell syntax, all 730 unit
+- **Current evidence (2026-09-25):** `main` passed Ruff, shell syntax, 733 unit
   tests, `ci-doctor` (`valid: true`), `git diff --check`, and a tracked-file
-  CRLF scan. SQLcl is `26.2.2.233.1901`; Java is
+  CRLF scan. Updated PR #13 branch `4cfa01f` passed the same gates with 734 unit
+  tests. SQLcl is `26.2.2.233.1901`; Java is
   `21.0.12.1`. Read-only inspection of `local-26ai` reported database `FREE`,
   PDB `FREEPDB1`, APEX `26.1.4` (`APEX` registry status `VALID`), and `USERS`.
   Its `oradata-26ai` volume was snapshotted at
@@ -61,13 +62,15 @@ isolated schema replay target and a throwaway APEX test app are available.
   and the hashes passed again after the host restart. The container is healthy.
   Stage 0 was then re-established: the four
   throwaway LT_* users have expected grants and quotas, fresh saved SQLcl
-  aliases connect as the expected identities, and Alice/Bob `doctor` both pass.
-  The APEX capture connection remains read-only; no APEX app was deployed.
+  aliases connected as the expected identities, and Alice/Bob `doctor` passed.
+  The isolated schema replay clone used a distinct database identity. Schema
+  replay, evidence signing and runbook verification passed for empty and earlier
+  histories. No APEX app was deployed; the evidence reports zero app checks.
 - **Results:**
 
   | Stage / step | Expected | Actual | Status | Evidence |
   |---|---|---|---|---|
-  | Offline baseline | All offline gates pass | The full offline gate passed after the live fixes and this documentation update: Ruff, shell syntax, 730 unit tests, `ci-doctor` (`valid: true`), `git diff --check`, and tracked CRLF scan | PASS | `scratch/live-test-2026-09-25/restart-continuation/pull-request-gates/pr10/report.json` |
+  | Offline baseline | All offline gates pass | `main` passed Ruff, shell syntax, 733 tests, `ci-doctor` (`valid: true`), `git diff --check`, and tracked CRLF scan; updated PR #13 passed with 734 tests | PASS | `scratch/live-test-2026-09-25/restart-continuation/pending-work-docs/offline-gate/report.json`; PR #13 checks |
   | 0 — snapshot | Consistent rollback copy before writes | Snapshot restored after Stage 2; file diff empty, all 33 hashes pass, container healthy | PASS | `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25.sha256`; `scratch/live-test-2026-09-25/stage2/restore-copy-attempt2.json`; `scratch/live-test-2026-09-25/stage2/restore-postcheck.json` |
   | 0 — APEX installation | APEX available on target | `DBA_REGISTRY` reports APEX `26.1.4`, status `VALID` | PASS | `scratch/live-test-2026-09-25/stage0/apex-installed-check.json` |
   | 0 — LT users | Least-privilege throwaway users and quotas | Four users are OPEN; expected system/role grants and 100 MB quotas verified | PASS | `scratch/live-test-2026-09-25/stage0/verify-lt-users-after-creation.json` |
@@ -85,15 +88,17 @@ isolated schema replay target and a throwaway APEX test app are available.
   | 3 — Bob foreign migration and Alice observation | Bob applies balances; Alice accepts it as foreign; Bob undo emits down event | Bob apply and Alice dry run passed; Bob undo passed, and the frontier returned to Alice-only digest `d4e1a384…` | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage3/bob-balances-apply/bob-balances-apply.json`; `.../alice-foreign-dry-run/alice-foreign-migration-dry-run.json`; `.../bob-balances-undo/bob-balances-undo.json`; `.../post-bob-undo-frontier/post-bob-undo-frontier-check.json` |
   | 3 — shared-app E2E runtime | E2E is `UNKNOWN` without the documented disposable fixture and protected ORDS/browser runner | The plan's `docker-demo` fixture contract and runner were not available on approved `local-26ai`; no app/browser payload was attempted | UNKNOWN | `scratch/live-test-2026-09-25/restart-continuation/stage4/replay-target-qualification.json`; `docs/local-three-developer-e2e.md` |
   | 4 — source identity/runtime preflight | Accept the pinned SQLcl, Oracle and APEX versions without payload | Read-only preflight using `require_flow_runner=False` passed identity and runtime checks; DB `23.26.2.0.0`, APEX `26.1.4`, SQLcl `26.2.2.233.1901`; no release payload | PASS | `scratch/live-test-2026-09-25/stage4/schema-v0.1.0/combined-live-preflight.json` |
-  | 4 — schema run-release-test flow runner (pre-fix) | Schema releases do not require an app flow runner | Initial attempt returned `TEAM_FLOW_RUNNER is required for declared flow checks` before SQLcl or payload. The fix is covered by an offline regression test; no live rerun was attempted because the only test profile is not isolated | FAIL, fixed in [PR #11](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/11); live rerun UNKNOWN | `scratch/live-test-2026-09-25/stage4/schema-v0.1.0/release-test-empty-history-preflight.json`; `scripts/teamlib/online_workflows.py:582`; `scripts/tests/test_online_workflows.py:740` |
-  | 4 — Oracle 26ai runtime marker (pre-fix) | Runtime query identifies Oracle DB and APEX versions | Initial read-only preflight reported `runtime version output must contain exactly database and apex markers`; the product filter was corrected, and the subsequent read-only runtime preflight passed | FAIL, fixed in [PR #12](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/12); runtime retest PASS | `scratch/live-test-2026-09-25/stage4/schema-v0.1.0/runner-optional-live-preflight.json`; `.../combined-live-preflight.json`; `scripts/sql/runtime_versions.sql:8`; `scripts/tests/test_runtime.py:168` |
+  | 4 — schema runner preflight | Schema releases do not require an app flow runner | Original attempt returned `TEAM_FLOW_RUNNER is required for declared flow checks` before payload. PR #11 made runner validation depend on selected app aliases; the fixed schema test flow passed on the isolated clone | Initial FAIL, fixed and rerun PASS in [PR #11](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/11) | `scratch/live-test-2026-09-25/restart-continuation/isolated-replay/empty-history-live-run-local-id/command.stdout.txt`; `.../prefix/run-full-0.1.0-from-prefix-fixed-identity-evidence.json`; `scripts/teamlib/online_workflows.py:582` |
+  | 4 — Oracle AI Database runtime marker | Runtime query identifies Oracle DB and APEX versions | Original preflight reported `runtime version output must contain exactly database and apex markers`; the product filter was widened and the subsequent read-only runtime preflight passed | Initial FAIL, fixed and runtime retest PASS in [PR #12](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/12) | `scratch/live-test-2026-09-25/stage4/schema-v0.1.0/runner-optional-live-preflight.json`; `.../combined-live-preflight.json`; `scripts/sql/runtime_versions.sql:8`; `scripts/tests/test_runtime.py:168` |
   | 4 — schema release cut and verify | Format 3 release `0.1.0` contains Alice up, Bob up/down and stored down members | Cut and verification passed; digest `b1f8fc78…`; source cut 3 and frontier `d4e1a384…` | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage4/cut-0.1.0/schema-release-cut-0.1.0.json`; `.../verify-0.1.0/verify-schema-release-0.1.0.json`; `.../schema-release-verification.json` |
   | 4 — deterministic recut | Unchanged ledger and version produce the same archive digest | Recut digest equals the first cut: `b1f8fc78…` | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage4/recut-0.1.0/schema-release-recut-0.1.0.json`; `.../digest-comparison.json` |
   | 4 — version binding after ledger change | Reusing `0.1.0` after a reversible migration is refused | Probe migration up/down was recorded; attempt refused with `release schema/v0.1.0 is already bound to a different archive`; release row stayed unchanged | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage4/version-reuse-attempt/schema-release-version-reuse-refusal.json`; `.../state-verification/report.json` |
   | 4 — drift refusal and restoration | Rogue DDL refuses a new cut; test fixture is removed and accepted frontier restored | Builder refused with `status=drift`, listing `RELEASE_DRIFT_PROBE`; guarded cleanup succeeded and inventory returned to `d4e1a384…` | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage4/drift-refusal/rogue-object-drift-refusal.json`; `.../drift-probe-drop-preflight/report.json`; `.../post-drift-cleanup-frontier/post-drift-cleanup-frontier.json` |
-  | 4 — empty/earlier release replay and evidence | Run release test and sign evidence on isolated test histories | No qualified isolated target exists: `.env.test` resolves to the same LT_* schemas/database as the source; `targets/test.json` has placeholder identity/workspace values and sample app ID 102. No replay payload was attempted | UNKNOWN | `scratch/live-test-2026-09-25/restart-continuation/stage4/replay-target-qualification.json` |
+  | 4 — empty-history schema replay | Apply format-3 schema release `0.1.0` on a distinct target with empty migration history | `run-release-test` passed on healthy clone `local-26ai-replay`; migration replay and final frontier checks passed. Evidence records `application_checks=PASS` with zero apps/checks, so this is schema-only proof | PASS | `scratch/live-test-2026-09-25/restart-continuation/isolated-replay/empty-history-run-evidence-local-id.json`; `.../empty-history-target-state-after-replay/command.stdout.txt`; `.../empty-history-live-run-local-id/command.stdout.txt` |
+  | 4 — earlier-history schema replay | Replay the same archive after the target's earlier release prefix | The earlier target state was the exact Alice-only prefix; the full replay passed and the target ended at the archive frontier | PASS | `scratch/live-test-2026-09-25/restart-continuation/isolated-replay/prefix/run-full-0.1.0-from-prefix-fixed-identity-evidence.json`; `.../prefix/target-state-after-earlier-full-run/command.stdout.txt` |
+  | 4 — local evidence signing and runbooks | Sign both passing evidence reports and verify generated offline runbooks, including down event | Initial local signing failed with `test evidence run identity is incomplete`. PR #13 added a local run identity fallback; both signatures verified and both runbooks include the required down step. The temporary private key was removed; the test trust key is ephemeral | Initial FAIL, fixed and rerun PASS in [PR #13](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/13) | `scratch/live-test-2026-09-25/restart-continuation/isolated-replay/prefix/signing-final-summary.json`; `.../prefix/signed-runbook-verification.json`; `scripts/teamlib/qualification.py:202`; `scripts/tests/test_qualification.py:162` |
   | 4 — app release | Throwaway APEX app, contract, stable capture and page-lock report qualify | Workspace `LT_RELEASE_TEST` exists with no app; its parsing-schema mapping names `LT_DATA`, now dropped. No throwaway source/test app or target contract was supplied; build/deploy not attempted | UNKNOWN | `scratch/live-test-2026-09-25/restart-continuation/stage4/replay-target-qualification.json`; `scratch/live-test-2026-09-25/restart-continuation/stage5/apex-workspace-post-cleanup.json` |
-  | 5 — final cleanup | Drop only LT_* users and their dedicated SQLcl aliases, then verify | Four users dropped under the SYS/FREEPDB1 identity guard; five aliases bound to those users removed; zero LT users remain. `lt-apex`, `local-26ai-sys`, and the Docker profiles remain | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage5/admin-cleanup-preflight.json`; `.../snapshot-check-before-cleanup.json`; `.../drop-throwaway-users.json`; `.../verify-dropped-users.json`; `.../throwaway-alias-identities.json`; `.../connections-delete.json`; `.../connections-after-cleanup.json` |
+  | 5 — final source/clone cleanup | Remove only LT_* test users and their saved connections, then verify both targets and snapshot | Source has zero LT users; replay clone has no LT users, objects or migration ledger; test aliases removed; all 33 source snapshot hashes still match | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage5/final-source-verify/`; `.../final-clone-verify/`; `.../final-connections-verification.json`; `.../final-snapshot-check` |
 
   The first migration verifier failed because it queried `USER_TABLES` as
   `LT_VERIFY`, which cannot see `LT_DATA.ACCOUNTS`; the scratch verifier was
@@ -110,19 +115,27 @@ isolated schema replay target and a throwaway APEX test app are available.
   use a genuine legacy history before testing backfill. The Stage 4 runner
   root cause was unconditional app-flow validation for a schema archive; PR
   #11 passes `require_flow_runner` based on selected app aliases at
-  `scripts/teamlib/online_workflows.py:582`. The Oracle marker failure was
-  caused by the product-name filter excluding Oracle AI Database; PR #12 fixes
-  it in `scripts/sql/runtime_versions.sql:8`. The root `.env` still references
+  `scripts/teamlib/online_workflows.py:582`, then the isolated schema replay
+  passed. The Oracle marker failure was caused by the product-name filter
+  excluding Oracle AI Database; PR #12 fixes it in
+  `scripts/sql/runtime_versions.sql:8`; the live runtime preflight passed.
+  Local signing initially failed because `_run_identity()` only returned CI
+  variables when present; PR #13 adds a generated local identity in
+  `scripts/teamlib/qualification.py:202` and a regression test at
+  `scripts/tests/test_qualification.py:162`. Signing and runbook verification
+  then passed for both replay histories. One clone reset attempt stopped at
+  SQLcl's HIDE prompt with `ORA-01741: illegal zero-length identifier`; it was
+  retried through the hidden prompt and the clone was subsequently cleaned and
+  verified. The root `.env` still references
   retired alias `lt-meta`; Alice and Bob's refreshed profiles passed (latest
   recheck: `scratch/live-test-2026-09-25/restart-continuation/restart-check/alice-doctor-recheck.json`
   and `.../bob-doctor-recheck.json`). Final Stage 5 cleanup removed the
   `LT_DATA` and `LT_META` schemas, so the test `ACCOUNTS` table and migration
   ledger are no longer present in the running container. Their pre-cleanup state
   is covered by the retained snapshot and stage evidence.
-- **Done when:** source stages 1–4 are reported with evidence, and the
-  isolated empty/earlier schema replay plus required app qualification are
-  either completed or remain explicitly UNKNOWN until their targets exist;
-  Stage 5 cleanup is complete.
+- **Done when:** source stages 1–4 and isolated empty/earlier schema replay are
+  reported with evidence, app qualification is complete or explicitly UNKNOWN
+  until its throwaway app/contract exist, and Stage 5 cleanup is complete.
 
 ### 1.2 Delete stale branches — COMPLETE
 The GitHub branch API confirmed `codex/pending-work-execution` is absent
@@ -158,7 +171,7 @@ in GitHub settings. No settings were changed. Click paths:
 
 ## 2. Release from the development database
 
-### 2.1 Phase 3b — COMPLETE OFFLINE; SCHEMA CUT LIVE PASS; TARGET REPLAY OPEN
+### 2.1 Phase 3b — COMPLETE OFFLINE; SCHEMA CUT AND REPLAY LIVE PASS
 Spec §2 (reverted migrations), §5 (format 3), delivery table row 3b.
 
 - **Planning (`plan-release`)**
@@ -186,11 +199,16 @@ Spec §2 (reverted migrations), §5 (format 3), delivery table row 3b.
 - **Done when:** a format 3 archive with an up/up/down ledger applies to a
   fresh test history and to one that already holds an earlier release, the
   signed evidence verifies, and `gen-runbook` emits the down step.
+- **Live status (2026-09-25):** format-3 schema release `0.1.0` replay passed on
+  isolated Docker clone `local-26ai-replay` from empty and Alice-only earlier
+  histories. Evidence signed with a temporary test key verified; generated
+  offline runbooks include Bob's down event. The ephemeral trust key is not an
+  owner trust root. Evidence reports no APEX apps or checks; app deployment is
+  not proven. Detailed commands and JSON are listed in 1.1.
 - **Offline status:** implemented and covered by synthetic target tests for fresh
   and earlier histories, signed format 3 evidence, and an explicit down runbook
   step. Tests also replan after an omitted no-op pair and a later release, and
-  replay down/redo for a migration already present on the target. Live target
-  behavior remains UNKNOWN until 1.1.
+  replay down/redo for a migration already present on the target.
 
 ### 2.2 Phase 4 — COMPLETE OFFLINE; LIVE ACCEPTANCE OPEN
 Spec §3.
@@ -246,13 +264,16 @@ Spec §6, decision 4.
 | SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | PRs #7–#9 reviewed and merged on 2026-09-25; pins match their release tags and their `offline` checks passed. Manual integration remains unrun because the repository has zero registered self-hosted runners. |
 | Release builds need a byte-stable toolchain | exact SQLcl build for schema and app captures | Schema cut verified on SQLcl `26.2.2.233.1901`; app capture remains UNKNOWN because no throwaway APEX app was supplied. |
 | METADATA is now the release system of record | `docs/metadata-backup-restore.md` | Backup/restore guidance added; live restore exercise remains open under 1.1. |
-| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 730 tests passed, and Ruff passed in the venv. |
+| Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded. The main gate passed 733 tests; updated PR #13 passed 734 tests, and Ruff passed in the venv. |
 
-Dependabot review (the `offline` checks passed; manual integration remains unrun):
+Dependabot review (the `offline` checks passed; manual integration remains unrun;
+all three actions use Node 24, and GitHub-hosted runners supply it. GitHub
+removed Node 20 from Actions on 2026-09-23, so any future self-hosted runner
+must be current):
 
-- [#9 setup-python 5.6.0 → 7.0.0](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/9): **merged** by squash on 2026-09-25. Low risk. Its pin `5fda3b9` matches v7.0.0. The action moves from Node 20 to Node 24 (Actions Runner 2.327.1 or newer) and removes the `pip-install` input, which this workflow does not use. It runs in `database-checks` on GitHub-hosted `ubuntu-latest`; the PR's offline check passed.
-- [#8 checkout 4.4.0 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/8): **merged by squash** on 2026-09-25 (`bc5a964`). Its pin `3d3c42e` matches v7.0.1. Moderate integration risk: Node 24 requires Actions Runner 2.327.1 or newer; both workflow call sites set `persist-credentials: false`; the safer fork-checkout behavior does not affect this repository's `pull_request` and `workflow_dispatch` triggers. No self-hosted runner is registered, so manual integration has not run.
-- [#7 upload-artifact 4.6.2 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/7): **merged by squash** on 2026-09-25 (`fd000b4`). Its pin `043fb46` matches v7.0.1. Moderate integration risk: Node 24 requires Actions Runner 2.327.1 or newer; direct, unzipped uploads are opt-in (`archive: false`), so the current named ZIP upload retains its name and format. Artifact immutability was already in effect in v4. No self-hosted runner is registered, so manual integration has not run.
+- [#9 setup-python 5.6.0 → 7.0.0](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/9): **merged** by squash on 2026-09-25. Low risk. Its pin `5fda3b9` matches v7.0.0. The action now uses Node 24 and removes the `pip-install` input, which this workflow does not use. It runs in `database-checks` on GitHub-hosted `ubuntu-latest`; the PR's offline check passed. Upstream: [v7.0.0 release notes](https://github.com/actions/setup-python/releases/tag/v7.0.0).
+- [#8 checkout 4.4.0 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/8): **merged by squash** on 2026-09-25 (`bc5a964`). Its pin `3d3c42e` matches v7.0.1. Moderate integration risk: it now uses Node 24; both workflow call sites set `persist-credentials: false`. Checkout v7 blocks fork checkouts by default for `pull_request_target` and `workflow_run`; this repository uses `pull_request` and `workflow_dispatch`, so that change does not affect its triggers. No self-hosted runner is registered, so manual integration has not run. Upstream: [v7.0.0](https://github.com/actions/checkout/releases/tag/v7.0.0) and [v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) release notes.
+- [#7 upload-artifact 4.6.2 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/7): **merged by squash** on 2026-09-25 (`fd000b4`). Its pin `043fb46` matches v7.0.1. Moderate integration risk: it now uses Node 24; direct, unzipped upload is opt-in (`archive: false`), so the workflow's existing named ZIP output keeps its name and format. Artifact immutability was introduced in v4, before this update. No self-hosted runner is registered, so manual integration has not run. Upstream: [v7.0.0](https://github.com/actions/upload-artifact/releases/tag/v7.0.0) and [v7.0.1](https://github.com/actions/upload-artifact/releases/tag/v7.0.1) release notes.
 
 PRs #7–#9 are merged, and PR branches #7/#8 were deleted. The repository has
 zero registered self-hosted runners; manually dispatch the integration workflow
@@ -276,22 +297,23 @@ when one is available.
 
 ## Remaining order
 
-1. Provision an isolated, disposable schema replay target whose schemas and
-   database identity differ from the live source. Run `run-release-test` and
-   evidence verification against both empty and earlier-release histories.
-2. Supply a throwaway APEX source/test app and matching target contract before
+1. Supply a throwaway APEX source/test app and matching target contract before
    app capture, page-lock qualification, app release or deploy testing. Recreate
    or reassign an approved throwaway parsing schema for `LT_RELEASE_TEST` first;
    its current `LT_DATA` mapping refers to the dropped test schema.
-3. Give separate explicit approval for the METADATA backup/restore rehearsal
+2. Give separate explicit approval for the METADATA backup/restore rehearsal
    on an isolated copy. It has not run.
-4. When a self-hosted runner becomes available, dispatch the integration
+3. When a self-hosted runner becomes available, dispatch the integration
    workflow to qualify the merged #7/#8 action updates.
-5. Owner: choose and enforce the integration environment reviewer policy and
+4. Owner: choose and enforce the integration environment reviewer policy and
    `main` ruleset in 1.3.
-6. Review and approve live-fix PRs #10, #11 and #12 before merging; they remain
-   separate by root cause. Dependabot PRs #7–#9 were already approved and merged.
+5. Supply a production-like read-only profile to exercise the live privilege
+   audit; none was provided, so that check remains UNKNOWN.
+6. Review and approve [PR #13](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/13),
+   the local evidence identity fix. PRs #10–#12 are merged by root cause;
+   Dependabot PRs #7–#9 are already merged.
 
-The remaining live gates require an isolated target, a throwaway APEX app, a
-separate restore approval, or owner changes in GitHub settings. They are not
-represented as passing offline tests.
+The remaining live gates require a throwaway APEX app and target contract,
+separate approval for the restore rehearsal, a production-like read-only
+profile, a self-hosted integration runner, or owner changes in GitHub settings.
+They are not represented as passing offline tests.
