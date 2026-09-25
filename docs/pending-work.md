@@ -15,12 +15,16 @@ missing-member reporting, and tamper rejection before and after storage. Stage
 3's two-repository migration and undo passed. Stage 4 cut and verified schema
 release `0.1.0`, recut it with the same digest, refused version reuse after a
 ledger change, and refused an untracked rogue object. The first Stage 5 cleanup
-passed at 15:04 EEST, then the approved LT_* fixture was re-established after
-the host restart to continue Stages 2–4; final cleanup remains open. I did not
-issue a reboot command. The previous boot's journal ends at 17:10 EEST and the
-next boot starts at 17:10:58; the logs do not identify the cause. The
-snapshotted container recovered and all snapshot hashes still match. The boot
-journal observation is saved at
+passed at 15:04 EEST. The LT_* fixture was re-established after the host restart
+to continue Stages 2–4, then final cleanup passed: four LT_* schemas and five
+SQLcl aliases that mapped to those schemas were removed. The `lt-apex` source
+alias and `LT_RELEASE_TEST` workspace remain. That workspace has no app and its
+parsing-schema mapping still names the now-dropped `LT_DATA`; it needs an
+approved throwaway parsing schema before it can host a test app. I did not issue
+a reboot command. The previous boot's journal ends at 17:10 EEST and the next
+boot starts at 17:10:58; the logs do not identify the cause. The snapshotted
+container recovered and all snapshot hashes still match. The boot journal
+observation is saved at
 `scratch/live-test-2026-09-25/restart-continuation/restart-check/host-boot-observation.txt`.
 Isolated release replay, app release/deploy and METADATA restore rehearsal also
 remain open as recorded below.
@@ -88,8 +92,8 @@ isolated schema replay target and a throwaway APEX test app are available.
   | 4 — version binding after ledger change | Reusing `0.1.0` after a reversible migration is refused | Probe migration up/down was recorded; attempt refused with `release schema/v0.1.0 is already bound to a different archive`; release row stayed unchanged | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage4/version-reuse-attempt/schema-release-version-reuse-refusal.json`; `.../state-verification/report.json` |
   | 4 — drift refusal and restoration | Rogue DDL refuses a new cut; test fixture is removed and accepted frontier restored | Builder refused with `status=drift`, listing `RELEASE_DRIFT_PROBE`; guarded cleanup succeeded and inventory returned to `d4e1a384…` | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage4/drift-refusal/rogue-object-drift-refusal.json`; `.../drift-probe-drop-preflight/report.json`; `.../post-drift-cleanup-frontier/post-drift-cleanup-frontier.json` |
   | 4 — empty/earlier release replay and evidence | Run release test and sign evidence on isolated test histories | No qualified isolated target exists: `.env.test` resolves to the same LT_* schemas/database as the source; `targets/test.json` has placeholder identity/workspace values and sample app ID 102. No replay payload was attempted | UNKNOWN | `scratch/live-test-2026-09-25/restart-continuation/stage4/replay-target-qualification.json` |
-  | 4 — app release | Throwaway APEX app, contract, stable capture and page-lock report qualify | Workspace `LT_RELEASE_TEST` exists, but no throwaway source/test app and target contract were supplied; build/deploy not attempted | UNKNOWN | `scratch/live-test-2026-09-25/restart-continuation/stage4/replay-target-qualification.json`; `scratch/live-test-2026-09-25/setup/apex-workspace-post-reboot-preflight.json` |
-  | 5 — initial cleanup | Drop only LT_* users and their dedicated SQLcl aliases, then verify | Passed at 15:04 EEST: four users removed, four aliases deleted, zero LT users remained. The LT_* fixture was re-established after the reboot to continue live checks; repeat final cleanup after remaining work | PASS, repeat pending | `scratch/live-test-2026-09-25/stage5/drop-throwaway-users-corrected.json`; `.../verify-dropped-users.json`; `.../connections-delete-and-verify.json`; post-restart doctor evidence above |
+  | 4 — app release | Throwaway APEX app, contract, stable capture and page-lock report qualify | Workspace `LT_RELEASE_TEST` exists with no app; its parsing-schema mapping names `LT_DATA`, now dropped. No throwaway source/test app or target contract was supplied; build/deploy not attempted | UNKNOWN | `scratch/live-test-2026-09-25/restart-continuation/stage4/replay-target-qualification.json`; `scratch/live-test-2026-09-25/restart-continuation/stage5/apex-workspace-post-cleanup.json` |
+  | 5 — final cleanup | Drop only LT_* users and their dedicated SQLcl aliases, then verify | Four users dropped under the SYS/FREEPDB1 identity guard; five aliases bound to those users removed; zero LT users remain. `lt-apex`, `local-26ai-sys`, and the Docker profiles remain | PASS | `scratch/live-test-2026-09-25/restart-continuation/stage5/admin-cleanup-preflight.json`; `.../snapshot-check-before-cleanup.json`; `.../drop-throwaway-users.json`; `.../verify-dropped-users.json`; `.../throwaway-alias-identities.json`; `.../connections-delete.json`; `.../connections-after-cleanup.json` |
 
   The first migration verifier failed because it queried `USER_TABLES` as
   `LT_VERIFY`, which cannot see `LT_DATA.ACCOUNTS`; the scratch verifier was
@@ -111,15 +115,14 @@ isolated schema replay target and a throwaway APEX test app are available.
   it in `scripts/sql/runtime_versions.sql:8`. The root `.env` still references
   retired alias `lt-meta`; Alice and Bob's refreshed profiles passed (latest
   recheck: `scratch/live-test-2026-09-25/restart-continuation/restart-check/alice-doctor-recheck.json`
-  and `.../bob-doctor-recheck.json`). The initial Stage 5 cleanup passed, but
-  the LT_* fixture was re-established after restart for continuation and remains
-  available. The `ACCOUNTS` table and migration ledger remain; the balances and
-  temporary release-probe tables are absent. Probe up/down events remain in
-  METADATA.
+  and `.../bob-doctor-recheck.json`). Final Stage 5 cleanup removed the
+  `LT_DATA` and `LT_META` schemas, so the test `ACCOUNTS` table and migration
+  ledger are no longer present in the running container. Their pre-cleanup state
+  is covered by the retained snapshot and stage evidence.
 - **Done when:** source stages 1–4 are reported with evidence, and the
   isolated empty/earlier schema replay plus required app qualification are
   either completed or remain explicitly UNKNOWN until their targets exist;
-  Stage 5 cleanup follows only after the planned checks.
+  Stage 5 cleanup is complete.
 
 ### 1.2 Delete stale branches — COMPLETE
 The GitHub branch API confirmed `codex/pending-work-execution` is absent
@@ -277,17 +280,16 @@ when one is available.
    database identity differ from the live source. Run `run-release-test` and
    evidence verification against both empty and earlier-release histories.
 2. Supply a throwaway APEX source/test app and matching target contract before
-   app capture, page-lock qualification, app release or deploy testing.
+   app capture, page-lock qualification, app release or deploy testing. Recreate
+   or reassign an approved throwaway parsing schema for `LT_RELEASE_TEST` first;
+   its current `LT_DATA` mapping refers to the dropped test schema.
 3. Give separate explicit approval for the METADATA backup/restore rehearsal
    on an isolated copy. It has not run.
-4. After the planned live checks, decide when to run Stage 5 cleanup. The
-   LT_* users, SQLcl connections, `LT_RELEASE_TEST` workspace, snapshot and
-   evidence remain in place.
-5. When a self-hosted runner becomes available, dispatch the integration
+4. When a self-hosted runner becomes available, dispatch the integration
    workflow to qualify the merged #7/#8 action updates.
-6. Owner: choose and enforce the integration environment reviewer policy and
+5. Owner: choose and enforce the integration environment reviewer policy and
    `main` ruleset in 1.3.
-7. Review and approve live-fix PRs #10, #11 and #12 before merging; they remain
+6. Review and approve live-fix PRs #10, #11 and #12 before merging; they remain
    separate by root cause. Dependabot PRs #7–#9 were already approved and merged.
 
 The remaining live gates require an isolated target, a throwaway APEX app, a
