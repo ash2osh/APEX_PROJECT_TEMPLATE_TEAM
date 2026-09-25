@@ -5,6 +5,6 @@ SET FEEDBACK OFF
 SET PAGESIZE 0
 SELECT 'TEAM_RUNTIME|database|' || version_full
   FROM product_component_version
- WHERE product LIKE 'Oracle Database%';
+ WHERE UPPER(product) LIKE 'ORACLE%DATABASE%';
 SELECT 'TEAM_RUNTIME|apex|' || version_no
   FROM apex_release;
