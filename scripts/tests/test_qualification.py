@@ -21,7 +21,14 @@ from teamlib.evidence import (
     validate_release_evidence_binding,
     validate_test_evidence,
 )
-from teamlib.qualification import QualificationError, _target_identity, qualify_target, sign_test_evidence, write_report
+from teamlib.qualification import (
+    QualificationError,
+    _run_identity,
+    _target_identity,
+    qualify_target,
+    sign_test_evidence,
+    write_report,
+)
 from teamlib.release import ApplyReport, ReleasePlan
 
 
@@ -151,6 +158,13 @@ class QualificationTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_local_run_identity_is_available_outside_ci(self):
+        with patch.dict("os.environ", {}, clear=True):
+            identity = _run_identity(None)
+
+        self.assertEqual(identity.get("origin"), "local")
+        self.assertRegex(identity.get("run_id", ""), r"^[0-9a-f]{32}$")
 
     def test_release_evidence_binding_rejects_each_independent_mismatch(self):
         valid = {
