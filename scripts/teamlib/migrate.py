@@ -525,14 +525,15 @@ def adopt_members(
         checksum = entry.get("checksum") if isinstance(entry, Mapping) else None
         if not isinstance(checksum, str):
             raise MigrationRunError(f"history entry has no checksum: {migration_id}")
+        local = bundles.get(migration_id)
+        if local is not None and local.checksum != checksum:
+            conflicts.append(migration_id)
+            continue
         if stored_index.get(checksum) == migration_id:
             already.append(migration_id)
             continue
-        local = bundles.get(migration_id)
         if local is None:
             missing.append(migration_id)
-        elif local.checksum != checksum:
-            conflicts.append(migration_id)
         else:
             to_store.append(local)
     if conflicts:
