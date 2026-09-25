@@ -4,17 +4,11 @@ Single list of everything still open for this template, in the order it should
 happen. Designs live where noted; this file says what is left, who does it, and
 when it is done. Update it in the same commit that closes an item.
 
-Last updated: 2026-09-24. Offline implementation and verification for the open
-release, acknowledgement, and hardening items is on branch
-`codex/pending-work-execution`, under review as a pull request. The review fixed
-the production privilege audit, which refused every real account because of
-Oracle's own grants to PUBLIC, then narrowed that exemption to a named baseline.
-Format 3 schema archives now carry the development frontier inventory so
-qualification compares the target's structure with it, and publish rechecks
-acknowledged checkout identities under the app mutex. The documented virtual-environment install
-succeeds; the full suite passes with one expected skip, and Ruff passes. Live
-database acceptance and GitHub-side actions remain separate gates and are not
-claimed here.
+Last updated: 2026-09-25. Offline implementation of the release,
+acknowledgement and hardening items is merged to `main` (PR #6), including
+fixes for 17 review findings. The full suite passes (729 tests, one expected
+skip) and Ruff passes. Nothing has run against a live Oracle database yet:
+live acceptance (1.1) and the GitHub settings (1.3) are the remaining gates.
 
 ## Where things stand
 
@@ -24,10 +18,11 @@ claimed here.
 | PR #2 | Signing moved to a separate trusted job; GitHub Actions pinned by commit SHA |
 | PR #3 | One Git repository per developer, no shared remote: docs, agent contract, three-repository e2e harness, `.env.example` |
 | PR #4 | Migration files stored in METADATA (`TEAM_MIGRATION_BUNDLE`/`MEMBER`), `adopt-migration-members` backfill |
-| PR #5 | Original `TEAM_RELEASE` schema-cut groundwork. This execution completes format 3 replay/evidence, paused app cuts, the unified database `build-release`, and the local release runbook in the current worktree. |
+| PR #5 | Original `TEAM_RELEASE` schema-cut groundwork |
+| PR #6 | Format 3 replay and evidence, paused app release cuts, unified database `build-release`, Git release path removed, database-backed publish acknowledgements, production privilege audit and hardening, plus 17 review fixes |
 
 Design for the release work: `docs/superpowers/specs/2026-09-24-dev-database-release-source-design.md`
-(owner decisions recorded there). Nothing from PR #1 to #5 has run against a
+(owner decisions recorded there). Nothing from PR #1 to #6 has run against a
 live Oracle database yet.
 
 ## 1. Owner actions (no code)
@@ -43,23 +38,21 @@ live Oracle database yet.
 - **Done when:** stages 1, 2 and 4 pass, or their failures are reported with the
   command JSON and the named `.team-sqlcl-*.log`.
 
-### 1.2 Delete stale branches — COMPLETE / VERIFIED ABSENT
-Read-only GitHub API now lists only `main`; all three named refs are absent:
-`claude/determined-hawking-v3qviv`,
-`codex/p1-remediation-flow-simplification`, and `claude/hopeful-ride-eu60f9`.
-PR #5 from `claude/hopeful-ride-eu60f9` is merged (2026-09-24 11:41 UTC).
-No refs were deleted by this agent.
+### 1.2 Delete stale branches — OPEN
+PR #6 is merged (2026-09-25); its branch `codex/pending-work-execution` is
+no longer needed. Delete it on GitHub so only `main` remains. Earlier branches
+(`claude/determined-hawking-v3qviv`, `codex/p1-remediation-flow-simplification`,
+`claude/hopeful-ride-eu60f9`) are already gone.
 
 ### 1.3 Check GitHub protection settings — REVIEWED / ACTION OPEN
 Current read-only API evidence: zero repository rulesets, no test environment,
-and no required reviewers on the integration environment. The remote `main`
-still contains `.github/workflows/release.yml`; this worktree removes it, but the
-remote tag-triggered workflow remains active until that change is merged. The
-only direct collaborator is `ash2osh`; the owner must decide the reviewer policy
-and apply it in GitHub settings. No settings were changed.
+and no required reviewers on the integration environment. The tag-triggered
+`.github/workflows/release.yml` was removed from `main` by PR #6. The only
+direct collaborator is `ash2osh`; the owner must decide the reviewer policy and
+apply it in GitHub settings. No settings were changed.
 
 ### 1.4 Optional
-- Codex reviews stopped on usage limits (PRs #3–#5); add credits if wanted.
+- Codex reviews stopped on usage limits (PRs #3–#6); add credits if wanted.
 
 ## 2. Release from the development database
 
@@ -173,9 +166,10 @@ Spec §6, decision 4.
 
 1. Owner: run 1.1 on the approved throwaway database and perform the METADATA
    restore exercise; report command JSON and named SQLcl logs.
-2. Owner: choose and enforce the integration environment reviewer policy in 1.3.
-3. Observe the first Dependabot pin-update PR; then close the external automation
-   acceptance note in 4c.
+2. Owner: delete the merged `codex/pending-work-execution` branch (1.2).
+3. Owner: choose and enforce the integration environment reviewer policy in 1.3.
+4. Observe the first Dependabot pin-update PR; then close the Dependabot row in
+   section 4.
 
 The remaining gates require an approved database target, an owner decision for
 external refs/reviewers, or external service activity; they are not represented
