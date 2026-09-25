@@ -165,6 +165,11 @@ class RuntimePreflightTests(unittest.TestCase):
                 which=self.fake_which, command_runner=self.fake_versions,
             )
 
+    def test_database_version_query_matches_oracle_ai_database_product_name(self):
+        query = Path(__file__).resolve().parents[1] / "sql" / "runtime_versions.sql"
+        normalized = " ".join(query.read_text(encoding="utf-8").split()).upper()
+        self.assertIn("UPPER(PRODUCT) LIKE 'ORACLE%DATABASE%'", normalized)
+
     def test_schema_release_can_skip_browser_runner_preflight(self):
         report = preflight_online(
             config_for(), self.root, None,
