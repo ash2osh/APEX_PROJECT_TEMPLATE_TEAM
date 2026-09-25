@@ -6,9 +6,9 @@ when it is done. Update it in the same commit that closes an item.
 
 Last updated: 2026-09-25. Offline implementation of the release,
 acknowledgement and hardening items is merged to `main` (PR #6), including
-fixes for 17 review findings. The full suite passes (729 tests, one expected
-skip) and Ruff passes. Nothing has run against a live Oracle database yet:
-live acceptance (1.1) and the GitHub settings (1.3) are the remaining gates.
+fixes for 17 review findings. The offline gate passed on `main` at
+`4669d29f7dccd178d3f31bc29400827640c69b72`. A candidate Oracle container was
+queried read-only and snapshotted, but no live write acceptance has run.
 
 ## Where things stand
 
@@ -29,27 +29,46 @@ live Oracle database yet.
 
 ### 1.1 Run the live database test plan — OPEN / UNKNOWN
 - **What:** `docs/live-test-plan.md` on `docker-demo` with throwaway schemas.
-- **Current evidence:** not run. SQLcl 26.2.2.233.1901 and a healthy Docker
-  Oracle Free container named `local-26ai` are present, but the plan requires the
-  approved `docker-demo` throwaway target. Neither the original checkout nor this
-  worktree has an `.env` file, and the persistent `oradata-26ai` volume has not
-  been identified as disposable or snapshotted. Do not use it as the test target
-  without the owner's approval and a consistent rollback snapshot.
+- **Current evidence (2026-09-25):** the offline gate passed: Ruff, shell syntax,
+  729 unit tests, `ci-doctor` (`valid: true`), `git diff --check`, and a tracked
+  file CRLF scan. SQLcl is `26.2.2.233.1901`; Java is `21.0.12.1`. Read-only
+  inspection of `local-26ai` reported database `FREE`, PDB `FREEPDB1`, APEX
+  `26.1.4`, and `USERS`. Its persistent `oradata-26ai` volume was copied to
+  `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25`
+  (33 files, 7.0 GB); all SHA-256 checks passed and the container resumed.
+  There is no Docker container named `docker-demo`, no repository `.env`, and no
+  LT_* users or saved test connections. Owner approval of the test target is
+  required before provisioning or running a database write.
+- **Results:**
+
+  | Stage / step | Expected | Actual | Status | Evidence |
+  |---|---|---|---|---|
+  | Offline baseline | All offline gates pass | All listed gates passed on `main` at `4669d29` | PASS | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 0 — snapshot | Consistent rollback copy before writes | Snapshot copied and verified; container running | PASS | `.sync-state/live-test-2026-09-25/local-26ai-oradata-pre-live-test-2026-09-25.sha256` |
+  | 0 — profiles and `.env` | LT_* users, saved SQLcl profiles, valid doctor | Not run; awaiting target approval | UNKNOWN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 1 — identity guard | Wrong profile refused before payload | Not run; awaiting target approval | UNKNOWN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 2 — migration storage | Backfill and tamper checks behave as specified | Not run; awaiting target approval | UNKNOWN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 3 — shared repositories | Foreign migrations and undo work; browser run may be UNKNOWN | Not run; target unavailable and no self-hosted runner is registered | UNKNOWN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 4 — schema release | Cut, deterministic digest, drift refusal, replay and evidence pass | Not run; awaiting target approval | UNKNOWN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+  | 4 — app release | Throwaway app and target contract qualify | Not supplied; app release/deploy not attempted | UNKNOWN | `scratch/live-test-2026-09-25/initial-evidence.json` |
+
+  No `.team-sqlcl-*.log` was created because no team SQLcl command was run.
 - **Done when:** stages 1, 2 and 4 pass, or their failures are reported with the
   command JSON and the named `.team-sqlcl-*.log`.
 
-### 1.2 Delete stale branches — OPEN
-PR #6 is merged (2026-09-25); its branch `codex/pending-work-execution` is
-no longer needed. Delete it on GitHub so only `main` remains. Earlier branches
-(`claude/determined-hawking-v3qviv`, `codex/p1-remediation-flow-simplification`,
-`claude/hopeful-ride-eu60f9`) are already gone.
+### 1.2 Delete stale branches — COMPLETE
+The GitHub branch API confirmed `codex/pending-work-execution` is absent
+(2026-09-25). Earlier branches (`claude/determined-hawking-v3qviv`,
+`codex/p1-remediation-flow-simplification`,
+`claude/hopeful-ride-eu60f9`) are also gone.
 
 ### 1.3 Check GitHub protection settings — REVIEWED / ACTION OPEN
-Current read-only API evidence: zero repository rulesets, no test environment,
-and no required reviewers on the integration environment. The tag-triggered
-`.github/workflows/release.yml` was removed from `main` by PR #6. The only
-direct collaborator is `ash2osh`; the owner must decide the reviewer policy and
-apply it in GitHub settings. No settings were changed.
+Current read-only API evidence (2026-09-25): zero repository rulesets and no
+branch protection on `main`; the `integration` environment exists but has no
+protection rules or required reviewers. No repository self-hosted runners are
+available. The tag-triggered `.github/workflows/release.yml` was removed from
+`main` by PR #6. The owner must choose and apply the reviewer and branch rules
+in GitHub settings. No settings were changed.
 
 ### 1.4 Optional
 - Codex reviews stopped on usage limits (PRs #3–#6); add credits if wanted.
@@ -141,10 +160,19 @@ Spec §6, decision 4.
 |---|---|---|
 | Production read-only must be enforced by a read-only database account | `doctor`/`qualify-target` query `SESSION_PRIVS`/`SESSION_ROLES` on the production profile; `docs/promotion.md` | Offline synthetic tests refuse write-capable profiles. Live account audit remains UNKNOWN until 1.1. |
 | UNKNOWN publish results are classified by text matching | `scripts/teamlib/publish.py` | Typed exceptions decide UNKNOWN vs FAILED; covered by the full suite. |
-| SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | Configuration added; first external Dependabot PR not yet observed. |
+| SHA-pinned actions need updates | `.github/dependabot.yml` (`github-actions`) | PRs #7–#9 observed and reviewed on 2026-09-25; pins match their release tags and the `offline` check passes. All remain open pending owner approval; see review notes below. |
 | Release builds need a byte-stable toolchain | exact SQLcl build for schema and app captures | Builders refuse other builds; live capture acceptance remains UNKNOWN. |
 | METADATA is now the release system of record | `docs/metadata-backup-restore.md` | Backup/restore guidance added; live restore exercise remains open under 1.1. |
 | Local test environments | `docs/toolchain.md`: run tests in a venv with `pip install -e '.[promotion,dev]'` (Debian's system `cryptography` crashes on import) | Explicit setuptools build and package discovery restrict the editable install to `scripts/team.py` and `scripts/teamlib/`; the documented install succeeded, all 729 tests passed with one expected skip, and Ruff passed in the venv. |
+
+Dependabot review (all three PRs remain open; only the `offline` job has passed):
+
+- [#9 setup-python 5.6.0 → 7.0.0](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/9): low risk. Its pin `5fda3b9` matches v7.0.0. The action moves from Node 20 to Node 24 (Actions Runner 2.327.1 or newer) and removes the `pip-install` input, which this workflow does not use. It runs in `database-checks` on GitHub-hosted `ubuntu-latest`; the PR's offline check passed.
+- [#8 checkout 4.4.0 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/8): moderate risk pending a manual integration run. Its pin `3d3c42e` matches v7.0.1. Node 24 requires Actions Runner 2.327.1 or newer; `persist-credentials` remains `true` by default, while both workflow call sites explicitly set it to `false`. The safer fork-checkout behavior does not affect this repository's `pull_request` and `workflow_dispatch` triggers. The protected integration job has no available self-hosted runner.
+- [#7 upload-artifact 4.6.2 → 7.0.1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/7): moderate risk pending a manual integration run. Its pin `043fb46` matches v7.0.1. It moves to Node 24 (Actions Runner 2.327.1 or newer); direct, unzipped uploads are opt-in (`archive: false`), so the current named ZIP upload retains its name and format. Artifact immutability was already in effect in v4. The protected integration job has no available self-hosted runner.
+
+No Dependabot PR was merged. If #7/#8 are approved and a self-hosted runner is
+registered, manually dispatch `.github/workflows/integration.yml` afterward.
 
 ## 5. Known limitations (tracked, not scheduled)
 
@@ -164,12 +192,13 @@ Spec §6, decision 4.
 
 ## Remaining order
 
-1. Owner: run 1.1 on the approved throwaway database and perform the METADATA
-   restore exercise; report command JSON and named SQLcl logs.
-2. Owner: delete the merged `codex/pending-work-execution` branch (1.2).
-3. Owner: choose and enforce the integration environment reviewer policy in 1.3.
-4. Observe the first Dependabot pin-update PR; then close the Dependabot row in
-   section 4.
+1. Owner: approve `local-26ai` as the throwaway target or identify the correct
+   `docker-demo` target; then complete 1.1. The METADATA restore rehearsal also
+   needs the owner's explicit OK.
+2. Owner: decide whether to merge Dependabot PRs #7–#9. If #7/#8 are merged and
+   a self-hosted runner becomes available, dispatch the integration workflow.
+3. Owner: choose and enforce the integration environment reviewer policy and
+   main ruleset in 1.3.
 
 The remaining gates require an approved database target, an owner decision for
 external refs/reviewers, or external service activity; they are not represented
