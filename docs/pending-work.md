@@ -59,7 +59,7 @@ acceptance against an Oracle/APEX database.
 
   The first migration verifier failed because it queried `USER_TABLES` as `LT_VERIFY`, which cannot see `LT_DATA.ACCOUNTS`. The scratch verifier was changed to query `DBA_TABLES` with `OWNER='LT_DATA'`; the migration then passed durable database verification. The initial plan invocation also lacked required `--expected-inventory` and `--actual-inventory` arguments and was refused before payload execution.
 
-  The Stage 2 plan mismatch exposed a real backfill bug: when a stored bundle existed, `adopt_members` returned before comparing any matching local files. `scripts/teamlib/migrate.py` now verifies local file checksums before the `already_stored` shortcut; `scripts/tests/test_migration_members.py::test_local_files_that_disagree_with_stored_bundle_are_refused` proves the prior behavior fails and stored bytes remain unchanged. The live tamper fixture confirmed the refusal and no-write behavior. The fix is on `fix/live-migration-members`; its code PR is to be reviewed before merge.
+  The Stage 2 plan mismatch exposed a real backfill bug: when a stored bundle existed, `adopt_members` returned before comparing any matching local files. `scripts/teamlib/migrate.py` now verifies local file checksums before the `already_stored` shortcut; `scripts/tests/test_migration_members.py::test_local_files_that_disagree_with_stored_bundle_are_refused` proves the prior behavior fails and stored bytes remain unchanged. The live tamper fixture confirmed the refusal and no-write behavior. The fix is on `fix/live-migration-members` ([PR #10](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/10)); review and approval are required before merge.
 
   The cleanup's first guarded script refused before DDL because its local guard expected `DB_NAME=FREE`; the read-only diagnostic showed the actual identity is `DB_NAME=FREEPDB1`, `SERVICE_NAME=freepdb1`. The guard was corrected and the cleanup then passed. Both the initial refusal and corrected output are retained. No production profile or app 102 was used; no APEX deploy, backup/restore, or production write was performed.
 - **Done when:** source checks through Stage 5 remain PASS and the remaining isolated release test/app targets, protected browser runner, backup/restore approval, and production-like read-only profile are qualified or explicitly closed as unavailable.
@@ -207,7 +207,7 @@ when one is available.
 4. Provide a production-like, truly read-only SQLcl profile to qualify the privilege audit. No production profile was used in this run.
 5. When a self-hosted runner becomes available, dispatch the integration workflow to qualify the merged #7/#8 action updates; Node 24 requires Actions Runner 2.327.1 or newer.
 6. Owner: choose and enforce the integration environment reviewer policy and `main` ruleset in 1.3.
-7. Review and approve the `fix/live-migration-members` code PR before merge. Do not merge it automatically.
+7. Review and approve [PR #10](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/pull/10) before merge. Do not merge it automatically.
 
 The user-approved Dependabot PRs #7–#9 are already merged; no further merge action is pending for those PRs. Optional Codex reviews remain unrun because review usage limits were reached.
 
