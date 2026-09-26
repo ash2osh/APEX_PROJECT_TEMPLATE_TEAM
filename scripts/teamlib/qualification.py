@@ -16,6 +16,7 @@ import re
 import subprocess
 import tempfile
 from typing import Any
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 
 from .app_checks import (
@@ -200,12 +201,21 @@ def _target_identity(config: Config, targets: Mapping[str, Target]) -> dict[str,
 
 def _run_identity(value: Mapping[str, Any] | None) -> dict[str, Any]:
     if value is not None:
-        return {str(key): str(item) for key, item in value.items() if item not in (None, "")}
-    return {
+        explicit = {
+            str(key): str(item)
+            for key, item in value.items()
+            if item not in (None, "")
+        }
+        if explicit:
+            return explicit
+    ci_identity = {
         key: os.environ[key]
         for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_WORKFLOW", "GITHUB_SHA")
         if os.environ.get(key)
     }
+    if ci_identity:
+        return ci_identity
+    return {"origin": "local", "run_id": uuid.uuid4().hex}
 
 
 def _sha256_field(value: Any, label: str) -> str:
