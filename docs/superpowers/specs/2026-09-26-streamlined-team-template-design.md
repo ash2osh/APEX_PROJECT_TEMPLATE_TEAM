@@ -64,21 +64,43 @@ APEX_PROJECT_TEMPLATE_TEAM/
 
 ## 3. Configuration Contract (`.env.example`)
 
+Mirrors the clean foundation of `APEX_PROJECT_TEMPLATE/.env.example`, allowing either a single shared connection (`docker-demo`) or separate table/code/APEX profiles, with optional staging and production deployment targets:
+
 ```bash
-# Project Identity
+# Copy this file to .env and adjust the values for this developer checkout.
+# Never store passwords, wallets, tokens, or credential-bearing URLs here.
+
 PROJECT_NAME=my-team-apex
 DB_ENVIRONMENT=development
 
-# Database Connection (saved in SQLcl connmgr)
-DB_SQLCL_CONNECTION=docker-demo
-DB_EXPECTED_USER=DEMO
-
-# Target APEX Application IDs (comma-separated for multi-app setups)
+# One or more APEX application IDs (numeric)
 APEX_APP_ID=100,200
 
-# Schema Mirroring (for database/ snapshot)
+# 1. Tables Metadata Mirror
 TABLES_SCHEMA=DEMO
+TABLES_PREFIXES=*
+TABLES_SQLCL_CONNECTION=docker-demo
+TABLES_EXPECTED_USER=DEMO
+
+# 2. Code Metadata Mirror
 CODE_SCHEMA=DEMO
+CODE_PREFIXES=*
+CODE_SQLCL_CONNECTION=docker-demo
+CODE_EXPECTED_USER=DEMO
+
+# 3. APEX Application Export (Development)
+APEX_PARSING_SCHEMA=DEMO
+APEX_SQLCL_CONNECTION=docker-demo
+APEX_EXPECTED_USER=DEMO
+
+# 4. Target Deployment Connections
+# Production connection is required for prod deployment commands
+PROD_SQLCL_CONNECTION=prod-db
+PROD_EXPECTED_USER=PROD_DEPLOYER
+
+# Staging connection is OPTIONAL (only needed for projects with a staging tier)
+# STAGING_SQLCL_CONNECTION=stage-db
+# STAGING_EXPECTED_USER=STAGE_DEPLOYER
 ```
 
 No `METADATA_SCHEMA`, no `VERIFY_SCHEMA`, and no `TEAM_CHECKOUT_UUID`.
@@ -87,7 +109,11 @@ No `METADATA_SCHEMA`, no `VERIFY_SCHEMA`, and no `TEAM_CHECKOUT_UUID`.
 
 ## 4. Declarative Deployment Descriptors
 
-Following the architecture in *The Missing Apartment Number*, each application under `apps/<app-id>/` contains a `deployments/` folder specifying explicit target workspace names and parsing schemas:
+Following the architecture in *The Missing Apartment Number*, each application under `apps/<parsing-schema>/<app-id>/` (or `apps/<app-id>/`) contains a `deployments/` folder specifying explicit target workspace names, application IDs, and parsing schemas.
+
+- `dev.json` (Required): Local / shared development workspace context.
+- `prod.json` (Required): Production workspace context.
+- `staging.json` (Optional): Staging / QA workspace context, for teams with a staging tier.
 
 ### `apps/100/deployments/dev.json`
 ```json
@@ -104,7 +130,7 @@ Following the architecture in *The Missing Apartment Number*, each application u
 }
 ```
 
-### `apps/100/deployments/staging.json`
+### `apps/100/deployments/staging.json` (Optional)
 ```json
 {
   "workspace": {
@@ -114,6 +140,21 @@ Following the architecture in *The Missing Apartment Number*, each application u
     "id": 100,
     "databaseSession": {
       "parsingSchema": "STAGE_APP"
+    }
+  }
+}
+```
+
+### `apps/100/deployments/prod.json`
+```json
+{
+  "workspace": {
+    "name": "PROD_WORKSPACE"
+  },
+  "app": {
+    "id": 100,
+    "databaseSession": {
+      "parsingSchema": "PROD_APP"
     }
   }
 }
