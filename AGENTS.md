@@ -10,8 +10,9 @@ state.
 
 ## Configuration and application source
 
-- Copy `.env.example` to ignored `.env` and use SQLcl saved connection names.
-  The default points the table, code, and APEX profiles at the same DEV
+- Copy `.env.example` to ignored `.env`, set `DEVELOPER_NAME` to the
+  developer's uppercase name, and use SQLcl saved connection names. The
+  default points the table, code, and APEX profiles at the same DEV
   connection. Keep these profile values aligned unless the project needs
   separate connections. Staging and production connection/user pairs are
   optional. Never put credentials in `.env` or tracked files.
@@ -41,15 +42,17 @@ state.
   that export. Oracle records this value at one-second precision, so the
   exporter and guard fail closed when it matches the current database second.
   This timestamp cannot see unsaved Builder edits; communicate with teammates
-  before publishing. APEX leaves it null after an APEXlang import, so the
-  marker records an imported app as present with no Builder timestamp; the
-  guard then refuses a later Builder save, but it cannot detect a teammate's
-  import over another import. The guard refuses to overwrite newer Builder
-  work. Export and reconcile before retrying. After import, publish re-exports the app and
-  requires exact APEXlang file and byte equality before it advances the DEV
-  baseline. A failed or ambiguous verification leaves the old baseline in
-  place, so the next publish still refuses newer Builder state. Use `--force`
-  only when the user explicitly directs an override after review.
+  before publishing. APEX leaves it null after an APEXlang import, so each
+  DEV publish stamps `[DEVELOPER_NAME-YYYY-MM-DDrNNN]` onto the application
+  version in `application.apx` before import, and the guard also refuses when
+  the live version differs from the baseline (a teammate's import). Commit the
+  stamped `application.apx` after publish; `deploy` ships the tag unchanged.
+  The guard refuses to overwrite newer Builder work. Export and reconcile
+  before retrying. After import, publish re-exports the app and requires
+  exact APEXlang file and byte equality before it advances the DEV baseline.
+  A failed or ambiguous verification leaves the old baseline in place, so the
+  next publish still refuses newer Builder state. Use `--force` only when the
+  user explicitly directs an override after review.
 - **Migrations:** Add immutable files under `migrations/<developer>/`, run
   `scripts/team.sh check-conflicts`, then apply selected files with
   `scripts/team.sh migrate migrations/<developer>/<file>.sql`. A migration

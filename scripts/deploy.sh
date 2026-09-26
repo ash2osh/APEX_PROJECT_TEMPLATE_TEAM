@@ -93,7 +93,7 @@ if [ "$manual" = true ]; then
     "@$REPO_ROOT/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "deployments/$app_environment.json" "$app_id"
   verify_parent="apps/$parsing_schema"
-  printf '3. Check that import completed without SQLcl errors and printed APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
+  printf '3. Check that import completed without SQLcl errors and printed "Import successful." and APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
   printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'
   printf '   verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-manual-verify.XXXXXX")\n'
   printf '   cd "$verify_dir"\n'

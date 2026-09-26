@@ -81,8 +81,8 @@ class ExportCliTests(unittest.TestCase):
         self,
         script: Path,
         powershell: bool,
-        before: str = "2026-09-26T08:00:00|2026-09-26T09:00:00",
-        after: str = "2026-09-26T08:00:00|2026-09-26T09:00:02",
+        before: str = "2026-09-26T08:00:00|2026-09-26T09:00:00|Release 1.0",
+        after: str = "2026-09-26T08:00:00|2026-09-26T09:00:02|Release 1.0",
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PATH"] = f"{script.parents[1] / 'bin'}{os.pathsep}{environment['PATH']}"
@@ -146,10 +146,10 @@ class ExportCliTests(unittest.TestCase):
             result = self.run_export(
                 script,
                 powershell=False,
-                after="2026-09-26T08:00:01|2026-09-26T09:00:02",
+                after="2026-09-26T08:00:01|2026-09-26T09:00:02|Release 1.0",
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("changed in Builder while export was running", result.stderr)
+            self.assertIn("while export was running", result.stderr)
             app = script.parents[1] / "apps" / "DEMO" / "100"
             self.assertFalse((app / "application.apx").exists())
             for name, contents in expected.items():
@@ -162,10 +162,10 @@ class ExportCliTests(unittest.TestCase):
             result = self.run_export(
                 script,
                 powershell=True,
-                after="2026-09-26T08:00:01|2026-09-26T09:00:02",
+                after="2026-09-26T08:00:01|2026-09-26T09:00:02|Release 1.0",
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("changed in Builder while export was running", result.stderr)
+            self.assertIn("while export was running", result.stderr)
             app = script.parents[1] / "apps" / "DEMO" / "100"
             self.assertFalse((app / "application.apx").exists())
             for name, contents in expected.items():

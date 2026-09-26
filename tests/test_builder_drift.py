@@ -10,8 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "scripts" / "check_builder_drift.py"
 
 
-def observed_state(last_updated_on: str, database_time: str = "2026-09-26T12:00:00") -> str:
-    return f"{last_updated_on}|{database_time}"
+def observed_state(
+    last_updated_on: str, database_time: str = "2026-09-26T12:00:00", version: str = "Release 1.0"
+) -> str:
+    # SQLcl pads the query line; the guard must ignore that padding.
+    version_text = "" if last_updated_on == "NOT_FOUND" else version
+    return f"{last_updated_on}|{database_time}|{version_text}   "
 
 
 class BuilderDriftTests(unittest.TestCase):
@@ -22,7 +26,9 @@ class BuilderDriftTests(unittest.TestCase):
         sql_output: str,
         sql_exit: str = "0",
         marker_present: bool = True,
-        application_present: bool | None = None,
+        application_present: bool | None = True,
+        version: str | None = "Release 1.0",
+        legacy_marker: bool = False,
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -31,8 +37,9 @@ class BuilderDriftTests(unittest.TestCase):
             (app / "application.apx").write_text("app SAMPLE ()\n", encoding="utf-8")
             if marker_present:
                 marker = {"applicationId": 100, "builderLastUpdatedOn": baseline}
-                if application_present is not None:
+                if not legacy_marker:
                     marker["applicationPresent"] = application_present
+                    marker["version"] = version if application_present else None
                 (app / "apex-team-export.json").write_text(json.dumps(marker), encoding="utf-8")
 
             fake_bin = root / "bin"
@@ -105,6 +112,7 @@ class BuilderDriftTests(unittest.TestCase):
     def test_application_not_yet_installed_is_not_builder_drift(self) -> None:
         result = self.run_guard(
             baseline=None,
+            application_present=False,
             sql_output=observed_state("NOT_FOUND"),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -119,7 +127,9 @@ class BuilderDriftTests(unittest.TestCase):
         self.assertIn("[DRIFT DETECTED]", result.stdout)
 
     def test_application_created_after_export_is_refused(self) -> None:
-        result = self.run_guard(baseline=None, sql_output=observed_state("2026-09-26T09:00:00"))
+        result = self.run_guard(
+            baseline=None, application_present=False, sql_output=observed_state("2026-09-26T09:00:00")
+        )
         self.assertEqual(result.returncode, 1)
         self.assertIn("[DRIFT DETECTED]", result.stdout)
         self.assertIn("created after the local export", result.stdout)
@@ -175,11 +185,45 @@ class BuilderDriftTests(unittest.TestCase):
         self.assertIn("[DRIFT DETECTED]", result.stdout)
         self.assertIn("re-imported", result.stdout)
 
-    def test_imported_app_is_not_treated_as_absent_by_legacy_marker(self) -> None:
-        result = self.run_guard(baseline=None, sql_output=observed_state("NO_TIMESTAMP"))
+    def test_marker_without_version_requires_a_fresh_export(self) -> None:
+        result = self.run_guard(
+            baseline="2026-09-26T08:00:00",
+            legacy_marker=True,
+            sql_output=observed_state("2026-09-26T08:00:00"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("[DRIFT UNKNOWN]", result.stderr)
+        self.assertIn("scripts/team.sh export 100", result.stderr)
+
+    # An import leaves no Builder timestamp; the publish tag in the version is
+    # what shows that someone else imported since this export.
+    def test_teammate_import_over_import_is_refused_by_version(self) -> None:
+        result = self.run_guard(
+            baseline=None,
+            version="V2 [ASHARIF-2026-09-26r001]",
+            sql_output=observed_state("NO_TIMESTAMP", version="V2 [BOB-2026-09-26r001]"),
+        )
         self.assertEqual(result.returncode, 1)
         self.assertIn("[DRIFT DETECTED]", result.stdout)
-        self.assertIn("created after the local export", result.stdout)
+        self.assertIn("V2 [BOB-2026-09-26r001]", result.stdout)
+        self.assertIn("V2 [ASHARIF-2026-09-26r001]", result.stdout)
+
+    def test_version_change_with_older_timestamp_is_refused(self) -> None:
+        result = self.run_guard(
+            baseline="2026-09-26T09:00:00",
+            sql_output=observed_state("2026-09-26T08:00:00", version="Release 2.0"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("[DRIFT DETECTED]", result.stdout)
+
+    def test_version_containing_separator_and_spaces_matches_exactly(self) -> None:
+        version = "V2 | Powered By xxx [ASHARIF-2026-09-26r002]"
+        result = self.run_guard(
+            baseline=None,
+            version=version,
+            sql_output=observed_state("NO_TIMESTAMP", version=version),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_import_baseline_for_removed_app_is_refused(self) -> None:
         result = self.run_guard(

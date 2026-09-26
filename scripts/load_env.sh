@@ -55,7 +55,7 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   project_env_key="${BASH_REMATCH[1]}"
   project_env_value="${BASH_REMATCH[2]}"
   case "$project_env_key" in
-    PROJECT_NAME|DB_ENVIRONMENT|APEX_APP_ID|\
+    PROJECT_NAME|DEVELOPER_NAME|DB_ENVIRONMENT|APEX_APP_ID|\
     TABLES_SCHEMA|TABLES_PREFIXES|TABLES_SQLCL_CONNECTION|TABLES_EXPECTED_USER|\
     CODE_SCHEMA|CODE_PREFIXES|CODE_SQLCL_CONNECTION|CODE_EXPECTED_USER|\
     APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
@@ -94,7 +94,7 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
 done < "$PROJECT_ENV_FILE"
 
 project_env_required=(
-  PROJECT_NAME DB_ENVIRONMENT APEX_APP_ID
+  PROJECT_NAME DEVELOPER_NAME DB_ENVIRONMENT APEX_APP_ID
   TABLES_SCHEMA TABLES_PREFIXES TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER
   CODE_SCHEMA CODE_PREFIXES CODE_SQLCL_CONNECTION CODE_EXPECTED_USER
   APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER
@@ -192,6 +192,12 @@ for project_env_key in TABLES_PREFIXES CODE_PREFIXES; do
     fi
   done
 done
+# DEV publish stamps this name into the app version tag, where '-' separates it
+# from the date.
+if [[ ! "$DEVELOPER_NAME" =~ ^[A-Z][A-Z0-9_]{0,29}$ ]]; then
+  project_env_fail "DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF"
+  return 1 2>/dev/null || exit 1
+fi
 case "$DB_ENVIRONMENT" in
   development|test|staging|production) ;;
   *)

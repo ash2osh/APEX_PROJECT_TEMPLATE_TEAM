@@ -195,7 +195,35 @@ $transcriptFile = [System.IO.Path]::GetTempFileName()
 $verifyTranscriptFile = [System.IO.Path]::GetTempFileName()
 $publishWorkDir = Join-Path $repoRoot ("scratch/apex-publish-" + [Guid]::NewGuid().ToString("N"))
 [System.IO.Directory]::CreateDirectory($publishWorkDir) | Out-Null
+$applicationSource = Join-Path $appDir "application.apx"
+$unstampedSource = Join-Path $publishWorkDir "application.apx.unstamped"
+$restoreUnstamped = $false
+$publishedVersion = ""
 try {
+  # An import leaves no Builder timestamp, so a DEV publish stamps its own tag
+  # into the application version before import. The drift guard compares that
+  # version to spot a teammate's import. Staging and production import the
+  # committed tag unchanged.
+  if ($appEnvironment -eq "dev") {
+    if (-not (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
+      throw "publish error: DEV publish needs application.apx to stamp the publish tag"
+    }
+    Copy-Item -LiteralPath $applicationSource -Destination $unstampedSource
+    $restoreUnstamped = $true
+    $stampPython = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($null -eq $stampPython) { $stampPython = Get-Command python -ErrorAction SilentlyContinue }
+    if ($null -eq $stampPython) { $stampPython = Get-Command py -ErrorAction SilentlyContinue }
+    if ($null -eq $stampPython) { throw "Python 3 is required to stamp the publish tag" }
+    $stampArgs = @((Join-Path $PSScriptRoot "stamp_publish_version.py"), $applicationSource, $env:DEVELOPER_NAME)
+    if ($stampPython.Name -in @("py.exe", "py")) {
+      $publishedVersion = & $stampPython.Source -3 @stampArgs
+    } else {
+      $publishedVersion = & $stampPython.Source @stampArgs
+    }
+    if ($LASTEXITCODE -ne 0) { throw "publish error: could not stamp the application version" }
+    Write-Output "Stamped application version: $publishedVersion"
+  }
+
   $relativeDeployment = "deployments/$appEnvironment.json"
   $sqlclExit = Invoke-Sqlcl -WorkingDirectory $appDir -StdInFile $stdinFile -Arguments @(
     "-S", "-noupdates", "-name", $sqlclConnection,
@@ -211,6 +239,13 @@ try {
   if (-not [regex]::IsMatch($sqlclOutput, "(?m)^\s*APEX_IMPORT_VERIFIED:$AppId\s*$")) {
     throw "SQLcl did not verify the imported application; the import result is unknown"
   }
+  # SQLcl exits 0 without importing when, for example, the descriptor names an
+  # unknown workspace ("... is invalid"). Only its success line proves an import.
+  if (-not [regex]::IsMatch($sqlclOutput, '(?m)^\s*Import successful\.\s*$')) {
+    throw "SQLcl did not report a successful APEX import; see the client output above"
+  }
+  # The stamped source is live now; keep it for the developer to commit.
+  $restoreUnstamped = $false
 
   # Re-export the selected target and compare exact APEXlang bytes before
   # reporting success. Only a DEV publish updates the local DEV drift marker.
@@ -264,7 +299,14 @@ try {
     throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
   }
   Write-Output "Published APEX App $AppId to $targetLabel ($($deployment.workspace.name) / $parsingSchema)."
+  if ($publishedVersion) {
+    $relativeSource = $applicationSource.Substring($repoRoot.Length).TrimStart('\', '/')
+    Write-Output "Commit the stamped version in ${relativeSource}: $publishedVersion"
+  }
 } finally {
+  if ($restoreUnstamped) {
+    Copy-Item -LiteralPath $unstampedSource -Destination $applicationSource -Force -ErrorAction SilentlyContinue
+  }
   Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $publishWorkDir) {
     Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue

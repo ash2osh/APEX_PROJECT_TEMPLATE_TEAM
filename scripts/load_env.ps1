@@ -31,7 +31,7 @@ if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
 
 $projectEnvSeen = @{}
 $projectEnvAllowed = @(
-  "PROJECT_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
+  "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
   "TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER",
   "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
@@ -67,7 +67,7 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
 }
 
 $projectEnvRequired = @(
-  "PROJECT_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
+  "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
   "TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER",
   "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER"
@@ -127,6 +127,11 @@ foreach ($projectEnvKey in @("TABLES_PREFIXES", "CODE_PREFIXES")) {
       throw "$projectEnvKey prefixes must be at most 128 characters"
     }
   }
+}
+# DEV publish stamps this name into the app version tag, where '-' separates it
+# from the date.
+if ($env:DEVELOPER_NAME -cnotmatch '^[A-Z][A-Z0-9_]{0,29}$') {
+  throw "DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF"
 }
 if ($env:DB_ENVIRONMENT -notin @("development", "test", "staging", "production")) { throw "DB_ENVIRONMENT is invalid" }
 foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_EXPECTED_USER", "APEX_PARSING_SCHEMA", "APEX_EXPECTED_USER")) {

@@ -36,6 +36,8 @@ class SqlDriverContractTests(unittest.TestCase):
                 contents = (ROOT / "scripts" / name).read_text(encoding="utf-8")
                 self.assertEqual(contents.count("WHEN COUNT(*) = 0 THEN 'NOT_FOUND'"), queries)
                 self.assertEqual(contents.count("WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'"), queries)
+                self.assertEqual(contents.count("|| '|' || MAX(version)"), queries)
+                self.assertIn("SET LINESIZE 32767", contents)
 
 
 if __name__ == "__main__":

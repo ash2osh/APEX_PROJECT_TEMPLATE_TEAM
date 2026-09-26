@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse an APEXlang import when Builder changed after the last export."""
+"""Refuse an APEXlang import when the live app changed after the last export."""
 
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from record_export_state import NO_TIMESTAMP, NOT_FOUND, AppState
+from record_export_state import NO_TIMESTAMP, NOT_FOUND, AppState, parse_state
 
 
-DATABASE_STATE_PATTERN = re.compile(
-    rf"\b({NOT_FOUND}|{NO_TIMESTAMP}|\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}})"
-    r"\|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\b"
+DATABASE_STATE_LINE = re.compile(
+    rf"^[ \t]*(?:{NOT_FOUND}|{NO_TIMESTAMP}|\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}})"
+    r"\|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\|.*$",
+    re.MULTILINE,
 )
 
 
@@ -55,12 +56,17 @@ def get_export_baseline(app_dir: Path, app_id: int) -> AppState | None:
     baseline = marker["builderLastUpdatedOn"]
     if baseline is not None and parse_timestamp(baseline) is None:
         return None
-    # Markers written before applicationPresent existed used null for an
-    # absent app only; keep that reading so they fail closed on an import.
-    present = marker.get("applicationPresent", baseline is not None)
-    if not isinstance(present, bool) or (not present and baseline is not None):
+    # A marker without the version cannot show a teammate's import, so an
+    # older marker is unavailable until the next export records one.
+    present = marker.get("applicationPresent")
+    version = marker.get("version", False)
+    if not isinstance(present, bool):
         return None
-    return AppState(present, baseline)
+    if present and not isinstance(version, str):
+        return None
+    if not present and (baseline is not None or version is not None):
+        return None
+    return AppState(present, baseline, version)
 
 
 def _query_live_timestamp(
@@ -100,20 +106,12 @@ def _query_live_timestamp(
     if result.returncode != 0 or re.search(r"\b(?:ORA|SP2|SQL)\s*-\d+", output, re.I):
         detail = output.strip() or f"SQLcl exited with status {result.returncode}"
         return None, None, detail
-    states = DATABASE_STATE_PATTERN.findall(output)
-    if not states:
-        return None, None, "SQLcl returned no application timestamp and database time"
-    app_value, database_time_value = states[-1]
-    database_time = parse_timestamp(database_time_value)
-    if database_time is None:
-        return None, None, "SQLcl returned an invalid database time"
-    if app_value == NOT_FOUND:
-        return AppState(False, None), database_time, None
-    if app_value == NO_TIMESTAMP:
-        return AppState(True, None), database_time, None
-    if parse_timestamp(app_value) is None:
-        return None, database_time, "SQLcl returned an invalid application timestamp"
-    return AppState(True, app_value), database_time, None
+    lines = DATABASE_STATE_LINE.findall(output)
+    parsed = parse_state(lines[-1]) if lines else None
+    if parsed is None:
+        return None, None, "SQLcl returned no valid application state and database time"
+    live, database_time = parsed
+    return live, database_time, None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,12 +162,18 @@ def main(argv: list[str] | None = None) -> int:
         reason = "no longer exists in the target after the local export."
     elif baseline_at is None and live_at is None:
         # APEX leaves last_updated_on NULL on import and sets it on any Builder
-        # save, so this proves no Builder edit. It cannot reveal another import.
-        print(
-            f"[DRIFT OK] APEX App {args.app_id} has no Builder edits since its last import. "
-            "An import does not record a Builder timestamp; confirm no teammate published it since your export."
-        )
-        return 0
+        # save. The publish tag in the version identifies which import is live.
+        if live.version != baseline.version:
+            reason = (
+                f"was re-imported since the local export (live version: {live.version!r}, "
+                f"local baseline: {baseline.version!r})."
+            )
+        else:
+            print(
+                f"[DRIFT OK] APEX App {args.app_id} has no Builder edits since its last import "
+                f"(version {live.version!r})."
+            )
+            return 0
     elif live_at is None:
         reason = "was re-imported after the local export (APEX clears last_updated_on on import)."
     elif baseline_at is None:
@@ -181,11 +185,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    elif live_at <= baseline_at:
+    elif live_at > baseline_at:
+        reason = f"was modified in Builder on {live_at.isoformat(timespec='seconds')}."
+    elif live.version != baseline.version:
+        reason = (
+            f"changed version since the local export (live: {live.version!r}, "
+            f"local baseline: {baseline.version!r})."
+        )
+    else:
         print("[DRIFT OK] No uncaptured Builder edits detected.")
         return 0
-    else:
-        reason = f"was modified in Builder on {live_at.isoformat(timespec='seconds')}."
 
     print(f"[DRIFT DETECTED] Live APEX App {args.app_id} {reason}")
     print(f"To prevent accidental overwrites, run: {export_command} to review and merge changes.")

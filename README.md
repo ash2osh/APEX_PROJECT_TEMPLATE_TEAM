@@ -11,8 +11,9 @@ separate file changes only and do not isolate a shared APEX application.
 
 ## Quickstart
 
-Copy the example configuration, adjust SQLcl saved connection names and
-expected users, then check the DEV connection:
+Copy the example configuration, set `DEVELOPER_NAME` to your uppercase name
+(for example `ASHARIF`), adjust SQLcl saved connection names and expected
+users, then check the DEV connection:
 
 ```bash
 cp .env.example .env
@@ -90,13 +91,23 @@ uses the separate `deploy` command.
 
 APEX does not stamp `last_updated_on` while importing, so an app installed or
 published from APEXlang has no Builder timestamp until someone saves it in
-Builder. The export marker records that as an installed app
-(`"applicationPresent": true` with a null `builderLastUpdatedOn`), not as an
-absent one. From that baseline, any later Builder save or removal of the app is
-refused as drift, and so is a re-import over a Builder-timestamped baseline.
-One import over another import leaves no timestamp to compare, so the guard
-cannot tell whether a teammate published the app since your export; confirm
-that with the team before publishing.
+Builder. To make each import identifiable, a DEV publish first stamps a
+publish tag onto the end of the application version in `application.apx`:
+
+```text
+version: "V2 Powered By xxx [ASHARIF-2026-09-26r001]"
+```
+
+The tag is `DEVELOPER_NAME` from `.env`, the publish date, and a counter that
+counts up with each publish of that date, whoever published, and restarts at
+`r001` on a later date. The date never moves back, so a tag is never reused.
+The export marker records the live version with the Builder timestamp, and the
+drift guard refuses to publish when the live version differs from your
+baseline, which is how it detects a teammate's import. Commit the stamped
+`application.apx` after a successful publish. If the import fails, publish
+restores the unstamped file. The tag appears wherever the theme renders
+`#APP_VERSION#`, such as the Universal Theme footer, and `deploy` ships it to
+staging and production unchanged.
 
 After a successful DEV import, `publish` exports the app again and compares the
 APEXlang file names and bytes with the local source, excluding the local
@@ -104,6 +115,9 @@ deployment descriptors and export marker. It advances the drift baseline only
 when that source matches and the live Builder revision stayed stable during the
 verification export. If SQLcl reports an error, the source differs, or the
 revision is ambiguous, publish fails and leaves the old baseline in place.
+SQLcl can exit successfully without importing, for example when a descriptor
+names an unknown workspace, so publish also requires its `Import successful.`
+line.
 Publish preflight also requires the selected application tree to be physically
 inside the checkout and rejects symbolic links and reparse points.
 

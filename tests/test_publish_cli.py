@@ -9,6 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLISH = ROOT / "scripts" / "publish_app.sh"
+# .env.example uses DEVELOPER_NAME=ALICE; the date is the workstation's today.
+STAMPED_VERSION = r"^Release 1\.0 \[ALICE-\d{{4}}-\d{{2}}-\d{{2}}r{counter}\]$"
 
 
 class PublishAppCliTests(unittest.TestCase):
@@ -35,6 +37,7 @@ class PublishAppCliTests(unittest.TestCase):
             "record_export_state.py",
             "verify_publish_state.py",
             "validate_app_source.py",
+            "stamp_publish_version.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         shutil.copy2(ROOT / ".env.example", root / ".env")
@@ -42,7 +45,7 @@ class PublishAppCliTests(unittest.TestCase):
         app = root / "apps" / "DEMO" / "100"
         deployments = app / "deployments"
         deployments.mkdir(parents=True)
-        (app / "application.apx").write_text("application {}\n", encoding="utf-8")
+        (app / "application.apx").write_text("app SAMPLE (\n    name: Sample\n)\n", encoding="utf-8")
         (app / ".apex").mkdir()
         (app / ".apex" / "apexlang.json").write_text('{"version":1}\n', encoding="utf-8")
         (deployments / "dev.json").write_text(
@@ -76,7 +79,7 @@ class PublishAppCliTests(unittest.TestCase):
             "case \"$mode\" in\n"
             "  drift)\n"
             "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then\n"
-            "      printf '%s|%s\\n' \"$(cat \"$FAKE_STATE_DIR/live.txt\")\" \"$(cat \"$FAKE_STATE_DIR/database.txt\")\"\n"
+            "      printf '%s|%s|%s\\n' \"$(cat \"$FAKE_STATE_DIR/live.txt\")\" \"$(cat \"$FAKE_STATE_DIR/database.txt\")\" \"$(cat \"$FAKE_STATE_DIR/version.txt\")\"\n"
             "    fi\n"
             "    ;;\n"
             "  import)\n"
@@ -88,13 +91,16 @@ class PublishAppCliTests(unittest.TestCase):
             "      printf '%s\\n' \"$count\" > \"$FAKE_STATE_DIR/import-count.txt\"\n"
             "      if [[ $count -eq 1 ]]; then live=2026-09-26T09:30:00; db=2026-09-26T09:30:02; else live=2026-09-26T09:45:00; db=2026-09-26T09:45:02; fi\n"
             "      if [[ \"${FAKE_IMPORT_CLEARS_TIMESTAMP:-0}\" == 1 ]]; then live=NO_TIMESTAMP; fi\n"
+            "      version=$(sed -n 's/^    version: //p' \"$PWD/application.apx\"); version=${version#\\\"}; version=${version%\\\"}\n"
+            "      printf '%s\\n' \"$version\" > \"$FAKE_STATE_DIR/version.txt\"\n"
             "      printf '%s\\n' \"$live\" > \"$FAKE_STATE_DIR/live.txt\"\n"
             "      printf '%s\\n' \"$db\" > \"$FAKE_STATE_DIR/database.txt\"\n"
             "    fi\n"
             "    case \"${FAKE_SQL_MODE:-success}\" in\n"
             "      sp2) printf '%s\\n' 'SP2-0640: Not connected' ;;\n"
-            "      no-sentinel) : ;;\n"
-            "      *) printf '%s\\n' 'APEX_IMPORT_VERIFIED:100' ;;\n"
+            "      no-sentinel) printf '%s\\n' 'Import successful.' ;;\n"
+            "      skipped) printf '%s\\n' 'Workspace: NO_SUCH_WORKSPACE from deployment file: deployments/dev.json is invalid' 'APEX_IMPORT_VERIFIED:100' ;;\n"
+            "      *) printf '%s\\n' 'Import successful.' 'APEX_IMPORT_VERIFIED:100' ;;\n"
             "    esac\n"
             "    ;;\n"
             "  export)\n"
@@ -103,8 +109,8 @@ class PublishAppCliTests(unittest.TestCase):
             "    cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"\n"
             "    cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"\n"
             "    if [[ \"${FAKE_EXPORT_MISMATCH:-0}\" == 1 ]]; then printf '%s\\n' '// race' >> \"$exported/application.apx\"; fi\n"
-            "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then live=$(cat \"$FAKE_STATE_DIR/live.txt\"); db=$(cat \"$FAKE_STATE_DIR/database.txt\"); else live=${FAKE_REVISION:-2026-09-26T09:30:00}; db=${FAKE_DATABASE_TIME:-2026-09-26T09:30:02}; fi\n"
-            "    printf '%s|%s\\n' \"$live\" \"$db\" > \"$PWD/.apex-export-before.txt\"\n"
+            "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then live=$(cat \"$FAKE_STATE_DIR/live.txt\"); db=$(cat \"$FAKE_STATE_DIR/database.txt\"); version=$(cat \"$FAKE_STATE_DIR/version.txt\"); else live=${FAKE_REVISION:-2026-09-26T09:30:00}; db=${FAKE_DATABASE_TIME:-2026-09-26T09:30:02}; version=${FAKE_VERSION:-Release 1.0}; fi\n"
+            "    printf '%s|%s|%s\\n' \"$live\" \"$db\" \"$version\" > \"$PWD/.apex-export-before.txt\"\n"
             "    cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"\n"
             "    ;;\n"
             "  *) : ;;\n"
@@ -140,7 +146,14 @@ class PublishAppCliTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         app = root / "apps" / "DEMO" / "100"
         (app / "apex-team-export.json").write_text(
-            json.dumps({"applicationId": 100, "builderLastUpdatedOn": "2026-09-26T08:00:00"}) + "\n",
+            json.dumps(
+                {
+                    "applicationId": 100,
+                    "applicationPresent": True,
+                    "builderLastUpdatedOn": "2026-09-26T08:00:00",
+                    "version": "Release 1.0",
+                }
+            ) + "\n",
             encoding="utf-8",
         )
         state_dir = root / "fake-db"
@@ -148,6 +161,7 @@ class PublishAppCliTests(unittest.TestCase):
         (state_dir / "live.txt").write_text("2026-09-26T08:00:00\n", encoding="utf-8")
         (state_dir / "database.txt").write_text("2026-09-26T09:00:00\n", encoding="utf-8")
         (state_dir / "import-count.txt").write_text("0\n", encoding="utf-8")
+        (state_dir / "version.txt").write_text("Release 1.0\n", encoding="utf-8")
         environment["FAKE_STATE_DIR"] = str(state_dir)
         environment["FAKE_SOURCE_DIR"] = str(app)
         return runner, sql_log, sql_cwd, environment, app, state_dir
@@ -319,10 +333,9 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
             self.assertIn("APEX_PUBLISH_SOURCE_VERIFIED:100", first.stdout)
             marker = json.loads((app / "apex-team-export.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                marker,
-                {"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": None},
-            )
+            self.assertIs(marker["applicationPresent"], True)
+            self.assertIsNone(marker["builderLastUpdatedOn"])
+            self.assertRegex(marker["version"], STAMPED_VERSION.format(counter="001"))
 
             second = subprocess.run(
                 ["bash", str(runner), "100"], cwd=root, env=environment,
@@ -330,6 +343,101 @@ class PublishAppCliTests(unittest.TestCase):
             )
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
             self.assertIn("no Builder edits since its last import", second.stdout)
+
+    def test_dev_publish_stamps_version_before_import_for_the_developer_to_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
+            environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            source = (app / "application.apx").read_text(encoding="utf-8")
+            version = (state_dir / "version.txt").read_text(encoding="utf-8").strip()
+            self.assertRegex(version, STAMPED_VERSION.format(counter="001"))
+            self.assertIn(f'    version: "{version}"\n', source)
+            self.assertIn("Commit the stamped version in apps/DEMO/100/application.apx", result.stdout)
+
+    def test_teammate_import_over_import_is_refused_by_the_version_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, _, state_dir = self.make_stateful_dev_fixture(root)
+            environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
+            first = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            # A teammate publishes from their own checkout: still no timestamp.
+            (state_dir / "version.txt").write_text("Release 1.0 [BOB-2026-09-26r001]\n", encoding="utf-8")
+
+            second = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertNotEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("[DRIFT DETECTED]", second.stdout)
+            self.assertIn("[BOB-2026-09-26r001]", second.stdout)
+            self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
+
+    def test_failed_import_restores_the_unstamped_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["FAKE_SQL_MODE"] = "sp2"
+            original = (app / "application.apx").read_bytes()
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Stamped application version", result.stdout)
+            self.assertEqual((app / "application.apx").read_bytes(), original)
+
+    # SQLcl prints "...is invalid" and exits 0 when the descriptor workspace
+    # does not exist, without importing (verified on docker-demo).
+    def test_import_skipped_by_sqlcl_is_a_failure_and_restores_the_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["FAKE_SQL_MODE"] = "skipped"
+            original = (app / "application.apx").read_bytes()
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("did not report a successful APEX import", result.stderr)
+            self.assertNotIn("Published APEX App", result.stdout)
+            self.assertEqual((app / "application.apx").read_bytes(), original)
+
+    def test_powershell_import_skipped_by_sqlcl_is_a_failure_and_restores_the_source(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            environment["FAKE_SQL_MODE"] = "skipped"
+            original = (app / "application.apx").read_bytes()
+            command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+
+            result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("did not report a successful APEX import", result.stdout + result.stderr)
+            self.assertNotIn("Published APEX App", result.stdout)
+            self.assertEqual((app / "application.apx").read_bytes(), original)
 
     def test_powershell_import_that_clears_builder_timestamp_publishes(self) -> None:
         pwsh = shutil.which("pwsh")
@@ -348,9 +456,33 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIs(marker["applicationPresent"], True)
             self.assertIsNone(marker["builderLastUpdatedOn"])
 
+            source = (app / "application.apx").read_text(encoding="utf-8")
+            self.assertRegex(marker["version"], STAMPED_VERSION.format(counter="001"))
+            self.assertIn(f'    version: "{marker["version"]}"\n', source)
+
             second = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
             self.assertIn("no Builder edits since its last import", second.stdout)
+            marker = json.loads((app / "apex-team-export.json").read_text(encoding="utf-8"))
+            self.assertRegex(marker["version"], STAMPED_VERSION.format(counter="002"))
+
+    def test_powershell_failed_import_restores_the_unstamped_source(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            environment["FAKE_SQL_MODE"] = "sp2"
+            original = (app / "application.apx").read_bytes()
+            command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+
+            result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Stamped application version", result.stdout)
+            self.assertEqual((app / "application.apx").read_bytes(), original)
 
     def test_production_like_dev_connection_is_refused_before_any_sqlcl_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -493,13 +625,14 @@ class PublishAppCliTests(unittest.TestCase):
                     "record_export_state.py",
                     "verify_publish_state.py",
                     "validate_app_source.py",
+                    "stamp_publish_version.py",
                 ):
                     shutil.copy2(ROOT / "scripts" / name, scripts / name)
                 shutil.copy2(ROOT / ".env.example", root / ".env")
                 app = root / "apps" / "DEMO" / "100"
                 deployments = app / "deployments"
                 deployments.mkdir(parents=True)
-                (app / "application.apx").write_text("application {}\n", encoding="utf-8")
+                (app / "application.apx").write_text("app SAMPLE (\n    name: Sample\n)\n", encoding="utf-8")
                 (app / ".apex").mkdir()
                 (app / ".apex" / "apexlang.json").write_text('{"version":1}\n', encoding="utf-8")
                 (deployments / "dev.json").write_text(
@@ -519,14 +652,15 @@ class PublishAppCliTests(unittest.TestCase):
                     "if [[ $mode == import ]]; then\n"
                     "  case \"$FAKE_SQL_MODE\" in\n"
                     "    sp2) printf '%s\\n' 'SP2-0640: Not connected' ;;\n"
-                    "    no-sentinel) : ;;\n"
-                    "    *) printf '%s\\n' 'APEX_IMPORT_VERIFIED:100' ;;\n"
+                    "    no-sentinel) printf '%s\\n' 'Import successful.' ;;\n"
+                    "    skipped) printf '%s\\n' 'Workspace: NO_SUCH_WORKSPACE from deployment file: deployments/dev.json is invalid' 'APEX_IMPORT_VERIFIED:100' ;;\n"
+                    "    *) printf '%s\\n' 'Import successful.' 'APEX_IMPORT_VERIFIED:100' ;;\n"
                     "  esac\n"
                     "elif [[ $mode == export ]]; then\n"
                     "  exported=\"$PWD/apps/DEMO/100\"; mkdir -p \"$exported/.apex\"\n"
                     "  cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"\n"
                     "  cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"\n"
-                    "  printf '%s\\n' '2026-09-26T09:30:00|2026-09-26T09:30:02' > \"$PWD/.apex-export-before.txt\"\n"
+                    "  printf '%s\\n' '2026-09-26T09:30:00|2026-09-26T09:30:02|Release 1.0' > \"$PWD/.apex-export-before.txt\"\n"
                     "  cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"\n"
                     "fi\n",
                     encoding="utf-8",
@@ -583,6 +717,7 @@ class PublishAppCliTests(unittest.TestCase):
                 "raise SystemExit(77)\n",
                 encoding="utf-8",
             )
+            original_source = (app / "application.apx").read_bytes()
 
             result = subprocess.run(
                 ["bash", str(runner), "100", "--env", "staging"],
@@ -597,6 +732,9 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(guard_marker.exists(), "staging promotions must not compare Builder edit timestamps")
             self.assertIn("deployments/staging.json", sql_log.read_text(encoding="utf-8"))
+            # Promotion ships the committed DEV publish tag unchanged.
+            self.assertEqual((app / "application.apx").read_bytes(), original_source)
+            self.assertNotIn("Stamped application version", result.stdout)
 
 
 if __name__ == "__main__":

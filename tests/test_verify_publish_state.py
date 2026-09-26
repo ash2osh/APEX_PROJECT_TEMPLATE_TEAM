@@ -23,13 +23,20 @@ class VerifyPublishStateTests(unittest.TestCase):
         (exported / ".apex" / "apexlang.json").write_bytes(b'{"version":1}\n')
         marker = source / "apex-team-export.json"
         marker.write_text(
-            json.dumps({"applicationId": 100, "builderLastUpdatedOn": "2026-09-26T08:00:00"}) + "\n",
+            json.dumps(
+                {
+                    "applicationId": 100,
+                    "applicationPresent": True,
+                    "builderLastUpdatedOn": "2026-09-26T08:00:00",
+                    "version": "Release 1.0",
+                }
+            ) + "\n",
             encoding="utf-8",
         )
         before = root / "before.txt"
         after = root / "after.txt"
-        before.write_text("2026-09-26T09:30:00|2026-09-26T09:30:03\n", encoding="utf-8")
-        after.write_text("2026-09-26T09:30:00|2026-09-26T09:30:04\n", encoding="utf-8")
+        before.write_text("2026-09-26T09:30:00|2026-09-26T09:30:03|Release 1.0\n", encoding="utf-8")
+        after.write_text("2026-09-26T09:30:00|2026-09-26T09:30:04|Release 1.0\n", encoding="utf-8")
         return source, exported, before, after, marker
 
     def run_verifier(self, source: Path, exported: Path, before: Path, after: Path):
@@ -54,14 +61,15 @@ class VerifyPublishStateTests(unittest.TestCase):
             self.assertEqual(marker["applicationId"], 100)
             self.assertEqual(marker["builderLastUpdatedOn"], "2026-09-26T09:30:00")
             self.assertIs(marker["applicationPresent"], True)
+            self.assertEqual(marker["version"], "Release 1.0")
 
     # An APEXlang import leaves last_updated_on NULL (APEX skips its audit
     # columns while importing), so this is the normal post-publish state.
     def test_imported_app_without_builder_timestamp_advances_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
-            before.write_text("NO_TIMESTAMP|2026-09-26T09:30:03\n", encoding="utf-8")
-            after.write_text("NO_TIMESTAMP|2026-09-26T09:30:04\n", encoding="utf-8")
+            before.write_text("NO_TIMESTAMP|2026-09-26T09:30:03|Release 1.0\n", encoding="utf-8")
+            after.write_text("NO_TIMESTAMP|2026-09-26T09:30:04|Release 1.0\n", encoding="utf-8")
 
             result = self.run_verifier(source, exported, before, after)
 
@@ -69,20 +77,38 @@ class VerifyPublishStateTests(unittest.TestCase):
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 marker,
-                {"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": None},
+                {
+                    "applicationId": 100,
+                    "applicationPresent": True,
+                    "builderLastUpdatedOn": None,
+                    "version": "Release 1.0",
+                },
             )
 
     def test_absent_app_after_import_does_not_advance_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
             original_marker = marker_path.read_bytes()
-            before.write_text("NOT_FOUND|2026-09-26T09:30:03\n", encoding="utf-8")
-            after.write_text("NOT_FOUND|2026-09-26T09:30:04\n", encoding="utf-8")
+            before.write_text("NOT_FOUND|2026-09-26T09:30:03|\n", encoding="utf-8")
+            after.write_text("NOT_FOUND|2026-09-26T09:30:04|\n", encoding="utf-8")
 
             result = self.run_verifier(source, exported, before, after)
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("not visible", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
+
+    def test_intervening_import_does_not_advance_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            before.write_text("NO_TIMESTAMP|2026-09-26T09:30:03|V2 [ASHARIF-2026-09-26r001]\n", encoding="utf-8")
+            after.write_text("NO_TIMESTAMP|2026-09-26T09:30:04|V2 [BOB-2026-09-26r001]\n", encoding="utf-8")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("changed while", result.stderr)
             self.assertEqual(marker_path.read_bytes(), original_marker)
 
     def test_source_mismatch_does_not_advance_marker(self) -> None:
@@ -101,7 +127,7 @@ class VerifyPublishStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
             original_marker = marker_path.read_bytes()
-            after.write_text("2026-09-26T09:31:00|2026-09-26T09:31:02\n", encoding="utf-8")
+            after.write_text("2026-09-26T09:31:00|2026-09-26T09:31:02|Release 1.0\n", encoding="utf-8")
 
             result = self.run_verifier(source, exported, before, after)
 
@@ -113,8 +139,8 @@ class VerifyPublishStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
             original_marker = marker_path.read_bytes()
-            before.write_text("2026-09-26T09:30:03|2026-09-26T09:30:03\n", encoding="utf-8")
-            after.write_text("2026-09-26T09:30:03|2026-09-26T09:30:04\n", encoding="utf-8")
+            before.write_text("2026-09-26T09:30:03|2026-09-26T09:30:03|Release 1.0\n", encoding="utf-8")
+            after.write_text("2026-09-26T09:30:03|2026-09-26T09:30:04|Release 1.0\n", encoding="utf-8")
 
             result = self.run_verifier(source, exported, before, after)
 
@@ -126,8 +152,8 @@ class VerifyPublishStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
             original_marker = marker_path.read_bytes()
-            before.write_text("2026-09-26T09:30:08|2026-09-26T09:30:06\n", encoding="utf-8")
-            after.write_text("2026-09-26T09:30:08|2026-09-26T09:30:07\n", encoding="utf-8")
+            before.write_text("2026-09-26T09:30:08|2026-09-26T09:30:06|Release 1.0\n", encoding="utf-8")
+            after.write_text("2026-09-26T09:30:08|2026-09-26T09:30:07|Release 1.0\n", encoding="utf-8")
 
             result = self.run_verifier(source, exported, before, after)
 

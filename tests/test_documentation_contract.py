@@ -51,6 +51,9 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("commands such as `SET DEFINE`", readme)
         self.assertIn("APEX does not stamp `last_updated_on` while importing", readme)
         self.assertIn("`CREATE MLE MODULE`", readme)
+        self.assertIn("[ASHARIF-2026-09-26r001]", readme)
+        self.assertIn("Commit the stamped", readme)
+        self.assertIn("DEVELOPER_NAME", contents[ROOT / "AGENTS.md"])
 
     def test_application_context_describes_only_current_numeric_paths_and_guards(self) -> None:
         context = (ROOT / "app_context" / "README.md").read_text(encoding="utf-8")

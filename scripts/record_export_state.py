@@ -21,31 +21,43 @@ NO_TIMESTAMP = "NO_TIMESTAMP"
 
 @dataclass(frozen=True)
 class AppState:
-    """One observation of a live application's Builder revision."""
+    """One observation of a live application's revision.
+
+    The Builder timestamp shows Builder saves; the version text carries the
+    DEV publish tag, which is the only trace an import leaves.
+    """
 
     present: bool
     last_updated_on: str | None
+    version: str | None = None
 
     def describe(self) -> str:
         if not self.present:
             return NOT_FOUND
-        return self.last_updated_on or NO_TIMESTAMP
+        return f"{self.last_updated_on or NO_TIMESTAMP}, version {self.version!r}"
 
 
-def read_state(path: Path) -> tuple[AppState, datetime]:
-    value = path.read_text(encoding="utf-8").strip()
-    parts = value.split("|")
-    if len(parts) != 2 or not DB_TIMESTAMP.fullmatch(parts[1]):
-        raise ValueError(f"invalid database application timestamp in {path}")
+def parse_state(line: str) -> tuple[AppState, datetime] | None:
+    """Parse `revision|database time|version`; the version may contain '|'."""
+    parts = line.strip().split("|", 2)
+    if len(parts) != 3 or not DB_TIMESTAMP.fullmatch(parts[1]):
+        return None
     observed_at = datetime.fromisoformat(parts[1])
     if parts[0] == NOT_FOUND:
         return AppState(False, None), observed_at
     if parts[0] == NO_TIMESTAMP:
-        return AppState(True, None), observed_at
+        return AppState(True, None, parts[2]), observed_at
     if not DB_TIMESTAMP.fullmatch(parts[0]):
-        raise ValueError(f"invalid database application timestamp in {path}")
+        return None
     datetime.fromisoformat(parts[0])
-    return AppState(True, parts[0]), observed_at
+    return AppState(True, parts[0], parts[2]), observed_at
+
+
+def read_state(path: Path) -> tuple[AppState, datetime]:
+    parsed = parse_state(path.read_text(encoding="utf-8"))
+    if parsed is None:
+        raise ValueError(f"invalid database application state in {path}")
+    return parsed
 
 
 def marker_payload(app_id: int, state: AppState) -> dict[str, object]:
@@ -53,6 +65,7 @@ def marker_payload(app_id: int, state: AppState) -> dict[str, object]:
         "applicationId": app_id,
         "applicationPresent": state.present,
         "builderLastUpdatedOn": state.last_updated_on,
+        "version": state.version,
     }
 
 
@@ -75,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if before != after:
         print(
-            f"export error: APEX App {args.app_id} changed in Builder while export was running "
+            f"export error: APEX App {args.app_id} changed (Builder save or import) while export was running "
             f"(before: {before.describe()}, after: {after.describe()}). "
             "Wait for Builder edits to stop, then export again.",
             file=sys.stderr,

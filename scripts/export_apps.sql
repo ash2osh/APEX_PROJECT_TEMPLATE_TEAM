@@ -13,6 +13,7 @@ SET ECHO OFF
 SET VERIFY OFF
 SET PAGESIZE 0
 SET TRIMSPOOL ON
+SET LINESIZE 32767
 WHENEVER SQLERROR EXIT FAILURE ROLLBACK
 WHENEVER OSERROR EXIT FAILURE ROLLBACK
 
@@ -26,6 +27,8 @@ SELECT CASE
          WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'
          ELSE TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS')
        END || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
+       -- The version is last because it is free text and may contain '|'.
+       || '|' || MAX(version)
 FROM apex_applications
 WHERE application_id = &&app_id;
 SPOOL OFF
@@ -41,6 +44,8 @@ SELECT CASE
          WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'
          ELSE TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS')
        END || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
+       -- The version is last because it is free text and may contain '|'.
+       || '|' || MAX(version)
 FROM apex_applications
 WHERE application_id = &&app_id;
 SPOOL OFF

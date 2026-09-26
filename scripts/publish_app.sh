@@ -179,11 +179,31 @@ fi
 
 mkdir -p "$REPO_ROOT/scratch"
 staging_dir="$(mktemp -d "$REPO_ROOT/scratch/apex-publish.XXXXXX")"
-cleanup() { rm -rf -- "$staging_dir"; }
+restore_unstamped=false
+cleanup() {
+  if [ "$restore_unstamped" = true ]; then
+    cp -p -- "$staging_dir/application.apx.unstamped" "$app_dir/application.apx" || true
+  fi
+  rm -rf -- "$staging_dir"
+}
 trap cleanup EXIT
 sqlcl_stdin="$staging_dir/.sqlcl-stdin"
 : > "$sqlcl_stdin"
 sqlcl_output="$staging_dir/sqlcl-output.log"
+
+# An import leaves no Builder timestamp, so a DEV publish stamps its own tag
+# into the application version before import. The drift guard compares that
+# version to spot a teammate's import. Staging and production import the
+# committed tag unchanged.
+published_version=""
+if [ "$app_environment" = dev ]; then
+  [ -f "$app_dir/application.apx" ] || fail "DEV publish needs application.apx to stamp the publish tag"
+  cp -p -- "$app_dir/application.apx" "$staging_dir/application.apx.unstamped"
+  restore_unstamped=true
+  published_version="$(python3 "$REPO_ROOT/scripts/stamp_publish_version.py" \
+    "$app_dir/application.apx" "$DEVELOPER_NAME")" || exit 2
+  printf 'Stamped application version: %s\n' "$published_version"
+fi
 
 relative_deployment="deployments/$app_environment.json"
 if ! (
@@ -203,6 +223,13 @@ fi
 if ! grep -Eq "^[[:space:]]*APEX_IMPORT_VERIFIED:${app_id}[[:space:]]*$" "$sqlcl_output"; then
   fail "SQLcl did not verify the imported application; the import result is unknown"
 fi
+# SQLcl exits 0 without importing when, for example, the descriptor names an
+# unknown workspace ("... is invalid"). Only its success line proves an import.
+if ! grep -Eq '^[[:space:]]*Import successful\.[[:space:]]*$' "$sqlcl_output"; then
+  fail "SQLcl did not report a successful APEX import; see the client output above"
+fi
+# The stamped source is live now; keep it for the developer to commit.
+restore_unstamped=false
 
 # Re-export from the selected target and compare exact APEXlang bytes before
 # claiming success. In DEV this same stable observation advances the drift
@@ -249,3 +276,7 @@ fi
 python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}"
 printf 'Published APEX App %s to %s (%s / %s).\n' \
   "$app_id" "$target_label" "$workspace_name" "$parsing_schema"
+if [ -n "$published_version" ]; then
+  printf 'Commit the stamped version in %s: %s\n' \
+    "${app_dir#"$REPO_ROOT/"}/application.apx" "$published_version"
+fi
