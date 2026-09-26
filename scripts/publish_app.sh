@@ -78,6 +78,8 @@ else
   esac
 fi
 
+python3 "$REPO_ROOT/scripts/validate_app_source.py" "$REPO_ROOT" "$app_dir" || exit 2
+
 deployment_file="$app_dir/deployments/$app_environment.json"
 [ -f "$deployment_file" ] || fail "deployment descriptor not found: ${deployment_file#"$REPO_ROOT/"}"
 
@@ -238,6 +240,7 @@ fi
 verify_args=(
   "$app_id" "$app_dir" "$exported_dir"
   "$verify_run_dir/.apex-export-before.txt" "$verify_run_dir/.apex-export-after.txt"
+  --repo-root "$REPO_ROOT"
 )
 if [ "$app_environment" = dev ]; then
   verify_args+=(--record-baseline)

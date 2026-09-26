@@ -7,8 +7,9 @@ usage() {
 Usage: scripts/migrate.sh <migrations/<developer>/<file>.sql> [...]
 
 Checks every developer migration for conflicts before applying the selected
-file(s) to the configured development database. SQLcl substitution is disabled
-while migration bodies run; do not use SET DEFINE ON inside a migration.
+file(s) to the configured development database. Migration files must contain
+SQL or PL/SQL statements only; SQLcl client commands are rejected before
+connecting. SQLcl substitution is disabled while migration bodies run.
 USAGE
 }
 
@@ -58,6 +59,7 @@ if not resolved.is_file():
     raise SystemExit(1)
 PY
   migrations+=("$migration")
+  python3 "$REPO_ROOT/scripts/validate_migration.py" "$REPO_ROOT/$migration" || exit 2
 done
 
 mkdir -p "$REPO_ROOT/scratch"

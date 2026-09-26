@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from record_export_state import read_state
+from validate_app_source import validate_app_source
 
 
 IGNORED_SOURCE_PATHS = {"apex-team-export.json"}
@@ -112,13 +113,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("exported_dir", type=Path)
     parser.add_argument("before_file", type=Path)
     parser.add_argument("after_file", type=Path)
+    parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--record-baseline", action="store_true")
     args = parser.parse_args(argv)
     if args.app_id < 1:
         parser.error("app_id must be a positive integer")
 
     try:
-        source_dir = args.source_dir.resolve(strict=True)
+        source_dir = validate_app_source(args.repo_root, args.source_dir)
         exported_dir = args.exported_dir.resolve(strict=True)
         verify_source_bytes(source_dir, exported_dir)
         revision = read_verified_revision(args.app_id, args.before_file, args.after_file)

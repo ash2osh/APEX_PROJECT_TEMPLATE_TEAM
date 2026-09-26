@@ -52,7 +52,10 @@ state.
   `scripts/team.sh migrate migrations/<developer>/<file>.sql`. A migration
   changes the shared DEV schema for everyone. The checker reports duplicate
   table, view, sequence, and added-column declarations across developer
-  folders; it does not replace SQL review.
+  folders; it does not replace SQL review. Migration files may contain SQL
+  statements and Oracle forms that use a standalone slash, such as PL/SQL
+  blocks, `CREATE TYPE`, and `CREATE LIBRARY`; SQLcl client commands are
+  rejected before connecting.
 - **Promotion:** Put an explicit deployment descriptor in the application
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
   each direct import requires the displayed `[y/N]` confirmation. Add

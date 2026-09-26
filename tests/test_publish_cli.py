@@ -34,6 +34,7 @@ class PublishAppCliTests(unittest.TestCase):
             "normalize_apx.sh",
             "record_export_state.py",
             "verify_publish_state.py",
+            "validate_app_source.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         shutil.copy2(ROOT / ".env.example", root / ".env")
@@ -208,6 +209,58 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("deployments/dev.json", args)
             self.assertEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(root / "apps/DEMO/100"))
 
+    def test_symlinked_app_root_is_rejected_before_sqlcl_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, _, environment = self.make_publish_fixture(root)
+            app = root / "apps" / "DEMO" / "100"
+            outside = root / "external-app"
+            app.rename(outside)
+            try:
+                app.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            result = subprocess.run(
+                ["bash", str(runner), "100", "--force"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symbolic links or reparse points", result.stderr)
+            self.assertFalse(sql_log.exists(), "SQLcl must not run for a symlinked application root")
+
+    def test_powershell_symlinked_app_root_is_rejected_before_sqlcl_import(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            outside = root / "external-app"
+            app.rename(outside)
+            try:
+                app.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            result = subprocess.run(
+                [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100", "--force"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("symbolic links or reparse points", result.stdout + result.stderr)
+            self.assertFalse(sql_log.exists(), "SQLcl must not run for a symlinked application root")
+
     def test_client_error_or_missing_verification_never_reports_published(self) -> None:
         for mode in ("sp2", "no-sentinel"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
@@ -341,6 +394,7 @@ class PublishAppCliTests(unittest.TestCase):
                     "normalize_apx.ps1",
                     "record_export_state.py",
                     "verify_publish_state.py",
+                    "validate_app_source.py",
                 ):
                     shutil.copy2(ROOT / "scripts" / name, scripts / name)
                 shutil.copy2(ROOT / ".env.example", root / ".env")

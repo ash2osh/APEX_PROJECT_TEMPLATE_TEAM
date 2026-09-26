@@ -59,17 +59,17 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 
 $preferredAppDir = Join-Path $repoRoot "apps/$($env:APEX_PARSING_SCHEMA)/$AppId"
 if (Test-Path -LiteralPath $preferredAppDir -PathType Container) {
-  $appDir = (Resolve-Path -LiteralPath $preferredAppDir).Path
+  $appDir = $preferredAppDir
 } else {
   $candidates = @()
   $directAppDir = Join-Path $repoRoot "apps/$AppId"
   if (Test-Path -LiteralPath $directAppDir -PathType Container) {
-    $candidates += (Resolve-Path -LiteralPath $directAppDir).Path
+    $candidates += $directAppDir
   }
   foreach ($schemaDir in (Get-ChildItem -LiteralPath (Join-Path $repoRoot "apps") -Directory -ErrorAction SilentlyContinue)) {
     $candidate = Join-Path $schemaDir.FullName $AppId
     if (Test-Path -LiteralPath $candidate -PathType Container) {
-      $candidates += (Resolve-Path -LiteralPath $candidate).Path
+      $candidates += $candidate
     }
   }
   $candidates = @($candidates | Select-Object -Unique)
@@ -81,6 +81,22 @@ if (Test-Path -LiteralPath $preferredAppDir -PathType Container) {
   }
   $appDir = $candidates[0]
 }
+
+$python = Get-Command python3 -ErrorAction SilentlyContinue
+if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
+if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+if ($null -eq $python) { throw "Python 3 is required to validate the application source tree" }
+$sourceValidator = Join-Path $PSScriptRoot "validate_app_source.py"
+if (-not (Test-Path -LiteralPath $sourceValidator -PathType Leaf)) {
+  throw "publish error: application source validator is missing; refusing import"
+}
+if ($python.Name -in @("py.exe", "py")) {
+  & $python.Source -3 $sourceValidator $repoRoot $appDir
+} else {
+  & $python.Source $sourceValidator $repoRoot $appDir
+}
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$appDir = [System.IO.Path]::GetFullPath($appDir)
 
 $deploymentFile = Join-Path $appDir "deployments/$appEnvironment.json"
 if (-not (Test-Path -LiteralPath $deploymentFile -PathType Leaf)) {
@@ -234,7 +250,8 @@ try {
   $verifyArgs = @(
     $verifyScript, $AppId, $appDir, $exportedDir,
     (Join-Path $verifyRunDir ".apex-export-before.txt"),
-    (Join-Path $verifyRunDir ".apex-export-after.txt")
+    (Join-Path $verifyRunDir ".apex-export-after.txt"),
+    "--repo-root", $repoRoot
   )
   if ($appEnvironment -eq "dev") { $verifyArgs += "--record-baseline" }
   if ($python.Name -in @("py.exe", "py")) {

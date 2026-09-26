@@ -36,7 +36,7 @@ class VerifyPublishStateTests(unittest.TestCase):
         return subprocess.run(
             [
                 "python3", str(VERIFIER), "100", str(source), str(exported), str(before), str(after),
-                "--record-baseline",
+                "--repo-root", str(source.parent), "--record-baseline",
             ],
             text=True,
             capture_output=True,

@@ -94,6 +94,8 @@ deployment descriptors and export marker. It advances the drift baseline only
 when that source matches and the live Builder revision stayed stable during the
 verification export. If SQLcl reports an error, the source differs, or the
 revision is ambiguous, publish fails and leaves the old baseline in place.
+Publish preflight also requires the selected application tree to be physically
+inside the checkout and rejects symbolic links and reparse points.
 
 ## Schema migrations
 
@@ -113,7 +115,11 @@ scripts/team.sh migrate migrations/alice/20260926_101500_add_status.sql
 ```
 
 Migration bodies run with SQLcl substitution disabled, so `&` is treated as
-ordinary SQL text. Do not enable `SET DEFINE ON` inside a migration.
+ordinary SQL text. Migration files may contain SQL statements ending in
+semicolons and Oracle forms that use a standalone slash, including PL/SQL
+blocks, `CREATE TYPE`, `CREATE LIBRARY`, and `CREATE JAVA`. SQLcl client
+commands such as `SET DEFINE`, `PROMPT`, and `WHENEVER` are rejected before
+connecting.
 
 The conflict checker looks for duplicate table, view, sequence, and
 `ALTER TABLE ... ADD` column declarations. It is a guard for common collisions,

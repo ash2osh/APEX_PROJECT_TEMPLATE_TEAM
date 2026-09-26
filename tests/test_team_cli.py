@@ -146,6 +146,7 @@ class TeamCliTests(unittest.TestCase):
             "normalize_apx.sh",
             "record_export_state.py",
             "verify_publish_state.py",
+            "validate_app_source.py",
         ):
             source = ROOT / "scripts" / name
             if source.exists():

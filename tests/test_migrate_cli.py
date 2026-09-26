@@ -16,6 +16,7 @@ class MigrateCliTests(unittest.TestCase):
         for name in (
             "migrate.sh",
             "migrate.sql",
+            "validate_migration.py",
             "check_conflicts.py",
             "load_env.sh",
             "check_db_target.sh",
@@ -128,7 +129,10 @@ class MigrateCliTests(unittest.TestCase):
             developer = migrations / "alice"
             developer.mkdir()
             migration = developer / "20260926_ampersand.sql"
-            migration.write_text("PROMPT Research & Development\n", encoding="utf-8")
+            migration.write_text(
+                "CREATE TABLE RESEARCH_DEVELOPMENT (NAME VARCHAR2(40) DEFAULT 'Research & Development');\n",
+                encoding="utf-8",
+            )
 
             result = self.run_migrate(script, migration, sql_log)
 
@@ -136,6 +140,31 @@ class MigrateCliTests(unittest.TestCase):
             generated = sql_log.with_suffix(".driver.sql").read_text(encoding="utf-8")
             self.assertIn("EXIT SUCCESS COMMIT", generated)
             self.assertLess(generated.index("SET DEFINE OFF"), generated.index("ampersand.sql"))
+
+    def test_sqlcl_client_directives_are_rejected_before_sqlcl(self) -> None:
+        for body in (
+            "SET DEFINE ON\n",
+            "CREATE TABLE ORDERS (ID NUMBER);\nPROMPT after DML\n",
+            "WHENEVER SQLERROR CONTINUE\n",
+            "HOST echo unexpected\n",
+            "@@UPDATE.sql\nSELECT 1 FROM dual;\n",
+            "/* outer /* inner */\nPROMPT client directive\n/* close */ -- */\nSELECT 1 FROM dual;\n",
+            "BEGIN\nNULL;\nEND;\n.\nPROMPT client directive\n/\n",
+            'CREATE JAVA SOURCE NAMED "Test" AS\npublic class Test {}\n;\nPROMPT client directive\n/\n',
+            'CREATE JAVA SOURCE NAMED "Test" AS\npublic class Test {\n/*\n;\n*/\n}\nPROMPT client directive\n/\n',
+        ):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as temporary:
+                script, migrations, sql_log = self.make_checkout(Path(temporary))
+                developer = migrations / "alice"
+                developer.mkdir()
+                migration = developer / "unsafe.sql"
+                migration.write_text(body, encoding="utf-8")
+
+                result = self.run_migrate(script, migration, sql_log)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SQL-only migration", result.stderr)
+                self.assertFalse(sql_log.exists(), "SQLcl must not run for client directives")
 
 
 if __name__ == "__main__":

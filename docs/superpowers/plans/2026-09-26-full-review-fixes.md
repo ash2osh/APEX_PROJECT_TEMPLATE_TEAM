@@ -38,12 +38,12 @@
 
 **Interfaces:** Migration runner continues to accept repository-relative `migrations/<developer>/<file>.sql` inputs. Publish wrappers may report success only after SQLcl exits successfully, emits no client error, and its driver reaches a verification sentinel.
 
-- [ ] Write regression tests for stable nonzero Oracle failures, migration rollback/success commit directives, literal ampersands in migration content, and SP2/client-error publishes.
-- [ ] Run the focused tests and confirm each new regression fails against the current implementation.
-- [ ] Resolve the migration file path before executing it with SQLcl substitution disabled; use explicit failure rollback and success commit.
-- [ ] Change all SQLcl drivers to stable success/failure exit statuses and make both publish wrappers reject SQLcl client diagnostics or a missing post-import sentinel.
-- [ ] Run the focused and full unittest suites; confirm each regression passes.
-- [ ] Commit as `fix: fail closed on SQLcl and migration errors`.
+- [x] Write regression tests for stable nonzero Oracle failures, migration rollback/success commit directives, literal ampersands in migration content, and SP2/client-error publishes.
+- [x] Run the focused tests and confirm each new regression fails against the current implementation.
+- [x] Resolve the migration file path before executing it with SQLcl substitution disabled; use explicit failure rollback and success commit.
+- [x] Change all SQLcl drivers to stable success/failure exit statuses and make both publish wrappers reject SQLcl client diagnostics or a missing post-import sentinel.
+- [x] Run the focused and full unittest suites; confirm each regression passes.
+- [x] Commit as `fix: fail closed on SQLcl and migration errors` (`843726c`).
 
 ### Task 2: Configuration parsing and PowerShell filesystem boundaries
 
@@ -53,11 +53,11 @@
 
 **Interfaces:** Keep the existing environment variable names and SQLcl invocation API. Mirror destinations must be verified as physically contained in the repository before moves/deletes.
 
-- [ ] Add failing fixtures for `$`/`#` Oracle identifiers, UTF-8 BOM profiles, a checkout containing brackets, and a destination ancestor that is a symlink to an external directory.
-- [ ] Run the focused tests and confirm they expose the parser, launch, or containment failures.
-- [ ] Make the Bash parser accept the same identifiers and BOMs as PowerShell, launch SQLcl from literal paths, and reject reparse-point/symlink destination ancestors before replacement.
-- [ ] Run the focused and full unittest suites plus PowerShell parser checks; confirm the external fixture remains untouched.
-- [ ] Commit as `fix: harden cross-platform path and config handling`.
+- [x] Add failing fixtures for `$`/`#` Oracle identifiers, UTF-8 BOM profiles, a checkout containing brackets, and a destination ancestor that is a symlink to an external directory.
+- [x] Run the focused tests and confirm they expose the parser, launch, or containment failures.
+- [x] Make the Bash parser accept the same identifiers and BOMs as PowerShell, launch SQLcl from literal paths, and reject reparse-point/symlink destination ancestors before replacement.
+- [x] Run the focused and full unittest suites plus PowerShell parser checks; confirm the external fixture remains untouched.
+- [x] Commit as `fix: harden cross-platform path and config handling` (`6b0f987`).
 
 ### Task 3: Backup spool paths for valid Oracle schema names
 
@@ -67,11 +67,11 @@
 
 **Interfaces:** Database mirrors remain under `database/<configured-schema>/`; only staging/spool paths may use an encoded filesystem-safe schema component.
 
-- [ ] Add failing Bash and PowerShell workflow fixtures using a schema containing `$` and assert staged files are installed under the original schema spelling.
-- [ ] Run the focused tests and observe the raw schema path failing in the fixture.
-- [ ] Map the configured schema to a collision-free spool directory for every object file and manifest, then relocate verified scope output before replacing mirrors.
-- [ ] Run both focused fixtures and the full unittest suite; confirm object counts and final mirror paths match.
-- [ ] Commit as `fix: spool backups for dollar schemas`.
+- [x] Add failing Bash and PowerShell workflow fixtures using a schema containing `$` and assert staged files are installed under the original schema spelling.
+- [x] Run the focused tests and observe the raw schema path failing in the fixture.
+- [x] Map the configured schema to a collision-free spool directory for every object file and manifest, then relocate verified scope output before replacing mirrors.
+- [x] Run both focused fixtures and the full unittest suite; confirm object counts and final mirror paths match.
+- [x] Commit as `fix: spool backups for dollar schemas` (`82c5ed7`).
 
 ### Task 4: Scanner correctness, active documentation, and CI coverage
 
@@ -100,6 +100,19 @@
 - [x] Re-export after the import sentinel, compare exact APEXlang file sets and bytes, and record the post-import DEV revision only after the export stayed stable and unambiguous.
 - [x] Run focused and full unittest suites; confirm Bash and PowerShell first publishes advance the baseline and failed/uncertain cases do not.
 - [x] Commit as `fix: advance Builder baseline after verified publish`.
+
+### Task 6: Validate publish source boundaries and migration input grammar
+
+**Files:**
+- Add: `scripts/validate_app_source.py`, `scripts/validate_migration.py`
+- Modify: Bash and PowerShell publish/migration wrappers, publish-state verification, active workflow documentation
+- Test: `tests/test_validate_app_source.py`, `tests/test_validate_migration.py`, and wrapper CLI suites
+
+- [x] Add regressions for symlinked or external APEXlang source trees and SQLcl client commands embedded in migration bodies.
+- [x] Reject source links/reparse points and checkout escapes before import; require exact source verification to use the same boundary check.
+- [x] Restrict migrations to SQL and supported slash-terminated Oracle forms, including `CREATE JAVA` resolve/compile options, and reject SQLcl directives before opening SQLcl.
+- [x] Reproduce SQLcl PL/SQL period and Java semicolon buffer terminators under `/nolog`; reject those boundaries, including Java block-comment semicolons.
+- [x] Run the complete unit suite and Bash/PowerShell/Python checks.
 
 ## Final verification and delivery
 
