@@ -141,6 +141,11 @@ class TeamCliTests(unittest.TestCase):
             "publish_app.sh",
             "publish_app.sql",
             "load_env.sh",
+            "export_apps.sql",
+            "verify_db_access.sql",
+            "normalize_apx.sh",
+            "record_export_state.py",
+            "verify_publish_state.py",
         ):
             source = ROOT / "scripts" / name
             if source.exists():
@@ -153,6 +158,8 @@ class TeamCliTests(unittest.TestCase):
         deployments = app / "deployments"
         deployments.mkdir(parents=True)
         (app / "application.apx").write_text("app SAMPLE ()\n", encoding="utf-8")
+        (app / ".apex").mkdir()
+        (app / ".apex" / "apexlang.json").write_text('{"version":1}\n', encoding="utf-8")
         (deployments / "prod.json").write_text(
             '{"workspace":{"name":"PROD_WORKSPACE"},"app":{"id":100,'
             '"databaseSession":{"parsingSchema":"PROD_APP"}}}\n',
@@ -164,8 +171,11 @@ class TeamCliTests(unittest.TestCase):
         fake_sql = fake_bin / "sql"
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
-            "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
-            "printf '%s\\n' 'APEX_IMPORT_VERIFIED:100'\n",
+            "mode=other; export_schema=DEMO\n"
+            "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
+            "if [[ $mode == export ]]; then found_script=0; for arg in \"$@\"; do if [[ $found_script == 1 ]]; then export_schema=$arg; break; fi; case \"$arg\" in *@*export_apps.sql) found_script=1 ;; esac; done; fi\n"
+            "if [[ $mode == import ]]; then printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"; printf '%s\\n' 'APEX_IMPORT_VERIFIED:100'; fi\n"
+            "if [[ $mode == export ]]; then exported=\"$PWD/apps/$export_schema/100\"; mkdir -p \"$exported/.apex\"; cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"; cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"; printf '%s\\n' '2026-09-26T09:30:00|2026-09-26T09:30:02' > \"$PWD/.apex-export-before.txt\"; cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"; fi\n",
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
@@ -175,6 +185,7 @@ class TeamCliTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PATH"] = f"{script.parents[1] / 'bin'}{os.pathsep}{environment['PATH']}"
         environment["FAKE_SQL_LOG"] = str(sql_log)
+        environment["FAKE_SOURCE_DIR"] = (script.parents[1] / "apps/DEMO/100").as_posix()
         environment["PROJECT_ENV_FILE"] = str(script.parents[1] / ".env")
         return subprocess.run(
             ["bash", str(script), "100", "--env", "prod", *args],
@@ -198,7 +209,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("PROD_APP", result.stdout)
             self.assertIn("deployments/prod.json", result.stdout)
             sql_lines = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("sql ")]
-            self.assertEqual(len(sql_lines), 1, result.stdout)
+            self.assertEqual(len(sql_lines), 2, result.stdout)
             self.assertEqual(
                 shlex.split(sql_lines[0]),
                 [
@@ -215,6 +226,23 @@ class TeamCliTests(unittest.TestCase):
                     "100",
                 ],
             )
+            self.assertEqual(
+                shlex.split(sql_lines[1]),
+                [
+                    "sql",
+                    "-S",
+                    "-noupdates",
+                    "-name",
+                    "prod-db",
+                    f"@{script.parents[1] / 'scripts' / 'export_apps.sql'}",
+                    "PROD_APP",
+                    "100",
+                    "production",
+                    "PROD_DEPLOYER",
+                ],
+            )
+            self.assertIn("verify_publish_state.py", result.stdout)
+            self.assertIn("APEX_PUBLISH_SOURCE_VERIFIED:100", result.stdout)
             self.assertFalse(sql_log.exists(), "manual mode must not invoke SQLcl")
 
     def test_manual_deploy_works_without_a_local_production_connection(self) -> None:

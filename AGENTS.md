@@ -42,8 +42,11 @@ state.
   exporter and guard fail closed when it matches the current database second.
   This timestamp cannot see unsaved Builder edits; communicate with teammates
   before publishing. The guard refuses to overwrite newer Builder work. Export
-  and reconcile before retrying. Use `--force` only when the user explicitly
-  directs an override after review.
+  and reconcile before retrying. After import, publish re-exports the app and
+  requires exact APEXlang file and byte equality before it advances the DEV
+  baseline. A failed or ambiguous verification leaves the old baseline in
+  place, so the next publish still refuses newer Builder state. Use `--force`
+  only when the user explicitly directs an override after review.
 - **Migrations:** Add immutable files under `migrations/<developer>/`, run
   `scripts/team.sh check-conflicts`, then apply selected files with
   `scripts/team.sh migrate migrations/<developer>/<file>.sql`. A migration

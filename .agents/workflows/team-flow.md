@@ -10,7 +10,9 @@ commits. Git branches do not isolate shared Builder or database state.
 2. **File-first:** Edit and commit the app's APEXlang source. Tell teammates
    which numeric app ID will be published and check for in-progress Builder
    work. Run `scripts/team.sh publish <numeric-app-id> --env dev`; the drift
-   guard refuses to overwrite Builder edits newer than the local export.
+   guard refuses to overwrite Builder edits newer than the local export. After
+   import, publish re-exports the app, verifies exact APEXlang file bytes, and
+   advances the DEV baseline only when the live revision stayed stable.
 3. **Schema work:** Add immutable SQL files under
    `migrations/<developer>/`, run `scripts/team.sh check-conflicts`, then
    apply selected files with `scripts/team.sh migrate <file>`. This changes

@@ -85,21 +85,21 @@
 - [x] Run the focused tests and confirm each finding is detected.
 - [x] Parse optional sequence syntax, ignore comment fence delimiters while retaining real payload behavior, align active docs with current numeric app/migration paths, and add unittest discovery to CI.
 - [x] Run focused tests and full unittest suite (61 tests); confirm extractor parser output contracts remain unchanged.
-- [ ] Commit as `fix: align scanners docs and CI with supported workflows`.
+- [x] Commit as `fix: align scanners docs and CI with supported workflows` (`952a9d8`).
 
 ### Task 5: Refresh the development Builder baseline after verified publish
 
 **Files:**
-- Modify: `scripts/publish_app.sh`, `scripts/publish_app.ps1`, `scripts/check_builder_drift.py` as needed
-- Test: `tests/test_publish_cli.py`, `tests/test_builder_drift.py`
+- Modify: `scripts/publish_app.sh`, `scripts/publish_app.ps1`, `scripts/deploy.sh`, `scripts/verify_publish_state.py`, `README.md`, `AGENTS.md`, `.agents/workflows/team-flow.md`
+- Test: `tests/test_publish_cli.py`, `tests/test_team_cli.py`, `tests/test_verify_publish_state.py`, `tests/test_documentation_contract.py`
 
 **Interfaces:** A successful development publish records a baseline for the exact app/source revision it imported. Failed imports or uncertain live revisions must not advance the baseline.
 
-- [ ] Add failing fake-SQLcl tests where import advances the live app revision and a second publish must pass, plus a failure/race case that must preserve refusal.
-- [ ] Run the focused tests and confirm the current publish leaves a stale baseline.
-- [ ] Record the post-import revision only after the import sentinel and source identity are verified; refuse if Builder state changed during the publish window.
-- [ ] Run focused and full unittest suites; confirm first publish advances the baseline and failed/uncertain cases do not.
-- [ ] Commit as `fix: advance Builder baseline after verified publish`.
+- [x] Add failing fake-SQLcl tests where import advances the live app revision and a second publish must pass, plus failure/race cases that must preserve refusal.
+- [x] Run the focused tests and confirm the current publish leaves a stale baseline or reports success after an unverified post-import source.
+- [x] Re-export after the import sentinel, compare exact APEXlang file sets and bytes, and record the post-import DEV revision only after the export stayed stable and unambiguous.
+- [x] Run focused and full unittest suites; confirm Bash and PowerShell first publishes advance the baseline and failed/uncertain cases do not.
+- [x] Commit as `fix: advance Builder baseline after verified publish`.
 
 ## Final verification and delivery
 

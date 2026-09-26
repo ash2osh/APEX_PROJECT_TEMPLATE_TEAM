@@ -200,5 +200,48 @@ fi
 if ! grep -Eq "^[[:space:]]*APEX_IMPORT_VERIFIED:$app_id[[:space:]]*$" "$sqlcl_output"; then
   fail "SQLcl did not verify the imported application; the import result is unknown"
 fi
+
+# Re-export from the selected target and compare exact APEXlang bytes before
+# claiming success. In DEV this same stable observation advances the drift
+# baseline; staging and production checks never modify the DEV marker.
+verify_run_dir="$staging_dir/post-import/runs/$app_id"
+verify_parent="$verify_run_dir/apps/$parsing_schema"
+mkdir -p "$verify_parent"
+verify_sqlcl_output="$staging_dir/post-import/sqlcl-output.log"
+if ! (
+  cd "$verify_run_dir"
+  sql -S -noupdates -name "$sqlcl_connection" \
+    "@$REPO_ROOT/scripts/export_apps.sql" \
+    "$parsing_schema" "$app_id" "$target_environment" "$expected_user" \
+    < "$sqlcl_stdin"
+) > "$verify_sqlcl_output" 2>&1; then
+  cat "$verify_sqlcl_output" >&2
+  fail "post-import APEX export failed; the imported source was not verified"
+fi
+cat "$verify_sqlcl_output"
+if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:' "$verify_sqlcl_output"; then
+  fail "SQLcl reported an error while verifying the post-import APEX source"
+fi
+
+exported_dirs=()
+while IFS= read -r -d '' exported_dir; do
+  exported_dirs+=("$exported_dir")
+done < <(find "$verify_parent" -mindepth 1 -maxdepth 1 -type d -print0)
+if [ "${#exported_dirs[@]}" -ne 1 ]; then
+  fail "expected exactly one post-import export for application $app_id, found ${#exported_dirs[@]}"
+fi
+exported_dir="${exported_dirs[0]}"
+if [ ! -f "$exported_dir/application.apx" ] || [ ! -f "$exported_dir/.apex/apexlang.json" ]; then
+  fail "post-import export for application $app_id is missing required APEXlang source files"
+fi
+"$REPO_ROOT/scripts/normalize_apx.sh" "$exported_dir"
+verify_args=(
+  "$app_id" "$app_dir" "$exported_dir"
+  "$verify_run_dir/.apex-export-before.txt" "$verify_run_dir/.apex-export-after.txt"
+)
+if [ "$app_environment" = dev ]; then
+  verify_args+=(--record-baseline)
+fi
+python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}"
 printf 'Published APEX App %s to %s (%s / %s).\n' \
   "$app_id" "$target_label" "$workspace_name" "$parsing_schema"

@@ -88,6 +88,13 @@ second. This persisted timestamp cannot reveal unsaved Builder edits, so
 coordinate with teammates before publishing. Staging and production promotion
 uses the separate `deploy` command.
 
+After a successful DEV import, `publish` exports the app again and compares the
+APEXlang file names and bytes with the local source, excluding the local
+deployment descriptors and export marker. It advances the drift baseline only
+when that source matches and the live Builder revision stayed stable during the
+verification export. If SQLcl reports an error, the source differs, or the
+revision is ambiguous, publish fails and leaves the old baseline in place.
+
 ## Schema migrations
 
 Create timestamped SQL files in your own developer folder and keep them

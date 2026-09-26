@@ -93,7 +93,22 @@ if [ "$manual" = true ]; then
     "$app_dir" "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "deployments/$app_environment.json" "$app_id"
-  printf '3. Confirm the identity check succeeds and SQLcl prints APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
+  verify_parent="apps/$parsing_schema"
+  printf '3. Check that import completed without SQLcl errors and printed APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
+  printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'
+  printf '   verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-manual-verify.XXXXXX")\n'
+  printf '   cd "$verify_dir"\n'
+  printf '   sql -S -noupdates -name %q %q %q %q %q %q\n' \
+    "$sqlcl_connection" "@$REPO_ROOT/scripts/export_apps.sql" \
+    "$parsing_schema" "$app_id" "$target_environment" "$expected_user"
+  printf '   shopt -s nullglob\n'
+  printf '   export_dirs=(%q/*/)\n' "$verify_parent"
+  printf '%s\n' '   test "${#export_dirs[@]}" -eq 1 || { echo "expected exactly one APEX export" >&2; exit 1; }'
+  printf '%s\n' '   exported_dir="${export_dirs[0]%/}"'
+  printf '   %q "$exported_dir"\n' "$REPO_ROOT/scripts/normalize_apx.sh"
+  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt\n' \
+    "$REPO_ROOT/scripts/verify_publish_state.py" "$app_id" "$app_dir"
+  printf '5. Treat the deployment as verified only if that check prints APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
   exit 0
 fi
 

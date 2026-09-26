@@ -175,6 +175,9 @@ if ($appEnvironment -eq "dev") {
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
 $stdinFile = [System.IO.Path]::GetTempFileName()
 $transcriptFile = [System.IO.Path]::GetTempFileName()
+$verifyTranscriptFile = [System.IO.Path]::GetTempFileName()
+$publishWorkDir = Join-Path $repoRoot ("scratch/apex-publish-" + [Guid]::NewGuid().ToString("N"))
+[System.IO.Directory]::CreateDirectory($publishWorkDir) | Out-Null
 try {
   $relativeDeployment = "deployments/$appEnvironment.json"
   $sqlclExit = Invoke-Sqlcl -WorkingDirectory $appDir -StdInFile $stdinFile -Arguments @(
@@ -191,7 +194,61 @@ try {
   if (-not [regex]::IsMatch($sqlclOutput, "(?m)^\s*APEX_IMPORT_VERIFIED:$AppId\s*$")) {
     throw "SQLcl did not verify the imported application; the import result is unknown"
   }
+
+  # Re-export the selected target and compare exact APEXlang bytes before
+  # reporting success. Only a DEV publish updates the local DEV drift marker.
+  $verifyRunDir = Join-Path $publishWorkDir "post-import/runs/$AppId"
+  $verifyParent = Join-Path $verifyRunDir "apps/$parsingSchema"
+  [System.IO.Directory]::CreateDirectory($verifyParent) | Out-Null
+  $verifyExit = Invoke-Sqlcl -WorkingDirectory $verifyRunDir -StdInFile $stdinFile `
+    -Arguments @(
+      "-S", "-noupdates", "-name", $sqlclConnection,
+      "@$(Join-Path $PSScriptRoot 'export_apps.sql')",
+      $parsingSchema, $AppId, $targetEnvironment, $expectedUser
+    ) -TranscriptFile $verifyTranscriptFile
+  $verifyOutput = [System.IO.File]::ReadAllText($verifyTranscriptFile)
+  if (-not [string]::IsNullOrEmpty($verifyOutput)) { Write-Output $verifyOutput }
+  if ($verifyExit -ne 0) {
+    throw "post-import APEX export failed with exit code $verifyExit; the imported source was not verified"
+  }
+  if ([regex]::IsMatch($verifyOutput, '(?i)\b(?:SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:')) {
+    throw "SQLcl reported an error while verifying the post-import APEX source"
+  }
+
+  $exportedDirs = @(Get-ChildItem -LiteralPath $verifyParent -Directory)
+  if ($exportedDirs.Count -ne 1) {
+    throw "expected exactly one post-import export for application $AppId, found $($exportedDirs.Count)"
+  }
+  $exportedDir = $exportedDirs[0].FullName
+  if (-not (Test-Path -LiteralPath (Join-Path $exportedDir "application.apx") -PathType Leaf) -or
+      -not (Test-Path -LiteralPath (Join-Path $exportedDir ".apex/apexlang.json") -PathType Leaf)) {
+    throw "post-import export for application $AppId is missing required APEXlang source files"
+  }
+  & (Join-Path $PSScriptRoot "normalize_apx.ps1") $exportedDir
+
+  $python = Get-Command python3 -ErrorAction SilentlyContinue
+  if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
+  if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+  if ($null -eq $python) { throw "Python 3 is required to verify the post-import APEX source" }
+  $verifyScript = Join-Path $PSScriptRoot "verify_publish_state.py"
+  $verifyArgs = @(
+    $verifyScript, $AppId, $appDir, $exportedDir,
+    (Join-Path $verifyRunDir ".apex-export-before.txt"),
+    (Join-Path $verifyRunDir ".apex-export-after.txt")
+  )
+  if ($appEnvironment -eq "dev") { $verifyArgs += "--record-baseline" }
+  if ($python.Name -in @("py.exe", "py")) {
+    & $python.Source -3 @verifyArgs
+  } else {
+    & $python.Source @verifyArgs
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
+  }
   Write-Output "Published APEX App $AppId to $targetLabel ($($deployment.workspace.name) / $parsingSchema)."
 } finally {
-  Remove-Item -LiteralPath $stdinFile, $transcriptFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $publishWorkDir) {
+    Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }

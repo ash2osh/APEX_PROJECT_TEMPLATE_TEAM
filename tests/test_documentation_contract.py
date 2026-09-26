@@ -45,6 +45,9 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, readme)
+        self.assertIn("After a successful DEV import", readme)
+        self.assertIn("APEXlang file names and bytes", readme)
+        self.assertIn("leaves the old baseline in place", readme)
 
     def test_application_context_describes_only_current_numeric_paths_and_guards(self) -> None:
         context = (ROOT / "app_context" / "README.md").read_text(encoding="utf-8")
