@@ -15,6 +15,8 @@ Commands:
   backup-db                                   Refresh the table and code mirrors
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
+  upgrade-template [--source <url|path>] [--ref <ref>] [--dry-run]
+                                              Update template-owned files from the template
   --help                                      Show this help
 USAGE
 }
@@ -84,6 +86,21 @@ case "$command_name" in
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh deploy <numeric_app_id> --env <staging|prod> [--manual]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       "$REPO_ROOT/scripts/deploy.sh" "$@"
+    ;;
+  upgrade-template)
+    if python3 "$REPO_ROOT/scripts/upgrade_template.py" --project-root "$REPO_ROOT" "$@"; then
+      upgrade_status=0
+    else
+      upgrade_status=$?
+    fi
+    dry_run=false
+    for upgrade_argument in "$@"; do [ "$upgrade_argument" != --dry-run ] || dry_run=true; done
+    if [ "$upgrade_status" -ne 2 ] && [ "$dry_run" = false ] && [ -f "$REPO_ROOT/.env" ]; then
+      if ! env_check="$(bash -c 'source "$1" "$2"' bash "$REPO_ROOT/scripts/load_env.sh" "$REPO_ROOT/.env" 2>&1)"; then
+        printf 'warning: .env needs attention after the upgrade:\n%s\n' "$env_check" >&2
+      fi
+    fi
+    exit "$upgrade_status"
     ;;
   *)
     fail "unknown command '$command_name'; use --help to list commands"

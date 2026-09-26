@@ -19,6 +19,8 @@ Commands:
   backup-db                                   Refresh the table and code mirrors
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
+  upgrade-template [--source <url|path>] [--ref <ref>] [--dry-run]
+                                              Update template-owned files from the template
 "@ | Write-Output
 }
 
@@ -93,6 +95,23 @@ switch ($Command) {
   "deploy" {
     if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 deploy <numeric_app_id> --env <staging|prod> [--manual]" }
     Invoke-TeamBash -ScriptName "deploy.sh" -ScriptArguments $Arguments
+  }
+  "upgrade-template" {
+    $python = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
+    if ($null -eq $python) { throw "Python 3 is required to upgrade the template" }
+    $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+    & $python.Source (Join-Path $PSScriptRoot "upgrade_template.py") --project-root $repoRoot @Arguments
+    $upgradeStatus = $LASTEXITCODE
+    $envFile = Join-Path $repoRoot ".env"
+    if ($upgradeStatus -ne 2 -and $Arguments -notcontains "--dry-run" -and (Test-Path -LiteralPath $envFile)) {
+      try {
+        . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $envFile
+      } catch {
+        Write-Warning ".env needs attention after the upgrade: $($_.Exception.Message)"
+      }
+    }
+    exit $upgradeStatus
   }
   default { throw "unknown command '$Command'; use --help to list commands" }
 }

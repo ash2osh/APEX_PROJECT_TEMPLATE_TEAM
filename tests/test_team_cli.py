@@ -40,7 +40,16 @@ class TeamCliTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        for command in ("doctor", "export", "publish", "check-conflicts", "migrate", "backup-db", "deploy"):
+        for command in (
+            "doctor",
+            "export",
+            "publish",
+            "check-conflicts",
+            "migrate",
+            "backup-db",
+            "deploy",
+            "upgrade-template",
+        ):
             self.assertIn(command, result.stdout)
 
     def test_check_conflicts_command_does_not_require_database_configuration(self) -> None:
@@ -278,6 +287,92 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("-name", args)
             self.assertIn("prod-db", args)
             self.assertIn("deployments/prod.json", args)
+
+    def make_upgrade_fixture(self, root: Path) -> tuple[Path, Path]:
+        template = root / "template"
+        project = root / "project"
+        for repo in (template, project):
+            repo.mkdir()
+            subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+        (template / "template-manifest.json").write_text(
+            '{"schemaVersion": 1, "upstream": "x", "templateOwned": ["scripts/**", "template-manifest.json"],'
+            ' "projectOwned": [], "templateOnly": []}',
+            encoding="utf-8",
+        )
+        (template / "scripts").mkdir()
+        (template / "scripts" / "hello.sh").write_text("echo template\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(template), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(template), "commit", "-q", "-m", "v1"], check=True)
+        (project / "scripts").mkdir()
+        for name in ("team.sh", "team.ps1", "upgrade_template.py", "load_env.sh", "load_env.ps1"):
+            shutil.copy2(ROOT / "scripts" / name, project / "scripts" / name)
+        # .env is local configuration; ignoring it keeps the tree clean for the engine.
+        (project / ".gitignore").write_text(".env\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(project), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(project), "commit", "-q", "-m", "project"], check=True)
+        return template, project
+
+    def test_upgrade_template_command_runs_the_engine_for_this_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            template, project = self.make_upgrade_fixture(Path(temporary))
+
+            result = subprocess.run(
+                ["bash", str(project / "scripts" / "team.sh"), "upgrade-template", "--source", str(template)],
+                cwd=project,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CREATE scripts/hello.sh", result.stdout)
+            self.assertTrue((project / ".template-lock.json").is_file())
+
+    def test_upgrade_template_warns_when_env_misses_a_new_required_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            template, project = self.make_upgrade_fixture(Path(temporary))
+            (project / ".env").write_text("PROJECT_NAME=x\n", encoding="utf-8")
+
+            result = subprocess.run(
+                ["bash", str(project / "scripts" / "team.sh"), "upgrade-template", "--source", str(template)],
+                cwd=project,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(".env needs attention after the upgrade", result.stderr)
+
+    def test_powershell_upgrade_template_command_runs_the_engine(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            template, project = self.make_upgrade_fixture(Path(temporary))
+
+            result = subprocess.run(
+                [
+                    pwsh,
+                    "-NoProfile",
+                    "-File",
+                    str(project / "scripts" / "team.ps1"),
+                    "upgrade-template",
+                    "--source",
+                    str(template),
+                    "--dry-run",
+                ],
+                cwd=project,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CREATE scripts/hello.sh", result.stdout)
+            self.assertFalse((project / ".template-lock.json").exists())
 
 
 if __name__ == "__main__":
