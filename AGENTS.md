@@ -52,7 +52,9 @@ state.
   exact APEXlang file and byte equality before it advances the DEV baseline.
   A failed or ambiguous verification leaves the old baseline in place, so the
   next publish still refuses newer Builder state. Use `--force` only when the
-  user explicitly directs an override after review.
+  user explicitly directs an override after review. When publish refuses,
+  follow [docs/publish-rules.md](docs/publish-rules.md), which lists every
+  refusal, its meaning, and the fix.
 - **Migrations:** Add immutable files under `migrations/<developer>/`, run
   `scripts/team.sh check-conflicts`, then apply selected files with
   `scripts/team.sh migrate migrations/<developer>/<file>.sql`. A migration

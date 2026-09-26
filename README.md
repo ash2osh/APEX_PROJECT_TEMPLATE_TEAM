@@ -121,6 +121,9 @@ line.
 Publish preflight also requires the selected application tree to be physically
 inside the checkout and rejects symbolic links and reparse points.
 
+When publish refuses, see [docs/publish-rules.md](docs/publish-rules.md) for
+every rule, what each message means, and what to do.
+
 ## Schema migrations
 
 Create timestamped SQL files in your own developer folder and keep them

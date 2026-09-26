@@ -10,6 +10,38 @@ DOCS = (
     ROOT / ".agents" / "workflows" / "team-flow.md",
     ROOT / ".agents" / "rules" / "agent-safety.md",
     ROOT / "app_context" / "README.md",
+    ROOT / "docs" / "publish-rules.md",
+)
+# Each refusal the publish guide explains, and the script that prints it. The
+# guide quotes these verbatim, so rewording a message must update the guide.
+PUBLISH_REFUSALS = (
+    ("scripts/check_builder_drift.py", "Database export baseline is unavailable"),
+    ("scripts/check_builder_drift.py", "Could not read live APEX App"),
+    ("scripts/check_builder_drift.py", "was created after the local export"),
+    ("scripts/check_builder_drift.py", "no longer exists in the target after the local export"),
+    ("scripts/check_builder_drift.py", "was re-imported since the local export"),
+    ("scripts/check_builder_drift.py", "was re-imported after the local export"),
+    ("scripts/check_builder_drift.py", "was modified in Builder on"),
+    ("scripts/check_builder_drift.py", "changed version since the local export"),
+    ("scripts/check_builder_drift.py", "matches the current database second"),
+    ("scripts/check_db_target.sh", "resembles production but DB_ENVIRONMENT"),
+    ("scripts/team.sh", "publish targets DEV only"),
+    ("scripts/publish_app.sh", "deployment descriptor not found"),
+    ("scripts/validate_app_source.py", "application source is outside the repository"),
+    ("scripts/validate_app_source.py", "symbolic links or reparse points are not supported"),
+    ("scripts/publish_app.sh", "DEV publish needs application.apx to stamp the publish tag"),
+    ("scripts/stamp_publish_version.py", "could not stamp the application version"),
+    ("scripts/publish_app.sh", "SQLcl application import failed"),
+    ("scripts/publish_app.sh", "SQLcl reported a client or database error during the application import"),
+    ("scripts/publish_app.sh", "SQLcl did not verify the imported application"),
+    ("scripts/publish_app.sh", "SQLcl did not report a successful APEX import"),
+    ("scripts/publish_app.sh", "post-import APEX export failed"),
+    ("scripts/verify_publish_state.py", "APEXlang source file set does not match the post-import re-export"),
+    ("scripts/verify_publish_state.py", "APEXlang source bytes do not match the post-import re-export"),
+    ("scripts/verify_publish_state.py", "is not visible in the post-import state"),
+    ("scripts/verify_publish_state.py", "changed while its post-import source was being verified"),
+    ("scripts/verify_publish_state.py", "same database second"),
+    ("scripts/verify_publish_state.py", "later than the database-time observation"),
 )
 RETIRED_TERMS = (
     "prepare-publish",
@@ -54,6 +86,16 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("[ASHARIF-2026-09-26r001]", readme)
         self.assertIn("Commit the stamped", readme)
         self.assertIn("DEVELOPER_NAME", contents[ROOT / "AGENTS.md"])
+
+    def test_publish_guide_explains_every_refusal_and_is_linked(self) -> None:
+        guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
+        for script, message in PUBLISH_REFUSALS:
+            with self.subTest(message=message):
+                self.assertIn(message, (ROOT / script).read_text(encoding="utf-8"))
+                self.assertIn(message, guide)
+        for path in (ROOT / "AGENTS.md", ROOT / "README.md", ROOT / ".agents" / "workflows" / "team-flow.md"):
+            with self.subTest(pointer=path.name):
+                self.assertIn("docs/publish-rules.md", path.read_text(encoding="utf-8"))
 
     def test_application_context_describes_only_current_numeric_paths_and_guards(self) -> None:
         context = (ROOT / "app_context" / "README.md").read_text(encoding="utf-8")

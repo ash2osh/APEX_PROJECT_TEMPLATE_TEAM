@@ -15,7 +15,8 @@ commits. Git branches do not isolate shared Builder or database state.
    advances the DEV baseline only when the live revision stayed stable.
    Publish first stamps `[DEVELOPER_NAME-YYYY-MM-DDrNNN]` onto the app
    version; the guard compares the live version to catch a teammate's
-   import. Commit the stamped `application.apx` afterwards.
+   import. Commit the stamped `application.apx` afterwards. When publish
+   refuses, follow `docs/publish-rules.md`.
 3. **Schema work:** Add immutable SQL files under
    `migrations/<developer>/`, run `scripts/team.sh check-conflicts`, then
    apply selected files with `scripts/team.sh migrate <file>`. This changes
