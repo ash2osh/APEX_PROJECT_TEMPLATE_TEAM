@@ -29,11 +29,7 @@ class DocumentationTests(unittest.TestCase):
         operator_paths = [
             ROOT / "README.md",
             ROOT / ".env.example",
-            *[
-                path
-                for path in sorted((ROOT / "docs").glob("*.md"))
-                if path.name != "design-review-resolution.md"
-            ],
+            *sorted((ROOT / "docs").glob("*.md")),
             ROOT / "docs" / "working-on-apex-together.html",
             ROOT / "ci" / "app-checks" / "README.md",
         ]
@@ -78,7 +74,8 @@ class DocumentationTests(unittest.TestCase):
         for relative in (
             "README.md", "docs/ci.md", "docs/promotion.md", "docs/app-recovery.md",
             "docs/conflict-resolution.md", "docs/import-pause.md", "docs/migrations.md",
-            "docs/design-review-resolution.md", "AGENTS.md", ".agents/workflows/team-flow.md",
+            "docs/live-test-plan.md", "docs/pending-work.md", "AGENTS.md",
+            ".agents/workflows/team-flow.md",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -159,7 +156,7 @@ class DocumentationTests(unittest.TestCase):
             *[
                 path
                 for path in sorted((ROOT / "docs").glob("*.md"))
-                if path.name not in {"design-review-resolution.md", "local-three-developer-e2e.md"}
+                if path.name != "local-three-developer-e2e.md"
             ],
             ROOT / "docs" / "working-on-apex-together.html",
             ROOT / "ci" / "app-checks" / "README.md",
@@ -210,11 +207,7 @@ class DocumentationTests(unittest.TestCase):
             "replay_identity",
         ):
             self.assertNotIn(removed.lower(), text.lower())
-        operator_docs = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in paths
-            if path.name not in {"2026-09-10-repo-review-p1-remediation-and-flow-simplification-design.md"}
-        )
+        operator_docs = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         for obsolete in ("TEAM_TEST_HISTORY_JSON", "test-plan.json", "apply-report.json"):
             self.assertNotIn(obsolete, operator_docs)
 

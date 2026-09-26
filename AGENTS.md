@@ -1,8 +1,11 @@
 # Team APEX agent contract
 
-This repository is a shared-application workflow supporting APEX 26.1+ and APEXlang only. The logical application alias is stable across developers; `apps/<alias>/` is the tracked APEXlang source. The development workspace and application ID are shared by the team, so a Git branch does not isolate Builder state. Each developer has a separate Git repository with no shared remote; the repositories meet only in the shared development database. Never pull, push or merge between developer repositories, and never assume a colleague's commits are present locally.
+This is the canonical template repository for a shared-application workflow supporting APEX 26.1+ and APEXlang only. Maintain this repository through its normal GitHub branch and pull-request process when requested. These instructions also describe how teams use repositories created from the template: each downstream developer has a separate Git repository with no shared remote, and those repositories meet only in the shared development database. Never exchange commits between downstream developer repositories or assume a colleague's commits are present locally. A Git branch does not isolate the shared APEX Builder workspace or application ID.
 
-## Three Authoring Routes
+## Downstream Authoring Routes
+
+These routes describe the team workflows used by projects created from this
+template.
 
 1. **Builder-first route:** Make edits in Builder, run `scripts/team.sh export-app <alias>`, review changes, and commit. There is no import in the normal Builder-first loop; export reflects the team's observed state.
 2. **File-first / Agent APEXlang route:** When editing APEXlang directly or using an AI coding agent:
@@ -23,3 +26,9 @@ This repository is a shared-application workflow supporting APEX 26.1+ and APEXl
 - **Production refusal:** Production writes remain strictly refused. Local test-profile qualification emits signed evidence and offline owner runbooks; live production actions are never automated.
 - **Durable recovery:** Recovery captures and journals belong under `.sync-state/` and survive process failure. Never clear locks or repair refusals by importing over the workspace.
 - **Evidence truth:** Never claim unavailable live checks passed. If an environment or flow check is unavailable, record `UNKNOWN`. Never silently commit or push to Git.
+
+See [README.md](README.md) for the downstream developer workflow and
+[docs/pending-work.md](docs/pending-work.md) for the current live acceptance
+gates. The canonical template repository uses ordinary branch and pull-request
+review. The separate-repository rule governs downstream teams that share an
+APEX development database.

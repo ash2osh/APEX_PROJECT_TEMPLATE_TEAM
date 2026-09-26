@@ -1,8 +1,13 @@
 # Live database test plan
 
-The offline suite and CI prove the Python contracts; none of the following has
-been exercised against a real Oracle database yet. This plan checks, on the
-local `docker-demo` database and with **throwaway schemas only**:
+This runbook records the live acceptance procedure and its current evidence.
+On 2026-09-25, the schema-release path was exercised against approved local
+Oracle Docker targets: schema release cut and verification, format-3 replay
+from empty and earlier-release histories, evidence signing, and offline
+runbook verification passed. No APEX application was captured or deployed, no
+app checks ran, and the METADATA backup/restore rehearsal remains open. Keep
+those unknown gates separate from the schema results and use **throwaway
+schemas only** for further live work.
 
 | Stage | Proves | Introduced by |
 |---|---|---|
@@ -16,8 +21,10 @@ or 4 and keep its evidence: those block the next release phase. Stage 3 is
 informational.
 
 Format-3 schema replay, application release capture, signed evidence and
-runbook generation are implemented and have offline tests. Live Oracle/APEX
-acceptance remains open and must use disposable source and test targets only.
+runbook generation are implemented and have offline tests. The schema path has
+the local Docker evidence noted above; live APEX application acceptance and
+METADATA backup/restore remain open and must use disposable source and test
+targets only.
 
 ## 0. One-time setup
 

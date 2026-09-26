@@ -1,8 +1,8 @@
 # APEX project template for teams
 
-This repository treats each APEX application as a shared physical Builder resource. The tracked source is `apps/<alias>/`; the database and Builder workspace are identified by validated target profiles, not by a Git branch.
+This is the canonical template repository and its changes use the normal upstream branch and pull-request workflow. It treats each APEX application as a shared physical Builder resource. The tracked source is `apps/<alias>/`; the database and Builder workspace are identified by validated target profiles, not by a Git branch.
 
-Every developer keeps a **separate Git repository** created from this template. There is no shared remote: the repositories never pull from each other. What the team shares is the development database, and that is where everyone's work meets.
+Teams created from this template use a **separate Git repository per developer**. Those downstream repositories do not share a Git remote; what the team shares is the development database, and that is where everyone's work meets. The canonical template repository follows its upstream branch and pull-request process.
 
 ## 1. What is shared
 
@@ -43,7 +43,7 @@ git diff --cached -- apps/hr/
 git commit -m "Capture reviewed HR Builder changes"
 ```
 
-There is no import in the normal builder-first loop, and no pull or push: the commit stays in your own repository. The export reflects the team's observed application state, including colleagues' saved Builder changes, which is how their work reaches your repository.
+There is no import in the normal builder-first loop. In a downstream developer repository, the commit stays in that developer's repository; colleagues' saved Builder changes reach it through `export-app`. Changes to this canonical template repository follow its upstream branch and pull-request workflow.
 
 ## 4. File-first publish workflow
 
@@ -125,7 +125,6 @@ Coding agents follow the exact same public CLI commands and rules as human devel
 - [CI workflows & protected test runs](docs/ci.md)
 - [Toolchain qualification & APEX 26.1+](docs/toolchain.md)
 - [Conflict resolution](docs/conflict-resolution.md)
-- [Design review resolution](docs/design-review-resolution.md)
 - [Local three-developer acceptance run](docs/local-three-developer-e2e.md)
 - [Live database test plan](docs/live-test-plan.md)
 - [Pending work](docs/pending-work.md)
