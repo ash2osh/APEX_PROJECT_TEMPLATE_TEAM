@@ -30,30 +30,42 @@ function Invoke-Sqlcl {
     if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
   })
 
-  if ([string]::IsNullOrWhiteSpace($TranscriptFile)) {
-    $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
-      -WorkingDirectory $WorkingDirectory -NoNewWindow -Wait -PassThru `
-      -RedirectStandardInput $StdInFile
-    return $process.ExitCode
-  }
-
-  $stdoutFile = [System.IO.Path]::GetTempFileName()
-  $stderrFile = [System.IO.Path]::GetTempFileName()
+  # Start-Process' -WorkingDirectory resolves wildcard characters in this path.
+  # Set the provider location by literal path and let the child inherit it.
+  # Its redirected-input path is also wildcard-resolved, so hand it a system
+  # temp copy even when the caller's checkout path contains brackets.
+  $stdinRedirectFile = [System.IO.Path]::GetTempFileName()
+  $locationPushed = $false
   try {
-    $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
-      -WorkingDirectory $WorkingDirectory -NoNewWindow -Wait -PassThru `
-      -RedirectStandardInput $StdInFile -RedirectStandardOutput $stdoutFile `
-      -RedirectStandardError $stderrFile
-    $stdout = [System.IO.File]::ReadAllText($stdoutFile)
-    $stderr = [System.IO.File]::ReadAllText($stderrFile)
-    $transcript = $stdout
-    if ($stdout.Length -gt 0 -and $stderr.Length -gt 0) {
-      $transcript += [Environment]::NewLine
+    Copy-Item -LiteralPath $StdInFile -Destination $stdinRedirectFile -Force
+    Push-Location -LiteralPath $WorkingDirectory
+    $locationPushed = $true
+    if ([string]::IsNullOrWhiteSpace($TranscriptFile)) {
+      $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
+        -NoNewWindow -Wait -PassThru -RedirectStandardInput $stdinRedirectFile
+      return $process.ExitCode
     }
-    $transcript += $stderr
-    [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
-    return $process.ExitCode
+
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+    try {
+      $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
+        -NoNewWindow -Wait -PassThru -RedirectStandardInput $stdinRedirectFile `
+        -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+      $stdout = [System.IO.File]::ReadAllText($stdoutFile)
+      $stderr = [System.IO.File]::ReadAllText($stderrFile)
+      $transcript = $stdout
+      if ($stdout.Length -gt 0 -and $stderr.Length -gt 0) {
+        $transcript += [Environment]::NewLine
+      }
+      $transcript += $stderr
+      [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
+      return $process.ExitCode
+    } finally {
+      Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    }
   } finally {
-    Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    if ($locationPushed) { Pop-Location }
+    Remove-Item -LiteralPath $stdinRedirectFile -Force -ErrorAction SilentlyContinue
   }
 }

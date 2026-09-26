@@ -9,10 +9,33 @@ $ErrorActionPreference = "Stop"
 if ($Pairs.Count -lt 2 -or $Pairs.Count % 2 -ne 0) {
   throw "usage: replace_mirror.ps1 <staged-dir> <destination> [<staged-dir> <destination> ...]"
 }
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $scratchPath = Join-Path $repoRoot "scratch"
-New-Item -ItemType Directory -Force -Path $scratchPath | Out-Null
+[System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
 $scratchRoot = (Resolve-Path -LiteralPath $scratchPath).Path
+
+function Assert-NoReparsePointsBelowRepository {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  $rootPath = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd([char[]]@('/', '\'))
+  $rootPrefix = $rootPath + [System.IO.Path]::DirectorySeparatorChar
+  if (-not $fullPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "$Label must be inside the repository: $fullPath"
+  }
+
+  $currentPath = $rootPath
+  foreach ($part in $fullPath.Substring($rootPrefix.Length) -split '[\\/]') {
+    if ([string]::IsNullOrEmpty($part)) { continue }
+    $currentPath = Join-Path $currentPath $part
+    if (Test-Path -LiteralPath $currentPath) {
+      $item = Get-Item -LiteralPath $currentPath -Force
+      if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "$Label contains a symbolic link, junction, or reparse point: $currentPath"
+      }
+    }
+  }
+}
 
 function Test-MirrorPair {
   param([string]$StagedDir, [string]$Destination, [int]$Index)
@@ -20,6 +43,7 @@ if (-not (Test-Path -LiteralPath $StagedDir -PathType Container)) {
   throw "staging directory does not exist or is not a directory: $StagedDir"
 }
 $stagedPath = (Resolve-Path -LiteralPath $StagedDir).Path
+Assert-NoReparsePointsBelowRepository -Path $stagedPath -Label "staging directory"
 
 if (-not $stagedPath.StartsWith($scratchRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "staging directory must be inside scratch/: $stagedPath"
@@ -43,6 +67,7 @@ if (-not $destinationPath.StartsWith($repoRoot + [System.IO.Path]::DirectorySepa
 }
 
 $relativeDestination = $Destination
+Assert-NoReparsePointsBelowRepository -Path $destinationPath -Label "destination"
 
 $stagedFiles = Get-ChildItem -LiteralPath $stagedPath -File -Recurse | Select-Object -First 1
 if ($null -eq $stagedFiles) {
@@ -60,9 +85,9 @@ if ($null -ne $stagedLink) {
 # `git status -- apps/<schema>/<app-id>` prints a "could not open directory"
 # warning that reads like an export failure.
 $destinationParent = Split-Path -Parent $destinationPath
-New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null
+[System.IO.Directory]::CreateDirectory($destinationParent) | Out-Null
 
-$dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destinationPath)
+$dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- ":(literal)$relativeDestination")
 $gitExitCode = $LASTEXITCODE
 if ($gitExitCode -ne 0) {
   throw "unable to inspect Git status for mirror: $relativeDestination"
@@ -73,6 +98,7 @@ if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
 
 $resolvedDestinationParent = (Resolve-Path -LiteralPath $destinationParent).Path
 $destinationPath = Join-Path $resolvedDestinationParent (Split-Path -Leaf $destinationPath)
+Assert-NoReparsePointsBelowRepository -Path $destinationPath -Label "destination"
 if (-not $destinationPath.StartsWith($repoRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "resolved destination escaped the repository: $destinationPath"
 }
@@ -196,7 +222,7 @@ function Enter-MirrorLock([string]$LockPath, [string]$CanonicalRelative) {
 }
 
 $lockRoot = Join-Path $scratchRoot ".mirror-locks"
-New-Item -ItemType Directory -Force -Path $lockRoot | Out-Null
+[System.IO.Directory]::CreateDirectory($lockRoot) | Out-Null
 $lockHandles = @()
 $installed = @()
 $movedDestination = @()
@@ -218,7 +244,9 @@ try {
 
   # Recheck every mirror after taking every lock.
   foreach ($pair in $validated) {
-    $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $pair.DestinationPath)
+    Assert-NoReparsePointsBelowRepository -Path $pair.DestinationPath -Label "destination"
+    Assert-NoReparsePointsBelowRepository -Path $pair.StagedPath -Label "staging directory"
+    $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- ":(literal)$($pair.CanonicalRelative)")
     if ($LASTEXITCODE -ne 0) { throw "unable to recheck Git status for mirror: $($pair.CanonicalRelative)" }
     if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
       throw "refusing to replace dirty mirror: $($pair.CanonicalRelative)"
@@ -226,6 +254,8 @@ try {
   }
 
   foreach ($pair in $validated) {
+    Assert-NoReparsePointsBelowRepository -Path $pair.DestinationPath -Label "destination"
+    Assert-NoReparsePointsBelowRepository -Path $pair.StagedPath -Label "staging directory"
     if (Test-Path -LiteralPath $pair.DestinationPath) {
       Move-Item -LiteralPath $pair.DestinationPath -Destination $pair.BackupPath
       $movedDestination += $pair

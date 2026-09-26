@@ -30,8 +30,15 @@ if [ ! -f "$PROJECT_ENV_FILE" ]; then
 fi
 
 project_env_seen_keys=()
+project_env_first_line=true
+project_env_oracle_identifier_regex='^[A-Z][A-Z0-9_$#]{0,127}$'
+project_env_oracle_prefix_regex='^[A-Z][A-Z0-9_$#]*(,[A-Z][A-Z0-9_$#]*)*$'
 while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   project_env_line="${project_env_line%$'\r'}"
+  if [ "$project_env_first_line" = true ]; then
+    project_env_line="${project_env_line#$'\xEF\xBB\xBF'}"
+    project_env_first_line=false
+  fi
   case "$project_env_line" in
     '#'*) continue ;;
   esac
@@ -132,7 +139,7 @@ for project_env_prefix in PROD STAGING; do
       project_env_fail "$project_env_connection_key contains unsupported characters"
       return 1 2>/dev/null || exit 1
     fi
-    if [[ ! "$project_env_user_value" =~ ^[A-Z][A-Z0-9_$#]{0,127}$ ]]; then
+    if [[ ! "$project_env_user_value" =~ $project_env_oracle_identifier_regex ]]; then
       project_env_fail "$project_env_user_key must be an uppercase Oracle identifier"
       return 1 2>/dev/null || exit 1
     fi
@@ -170,7 +177,7 @@ for project_env_key in TABLES_PREFIXES CODE_PREFIXES; do
   if [ "$project_env_value" = "*" ]; then
     continue
   fi
-  if [[ ! "$project_env_value" =~ ^[A-Z][A-Z0-9_$#]*(,[A-Z][A-Z0-9_$#]*)*$ ]]; then
+  if [[ ! "$project_env_value" =~ $project_env_oracle_prefix_regex ]]; then
     project_env_fail "$project_env_key must be * or a comma-separated list of uppercase Oracle identifier prefixes without spaces"
     return 1 2>/dev/null || exit 1
   fi
@@ -194,7 +201,7 @@ case "$DB_ENVIRONMENT" in
 esac
 for project_env_key in TABLES_SCHEMA TABLES_EXPECTED_USER CODE_SCHEMA \
   CODE_EXPECTED_USER APEX_PARSING_SCHEMA APEX_EXPECTED_USER; do
-  if [[ ! "${!project_env_key}" =~ ^[A-Z][A-Z0-9_$#]{0,127}$ ]]; then
+  if [[ ! "${!project_env_key}" =~ $project_env_oracle_identifier_regex ]]; then
     project_env_fail "$project_env_key must be an uppercase Oracle identifier"
     return 1 2>/dev/null || exit 1
   fi
@@ -211,6 +218,7 @@ unset project_env_prefix_items project_env_prefix_item project_env_quoted
 unset project_env_prefix project_env_connection_key project_env_user_key
 unset project_env_connection_seen project_env_user_seen project_env_connection_value
 unset project_env_user_value
+unset project_env_first_line project_env_oracle_identifier_regex project_env_oracle_prefix_regex
 unset project_env_repo_root
 # load_env.ps1 removes its helper and says it is mirroring this file. It was
 # not: only variables were unset, leaving two functions in the caller's shell.

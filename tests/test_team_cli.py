@@ -11,6 +11,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TeamCliTests(unittest.TestCase):
+    def run_bash_env_loader(self, environment: Path) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary) / "scripts"
+            scripts.mkdir()
+            loader = scripts / "load_env.sh"
+            shutil.copy2(ROOT / "scripts" / "load_env.sh", loader)
+            return subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'set -e; source "$1" "$2"; printf "%s|%s|%s|%s\\n" "$CODE_SCHEMA" "$CODE_EXPECTED_USER" "$CODE_PREFIXES" "$APEX_PARSING_SCHEMA"',
+                    "bash",
+                    str(loader),
+                    str(environment),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
     def test_team_help_lists_primary_commands(self) -> None:
         result = subprocess.run(
             ["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
@@ -44,6 +64,32 @@ class TeamCliTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("use deploy for staging or production", result.stderr)
+
+    def test_bash_environment_loader_accepts_dollar_and_hash_oracle_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = Path(temporary) / ".env"
+            content = (ROOT / ".env.example").read_text(encoding="utf-8")
+            content = content.replace("CODE_SCHEMA=DEMO", "CODE_SCHEMA=DEMO$")
+            content = content.replace("CODE_EXPECTED_USER=DEMO", "CODE_EXPECTED_USER=DEMO#")
+            content = content.replace("CODE_PREFIXES=*", "CODE_PREFIXES=AB$,XY#")
+            content = content.replace("APEX_PARSING_SCHEMA=DEMO", "APEX_PARSING_SCHEMA=APP$")
+            environment.write_text(content, encoding="utf-8")
+
+            result = self.run_bash_env_loader(environment)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "DEMO$|DEMO#|AB$,XY#|APP$\n")
+
+    def test_bash_environment_loader_accepts_utf8_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = Path(temporary) / ".env"
+            example = (ROOT / ".env.example").read_bytes()
+            environment.write_bytes(b"\xef\xbb\xbf" + example)
+
+            result = self.run_bash_env_loader(environment)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "DEMO|DEMO|*|DEMO\n")
 
     def test_doctor_uses_read_only_identity_sqlcl_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

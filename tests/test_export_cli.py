@@ -128,6 +128,18 @@ class ExportCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assert_descriptors_preserved(script, expected)
 
+    @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
+    def test_powershell_export_works_from_checkout_path_with_brackets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo[one]"
+            root.mkdir()
+            script, expected = self.make_checkout(root, powershell=True)
+
+            result = self.run_export(script, powershell=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assert_descriptors_preserved(script, expected)
+
     def test_bash_export_refuses_builder_changes_during_export(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             script, expected = self.make_checkout(Path(temporary), powershell=False)
