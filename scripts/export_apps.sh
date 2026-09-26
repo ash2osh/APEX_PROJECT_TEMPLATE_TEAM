@@ -77,6 +77,19 @@ for app_id in "${APP_IDS[@]}"; do
   APP_STAGE="$STAGE_PARENT/$app_id"
   mv -- "$EXPORTED_DIR" "$APP_STAGE"
   "$REPO_ROOT/scripts/normalize_apx.sh" "$APP_STAGE"
+  python3 - "$APP_STAGE/apex-team-export.json" "$app_id" <<'PY'
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+marker_path = Path(sys.argv[1])
+marker = {
+    "applicationId": int(sys.argv[2]),
+    "exportedAt": datetime.now().replace(microsecond=0).isoformat(timespec="seconds"),
+}
+marker_path.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+PY
 done
 
 # Install only after every requested application has exported and verified, and

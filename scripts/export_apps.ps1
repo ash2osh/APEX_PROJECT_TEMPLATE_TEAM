@@ -60,6 +60,15 @@ try {
     $appStage = Join-Path $stageParent $appId
     Move-Item -LiteralPath $exportedDir -Destination $appStage
     & (Join-Path $PSScriptRoot "normalize_apx.ps1") $appStage
+    $exportMarker = [ordered]@{
+      applicationId = [int]$appId
+      exportedAt = [DateTime]::Now.ToString("yyyy-MM-dd'T'HH:mm:ss")
+    } | ConvertTo-Json -Compress
+    [System.IO.File]::WriteAllText(
+      (Join-Path $appStage "apex-team-export.json"),
+      $exportMarker + [Environment]::NewLine,
+      (New-Object System.Text.UTF8Encoding($false))
+    )
   }
 
   # Install every application in one call so a failure on the last does not

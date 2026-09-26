@@ -15,6 +15,7 @@ __pycache__/
 
 # SQLcl deployment bindings may contain local connection names or IDs.
 apps/**/deployments/default.json
+apps/**/apex-team-export.json
 
 # Local graph/build output
 graphify-out/
