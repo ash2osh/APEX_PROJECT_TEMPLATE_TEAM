@@ -1,10 +1,9 @@
 [project]
-name = "apex-team-template"
+name = "apex-project-template-team"
 version = "0.1.0"
-description = "Shared-application APEX team workflow, migrations and promotion"
+description = "Lightweight APEX team template with explicit deployments and Git-based migrations"
 requires-python = ">=3.10"
-# The daily team workflow -- export, reconcile, migrate, release -- is stdlib
-# only and deliberately has no runtime dependencies.
+# The daily team workflow is stdlib-only and deliberately has no runtime dependencies.
 dependencies = []
 
 [build-system]
@@ -12,20 +11,13 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-package-dir = {"" = "scripts"}
-py-modules = ["team"]
-
-[tool.setuptools.packages.find]
-where = ["scripts"]
-include = ["teamlib*"]
+packages = []
+py-modules = []
 
 [project.optional-dependencies]
-# Required by gen-runbook to verify the signed test evidence on the production
-# handoff path.
-promotion = ["cryptography>=41"]
-# Required only by setup_graphify_apx.py and teamlib/graphify_corpus.py.
+# Required only by setup_graphify_apx.py.
 graph = ["graphify", "tree-sitter-sql"]
-# Offline quality gate.
+# Optional Python linting.
 dev = ["ruff>=0.5"]
 
 [tool.ruff]
@@ -39,7 +31,3 @@ src = ["scripts"]
 # B  bugbear       - mutable defaults, silent except patterns
 # UP unpyupgrade   - keep the 3.10+ idioms consistent
 select = ["F", "E9", "B", "UP"]
-
-[tool.ruff.lint.per-file-ignores]
-# Tests deliberately import symbols to assert they are re-exported.
-"scripts/tests/*" = ["F401"]

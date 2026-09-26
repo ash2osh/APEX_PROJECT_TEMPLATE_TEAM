@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# Source this file to load a strict KEY=VALUE .env file without executing it.
+
+project_env_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+PROJECT_ENV_FILE="${1:-${PROJECT_ENV_FILE:-$project_env_repo_root/.env}}"
+unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER
+
+# README.md documents a relative PROJECT_ENV_FILE. Resolve it against the
+# repository root when it is not found relative to the caller's directory, so a
+# wrapper run from a subdirectory finds the same file as one run from the root.
+# The drive-letter arm keeps Git Bash from treating C:/... as relative.
+case "$PROJECT_ENV_FILE" in
+  /*|[A-Za-z]:[/\\]*) ;;
+  *)
+    if [ ! -f "$PROJECT_ENV_FILE" ] && [ -f "$project_env_repo_root/$PROJECT_ENV_FILE" ]; then
+      PROJECT_ENV_FILE="$project_env_repo_root/$PROJECT_ENV_FILE"
+    fi
+    ;;
+esac
+
+project_env_fail() {
+  unset project_env_repo_root
+  echo "project environment error: $*" >&2
+  return 1
+}
+
+if [ ! -f "$PROJECT_ENV_FILE" ]; then
+  project_env_fail "configuration file not found: $PROJECT_ENV_FILE (copy .env.example to .env)"
+  return 1 2>/dev/null || exit 1
+fi
+
+project_env_seen_keys=()
+while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
+  project_env_line="${project_env_line%$'\r'}"
+  case "$project_env_line" in
+    '#'*) continue ;;
+  esac
+  # A line of only whitespace is not a configuration error. PowerShell's
+  # IsNullOrWhiteSpace already skips one, so Bash must agree, or a .env
+  # authored on Windows loads there and fails on Linux.
+  if [ -z "${project_env_line//[[:space:]]/}" ]; then
+    continue
+  fi
+  if [[ ! "$project_env_line" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+    project_env_fail "invalid line in $PROJECT_ENV_FILE: $project_env_line"
+    return 1 2>/dev/null || exit 1
+  fi
+  project_env_key="${BASH_REMATCH[1]}"
+  project_env_value="${BASH_REMATCH[2]}"
+  case "$project_env_key" in
+    PROJECT_NAME|DB_ENVIRONMENT|APEX_APP_ID|\
+    TABLES_SCHEMA|TABLES_PREFIXES|TABLES_SQLCL_CONNECTION|TABLES_EXPECTED_USER|\
+    CODE_SCHEMA|CODE_PREFIXES|CODE_SQLCL_CONNECTION|CODE_EXPECTED_USER|\
+    APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
+    PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|\
+    STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER) ;;
+    *)
+      project_env_fail "unsupported setting in $PROJECT_ENV_FILE: $project_env_key"
+      return 1 2>/dev/null || exit 1
+      ;;
+  esac
+  for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+    if [ "$project_env_seen_key" = "$project_env_key" ]; then
+      project_env_fail "duplicate setting in $PROJECT_ENV_FILE: $project_env_key"
+      return 1 2>/dev/null || exit 1
+    fi
+  done
+  project_env_quoted=false
+  if [ "${#project_env_value}" -ge 2 ]; then
+    if [[ "$project_env_value" == \"*\" ]] || [[ "$project_env_value" == \'*\' ]]; then
+      project_env_value="${project_env_value:1:${#project_env_value}-2}"
+      project_env_quoted=true
+    fi
+  elif [[ "$project_env_value" == \" || "$project_env_value" == \' ]]; then
+    project_env_fail "$project_env_key has an unterminated quoted value"
+    return 1 2>/dev/null || exit 1
+  fi
+  # Values are parsed literally, so an unquoted inline comment would be stored
+  # verbatim. For the settings with a format rule that surfaces as a confusing
+  # error; for PROJECT_NAME, which has none, it is stored silently.
+  if [ "$project_env_quoted" != true ] && [[ "$project_env_value" =~ [[:space:]]# ]]; then
+    project_env_fail "$project_env_key has an inline comment; .env values are parsed literally, so put the comment on its own line, or quote the value to keep a literal '#'"
+    return 1 2>/dev/null || exit 1
+  fi
+  export "$project_env_key=$project_env_value"
+  project_env_seen_keys+=("$project_env_key")
+done < "$PROJECT_ENV_FILE"
+
+project_env_required=(
+  PROJECT_NAME DB_ENVIRONMENT APEX_APP_ID
+  TABLES_SCHEMA TABLES_PREFIXES TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER
+  CODE_SCHEMA CODE_PREFIXES CODE_SQLCL_CONNECTION CODE_EXPECTED_USER
+  APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER
+)
+for project_env_key in "${project_env_required[@]}"; do
+  project_env_seen_present=false
+  for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+    if [ "$project_env_seen_key" = "$project_env_key" ]; then
+      project_env_seen_present=true
+      break
+    fi
+  done
+  project_env_value="${!project_env_key:-}"
+  if [ "$project_env_seen_present" != true ] || [ -z "${project_env_value//[[:space:]]/}" ]; then
+    project_env_fail "$project_env_key is required in $PROJECT_ENV_FILE"
+    return 1 2>/dev/null || exit 1
+  fi
+done
+
+for project_env_prefix in PROD STAGING; do
+  project_env_connection_key="${project_env_prefix}_SQLCL_CONNECTION"
+  project_env_user_key="${project_env_prefix}_EXPECTED_USER"
+  project_env_connection_seen=false
+  project_env_user_seen=false
+  for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+    [ "$project_env_seen_key" = "$project_env_connection_key" ] && project_env_connection_seen=true
+    [ "$project_env_seen_key" = "$project_env_user_key" ] && project_env_user_seen=true
+  done
+  if [ "$project_env_connection_seen" != "$project_env_user_seen" ]; then
+    project_env_fail "$project_env_connection_key and $project_env_user_key must be configured together"
+    return 1 2>/dev/null || exit 1
+  fi
+  if [ "$project_env_connection_seen" = true ]; then
+    project_env_connection_value="${!project_env_connection_key:-}"
+    project_env_user_value="${!project_env_user_key:-}"
+    if [ -z "${project_env_connection_value//[[:space:]]/}" ] || \
+       [ -z "${project_env_user_value//[[:space:]]/}" ]; then
+      project_env_fail "$project_env_connection_key and $project_env_user_key must not be empty"
+      return 1 2>/dev/null || exit 1
+    fi
+    if [[ ! "$project_env_connection_value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+      project_env_fail "$project_env_connection_key contains unsupported characters"
+      return 1 2>/dev/null || exit 1
+    fi
+    if [[ ! "$project_env_user_value" =~ ^[A-Z][A-Z0-9_$#]{0,127}$ ]]; then
+      project_env_fail "$project_env_user_key must be an uppercase Oracle identifier"
+      return 1 2>/dev/null || exit 1
+    fi
+  fi
+done
+
+[[ "$APEX_APP_ID" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
+  project_env_fail "APEX_APP_ID must be a comma-separated list of positive integers without spaces"
+  return 1 2>/dev/null || exit 1
+}
+
+project_env_validate_unique_csv() {
+  local project_env_csv_key="$1"
+  local project_env_csv_value="$2"
+  local project_env_csv_item project_env_csv_seen_item
+  local project_env_csv_items=() project_env_csv_seen_items=()
+  IFS=',' read -r -a project_env_csv_items <<< "$project_env_csv_value"
+  for project_env_csv_item in "${project_env_csv_items[@]}"; do
+    for project_env_csv_seen_item in "${project_env_csv_seen_items[@]}"; do
+      if [ "$project_env_csv_item" = "$project_env_csv_seen_item" ]; then
+        project_env_fail "$project_env_csv_key must not contain duplicate values: $project_env_csv_item"
+        return 1
+      fi
+    done
+    project_env_csv_seen_items+=("$project_env_csv_item")
+  done
+}
+
+project_env_validate_unique_csv APEX_APP_ID "$APEX_APP_ID" || {
+  return 1 2>/dev/null || exit 1
+}
+
+for project_env_key in TABLES_PREFIXES CODE_PREFIXES; do
+  project_env_value="${!project_env_key}"
+  if [ "$project_env_value" = "*" ]; then
+    continue
+  fi
+  if [[ ! "$project_env_value" =~ ^[A-Z][A-Z0-9_$#]*(,[A-Z][A-Z0-9_$#]*)*$ ]]; then
+    project_env_fail "$project_env_key must be * or a comma-separated list of uppercase Oracle identifier prefixes without spaces"
+    return 1 2>/dev/null || exit 1
+  fi
+  project_env_validate_unique_csv "$project_env_key" "$project_env_value" || {
+    return 1 2>/dev/null || exit 1
+  }
+  IFS=',' read -r -a project_env_prefix_items <<< "$project_env_value"
+  for project_env_prefix_item in "${project_env_prefix_items[@]}"; do
+    if [ "${#project_env_prefix_item}" -gt 128 ]; then
+      project_env_fail "$project_env_key prefixes must be at most 128 characters"
+      return 1 2>/dev/null || exit 1
+    fi
+  done
+done
+case "$DB_ENVIRONMENT" in
+  development|test|staging|production) ;;
+  *)
+    project_env_fail "DB_ENVIRONMENT must be development, test, staging, or production"
+    return 1 2>/dev/null || exit 1
+    ;;
+esac
+for project_env_key in TABLES_SCHEMA TABLES_EXPECTED_USER CODE_SCHEMA \
+  CODE_EXPECTED_USER APEX_PARSING_SCHEMA APEX_EXPECTED_USER; do
+  if [[ ! "${!project_env_key}" =~ ^[A-Z][A-Z0-9_$#]{0,127}$ ]]; then
+    project_env_fail "$project_env_key must be an uppercase Oracle identifier"
+    return 1 2>/dev/null || exit 1
+  fi
+done
+for project_env_key in TABLES_SQLCL_CONNECTION CODE_SQLCL_CONNECTION APEX_SQLCL_CONNECTION; do
+  if [[ ! "${!project_env_key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    project_env_fail "$project_env_key contains unsupported characters"
+    return 1 2>/dev/null || exit 1
+  fi
+done
+unset project_env_line project_env_key project_env_value project_env_required
+unset project_env_seen_keys project_env_seen_key project_env_seen_present
+unset project_env_prefix_items project_env_prefix_item project_env_quoted
+unset project_env_prefix project_env_connection_key project_env_user_key
+unset project_env_connection_seen project_env_user_seen project_env_connection_value
+unset project_env_user_value
+unset project_env_repo_root
+# load_env.ps1 removes its helper and says it is mirroring this file. It was
+# not: only variables were unset, leaving two functions in the caller's shell.
+unset -f project_env_fail project_env_validate_unique_csv

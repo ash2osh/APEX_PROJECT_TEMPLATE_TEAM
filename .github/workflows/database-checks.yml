@@ -1,4 +1,4 @@
-name: database-checks
+name: template-checks
 
 on:
   push:
@@ -18,23 +18,16 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.10'
-      - name: Python lint
+      - name: Python syntax
         run: |
-          python3 -m pip install --quiet ruff
-          python3 -m ruff check scripts/
+          python3 -m compileall -q scripts/
       - name: Shell syntax
         run: |
           for script in scripts/*.sh; do bash -n "$script"; done
-      - name: Install the signed-handoff verification dependency
+      - name: Validate the example configuration
         run: |
-          # test_runbook.py exercises real Ed25519 signing. The daily workflow
-          # is stdlib-only; this is the one command that needs the promotion extra.
-          python3 -m pip install --quiet 'cryptography>=41'
-      - name: Required offline qualification
-        run: |
-          PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -v
-          PYTHONPATH=scripts python3 scripts/team.py ci-doctor --contract ci/runner-contract.json
+          PROJECT_ENV_FILE=.env.example bash -c 'source scripts/load_env.sh "$PROJECT_ENV_FILE"'
       - name: JSON and line-ending checks
         run: |
-          find targets -name '*.json' -print0 | xargs -0 -n1 python3 -m json.tool >/dev/null
+          python3 -c 'import json; from pathlib import Path; [json.loads(p.read_text()) for p in Path("apps").rglob("*.json")]'
           ! grep -RIl $'\r' --include='*.apx' --include='*.sql' --include='*.json' --include='*.sh' --include='*.ps1' .

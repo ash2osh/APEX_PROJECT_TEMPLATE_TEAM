@@ -1,0 +1,155 @@
+#Requires -Version 5.1
+# Dot-source this file to load a strict KEY=VALUE .env file without executing it.
+#
+# Dot-sourcing runs in the CALLER's scope, so every variable defined here is
+# visible to the caller afterwards. Internals are prefixed with `projectEnv`
+# and removed at the end to keep that surface small. The one unavoidable
+# exception is the `$EnvFile` parameter itself: a caller that also uses a
+# variable named `$EnvFile` (PowerShell names are case-insensitive, so
+# `$envFile` too) will have it overwritten. Do not use that name in a script
+# that dot-sources this one.
+param([string]$EnvFile = $env:PROJECT_ENV_FILE)
+
+$ErrorActionPreference = "Stop"
+try {
+Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
+  Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER -ErrorAction SilentlyContinue
+$projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
+# Mirror load_env.sh: a relative PROJECT_ENV_FILE resolves against the
+# repository root when it is not found relative to the caller's location.
+if (-not [System.IO.Path]::IsPathRooted($EnvFile) -and
+    -not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
+  $projectEnvRootRelative = Join-Path $projectEnvRepoRoot $EnvFile
+  if (Test-Path -LiteralPath $projectEnvRootRelative -PathType Leaf) {
+    $EnvFile = $projectEnvRootRelative
+  }
+}
+if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
+  throw "project environment error: configuration file not found: $EnvFile (copy .env.example to .env)"
+}
+
+$projectEnvSeen = @{}
+$projectEnvAllowed = @(
+  "PROJECT_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
+  "TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER",
+  "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
+  "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
+  "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER",
+  "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER"
+)
+foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
+  $projectEnvLine = $projectEnvLine.TrimEnd("`r")
+  if ([string]::IsNullOrWhiteSpace($projectEnvLine) -or $projectEnvLine.StartsWith("#")) { continue }
+  if ($projectEnvLine -cnotmatch '^([A-Z][A-Z0-9_]*)=(.*)$') {
+    throw "project environment error: invalid line in ${EnvFile}: $projectEnvLine"
+  }
+  $projectEnvKey = $Matches[1]
+  $projectEnvValue = $Matches[2]
+  if ($projectEnvKey -notin $projectEnvAllowed) { throw "project environment error: unsupported setting in ${EnvFile}: $projectEnvKey" }
+  if ($projectEnvSeen.ContainsKey($projectEnvKey)) { throw "project environment error: duplicate setting in ${EnvFile}: $projectEnvKey" }
+  # The length guard matters: a one-character value of '"' satisfies both
+  # StartsWith and EndsWith, and Substring(1, -1) throws.
+  $projectEnvQuoted = $false
+  if ($projectEnvValue.Length -ge 2 -and
+      (($projectEnvValue.StartsWith('"') -and $projectEnvValue.EndsWith('"')) -or
+       ($projectEnvValue.StartsWith("'") -and $projectEnvValue.EndsWith("'")))) {
+    $projectEnvValue = $projectEnvValue.Substring(1, $projectEnvValue.Length - 2)
+    $projectEnvQuoted = $true
+  } elseif ($projectEnvValue -eq '"' -or $projectEnvValue -eq "'") {
+    throw "project environment error: $projectEnvKey has an unterminated quoted value"
+  }
+  if (-not $projectEnvQuoted -and $projectEnvValue -match '\s#') {
+    throw "project environment error: $projectEnvKey has an inline comment; .env values are parsed literally, so put the comment on its own line, or quote the value to keep a literal '#'"
+  }
+  Set-Item -LiteralPath "Env:$projectEnvKey" -Value $projectEnvValue
+  $projectEnvSeen[$projectEnvKey] = $true
+}
+
+$projectEnvRequired = @(
+  "PROJECT_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
+  "TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER",
+  "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
+  "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER"
+)
+foreach ($projectEnvKey in $projectEnvRequired) {
+  if (-not $projectEnvSeen.ContainsKey($projectEnvKey) -or
+      [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($projectEnvKey, "Process"))) {
+    throw "project environment error: $projectEnvKey is required in $EnvFile"
+  }
+}
+foreach ($projectEnvPrefix in @("PROD", "STAGING")) {
+  $projectEnvConnectionKey = "${projectEnvPrefix}_SQLCL_CONNECTION"
+  $projectEnvUserKey = "${projectEnvPrefix}_EXPECTED_USER"
+  $projectEnvConnectionSeen = $projectEnvSeen.ContainsKey($projectEnvConnectionKey)
+  $projectEnvUserSeen = $projectEnvSeen.ContainsKey($projectEnvUserKey)
+  if ($projectEnvConnectionSeen -ne $projectEnvUserSeen) {
+    throw "$projectEnvConnectionKey and $projectEnvUserKey must be configured together"
+  }
+  if ($projectEnvConnectionSeen) {
+    $projectEnvConnectionValue = [Environment]::GetEnvironmentVariable($projectEnvConnectionKey, "Process")
+    $projectEnvUserValue = [Environment]::GetEnvironmentVariable($projectEnvUserKey, "Process")
+    if ([string]::IsNullOrWhiteSpace($projectEnvConnectionValue) -or
+        [string]::IsNullOrWhiteSpace($projectEnvUserValue)) {
+      throw "$projectEnvConnectionKey and $projectEnvUserKey must not be empty"
+    }
+    if ($projectEnvConnectionValue -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+      throw "$projectEnvConnectionKey contains unsupported characters"
+    }
+    if ($projectEnvUserValue -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
+      throw "$projectEnvUserKey must be an uppercase Oracle identifier"
+    }
+  }
+}
+function Assert-ProjectEnvUniqueCsv([string]$Name, [string]$Value) {
+  $projectEnvCsvSeen = @{}
+  foreach ($projectEnvCsvItem in $Value.Split(',')) {
+    if ($projectEnvCsvSeen.ContainsKey($projectEnvCsvItem)) {
+      throw "$Name must not contain duplicate values: $projectEnvCsvItem"
+    }
+    $projectEnvCsvSeen[$projectEnvCsvItem] = $true
+  }
+}
+
+if ($env:APEX_APP_ID -notmatch '^[1-9][0-9]*(,[1-9][0-9]*)*$') {
+  throw "APEX_APP_ID must be a comma-separated list of positive integers without spaces"
+}
+Assert-ProjectEnvUniqueCsv -Name "APEX_APP_ID" -Value $env:APEX_APP_ID
+foreach ($projectEnvKey in @("TABLES_PREFIXES", "CODE_PREFIXES")) {
+  $projectEnvPrefixValue = [Environment]::GetEnvironmentVariable($projectEnvKey, "Process")
+  if ($projectEnvPrefixValue -eq "*") { continue }
+  if ($projectEnvPrefixValue -cnotmatch '^[A-Z][A-Z0-9_$#]*(,[A-Z][A-Z0-9_$#]*)*$') {
+    throw "$projectEnvKey must be * or a comma-separated list of uppercase Oracle identifier prefixes without spaces"
+  }
+  Assert-ProjectEnvUniqueCsv -Name $projectEnvKey -Value $projectEnvPrefixValue
+  foreach ($projectEnvPrefixItem in $projectEnvPrefixValue.Split(',')) {
+    if ($projectEnvPrefixItem.Length -gt 128) {
+      throw "$projectEnvKey prefixes must be at most 128 characters"
+    }
+  }
+}
+if ($env:DB_ENVIRONMENT -notin @("development", "test", "staging", "production")) { throw "DB_ENVIRONMENT is invalid" }
+foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_EXPECTED_USER", "APEX_PARSING_SCHEMA", "APEX_EXPECTED_USER")) {
+  if ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process") -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
+    throw "$projectEnvKey must be an uppercase Oracle identifier"
+  }
+}
+foreach ($projectEnvKey in @("TABLES_SQLCL_CONNECTION", "CODE_SQLCL_CONNECTION", "APEX_SQLCL_CONNECTION")) {
+  if ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process") -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    throw "$projectEnvKey contains unsupported characters"
+  }
+}
+# Mirror load_env.sh, which unsets its own temporaries after a successful load.
+Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
+  projectEnvRequired, projectEnvLine, projectEnvKey, projectEnvValue,
+  projectEnvPrefixValue, projectEnvPrefixItem, projectEnvQuoted,
+  projectEnvPrefix, projectEnvConnectionKey, projectEnvUserKey,
+  projectEnvConnectionSeen, projectEnvUserSeen, projectEnvConnectionValue,
+  projectEnvUserValue,
+  projectEnvRootRelative `
+  -ErrorAction SilentlyContinue
+Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv -ErrorAction SilentlyContinue
+}
+finally {
+  Remove-Variable -Name projectEnvRepoRoot, projectEnvRootRelative -ErrorAction SilentlyContinue
+}
