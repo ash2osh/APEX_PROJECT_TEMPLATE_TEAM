@@ -1,12 +1,24 @@
 # Team workflow
 
-This checkout is the canonical template repository and uses the normal
-upstream branch and pull-request workflow when a change is authorized. The
-separate-repository rules below describe downstream teams created from the
-template. A branch never isolates their shared APEX Builder workspace or
-database.
+This template uses one downstream Git repository per developer and a shared
+development database/APEX workspace. Developer repositories do not exchange
+commits. Git branches do not isolate shared Builder or database state.
 
-1. **Builder route:** Edit in APEX Builder, run `scripts/team.sh export-app <alias>`, review `git status` and diff, and commit. There is no import in the normal Builder loop.
-2. **File-first / Agent route:** Edit `apps/<alias>/`, review, and commit. Prepare publish with `scripts/team.sh prepare-publish <alias> --ref HEAD`. Post the printed app-scoped pause notice. Each registered teammate runs `scripts/team.sh ack-publish <id>` from their own checkout using its stable `TEAM_CHECKOUT_UUID`; the command records the preparation digest, UUID, host, user, and time in shared control metadata. Publish with `scripts/team.sh publish-app --prepared <id> --confirm-pause`, which reads and verifies those rows. Never acknowledge for another checkout. Only selected apps pause.
-3. **Schema work:** Author migration pairs under `migrations/`, check drift, apply through the isolated METADATA profile, and merge promptly.
-4. **Promotion:** Build kind-bound immutable archives (`schema/v<semver>` once for shared migrations; `app/<alias>/v<semver>` for single application releases). Test on protected test target and hand off an offline production-owner runbook. Production writes remain refused.
+1. **Builder-first:** Coordinate the shared app edit, save in Builder, run
+   `scripts/team.sh export <numeric-app-id>`, review the APEXlang diff, then
+   commit. Export captures Builder state; it does not import.
+2. **File-first:** Edit and commit the app's APEXlang source. Tell teammates
+   which numeric app ID will be published and check for in-progress Builder
+   work. Run `scripts/team.sh publish <numeric-app-id> --env dev`; the drift
+   guard refuses to overwrite Builder edits newer than the local export.
+3. **Schema work:** Add immutable SQL files under
+   `migrations/<developer>/`, run `scripts/team.sh check-conflicts`, then
+   apply selected files with `scripts/team.sh migrate <file>`. This changes
+   the shared DEV schema.
+4. **Promotion:** Configure explicit workspace/app/schema descriptors and
+   use `scripts/team.sh deploy <numeric-app-id> --env staging|prod`. The
+   direct route asks for interactive confirmation. `--manual` prints a DBA
+   runbook without connecting.
+
+Use `scripts/team.sh doctor` for the read-only connection and database
+identity check. Never invent live database or team coordination evidence.

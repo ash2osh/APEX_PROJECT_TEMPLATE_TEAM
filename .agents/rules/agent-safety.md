@@ -1,18 +1,20 @@
 # Agent safety rules
 
-- Inspect SQL/APEX files before executing `@`, `@@`, `START`, APEX import, or
-  migration content.
-- Use `team.py` and the verified SQLcl boundary. Do not put credentials in
-  command lines, tracked bindings, recovery manifests, or logs.
-- Treat `.sync-state` captures as durable recovery evidence; `scratch/` is
-  temporary staging only. Never recursively replace an application directory.
-- APEX source is keyed by alias, not by a numeric directory. Database evidence
-  is generated evidence, not a source mirror.
-- Use the normal branch and pull-request process for this canonical template
-  repository when requested. Never exchange commits between downstream
-  developer repositories; they coordinate through the shared database.
-- A Git branch isolates files only. It does not isolate shared Builder or
-  database state, so follow the app-scoped pause, acknowledgement, and
-  migration guards before live writes.
-- Production profiles are SELECT-only. A target role cannot override the
-  verified production identity.
+- Read APEXlang and SQL source before changing it or applying it. Keep numeric
+  app IDs and explicit deployment workspace/schema mappings consistent.
+- Do not place database credentials in `.env`, tracked files, command output,
+  or logs. Use saved SQLcl connection names.
+- Treat export as a read from shared Builder that refreshes tracked local
+  source. Do not export unless requested, and review the result before
+  committing it.
+- Do not run migrations, APEX imports, or deployments unless the user asked
+  for that database write. Coordinate with teammates before importing into a
+  shared DEV app; Git branches do not protect shared database state.
+- Use `scripts/team.sh check-conflicts` before applying a migration. Applied
+  SQL changes shared DEV state and migration files remain immutable.
+- `scripts/team.sh deploy` requires confirmation for staging and production.
+  `--manual` prints a runbook and makes no connection. Do not describe the
+  manual output as an executed deployment.
+- Do not claim a live check passed unless it actually ran. Report unavailable
+  checks as unknown.
+- Do not commit or push without an explicit instruction. Never silently push.
