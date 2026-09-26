@@ -73,6 +73,16 @@ state.
   read-only SQLcl identity check. `scripts/team.sh backup-db` refreshes the
   local table and code mirrors.
 
+## Project instructions
+
+- `AGENTS.md`, `CLAUDE.md`, `README.md`, and `.agents/rules/agent-safety.md`
+  belong to the template; `scripts/team.sh upgrade-template` replaces them.
+  Put project-specific agent instructions in `AGENTS.project.md`, project
+  rules in `.agents/rules/project.md`, and the project overview in
+  `PROJECT.md`. The upgrade never overwrites those files.
+- Read `AGENTS.project.md` and `.agents/rules/project.md` after this file.
+  When they conflict with this file, ask the user which applies.
+
 ## Rules for coding agents
 
 - Read the relevant `.apx`, APEXlang, SQL, and deployment descriptor files

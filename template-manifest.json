@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "upstream": "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+  "templateOwned": [
+    ".agents/rules/agent-safety.md",
+    ".agents/rules/graphify.md",
+    ".agents/workflows/**",
+    ".agents/skills/**",
+    ".claude/skills/**",
+    ".env.example",
+    ".gitattributes",
+    ".github/**",
+    ".gitignore",
+    ".graphifyignore",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "app_context/README.md",
+    "apps/templates/**",
+    "docs/publish-rules.md",
+    "migrations/README.md",
+    "pyproject.toml",
+    "scripts/**",
+    "self_improve.md",
+    "template-manifest.json",
+    "tests/**"
+  ],
+  "projectOwned": [
+    ".agents/rules/project.md",
+    "AGENTS.project.md",
+    "PROJECT.md",
+    "ai_generate/.gitkeep",
+    "apps/.gitkeep",
+    "database/.gitkeep",
+    "migrations/.gitkeep"
+  ],
+  "templateOnly": [
+    "docs/superpowers/**"
+  ]
+}

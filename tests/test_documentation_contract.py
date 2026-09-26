@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = (
     ROOT / "AGENTS.md",
+    ROOT / "CLAUDE.md",
     ROOT / "README.md",
     ROOT / ".agents" / "workflows" / "team-flow.md",
     ROOT / ".agents" / "rules" / "agent-safety.md",
