@@ -116,7 +116,7 @@
 
 ## Final verification and delivery
 
-- [ ] Run the repository's complete supported checks, inspect the final diff, and obtain a fresh whole-change review.
-- [ ] Fix any critical or important review issue and rerun its regression plus the full suite.
-- [ ] Commit any final review fixes, verify `main` is clean, and push the requested branch.
-- [ ] Report the `docker-demo` read-only checks, tests, commit SHA, push result, and any unavailable checks as `UNKNOWN`.
+- [x] Run the complete unit suite (85 tests), Python compilation, Bash syntax checks, PowerShell parsing, and `git diff --check`; inspect the final diff and obtain a fresh review.
+- [x] Fix the Oracle `CREATE JAVA` resolve/compile grammar omission and rerun its regressions plus the full suite. Verify with SQLcl `/nolog` that a Java standalone period does not execute a following `PROMPT`.
+- [x] Commit review fixes as `ada743f`, verify `main` is clean, and push `main` to `origin`.
+- [x] Verify `docker-demo` read-only identity (`DEMO`, `FREEPDB1`) and scan migrations for conflicts (0 files); report test results, commit SHA, and push result.
