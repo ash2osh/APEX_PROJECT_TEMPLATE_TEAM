@@ -20,6 +20,20 @@ add_backup_schema() {
 add_backup_schema "$TABLES_SCHEMA"
 add_backup_schema "$CODE_SCHEMA"
 
+# Use a reversible URL-safe Base64 name for SQLcl spool directories. SQLcl can
+# misread '$' in SPOOL paths. The encoding is injective, contains no '$', and
+# stays below the filesystem's component-length limit for Oracle's 128-byte
+# identifier maximum. Mirrors are renamed to the configured schema afterward.
+schema_stage_directory() {
+  python3 - "$1" <<'PY'
+import base64
+import sys
+
+encoded = base64.urlsafe_b64encode(sys.argv[1].encode("ascii")).decode("ascii").rstrip("=")
+print(f".sqlcl-schema-{encoded}")
+PY
+}
+
 # Refuse local mirror edits before making either database connection.
 for schema in "${BACKUP_SCHEMAS[@]}"; do
   destination="database/$schema"
@@ -67,7 +81,10 @@ scope_directories() {
 verify_scope_complete() {
   local scope="$1"
   local schema="$2"
-  local manifest="$STAGING_DIR/database/$schema/manifest-$scope.txt"
+  local spool_schema
+  spool_schema="$(schema_stage_directory "$schema")"
+  local mirror_stage="$STAGING_DIR/database/$spool_schema"
+  local manifest="$mirror_stage/manifest-$scope.txt"
   local expected=0
   local counted=0
   local line count
@@ -95,7 +112,7 @@ verify_scope_complete() {
   local actual=0
   local scope_dir found
   while IFS= read -r scope_dir; do
-    found="$(find "$STAGING_DIR/database/$schema/$scope_dir" -maxdepth 1 -type f \
+    found="$(find "$mirror_stage/$scope_dir" -maxdepth 1 -type f \
       -name '*.sql' 2>/dev/null | wc -l)"
     actual=$((actual + found))
   done < <(scope_directories "$scope")
@@ -113,19 +130,21 @@ run_backup_scope() {
   local connection="$3"
   local expected_user="$4"
   local prefixes="$5"
+  local spool_schema
+  spool_schema="$(schema_stage_directory "$schema")"
   local scope_dir
   while IFS= read -r scope_dir; do
-    mkdir -p "$STAGING_DIR/database/$schema/$scope_dir"
+    mkdir -p "$STAGING_DIR/database/$spool_schema/$scope_dir"
   done < <(scope_directories "$scope")
   (
     cd "$STAGING_DIR"
     sql -S -noupdates -name "$connection" \
       "@$REPO_ROOT/scripts/backup_db.sql" \
-      "$schema" "$scope" "$DB_ENVIRONMENT" "$expected_user" "$prefixes" \
+      "$schema" "$scope" "$DB_ENVIRONMENT" "$expected_user" "$prefixes" "$spool_schema" \
       < "$SQLCL_STDIN"
   )
-  test -f "$STAGING_DIR/database/$schema/manifest-$scope.txt" || {
-    echo "database backup did not create manifest-$scope.txt under database/$schema" >&2
+  test -f "$STAGING_DIR/database/$spool_schema/manifest-$scope.txt" || {
+    echo "database backup did not create manifest-$scope.txt for $schema" >&2
     exit 1
   }
   verify_scope_complete "$scope" "$schema"
@@ -139,6 +158,8 @@ run_backup_scope code "$CODE_SCHEMA" "$CODE_SQLCL_CONNECTION" \
 
 REPLACE_ARGS=()
 for schema in "${BACKUP_SCHEMAS[@]}"; do
+  spool_schema="$(schema_stage_directory "$schema")"
+  mv -- "$STAGING_DIR/database/$spool_schema" "$STAGING_DIR/database/$schema"
   # A scope that produced no objects of one type leaves an empty directory that
   # would otherwise be installed, implying "none exist" where the truth is
   # "none were looked for". Prune after verification, before replacement.

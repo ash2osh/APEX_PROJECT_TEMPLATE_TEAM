@@ -17,13 +17,23 @@ function Get-ScopeDirectory {
   return @("views", "packages", "procedures", "functions", "triggers")
 }
 
+function Get-SqlclSpoolSchemaName {
+  param([Parameter(Mandatory = $true)][string] $Schema)
+  # URL-safe Base64 is reversible, contains no SQLcl-significant '$', and is
+  # short enough for a maximum-length Oracle identifier as one path component.
+  $bytes = [System.Text.Encoding]::ASCII.GetBytes($Schema)
+  $encoded = [Convert]::ToBase64String($bytes).TrimEnd([char[]]@('='))
+  return ".sqlcl-schema-$($encoded.Replace('+', '-').Replace('/', '_'))"
+}
+
 function Test-ScopeComplete {
   param(
     [string] $Scope,
     [string] $Schema,
     [string] $StagingPath
   )
-  $manifestPath = Join-Path $StagingPath "database/$Schema/manifest-$Scope.txt"
+  $spoolSchema = Get-SqlclSpoolSchemaName -Schema $Schema
+  $manifestPath = Join-Path $StagingPath "database/$spoolSchema/manifest-$Scope.txt"
   $expected = 0
   $counted = 0
   foreach ($line in (Get-Content -LiteralPath $manifestPath)) {
@@ -47,7 +57,7 @@ function Test-ScopeComplete {
   $scopeDirs = Get-ScopeDirectory -Scope $Scope
   $actual = 0
   foreach ($scopeDir in $scopeDirs) {
-    $scopePath = Join-Path $StagingPath "database/$Schema/$scopeDir"
+    $scopePath = Join-Path $StagingPath "database/$spoolSchema/$scopeDir"
     if (Test-Path -LiteralPath $scopePath) {
       $actual += @(Get-ChildItem -LiteralPath $scopePath -File -Filter *.sql).Count
     }
@@ -101,9 +111,10 @@ try {
 
   # Both exports and manifests must complete before any generated mirror changes.
   foreach ($target in $backupTargets) {
+    $spoolSchema = Get-SqlclSpoolSchemaName -Schema $target.Schema
     foreach ($scopeDir in (Get-ScopeDirectory -Scope $target.Scope)) {
       New-Item -ItemType Directory -Force `
-        -Path (Join-Path $stagingPath "database/$($target.Schema)/$scopeDir") | Out-Null
+        -Path (Join-Path $stagingPath "database/$spoolSchema/$scopeDir") | Out-Null
     }
     $sqlclExit = Invoke-Sqlcl -WorkingDirectory $stagingPath `
       -StdInFile (Join-Path $stagingPath ".sqlcl-stdin") `
@@ -111,16 +122,22 @@ try {
         "-S", "-noupdates", "-name", $target.Connection,
         "@$(Join-Path $repoRoot 'scripts/backup_db.sql')",
         $target.Schema, $target.Scope, $env:DB_ENVIRONMENT,
-        $target.ExpectedUser, $target.Prefixes
+        $target.ExpectedUser, $target.Prefixes, $spoolSchema
       )
     if ($sqlclExit -ne 0) {
       throw "SQLcl $($target.Scope) metadata backup failed with exit code $sqlclExit"
     }
-    $manifestPath = Join-Path $stagingPath "database/$($target.Schema)/manifest-$($target.Scope).txt"
+    $manifestPath = Join-Path $stagingPath "database/$spoolSchema/manifest-$($target.Scope).txt"
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-      throw "database backup did not create manifest-$($target.Scope).txt under database/$($target.Schema)"
+      throw "database backup did not create manifest-$($target.Scope).txt for $($target.Schema)"
     }
     Test-ScopeComplete -Scope $target.Scope -Schema $target.Schema -StagingPath $stagingPath
+  }
+
+  foreach ($schema in $backupSchemas) {
+    $spoolSchema = Get-SqlclSpoolSchemaName -Schema $schema
+    Move-Item -LiteralPath (Join-Path $stagingPath "database/$spoolSchema") `
+      -Destination (Join-Path $stagingPath "database/$schema")
   }
 
   Pop-Location

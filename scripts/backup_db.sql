@@ -1,12 +1,13 @@
 -- Export schema metadata only (never table data). Arguments are supplied by
 -- the validated shell/PowerShell wrappers: schema, scope, environment,
--- expected session user, and object-name prefixes.
+-- expected session user, object-name prefixes, and a SQLcl-safe spool schema.
 SET DEFINE ON
 DEFINE target_schema = '&1'
 DEFINE object_scope = '&2'
 DEFINE db_environment = '&3'
 DEFINE expected_user = '&4'
 DEFINE object_prefixes = '&5'
+DEFINE spool_schema = '&6'
 SET ENCODING UTF-8
 SET PAGESIZE 0
 -- PAGESIZE 0 alone does not suppress column headings in every SQLcl release,
@@ -105,7 +106,7 @@ END;
 -- an empty driver and an empty mirror. Keep CHR(59).
 SPOOL scripts/_backup_db_driver_&&object_scope..sql
 
-SELECT 'SPOOL database/&&target_schema/tables/' || REPLACE(table_name, '$', '-S-') || '.sql'
+SELECT 'SPOOL database/&&spool_schema/tables/' || REPLACE(table_name, '$', '-S-') || '.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''TABLE'', ''' || table_name
        || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
        || CHR(10) || 'SPOOL OFF'
@@ -128,7 +129,7 @@ WHERE LOWER('&&object_scope') = 'tables'
   )
 ORDER BY table_name;
 
-SELECT 'SPOOL database/&&target_schema/views/' || REPLACE(view_name, '$', '-S-') || '.sql'
+SELECT 'SPOOL database/&&spool_schema/views/' || REPLACE(view_name, '$', '-S-') || '.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''VIEW'', ''' || view_name
        || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
        || CHR(10) || 'SPOOL OFF'
@@ -150,7 +151,7 @@ WHERE LOWER('&&object_scope') = 'code'
   )
 ORDER BY view_name;
 
-SELECT 'SPOOL database/&&target_schema/packages/' || REPLACE(object_name, '$', '-S-') || '_SPEC.sql'
+SELECT 'SPOOL database/&&spool_schema/packages/' || REPLACE(object_name, '$', '-S-') || '_SPEC.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''PACKAGE_SPEC'', ''' || object_name
        || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
        || CHR(10) || 'SPOOL OFF'
@@ -173,7 +174,7 @@ WHERE LOWER('&&object_scope') = 'code'
   )
 ORDER BY object_name;
 
-SELECT 'SPOOL database/&&target_schema/packages/' || REPLACE(object_name, '$', '-S-') || '_BODY.sql'
+SELECT 'SPOOL database/&&spool_schema/packages/' || REPLACE(object_name, '$', '-S-') || '_BODY.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''PACKAGE_BODY'', ''' || object_name
        || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
        || CHR(10) || 'SPOOL OFF'
@@ -196,7 +197,7 @@ WHERE LOWER('&&object_scope') = 'code'
   )
 ORDER BY object_name;
 
-SELECT 'SPOOL database/&&target_schema/procedures/' || REPLACE(object_name, '$', '-S-') || '.sql'
+SELECT 'SPOOL database/&&spool_schema/procedures/' || REPLACE(object_name, '$', '-S-') || '.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''PROCEDURE'', ''' || object_name
        || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
        || CHR(10) || 'SPOOL OFF'
@@ -219,7 +220,7 @@ WHERE LOWER('&&object_scope') = 'code'
   )
 ORDER BY object_name;
 
-SELECT 'SPOOL database/&&target_schema/functions/' || REPLACE(object_name, '$', '-S-') || '.sql'
+SELECT 'SPOOL database/&&spool_schema/functions/' || REPLACE(object_name, '$', '-S-') || '.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''FUNCTION'', ''' || object_name
        || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
        || CHR(10) || 'SPOOL OFF'
@@ -242,7 +243,7 @@ WHERE LOWER('&&object_scope') = 'code'
   )
 ORDER BY object_name;
 
-SELECT 'SPOOL database/&&target_schema/triggers/' || REPLACE(object_name, '$', '-S-') || '.sql'
+SELECT 'SPOOL database/&&spool_schema/triggers/' || REPLACE(object_name, '$', '-S-') || '.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''TRIGGER'', ''' || object_name
        || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
        || CHR(10) || 'SPOOL OFF'
@@ -276,7 +277,7 @@ SELECT CASE LOWER('&&object_scope')
        END AS manifest_file
 FROM dual;
 
-SPOOL database/&&target_schema/&&manifest_file
+SPOOL database/&&spool_schema/&&manifest_file
 WITH expected_types (object_type, object_scope) AS (
   SELECT 'TABLE', 'tables' FROM dual UNION ALL
   SELECT 'VIEW', 'code' FROM dual UNION ALL
