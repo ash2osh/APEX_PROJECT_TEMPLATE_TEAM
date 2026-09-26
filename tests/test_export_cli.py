@@ -178,7 +178,7 @@ class ExportCliTests(unittest.TestCase):
         after = script.index("SPOOL .apex-export-after.txt")
         self.assertLess(before, export)
         self.assertLess(export, after)
-        self.assertEqual(script.count("MAX(last_updated_on)"), 2)
+        self.assertEqual(script.count("FROM apex_applications"), 2)
         self.assertEqual(script.count("TO_CHAR(SYSDATE"), 2)
 
 

@@ -46,7 +46,7 @@ class RecordExportStateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             marker,
-            {"applicationId": 100, "builderLastUpdatedOn": "2026-09-26T08:00:00"},
+            {"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": "2026-09-26T08:00:00"},
         )
 
     def test_export_fails_if_builder_changes_during_export(self) -> None:
@@ -65,6 +65,21 @@ class RecordExportStateTests(unittest.TestCase):
         result, marker = self.run_recorder("NOT_FOUND", "NOT_FOUND")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(marker["builderLastUpdatedOn"], None)
+        self.assertIs(marker["applicationPresent"], False)
+
+    def test_imported_app_without_builder_timestamp_is_recorded_as_present(self) -> None:
+        result, marker = self.run_recorder("NO_TIMESTAMP", "NO_TIMESTAMP")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            marker,
+            {"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": None},
+        )
+
+    def test_builder_edit_during_export_of_imported_app_fails_closed(self) -> None:
+        result, marker = self.run_recorder("NO_TIMESTAMP", "2026-09-26T09:00:01")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changed in Builder while export was running", result.stderr)
+        self.assertIsNone(marker)
 
     def test_invalid_or_mismatched_export_state_fails_closed(self) -> None:
         result, marker = self.run_recorder("NOT_FOUND", "2026-09-26T08:00:00")

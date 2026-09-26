@@ -13,6 +13,8 @@ commits. Git branches do not isolate shared Builder or database state.
    guard refuses to overwrite Builder edits newer than the local export. After
    import, publish re-exports the app, verifies exact APEXlang file bytes, and
    advances the DEV baseline only when the live revision stayed stable.
+   APEX leaves `last_updated_on` null after an import, so the guard cannot
+   see a teammate's import over another import; confirm with the team.
 3. **Schema work:** Add immutable SQL files under
    `migrations/<developer>/`, run `scripts/team.sh check-conflicts`, then
    apply selected files with `scripts/team.sh migrate <file>`. This changes

@@ -88,6 +88,16 @@ second. This persisted timestamp cannot reveal unsaved Builder edits, so
 coordinate with teammates before publishing. Staging and production promotion
 uses the separate `deploy` command.
 
+APEX does not stamp `last_updated_on` while importing, so an app installed or
+published from APEXlang has no Builder timestamp until someone saves it in
+Builder. The export marker records that as an installed app
+(`"applicationPresent": true` with a null `builderLastUpdatedOn`), not as an
+absent one. From that baseline, any later Builder save or removal of the app is
+refused as drift, and so is a re-import over a Builder-timestamped baseline.
+One import over another import leaves no timestamp to compare, so the guard
+cannot tell whether a teammate published the app since your export; confirm
+that with the team before publishing.
+
 After a successful DEV import, `publish` exports the app again and compares the
 APEXlang file names and bytes with the local source, excluding the local
 deployment descriptors and export marker. It advances the drift baseline only
@@ -117,7 +127,8 @@ scripts/team.sh migrate migrations/alice/20260926_101500_add_status.sql
 Migration bodies run with SQLcl substitution disabled, so `&` is treated as
 ordinary SQL text. Migration files may contain SQL statements ending in
 semicolons and Oracle forms that use a standalone slash, including PL/SQL
-blocks, `CREATE TYPE`, `CREATE LIBRARY`, and `CREATE JAVA`. SQLcl client
+blocks, `CREATE TYPE`, `CREATE LIBRARY`, `CREATE JAVA`, and
+`CREATE MLE MODULE`. SQLcl client
 commands such as `SET DEFINE`, `PROMPT`, and `WHENEVER` are rejected before
 connecting.
 

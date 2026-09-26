@@ -42,8 +42,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$app_environment" in
-  staging) target_label=STAGING ;;
-  prod) target_label=PROD ;;
+  staging|prod) ;;
   *) fail "select --env staging or --env prod" ;;
 esac
 

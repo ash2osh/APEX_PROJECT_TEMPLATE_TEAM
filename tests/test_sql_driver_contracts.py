@@ -28,6 +28,15 @@ class SqlDriverContractTests(unittest.TestCase):
                 contents = (ROOT / "scripts" / name).read_text(encoding="utf-8")
                 self.assertRegex(contents, r"(?im)^EXIT SUCCESS ROLLBACK\s*$")
 
+    def test_revision_queries_distinguish_imported_app_from_absent_app(self) -> None:
+        # APEX leaves last_updated_on NULL on import, so NVL(MAX(...)) alone
+        # would report an installed app as NOT_FOUND.
+        for name, queries in (("check_builder_drift.sql", 1), ("export_apps.sql", 2)):
+            with self.subTest(driver=name):
+                contents = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+                self.assertEqual(contents.count("WHEN COUNT(*) = 0 THEN 'NOT_FOUND'"), queries)
+                self.assertEqual(contents.count("WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'"), queries)
+
 
 if __name__ == "__main__":
     unittest.main()

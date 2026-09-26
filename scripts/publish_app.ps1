@@ -167,6 +167,11 @@ if ($appEnvironment -ne "dev") {
   if ($answer -notmatch '^(?i:y|yes)$') { throw "Publish cancelled." }
 }
 
+# Classify the target before the drift guard opens its read-only session.
+if ($appEnvironment -eq "dev") {
+  & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation write -Target apex
+}
+
 if ($appEnvironment -eq "dev" -and -not $force) {
   $driftGuard = Join-Path $repoRoot "scripts/check_builder_drift.py"
   if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
@@ -182,10 +187,6 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     & $python.Source $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser
   }
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-}
-
-if ($appEnvironment -eq "dev") {
-  & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation write -Target apex
 }
 
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")

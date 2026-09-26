@@ -70,6 +70,7 @@ class PublishAppCliTests(unittest.TestCase):
             "    *@*export_apps.sql) mode=export ;;\n"
             "  esac\n"
             "done\n"
+            "if [[ -n \"${FAKE_SQL_CALLS:-}\" ]]; then printf '%s\\n' \"$mode\" >> \"$FAKE_SQL_CALLS\"; fi\n"
             "export_schema=DEMO\n"
             "if [[ $mode == export ]]; then found_script=0; for arg in \"$@\"; do if [[ $found_script == 1 ]]; then export_schema=$arg; break; fi; case \"$arg\" in *@*export_apps.sql) found_script=1 ;; esac; done; fi\n"
             "case \"$mode\" in\n"
@@ -86,6 +87,7 @@ class PublishAppCliTests(unittest.TestCase):
             "      count=$((count + 1))\n"
             "      printf '%s\\n' \"$count\" > \"$FAKE_STATE_DIR/import-count.txt\"\n"
             "      if [[ $count -eq 1 ]]; then live=2026-09-26T09:30:00; db=2026-09-26T09:30:02; else live=2026-09-26T09:45:00; db=2026-09-26T09:45:02; fi\n"
+            "      if [[ \"${FAKE_IMPORT_CLEARS_TIMESTAMP:-0}\" == 1 ]]; then live=NO_TIMESTAMP; fi\n"
             "      printf '%s\\n' \"$live\" > \"$FAKE_STATE_DIR/live.txt\"\n"
             "      printf '%s\\n' \"$db\" > \"$FAKE_STATE_DIR/database.txt\"\n"
             "    fi\n"
@@ -301,6 +303,102 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("No uncaptured Builder edits", second.stdout)
             marker = json.loads((app / "apex-team-export.json").read_text(encoding="utf-8"))
             self.assertEqual(marker["builderLastUpdatedOn"], "2026-09-26T09:45:00")
+
+    # Live APEX leaves last_updated_on NULL after an APEXlang import. Publish
+    # must treat that as an installed app and let the next publish through.
+    def test_import_that_clears_builder_timestamp_publishes_and_records_present_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
+
+            first = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertIn("APEX_PUBLISH_SOURCE_VERIFIED:100", first.stdout)
+            marker = json.loads((app / "apex-team-export.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                marker,
+                {"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": None},
+            )
+
+            second = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("no Builder edits since its last import", second.stdout)
+
+    def test_powershell_import_that_clears_builder_timestamp_publishes(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
+            command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+
+            first = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            marker = json.loads((app / "apex-team-export.json").read_text(encoding="utf-8"))
+            self.assertIs(marker["applicationPresent"], True)
+            self.assertIsNone(marker["builderLastUpdatedOn"])
+
+            second = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("no Builder edits since its last import", second.stdout)
+
+    def test_production_like_dev_connection_is_refused_before_any_sqlcl_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, _, _ = self.make_stateful_dev_fixture(root)
+            env_file = root / ".env"
+            env_file.write_text(
+                env_file.read_text(encoding="utf-8").replace(
+                    "APEX_SQLCL_CONNECTION=docker-demo", "APEX_SQLCL_CONNECTION=prod-db"
+                ),
+                encoding="utf-8",
+            )
+            calls = root / "sql-calls.txt"
+            environment["FAKE_SQL_CALLS"] = str(calls)
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("resembles production", result.stderr)
+            self.assertFalse(calls.exists(), calls.read_text(encoding="utf-8") if calls.exists() else "")
+
+    def test_powershell_production_like_dev_connection_is_refused_before_any_sqlcl_session(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, _, environment, _, _ = self.make_stateful_dev_fixture(root)
+            env_file = root / ".env"
+            env_file.write_text(
+                env_file.read_text(encoding="utf-8").replace(
+                    "APEX_SQLCL_CONNECTION=docker-demo", "APEX_SQLCL_CONNECTION=prod-db"
+                ),
+                encoding="utf-8",
+            )
+            environment["PROJECT_ENV_FILE"] = str(env_file)
+            calls = root / "sql-calls.txt"
+            environment["FAKE_SQL_CALLS"] = str(calls)
+            command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+
+            result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("resembles production", result.stdout + result.stderr)
+            self.assertFalse(calls.exists(), calls.read_text(encoding="utf-8") if calls.exists() else "")
 
     def test_unverified_publish_keeps_old_baseline_and_next_attempt_refuses_builder_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -228,7 +228,7 @@ def validate_sql_only(source: str) -> None:
                 re.match(
                     r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:AND\s+(?:RESOLVE|COMPILE)\s+)?(?:NOFORCE\s+)?"
                     r"(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?(?:FORCE\s+)?"
-                    r"(?:PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?|LIBRARY|JAVA|PROCEDURE|FUNCTION|TRIGGER)\b",
+                    r"(?:PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?|LIBRARY|JAVA|MLE\s+MODULE|PROCEDURE|FUNCTION|TRIGGER)\b",
                     create_head,
                 )
             )

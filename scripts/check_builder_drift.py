@@ -12,9 +12,11 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from record_export_state import NO_TIMESTAMP, NOT_FOUND, AppState
+
 
 DATABASE_STATE_PATTERN = re.compile(
-    r"\b(NOT_FOUND|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    rf"\b({NOT_FOUND}|{NO_TIMESTAMP}|\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}})"
     r"\|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\b"
 )
 
@@ -34,35 +36,39 @@ def parse_timestamp(value: object) -> datetime | None:
     return parsed.replace(microsecond=0)
 
 
-def get_export_baseline(app_dir: Path, app_id: int) -> tuple[datetime | None, bool]:
+def get_export_baseline(app_dir: Path, app_id: int) -> AppState | None:
     """Read the database revision captured before the APEX source export."""
     marker_path = app_dir / "apex-team-export.json"
     if not marker_path.is_file():
-        return None, False
+        return None
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None, False
+        return None
     if not isinstance(marker, dict):
-        return None, False
+        return None
     marker_id = marker.get("applicationId")
     if isinstance(marker_id, bool) or not isinstance(marker_id, int) or marker_id != app_id:
-        return None, False
+        return None
     if "builderLastUpdatedOn" not in marker:
-        return None, False
+        return None
     baseline = marker["builderLastUpdatedOn"]
-    if baseline is None:
-        return None, True
-    parsed = parse_timestamp(baseline)
-    return parsed, parsed is not None
+    if baseline is not None and parse_timestamp(baseline) is None:
+        return None
+    # Markers written before applicationPresent existed used null for an
+    # absent app only; keep that reading so they fail closed on an import.
+    present = marker.get("applicationPresent", baseline is not None)
+    if not isinstance(present, bool) or (not present and baseline is not None):
+        return None
+    return AppState(present, baseline)
 
 
 def _query_live_timestamp(
     app_id: int, connection: str, expected_user: str | None, app_dir: Path
-) -> tuple[datetime | None, datetime | None, bool, str | None]:
+) -> tuple[AppState | None, datetime | None, str | None]:
     sql_script = Path(__file__).with_name("check_builder_drift.sql")
     if not sql_script.is_file():
-        return None, None, False, f"SQLcl query script is missing: {sql_script}"
+        return None, None, f"SQLcl query script is missing: {sql_script}"
     expected_arg = expected_user or "-"
     with tempfile.TemporaryDirectory(prefix="apex-builder-drift-") as temp_dir:
         stdin_path = Path(temp_dir) / "sqlcl-stdin"
@@ -88,25 +94,26 @@ def _query_live_timestamp(
                     check=False,
                 )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return None, None, False, f"SQLcl query failed: {exc}"
+            return None, None, f"SQLcl query failed: {exc}"
 
     output = f"{result.stdout}\n{result.stderr}"
     if result.returncode != 0 or re.search(r"\b(?:ORA|SP2|SQL)\s*-\d+", output, re.I):
         detail = output.strip() or f"SQLcl exited with status {result.returncode}"
-        return None, None, False, detail
+        return None, None, detail
     states = DATABASE_STATE_PATTERN.findall(output)
     if not states:
-        return None, None, False, "SQLcl returned no application timestamp and database time"
+        return None, None, "SQLcl returned no application timestamp and database time"
     app_value, database_time_value = states[-1]
     database_time = parse_timestamp(database_time_value)
     if database_time is None:
-        return None, None, False, "SQLcl returned an invalid database time"
-    if app_value == "NOT_FOUND":
-        return None, database_time, True, None
-    live_timestamp = parse_timestamp(app_value)
-    if live_timestamp is None:
-        return None, database_time, False, "SQLcl returned an invalid application timestamp"
-    return live_timestamp, database_time, False, None
+        return None, None, "SQLcl returned an invalid database time"
+    if app_value == NOT_FOUND:
+        return AppState(False, None), database_time, None
+    if app_value == NO_TIMESTAMP:
+        return AppState(True, None), database_time, None
+    if parse_timestamp(app_value) is None:
+        return None, database_time, "SQLcl returned an invalid application timestamp"
+    return AppState(True, app_value), database_time, None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,9 +133,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[DRIFT UNKNOWN] Application source directory does not exist: {app_dir}", file=sys.stderr)
         return 1
 
-    baseline, baseline_available = get_export_baseline(app_dir, args.app_id)
+    baseline = get_export_baseline(app_dir, args.app_id)
     export_command = f"scripts/team.sh export {args.app_id}"
-    if not baseline_available:
+    if baseline is None:
         print(
             f"[DRIFT UNKNOWN] Database export baseline is unavailable for APEX App {args.app_id}.\n"
             f"Run {export_command} before publishing.",
@@ -136,35 +143,48 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    live_at, database_time, not_found, error = _query_live_timestamp(
+    live, database_time, error = _query_live_timestamp(
         args.app_id, args.connection, args.expected_user, app_dir
     )
-    if error:
+    if error or live is None:
         print(
             f"[DRIFT UNKNOWN] Could not read live APEX App {args.app_id}: {error}",
             file=sys.stderr,
         )
         return 1
 
-    if baseline is None and not_found:
+    baseline_at = parse_timestamp(baseline.last_updated_on)
+    live_at = parse_timestamp(live.last_updated_on)
+    if not baseline.present and not live.present:
         print(f"[DRIFT OK] APEX App {args.app_id} remains absent since the local export.")
         return 0
-    if baseline is not None and live_at == baseline == database_time:
+    if not baseline.present:
+        reason = "was created after the local export."
+    elif not live.present:
+        reason = "no longer exists in the target after the local export."
+    elif baseline_at is None and live_at is None:
+        # APEX leaves last_updated_on NULL on import and sets it on any Builder
+        # save, so this proves no Builder edit. It cannot reveal another import.
+        print(
+            f"[DRIFT OK] APEX App {args.app_id} has no Builder edits since its last import. "
+            "An import does not record a Builder timestamp; confirm no teammate published it since your export."
+        )
+        return 0
+    elif live_at is None:
+        reason = "was re-imported after the local export (APEX clears last_updated_on on import)."
+    elif baseline_at is None:
+        reason = f"was modified in Builder on {live_at.isoformat(timespec='seconds')}."
+    elif live_at == baseline_at == database_time:
         print(
             f"[DRIFT UNKNOWN] APEX App {args.app_id} last_updated_on matches the current database second. "
             "Oracle DATE has one-second precision, so the revision is ambiguous; wait one second and retry.",
             file=sys.stderr,
         )
         return 1
-    if baseline is None:
-        reason = "was created after the local export."
-    elif not_found:
-        reason = "no longer exists in the target after the local export."
+    elif live_at <= baseline_at:
+        print("[DRIFT OK] No uncaptured Builder edits detected.")
+        return 0
     else:
-        assert live_at is not None
-        if live_at <= baseline:
-            print("[DRIFT OK] No uncaptured Builder edits detected.")
-            return 0
         reason = f"was modified in Builder on {live_at.isoformat(timespec='seconds')}."
 
     print(f"[DRIFT DETECTED] Live APEX App {args.app_id} {reason}")

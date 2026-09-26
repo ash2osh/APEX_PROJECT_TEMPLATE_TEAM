@@ -165,15 +165,16 @@ if [ "$app_environment" != dev ]; then
   esac
 fi
 
+# Classify the target before the drift guard opens its read-only session.
+if [ "$app_environment" = dev ]; then
+  PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" write apex
+fi
+
 if [ "$app_environment" = dev ] && [ "$force" != true ]; then
   drift_guard="$REPO_ROOT/scripts/check_builder_drift.py"
   [ -f "$drift_guard" ] || fail "Builder drift guard is missing; refusing import"
   python3 "$drift_guard" "$app_id" "$sqlcl_connection" "$app_dir" \
     --expected-user "$expected_user"
-fi
-
-if [ "$app_environment" = dev ]; then
-  PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" write apex
 fi
 
 mkdir -p "$REPO_ROOT/scratch"
@@ -199,7 +200,7 @@ cat "$sqlcl_output"
 if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:' "$sqlcl_output"; then
   fail "SQLcl reported a client or database error during the application import"
 fi
-if ! grep -Eq "^[[:space:]]*APEX_IMPORT_VERIFIED:$app_id[[:space:]]*$" "$sqlcl_output"; then
+if ! grep -Eq "^[[:space:]]*APEX_IMPORT_VERIFIED:${app_id}[[:space:]]*$" "$sqlcl_output"; then
   fail "SQLcl did not verify the imported application; the import result is unknown"
 fi
 

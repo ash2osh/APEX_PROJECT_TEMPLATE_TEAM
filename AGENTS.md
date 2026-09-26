@@ -41,8 +41,11 @@ state.
   that export. Oracle records this value at one-second precision, so the
   exporter and guard fail closed when it matches the current database second.
   This timestamp cannot see unsaved Builder edits; communicate with teammates
-  before publishing. The guard refuses to overwrite newer Builder work. Export
-  and reconcile before retrying. After import, publish re-exports the app and
+  before publishing. APEX leaves it null after an APEXlang import, so the
+  marker records an imported app as present with no Builder timestamp; the
+  guard then refuses a later Builder save, but it cannot detect a teammate's
+  import over another import. The guard refuses to overwrite newer Builder
+  work. Export and reconcile before retrying. After import, publish re-exports the app and
   requires exact APEXlang file and byte equality before it advances the DEV
   baseline. A failed or ambiguous verification leaves the old baseline in
   place, so the next publish still refuses newer Builder state. Use `--force`
@@ -54,8 +57,8 @@ state.
   table, view, sequence, and added-column declarations across developer
   folders; it does not replace SQL review. Migration files may contain SQL
   statements and Oracle forms that use a standalone slash, such as PL/SQL
-  blocks, `CREATE TYPE`, and `CREATE LIBRARY`; SQLcl client commands are
-  rejected before connecting.
+  blocks, `CREATE TYPE`, `CREATE LIBRARY`, and `CREATE MLE MODULE`; SQLcl
+  client commands are rejected before connecting.
 - **Promotion:** Put an explicit deployment descriptor in the application
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
   each direct import requires the displayed `[y/N]` confirmation. Add

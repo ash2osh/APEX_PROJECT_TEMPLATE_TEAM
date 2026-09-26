@@ -20,8 +20,12 @@ WHENEVER OSERROR EXIT FAILURE ROLLBACK
 
 -- Save the live Builder revision in database time before reading APEX source.
 SPOOL .apex-export-before.txt
-SELECT NVL(TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS'), 'NOT_FOUND')
-       || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
+SELECT CASE
+         WHEN COUNT(*) = 0 THEN 'NOT_FOUND'
+         -- APEX leaves last_updated_on NULL on import; the app still exists.
+         WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'
+         ELSE TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS')
+       END || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
 FROM apex_applications
 WHERE application_id = &&app_id;
 SPOOL OFF
@@ -31,8 +35,12 @@ apex export -applicationid &&app_id -exptype APEXLANG -overwrite-files -dir apps
 
 -- Refuse to publish a local export marker if Builder changed during the export.
 SPOOL .apex-export-after.txt
-SELECT NVL(TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS'), 'NOT_FOUND')
-       || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
+SELECT CASE
+         WHEN COUNT(*) = 0 THEN 'NOT_FOUND'
+         -- APEX leaves last_updated_on NULL on import; the app still exists.
+         WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'
+         ELSE TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS')
+       END || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
 FROM apex_applications
 WHERE application_id = &&app_id;
 SPOOL OFF

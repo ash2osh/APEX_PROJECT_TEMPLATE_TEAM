@@ -22,6 +22,7 @@ class BuilderDriftTests(unittest.TestCase):
         sql_output: str,
         sql_exit: str = "0",
         marker_present: bool = True,
+        application_present: bool | None = None,
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -29,10 +30,10 @@ class BuilderDriftTests(unittest.TestCase):
             app.mkdir()
             (app / "application.apx").write_text("app SAMPLE ()\n", encoding="utf-8")
             if marker_present:
-                (app / "apex-team-export.json").write_text(
-                    json.dumps({"applicationId": 100, "builderLastUpdatedOn": baseline}),
-                    encoding="utf-8",
-                )
+                marker = {"applicationId": 100, "builderLastUpdatedOn": baseline}
+                if application_present is not None:
+                    marker["applicationPresent"] = application_present
+                (app / "apex-team-export.json").write_text(json.dumps(marker), encoding="utf-8")
 
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -140,6 +141,63 @@ class BuilderDriftTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("current database second", result.stderr)
+
+    # APEX does not stamp last_updated_on during an import, so an app installed
+    # from APEXlang exists with a NULL revision. That is not an absent app.
+    def test_imported_app_without_builder_timestamp_is_clean(self) -> None:
+        result = self.run_guard(
+            baseline=None,
+            application_present=True,
+            sql_output=observed_state("NO_TIMESTAMP"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[DRIFT OK]", result.stdout)
+        self.assertIn("no Builder edits since its last import", result.stdout)
+        self.assertNotIn("absent", result.stdout)
+
+    def test_builder_edit_after_import_baseline_is_refused(self) -> None:
+        result = self.run_guard(
+            baseline=None,
+            application_present=True,
+            sql_output=observed_state("2026-09-26T09:00:00"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("[DRIFT DETECTED]", result.stdout)
+        self.assertIn("modified in Builder on 2026-09-26T09:00:00", result.stdout)
+
+    def test_reimport_after_builder_baseline_is_refused(self) -> None:
+        result = self.run_guard(
+            baseline="2026-09-26T08:00:00",
+            application_present=True,
+            sql_output=observed_state("NO_TIMESTAMP"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("[DRIFT DETECTED]", result.stdout)
+        self.assertIn("re-imported", result.stdout)
+
+    def test_imported_app_is_not_treated_as_absent_by_legacy_marker(self) -> None:
+        result = self.run_guard(baseline=None, sql_output=observed_state("NO_TIMESTAMP"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("[DRIFT DETECTED]", result.stdout)
+        self.assertIn("created after the local export", result.stdout)
+
+    def test_import_baseline_for_removed_app_is_refused(self) -> None:
+        result = self.run_guard(
+            baseline=None,
+            application_present=True,
+            sql_output=observed_state("NOT_FOUND"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no longer exists", result.stdout)
+
+    def test_inconsistent_marker_fails_closed(self) -> None:
+        result = self.run_guard(
+            baseline="2026-09-26T08:00:00",
+            application_present=False,
+            sql_output=observed_state("2026-09-26T08:00:00"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("[DRIFT UNKNOWN]", result.stderr)
 
 
 if __name__ == "__main__":

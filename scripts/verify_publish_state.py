@@ -11,7 +11,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from record_export_state import read_state
+from record_export_state import AppState, marker_payload, read_state
 from validate_app_source import validate_app_source
 
 
@@ -55,22 +55,27 @@ def verify_source_bytes(source_dir: Path, exported_dir: Path) -> None:
             raise ValueError(f"required APEXlang source file is missing: {required.as_posix()}")
 
 
-def read_verified_revision(app_id: int, before_file: Path, after_file: Path) -> str:
+def read_verified_revision(app_id: int, before_file: Path, after_file: Path) -> AppState:
     before, before_observed_at = read_state(before_file)
     after, after_observed_at = read_state(after_file)
-    if before is None or after is None:
+    if not before.present or not after.present:
         raise ValueError(f"APEX App {app_id} is not visible in the post-import state")
     if before != after:
         raise ValueError(
             f"APEX App {app_id} changed while its post-import source was being verified "
-            f"(before: {before}, after: {after})"
+            f"(before: {before.describe()}, after: {after.describe()})"
         )
     if before_observed_at > after_observed_at:
         raise ValueError("database time moved backwards during post-import verification")
-    if datetime.fromisoformat(after) > after_observed_at:
+    # An APEXlang import leaves last_updated_on NULL, so a freshly imported app
+    # has no Builder timestamp to compare; only a Builder edit would set one.
+    if after.last_updated_on is None:
+        return after
+    if datetime.fromisoformat(after.last_updated_on) > after_observed_at:
         raise ValueError("APEX last_updated_on is later than the database-time observation")
-    if before == before_observed_at.isoformat(timespec="seconds") or after == after_observed_at.isoformat(
-        timespec="seconds"
+    if after.last_updated_on in (
+        before_observed_at.isoformat(timespec="seconds"),
+        after_observed_at.isoformat(timespec="seconds"),
     ):
         raise ValueError(
             f"APEX App {app_id} has a last_updated_on value in the same database second "
@@ -79,17 +84,14 @@ def read_verified_revision(app_id: int, before_file: Path, after_file: Path) -> 
     return after
 
 
-def advance_baseline(app_id: int, source_dir: Path, revision: str) -> None:
+def advance_baseline(app_id: int, source_dir: Path, revision: AppState) -> None:
     marker_path = source_dir / "apex-team-export.json"
     if marker_path.is_symlink():
         raise ValueError(f"refusing to replace a symbolic-link export marker: {marker_path}")
     if marker_path.exists() and not marker_path.is_file():
         raise ValueError(f"export marker path is not a regular file: {marker_path}")
 
-    payload = json.dumps(
-        {"applicationId": app_id, "builderLastUpdatedOn": revision},
-        indent=2,
-    ) + "\n"
+    payload = json.dumps(marker_payload(app_id, revision), indent=2) + "\n"
     descriptor, temporary_name = tempfile.mkstemp(prefix=".apex-team-export.", suffix=".tmp", dir=source_dir)
     temporary_path = Path(temporary_name)
     try:

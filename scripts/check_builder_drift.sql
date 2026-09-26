@@ -23,8 +23,12 @@ BEGIN
 END;
 /
 
-SELECT NVL(TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS'), 'NOT_FOUND')
-       || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
+SELECT CASE
+         WHEN COUNT(*) = 0 THEN 'NOT_FOUND'
+         -- APEX leaves last_updated_on NULL on import; the app still exists.
+         WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'
+         ELSE TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS')
+       END || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
 FROM apex_applications
 WHERE application_id = &&application_id;
 

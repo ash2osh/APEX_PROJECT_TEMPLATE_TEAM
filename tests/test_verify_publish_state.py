@@ -53,6 +53,37 @@ class VerifyPublishStateTests(unittest.TestCase):
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
             self.assertEqual(marker["applicationId"], 100)
             self.assertEqual(marker["builderLastUpdatedOn"], "2026-09-26T09:30:00")
+            self.assertIs(marker["applicationPresent"], True)
+
+    # An APEXlang import leaves last_updated_on NULL (APEX skips its audit
+    # columns while importing), so this is the normal post-publish state.
+    def test_imported_app_without_builder_timestamp_advances_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            before.write_text("NO_TIMESTAMP|2026-09-26T09:30:03\n", encoding="utf-8")
+            after.write_text("NO_TIMESTAMP|2026-09-26T09:30:04\n", encoding="utf-8")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                marker,
+                {"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": None},
+            )
+
+    def test_absent_app_after_import_does_not_advance_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            before.write_text("NOT_FOUND|2026-09-26T09:30:03\n", encoding="utf-8")
+            after.write_text("NOT_FOUND|2026-09-26T09:30:04\n", encoding="utf-8")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not visible", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
 
     def test_source_mismatch_does_not_advance_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -44,6 +44,10 @@ class ValidateMigrationTests(unittest.TestCase):
             'public class Compiling {}\n/\n',
             'CREATE JAVA IF NOT EXISTS SOURCE NAMED "Optional" AS\n'
             'public class Optional {}\n/\n',
+            "CREATE OR REPLACE MLE MODULE M_TEST LANGUAGE JAVASCRIPT AS\n"
+            "export function add(a, b) { return a + b; }\n/\n",
+            "CREATE MLE MODULE IF NOT EXISTS M_TEST LANGUAGE JAVASCRIPT AS\n"
+            "export const text = `a; b`;\n/\n",
         ):
             with self.subTest(source=source):
                 result = self.run_validator(source)
@@ -122,6 +126,20 @@ class ValidateMigrationTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SQL-only migration", result.stderr)
+
+    def test_mle_module_period_buffer_terminator_is_rejected(self) -> None:
+        # SQLcl ends an MLE module buffer at a lone period, so the next line
+        # would run as a client command (verified with SQLcl under /nolog).
+        result = self.run_validator(
+            "CREATE OR REPLACE MLE MODULE M_TEST LANGUAGE JAVASCRIPT AS\n"
+            "export function f() { return 1; }\n"
+            ".\n"
+            "PROMPT CLIENT_DIRECTIVE_EXECUTED\n"
+            "/\n"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("buffer terminator", result.stderr)
 
     def test_migration_cannot_take_transaction_completion_away_from_driver(self) -> None:
         for source in ("COMMIT;\n", "ROLLBACK;\n"):
