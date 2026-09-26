@@ -1,0 +1,159 @@
+taskDefinition bg-probe-task (
+    name: BG Probe Task
+    type: approval
+    task {
+        subject: BG probe task
+        initiatorCanComplete: true
+    }
+
+    parameter T_PROBE_PARAM (
+        label: T_PROBE_PARAM
+    )
+
+    action on-create (
+        name: Capture on create
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture('TASK_ACTION_CREATE');
+                end;
+                ```
+        }
+        execution {
+            onEvent: create
+            sequence: 10
+        }
+        error {
+            stopExecutionOnError: true
+            logging: all
+        }
+    )
+
+    action on-create-binds (
+        name: Capture binds on create
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_CREATED_ON', :APEX$TASK_CREATED_ON);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_DUE_ON', :APEX$TASK_DUE_ON);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_ID', :APEX$TASK_ID);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_INITIATOR', :APEX$TASK_INITIATOR);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_MAX_RENEWAL_COUNT', :APEX$TASK_MAX_RENEWAL_COUNT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_OWNER', :APEX$TASK_OWNER);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_PK', :APEX$TASK_PK);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_PREVIOUS_ID', :APEX$TASK_PREVIOUS_ID);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_RENEWAL_COUNT', :APEX$TASK_RENEWAL_COUNT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_STATE', :APEX$TASK_STATE);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_SUBJECT', :APEX$TASK_SUBJECT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'T_PROBE_PARAM', :T_PROBE_PARAM);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APP_USER', :APP_USER);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APP_SESSION', :APP_SESSION);
+                    apex_bg_probe.record_context_complete('TASK_ACTION_CREATE');
+                end;
+                ```
+        }
+        execution {
+            onEvent: create
+            sequence: 20
+        }
+        error {
+            stopExecutionOnError: true
+            logging: all
+        }
+    )
+
+    action on-complete (
+        name: Capture on complete
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture('TASK_ACTION_COMPLETE');
+                end;
+                ```
+        }
+        execution {
+            onEvent: complete
+            outcome: approved
+            sequence: 30
+        }
+        error {
+            stopExecutionOnError: true
+            logging: all
+        }
+    )
+
+    action on-complete-binds (
+        name: Capture binds on complete
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_CREATED_ON', :APEX$TASK_CREATED_ON);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_DUE_ON', :APEX$TASK_DUE_ON);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_ID', :APEX$TASK_ID);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_INITIATOR', :APEX$TASK_INITIATOR);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_MAX_RENEWAL_COUNT', :APEX$TASK_MAX_RENEWAL_COUNT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_OUTCOME', :APEX$TASK_OUTCOME);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_OWNER', :APEX$TASK_OWNER);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_PK', :APEX$TASK_PK);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_PREVIOUS_ID', :APEX$TASK_PREVIOUS_ID);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_RENEWAL_COUNT', :APEX$TASK_RENEWAL_COUNT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_STATE', :APEX$TASK_STATE);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_SUBJECT', :APEX$TASK_SUBJECT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'T_PROBE_PARAM', :T_PROBE_PARAM);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APP_USER', :APP_USER);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APP_SESSION', :APP_SESSION);
+                    apex_bg_probe.record_context_complete('TASK_ACTION_COMPLETE');
+                end;
+                ```
+        }
+        execution {
+            onEvent: complete
+            outcome: approved
+            sequence: 40
+        }
+        error {
+            stopExecutionOnError: true
+            logging: all
+        }
+    )
+
+    action on-comment-text (
+        name: Capture task comment text
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture_bind(
+                        'TASK_ACTION_COMMENT',
+                        'APEX$TASK_TEXT task ' || TO_CHAR(:APEX$TASK_ID),
+                        :APEX$TASK_TEXT);
+                    apex_bg_probe.record_context_complete('TASK_ACTION_COMMENT');
+                end;
+                ```
+        }
+        execution {
+            onEvent: updateComment
+            sequence: 50
+        }
+        error {
+            stopExecutionOnError: true
+            logging: all
+        }
+    )
+
+    participant (
+        value {
+            type: staticValue
+            staticValue: PROBE_USER
+        }
+    )
+)

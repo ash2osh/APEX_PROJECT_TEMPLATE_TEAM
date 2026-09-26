@@ -1,0 +1,48 @@
+automation bg-probe-scheduled (
+    name: BG Probe Scheduled
+    execution {
+        type: scheduled
+        scheduleExpression: FREQ=MINUTELY;INTERVAL=1
+        scheduleStatus: disabled
+        actionsInitiatedOn: always
+    }
+    actionExecution {
+        actionErrorHandling: terminate
+    }
+
+    action capture (
+        name: Capture session
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture('AUTOMATION_SCHEDULED');
+                end;
+                ```
+        }
+        execution {
+            sequence: 10
+        }
+    )
+
+    action binds (
+        name: Capture binds
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture_bind('AUTOMATION_SCHEDULED', 'APP_ID', :APP_ID);
+                    apex_bg_probe.capture_bind('AUTOMATION_SCHEDULED', 'APP_USER', :APP_USER);
+                    apex_bg_probe.capture_bind('AUTOMATION_SCHEDULED', 'APP_SESSION', :APP_SESSION);
+                    apex_bg_probe.capture_bind('AUTOMATION_SCHEDULED', 'PROBE_APP_ITEM', :PROBE_APP_ITEM);
+                    apex_bg_probe.record_context_complete('AUTOMATION_SCHEDULED');
+                end;
+                ```
+        }
+        execution {
+            sequence: 20
+        }
+    )
+)

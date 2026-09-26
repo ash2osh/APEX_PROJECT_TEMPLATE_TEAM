@@ -85,6 +85,9 @@ state.
 
 ## Rules for coding agents
 
+- Before writing PL/SQL for APEX automations, workflow activities, task
+  actions, or background execution chains, read
+  `.agents/skills/apex-background/SKILL.md`.
 - Read the relevant `.apx`, APEXlang, SQL, and deployment descriptor files
   before editing them. Preserve the app's numeric ID and explicit workspace
   mapping. Do not invent a live workspace, schema, connection, or migration

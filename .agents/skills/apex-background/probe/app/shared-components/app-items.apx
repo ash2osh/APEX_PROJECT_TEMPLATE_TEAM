@@ -1,0 +1,5 @@
+appItem PROBE_APP_ITEM (
+    security {
+        sessionStateProtection: unrestricted
+    }
+)

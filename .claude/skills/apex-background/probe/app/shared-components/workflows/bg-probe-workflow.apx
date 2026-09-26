@@ -1,0 +1,237 @@
+workflow bg-probe-workflow (
+    name: BG Probe Workflow
+    title: BG Probe Workflow
+
+    parameter P_PROBE_PARAM (
+        label {
+            label: P_PROBE_PARAM
+        }
+    )
+
+    version v1 (
+        settings {
+            state: active
+        }
+        additionalData {
+            type: sqlQuery
+            sqlQuery: select 'additional-data-value' as PROBE_DATA from dual
+        }
+
+        activity start (
+            name: Start
+            type: workflowStart
+            layout {
+                sequence: 10
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @capture-start
+                }
+            )
+        )
+
+        activity capture-start (
+            name: Capture at start
+            type: executeCode
+            source {
+                plsqlCode:
+                    ```plsql
+                    begin
+                        apex_bg_probe.capture('WORKFLOW_START');
+                    end;
+                    ```
+            }
+            layout {
+                sequence: 20
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @binds-start
+                }
+            )
+        )
+
+        activity binds-start (
+            name: Capture binds at start
+            type: executeCode
+            source {
+                plsqlCode:
+                    ```plsql
+                    begin
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_ACTIVITY_ID', :APEX$WORKFLOW_ACTIVITY_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_CREATED_ON', :APEX$WORKFLOW_CREATED_ON);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_ID', :APEX$WORKFLOW_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_DETAIL_PK', :APEX$WORKFLOW_DETAIL_PK);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_INITIATOR', :APEX$WORKFLOW_INITIATOR);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_STATE', :APEX$WORKFLOW_STATE);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'P_PROBE_PARAM', :P_PROBE_PARAM);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'PROBE_DATA', :PROBE_DATA);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APP_USER', :APP_USER);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APP_SESSION', :APP_SESSION);
+                        apex_bg_probe.record_context_complete('WORKFLOW_START');
+                    end;
+                    ```
+            }
+            layout {
+                sequence: 30
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @wait
+                }
+            )
+        )
+
+        activity wait (
+            name: Wait one minute
+            type: wait
+            timeout {
+                timeoutType: static
+                staticValue: PT1M
+            }
+            layout {
+                sequence: 40
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @capture-after-wait
+                }
+            )
+        )
+
+        activity capture-after-wait (
+            name: Capture after wait
+            type: executeCode
+            source {
+                plsqlCode:
+                    ```plsql
+                    begin
+                        apex_bg_probe.capture('WORKFLOW_AFTER_WAIT');
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_ACTIVITY_ID', :APEX$WORKFLOW_ACTIVITY_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_CREATED_ON', :APEX$WORKFLOW_CREATED_ON);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_DETAIL_PK', :APEX$WORKFLOW_DETAIL_PK);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_ID', :APEX$WORKFLOW_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_INITIATOR', :APEX$WORKFLOW_INITIATOR);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_STATE', :APEX$WORKFLOW_STATE);
+                        apex_bg_probe.record_context_complete('WORKFLOW_AFTER_WAIT');
+                    end;
+                    ```
+            }
+            layout {
+                sequence: 50
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @probe-task
+                }
+            )
+        )
+
+        activity probe-task (
+            name: Probe task
+            type: humanTaskCreate
+            humanTask {
+                definition: @bg-probe-task
+            }
+            result {
+                outcome: TASK_OUTCOME
+            }
+            layout {
+                sequence: 60
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @capture-after-task
+                }
+            )
+            parameter (
+                name: @T_PROBE_PARAM
+                value {
+                    type: expression
+                    plsqlExpression: 'from-workflow'
+                }
+            )
+        )
+
+        activity capture-after-task (
+            name: Capture after task
+            type: executeCode
+            source {
+                plsqlCode:
+                    ```plsql
+                    begin
+                        apex_bg_probe.capture('WORKFLOW_AFTER_TASK');
+                    end;
+                    ```
+            }
+            layout {
+                sequence: 70
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @binds-after-task
+                }
+            )
+        )
+
+        activity binds-after-task (
+            name: Capture binds after task
+            type: executeCode
+            source {
+                plsqlCode:
+                    ```plsql
+                    begin
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_ACTIVITY_ID', :APEX$WORKFLOW_ACTIVITY_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_CREATED_ON', :APEX$WORKFLOW_CREATED_ON);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_DETAIL_PK', :APEX$WORKFLOW_DETAIL_PK);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_ID', :APEX$WORKFLOW_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_INITIATOR', :APEX$WORKFLOW_INITIATOR);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_STATE', :APEX$WORKFLOW_STATE);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'TASK_OUTCOME', :TASK_OUTCOME);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APP_USER', :APP_USER);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APP_SESSION', :APP_SESSION);
+                        apex_bg_probe.record_context_complete('WORKFLOW_AFTER_TASK');
+                    end;
+                    ```
+            }
+            layout {
+                sequence: 80
+            }
+            connection (
+                name: Next
+                activity {
+                    to: @end
+                }
+            )
+        )
+
+        activity end (
+            name: End
+            type: workflowEnd
+            layout {
+                sequence: 90
+            }
+        )
+
+        variable TASK_OUTCOME (
+            label {
+                label: TASK_OUTCOME
+            }
+        )
+
+        participant (
+            name: Owner
+            value {
+                type: staticValue
+                staticValue: PROBE_USER
+            }
+        )
+    )
+)

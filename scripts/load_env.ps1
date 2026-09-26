@@ -13,7 +13,8 @@ param([string]$EnvFile = $env:PROJECT_ENV_FILE)
 $ErrorActionPreference = "Stop"
 try {
 Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
-  Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER -ErrorAction SilentlyContinue
+  Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
+  Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
 # Mirror load_env.sh: a relative PROJECT_ENV_FILE resolves against the
@@ -35,6 +36,7 @@ $projectEnvAllowed = @(
   "TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER",
   "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
+  "INSTALL_UC_APX", "UC_APX_SKILLS_AGENT",
   "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER",
   "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER"
 )
@@ -65,6 +67,11 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   Set-Item -LiteralPath "Env:$projectEnvKey" -Value $projectEnvValue
   $projectEnvSeen[$projectEnvKey] = $true
 }
+
+# Preserve compatibility with existing .env files while exposing stable
+# defaults to project skills.
+if (-not $projectEnvSeen.ContainsKey("INSTALL_UC_APX")) { $env:INSTALL_UC_APX = "false" }
+if (-not $projectEnvSeen.ContainsKey("UC_APX_SKILLS_AGENT")) { $env:UC_APX_SKILLS_AGENT = "universal" }
 
 $projectEnvRequired = @(
   "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
@@ -134,6 +141,10 @@ if ($env:DEVELOPER_NAME -cnotmatch '^[A-Z][A-Z0-9_]{0,29}$') {
   throw "DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF"
 }
 if ($env:DB_ENVIRONMENT -notin @("development", "test", "staging", "production")) { throw "DB_ENVIRONMENT is invalid" }
+if ($env:INSTALL_UC_APX -cnotin @("true", "false")) { throw "INSTALL_UC_APX must be true or false" }
+if ($env:UC_APX_SKILLS_AGENT -cnotin @("universal", "claude-code")) {
+  throw "UC_APX_SKILLS_AGENT must be universal or claude-code"
+}
 foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_EXPECTED_USER", "APEX_PARSING_SCHEMA", "APEX_EXPECTED_USER")) {
   if ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process") -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
     throw "$projectEnvKey must be an uppercase Oracle identifier"

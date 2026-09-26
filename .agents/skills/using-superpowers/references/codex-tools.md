@@ -78,10 +78,11 @@ default_subagent_model = "<a mid-tier model from your spawn allowlist>"
 default_subagent_reasoning_effort = "medium"
 ```
 
-## Environment Detection
+## Branch Detection
 
-Skills that create worktrees or finish branches should detect their
-environment with read-only git commands before proceeding:
+This project uses the existing checkout and a named branch; do not create a
+worktree. Skills that finish a branch should inspect the current state with
+read-only git commands before proceeding:
 
 ```bash
 GIT_DIR=$(cd "$(git rev-parse --git-dir)" 2>/dev/null && pwd -P)
@@ -89,16 +90,16 @@ GIT_COMMON=$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd -P)
 BRANCH=$(git branch --show-current)
 ```
 
-- `GIT_DIR != GIT_COMMON` → already in a linked worktree (skip creation)
-- `BRANCH` empty → detached HEAD (cannot branch/push/PR from sandbox)
+- `BRANCH` empty → detached HEAD; establish an authorized task branch before
+  editing, while preserving any uncommitted user changes.
 
-See `using-git-worktrees` Step 0 and `finishing-a-development-branch`
-Step 1 for how each skill uses these signals.
+See `finishing-a-development-branch` Step 1 for how the branch signals are
+used.
 
 ## Codex App Finishing
 
-When the sandbox blocks branch/push operations (detached HEAD in an
-externally managed worktree), the agent commits all work and informs
+When the sandbox blocks branch/push operations (for example, on a detached
+HEAD), the agent commits all work and informs
 the user to use the App's native controls:
 
 - **"Create branch"** — names the branch, then commit/push/PR via App UI

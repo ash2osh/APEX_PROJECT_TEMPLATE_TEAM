@@ -37,7 +37,7 @@ going. Deviating from the plan without a ledgered ruling is a decision made
 in secret.
 
 Four things stop you, and only these: an irreversible or destructive
-operation; a security-sensitive action; a side effect outside this worktree
+operation; a security-sensitive action; a side effect outside this checkout
 that norms say you ask about first (a merge, a push to a shared branch, a
 publish); and a plan so broken that every path forward is a guess. For
 those, stop and ask.
@@ -80,14 +80,14 @@ digraph process {
         "task-done: run tests, ledger the result; mark todo complete" [shape=box];
     }
 
-    "Setup: worktree, workspace + ledger, read plan + spec, pre-flight scan" [shape=box];
+    "Setup: branch, workspace + ledger, read plan + spec, pre-flight scan" [shape=box];
     "More tasks remain?" [shape=diamond];
     "Final whole-branch review (fresh reviewer if you have one)" [shape=box];
     "Re-grade, then: Critical/Important → ONE fix pass, each fix RED→GREEN + green suite; Minor → ledger" [shape=box];
     "Final review clean: delete this plan's workspace" [shape=box];
     "Use superpowers:finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
 
-    "Setup: worktree, workspace + ledger, read plan + spec, pre-flight scan" -> "task-start: brief + BASE; read the brief";
+    "Setup: branch, workspace + ledger, read plan + spec, pre-flight scan" -> "task-start: brief + BASE; read the brief";
     "task-start: brief + BASE; read the brief" -> "Work the steps in order: TDD, run every verification, read every output";
     "Work the steps in order: TDD, run every verification, read every output" -> "Step output matches plan's Expected?";
     "Step output matches plan's Expected?" -> "Plan wrong? Rule and ledger. Code wrong? systematic-debugging" [label="no"];
@@ -107,10 +107,10 @@ digraph process {
 
 ## Setup
 
-Ensure the work happens in an isolated workspace: use
-superpowers:using-git-worktrees to create one or verify the existing one.
-Never start implementation on a main/master branch without your human
-partner's explicit consent.
+Use the existing checkout and a named Git branch; do not create a worktree.
+Before editing, confirm the current branch is not `main` or `master`. If it is,
+move the work to a task branch after preserving any uncommitted changes. Do not
+switch branches when that would overwrite or strand user work.
 
 Conversation memory does not survive compaction. An inline executor that
 loses its place re-implements tasks whose commits already exist — the same
@@ -325,7 +325,7 @@ Use superpowers:finishing-a-development-branch.
 ```
 You: I'm using the executing-plans skill to implement this plan inline.
 
-[Setup: worktree verified]
+[Setup: task branch verified]
 [Read plan once: docs/superpowers/plans/feature-plan.md; spec read]
 [Resolve workspace: sdd-workspace docs/superpowers/plans/feature-plan.md — no ledger inside, fresh start]
 [Pre-flight scan: 2 shared-interface rows, 4 self-consistency rows, clean; written to ledger]

@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -433,9 +434,9 @@ def apply_actions(
 
     mutations: list[Mutation] = []
     created_directories: list[Path] = []
-    scratch_context = tempfile.TemporaryDirectory(prefix=".apex-template-upgrade-", dir=project_root)
+    scratch_root = Path(tempfile.mkdtemp(prefix=".apex-template-upgrade-", dir=project_root))
+    preserve_scratch = False
     try:
-        scratch_root = Path(scratch_context.name)
         staged: dict[str, Path] = {}
         for index, (relative, (contents, mode)) in enumerate(sorted(writes.items())):
             stage = scratch_root / f"write-{index}"
@@ -495,12 +496,19 @@ def apply_actions(
                 directory.rmdir()
             except OSError:
                 pass
-        detail = f"filesystem update failed and was rolled back: {exc}"
         if rollback_errors:
-            detail += "; rollback errors: " + "; ".join(rollback_errors)
+            preserve_scratch = True
+            detail = (
+                f"filesystem update failed: {exc}; rollback incomplete: "
+                + "; ".join(rollback_errors)
+                + f"; recovery backups retained at {scratch_root}"
+            )
+        else:
+            detail = f"filesystem update failed and was rolled back: {exc}"
         raise UpgradeError(detail) from exc
     finally:
-        scratch_context.cleanup()
+        if not preserve_scratch:
+            shutil.rmtree(scratch_root, ignore_errors=True)
 
 
 def _normalize_source(source: str) -> str:
@@ -515,7 +523,10 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--project-root", type=Path, required=True)
-    parser.add_argument("--source", help="template Git URL or local path (default: upstream recorded in the lock)")
+    parser.add_argument(
+        "--source",
+        help="template Git URL or local path (default: upstream recorded in the lock or manifest)",
+    )
     parser.add_argument("--ref", help="template branch, tag, or commit (default: the source's default branch)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan without changing files")
     args = parser.parse_args(argv)
@@ -526,7 +537,9 @@ def main(argv: list[str] | None = None) -> int:
         lock = read_lock(project_root)
         source = args.source or lock.get("upstream")
         if not source:
-            raise UpgradeError("no template source recorded; pass --source <template Git URL or path>")
+            source = load_manifest(project_root)["upstream"]
+        if not source:
+            raise UpgradeError("no template source recorded in lock or manifest; pass --source <template Git URL or path>")
         source = _normalize_source(source)
         with tempfile.TemporaryDirectory(prefix="apex-template-") as temporary:
             template_root = Path(temporary) / "template"

@@ -5,8 +5,8 @@
 #
 # Usage: task-brief PLAN_FILE TASK_NUMBER [OUTFILE]
 # Default OUTFILE: <repo-root>/.superpowers/sdd/<plan-basename>/task-<N>-brief.md
-# (per plan and per worktree; concurrent runs of the SAME plan in the same
-# working tree share it).
+# (per plan and per branch; concurrent runs of the SAME plan in the same
+# checkout share it).
 set -euo pipefail
 
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then

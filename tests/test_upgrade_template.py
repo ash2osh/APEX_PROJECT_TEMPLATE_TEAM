@@ -53,10 +53,11 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.template = base / "template"
         self.project = base / "project"
         init_repo(self.template)
+        template_manifest = {**MANIFEST, "upstream": str(self.template)}
         write(
             self.template,
             {
-                "template-manifest.json": json.dumps(MANIFEST),
+                "template-manifest.json": json.dumps(template_manifest),
                 "AGENTS.md": "rules v1\n",
                 "AGENTS.project.md": "<!-- placeholder -->\n",
                 "scripts/tool.sh": "echo v1\n",
@@ -70,6 +71,7 @@ class UpgradeTemplateTests(unittest.TestCase):
         write(
             self.project,
             {
+                "template-manifest.json": json.dumps(template_manifest),
                 "AGENTS.md": "rules v1\n",
                 "AGENTS.project.md": "our project rules\n",
                 "scripts/tool.sh": "echo v1\n",
@@ -85,6 +87,14 @@ class UpgradeTemplateTests(unittest.TestCase):
     def upgrade(self, *extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["python3", str(ENGINE), "--project-root", str(self.project), "--source", str(self.template), *extra],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def upgrade_without_source(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["python3", str(ENGINE), "--project-root", str(self.project), *extra],
             text=True,
             capture_output=True,
             check=False,
@@ -116,6 +126,13 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.lock()["commit"], git(self.template, "rev-parse", "HEAD"))
         self.assertIn("scripts/tool.sh", self.lock()["files"])
         self.assertNotIn("AGENTS.project.md", self.lock()["files"])
+
+    def test_fresh_template_clone_uses_manifest_upstream_without_source_or_lock(self) -> None:
+        result = self.upgrade_without_source("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("UNCHANGED AGENTS.md", result.stdout)
+        self.assertFalse((self.project / ".template-lock.json").exists())
 
     def test_unmodified_template_files_are_updated_and_new_files_created(self) -> None:
         self.adopt()
@@ -162,6 +179,42 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read("scripts/tool.sh"), "echo v1\n")
         self.assertEqual(self.read(".template-lock.json"), original_lock)
         self.assertEqual(git(self.project, "status", "--porcelain"), "")
+
+    def test_failed_rollback_retains_backup_and_does_not_claim_success(self) -> None:
+        self.adopt()
+        self.release_v2({"AGENTS.md": "rules v2\n", "scripts/tool.sh": "echo v2\n"})
+        actions = [
+            upgrade_engine.Action("UPDATE", "AGENTS.md"),
+            upgrade_engine.Action("UPDATE", "scripts/tool.sh"),
+        ]
+        real_replace = os.replace
+        calls = 0
+
+        def fail_update_and_restore(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+            nonlocal calls
+            calls += 1
+            if calls in {6, 7}:
+                raise OSError(f"injected replace failure {calls}")
+            real_replace(source, target)
+
+        with patch("scripts.upgrade_template.os.replace", side_effect=fail_update_and_restore):
+            with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+                upgrade_engine.apply_actions(
+                    self.project,
+                    self.template,
+                    actions,
+                    str(self.template),
+                    git(self.template, "rev-parse", "HEAD"),
+                    {"AGENTS.md": "a" * 64, "scripts/tool.sh": "b" * 64},
+                )
+
+        message = str(caught.exception)
+        self.assertIn("rollback incomplete", message)
+        self.assertIn("recovery backups retained at", message)
+        self.assertNotIn("was rolled back", message)
+        recovery = Path(message.split("recovery backups retained at ", 1)[1])
+        self.assertTrue(recovery.is_dir())
+        self.assertIn(b"echo v1\n", [path.read_bytes() for path in recovery.iterdir() if path.is_file()])
 
     def test_locally_modified_file_changed_upstream_is_a_conflict(self) -> None:
         self.adopt()

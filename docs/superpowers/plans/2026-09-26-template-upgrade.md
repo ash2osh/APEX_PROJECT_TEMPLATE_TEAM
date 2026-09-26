@@ -1,6 +1,6 @@
 # Template Upgrade Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Let a project created from this template pull newer template scripts, tests, and agent instructions with `scripts/team.sh upgrade-template`, without overwriting the project's own instruction files, application source, database mirrors, or migrations.
 
@@ -35,7 +35,7 @@
 | `AGENTS.md` | template | Points agents at the project placeholders |
 | `scripts/upgrade_template.py` | template | Upgrade engine and CLI |
 | `scripts/team.sh`, `scripts/team.ps1` | template | `upgrade-template` command |
-| `tests/test_template_manifest.py` | template | Every tracked file is classified exactly once |
+| `tests/test_template_manifest.py` | template | Every template/placeholder path is classified once; downstream app, migration, environment, and lock paths stay unowned |
 | `tests/test_upgrade_template.py` | template | Engine behavior against real temporary Git repos |
 | `README.md` | template | "Upgrading from the template" section |
 | `.template-lock.json` | written in downstream projects only | Installed template commit and per-file hashes |
@@ -49,9 +49,9 @@
 - Modify: `AGENTS.md` (new "Project instructions" section), `tests/test_documentation_contract.py` (add `CLAUDE.md` to `DOCS`)
 
 **Interfaces:**
-- Produces: `template-manifest.json` with keys `schemaVersion` (int, `1`), `upstream` (str, Git URL), `templateOwned` (list of globs), `projectOwned` (list of exact paths), `templateOnly` (list of globs). Glob rules used by Task 2: `**` matches any number of path segments including none, `*` matches within one segment, paths use `/`.
+- Produces: `template-manifest.json` with keys `schemaVersion` (int, `1`), `upstream` (str, Git URL), `templateOwned` (list of globs), `projectOwned` (list of exact paths), `templateOnly` (list of globs). Glob rules used by Task 2: `**` matches any number of path segments including none, `*` matches within one segment, paths use `/`. In a downstream clone, application source, database mirrors, migrations, `.env`, and `.template-lock.json` are intentionally unowned; they are not expected to be classified as template files.
 
-- [ ] **Step 1: Write the failing classification test**
+- [x] **Step 1: Write the failing classification test**
 
 Create `tests/test_template_manifest.py`:
 
@@ -143,12 +143,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run it and confirm it fails**
+- [x] **Step 2: Run it and confirm it fails**
 
 Run: `python3 -m unittest tests.test_template_manifest -v`
 Expected: ERROR, `FileNotFoundError: ... template-manifest.json`.
 
-- [ ] **Step 3: Create the manifest**
+- [x] **Step 3: Create the manifest**
 
 Create `template-manifest.json`:
 
@@ -195,7 +195,7 @@ Create `template-manifest.json`:
 }
 ```
 
-- [ ] **Step 4: Create the empty placeholders**
+- [x] **Step 4: Create the empty placeholders**
 
 Each placeholder holds only an HTML comment, so it renders empty and tells a reader what belongs there.
 
@@ -224,7 +224,7 @@ Each placeholder holds only an HTML comment, so it renders empty and tells a rea
 @AGENTS.project.md
 ```
 
-- [ ] **Step 5: Point AGENTS.md at the placeholders**
+- [x] **Step 5: Point AGENTS.md at the placeholders**
 
 In `AGENTS.md`, insert this section directly before `## Rules for coding agents`:
 
@@ -242,12 +242,12 @@ In `AGENTS.md`, insert this section directly before `## Rules for coding agents`
 
 In `tests/test_documentation_contract.py`, add `ROOT / "CLAUDE.md",` to the `DOCS` tuple after `ROOT / "AGENTS.md",`.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `git add -N template-manifest.json AGENTS.project.md PROJECT.md .agents/rules/project.md CLAUDE.md tests/test_template_manifest.py && python3 -m unittest tests.test_template_manifest tests.test_documentation_contract -v`
-Expected: PASS. (`git add -N` makes the new files visible to `git ls-files` before the commit.) If `test_every_tracked_file_has_exactly_one_owner` names an unclassified file, add it to the list that owns it; do not widen `templateOwned` to `**`.
+Expected: PASS. (`git add -N` makes the new files visible to `git ls-files` before the commit.) The template checkout's eligible files must have exactly one owner. A downstream-repository fixture must also prove its app source, migration, `.env`, and lock remain unowned. Do not widen `templateOwned` to `**` to silence ownership failures.
 
-- [ ] **Step 7: Run the full suite and commit**
+- [x] **Step 7: Run the full suite and commit**
 
 Run: `python3 -m unittest discover -s tests`
 Expected: `OK`.
@@ -267,8 +267,8 @@ git commit -m "feat: declare template file ownership and project instruction pla
 **Interfaces:**
 - Consumes: `template-manifest.json` schema from Task 1.
 - Produces (used by Task 3):
-  - CLI: `python3 scripts/upgrade_template.py --project-root <dir> [--source <git-url-or-path>] [--ref <ref>] [--dry-run]`
-  - Exit codes: `0` applied (or dry run) with nothing needing attention; `1` applied with conflicts or kept files the user must review; `2` refused or failed (nothing changed).
+  - CLI: `python3 scripts/upgrade_template.py --project-root <dir> [--source <git-url-or-path>] [--ref <ref>] [--dry-run]`. Resolve source in this order: explicit `--source`, upstream in the target's `.template-lock.json`, then upstream in the target's `template-manifest.json`. This supports a new GitHub template clone that has no lock yet.
+  - Exit codes: `0` applied (or dry run) with nothing needing attention; `1` applied with conflicts or kept files the user must review; `2` refused or failed. Filesystem writes are rolled back when possible; if rollback is incomplete, keep and use the reported recovery directory before retrying.
   - Output lines: `<ACTION> <path>` where ACTION is one of `CREATE`, `UPDATE`, `UNCHANGED`, `KEEP-LOCAL`, `CONFLICT`, `DELETE`, `KEEP-DELETED`, `KEEP-REMOVED`, `PLACEHOLDER`, `KEEP-PLACEHOLDER`, then `Template <commit> <summary>`.
   - Writes `.template-lock.json`: `{"schemaVersion": 1, "upstream": str, "commit": str, "files": {path: sha256_hex}}` covering template-owned files only.
 
@@ -285,7 +285,7 @@ Decision table the engine implements, per template-owned path (`N` new template 
 
 Paths in the lock but no longer in the template: `DELETE` when `C == L`, `KEEP-REMOVED` when modified, silently dropped from the lock when already missing. Project-owned paths: `PLACEHOLDER` when missing, else `KEEP-PLACEHOLDER`. A project with no lock (every project created before this feature) has `L` none everywhere, so any differing file becomes a `CONFLICT` rather than being overwritten.
 
-- [ ] **Step 1: Write the failing engine tests**
+- [x] **Step 1: Write the failing engine tests**
 
 Create `tests/test_upgrade_template.py`:
 
@@ -554,12 +554,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `python3 -m unittest tests.test_upgrade_template -v`
 Expected: every test fails with `can't open file '.../scripts/upgrade_template.py'`.
 
-- [ ] **Step 3: Implement the engine**
+- [x] **Step 3: Implement the engine**
 
 Create `scripts/upgrade_template.py`:
 
@@ -743,16 +743,13 @@ def plan_upgrade(
     return actions, new_lock
 
 
-def apply_actions(project_root: Path, template_root: Path, actions: list[Action]) -> None:
-    for action in actions:
-        target = project_root / action.path
-        if action.kind in {"CREATE", "UPDATE", "PLACEHOLDER"}:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(template_root / action.path, target)
-        elif action.kind == "CONFLICT":
-            shutil.copyfile(template_root / action.path, target.with_name(target.name + CONFLICT_SUFFIX))
-        elif action.kind == "DELETE":
-            target.unlink()
+# apply_actions stages every managed write, conflict file, and updated lock in a
+# project-local scratch directory before changing targets. It rejects protected
+# paths, symlinked parents, and non-regular targets. Replaced or deleted originals
+# move into scratch before staged files are installed with os.replace. If an
+# operation fails, reverse completed operations in reverse order. Remove scratch
+# only after a complete rollback; if rollback fails, retain the recovery backups
+# and report their path so the operator can restore them manually.
 
 
 def write_lock(project_root: Path, upstream: str, commit: str, files: dict[str, str]) -> None:
@@ -764,7 +761,7 @@ def write_lock(project_root: Path, upstream: str, commit: str, files: dict[str, 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project-root", type=Path, required=True)
-    parser.add_argument("--source", help="template Git URL or local path (default: upstream recorded in the lock)")
+    parser.add_argument("--source", help="template Git URL or local path (default: lock upstream, then manifest upstream)")
     parser.add_argument("--ref", help="template branch, tag, or commit (default: the source's default branch)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan without changing files")
     args = parser.parse_args(argv)
@@ -772,9 +769,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project_root = Path(run_git(args.project_root, "rev-parse", "--show-toplevel").strip())
         lock = read_lock(project_root)
-        source = args.source or lock.get("upstream")
+        source = args.source or lock.get("upstream") or load_manifest(project_root)["upstream"]
         if not source:
-            raise UpgradeError("no template source recorded; pass --source <template Git URL or path>")
+            raise UpgradeError("no template source recorded in lock or manifest; pass --source <template Git URL or path>")
         if not args.dry_run:
             check_project(project_root)
         with tempfile.TemporaryDirectory(prefix="apex-template-") as temporary:
@@ -812,12 +809,12 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: Run the tests and confirm they pass**
+- [x] **Step 4: Run the tests and confirm they pass**
 
 Run: `python3 -m unittest tests.test_upgrade_template -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Lint, run the full suite, and commit**
+- [x] **Step 5: Lint, run the full suite, and commit**
 
 Run: `.venv/bin/ruff check scripts tests && python3 -m unittest discover -s tests`
 Expected: `All checks passed!` and `OK`.
@@ -839,7 +836,7 @@ git commit -m "feat: add file-level template upgrade engine"
 - Consumes: `scripts/upgrade_template.py` CLI and exit codes from Task 2.
 - Produces: `scripts/team.sh upgrade-template [--source <url-or-path>] [--ref <ref>] [--dry-run]` and the same for `scripts/team.ps1`. It passes the checkout root as `--project-root` and returns the engine's exit code. After a non-dry-run upgrade it runs the Bash `.env` loader against `.env` when present and prints `warning: .env needs attention after the upgrade:` plus the loader's message if it fails; the upgrade's exit code is unchanged by that warning.
 
-- [ ] **Step 1: Write the failing CLI tests**
+- [x] **Step 1: Write the failing CLI tests**
 
 Append these methods to `TeamCliTests` in `tests/test_team_cli.py`:
 
@@ -916,12 +913,12 @@ Append these methods to `TeamCliTests` in `tests/test_team_cli.py`:
 
 Also add `"upgrade-template"` to the command tuple in `test_team_help_lists_primary_commands`.
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `python3 -m unittest tests.test_team_cli -v`
 Expected: the three new tests and the help test FAIL (`unknown command 'upgrade-template'`).
 
-- [ ] **Step 3: Add the Bash command**
+- [x] **Step 3: Add the Bash command**
 
 In `scripts/team.sh`, add this usage line after the `deploy` lines:
 
@@ -947,7 +944,7 @@ and add this case before `*)`:
     ;;
 ```
 
-- [ ] **Step 4: Add the PowerShell command**
+- [x] **Step 4: Add the PowerShell command**
 
 In `scripts/team.ps1`, add the same usage lines to `Show-Usage` and this case before `default`:
 
@@ -971,12 +968,12 @@ In `scripts/team.ps1`, add the same usage lines to `Show-Usage` and this case be
   }
 ```
 
-- [ ] **Step 5: Run the tests and confirm they pass**
+- [x] **Step 5: Run the tests and confirm they pass**
 
 Run: `python3 -m unittest tests.test_team_cli -v && shellcheck -S warning scripts/team.sh`
 Expected: PASS and no shellcheck warnings.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/team.sh scripts/team.ps1 tests/test_team_cli.py
@@ -993,7 +990,7 @@ git commit -m "feat: add upgrade-template to the team CLIs"
 **Interfaces:**
 - Consumes: CLI from Task 3; ownership rules from Task 1.
 
-- [ ] **Step 1: Write the failing documentation assertions**
+- [x] **Step 1: Write the failing documentation assertions**
 
 In `tests/test_documentation_contract.py`, inside `test_active_team_guidance_uses_the_current_cli`, append:
 
@@ -1007,7 +1004,7 @@ In `tests/test_documentation_contract.py`, inside `test_active_team_guidance_use
 Run: `python3 -m unittest tests.test_documentation_contract -v`
 Expected: FAIL.
 
-- [ ] **Step 2: Add the README section**
+- [x] **Step 2: Add the README section**
 
 Insert before `## Command reference`:
 
@@ -1049,7 +1046,9 @@ python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source
 ```
 
 That first run has no lock, so every file that differs from the template is
-reported as a conflict instead of being overwritten.
+reported as a conflict instead of being overwritten. With no explicit source
+or lock, the script uses the upstream URL in the target's manifest. An explicit
+`--source` overrides the lock, and a lock overrides the manifest.
 ````
 
 Add this row to the command table:
@@ -1058,7 +1057,7 @@ Add this row to the command table:
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 ```
 
-- [ ] **Step 3: Run the tests and commit**
+- [x] **Step 3: Run the tests and commit**
 
 Run: `python3 -m unittest discover -s tests`
 Expected: `OK`.
@@ -1077,7 +1076,7 @@ git commit -m "docs: explain template upgrades and project placeholder files"
 **Interfaces:**
 - Consumes: everything above on `main`.
 
-- [ ] **Step 1: Create a project the way a developer did before this feature**
+- [x] **Step 1: Create a project the way a developer did before this feature**
 
 Run from the template checkout. Set `SCRATCH` to the session scratchpad
 directory printed in the agent's environment.
@@ -1093,7 +1092,7 @@ printf 'Our team rule.\n' >> AGENTS.md && git commit -qam "customize AGENTS.md"
 
 `2dc1625` is the last template commit before the manifest; it has no `upgrade_template.py`.
 
-- [ ] **Step 2: Bootstrap the upgrade from the current template**
+- [x] **Step 2: Bootstrap the upgrade from the current template**
 
 ```bash
 python3 "$REPO/scripts/upgrade_template.py" --project-root . --source "$REPO"
@@ -1103,7 +1102,7 @@ git status --short
 
 Expected: exit `1`. `CONFLICT AGENTS.md` with `AGENTS.md.template-new` present. `CREATE` lines for `template-manifest.json`, `CLAUDE.md`, and `scripts/upgrade_template.py`. `PLACEHOLDER AGENTS.project.md`, `PLACEHOLDER PROJECT.md`, `PLACEHOLDER .agents/rules/project.md`. `CREATE docs/publish-rules.md` (added after `2dc1625`), and no `docs/superpowers/` files. `AGENTS.md` still ends with `Our team rule.`
 
-- [ ] **Step 3: Resolve and upgrade again through the team CLI**
+- [x] **Step 3: Resolve and upgrade again through the team CLI**
 
 ```bash
 mv AGENTS.md.template-new AGENTS.md && printf 'Our team rule.\n' >> AGENTS.project.md
@@ -1114,7 +1113,7 @@ echo "exit=$?"
 
 Expected: exit `0`, only `UNCHANGED`/`KEEP-PLACEHOLDER` lines, and `git status --short` empty except `.template-lock.json` when its commit changed.
 
-- [ ] **Step 4: Record the evidence**
+- [x] **Step 4: Record the evidence**
 
 Report the exit codes and action lines from Steps 2 and 3 to the user. Do not commit anything from `$SCRATCH`.
 
@@ -1124,3 +1123,19 @@ Report the exit codes and action lines from Steps 2 and 3 to the user. Do not co
 
 - Spec coverage: upgrade scripts and instructions (Tasks 2–3), never overwrite project instruction files (Task 1 ownership, Task 2 `KEEP-PLACEHOLDER`), empty placeholder files in the template (Task 1), existing downstream projects (Task 4 bootstrap, Task 5 dogfood).
 - Out of scope: merging customized files automatically (the engine writes `.template-new` instead), and upgrading `docs/superpowers/` planning history (`templateOnly`). `docs/publish-rules.md` is template-owned so projects receive it.
+
+## Post-plan review fixes
+
+Follow-up review fixes on `codex/two-plans-and-superpowers` resolve an
+unlocked-clone bootstrap from the target manifest, retain filesystem recovery
+backups when rollback is incomplete, and allow committed downstream app,
+migration, `.env`, and lock files to remain outside template ownership. The
+README documents the source precedence and recovery directory. Regression
+tests cover each case.
+
+The original plan verification ran 176 tests and passed;
+`.venv/bin/ruff check .agents tests scripts`, `shellcheck -S warning` for the
+project and probe scripts, Bash syntax validation, and `git diff --check` also
+passed. After review hardening, `bash -n` and `git diff --check` passed. The
+user has explicitly authorized committing and pushing the follow-up changes to
+`main` as part of the integration changeset.

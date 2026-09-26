@@ -1,8 +1,11 @@
 import json
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+
+from scripts.upgrade_template import protected_project_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,10 +52,48 @@ class TemplateManifestTests(unittest.TestCase):
             owners.append("templateOnly")
         return owners
 
-    def test_every_tracked_file_has_exactly_one_owner(self) -> None:
-        for path in self.tracked:
+    def assert_tracked_ownership_valid(self, tracked: list[str]) -> None:
+        for path in tracked:
+            owners = self.classify(path)
             with self.subTest(path=path):
-                self.assertEqual(len(self.classify(path)), 1, self.classify(path))
+                if protected_project_path(path):
+                    self.assertEqual(owners, [])
+                elif owners:
+                    self.assertEqual(len(owners), 1, owners)
+
+    def test_tracked_files_are_not_ambiguously_owned_and_protected_paths_are_unowned(self) -> None:
+        self.assert_tracked_ownership_valid(self.tracked)
+
+    def test_downstream_data_and_lock_can_be_committed_without_template_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            downstream = Path(temporary)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(downstream)], check=True)
+            subprocess.run(["git", "-C", str(downstream), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(downstream), "config", "user.name", "Test"], check=True)
+            downstream_files = {
+                "template-manifest.json": (ROOT / "template-manifest.json").read_text(encoding="utf-8"),
+                ".template-lock.json": json.dumps({"schemaVersion": 1, "upstream": "template", "commit": "abc", "files": {}}),
+                "apps/DEMO/100/application.apx": "app DEMO ()\n",
+                "migrations/alice/20260926_add.sql": "select 1 from dual;\n",
+                "docs/architecture.md": "Downstream-owned documentation.\n",
+            }
+            for relative, contents in downstream_files.items():
+                target = downstream / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(contents, encoding="utf-8")
+            subprocess.run(["git", "-C", str(downstream), "add", "-A"], check=True)
+            subprocess.run(
+                ["git", "-C", str(downstream), "commit", "-q", "-m", "downstream data"],
+                check=True,
+            )
+            tracked = subprocess.run(
+                ["git", "-C", str(downstream), "ls-files"], capture_output=True, text=True, check=True
+            ).stdout.splitlines()
+
+        self.assert_tracked_ownership_valid(tracked)
+        for path in (".template-lock.json", "apps/DEMO/100/application.apx", "migrations/alice/20260926_add.sql"):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), [])
 
     def test_project_placeholders_exist_and_are_not_template_owned(self) -> None:
         for path in self.manifest["projectOwned"]:

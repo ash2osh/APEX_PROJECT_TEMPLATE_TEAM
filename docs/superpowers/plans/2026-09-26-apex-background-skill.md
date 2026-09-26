@@ -6,15 +6,24 @@
 
 **Architecture:** Discovery first, documentation second. A self-contained probe ships with the skill under `.agents/skills/apex-background/probe/`:
 
-- database objects (a run table, a log table, and a capture package);
+- database objects (run/log tables, a package specification, and a separately
+  compiled package body that install and finish can verify);
 - an APEXlang probe application (app 9901), built from SQLcl's bundled starter app plus one component per background context;
 - a Bash runner.
 
-Each context calls the capture package, which evaluates a fixed list of session probes in its own exception handler. Separate components record bind variables, so an unsupported bind cannot hide the session probes. A tested Python renderer turns the logged rows into `findings-apex-26.1.md`, and `SKILL.md` is written only from that matrix. The canonical skill lives in `.agents/skills/apex-background/`; a byte-identical `SKILL.md` in `.claude/skills/apex-background/` lets Claude Code discover it.
+Each context calls the capture package, which evaluates a fixed list of session probes in its own exception handler. Separate components record bind variables, so an unsupported bind cannot hide the session probes. Each component writes a `CONTEXT_COMPLETE` marker only after its final bind probe; the finisher waits for expected marker counts rather than treating any row as completion. After disabling its schedule and completing its tasks, the finisher refreshes and validates the package body before it checks and completes the run. It exports logs and faults even when orchestration fails and leaves an incomplete run active for a retry or confirmed cleanup. A tested Python renderer turns all logged observations into `findings-apex-26.1.md`, and `SKILL.md` is written only from that matrix. The canonical skill lives in `.agents/skills/apex-background/`; a byte-identical `SKILL.md` in `.claude/skills/apex-background/` lets Claude Code discover it.
 
 **Tech Stack:** Oracle APEX 26.1.4, APEXlang, SQLcl 26.2, PL/SQL, Bash, Python 3.10+ standard library, `unittest`, the built-in browser pane (for one page submit).
 
 **Spec:** This plan is the spec. User request (2026-09-26): "I need to make some extra skills for Oracle APEX to be added to this repo. Let's start with [call this the APEX background skill, because background actions do not have APEX sessions, I think, except for tasks]: substitution strings discovery in the background processes, automation and workflow code activities, and APEX task actions and task actions in workflow activities."
+
+**Execution status:** Tasks 1–6 are implemented and verified on this branch. Probe database phases were authorized by the user's “go ahead” instruction and each runner phase used its exact target confirmation. The user has since explicitly authorized committing this work and pushing it to `main`.
+
+The original implementation passed 176 unittest cases, Ruff, ShellCheck, Bash
+syntax, Python compileall, findings re-render comparison, and `git diff
+--check`. After the final workspace-context guard edits, `bash -n` and
+`git diff --check` passed. No live database recheck or test suite was run after
+those last guards; the guard fails closed if the requested context is absent.
 
 ## Global Constraints
 
@@ -42,10 +51,12 @@ Each context calls the capture package, which evaluates a fixed list of session 
 | `.claude/skills/apex-background/SKILL.md` | Byte-identical copy for Claude Code discovery |
 | `.agents/skills/apex-background/findings-apex-26.1.md` | Rendered probe evidence the skill cites |
 | `.agents/skills/apex-background/probe/install.sql` | Probe tables and `APEX_BG_PROBE` package |
+| `.agents/skills/apex-background/probe/package-body.sql` | Reusable body compilation plus compiler-error check |
 | `.agents/skills/apex-background/probe/uninstall.sql` | Removes probe objects |
 | `.agents/skills/apex-background/probe/contexts.sql` | Starts a run and triggers SQLcl-driven contexts |
-| `.agents/skills/apex-background/probe/finish.sql` | Waits, approves tasks, disables the schedule, spools CSV |
+| `.agents/skills/apex-background/probe/finish.sql` | Waits for completion markers, approves tasks, disables the schedule, and exports evidence even on failure |
 | `.agents/skills/apex-background/probe/app/` | APEXlang probe application source |
+| `.agents/skills/apex-background/probe/app/shared-components/messages.apx` | Text message fixture for the official `APP_TEXT$...` substitution |
 | `.agents/skills/apex-background/probe/run.sh` | `install`, `start`, `finish`, `report`, `uninstall` phases |
 | `.agents/skills/apex-background/probe/render_findings.py` | CSV to Markdown matrix |
 | `tests/test_apex_background_skill.py` | Renderer, probe layout, and skill contract tests |
@@ -60,9 +71,9 @@ Each context calls the capture package, which evaluates a fixed list of session 
 **Interfaces:**
 - Produces: `python3 render_findings.py <log.csv> <faults.csv> --apex <version> --database <name> > findings.md`.
   - `log.csv` has the header `CONTEXT_NAME,PROBE_NAME,PROBE_VALUE,PROBE_ERROR`; `faults.csv` has `SOURCE,NAME,DETAIL`. Both are SQLcl `SET SQLFORMAT CSV` output with double-quoted fields.
-  - Output: a header with the versions, a Markdown table with one row per probe and one column per context (contexts in first-seen order), then a `## Faults` list. A cell is the value, `<null>`, `error: <message>`, or `-` when the context did not record that probe.
+  - Output: a header with the versions, a Markdown table with one row per probe and one column per context (contexts in first-seen order), then a `## Faults` list. A cell is the value, `<null>`, `error: <message>`, or `-` when the context did not record that probe. If a task or repeated run records the same probe more than once in one context, preserve every observation by joining the cell values with `; ` in capture order.
 
-- [ ] **Step 1: Write the failing renderer tests**
+- [x] **Step 1: Write the failing renderer tests**
 
 Create `tests/test_apex_background_skill.py`:
 
@@ -94,9 +105,10 @@ class RenderFindingsTests(unittest.TestCase):
         result = self.render(
             '"CONTEXT_NAME","PROBE_NAME","PROBE_VALUE","PROBE_ERROR"\n'
             '"SQLCL_APEX_SESSION","V(APP_SESSION)","1234",\n'
+            '"SQLCL_APEX_SESSION","V(APP_SESSION)","1235",\n'
             '"WORKFLOW_START","V(APP_SESSION)","<null>",\n'
             '"SQLCL_APEX_SESSION","BIND :APEX$TASK_ID","",\n'
-            '"WORKFLOW_START","DO_SUBSTITUTIONS(&APP_NAME.)",,"ORA-06550: boom"\n',
+            '"WORKFLOW_START","DO_SUBSTITUTIONS(&APP_TITLE.)",,"ORA-06550: boom"\n',
             '"SOURCE","NAME","DETAIL"\n',
         )
 
@@ -104,9 +116,9 @@ class RenderFindingsTests(unittest.TestCase):
         lines = result.stdout.splitlines()
         self.assertIn("APEX 26.1.4", result.stdout)
         self.assertIn("| Probe | SQLCL_APEX_SESSION | WORKFLOW_START |", lines)
-        self.assertIn("| V(APP_SESSION) | 1234 | <null> |", lines)
+        self.assertIn("| V(APP_SESSION) | 1234; 1235 | <null> |", lines)
         self.assertIn("| BIND :APEX$TASK_ID | <null> | - |", lines)
-        self.assertIn("| DO_SUBSTITUTIONS(&APP_NAME.) | - | error: ORA-06550: boom |", lines)
+        self.assertIn("| DO_SUBSTITUTIONS(&APP_TITLE.) | - | error: ORA-06550: boom |", lines)
         self.assertIn("No faults recorded.", result.stdout)
 
     def test_pipes_in_values_are_escaped_and_faults_listed(self) -> None:
@@ -131,12 +143,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `python3 -m unittest tests.test_apex_background_skill -v`
 Expected: FAIL, `can't open file ... render_findings.py`.
 
-- [ ] **Step 3: Implement the renderer**
+- [x] **Step 3: Implement the renderer**
 
 Create `.agents/skills/apex-background/probe/render_findings.py`:
 
@@ -223,7 +235,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: Run the tests, lint, and commit**
+- [x] **Step 4: Run the tests, lint, and commit**
 
 Run: `python3 -m unittest tests.test_apex_background_skill -v && .venv/bin/ruff check .agents tests`
 Expected: PASS and `All checks passed!`.
@@ -238,22 +250,64 @@ git commit -m "feat: add APEX background probe findings renderer"
 ### Task 2: Probe database objects
 
 **Files:**
-- Create: `.agents/skills/apex-background/probe/install.sql`, `.agents/skills/apex-background/probe/uninstall.sql`
+- Create: `.agents/skills/apex-background/probe/install.sql`, `.agents/skills/apex-background/probe/package-body.sql`, `.agents/skills/apex-background/probe/uninstall.sql`
 - Modify: `tests/test_apex_background_skill.py`
 
 **Interfaces:**
 - Produces, in the probe app's parsing schema:
-  - tables `APEX_BG_PROBE_RUN(run_id, label, started_at)` and `APEX_BG_PROBE_LOG(log_id, run_id, context_name, probe_name, probe_value, probe_error, captured_at)`;
-  - package `APEX_BG_PROBE` with `start_run(p_label VARCHAR2)`, `current_run RETURN NUMBER`, `capture(p_context VARCHAR2)`, and `capture_bind(p_context VARCHAR2, p_name VARCHAR2, p_value VARCHAR2)`.
+  - tables `APEX_BG_PROBE_RUN(run_id, label, run_state, active_slot, started_at)` and `APEX_BG_PROBE_LOG(log_id, run_id, context_name, probe_name, probe_value, probe_error, captured_at)`;
+  - `run_state` is `RUNNING` or `COMPLETE`; a unique virtual `active_slot` permits only one active run. `started_at` retains the database time zone for run-scoped automation log checks;
+  - `complete_run` selects the active run ID before updating the run row, avoiding a query of the mutating table from inside the update predicate;
+  - package `APEX_BG_PROBE` with `start_run`, `current_run`, `complete_run`, `capture`, `capture_bind`, `record_background_execution`, `record_context_complete`, and `record_issue` procedures/functions.
 - Every write is an autonomous transaction, so rows survive a failing component. `capture` records these probe names, which later tasks and the skill rely on:
   - session state: `V(APP_ID)`, `V(APP_PAGE_ID)`, `V(APP_SESSION)`, `V(APP_USER)`, `V(APP_ALIAS)`, `V(WORKSPACE_ID)`, `V(PROBE_APP_ITEM)`, `V(P1_PROBE_ITEM)`;
   - globals: `APEX_APPLICATION.G_FLOW_ID`, `APEX_APPLICATION.G_FLOW_STEP_ID`, `APEX_APPLICATION.G_INSTANCE`, `APEX_APPLICATION.G_USER`;
   - session context: `SYS_CONTEXT(APEX$SESSION,APP_SESSION)`, `SYS_CONTEXT(APEX$SESSION,APP_USER)`, `SYS_CONTEXT(APEX$SESSION,WORKSPACE_ID)`;
-  - substitutions: `DO_SUBSTITUTIONS(&APP_ID.)`, `DO_SUBSTITUTIONS(&APP_USER.)`, `DO_SUBSTITUTIONS(&APP_NAME.)`, `DO_SUBSTITUTIONS(&PROBE_SUBST.)`, `DO_SUBSTITUTIONS(&PROBE_APP_ITEM.)`, `DO_SUBSTITUTIONS(&P1_PROBE_ITEM.)`;
+  - substitutions: the official background-relevant built-ins from the inventory below, plus `DO_SUBSTITUTIONS(&PROBE_SUBST.)`, `DO_SUBSTITUTIONS(&PROBE_APP_ITEM.)`, and `DO_SUBSTITUTIONS(&P1_PROBE_ITEM.)`;
+  - direct APEX globals for official names without `&` syntax: `G_FLOW_SCHEMA_OWNER`, `G_PROXY_SERVER`, `G_SYSDATE`, and `V(SYSDATE_YYYYMMDD)`;
   - database session: `USERENV SESSION_USER`, `USERENV CURRENT_SCHEMA`, `USERENV MODULE`, `USERENV ACTION`, `USERENV CLIENT_IDENTIFIER`, `USERENV CLIENT_INFO`, `USERENV BG_JOB_ID`, `USERENV SID`, and `SESSIONTIMEZONE`.
-- `capture_bind` records `BIND :<name>`.
+- `capture_bind` records `BIND :<name>`. `record_background_execution` captures the current execution ID/state using `APEX_BACKGROUND_PROCESS.GET_CURRENT_EXECUTION`; the finisher polls that ID using `GET_EXECUTION` and records failed/aborted status and its last status message. `record_context_complete` logs `CONTEXT_COMPLETE=OK`; call it after the final bind probe in each component. `record_issue` stores an orchestration failure under the active run without hiding the rest of the evidence.
 
-- [ ] **Step 1: Add a failing layout test**
+An install retry may resume the app import only when all four existing SQL objects are valid and carry the probe ownership markers. A partial or unmarked object set fails closed and can be removed only by the separately confirmed uninstall phase. Uninstall accepts already-missing owned objects and continues dropping the remaining individually marked objects, so a partial cleanup can be retried safely.
+
+### Official APEX substitution inventory (26.1)
+
+Use Oracle's [Using Built-in Substitution Strings](https://docs.oracle.com/en/database/oracle/apex/26.1/htmdb/using-available-built-in-substitution-strings.html) as the complete general built-in catalog. The plan must account for every listed name below, including names that do not apply to background PL/SQL:
+
+```text
+APEX_CSP_DISPLAY_NONE, APEX_FILES, APEX$ROW_NUM, APEX$ROW_SELECTOR, APEX$ROW_STATUS,
+APP_ID, APP_ALIAS, APP_AJAX_X01, APP_AJAX_X02, APP_AJAX_X03, APP_AJAX_X04, APP_AJAX_X05,
+APP_AJAX_X06, APP_AJAX_X07, APP_AJAX_X08, APP_AJAX_X09, APP_AJAX_X10, APP_BUILDER_SESSION,
+APP_DATE_TIME_FORMAT, APP_FILES, APP_NLS_DATE_FORMAT, APP_NLS_TIMESTAMP_FORMAT,
+APP_NLS_TIMESTAMP_TZ_FORMAT, APP_PAGE_ALIAS, APP_PAGE_ID, APP_REGION_DOM_ID, APP_REGION_ID,
+APP_REGION_STATIC_ID (deprecated), APP_REQUEST_DATA_HASH, APP_SESSION, SESSION (APP_SESSION alias), APP_SESSION_VISIBLE,
+APP_TEXT$Message_Name, APP_TEXT$Message_Name$Lang, APP_TITLE, APP_UNIQUE_PAGE_ID, APP_USER,
+APP_VERSION, AUTHENTICATED_URL_PREFIX, BROWSER_LANGUAGE, CURRENT_PARENT_TAB_TEXT, DEBUG,
+DEFAULT_THEME_FILES, HOME_LINK, JET_BASE_DIRECTORY, JET_CSS_DIRECTORY, JET_JS_DIRECTORY,
+LOGIN_URL, LOGOUT_URL, MAIN_APP_ID, OWNER, PRINTER_FRIENDLY, PROXY_SERVER, PUBLIC_URL_PREFIX,
+REQUEST, SCHEMA OWNER, SQLERRM, SYSDATE_YYYYMMDD, THEME_DB_FILES, THEME_FILES,
+WORKSPACE_FILES, WORKSPACE_ID
+```
+
+Probe each general built-in whose documented syntax includes `&NAME.` through `APEX_APPLICATION.DO_SUBSTITUTIONS` in every captured context. Expand `APP_AJAX_X01` through `APP_AJAX_X10` individually. The application includes `PROBE_MESSAGE` so `APP_TEXT$PROBE_MESSAGE` and `APP_TEXT$PROBE_MESSAGE$EN` test an actual text message. Also probe the documented legacy aliases `APP_IMAGES`, `IMAGE_PREFIX`, `THEME_DB_IMAGES`, `THEME_IMAGES`, and `WORKSPACE_IMAGE` because the 26.1 guide says they remain supported.
+
+The probe and eventual skill must clearly mark these documented scope limits rather than present them as universal background values:
+
+- `APEX_CSP_DISPLAY_NONE`, `APP_VERSION`, `DEFAULT_THEME_FILES`, `JET_BASE_DIRECTORY`, `JET_CSS_DIRECTORY`, `JET_JS_DIRECTORY`, `OWNER`, `SQLERRM`, `THEME_DB_FILES`, and `THEME_FILES` are template-only (`#NAME#`) values. `APP_REGION_*`, `CURRENT_PARENT_TAB_TEXT`, `APP_PAGE_*`, `APP_AJAX_X01` through `APP_AJAX_X10`, `APP_REQUEST_DATA_HASH`, `APP_UNIQUE_PAGE_ID`, and `REQUEST` are page, region, browser-request, or row-processing values; record the observed result, but do not claim they are meaningful in a background context.
+- `APEX$ROW_NUM`, `APEX$ROW_SELECTOR`, and `APEX$ROW_STATUS` are for tabular form or grid row processing. Probe them as official names and explain why background rows ordinarily have no current form row.
+- Oracle documents `SESSION` as a short alias for `APP_SESSION`; capture both forms.
+- `PROXY_SERVER` and `SCHEMA OWNER` are headings in the official catalog, but their documented PL/SQL forms are `APEX_APPLICATION.G_PROXY_SERVER` and `APEX_APPLICATION.G_FLOW_SCHEMA_OWNER`; `SYSDATE_YYYYMMDD` is documented through `V`, a bind, or `G_SYSDATE`, not `&NAME.`. Capture these forms directly.
+- `APP_NAME` is not in the 26.1 official built-in catalog. Use official `APP_TITLE` in probes and examples.
+
+The three substitution-name catalogs used here are the general built-ins, workflow strings, and task strings linked above. Keep other background-context values distinct from substitutions: Oracle documents automation query columns as bind variables in [Understanding Key Automation Concepts](https://docs.oracle.com/en/database/oracle/apex/26.1/apxdc/understanding-key-automation-concepts.html), and describes background page execution as a private session with a copy of the page session state in [Understanding Background Page Processing](https://docs.oracle.com/en/database/oracle/apex/26.1/htmdb/understanding-background-page-processing.html). Record those values under their execution contexts; do not invent `APEX$AUTOMATION_*` or `APEX$BACKGROUND_*` substitution names without an Oracle reference.
+
+### Background-specific workflow and task substitution strings
+
+The Oracle 26.1 [Workflow Substitution Strings](https://docs.oracle.com/en/database/oracle/apex/26.1/htmdb/workflow-substitution-strings.html) and [Task Substitution Strings and Bind Variables](https://docs.oracle.com/en/database/oracle/apex/26.1/htmdb/substitution-strings-for-tasks.html) pages add context-specific catalogs. The workflow has six names: `APEX$WORKFLOW_ACTIVITY_ID`, `APEX$WORKFLOW_CREATED_ON`, `APEX$WORKFLOW_DETAIL_PK`, `APEX$WORKFLOW_ID`, `APEX$WORKFLOW_INITIATOR`, and `APEX$WORKFLOW_STATE`. The task has thirteen: `APEX$TASK_CREATED_ON`, `APEX$TASK_DUE_ON`, `APEX$TASK_ID`, `APEX$TASK_INITIATOR`, `APEX$TASK_MAX_RENEWAL_COUNT`, `APEX$TASK_OUTCOME`, `APEX$TASK_OWNER`, `APEX$TASK_PK`, `APEX$TASK_PREVIOUS_ID`, `APEX$TASK_RENEWAL_COUNT`, `APEX$TASK_STATE`, `APEX$TASK_SUBJECT`, and `APEX$TASK_TEXT`.
+
+Probe all six workflow names in workflow activity code and all thirteen task values. Capture the twelve lifecycle values in task create/completion actions, with `APEX$TASK_OUTCOME` only on completion where Oracle documents it as populated. Oracle documents `APEX$TASK_TEXT` as the text for Add Comment, Request Information, and Submit Information actions. Capture it in an `updateComment` task-definition action by calling the documented `APEX_HUMAN_TASK.ADD_TASK_COMMENT` API for both the standalone task and the workflow-created task. Include each task ID in the probe name so repeated task operations remain identifiable in the rendered evidence. Request Information and Submit Information are outside this probe; the final skill must say they were not observed, rather than implying those operations have no value.
+
+- [x] **Step 1: Add a failing layout test**
 
 Append to `tests/test_apex_background_skill.py`:
 
@@ -264,12 +318,14 @@ class ProbeLayoutTests(unittest.TestCase):
         for probe in (
             "V(APP_SESSION)", "V(APP_USER)", "V(PROBE_APP_ITEM)", "V(P1_PROBE_ITEM)",
             "APEX_APPLICATION.G_INSTANCE", "SYS_CONTEXT(APEX$SESSION,APP_SESSION)",
-            "DO_SUBSTITUTIONS(&APP_NAME.)", "DO_SUBSTITUTIONS(&PROBE_SUBST.)",
+            "DO_SUBSTITUTIONS(&PROBE_SUBST.)",
             "USERENV BG_JOB_ID", "USERENV MODULE",
         ):
             with self.subTest(probe=probe):
                 self.assertIn(f"'{probe}'", install)
         self.assertIn("PRAGMA AUTONOMOUS_TRANSACTION", install)
+        self.assertIn("capture_builtin_substitutions", install)
+        self.assertIn("'APP_TITLE'", install)
         self.assertIn("SET DEFINE OFF", install)
 
     def test_uninstall_removes_every_installed_object(self) -> None:
@@ -282,130 +338,31 @@ class ProbeLayoutTests(unittest.TestCase):
 Run: `python3 -m unittest tests.test_apex_background_skill -v`
 Expected: the two new tests ERROR with `FileNotFoundError`.
 
-- [ ] **Step 2: Write `install.sql`**
+- [x] **Step 2: Write `install.sql`**
 
-```sql
--- APEX background probe objects. Run as the probe application's parsing schema.
--- Writes only APEX_BG_PROBE* objects. Re-runnable.
-SET DEFINE OFF
-WHENEVER SQLERROR EXIT FAILURE ROLLBACK
+Create the two probe tables and `APEX_BG_PROBE` package. The run table stores
+`run_state` (`RUNNING` or `COMPLETE`), a unique virtual active-run slot, and a
+time-zone-aware `started_at`. Each log write is autonomous. The package exposes
+`start_run`, `current_run`, `complete_run`, `capture`, `capture_bind`,
+`record_context_complete`, and `record_issue`; each individual session probe
+catches and records its own exception.
 
-CREATE TABLE IF NOT EXISTS apex_bg_probe_run (
-  run_id     NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  label      VARCHAR2(200) NOT NULL,
-  started_at TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL
-);
+Mark both tables and the package body with `APEX_BG_PROBE_OWNER_V1`. A fresh
+install creates all four SQL objects. A retry may skip object creation and
+resume APEX import only when all four objects are valid and the two table
+comments plus package body marker match. Partial, invalid, or unmarked objects
+must fail closed and remain recoverable through the separately confirmed
+uninstall phase.
 
-CREATE TABLE IF NOT EXISTS apex_bg_probe_log (
-  log_id       NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  run_id       NUMBER NOT NULL REFERENCES apex_bg_probe_run,
-  context_name VARCHAR2(60) NOT NULL,
-  probe_name   VARCHAR2(128) NOT NULL,
-  probe_value  VARCHAR2(4000),
-  probe_error  VARCHAR2(4000),
-  captured_at  TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL
-);
+- [x] **Step 3: Write `uninstall.sql`**
 
-CREATE OR REPLACE PACKAGE apex_bg_probe AUTHID DEFINER AS
-  PROCEDURE start_run(p_label IN VARCHAR2);
-  FUNCTION current_run RETURN NUMBER;
-  PROCEDURE capture(p_context IN VARCHAR2);
-  PROCEDURE capture_bind(p_context IN VARCHAR2, p_name IN VARCHAR2, p_value IN VARCHAR2);
-END apex_bg_probe;
-/
+Validate ownership before dropping anything. Check each existing table against
+its table comment and the package spec/body against the body marker. Missing
+objects are acceptable so an interrupted uninstall can be retried; a present
+object without its expected marker blocks cleanup. Drop the package, log table,
+and run table in dependency order, and retain local `.run` evidence.
 
-CREATE OR REPLACE PACKAGE BODY apex_bg_probe AS
-  PROCEDURE log_value(p_context VARCHAR2, p_name VARCHAR2, p_value VARCHAR2, p_error VARCHAR2 DEFAULT NULL) IS
-    PRAGMA AUTONOMOUS_TRANSACTION;
-  BEGIN
-    INSERT INTO apex_bg_probe_log (run_id, context_name, probe_name, probe_value, probe_error)
-    VALUES (current_run, p_context, p_name, SUBSTR(p_value, 1, 4000), SUBSTR(p_error, 1, 4000));
-    COMMIT;
-  END log_value;
-
-  PROCEDURE start_run(p_label IN VARCHAR2) IS
-    PRAGMA AUTONOMOUS_TRANSACTION;
-  BEGIN
-    INSERT INTO apex_bg_probe_run (label) VALUES (p_label);
-    COMMIT;
-  END start_run;
-
-  FUNCTION current_run RETURN NUMBER IS
-    l_run NUMBER;
-  BEGIN
-    SELECT MAX(run_id) INTO l_run FROM apex_bg_probe_run;
-    RETURN l_run;
-  END current_run;
-
-  -- Each probe is evaluated separately so one unavailable API cannot hide the rest.
-  PROCEDURE probe(p_context VARCHAR2, p_name VARCHAR2, p_expression VARCHAR2) IS
-    l_value VARCHAR2(4000);
-  BEGIN
-    EXECUTE IMMEDIATE 'BEGIN :v := ' || p_expression || '; END;' USING OUT l_value;
-    log_value(p_context, p_name, NVL(l_value, '<null>'));
-  EXCEPTION
-    WHEN OTHERS THEN
-      log_value(p_context, p_name, NULL, SQLERRM);
-  END probe;
-
-  PROCEDURE capture(p_context IN VARCHAR2) IS
-  BEGIN
-    probe(p_context, 'V(APP_ID)', q'[v('APP_ID')]');
-    probe(p_context, 'V(APP_PAGE_ID)', q'[v('APP_PAGE_ID')]');
-    probe(p_context, 'V(APP_SESSION)', q'[v('APP_SESSION')]');
-    probe(p_context, 'V(APP_USER)', q'[v('APP_USER')]');
-    probe(p_context, 'V(APP_ALIAS)', q'[v('APP_ALIAS')]');
-    probe(p_context, 'V(WORKSPACE_ID)', q'[v('WORKSPACE_ID')]');
-    probe(p_context, 'V(PROBE_APP_ITEM)', q'[v('PROBE_APP_ITEM')]');
-    probe(p_context, 'V(P1_PROBE_ITEM)', q'[v('P1_PROBE_ITEM')]');
-    probe(p_context, 'APEX_APPLICATION.G_FLOW_ID', 'apex_application.g_flow_id');
-    probe(p_context, 'APEX_APPLICATION.G_FLOW_STEP_ID', 'apex_application.g_flow_step_id');
-    probe(p_context, 'APEX_APPLICATION.G_INSTANCE', 'apex_application.g_instance');
-    probe(p_context, 'APEX_APPLICATION.G_USER', 'apex_application.g_user');
-    probe(p_context, 'SYS_CONTEXT(APEX$SESSION,APP_SESSION)', q'[sys_context('APEX$SESSION', 'APP_SESSION')]');
-    probe(p_context, 'SYS_CONTEXT(APEX$SESSION,APP_USER)', q'[sys_context('APEX$SESSION', 'APP_USER')]');
-    probe(p_context, 'SYS_CONTEXT(APEX$SESSION,WORKSPACE_ID)', q'[sys_context('APEX$SESSION', 'WORKSPACE_ID')]');
-    probe(p_context, 'DO_SUBSTITUTIONS(&APP_ID.)', q'[apex_application.do_substitutions('&APP_ID.')]');
-    probe(p_context, 'DO_SUBSTITUTIONS(&APP_USER.)', q'[apex_application.do_substitutions('&APP_USER.')]');
-    probe(p_context, 'DO_SUBSTITUTIONS(&APP_NAME.)', q'[apex_application.do_substitutions('&APP_NAME.')]');
-    probe(p_context, 'DO_SUBSTITUTIONS(&PROBE_SUBST.)', q'[apex_application.do_substitutions('&PROBE_SUBST.')]');
-    probe(p_context, 'DO_SUBSTITUTIONS(&PROBE_APP_ITEM.)', q'[apex_application.do_substitutions('&PROBE_APP_ITEM.')]');
-    probe(p_context, 'DO_SUBSTITUTIONS(&P1_PROBE_ITEM.)', q'[apex_application.do_substitutions('&P1_PROBE_ITEM.')]');
-    probe(p_context, 'USERENV SESSION_USER', q'[sys_context('USERENV', 'SESSION_USER')]');
-    probe(p_context, 'USERENV CURRENT_SCHEMA', q'[sys_context('USERENV', 'CURRENT_SCHEMA')]');
-    probe(p_context, 'USERENV MODULE', q'[sys_context('USERENV', 'MODULE')]');
-    probe(p_context, 'USERENV ACTION', q'[sys_context('USERENV', 'ACTION')]');
-    probe(p_context, 'USERENV CLIENT_IDENTIFIER', q'[sys_context('USERENV', 'CLIENT_IDENTIFIER')]');
-    probe(p_context, 'USERENV CLIENT_INFO', q'[sys_context('USERENV', 'CLIENT_INFO')]');
-    probe(p_context, 'USERENV BG_JOB_ID', q'[sys_context('USERENV', 'BG_JOB_ID')]');
-    probe(p_context, 'USERENV SID', q'[sys_context('USERENV', 'SID')]');
-    probe(p_context, 'SESSIONTIMEZONE', 'sessiontimezone');
-  END capture;
-
-  PROCEDURE capture_bind(p_context IN VARCHAR2, p_name IN VARCHAR2, p_value IN VARCHAR2) IS
-  BEGIN
-    log_value(p_context, 'BIND :' || p_name, NVL(p_value, '<null>'));
-  END capture_bind;
-END apex_bg_probe;
-/
-
-PROMPT APEX_BG_PROBE_INSTALLED
-EXIT SUCCESS COMMIT
-```
-
-- [ ] **Step 3: Write `uninstall.sql`**
-
-```sql
--- Remove APEX background probe objects. Application 9901 is removed by run.sh uninstall.
-WHENEVER SQLERROR EXIT FAILURE ROLLBACK
-DROP PACKAGE apex_bg_probe;
-DROP TABLE apex_bg_probe_log PURGE;
-DROP TABLE apex_bg_probe_run PURGE;
-PROMPT APEX_BG_PROBE_UNINSTALLED
-EXIT SUCCESS COMMIT
-```
-
-- [ ] **Step 4: Run the tests and commit**
+- [x] **Step 4: Run the tests and commit**
 
 Run: `python3 -m unittest tests.test_apex_background_skill -v`
 Expected: PASS.
@@ -436,6 +393,7 @@ git commit -m "feat: add APEX background probe database objects"
     | automation `bg-probe-scheduled` (schedule disabled in source) | `AUTOMATION_SCHEDULED` |
     | task definition `bg-probe-task`, `create` event | `TASK_ACTION_CREATE` |
     | task definition `bg-probe-task`, `complete` event with outcome `approved` | `TASK_ACTION_COMPLETE` |
+    | task definition `bg-probe-task`, Add Comment operation | `TASK_ACTION_COMMENT` |
     | workflow `bg-probe-workflow`, at start | `WORKFLOW_START` |
     | workflow `bg-probe-workflow`, after a one-minute Wait | `WORKFLOW_AFTER_WAIT` |
     | workflow `bg-probe-workflow`, after its human task completes | `WORKFLOW_AFTER_TASK` |
@@ -445,7 +403,7 @@ git commit -m "feat: add APEX background probe database objects"
   - The SQLcl-driven contexts are `SQLCL_NO_SESSION` and `SQLCL_APEX_SESSION`.
   - `run.sh <install|start|finish|report|uninstall> <sqlcl-connection> <workspace> <parsing-schema>`.
 
-- [ ] **Step 1: Add a failing app layout test**
+- [x] **Step 1: Add a failing app layout test**
 
 Append to `ProbeLayoutTests`:
 
@@ -456,7 +414,7 @@ Append to `ProbeLayoutTests`:
         for context in (
             "AUTOMATION_ON_DEMAND'", "AUTOMATION_ON_DEMAND_BACKGROUND'", "AUTOMATION_SCHEDULED'",
             "TASK_ACTION_CREATE'", "TASK_ACTION_COMPLETE'", "WORKFLOW_START'", "WORKFLOW_AFTER_WAIT'",
-            "WORKFLOW_AFTER_TASK'", "PAGE_PROCESS_FOREGROUND'", "EXECUTION_CHAIN_BACKGROUND'",
+            "TASK_ACTION_COMMENT'", "WORKFLOW_AFTER_TASK'", "PAGE_PROCESS_FOREGROUND'", "EXECUTION_CHAIN_BACKGROUND'",
         ):
             with self.subTest(context=context):
                 self.assertIn("'" + context, source)
@@ -470,7 +428,7 @@ Append to `ProbeLayoutTests`:
 Run: `python3 -m unittest tests.test_apex_background_skill -v`
 Expected: the new test FAILS (`application.apx` is missing).
 
-- [ ] **Step 2: Copy the SQLcl starter app**
+- [x] **Step 2: Copy the SQLcl starter app**
 
 ```bash
 PROBE=.agents/skills/apex-background/probe
@@ -487,7 +445,7 @@ head -2 "$PROBE/app/application.apx"
 
 Expected: `app APEX-BG-PROBE (` and `    name: APEX Background Probe`.
 
-- [ ] **Step 3: Switch to No Authentication and add the substitution string**
+- [x] **Step 3: Switch to No Authentication and add the substitution string**
 
 Append to `$PROBE/app/shared-components/authentications.apx`:
 
@@ -510,6 +468,17 @@ In `$PROBE/app/application.apx`, change `scheme: @oracle-apex-accounts` to `sche
     )
 ```
 
+Also add `globalization { translationMethod: textMessages }` and create `$PROBE/app/shared-components/messages.apx`:
+
+```text
+textMessage PROBE_MESSAGE (
+    message {
+        text: background-substitution-message
+        language: en
+    }
+)
+```
+
 Create `$PROBE/app/shared-components/app-items.apx`:
 
 ```text
@@ -520,7 +489,7 @@ appItem PROBE_APP_ITEM (
 )
 ```
 
-- [ ] **Step 4: Add the three automations**
+- [x] **Step 4: Add the three automations**
 
 Create `$PROBE/app/shared-components/automations/bg-probe-on-demand.apx`:
 
@@ -577,7 +546,7 @@ Create `bg-probe-scheduled.apx` with the same content, but with identifier `bg-p
     }
 ```
 
-- [ ] **Step 5: Add the task definition**
+- [x] **Step 5: Add the task definition**
 
 Create `$PROBE/app/shared-components/task-definitions/bg-probe-task.apx`:
 
@@ -613,10 +582,16 @@ taskDefinition bg-probe-task (
             plsqlCode:
                 ```plsql
                 begin
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_CREATED_ON', :APEX$TASK_CREATED_ON);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_DUE_ON', :APEX$TASK_DUE_ON);
                     apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_ID', :APEX$TASK_ID);
-                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_PK', :APEX$TASK_PK);
-                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_OWNER', :APEX$TASK_OWNER);
                     apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_INITIATOR', :APEX$TASK_INITIATOR);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_MAX_RENEWAL_COUNT', :APEX$TASK_MAX_RENEWAL_COUNT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_OWNER', :APEX$TASK_OWNER);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_PK', :APEX$TASK_PK);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_PREVIOUS_ID', :APEX$TASK_PREVIOUS_ID);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_RENEWAL_COUNT', :APEX$TASK_RENEWAL_COUNT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_STATE', :APEX$TASK_STATE);
                     apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APEX$TASK_SUBJECT', :APEX$TASK_SUBJECT);
                     apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'T_PROBE_PARAM', :T_PROBE_PARAM);
                     apex_bg_probe.capture_bind('TASK_ACTION_CREATE', 'APP_USER', :APP_USER);
@@ -650,10 +625,18 @@ taskDefinition bg-probe-task (
             plsqlCode:
                 ```plsql
                 begin
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_CREATED_ON', :APEX$TASK_CREATED_ON);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_DUE_ON', :APEX$TASK_DUE_ON);
                     apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_ID', :APEX$TASK_ID);
-                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_PK', :APEX$TASK_PK);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_INITIATOR', :APEX$TASK_INITIATOR);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_MAX_RENEWAL_COUNT', :APEX$TASK_MAX_RENEWAL_COUNT);
                     apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_OUTCOME', :APEX$TASK_OUTCOME);
                     apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_OWNER', :APEX$TASK_OWNER);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_PK', :APEX$TASK_PK);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_PREVIOUS_ID', :APEX$TASK_PREVIOUS_ID);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_RENEWAL_COUNT', :APEX$TASK_RENEWAL_COUNT);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_STATE', :APEX$TASK_STATE);
+                    apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APEX$TASK_SUBJECT', :APEX$TASK_SUBJECT);
                     apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'T_PROBE_PARAM', :T_PROBE_PARAM);
                     apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APP_USER', :APP_USER);
                     apex_bg_probe.capture_bind('TASK_ACTION_COMPLETE', 'APP_SESSION', :APP_SESSION);
@@ -667,6 +650,30 @@ taskDefinition bg-probe-task (
         }
     )
 
+    action on-comment-text (
+        name: Capture task comment text
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture_bind(
+                        'TASK_ACTION_COMMENT',
+                        'APEX$TASK_TEXT task ' || TO_CHAR(:APEX$TASK_ID),
+                        :APEX$TASK_TEXT);
+                end;
+                ```
+        }
+        execution {
+            onEvent: updateComment
+            sequence: 50
+        }
+        error {
+            stopExecutionOnError: true
+            logging: all
+        }
+    )
+
     participant (
         value {
             type: staticValue
@@ -676,7 +683,7 @@ taskDefinition bg-probe-task (
 )
 ````
 
-- [ ] **Step 6: Add the workflow**
+- [x] **Step 6: Add the workflow**
 
 Create `$PROBE/app/shared-components/workflows/bg-probe-workflow.apx`. Each `executeCode` activity follows the same shape; bind activities list the binds shown.
 
@@ -738,9 +745,12 @@ workflow bg-probe-workflow (
                 plsqlCode:
                     ```plsql
                     begin
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_ACTIVITY_ID', :APEX$WORKFLOW_ACTIVITY_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_CREATED_ON', :APEX$WORKFLOW_CREATED_ON);
                         apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_ID', :APEX$WORKFLOW_ID);
                         apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_DETAIL_PK', :APEX$WORKFLOW_DETAIL_PK);
                         apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_INITIATOR', :APEX$WORKFLOW_INITIATOR);
+                        apex_bg_probe.capture_bind('WORKFLOW_START', 'APEX$WORKFLOW_STATE', :APEX$WORKFLOW_STATE);
                         apex_bg_probe.capture_bind('WORKFLOW_START', 'P_PROBE_PARAM', :P_PROBE_PARAM);
                         apex_bg_probe.capture_bind('WORKFLOW_START', 'PROBE_DATA', :PROBE_DATA);
                         apex_bg_probe.capture_bind('WORKFLOW_START', 'APP_USER', :APP_USER);
@@ -781,7 +791,18 @@ workflow bg-probe-workflow (
             name: Capture after wait
             type: executeCode
             source {
-                plsqlCode: apex_bg_probe.capture('WORKFLOW_AFTER_WAIT');
+                plsqlCode:
+                    ```plsql
+                    begin
+                        apex_bg_probe.capture('WORKFLOW_AFTER_WAIT');
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_ACTIVITY_ID', :APEX$WORKFLOW_ACTIVITY_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_CREATED_ON', :APEX$WORKFLOW_CREATED_ON);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_DETAIL_PK', :APEX$WORKFLOW_DETAIL_PK);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_ID', :APEX$WORKFLOW_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_INITIATOR', :APEX$WORKFLOW_INITIATOR);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_WAIT', 'APEX$WORKFLOW_STATE', :APEX$WORKFLOW_STATE);
+                    end;
+                    ```
             }
             layout {
                 sequence: 50
@@ -845,7 +866,12 @@ workflow bg-probe-workflow (
                 plsqlCode:
                     ```plsql
                     begin
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_ACTIVITY_ID', :APEX$WORKFLOW_ACTIVITY_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_CREATED_ON', :APEX$WORKFLOW_CREATED_ON);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_DETAIL_PK', :APEX$WORKFLOW_DETAIL_PK);
                         apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_ID', :APEX$WORKFLOW_ID);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_INITIATOR', :APEX$WORKFLOW_INITIATOR);
+                        apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APEX$WORKFLOW_STATE', :APEX$WORKFLOW_STATE);
                         apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'TASK_OUTCOME', :TASK_OUTCOME);
                         apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APP_USER', :APP_USER);
                         apex_bg_probe.capture_bind('WORKFLOW_AFTER_TASK', 'APP_SESSION', :APP_SESSION);
@@ -888,7 +914,7 @@ workflow bg-probe-workflow (
 )
 ````
 
-- [ ] **Step 7: Replace page 1 with the background-chain page**
+- [x] **Step 7: Replace page 1 with the background-chain page**
 
 Overwrite `$PROBE/app/pages/p00001-home.apx`:
 
@@ -1010,7 +1036,7 @@ page 1 (
 )
 ```
 
-- [ ] **Step 8: Write the SQLcl context and finish scripts**
+- [x] **Step 8: Write the SQLcl context and finish scripts**
 
 Create `.agents/skills/apex-background/probe/contexts.sql`:
 
@@ -1022,8 +1048,13 @@ WHENEVER SQLERROR EXIT FAILURE ROLLBACK
 DEFINE app_id = '&1'
 DEFINE run_label = '&2'
 
+DECLARE
+  l_run_id NUMBER;
+  l_task_id NUMBER;
+  l_workflow_id NUMBER;
 BEGIN
   apex_bg_probe.start_run('&&run_label');
+  l_run_id := apex_bg_probe.current_run;
   apex_bg_probe.capture('SQLCL_NO_SESSION');
 
   apex_session.create_session(p_app_id => &&app_id, p_page_id => 1, p_username => 'PROBE_USER');
@@ -1035,12 +1066,28 @@ BEGIN
   apex_automation.execute(p_application_id => &&app_id, p_static_id => 'bg-probe-on-demand-bg', p_run_in_background => TRUE);
   apex_automation.enable(p_application_id => &&app_id, p_static_id => 'bg-probe-scheduled');
 
-  DBMS_OUTPUT.PUT_LINE('standalone task ' || apex_human_task.create_task(
+  l_task_id := apex_human_task.create_task(
     p_application_id => &&app_id, p_task_def_static_id => 'bg-probe-task', p_subject => 'BG probe standalone',
-    p_initiator => 'PROBE_USER', p_initiator_can_complete => TRUE, p_detail_pk => 'standalone'));
-  DBMS_OUTPUT.PUT_LINE('workflow ' || apex_workflow.start_workflow(
-    p_application_id => &&app_id, p_static_id => 'bg-probe-workflow', p_initiator => 'PROBE_USER',
-    p_detail_pk => 'workflow'));
+    p_initiator => 'PROBE_USER', p_initiator_can_complete => TRUE,
+    p_parameters => apex_human_task.t_task_parameters(
+      1 => apex_human_task.t_task_parameter(static_id => 'T_PROBE_PARAM', string_value => 'from-sqlcl-task')),
+    p_detail_pk => TO_CHAR(l_run_id));
+  DBMS_OUTPUT.PUT_LINE('standalone task ' || l_task_id);
+  apex_human_task.add_task_comment(
+    p_task_id => l_task_id,
+    p_text => 'comment text from SQLcl task probe');
+  l_workflow_id := apex_workflow.start_workflow(
+    p_application_id => &&app_id,
+      p_static_id => 'bg-probe-workflow',
+      p_parameters => apex_workflow.t_workflow_parameters(
+        1 => apex_workflow.t_workflow_parameter(
+          static_id => 'P_PROBE_PARAM',
+          value => apex_session_state.t_value(
+            data_type => apex_session_state.c_data_type_varchar2,
+            varchar2_value => 'from-sqlcl-workflow'))),
+    p_initiator => 'PROBE_USER',
+    p_detail_pk => TO_CHAR(l_run_id));
+  DBMS_OUTPUT.PUT_LINE('workflow ' || l_workflow_id);
   COMMIT;
 END;
 /
@@ -1048,137 +1095,48 @@ PROMPT APEX_BG_PROBE_STARTED
 EXIT SUCCESS COMMIT
 ```
 
-Create `.agents/skills/apex-background/probe/finish.sql`:
+Create `.agents/skills/apex-background/probe/finish.sql` using this execution contract:
 
-```sql
--- Arguments: application id. Waits for the Wait activity, approves open probe
--- tasks, disables the schedule, and spools log.csv and faults.csv.
-SET DEFINE ON
-WHENEVER SQLERROR EXIT FAILURE ROLLBACK
-DEFINE app_id = '&1'
+- Wait on `CONTEXT_COMPLETE=OK` rows for the required context counts, including two task-create and two task-complete actions. A probe row by itself is not completion.
+- Disable the schedule even when a wait, task comment, or approval fails. Record each orchestration failure through `APEX_BG_PROBE.RECORD_ISSUE` and continue to spool `log.csv` and `faults.csv`.
+- For the execution chain, record the execution ID inside the background chain with `APEX_BACKGROUND_PROCESS.GET_CURRENT_EXECUTION`. Poll it from the finisher with `GET_EXECUTION` until `SUCCESS`, `FAILED`, or `ABORTED`; include `last_status_message` when failed.
+- Scope workflow activities by app, workflow static ID, and the active run's detail key; scope automation messages by app, automation static ID, and run start time; scope tasks by app and run detail key.
+- Scope tasks either by their run `DETAIL_PK` or by their `WORKFLOW_ID` linked to this app's probe workflow with the same run detail key. Workflow-created tasks can have a null task `DETAIL_PK`.
+- Create the APEX session before disabling the schedule, because `APEX_AUTOMATION.DISABLE` requires the session's security-group context.
+- Start each finish attempt with a marker. When exporting and validating finish issues, count only issue rows after that marker so a retry can succeed after a prior failed attempt; preserve earlier CSVs in local `.previous-*` files.
+- Set `VERIFY OFF` before command-line substitution and fault spooling, so SQLcl's substitution echo does not contaminate `faults.csv`.
+- After both CSV files are written, leave the run active and return failure if any required completion marker is missing, workflow/automation errors exist, tasks remain open, or this attempt recorded an issue. The files must remain available to `report`. Mark the run `COMPLETE` only after these checks pass.
+- On retry, preserve previous local CSV/log files under unique `.previous-*` names before writing new output. Uninstall retains `.run` files so an operator can inspect or report the evidence.
 
-DECLARE
-  PROCEDURE wait_for(p_context VARCHAR2, p_seconds PLS_INTEGER) IS
-    l_count PLS_INTEGER;
-  BEGIN
-    FOR i IN 1 .. p_seconds / 5 LOOP
-      SELECT COUNT(*) INTO l_count FROM apex_bg_probe_log
-       WHERE run_id = apex_bg_probe.current_run AND context_name = p_context;
-      EXIT WHEN l_count > 0;
-      DBMS_SESSION.SLEEP(5);
-    END LOOP;
-  END;
-BEGIN
-  wait_for('WORKFLOW_AFTER_WAIT', 240);
-  wait_for('AUTOMATION_SCHEDULED', 120);
-  apex_session.create_session(p_app_id => &&app_id, p_page_id => 1, p_username => 'PROBE_USER');
-  FOR t IN (SELECT task_id FROM apex_tasks
-             WHERE application_id = &&app_id AND state_code IN ('UNASSIGNED', 'ASSIGNED')) LOOP
-    apex_human_task.approve_task(p_task_id => t.task_id, p_autoclaim => TRUE);
-  END LOOP;
-  COMMIT;
-  wait_for('WORKFLOW_AFTER_TASK', 120);
-  apex_automation.disable(p_application_id => &&app_id, p_static_id => 'bg-probe-scheduled');
-  COMMIT;
-END;
-/
+The APEX 26.1 view columns were checked read-only as the probe schema. Keep the run-scope predicates and the `faults.csv` export; do not revert to broad app-wide fault queries.
 
-SET SQLFORMAT CSV
-SET FEEDBACK OFF
-SPOOL log.csv
-SELECT context_name, probe_name, probe_value, probe_error
-  FROM apex_bg_probe_log
- WHERE run_id = apex_bg_probe.current_run
- ORDER BY log_id;
-SPOOL OFF
-SPOOL faults.csv
-SELECT 'workflow activity' AS source, activity_static_id AS name, state_code || ': ' || error_message AS detail
-  FROM apex_workflow_activities
- WHERE application_id = &&app_id AND state_code IN ('FAULTED', 'ERROR')
-UNION ALL
-SELECT 'automation', automation_static_id, message
-  FROM apex_automation_msg_log
- WHERE application_id = &&app_id AND message_type = 'ERROR'
-UNION ALL
-SELECT 'task', TO_CHAR(task_id), state_code
-  FROM apex_tasks
- WHERE application_id = &&app_id AND state_code NOT IN ('COMPLETED');
-SPOOL OFF
-EXIT SUCCESS COMMIT
-```
+- [x] **Step 9: Write the runner**
 
-The column names in the three fault views (`activity_static_id`, `error_message`, `automation_static_id`, `message`, `message_type`) must be checked before the first run. Run `DESC apex_workflow_activities`, `DESC apex_automation_msg_log`, and `DESC apex_tasks` as the probe schema and adjust the fault query to the actual names. Do not skip the faults section.
+Create `.agents/skills/apex-background/probe/run.sh` and make it executable.
+The runner accepts `install`, `start`, `finish`, `report`, and `uninstall`, plus
+a saved SQLcl connection, APEX workspace, and parsing schema. Every database
+phase reads the DEV profile from `.env`, checks the connected user/current
+schema, workspace, application ID/alias, and object ownership, then requires an
+interactive confirmation naming the exact target identity and phase.
 
-- [ ] **Step 9: Write the runner**
-
-Create `.agents/skills/apex-background/probe/run.sh` and `chmod +x` it:
-
-```bash
-#!/usr/bin/env bash
-# APEX background probe. Every phase except report writes to the target
-# database: probe objects and application 9901. Use only a DEV database.
-set -euo pipefail
-
-usage() {
-  printf 'usage: run.sh <install|start|finish|report|uninstall> <sqlcl-connection> <workspace> <parsing-schema>\n' >&2
-  exit 2
-}
-[ "$#" -eq 4 ] || usage
-phase="$1" connection="$2" workspace="$3" schema="$4"
-app_id=9901
-probe_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-state_dir="$probe_dir/.run"
-mkdir -p "$state_dir"
-: > "$state_dir/.stdin"
-
-sqlcl() { sql -S -noupdates -name "$connection" "$@" < "$state_dir/.stdin"; }
-require_line() { grep -Eq "^[[:space:]]*$1[[:space:]]*$" "$2" || { cat "$2" >&2; printf 'probe error: missing %s\n' "$1" >&2; exit 1; }; }
-
-case "$phase" in
-  install)
-    (cd "$probe_dir" && sqlcl @install.sql) | tee "$state_dir/install.log"
-    require_line APEX_BG_PROBE_INSTALLED "$state_dir/install.log"
-    rm -rf "$state_dir/app" && cp -R "$probe_dir/app" "$state_dir/app"
-    mkdir -p "$state_dir/app/deployments"
-    printf '{"workspace":{"name":"%s"},"app":{"id":%s,"databaseSession":{"parsingSchema":"%s"}}}\n' \
-      "$workspace" "$app_id" "$schema" > "$state_dir/app/deployments/probe.json"
-    printf 'apex import -input . -deployment deployments/probe.json\nexit\n' > "$state_dir/import.sql"
-    (cd "$state_dir/app" && sqlcl "@$state_dir/import.sql") | tee "$state_dir/import.log"
-    require_line 'Import successful\.' "$state_dir/import.log"
-    ;;
-  start)
-    (cd "$probe_dir" && sqlcl @contexts.sql "$app_id" "apex-bg-probe $(date -u +%Y-%m-%dT%H:%M:%SZ)") | tee "$state_dir/start.log"
-    require_line APEX_BG_PROBE_STARTED "$state_dir/start.log"
-    printf 'Now open %s and click "Run probe", then run the finish phase.\n' \
-      "http://localhost:8181/ords/r/$(printf '%s' "$workspace" | tr '[:upper:]' '[:lower:]')/apex-bg-probe/home"
-    ;;
-  finish)
-    (cd "$state_dir" && sqlcl "@$probe_dir/finish.sql" "$app_id")
-    test -s "$state_dir/log.csv" || { printf 'probe error: log.csv was not written\n' >&2; exit 1; }
-    ;;
-  report)
-    python3 "$probe_dir/render_findings.py" "$state_dir/log.csv" "$state_dir/faults.csv" \
-      --apex "${APEX_VERSION:?set APEX_VERSION}" --database "${DATABASE_NAME:?set DATABASE_NAME}"
-    ;;
-  uninstall)
-    printf "begin apex_util.set_workspace('%s'); apex_application_install.remove_application(%s); commit; end;\n/\nexit\n" \
-      "$workspace" "$app_id" > "$state_dir/remove.sql"
-    sqlcl "@$state_dir/remove.sql"
-    (cd "$probe_dir" && sqlcl @uninstall.sql)
-    rm -rf "$state_dir"
-    ;;
-  *) usage ;;
-esac
-```
+Use only the validated DEV connection. Keep `.run/` private to the current
+user; reject symlinked or non-regular output files and preserve previous
+staging directories and evidence under unique names. If a failed install left
+all probe objects valid and marked, resume only the app import; reject partial
+or unmarked database objects. If a finish phase returns an error after export,
+leave `log.csv` and `faults.csv` available for `report` and retry. Uninstall
+removes the application only if its ID, alias, workspace, and parsing schema
+match; then it removes only individually marked objects and keeps `.run/` for
+inspection.
 
 Add `.agents/skills/apex-background/probe/.run/` to `.gitignore`.
 
-- [ ] **Step 10: Run the layout tests and shellcheck**
+- [x] **Step 10: Run the layout tests and shellcheck**
 
 Run: `python3 -m unittest tests.test_apex_background_skill -v && shellcheck -S warning .agents/skills/apex-background/probe/run.sh`
 Expected: PASS, no warnings.
 
-- [ ] **Step 11: Install on docker-demo (database write; ask the user first)**
+- [x] **Step 11: Install on docker-demo (database write; ask the user first)**
 
 Run: `.agents/skills/apex-background/probe/run.sh install docker-demo DEMO DEMO`
 Expected: `APEX_BG_PROBE_INSTALLED` and `Import successful.`
@@ -1202,12 +1160,16 @@ PY
 
 Replace `automation` with the failing component (`taskDefinition`, `workflow`, `activity`, `process`, `appItem`). Native plugin attributes (`backgroundExecution.runInBackground`, `timeout.timeoutType`) are in `apexlang.zip` under `apexlangmeta/native-plugins/shared-components/plugins/process/<plugin>/custom-attributes.apx`.
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit and push in the user-requested integration changeset**
 
 ```bash
-git add .agents/skills/apex-background/probe .gitignore tests/test_apex_background_skill.py
-git commit -m "feat: add APEX background probe application and runner"
+git add -A
+git commit -m "feat: add project APEX skills and optional uc-apx setup"
+git push origin HEAD:main
 ```
+
+The user explicitly authorized this integration commit and direct push to
+`main`. Delete the local task branch only after the push succeeds.
 
 ---
 
@@ -1220,16 +1182,16 @@ git commit -m "feat: add APEX background probe application and runner"
 - Consumes: Task 3 runner and app.
 - Produces: the findings matrix that Task 5 cites. It has one column per context in the Task 3 table, plus `SQLCL_NO_SESSION` and `SQLCL_APEX_SESSION`.
 
-- [ ] **Step 1: Start the run**
+- [x] **Step 1: Start the run**
 
 Run: `.agents/skills/apex-background/probe/run.sh start docker-demo DEMO DEMO`
 Expected: `APEX_BG_PROBE_STARTED`, a standalone task ID, a workflow ID, and the page URL.
 
-- [ ] **Step 2: Submit the page in the built-in browser**
+- [x] **Step 2: Submit the page in the built-in browser**
 
 Open the printed URL (`http://localhost:8181/ords/r/demo/apex-bg-probe/home`) with the browser pane, click **Run probe**, and confirm that the page reloads without an error. The app uses No Authentication, so no credentials are entered.
 
-- [ ] **Step 3: Finish and render**
+- [x] **Step 3: Finish and render**
 
 Run:
 
@@ -1239,16 +1201,24 @@ APEX_VERSION=26.1.4 DATABASE_NAME=FREEPDB1 .agents/skills/apex-background/probe/
   > .agents/skills/apex-background/findings-apex-26.1.md
 ```
 
-Expected: the findings table has 12 context columns. If a context column is missing, or `## Faults` lists a bind activity, remove only the named failing bind from that component in `probe/app`, then rerun `install`, `start`, the browser step, `finish`, and `report`. Record the removed bind and the fault message in the findings file under a `## Unsupported binds` heading.
+Expected: the findings table has 13 context columns. If a context column is missing, or `## Faults` lists a bind activity, remove only the named failing bind from that component in `probe/app`, then rerun `install`, `start`, the browser step, `finish`, and `report`. Record the removed bind and the fault message in the findings file under a `## Unsupported binds` heading.
 
-- [ ] **Step 4: Review and commit**
+- [x] **Step 4: Review the findings**
 
 Read the whole matrix and check that each cell is plausible (for example, `SQLCL_NO_SESSION` has `<null>` for `V(APP_SESSION)`).
 
-```bash
-git add .agents/skills/apex-background/findings-apex-26.1.md
-git commit -m "docs: record APEX 26.1 background execution probe findings"
-```
+The matrix was checked against the required markers, observed binds, and
+context-specific session values. The user explicitly authorized including the
+findings in the final integration commit; no separate findings-only commit is
+needed.
+
+**Run result:** APEX 26.1.4 / FREEPDB1 returned 1,474 observation rows across
+13 contexts. All required completion markers were present, the finisher
+completed the run, and its final runtime-fault count was zero. `faults.csv`
+for the rendered evidence contains no faults; local `.previous-*` files retain
+the earlier failed-attempt outputs for diagnosis. The matrix captures
+`APEX$TASK_TEXT` in Add Comment only; Request Information and Submit
+Information remain unverified.
 
 ---
 
@@ -1261,7 +1231,7 @@ git commit -m "docs: record APEX 26.1 background execution probe findings"
 **Interfaces:**
 - Consumes: `findings-apex-26.1.md` from Task 4.
 
-- [ ] **Step 1: Add the failing skill contract tests**
+- [x] **Step 1: Add the failing skill contract tests**
 
 Append to `tests/test_apex_background_skill.py`:
 
@@ -1283,7 +1253,7 @@ class SkillContractTests(unittest.TestCase):
         findings = (SKILL / "findings-apex-26.1.md").read_text(encoding="utf-8")
         header = next(line for line in findings.splitlines() if line.startswith("| Probe |"))
         contexts = [c.strip() for c in header.strip("|").split("|")[1:]]
-        self.assertGreaterEqual(len(contexts), 12)
+        self.assertGreaterEqual(len(contexts), 13)
         for context in contexts:
             with self.subTest(context=context):
                 self.assertIn(context, skill)
@@ -1297,7 +1267,7 @@ class SkillContractTests(unittest.TestCase):
 Run: `python3 -m unittest tests.test_apex_background_skill -v`
 Expected: the four new tests FAIL.
 
-- [ ] **Step 2: Write `SKILL.md` from the matrix**
+- [x] **Step 2: Write `SKILL.md` from the matrix**
 
 Create `.agents/skills/apex-background/SKILL.md` with exactly this structure. Fill every table cell from `findings-apex-26.1.md`, citing the probe name. A cell with no observation says `not verified on 26.1`.
 
@@ -1311,7 +1281,7 @@ description: Use when writing or debugging Oracle APEX PL/SQL that runs outside 
 
 Code in APEX automations, workflow activities, task actions, and background
 execution chains does not run inside the browser request that triggered it.
-Before relying on `:APP_USER`, `v('P1_ITEM')`, `&APP_NAME.`, or
+Before relying on `:APP_USER`, `v('P1_ITEM')`, `&APP_TITLE.`, or
 `apex_application.g_*`, check this table. Evidence:
 `.agents/skills/apex-background/findings-apex-26.1.md` (APEX 26.1.4,
 FREEPDB1). Re-verify on another version with
@@ -1331,6 +1301,7 @@ FREEPDB1). Re-verify on another version with
 | WORKFLOW_AFTER_TASK | … | … | … | … | … |
 | TASK_ACTION_CREATE | … | … | … | … | … |
 | TASK_ACTION_COMPLETE | … | … | … | … | … |
+| TASK_ACTION_COMMENT | … | … | … | … | … |
 | PAGE_PROCESS_FOREGROUND | … | … | … | … | … |
 | EXECUTION_CHAIN_BACKGROUND | … | … | … | … | … |
 
@@ -1338,6 +1309,14 @@ FREEPDB1). Re-verify on another version with
 
 One row per `BIND :<name>` probe with a non-null value in the findings, and
 the contexts where it had a value.
+
+## Official substitution strings
+
+Use the [Oracle APEX 26.1 built-in substitution reference](https://docs.oracle.com/en/database/oracle/apex/26.1/htmdb/using-available-built-in-substitution-strings.html) as the full general catalog. This probe records the documented `&NAME.` forms in every context and keeps template-only values, page/row values, and direct-PL/SQL forms identified by their official scope. `APP_NAME` is not an official 26.1 built-in; use `APP_TITLE`.
+
+Workflow probes cover all six official names: `APEX$WORKFLOW_ACTIVITY_ID`, `APEX$WORKFLOW_CREATED_ON`, `APEX$WORKFLOW_DETAIL_PK`, `APEX$WORKFLOW_ID`, `APEX$WORKFLOW_INITIATOR`, and `APEX$WORKFLOW_STATE`.
+
+Task probes cover all thirteen official names: `APEX$TASK_CREATED_ON`, `APEX$TASK_DUE_ON`, `APEX$TASK_ID`, `APEX$TASK_INITIATOR`, `APEX$TASK_MAX_RENEWAL_COUNT`, `APEX$TASK_OUTCOME`, `APEX$TASK_OWNER`, `APEX$TASK_PK`, `APEX$TASK_PREVIOUS_ID`, `APEX$TASK_RENEWAL_COUNT`, `APEX$TASK_STATE`, `APEX$TASK_SUBJECT`, and `APEX$TASK_TEXT`. The last value is observed in Add Comment; Request Information and Submit Information remain explicitly unverified.
 
 ## Rules
 
@@ -1355,7 +1334,7 @@ whether the findings confirmed it, per context.
 
 (The `…` cells in this skeleton are the ones Step 2 fills from the findings; the finished file must contain no `…`.)
 
-- [ ] **Step 3: Mirror for Claude Code and point AGENTS.md at it**
+- [x] **Step 3: Mirror for Claude Code and point AGENTS.md at it**
 
 ```bash
 mkdir -p .claude/skills/apex-background
@@ -1370,26 +1349,24 @@ In `AGENTS.md` under `## Rules for coding agents`, add:
   `.agents/skills/apex-background/SKILL.md`.
 ```
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify**
 
 Run: `grep -n '…' .agents/skills/apex-background/SKILL.md; python3 -m unittest discover -s tests`
 Expected: no `…` lines, and `OK`.
 
-```bash
-git add .agents/skills/apex-background/SKILL.md .claude/skills/apex-background/SKILL.md AGENTS.md tests/test_apex_background_skill.py
-git commit -m "feat: add apex-background skill backed by APEX 26.1 probe findings"
-```
+Verification is complete. The user explicitly authorized including the skill
+and its verification changes in the final integration commit.
 
 ---
 
 ### Task 6: Remove the probe from the database (ask the user first)
 
-- [ ] **Step 1: Uninstall**
+- [x] **Step 1: Uninstall**
 
 Run: `.agents/skills/apex-background/probe/run.sh uninstall docker-demo DEMO DEMO`
 Expected: `APEX_BG_PROBE_UNINSTALLED`.
 
-- [ ] **Step 2: Confirm nothing is left**
+- [x] **Step 2: Confirm nothing is left**
 
 Run as DEMO:
 
@@ -1399,6 +1376,9 @@ SELECT COUNT(*) FROM apex_applications WHERE application_id = 9901;
 ```
 
 Expected: `0` and `0`. Report both counts to the user.
+
+Observed after uninstall: `USER_OBJECTS` count `0`; `APEX_APPLICATIONS` count
+for application 9901 `0`.
 
 ---
 

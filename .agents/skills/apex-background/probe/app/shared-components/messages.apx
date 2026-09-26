@@ -1,0 +1,6 @@
+textMessage PROBE_MESSAGE (
+    message {
+        text: background-substitution-message
+        language: en
+    }
+)

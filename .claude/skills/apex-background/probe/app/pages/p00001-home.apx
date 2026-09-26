@@ -1,0 +1,151 @@
+page 1 (
+    name: Home
+    alias: HOME
+    title: Home
+    appearance {
+        pageTemplate: @/standard
+        templateOptions: #DEFAULT#
+    }
+
+    region breadcrumb (
+        name: APEX Background Probe
+        type: breadcrumb
+        source {
+            breadcrumb: @breadcrumb
+        }
+        layout {
+            sequence: 5
+            slot: REGION_POSITION_01
+        }
+        appearance {
+            template: @/title-bar
+            templateOptions: #DEFAULT#
+        }
+        componentAppearance {
+            breadcrumbTemplate: @/breadcrumb
+            templateOptions: #DEFAULT#
+        }
+    )
+
+    region probe (
+        name: Background probe
+        title: Background probe
+        type: staticContent
+        layout {
+            sequence: 10
+            slot: body
+        }
+        appearance {
+            template: @/standard
+            templateOptions: #DEFAULT#
+        }
+    )
+
+    pageItem P1_PROBE_ITEM (
+        type: textField
+        label {
+            label: Probe item
+        }
+        layout {
+            sequence: 10
+            region: @probe
+            slot: regionBody
+        }
+        default {
+            type: static
+            staticValue: page-item-value
+        }
+        help {
+            helpText: Value passed to the background execution chain.
+        }
+    )
+
+    button run-probe (
+        buttonName: RUN_PROBE
+        label: Run probe
+        layout {
+            sequence: 20
+            region: @probe
+            slot: create
+        }
+        appearance {
+            buttonTemplate: @/text
+            hot: true
+            templateOptions: #DEFAULT#
+        }
+    )
+
+    process capture-foreground (
+        name: Capture in foreground
+        type: executeCode
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture('PAGE_PROCESS_FOREGROUND');
+                    apex_bg_probe.record_context_complete('PAGE_PROCESS_FOREGROUND');
+                end;
+                ```
+        }
+        execution {
+            sequence: 10
+            point: processing
+        }
+        serverSideCondition {
+            whenButtonPressed: @run-probe
+        }
+    )
+
+    process background-chain (
+        name: Background chain
+        type: executionChain
+        backgroundExecution {
+            runInBackground: true
+        }
+        execution {
+            sequence: 20
+            point: processing
+        }
+        serverSideCondition {
+            whenButtonPressed: @run-probe
+        }
+    )
+
+    process capture-background (
+        name: Capture in background
+        type: executeCode
+        executionChain: @background-chain
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture('EXECUTION_CHAIN_BACKGROUND');
+                    apex_bg_probe.record_background_execution('EXECUTION_CHAIN_BACKGROUND');
+                end;
+                ```
+        }
+        execution {
+            sequence: 30
+        }
+    )
+
+    process binds-background (
+        name: Capture binds in background
+        type: executeCode
+        executionChain: @background-chain
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    apex_bg_probe.capture_bind('EXECUTION_CHAIN_BACKGROUND', 'P1_PROBE_ITEM', :P1_PROBE_ITEM);
+                    apex_bg_probe.capture_bind('EXECUTION_CHAIN_BACKGROUND', 'APP_USER', :APP_USER);
+                    apex_bg_probe.capture_bind('EXECUTION_CHAIN_BACKGROUND', 'APP_SESSION', :APP_SESSION);
+                    apex_bg_probe.record_context_complete('EXECUTION_CHAIN_BACKGROUND');
+                end;
+                ```
+        }
+        execution {
+            sequence: 40
+        }
+    )
+)

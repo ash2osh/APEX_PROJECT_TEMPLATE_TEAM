@@ -209,7 +209,10 @@ to install a specific template version and `--source <url>` for a fork. If the
 upgrade reports that `.env` needs attention, compare it with `.env.example`.
 
 Projects created before `template-manifest.json` existed do not have the
-upgrade script yet. Run it once from a fresh template clone:
+upgrade script yet. Run it once from a fresh template clone. When the target
+repository has no `.template-lock.json`, the source resolves from its own
+`template-manifest.json`; `--source` overrides that value, and a lock's upstream
+is used when no explicit source is supplied:
 
 ```bash
 git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git /tmp/apex-template
@@ -217,7 +220,12 @@ python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source
 ```
 
 That first run has no lock, so every file that differs from the template is
-reported as a conflict instead of being overwritten.
+reported as a conflict instead of being overwritten. Keep the project clean
+before running it; conflicts must be reviewed and merged manually.
+
+The engine stages updates and restores them if a filesystem operation fails.
+If it reports an incomplete rollback, keep the named recovery directory and
+restore those backups before retrying the upgrade.
 
 ## Command reference
 
