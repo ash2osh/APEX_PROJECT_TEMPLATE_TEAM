@@ -69,5 +69,42 @@ class RenderFindingsTests(unittest.TestCase):
         self.assertIn("unexpected CSV header", result.stderr)
 
 
+class ProbeLayoutTests(unittest.TestCase):
+    def test_install_defines_every_probe_the_skill_relies_on(self) -> None:
+        install = (SKILL / "probe" / "install.sql").read_text(encoding="utf-8")
+        for probe in (
+            "V(APP_SESSION)",
+            "V(APP_USER)",
+            "V(PROBE_APP_ITEM)",
+            "V(P1_PROBE_ITEM)",
+            "APEX_APPLICATION.G_INSTANCE",
+            "SYS_CONTEXT(APEX$SESSION,APP_SESSION)",
+            "DO_SUBSTITUTIONS(&APP_NAME.)",
+            "DO_SUBSTITUTIONS(&PROBE_SUBST.)",
+            "USERENV BG_JOB_ID",
+            "USERENV MODULE",
+        ):
+            with self.subTest(probe=probe):
+                self.assertIn(f"'{probe}'", install)
+        self.assertIn("PRAGMA AUTONOMOUS_TRANSACTION", install)
+        self.assertIn("SET DEFINE OFF", install)
+
+    def test_uninstall_removes_every_installed_object(self) -> None:
+        uninstall = (SKILL / "probe" / "uninstall.sql").read_text(encoding="utf-8")
+        for statement in (
+            "DROP PACKAGE apex_bg_probe",
+            "DROP TABLE apex_bg_probe_log",
+            "DROP TABLE apex_bg_probe_run",
+        ):
+            with self.subTest(statement=statement):
+                self.assertIn(statement, uninstall)
+
+    def test_uninstall_checks_object_ownership_before_dropping(self) -> None:
+        uninstall = (SKILL / "probe" / "uninstall.sql").read_text(encoding="utf-8")
+        self.assertIn("APEX_BG_PROBE_OWNER_V1", uninstall)
+        self.assertIn("USER_TAB_COMMENTS", uninstall)
+        self.assertIn("USER_SOURCE", uninstall)
+
+
 if __name__ == "__main__":
     unittest.main()
