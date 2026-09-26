@@ -7,6 +7,21 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
 & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target apex
+
+function Invoke-PythonScript {
+  param([string] $ScriptPath, [string[]] $ScriptArguments)
+  $python = Get-Command python3 -ErrorAction SilentlyContinue
+  if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
+  if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+  if ($null -eq $python) { throw "Python 3 is required for APEX export metadata" }
+  if ($python.Name -in @("py.exe", "py")) {
+    & $python.Source -3 $ScriptPath @ScriptArguments
+  } else {
+    & $python.Source $ScriptPath @ScriptArguments
+  }
+  if ($LASTEXITCODE -ne 0) { throw "Python export helper failed with exit code $LASTEXITCODE" }
+}
+
 if (-not [string]::IsNullOrWhiteSpace($AppId)) {
   if ($AppId -cnotmatch '^[1-9][0-9]*$') { throw "export error: expected a positive numeric application id" }
   $appIds = @($AppId)
@@ -67,15 +82,18 @@ try {
     $appStage = Join-Path $stageParent $appId
     Move-Item -LiteralPath $exportedDir -Destination $appStage
     & (Join-Path $PSScriptRoot "normalize_apx.ps1") $appStage
-    $exportMarker = [ordered]@{
-      applicationId = [int]$appId
-      exportedAt = [DateTime]::Now.ToString("yyyy-MM-dd'T'HH:mm:ss")
-    } | ConvertTo-Json -Compress
-    [System.IO.File]::WriteAllText(
-      (Join-Path $appStage "apex-team-export.json"),
-      $exportMarker + [Environment]::NewLine,
-      (New-Object System.Text.UTF8Encoding($false))
-    )
+    Invoke-PythonScript -ScriptPath (Join-Path $PSScriptRoot "record_export_state.py") `
+      -ScriptArguments @(
+        $appId,
+        (Join-Path $runPath ".apex-export-before.txt"),
+        (Join-Path $runPath ".apex-export-after.txt"),
+        (Join-Path $appStage "apex-team-export.json")
+      )
+    Invoke-PythonScript -ScriptPath (Join-Path $PSScriptRoot "preserve_deployments.py") `
+      -ScriptArguments @(
+        (Join-Path $repoRoot "apps/$($env:APEX_PARSING_SCHEMA)/$appId"),
+        $appStage
+      )
   }
 
   # Install every application in one call so a failure on the last does not

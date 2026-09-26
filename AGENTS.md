@@ -36,9 +36,14 @@ state.
   to shared DEV, tell the team which numeric app ID is being published and
   check for in-progress Builder edits. Run
   `scripts/team.sh publish <app-id> --env dev`. The drift guard compares the
-  live app's update time with the latest local export marker and refuses to
-  overwrite newer Builder work. Export and reconcile before retrying. Use
-  `--force` only when the user explicitly directs an override after review.
+  live app's update time with the database-time revision captured before the
+  latest export. The exporter also checks that Builder did not change during
+  that export. Oracle records this value at one-second precision, so the
+  exporter and guard fail closed when it matches the current database second.
+  This timestamp cannot see unsaved Builder edits; communicate with teammates
+  before publishing. The guard refuses to overwrite newer Builder work. Export
+  and reconcile before retrying. Use `--force` only when the user explicitly
+  directs an override after review.
 - **Migrations:** Add immutable files under `migrations/<developer>/`, run
   `scripts/team.sh check-conflicts`, then apply selected files with
   `scripts/team.sh migrate migrations/<developer>/<file>.sql`. A migration

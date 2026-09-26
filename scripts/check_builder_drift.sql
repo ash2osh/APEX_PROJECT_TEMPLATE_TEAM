@@ -23,14 +23,9 @@ BEGIN
 END;
 /
 
-SELECT TO_CHAR(last_updated_on, 'YYYY-MM-DD"T"HH24:MI:SS')
+SELECT NVL(TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS'), 'NOT_FOUND')
+       || '|' || TO_CHAR(SYSDATE, 'YYYY-MM-DD"T"HH24:MI:SS')
 FROM apex_applications
-WHERE application_id = &&application_id
-UNION ALL
-SELECT 'NOT_FOUND'
-FROM dual
-WHERE NOT EXISTS (
-  SELECT 1 FROM apex_applications WHERE application_id = &&application_id
-);
+WHERE application_id = &&application_id;
 
 EXIT

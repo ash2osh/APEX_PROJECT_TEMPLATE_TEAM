@@ -1,4 +1,5 @@
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -148,6 +149,23 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("PROD_WORKSPACE", result.stdout)
             self.assertIn("PROD_APP", result.stdout)
             self.assertIn("deployments/prod.json", result.stdout)
+            sql_lines = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("sql ")]
+            self.assertEqual(len(sql_lines), 1, result.stdout)
+            self.assertEqual(
+                shlex.split(sql_lines[0]),
+                [
+                    "sql",
+                    "-S",
+                    "-noupdates",
+                    "-name",
+                    "prod-db",
+                    f"@{script.parents[1] / 'scripts' / 'publish_app.sql'}",
+                    "PROD_APP",
+                    "production",
+                    "PROD_DEPLOYER",
+                    "deployments/prod.json",
+                ],
+            )
             self.assertFalse(sql_log.exists(), "manual mode must not invoke SQLcl")
 
     def test_manual_deploy_works_without_a_local_production_connection(self) -> None:

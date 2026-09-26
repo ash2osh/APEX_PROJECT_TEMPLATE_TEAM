@@ -9,6 +9,7 @@ WHENEVER SQLERROR EXIT SQL.SQLCODE
 WHENEVER OSERROR EXIT FAILURE
 
 @@verify_db_access.sql
+ALTER SESSION SET CURRENT_SCHEMA = &&target_schema;
 @@&&migration_file
 
 EXIT

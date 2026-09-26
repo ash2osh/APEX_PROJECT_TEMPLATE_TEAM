@@ -86,6 +86,31 @@ class MigrateCliTests(unittest.TestCase):
             self.assertTrue(any("migrate.sql" in arg for arg in args))
             self.assertTrue(any("../migrations/alice/20260926_create_orders.sql" in arg for arg in args))
 
+    def test_migration_driver_selects_configured_target_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, migrations, sql_log = self.make_checkout(Path(temporary))
+            env_path = script.parents[1] / ".env"
+            env_text = env_path.read_text(encoding="utf-8")
+            env_text = env_text.replace("CODE_SCHEMA=DEMO", "CODE_SCHEMA=APP_CODE")
+            env_text = env_text.replace("CODE_EXPECTED_USER=DEMO", "CODE_EXPECTED_USER=MIGRATION_USER")
+            env_path.write_text(env_text, encoding="utf-8")
+            developer = migrations / "alice"
+            developer.mkdir()
+            migration = developer / "20260926_create_orders.sql"
+            migration.write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
+
+            result = self.run_migrate(script, migration, sql_log)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = sql_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("APP_CODE", args)
+            self.assertIn("MIGRATION_USER", args)
+            driver = (script.parent / "migrate.sql").read_text(encoding="utf-8")
+            set_schema = "ALTER SESSION SET CURRENT_SCHEMA = &&target_schema"
+            self.assertIn(set_schema, driver)
+            self.assertLess(driver.index("@@verify_db_access.sql"), driver.index(set_schema))
+            self.assertLess(driver.index(set_schema), driver.index("@@&&migration_file"))
+
 
 if __name__ == "__main__":
     unittest.main()

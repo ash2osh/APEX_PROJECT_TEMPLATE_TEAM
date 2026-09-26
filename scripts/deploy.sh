@@ -89,7 +89,7 @@ if [ "$manual" = true ]; then
   esac
   printf '\nDBA runbook (this command did not connect to a database):\n'
   printf '1. Review the committed descriptor: %s\n' "$app_dir/deployments/$app_environment.json"
-  printf '2. From a shell with SQLcl and the approved connection configured, run:\n   cd %q\n   sql -S -noupdates -name %q %q %q %q %q\n' \
+  printf '2. From a shell with SQLcl and the approved connection configured, run:\n   cd %q\n   sql -S -noupdates -name %q %q %q %q %q %q\n' \
     "$app_dir" "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "deployments/$app_environment.json"

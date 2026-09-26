@@ -75,10 +75,17 @@ unsaved or in-progress Builder edits. Then run:
 scripts/team.sh publish 100 --env dev
 ```
 
-The DEV drift guard compares the live Builder update time with the timestamp
-written by the latest local export. If Builder is newer, export and reconcile
-before importing. `--force` bypasses only that timestamp guard and should be
-used only after the discrepancy is reviewed. Staging and production promotion
+The exporter records the app's `last_updated_on` value from Oracle before it
+reads APEXlang, then checks the value again when the export completes. If the
+app changed during export, it refuses to install that source. The DEV drift
+guard compares the current Builder value with this database-time baseline, so
+the workstation's time zone does not affect the check. If Builder is newer,
+export and reconcile before importing. `--force` bypasses only the drift guard
+and should be used only after the discrepancy is reviewed. Oracle stores this
+revision at one-second precision; if the revision matches the database's
+current second, export and publish fail closed and ask you to retry after one
+second. This persisted timestamp cannot reveal unsaved Builder edits, so
+coordinate with teammates before publishing. Staging and production promotion
 uses the separate `deploy` command.
 
 ## Schema migrations
