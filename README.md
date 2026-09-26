@@ -178,6 +178,47 @@ check. A human DBA executes it using an approved saved connection. Database
 migrations remain a DEV workflow; do not use the deployment command to apply
 schema changes.
 
+## Upgrading from the template
+
+Projects created from this template do not share its Git history, so updates
+are copied file by file. `template-manifest.json` decides which repository
+files the upgrade may touch: template scripts, tests, CI, and agent guidance
+are upgraded; project files such as `AGENTS.project.md`,
+`.agents/rules/project.md`, and `PROJECT.md` are created once and never
+overwritten; application source, database mirrors, migrations,
+`app_context/<id>/`, and `.env` are never touched. Put project-specific
+instructions in those placeholder files, not in `AGENTS.md` or `README.md`.
+The engine also writes its fixed `.template-lock.json` metadata file, which
+records the installed template commit and hashes.
+
+Commit your work, then run:
+
+```bash
+scripts/team.sh upgrade-template --dry-run
+scripts/team.sh upgrade-template
+git status
+```
+
+A file you customized is kept when the template did not change it. When both
+changed, the upgrade keeps your file, writes the new template version beside
+it as `<file>.template-new`, and exits with status 1: merge the two, delete the
+`.template-new` file, and commit. The next upgrade refuses to run while any
+`.template-new` file remains. The upgrade records the installed template commit
+in `.template-lock.json`; commit it with the upgraded files. Use `--ref <tag>`
+to install a specific template version and `--source <url>` for a fork. If the
+upgrade reports that `.env` needs attention, compare it with `.env.example`.
+
+Projects created before `template-manifest.json` existed do not have the
+upgrade script yet. Run it once from a fresh template clone:
+
+```bash
+git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git /tmp/apex-template
+python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git
+```
+
+That first run has no lock, so every file that differs from the template is
+reported as a conflict instead of being overwritten.
+
 ## Command reference
 
 | Command | Purpose |
@@ -189,6 +230,7 @@ schema changes.
 | `scripts/team.sh migrate <file> [...]` | Check conflicts, then apply selected migration files to DEV. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
+| `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 
 `scripts/team.ps1` exposes the same commands for PowerShell. Migration and
 deployment helpers use Bash, such as Git Bash on Windows.

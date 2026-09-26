@@ -87,6 +87,10 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("[ASHARIF-2026-09-26r001]", readme)
         self.assertIn("Commit the stamped", readme)
         self.assertIn("DEVELOPER_NAME", contents[ROOT / "AGENTS.md"])
+        self.assertIn("scripts/team.sh upgrade-template", readme)
+        self.assertIn("AGENTS.project.md", readme)
+        self.assertIn(".template-new", readme)
+        self.assertIn("python3 /tmp/apex-template/scripts/upgrade_template.py", readme)
 
     def test_publish_guide_explains_every_refusal_and_is_linked(self) -> None:
         guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
