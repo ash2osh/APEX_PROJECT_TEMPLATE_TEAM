@@ -1,0 +1,11 @@
+{
+  "workspace": {
+    "name": "STAGE_WORKSPACE"
+  },
+  "app": {
+    "id": 100,
+    "databaseSession": {
+      "parsingSchema": "STAGE_APP"
+    }
+  }
+}
