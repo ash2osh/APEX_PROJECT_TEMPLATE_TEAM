@@ -7,7 +7,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 source "$REPO_ROOT/scripts/load_env.sh" "${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read apex
 
-IFS=',' read -r -a APP_IDS <<< "$APEX_APP_ID"
+if [ "$#" -gt 1 ]; then
+  echo "usage: scripts/export_apps.sh [numeric_app_id]" >&2
+  exit 2
+fi
+if [ "$#" -eq 1 ]; then
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] || { echo "export error: expected a positive numeric application id" >&2; exit 2; }
+  APP_IDS=("$1")
+else
+  IFS=',' read -r -a APP_IDS <<< "$APEX_APP_ID"
+fi
 
 # Refuse any dirty destination before making the first database connection.
 for app_id in "${APP_IDS[@]}"; do

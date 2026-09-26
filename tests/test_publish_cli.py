@@ -117,6 +117,66 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("deployments/dev.json", args)
             self.assertEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(app))
 
+    def test_staging_publish_skips_dev_builder_drift_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            for name in ("publish_app.sh", "publish_app.sql", "load_env.sh"):
+                shutil.copy2(ROOT / "scripts" / name, scripts / name)
+
+            env_text = (ROOT / ".env.example").read_text(encoding="utf-8")
+            env_text += "\nSTAGING_SQLCL_CONNECTION=stage-db\nSTAGING_EXPECTED_USER=STAGE_DEPLOYER\n"
+            (root / ".env").write_text(env_text, encoding="utf-8")
+            app = root / "apps" / "DEMO" / "100"
+            deployments = app / "deployments"
+            deployments.mkdir(parents=True)
+            (app / "application.apx").write_text("application {}\n", encoding="utf-8")
+            (deployments / "staging.json").write_text(
+                json.dumps(
+                    {
+                        "workspace": {"name": "STAGE_WORKSPACE"},
+                        "app": {"id": 100, "databaseSession": {"parsingSchema": "STAGE_APP"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            guard_marker = root / "drift-guard-called"
+            drift_guard = scripts / "check_builder_drift.py"
+            drift_guard.write_text(
+                "import pathlib, sys\n"
+                "pathlib.Path(sys.argv[1]).write_text('called')\n"
+                "raise SystemExit(77)\n",
+                encoding="utf-8",
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            sql_log = root / "sql-args.txt"
+            fake_sql = fake_bin / "sql"
+            fake_sql.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n",
+                encoding="utf-8",
+            )
+            fake_sql.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+            environment["FAKE_SQL_LOG"] = str(sql_log)
+
+            result = subprocess.run(
+                ["bash", str(scripts / "publish_app.sh"), "100", "--env", "staging"],
+                cwd=root,
+                env=environment,
+                input="y\n",
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(guard_marker.exists(), "staging promotions must not compare Builder edit timestamps")
+            self.assertIn("deployments/staging.json", sql_log.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

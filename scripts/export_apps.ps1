@@ -1,11 +1,18 @@
 #Requires -Version 5.1
 # Export the configured APEX application as an APEXlang mirror.
+param([string] $AppId)
+
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
 & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target apex
-$appIds = @($env:APEX_APP_ID.Split(','))
+if (-not [string]::IsNullOrWhiteSpace($AppId)) {
+  if ($AppId -cnotmatch '^[1-9][0-9]*$') { throw "export error: expected a positive numeric application id" }
+  $appIds = @($AppId)
+} else {
+  $appIds = @($env:APEX_APP_ID.Split(','))
+}
 
 # Refuse any dirty destination before making the first database connection.
 foreach ($appId in $appIds) {

@@ -27,6 +27,7 @@ if ([string]::IsNullOrWhiteSpace($AppId) -or $AppId -cnotmatch '^[1-9][0-9]*$') 
 
 $appEnvironment = "dev"
 $force = $false
+$describe = $false
 for ($index = 0; $index -lt $RemainingArguments.Count;) {
   switch ($RemainingArguments[$index]) {
     "--env" {
@@ -38,6 +39,10 @@ for ($index = 0; $index -lt $RemainingArguments.Count;) {
     }
     "--force" {
       $force = $true
+      $index += 1
+    }
+    "--describe" {
+      $describe = $true
       $index += 1
     }
     "--help" { Show-Usage; exit 0 }
@@ -117,19 +122,28 @@ switch ($appEnvironment) {
     $expectedUser = $env:STAGING_EXPECTED_USER
     $targetLabel = "STAGING"
     $targetEnvironment = "staging"
-    if ([string]::IsNullOrWhiteSpace($sqlclConnection) -or [string]::IsNullOrWhiteSpace($expectedUser)) {
-      throw "publish error: set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
-    }
   }
   "prod" {
     $sqlclConnection = $env:PROD_SQLCL_CONNECTION
     $expectedUser = $env:PROD_EXPECTED_USER
     $targetLabel = "PROD"
     $targetEnvironment = "production"
-    if ([string]::IsNullOrWhiteSpace($sqlclConnection) -or [string]::IsNullOrWhiteSpace($expectedUser)) {
-      throw "publish error: set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
-    }
   }
+}
+
+if ($describe) {
+  # Internal read-only interface for deployment summaries and DBA runbooks.
+  Write-Output (@($appDir, $deployment.workspace.name, $parsingSchema,
+    $sqlclConnection, $expectedUser, $targetEnvironment) -join "`t")
+  exit 0
+}
+
+if ($appEnvironment -ne "dev" -and
+    ([string]::IsNullOrWhiteSpace($sqlclConnection) -or [string]::IsNullOrWhiteSpace($expectedUser))) {
+  if ($appEnvironment -eq "staging") {
+    throw "publish error: set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
+  }
+  throw "publish error: set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
 }
 
 if ($appEnvironment -ne "dev") {
@@ -137,7 +151,7 @@ if ($appEnvironment -ne "dev") {
   if ($answer -notmatch '^(?i:y|yes)$') { throw "Publish cancelled." }
 }
 
-if (-not $force) {
+if ($appEnvironment -eq "dev" -and -not $force) {
   $driftGuard = Join-Path $repoRoot "scripts/check_builder_drift.py"
   if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
     throw "publish error: Builder drift guard is missing; refusing import"

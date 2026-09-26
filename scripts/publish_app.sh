@@ -25,6 +25,7 @@ shift
 
 app_environment=dev
 force=false
+describe=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env)
@@ -34,6 +35,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --force)
       force=true
+      shift
+      ;;
+    --describe)
+      describe=true
       shift
       ;;
     --help|-h)
@@ -124,18 +129,29 @@ case "$app_environment" in
     expected_user="${STAGING_EXPECTED_USER:-}"
     target_label=STAGING
     target_environment=staging
-    [ -n "$sqlcl_connection" ] && [ -n "$expected_user" ] || \
-      fail "set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
     ;;
   prod)
     sqlcl_connection="${PROD_SQLCL_CONNECTION:-}"
     expected_user="${PROD_EXPECTED_USER:-}"
     target_label=PROD
     target_environment=production
-    [ -n "$sqlcl_connection" ] && [ -n "$expected_user" ] || \
-      fail "set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
     ;;
 esac
+
+if [ "$describe" = true ]; then
+  # Internal read-only interface for deploy.sh to show the selected descriptor
+  # before it asks the operator to confirm or prints a DBA runbook.
+  printf '%s\n' "$app_dir" "$workspace_name" "$parsing_schema" \
+    "$sqlcl_connection" "$expected_user" "$target_environment"
+  exit 0
+fi
+
+if [ "$app_environment" != dev ] && { [ -z "$sqlcl_connection" ] || [ -z "$expected_user" ]; }; then
+  if [ "$app_environment" = staging ]; then
+    fail "set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
+  fi
+  fail "set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
+fi
 
 if [ "$app_environment" != dev ]; then
   printf 'Deploying to %s. Proceed? [y/N]: ' "$target_label"
@@ -147,7 +163,7 @@ if [ "$app_environment" != dev ]; then
   esac
 fi
 
-if [ "$force" != true ]; then
+if [ "$app_environment" = dev ] && [ "$force" != true ]; then
   drift_guard="$REPO_ROOT/scripts/check_builder_drift.py"
   [ -f "$drift_guard" ] || fail "Builder drift guard is missing; refusing import"
   python3 "$drift_guard" "$app_id" "$sqlcl_connection" "$app_dir" \
