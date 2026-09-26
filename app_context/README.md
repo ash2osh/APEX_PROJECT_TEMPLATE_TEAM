@@ -1,35 +1,17 @@
-# Alias-keyed application context
+# Application context
 
-Store durable knowledge below `app_context/<alias>/` only. Suggested files are
-`purpose.md`, `data-dependencies.md`, `subscriptions.md`, `known-issues.md`,
-`release.json`, and `recovery.md`. Keep connection names, passwords, local defaults,
-logs, and sync state out of this directory. Context is advisory; target contracts
-and verified SQLcl identity remain authoritative.
+Store durable notes under `app_context/<numeric-app-id>/`, with one directory
+per numeric APEX application. Suggested files include `purpose.md`,
+`data-dependencies.md`, `subscriptions.md`, `known-issues.md`, and `recovery.md`.
+Keep connection names, passwords, local defaults, logs, and sync state out of
+this directory.
 
-## Application Release Prerequisites
+Application source lives under `apps/<schema>/<numeric-app-id>/` (or
+`apps/<numeric-app-id>/` when no schema directory is used). Schema changes are
+authored as immutable files under `migrations/<developer>/`.
 
-Each application must declare its database migration prerequisites in
-`app_context/<alias>/release.json`:
-
-```json
-{
-  "version": 1,
-  "requires": [
-    "20260907T100000__alice__one"
-  ]
-}
-```
-
-For applications with no database migration prerequisites:
-
-```json
-{
-  "version": 1,
-  "requires": []
-}
-```
-
-Authors declare canonical migration IDs in `requires`. The release builder
-resolves exact immutable SHA-256 bundle checksums from the selected Git commit;
-authors do not hand-copy checksums. The builder rejects missing declarations,
-unknown fields, duplicate IDs, non-canonical IDs, and IDs absent from the commit.
+release.json is not read by current scripts. Notes in
+application context are informational and do not enforce app migration
+prerequisites or gate a publish/deploy. The conflict checker detects common
+duplicate DDL declarations in the migration files it can see; it does not
+enforce an application dependency graph.

@@ -24,7 +24,8 @@ VIEW_RE = re.compile(
     re.IGNORECASE,
 )
 SEQUENCE_RE = re.compile(
-    rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?SEQUENCE\s+(?P<name>{QUALIFIED_NAME})",
+    rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?SEQUENCE\s+"
+    rf"(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>{QUALIFIED_NAME})",
     re.IGNORECASE,
 )
 ALTER_TABLE_RE = re.compile(

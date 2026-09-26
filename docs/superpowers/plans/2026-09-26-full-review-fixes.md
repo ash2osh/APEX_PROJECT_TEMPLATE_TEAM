@@ -81,10 +81,10 @@
 
 **Interfaces:** Preserve the extractor's current node/edge JSON contract and the migration conflict check's current CLI/output contract. Documentation must describe only guards present in current code.
 
-- [ ] Add failing tests for `CREATE SEQUENCE IF NOT EXISTS`, comment backticks before real APEXlang fences, stale alias/release claims, and CI behavioral test invocation.
-- [ ] Run the focused tests and confirm each finding is detected.
-- [ ] Parse optional sequence syntax, ignore comment fence delimiters while retaining real payload behavior, align active docs with current numeric app/migration paths, and add unittest discovery to CI.
-- [ ] Run focused and full unittest suites plus extractor CLI checks; confirm output contracts remain unchanged.
+- [x] Add failing tests for `CREATE SEQUENCE IF NOT EXISTS`, comment backticks before real APEXlang fences, stale alias/release claims, and CI behavioral test invocation.
+- [x] Run the focused tests and confirm each finding is detected.
+- [x] Parse optional sequence syntax, ignore comment fence delimiters while retaining real payload behavior, align active docs with current numeric app/migration paths, and add unittest discovery to CI.
+- [x] Run focused tests and full unittest suite (61 tests); confirm extractor parser output contracts remain unchanged.
 - [ ] Commit as `fix: align scanners docs and CI with supported workflows`.
 
 ### Task 5: Refresh the development Builder baseline after verified publish

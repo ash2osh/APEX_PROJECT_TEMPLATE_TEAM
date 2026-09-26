@@ -9,6 +9,7 @@ DOCS = (
     ROOT / "README.md",
     ROOT / ".agents" / "workflows" / "team-flow.md",
     ROOT / ".agents" / "rules" / "agent-safety.md",
+    ROOT / "app_context" / "README.md",
 )
 RETIRED_TERMS = (
     "prepare-publish",
@@ -44,6 +45,20 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, readme)
+
+    def test_application_context_describes_only_current_numeric_paths_and_guards(self) -> None:
+        context = (ROOT / "app_context" / "README.md").read_text(encoding="utf-8")
+        self.assertIn("app_context/<numeric-app-id>/", context)
+        self.assertIn("apps/<schema>/<numeric-app-id>/", context)
+        self.assertIn("migrations/<developer>/", context)
+        self.assertIn("release.json is not read", context)
+        self.assertIn("do not enforce", context)
+        self.assertNotIn("app_context/<alias>/", context)
+        self.assertNotIn("release builder resolves", context)
+
+    def test_ci_runs_behavioral_unittest_suite(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 -m unittest discover -s tests -v", workflow)
 
     def test_active_markdown_links_resolve(self) -> None:
         for path in DOCS:

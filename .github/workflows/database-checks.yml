@@ -24,6 +24,8 @@ jobs:
       - name: Shell syntax
         run: |
           for script in scripts/*.sh; do bash -n "$script"; done
+      - name: Behavioral tests
+        run: python3 -m unittest discover -s tests -v
       - name: Validate the example configuration
         run: |
           PROJECT_ENV_FILE=.env.example bash -c 'source scripts/load_env.sh "$PROJECT_ENV_FILE"'

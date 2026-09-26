@@ -63,6 +63,24 @@ class MigrationConflictTests(unittest.TestCase):
         self.assertIn("VIEW ACTIVE_ORDERS", result.stdout)
         self.assertIn("SEQUENCE ORDER_SEQ", result.stdout)
 
+    def test_distinct_create_sequence_if_not_exists_names_are_clean(self) -> None:
+        self.add_migration("alice", "one.sql", "CREATE SEQUENCE IF NOT EXISTS ALICE_SEQ;\n")
+        self.add_migration("bob", "two.sql", "CREATE SEQUENCE IF NOT EXISTS BOB_SEQ;\n")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No cross-developer conflicts", result.stdout)
+
+    def test_if_not_exists_sequence_duplicate_conflicts_with_plain_syntax(self) -> None:
+        self.add_migration("alice", "one.sql", "CREATE SEQUENCE IF NOT EXISTS ORDER_SEQ;\n")
+        self.add_migration("bob", "two.sql", "CREATE SEQUENCE ORDER_SEQ;\n")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("SEQUENCE ORDER_SEQ", result.stdout)
+
     def test_duplicate_added_columns_conflict(self) -> None:
         self.add_migration("alice", "one.sql", "ALTER TABLE ORDERS ADD STATUS VARCHAR2(30);\n")
         self.add_migration("bob", "two.sql", "ALTER TABLE orders ADD (status VARCHAR2(50));\n")

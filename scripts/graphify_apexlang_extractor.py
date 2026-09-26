@@ -374,8 +374,8 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
             edges.append(candidate)
 
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
-        fence_count = raw_line.count("```")
         if in_fence:
+            fence_count = raw_line.count("```")
             if fence_count % 2:
                 block = "\n".join(fence_lines)
                 if fence_owner and fence_is_database_code:
@@ -394,12 +394,17 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
             else:
                 fence_lines.append(raw_line)
             continue
+        # APEXlang comments belong to the syntax outside a real multiline
+        # payload. Remove them before recognizing fence delimiters so a note
+        # such as "// examples use ```sql" cannot consume the rest of the file.
+        line, in_block_comment = _strip_comments(raw_line, in_block_comment)
+        fence_count = line.count("```")
         if fence_count % 2:
-            prefix = raw_line.split("```", 1)[0]
+            prefix = line.split("```", 1)[0]
             property_match = PROPERTY_RE.match(prefix)
             if property_match:
                 pending_property = property_match.group(1)
-            language = raw_line.split("```", 1)[1].strip().casefold()
+            language = line.split("```", 1)[1].strip().casefold()
             in_fence = True
             fence_owner = _nearest_owner(frames, app_node_id)
             fence_start = line_number + 1
@@ -410,7 +415,6 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
             )
             continue
 
-        line, in_block_comment = _strip_comments(raw_line, in_block_comment)
         if not line.strip():
             continue
 
