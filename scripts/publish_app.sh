@@ -180,14 +180,25 @@ cleanup() { rm -rf -- "$staging_dir"; }
 trap cleanup EXIT
 sqlcl_stdin="$staging_dir/.sqlcl-stdin"
 : > "$sqlcl_stdin"
+sqlcl_output="$staging_dir/sqlcl-output.log"
 
 relative_deployment="deployments/$app_environment.json"
-(
+if ! (
   cd "$app_dir"
   sql -S -noupdates -name "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/publish_app.sql" \
-    "$parsing_schema" "$target_environment" "$expected_user" "$relative_deployment" \
+    "$parsing_schema" "$target_environment" "$expected_user" "$relative_deployment" "$app_id" \
     < "$sqlcl_stdin"
-)
+) > "$sqlcl_output" 2>&1; then
+  cat "$sqlcl_output" >&2
+  fail "SQLcl application import failed; see the client output above"
+fi
+cat "$sqlcl_output"
+if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:' "$sqlcl_output"; then
+  fail "SQLcl reported a client or database error during the application import"
+fi
+if ! grep -Eq "^[[:space:]]*APEX_IMPORT_VERIFIED:$app_id[[:space:]]*$" "$sqlcl_output"; then
+  fail "SQLcl did not verify the imported application; the import result is unknown"
+fi
 printf 'Published APEX App %s to %s (%s / %s).\n' \
   "$app_id" "$target_label" "$workspace_name" "$parsing_schema"

@@ -84,7 +84,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("docker-demo", args)
             self.assertIn(f"@{scripts / 'doctor.sql'}", args)
             doctor_sql = (scripts / "doctor.sql").read_text(encoding="utf-8")
-            self.assertIn("WHENEVER SQLERROR EXIT SQL.SQLCODE", doctor_sql)
+            self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", doctor_sql)
             self.assertIn("@@verify_db_access.sql", doctor_sql)
 
     def make_deploy_checkout(self, root: Path, configure_profile: bool = True) -> tuple[Path, Path]:
@@ -117,7 +117,9 @@ class TeamCliTests(unittest.TestCase):
         sql_log = root / "sql-called"
         fake_sql = fake_bin / "sql"
         fake_sql.write_text(
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n",
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
+            "printf '%s\\n' 'APEX_IMPORT_VERIFIED:100'\n",
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
@@ -164,6 +166,7 @@ class TeamCliTests(unittest.TestCase):
                     "production",
                     "PROD_DEPLOYER",
                     "deployments/prod.json",
+                    "100",
                 ],
             )
             self.assertFalse(sql_log.exists(), "manual mode must not invoke SQLcl")

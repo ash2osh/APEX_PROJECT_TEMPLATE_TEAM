@@ -7,7 +7,8 @@ usage() {
 Usage: scripts/migrate.sh <migrations/<developer>/<file>.sql> [...]
 
 Checks every developer migration for conflicts before applying the selected
-file(s) to the configured development database.
+file(s) to the configured development database. SQLcl substitution is disabled
+while migration bodies run; do not use SET DEFINE ON inside a migration.
 USAGE
 }
 
@@ -66,13 +67,35 @@ trap cleanup EXIT
 sqlcl_stdin="$staging_dir/.sqlcl-stdin"
 : > "$sqlcl_stdin"
 
+driver_index=0
 for migration in "${migrations[@]}"; do
-  (
+  driver_index=$((driver_index + 1))
+  migration_driver="$staging_dir/migration-$driver_index.sql"
+  sqlcl_log="$staging_dir/migration-$driver_index.log"
+  {
+    printf 'SET DEFINE ON\n'
+    printf '@@../../scripts/migrate.sql %s %s %s\n' \
+      "$CODE_SCHEMA" "$DB_ENVIRONMENT" "$CODE_EXPECTED_USER"
+    printf 'SET DEFINE OFF\n'
+    printf '@@../../%s\n' "$migration"
+    printf 'PROMPT MIGRATION_SCRIPT_COMPLETED\n'
+    printf 'EXIT SUCCESS COMMIT\n'
+  } > "$migration_driver"
+  if ! (
     cd "$REPO_ROOT/scripts"
-    sql -S -noupdates -name "$CODE_SQLCL_CONNECTION" \
-      "@$REPO_ROOT/scripts/migrate.sql" \
-      "$CODE_SCHEMA" "$DB_ENVIRONMENT" "$CODE_EXPECTED_USER" "../$migration" \
+    sql -S -noupdates -name "$CODE_SQLCL_CONNECTION" "@$migration_driver" \
       < "$sqlcl_stdin"
-  )
+  ) > "$sqlcl_log" 2>&1; then
+    cat "$sqlcl_log" >&2
+    fail "SQLcl failed while applying $migration"
+  fi
+  cat "$sqlcl_log"
+  if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:' "$sqlcl_log" || \
+     grep -qi 'Substitution cancelled' "$sqlcl_log"; then
+    fail "SQLcl reported an error while applying $migration"
+  fi
+  if ! grep -Eq '^[[:space:]]*MIGRATION_SCRIPT_COMPLETED[[:space:]]*$' "$sqlcl_log"; then
+    fail "SQLcl did not confirm completion of $migration"
+  fi
   printf 'Applied migration %s.\n' "$migration"
 done

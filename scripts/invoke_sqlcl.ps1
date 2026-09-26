@@ -15,7 +15,8 @@ function Invoke-Sqlcl {
   param(
     [Parameter(Mandatory = $true)][string[]] $Arguments,
     [Parameter(Mandatory = $true)][string] $WorkingDirectory,
-    [Parameter(Mandatory = $true)][string] $StdInFile
+    [Parameter(Mandatory = $true)][string] $StdInFile,
+    [string] $TranscriptFile
   )
 
   if (-not (Test-Path -LiteralPath $StdInFile -PathType Leaf)) {
@@ -29,8 +30,30 @@ function Invoke-Sqlcl {
     if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
   })
 
-  $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
-    -WorkingDirectory $WorkingDirectory -NoNewWindow -Wait -PassThru `
-    -RedirectStandardInput $StdInFile
-  return $process.ExitCode
+  if ([string]::IsNullOrWhiteSpace($TranscriptFile)) {
+    $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
+      -WorkingDirectory $WorkingDirectory -NoNewWindow -Wait -PassThru `
+      -RedirectStandardInput $StdInFile
+    return $process.ExitCode
+  }
+
+  $stdoutFile = [System.IO.Path]::GetTempFileName()
+  $stderrFile = [System.IO.Path]::GetTempFileName()
+  try {
+    $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
+      -WorkingDirectory $WorkingDirectory -NoNewWindow -Wait -PassThru `
+      -RedirectStandardInput $StdInFile -RedirectStandardOutput $stdoutFile `
+      -RedirectStandardError $stderrFile
+    $stdout = [System.IO.File]::ReadAllText($stdoutFile)
+    $stderr = [System.IO.File]::ReadAllText($stderrFile)
+    $transcript = $stdout
+    if ($stdout.Length -gt 0 -and $stderr.Length -gt 0) {
+      $transcript += [Environment]::NewLine
+    }
+    $transcript += $stderr
+    [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
+    return $process.ExitCode
+  } finally {
+    Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+  }
 }

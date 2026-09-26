@@ -174,15 +174,24 @@ if ($appEnvironment -eq "dev") {
 
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
 $stdinFile = [System.IO.Path]::GetTempFileName()
+$transcriptFile = [System.IO.Path]::GetTempFileName()
 try {
   $relativeDeployment = "deployments/$appEnvironment.json"
   $sqlclExit = Invoke-Sqlcl -WorkingDirectory $appDir -StdInFile $stdinFile -Arguments @(
     "-S", "-noupdates", "-name", $sqlclConnection,
     "@$(Join-Path $PSScriptRoot 'publish_app.sql')",
-    $parsingSchema, $targetEnvironment, $expectedUser, $relativeDeployment
-  )
+    $parsingSchema, $targetEnvironment, $expectedUser, $relativeDeployment, $AppId
+  ) -TranscriptFile $transcriptFile
+  $sqlclOutput = [System.IO.File]::ReadAllText($transcriptFile)
+  if (-not [string]::IsNullOrEmpty($sqlclOutput)) { Write-Output $sqlclOutput }
   if ($sqlclExit -ne 0) { throw "SQLcl application import failed with exit code $sqlclExit" }
+  if ([regex]::IsMatch($sqlclOutput, '(?i)\b(?:SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:')) {
+    throw "SQLcl reported a client or database error during the application import"
+  }
+  if (-not [regex]::IsMatch($sqlclOutput, "(?m)^\s*APEX_IMPORT_VERIFIED:$AppId\s*$")) {
+    throw "SQLcl did not verify the imported application; the import result is unknown"
+  }
   Write-Output "Published APEX App $AppId to $targetLabel ($($deployment.workspace.name) / $parsingSchema)."
 } finally {
-  Remove-Item -LiteralPath $stdinFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stdinFile, $transcriptFile -Force -ErrorAction SilentlyContinue
 }

@@ -105,6 +105,9 @@ scripts/team.sh check-conflicts
 scripts/team.sh migrate migrations/alice/20260926_101500_add_status.sql
 ```
 
+Migration bodies run with SQLcl substitution disabled, so `&` is treated as
+ordinary SQL text. Do not enable `SET DEFINE ON` inside a migration.
+
 The conflict checker looks for duplicate table, view, sequence, and
 `ALTER TABLE ... ADD` column declarations. It is a guard for common collisions,
 not a substitute for reviewing the SQL. A successful migration changes shared

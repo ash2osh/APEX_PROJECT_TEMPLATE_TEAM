@@ -21,6 +21,55 @@ class PublishAppCliTests(unittest.TestCase):
             check=False,
         )
 
+    def make_publish_fixture(self, root: Path) -> tuple[Path, Path, Path, dict[str, str]]:
+        scripts = root / "scripts"
+        scripts.mkdir()
+        for name in (
+            "publish_app.sh",
+            "publish_app.sql",
+            "load_env.sh",
+            "check_db_target.sh",
+        ):
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / ".env.example", root / ".env")
+
+        app = root / "apps" / "DEMO" / "100"
+        deployments = app / "deployments"
+        deployments.mkdir(parents=True)
+        (app / "application.apx").write_text("application {}\n", encoding="utf-8")
+        (deployments / "dev.json").write_text(
+            json.dumps(
+                {
+                    "workspace": {"name": "DEV_WORKSPACE"},
+                    "app": {"id": 100, "databaseSession": {"parsingSchema": "DEMO"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        sql_log = root / "sql-args.txt"
+        sql_cwd = root / "sql-cwd.txt"
+        fake_sql = fake_bin / "sql"
+        fake_sql.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
+            "pwd > \"$FAKE_SQL_CWD\"\n"
+            "case \"${FAKE_SQL_MODE:-success}\" in\n"
+            "  sp2) printf '%s\\n' 'SP2-0640: Not connected' ;;\n"
+            "  no-sentinel) : ;;\n"
+            "  *) printf '%s\\n' 'APEX_IMPORT_VERIFIED:100' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake_sql.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+        environment["FAKE_SQL_LOG"] = str(sql_log)
+        environment["FAKE_SQL_CWD"] = str(sql_cwd)
+        return scripts / "publish_app.sh", sql_log, sql_cwd, environment
+
     def test_help_describes_numeric_id_and_environment_options(self) -> None:
         result = self.run_publish("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -57,51 +106,14 @@ class PublishAppCliTests(unittest.TestCase):
             "apex import -input . -deployment &&deployment_file",
             import_script.read_text(encoding="utf-8"),
         )
+        self.assertIn("APEX_IMPORT_VERIFIED:&&expected_app_id", import_script.read_text(encoding="utf-8"))
 
     def test_force_publish_passes_numeric_id_and_environment_descriptor_to_sqlcl(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            scripts = root / "scripts"
-            scripts.mkdir()
-            for name in (
-                "publish_app.sh",
-                "publish_app.sql",
-                "load_env.sh",
-                "check_db_target.sh",
-            ):
-                shutil.copy2(ROOT / "scripts" / name, scripts / name)
-            shutil.copy2(ROOT / ".env.example", root / ".env")
-
-            app = root / "apps" / "DEMO" / "100"
-            deployments = app / "deployments"
-            deployments.mkdir(parents=True)
-            (app / "application.apx").write_text("application {}\n", encoding="utf-8")
-            (deployments / "dev.json").write_text(
-                json.dumps(
-                    {
-                        "workspace": {"name": "DEV_WORKSPACE"},
-                        "app": {"id": 100, "databaseSession": {"parsingSchema": "DEMO"}},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            sql_log = root / "sql-args.txt"
-            sql_cwd = root / "sql-cwd.txt"
-            fake_sql = fake_bin / "sql"
-            fake_sql.write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\npwd > \"$FAKE_SQL_CWD\"\n",
-                encoding="utf-8",
-            )
-            fake_sql.chmod(0o755)
-            environment = os.environ.copy()
-            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
-            environment["FAKE_SQL_LOG"] = str(sql_log)
-            environment["FAKE_SQL_CWD"] = str(sql_cwd)
+            runner, sql_log, sql_cwd, environment = self.make_publish_fixture(root)
             result = subprocess.run(
-                ["bash", str(scripts / "publish_app.sh"), "100", "--force"],
+                ["bash", str(runner), "100", "--force"],
                 cwd=root,
                 env=environment,
                 text=True,
@@ -113,9 +125,91 @@ class PublishAppCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("docker-demo", args)
-            self.assertIn(f"@{scripts / 'publish_app.sql'}", args)
+            self.assertIn(f"@{runner.parent / 'publish_app.sql'}", args)
             self.assertIn("deployments/dev.json", args)
-            self.assertEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(app))
+            self.assertEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(root / "apps/DEMO/100"))
+
+    def test_client_error_or_missing_verification_never_reports_published(self) -> None:
+        for mode in ("sp2", "no-sentinel"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, _, _, environment = self.make_publish_fixture(root)
+                environment["FAKE_SQL_MODE"] = mode
+                result = subprocess.run(
+                    ["bash", str(runner), "100", "--force"],
+                    cwd=root,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("Published APEX App", result.stdout + result.stderr)
+
+    def test_powershell_publish_requires_clean_client_output_and_sentinel(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+
+        for mode, expected_success in (("sp2", False), ("no-sentinel", False), ("success", True)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                scripts = root / "scripts"
+                scripts.mkdir()
+                for name in (
+                    "publish_app.ps1",
+                    "publish_app.sql",
+                    "load_env.ps1",
+                    "invoke_sqlcl.ps1",
+                    "check_db_target.ps1",
+                ):
+                    shutil.copy2(ROOT / "scripts" / name, scripts / name)
+                shutil.copy2(ROOT / ".env.example", root / ".env")
+                app = root / "apps" / "DEMO" / "100"
+                deployments = app / "deployments"
+                deployments.mkdir(parents=True)
+                (app / "application.apx").write_text("application {}\n", encoding="utf-8")
+                (deployments / "dev.json").write_text(
+                    json.dumps({
+                        "workspace": {"name": "DEV_WORKSPACE"},
+                        "app": {"id": 100, "databaseSession": {"parsingSchema": "DEMO"}},
+                    }),
+                    encoding="utf-8",
+                )
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                fake_sql = fake_bin / "sql"
+                fake_sql.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "case \"$FAKE_SQL_MODE\" in\n"
+                    "  sp2) printf '%s\\n' 'SP2-0640: Not connected' ;;\n"
+                    "  no-sentinel) : ;;\n"
+                    "  *) printf '%s\\n' 'APEX_IMPORT_VERIFIED:100' ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                fake_sql.chmod(0o755)
+                environment = os.environ.copy()
+                environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                environment["FAKE_SQL_MODE"] = mode
+
+                result = subprocess.run(
+                    [pwsh, "-NoProfile", "-File", str(scripts / "publish_app.ps1"), "100", "--force"],
+                    cwd=root,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                if expected_success:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("Published APEX App 100", result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertNotIn("Published APEX App 100", result.stdout + result.stderr)
 
     def test_staging_publish_skips_dev_builder_drift_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -156,6 +250,11 @@ class PublishAppCliTests(unittest.TestCase):
             fake_sql = fake_bin / "sql"
             fake_sql.write_text(
                 "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n",
+                encoding="utf-8",
+            )
+            fake_sql.write_text(
+                fake_sql.read_text(encoding="utf-8")
+                + "printf '%s\\n' 'APEX_IMPORT_VERIFIED:100'\n",
                 encoding="utf-8",
             )
             fake_sql.chmod(0o755)

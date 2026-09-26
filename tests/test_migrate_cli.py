@@ -32,7 +32,12 @@ class MigrateCliTests(unittest.TestCase):
         sql_log = root / "sql-called"
         fake_sql = fake_bin / "sql"
         fake_sql.write_text(
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$FAKE_SQL_LOG\"\n",
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$@\" >> \"$FAKE_SQL_LOG\"\n"
+            "for arg in \"$@\"; do\n"
+            "  case \"$arg\" in @*) cat \"${arg#@}\" > \"$FAKE_DRIVER_LOG\" ;; esac\n"
+            "done\n"
+            "printf '%s\\n' MIGRATION_SCRIPT_COMPLETED\n",
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
@@ -42,6 +47,7 @@ class MigrateCliTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PATH"] = f"{sql_log.parent / 'bin'}{os.pathsep}{environment['PATH']}"
         environment["FAKE_SQL_LOG"] = str(sql_log)
+        environment["FAKE_DRIVER_LOG"] = str(sql_log.with_suffix(".driver.sql"))
         return subprocess.run(
             ["bash", str(script), str(migration.relative_to(script.parents[1]))],
             cwd=script.parents[1],
@@ -83,8 +89,11 @@ class MigrateCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("docker-demo", args)
-            self.assertTrue(any("migrate.sql" in arg for arg in args))
-            self.assertTrue(any("../migrations/alice/20260926_create_orders.sql" in arg for arg in args))
+            driver = sql_log.with_suffix(".driver.sql").read_text(encoding="utf-8")
+            self.assertIn("@@../../scripts/migrate.sql DEMO development DEMO", driver)
+            self.assertIn("SET DEFINE OFF", driver)
+            self.assertIn("@@../../migrations/alice/20260926_create_orders.sql", driver)
+            self.assertLess(driver.index("SET DEFINE OFF"), driver.index("@@../../migrations/"))
 
     def test_migration_driver_selects_configured_target_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -102,14 +111,31 @@ class MigrateCliTests(unittest.TestCase):
             result = self.run_migrate(script, migration, sql_log)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            args = sql_log.read_text(encoding="utf-8").splitlines()
-            self.assertIn("APP_CODE", args)
-            self.assertIn("MIGRATION_USER", args)
+            generated = sql_log.with_suffix(".driver.sql").read_text(encoding="utf-8")
+            self.assertIn("@@../../scripts/migrate.sql APP_CODE development MIGRATION_USER", generated)
             driver = (script.parent / "migrate.sql").read_text(encoding="utf-8")
             set_schema = "ALTER SESSION SET CURRENT_SCHEMA = &&target_schema"
             self.assertIn(set_schema, driver)
             self.assertLess(driver.index("@@verify_db_access.sql"), driver.index(set_schema))
-            self.assertLess(driver.index(set_schema), driver.index("@@&&migration_file"))
+            self.assertNotIn("@@&&migration_file", driver)
+
+    def test_migration_failure_rolls_back_and_success_commits(self) -> None:
+        driver = (ROOT / "scripts" / "migrate.sql").read_text(encoding="utf-8")
+        self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", driver)
+        self.assertIn("WHENEVER OSERROR EXIT FAILURE ROLLBACK", driver)
+        with tempfile.TemporaryDirectory() as temporary:
+            script, migrations, sql_log = self.make_checkout(Path(temporary))
+            developer = migrations / "alice"
+            developer.mkdir()
+            migration = developer / "20260926_ampersand.sql"
+            migration.write_text("PROMPT Research & Development\n", encoding="utf-8")
+
+            result = self.run_migrate(script, migration, sql_log)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generated = sql_log.with_suffix(".driver.sql").read_text(encoding="utf-8")
+            self.assertIn("EXIT SUCCESS COMMIT", generated)
+            self.assertLess(generated.index("SET DEFINE OFF"), generated.index("ampersand.sql"))
 
 
 if __name__ == "__main__":

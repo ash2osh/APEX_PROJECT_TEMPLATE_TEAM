@@ -1,17 +1,18 @@
 -- Arguments: target parsing schema, target environment, expected session user,
--- and explicit deployment descriptor path relative to the application source.
+-- deployment descriptor path relative to the application source, and numeric app ID.
 SET DEFINE ON
 DEFINE target_schema = '&1'
 DEFINE db_environment = '&2'
 DEFINE expected_user = '&3'
 DEFINE deployment_file = '&4'
+DEFINE expected_app_id = '&5'
 SET ENCODING UTF-8
 SET HEADING OFF
 SET FEEDBACK OFF
 SET ECHO OFF
 SET VERIFY OFF
-WHENEVER SQLERROR EXIT SQL.SQLCODE
-WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE ROLLBACK
+WHENEVER OSERROR EXIT FAILURE ROLLBACK
 
 DECLARE
   v_target_schema VARCHAR2(128) := UPPER('&&target_schema');
@@ -45,4 +46,19 @@ END;
 /
 
 apex import -input . -deployment &&deployment_file
-exit
+
+DECLARE
+  v_application_count PLS_INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO v_application_count
+  FROM apex_applications
+  WHERE application_id = TO_NUMBER('&&expected_app_id');
+  IF v_application_count != 1 THEN
+    RAISE_APPLICATION_ERROR(-20015,
+      'Imported APEX application is not visible: ' || '&&expected_app_id');
+  END IF;
+END;
+/
+
+PROMPT APEX_IMPORT_VERIFIED:&&expected_app_id
+EXIT SUCCESS COMMIT
