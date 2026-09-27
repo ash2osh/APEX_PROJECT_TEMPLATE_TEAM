@@ -250,4 +250,6 @@ rules as developers. Review source before editing; do not run database-writing
 commands unless the user asked; coordinate with the team before importing into
 shared DEV. Never claim an unavailable live check passed. See [AGENTS.md](AGENTS.md)
 for the full repository contract and [migrations/README.md](migrations/README.md)
-for migration naming and immutability rules.
+for migration naming and immutability rules. For browser runtime checks, see
+[Chrome DevTools MCP](docs/CHROME_DEVTOOLS_MCP.md) and use the project browser
+[skill](.agents/skills/chrome-devtools-mcp/SKILL.md).
