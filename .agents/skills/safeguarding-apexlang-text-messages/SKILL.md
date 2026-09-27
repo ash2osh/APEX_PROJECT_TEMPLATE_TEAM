@@ -5,48 +5,39 @@ description: Use when localizing, bulk converting, reviewing, or repairing APEXl
 
 # Safeguarding APEXlang text messages
 
-Classify values by runtime consumer, not visibility. A message key is safe only when that field evaluates text messages.
+Classify fields by runtime consumer and payload, not visibility: keys are safe only where the field evaluates messages.
 
-**REQUIRED BACKGROUND:** Use `apexlang` for canonical syntax and artifacts; this skill narrows its translation workflow for runtime data and executable markup.
+Use `apexlang` for canonical syntax; apply these safeguards to runtime data and executable markup.
 
 ## Classify before converting
 
-Read `application.apx`, the target components, `messages.apx`, and SQL/code or runtime views consuming candidates. Record each field and its consumer before editing.
+Read `application.apx`, target components, `messages.apx`, and consuming SQL/code or views. Record fields, consumers, and substitutions.
 
 | Candidate | Decision |
 |---|---|
-| Static APEX-rendered title, region name, button label, or report heading | Eligible for a shared message using canonical syntax. |
-| Workflow/task names, parameter/variable labels, metadata surfaced by workflow/task views or SQL | Keep literal unless Oracle documentation and runtime evidence prove this exact field evaluates messages. UI visibility alone is not proof. |
-| Process/task message containing `&ITEM.`, `!HTML`, `!RAW`, binds, or `%n` | Keep the entire value literal. Copying tokens into translations does not prove safe substitution. |
-| Row link text containing `#COLUMN#`, such as `complete #TASK_ID#` | Keep all of `linkText`; do not extract and translate only its verb. |
-| Functional source: checkbox HTML, `#select!RAW#`, JS hooks, DOM mount points (`<div id="active_facets"></div>`), SQL/PLSQL/JS/CSS, or raw plugin source such as `&{PLUG_SOURCE_2}!RAW.` | Preserve structure and hooks; do not make a message key for them. Isolate separate user-facing copy before translating it. |
-| Spacing placeholder `&nbsp;` or empty content | Keep literal `&nbsp;` with the semicolon; leave empty content empty. |
+| Static title, region, button label, or heading in a verified message-aware field | Eligible using syntax valid for this app and workflow. |
+| Mixed copy such as `Alert - &APP_TITLE.` | Hold until the consumer and substitution/parameter behavior are proven; same token text in each locale is not proof. Translate a separable text node only if semantics stay intact. |
+| Workflow/task metadata or messages with `&ITEM.`, `!HTML`, `!RAW`, binds, or `%n` | Keep literal unless docs and runtime evidence prove the exact consumer evaluates messages and passes arguments safely. |
+| Message value with `%name` or `%0` | Translate only if the caller supplies values; preserve named placeholders and positional counts in every locale. |
+| Row link with `#COLUMN#` or report value `#ACTIONS#` | Preserve the whole data-driven template; do not translate just its verb. |
+| Functional source: HTML, `#select!RAW#`, JS hooks, DOM mounts, SQL/PLSQL/JS/CSS, `#APP_FILES#`, plugin source | Preserve structure, routes, and handlers. In `View Sample` HTML with `&APP_ID.` / `&APP_SESSION.`, translate visible text only after verifying the field. |
+| `&nbsp;` or empty content | Keep `&nbsp;` with semicolon; preserve empty content. |
 
 ## Safe conversion
 
-1. Convert only static copy in verified message-aware fields. Use the current Oracle APEXlang syntax; do not reuse historical `&{KEY}.` syntax where the workflow specifies `&APP_TEXT$KEY.`.
-2. Diff each changed field against the original; preserve exclusions, verify variants and references, and remove orphan keys.
-3. If the consumer is unclear, leave it unchanged and unresolved; do not claim full localization. Validate per project workflow; import/export only if authorized.
+1. Check compatibility mode and loaded APEXlang workflow. Oracle APEX 26.1 marks `&APP_TEXT$KEY.` legacy and recommends `&{KEY}.` for compatibility 24.2+. If workflow still requires `APP_TEXT$`, resolve the conflict; do not call `&{KEY}.` historical or switch silently.
+2. Convert verified static copy only. Review diffs, preserve exclusions, compare placeholders, check references, and remove orphan keys.
+3. Without live message setup or target-language entries, report candidates only; source review cannot prove translated output. Leave unclear consumers unchanged. Export/import only if authorized.
 
-```apexlang
-label: &APP_TEXT$SAVE.
-successMessage: "Task delegated to &P7_NEW_OWNER!HTML."
-linkText: complete #TASK_ID#
-```
+## Live check: Universal Theme reference app 102
 
-## Rationalizations to reject
+App 102 (`docker-demo`, APEX 26.1.4, compatibility 26.1) has no text messages or translation rows; output is unverified. Hold `Alert - &APP_TITLE.` pending consumer proof. `View Sample` in static HTML is a candidate only after a field check; preserve `&APP_ID.`, `&APP_SESSION.`, markup, and handlers. `#ACTIONS#` / `#ID#` are data.
 
-| Temptation | Response |
-|---|---|
-| “It is visible, so it must be a text message.” | Prove the exact field evaluates messages; SQL/workflow metadata may bypass substitution. |
-| “Translate `complete`; keep `#TASK_ID#` unchanged.” | Preserve the entire internal row-ID link template. |
-| “The token stays exact in every language.” | Substitution or escaping can still happen at the wrong layer or twice. |
-| “The batch validated, the deadline is close, or review wastes prior work.” | Pressure never replaces field-level diff review; revert unsafe conversions before claiming completion. |
+Reject visibility, exact-token, or deadline arguments: verify consumers, preserve full row-ID links, and review field diffs.
 
 ## Stop signs
 
-- A key replaces `&P...`, `#COLUMN#`, `!RAW`, `!HTML`, functional markup, or spacing.
-- A workflow/task metadata field receives a key without runtime evidence.
-- A bulk pass lacks a candidate-to-consumer inventory or source diff review.
+- Mixed content is called static without checking substitutions; keys replace `&P...`, `#COLUMN#`, `!RAW`, `!HTML`, markup, or spacing.
+- Workflow/task metadata is keyed without runtime evidence; bulk conversion lacks an inventory or diff review.
 
 Stop and repair the source before validation or import.
