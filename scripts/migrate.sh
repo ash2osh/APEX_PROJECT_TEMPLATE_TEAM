@@ -26,6 +26,8 @@ python3 "$REPO_ROOT/scripts/check_conflicts.py"
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
 # shellcheck source=load_env.sh
 source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+# shellcheck source=sqlcl_safe.sh
+source "$REPO_ROOT/scripts/sqlcl_safe.sh"
 
 PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" write code
 
@@ -84,8 +86,8 @@ for migration in "${migrations[@]}"; do
     printf 'EXIT SUCCESS COMMIT\n'
   } > "$migration_driver"
   if ! (
-    cd "$REPO_ROOT/scripts"
-    sql -S -noupdates -name "$CODE_SQLCL_CONNECTION" "@$migration_driver" \
+    invoke_sqlcl_safe "$staging_dir" \
+      -S -noupdates -name "$CODE_SQLCL_CONNECTION" "@$migration_driver" \
       < "$sqlcl_stdin"
   ) > "$sqlcl_log" 2>&1; then
     cat "$sqlcl_log" >&2

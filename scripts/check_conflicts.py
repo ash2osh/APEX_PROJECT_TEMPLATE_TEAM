@@ -15,12 +15,12 @@ IDENTIFIER = r'(?:"(?:""|[^"])+"|[A-Za-z][A-Za-z0-9_$#]*)'
 QUALIFIED_NAME = rf"{IDENTIFIER}(?:\s*\.\s*{IDENTIFIER})?"
 IDENTIFIER_RE = re.compile(IDENTIFIER)
 TABLE_RE = re.compile(
-    rf"\bCREATE\s+(?:(?:GLOBAL|PRIVATE)\s+TEMPORARY\s+)?TABLE\s+"
+    rf"\bCREATE\s+(?:(?:GLOBAL|PRIVATE)\s+TEMPORARY\s+|IMMUTABLE\s+|BLOCKCHAIN\s+)?TABLE\s+"
     rf"(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>{QUALIFIED_NAME})",
     re.IGNORECASE,
 )
 VIEW_RE = re.compile(
-    rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+)?VIEW\s+(?P<name>{QUALIFIED_NAME})",
+    rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+)?(?:EDITIONING\s+|EDITIONABLE\s+|NONEDITIONABLE\s+)?VIEW\s+(?P<name>{QUALIFIED_NAME})",
     re.IGNORECASE,
 )
 SEQUENCE_RE = re.compile(

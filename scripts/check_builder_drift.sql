@@ -35,4 +35,5 @@ SELECT CASE
 FROM apex_applications
 WHERE application_id = &&application_id;
 
+PROMPT APEX_DRIFT_QUERY_VERIFIED
 EXIT SUCCESS ROLLBACK

@@ -21,7 +21,6 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Dict, Optional
 
 ALLOWED_TOOLS = frozenset({
     "click", "close_page", "drag", "emulate", "evaluate_script", "fill", "fill_form",
@@ -109,29 +108,29 @@ def _ensure_private_socket_directory(parent: Path) -> None:
 class ChromeMcpDaemon:
     def __init__(
         self,
-        executable: Optional[str] = None,
-        socket_path: Optional[Path] = None,
+        executable: str | None = None,
+        socket_path: Path | None = None,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
-        initialize_timeout: Optional[float] = None,
+        initialize_timeout: float | None = None,
     ):
         self.executable = executable or os.environ.get("CHROME_MCP_EXECUTABLE", "chrome-devtools-mcp")
         self.socket_path = socket_path or default_socket_path()
         self.request_timeout = request_timeout
         self.initialize_timeout = request_timeout if initialize_timeout is None else initialize_timeout
-        self.proc: Optional[subprocess.Popen] = None
+        self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()            # serialises writes to the MCP stdin and id allocation
         self.request_id = 0
-        self.pending: Dict[int, "queue.Queue[dict]"] = {}
+        self.pending: dict[int, queue.Queue[dict]] = {}
         self.pending_lock = threading.Lock()
-        self.server_sock: Optional[socket.socket] = None
-        self.socket_identity: Optional[tuple[int, int]] = None
-        self.lock_fd: Optional[int] = None
-        self.lock_path: Optional[Path] = None
+        self.server_sock: socket.socket | None = None
+        self.socket_identity: tuple[int, int] | None = None
+        self.lock_fd: int | None = None
+        self.lock_path: Path | None = None
         self.stopping = threading.Event()
         self.initialize_timed_out = threading.Event()
         self.initialize_complete = threading.Event()
-        self.reader_thread: Optional[threading.Thread] = None
-        self.stderr_thread: Optional[threading.Thread] = None
+        self.reader_thread: threading.Thread | None = None
+        self.stderr_thread: threading.Thread | None = None
 
     def _acquire_startup_lock(self) -> None:
         _ensure_private_socket_directory(self.socket_path.expanduser().absolute().parent)
@@ -183,7 +182,7 @@ class ChromeMcpDaemon:
         for line in self.proc.stderr:
             self._log(f"chrome-devtools-mcp: {line.rstrip()}")
 
-    def _write(self, payload: dict, deadline: Optional[float] = None) -> None:
+    def _write(self, payload: dict, deadline: float | None = None) -> None:
         assert self.proc and self.proc.stdin
         fd = self.proc.stdin.fileno()
         if os.get_blocking(fd):
@@ -267,14 +266,14 @@ class ChromeMcpDaemon:
         if not isinstance(arguments, dict):
             raise ValueError("arguments must be an object")
         deadline = time.monotonic() + self.request_timeout
-        waiter: "queue.Queue[dict]" = queue.Queue(maxsize=1)
+        waiter: queue.Queue[dict] = queue.Queue(maxsize=1)
         remaining = max(0.0, deadline - time.monotonic())
         if not self.lock.acquire(timeout=remaining):
             self.shutdown()
             raise RuntimeError(
                 f"chrome-devtools-mcp did not accept '{tool_name}' within {self.request_timeout:g}s; request timed out."
             )
-        request_id: Optional[int] = None
+        request_id: int | None = None
         try:
             if not self.proc or self.proc.poll() is not None:
                 raise RuntimeError("chrome-devtools-mcp process is not running")
@@ -308,7 +307,7 @@ class ChromeMcpDaemon:
             raise RuntimeError(
                 f"chrome-devtools-mcp did not answer '{tool_name}' within {self.request_timeout:g}s total; request timed out. "
                 "Check Chrome's remote-debugging consent prompt and that no other MCP instance holds the connection."
-            )
+            ) from None
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:

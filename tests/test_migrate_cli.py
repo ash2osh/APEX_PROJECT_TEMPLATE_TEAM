@@ -20,6 +20,7 @@ class MigrateCliTests(unittest.TestCase):
             "check_conflicts.py",
             "load_env.sh",
             "check_db_target.sh",
+            "sqlcl_safe.sh",
             "verify_db_access.sql",
         ):
             source = ROOT / "scripts" / name

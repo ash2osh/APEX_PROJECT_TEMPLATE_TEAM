@@ -22,6 +22,9 @@ function Invoke-Sqlcl {
   if (-not (Test-Path -LiteralPath $StdInFile -PathType Leaf)) {
     New-Item -ItemType File -Path $StdInFile | Out-Null
   }
+  if (Test-Path -LiteralPath (Join-Path $WorkingDirectory "login.sql") -PathType Leaf) {
+    throw "refusing to start SQLcl in a directory containing login.sql: $WorkingDirectory"
+  }
 
   # Start-Process joins -ArgumentList with spaces and does not quote, so any
   # argument holding a space (a repository path, most often) must be quoted
@@ -35,11 +38,19 @@ function Invoke-Sqlcl {
   # Its redirected-input path is also wildcard-resolved, so hand it a system
   # temp copy even when the caller's checkout path contains brackets.
   $stdinRedirectFile = [System.IO.Path]::GetTempFileName()
+  $safeSqlPath = Join-Path $WorkingDirectory ".sqlcl-path"
+  [System.IO.Directory]::CreateDirectory($safeSqlPath) | Out-Null
+  $hadSqlPath = Test-Path Env:SQLPATH
+  $oldSqlPath = $env:SQLPATH
+  $hadOraclePath = Test-Path Env:ORACLE_PATH
+  $oldOraclePath = $env:ORACLE_PATH
   $locationPushed = $false
   try {
     Copy-Item -LiteralPath $StdInFile -Destination $stdinRedirectFile -Force
     Push-Location -LiteralPath $WorkingDirectory
     $locationPushed = $true
+    $env:SQLPATH = $safeSqlPath
+    $env:ORACLE_PATH = $safeSqlPath
     if ([string]::IsNullOrWhiteSpace($TranscriptFile)) {
       $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
         -NoNewWindow -Wait -PassThru -RedirectStandardInput $stdinRedirectFile
@@ -65,6 +76,8 @@ function Invoke-Sqlcl {
       Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     }
   } finally {
+    if ($hadSqlPath) { $env:SQLPATH = $oldSqlPath } else { Remove-Item Env:SQLPATH -ErrorAction SilentlyContinue }
+    if ($hadOraclePath) { $env:ORACLE_PATH = $oldOraclePath } else { Remove-Item Env:ORACLE_PATH -ErrorAction SilentlyContinue }
     if ($locationPushed) { Pop-Location }
     Remove-Item -LiteralPath $stdinRedirectFile -Force -ErrorAction SilentlyContinue
   }

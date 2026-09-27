@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=load_env.sh
 source "$REPO_ROOT/scripts/load_env.sh" "${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+# shellcheck source=sqlcl_safe.sh
+source "$REPO_ROOT/scripts/sqlcl_safe.sh"
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read apex
 
 if [ "$#" -gt 1 ]; then
@@ -19,9 +21,11 @@ else
 fi
 
 # Refuse any dirty destination before making the first database connection.
+# Git warns when the schema parent does not exist on a first export; suppress
+# that diagnostic while preserving the command's failure status.
 for app_id in "${APP_IDS[@]}"; do
   destination="apps/$APEX_PARSING_SCHEMA/$app_id"
-  dirty_status="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- "$destination")" || {
+  dirty_status="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- "$destination" 2>/dev/null)" || {
     echo "unable to inspect Git status for mirror: $destination" >&2
     exit 1
   }
@@ -54,8 +58,8 @@ for app_id in "${APP_IDS[@]}"; do
   mkdir -p "$RUN_STAGE_PARENT"
 
   (
-    cd "$RUN_DIR"
-    sql -S -noupdates -name "$APEX_SQLCL_CONNECTION" \
+    invoke_sqlcl_safe "$RUN_DIR" \
+      -S -noupdates -name "$APEX_SQLCL_CONNECTION" \
       "@$REPO_ROOT/scripts/export_apps.sql" \
       "$APEX_PARSING_SCHEMA" "$app_id" "$DB_ENVIRONMENT" \
       "$APEX_EXPECTED_USER" < "$SQLCL_STDIN"

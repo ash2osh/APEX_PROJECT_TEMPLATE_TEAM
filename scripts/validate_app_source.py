@@ -55,6 +55,8 @@ def validate_app_source(repo_root: Path, source_dir: Path) -> Path:
         current_dir = Path(current_name)
         for name in directory_names + file_names:
             entry = current_dir / name
+            if name.casefold() == "login.sql":
+                raise ValueError(f"SQLcl startup file is not allowed in an APEXlang source tree: {entry}")
             if _is_reparse_point(entry):
                 raise ValueError(f"symbolic links or reparse points are not supported in an APEXlang source tree: {entry}")
 

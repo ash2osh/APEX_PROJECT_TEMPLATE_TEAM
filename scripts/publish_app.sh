@@ -57,6 +57,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
 # shellcheck source=load_env.sh
 source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+# shellcheck source=sqlcl_safe.sh
+source "$REPO_ROOT/scripts/sqlcl_safe.sh"
 
 preferred_app_dir="$REPO_ROOT/apps/$APEX_PARSING_SCHEMA/$app_id"
 if [ -d "$preferred_app_dir" ]; then
@@ -205,12 +207,14 @@ if [ "$app_environment" = dev ]; then
   printf 'Stamped application version: %s\n' "$published_version"
 fi
 
-relative_deployment="deployments/$app_environment.json"
+application_source="$app_dir"
+deployment_file="$app_dir/deployments/$app_environment.json"
 if ! (
-  cd "$app_dir"
-  sql -S -noupdates -name "$sqlcl_connection" \
+  invoke_sqlcl_safe "$staging_dir" \
+    -S -noupdates -name "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/publish_app.sql" \
-    "$parsing_schema" "$target_environment" "$expected_user" "$relative_deployment" "$app_id" \
+    "$parsing_schema" "$target_environment" "$expected_user" \
+    "$application_source" "$deployment_file" "$app_id" \
     < "$sqlcl_stdin"
 ) > "$sqlcl_output" 2>&1; then
   cat "$sqlcl_output" >&2
@@ -239,8 +243,8 @@ verify_parent="$verify_run_dir/apps/$parsing_schema"
 mkdir -p "$verify_parent"
 verify_sqlcl_output="$staging_dir/post-import/sqlcl-output.log"
 if ! (
-  cd "$verify_run_dir"
-  sql -S -noupdates -name "$sqlcl_connection" \
+  invoke_sqlcl_safe "$verify_run_dir" \
+    -S -noupdates -name "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/export_apps.sql" \
     "$parsing_schema" "$app_id" "$target_environment" "$expected_user" \
     < "$sqlcl_stdin"

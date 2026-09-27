@@ -17,13 +17,16 @@
     "README.md",
     "app_context/README.md",
     "apps/templates/**",
+    "docs/CHROME_DEVTOOLS_MCP.md",
     "docs/publish-rules.md",
     "migrations/README.md",
     "pyproject.toml",
     "scripts/**",
     "self_improve.md",
     "template-manifest.json",
-    "tests/**"
+    "tests/**",
+    "tools/chrome_devtools_client.py",
+    "tools/chrome_mcp_daemon.py"
   ],
   "projectOwned": [
     ".agents/rules/project.md",

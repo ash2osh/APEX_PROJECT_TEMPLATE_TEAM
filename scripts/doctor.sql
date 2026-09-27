@@ -9,4 +9,5 @@ DEFINE db_environment = '&2'
 DEFINE expected_user = '&3'
 @@verify_db_access.sql
 PROMPT SQLcl connection and database identity checks passed.
+PROMPT APEX_DOCTOR_VERIFIED:&&expected_user
 EXIT SUCCESS ROLLBACK

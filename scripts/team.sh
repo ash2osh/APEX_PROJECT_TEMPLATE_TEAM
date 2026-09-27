@@ -40,13 +40,27 @@ case "$command_name" in
     source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
     PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" read apex
     mkdir -p "$REPO_ROOT/scratch"
-    sqlcl_stdin="$(mktemp "$REPO_ROOT/scratch/.doctor-stdin.XXXXXX")"
-    cleanup() { rm -f -- "$sqlcl_stdin"; }
+    # Never let SQLcl start in the caller's directory: SQLcl executes a
+    # login.sql found there before doctor.sql.
+    sqlcl_workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
+    sqlcl_stdin="$sqlcl_workdir/.sqlcl-stdin"
+    : > "$sqlcl_stdin"
+    sqlcl_output="$sqlcl_workdir/sqlcl-output.log"
+    # shellcheck source=sqlcl_safe.sh
+    source "$REPO_ROOT/scripts/sqlcl_safe.sh"
+    cleanup() { rm -rf -- "$sqlcl_workdir"; }
     trap cleanup EXIT
-    sql -S -noupdates -name "$APEX_SQLCL_CONNECTION" \
+    if ! invoke_sqlcl_safe "$sqlcl_workdir" \
+      -S -noupdates -name "$APEX_SQLCL_CONNECTION" \
       "@$REPO_ROOT/scripts/doctor.sql" \
       "$APEX_PARSING_SCHEMA" "$DB_ENVIRONMENT" "$APEX_EXPECTED_USER" \
-      < "$sqlcl_stdin"
+      < "$sqlcl_stdin" > "$sqlcl_output" 2>&1; then
+      cat "$sqlcl_output" >&2
+      fail "SQLcl doctor check failed"
+    fi
+    cat "$sqlcl_output"
+    grep -Fxq "APEX_DOCTOR_VERIFIED:$APEX_EXPECTED_USER" "$sqlcl_output" || \
+      fail "SQLcl did not verify the doctor script; the result is unknown"
     printf 'Doctor checks passed for the configured DEV connection.\n'
     ;;
   export)

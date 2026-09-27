@@ -64,6 +64,13 @@ class TemplateManifestTests(unittest.TestCase):
     def test_tracked_files_are_not_ambiguously_owned_and_protected_paths_are_unowned(self) -> None:
         self.assert_tracked_ownership_valid(self.tracked)
 
+    def test_every_non_project_template_file_has_exactly_one_owner(self) -> None:
+        for path in self.tracked:
+            if protected_project_path(path):
+                continue
+            with self.subTest(path=path):
+                self.assertEqual(len(self.classify(path)), 1, path)
+
     def test_downstream_data_and_lock_can_be_committed_without_template_ownership(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             downstream = Path(temporary)

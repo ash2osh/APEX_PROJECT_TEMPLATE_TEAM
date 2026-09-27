@@ -30,9 +30,11 @@ if (-not [string]::IsNullOrWhiteSpace($AppId)) {
 }
 
 # Refuse any dirty destination before making the first database connection.
+# Git warns when the schema parent does not exist on a first export; suppress
+# that diagnostic while preserving the command's failure status.
 foreach ($appId in $appIds) {
   $destination = "apps/$($env:APEX_PARSING_SCHEMA)/$appId"
-  $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination)
+  $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination 2>$null)
   if ($LASTEXITCODE -ne 0) { throw "unable to inspect Git status for mirror: $destination" }
   if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
     throw "refusing to export over dirty mirror: $destination; commit, stash, or remove local changes first"

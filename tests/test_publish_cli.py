@@ -40,6 +40,9 @@ class PublishAppCliTests(unittest.TestCase):
             "stamp_publish_version.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        helper = ROOT / "scripts" / "sqlcl_safe.sh"
+        if helper.exists():
+            shutil.copy2(helper, scripts / helper.name)
         shutil.copy2(ROOT / ".env.example", root / ".env")
 
         app = root / "apps" / "DEMO" / "100"
@@ -73,6 +76,7 @@ class PublishAppCliTests(unittest.TestCase):
             "    *@*export_apps.sql) mode=export ;;\n"
             "  esac\n"
             "done\n"
+            "if [[ -f login.sql ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
             "if [[ -n \"${FAKE_SQL_CALLS:-}\" ]]; then printf '%s\\n' \"$mode\" >> \"$FAKE_SQL_CALLS\"; fi\n"
             "export_schema=DEMO\n"
             "if [[ $mode == export ]]; then found_script=0; for arg in \"$@\"; do if [[ $found_script == 1 ]]; then export_schema=$arg; break; fi; case \"$arg\" in *@*export_apps.sql) found_script=1 ;; esac; done; fi\n"
@@ -81,6 +85,7 @@ class PublishAppCliTests(unittest.TestCase):
             "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then\n"
             "      printf '%s|%s|%s\\n' \"$(cat \"$FAKE_STATE_DIR/live.txt\")\" \"$(cat \"$FAKE_STATE_DIR/database.txt\")\" \"$(cat \"$FAKE_STATE_DIR/version.txt\")\"\n"
             "    fi\n"
+            "    printf 'APEX_DRIFT_QUERY_VERIFIED\\n'\n"
             "    ;;\n"
             "  import)\n"
             "    printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
@@ -91,7 +96,8 @@ class PublishAppCliTests(unittest.TestCase):
             "      printf '%s\\n' \"$count\" > \"$FAKE_STATE_DIR/import-count.txt\"\n"
             "      if [[ $count -eq 1 ]]; then live=2026-09-26T09:30:00; db=2026-09-26T09:30:02; else live=2026-09-26T09:45:00; db=2026-09-26T09:45:02; fi\n"
             "      if [[ \"${FAKE_IMPORT_CLEARS_TIMESTAMP:-0}\" == 1 ]]; then live=NO_TIMESTAMP; fi\n"
-            "      version=$(sed -n 's/^    version: //p' \"$PWD/application.apx\"); version=${version#\\\"}; version=${version%\\\"}\n"
+            "      source_dir=\"$FAKE_SOURCE_DIR\"\n"
+            "      version=$(sed -n 's/^    version: //p' \"$source_dir/application.apx\"); version=${version#\\\"}; version=${version%\\\"}\n"
             "      printf '%s\\n' \"$version\" > \"$FAKE_STATE_DIR/version.txt\"\n"
             "      printf '%s\\n' \"$live\" > \"$FAKE_STATE_DIR/live.txt\"\n"
             "      printf '%s\\n' \"$db\" > \"$FAKE_STATE_DIR/database.txt\"\n"
@@ -108,6 +114,7 @@ class PublishAppCliTests(unittest.TestCase):
             "    mkdir -p \"$exported/.apex\"\n"
             "    cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"\n"
             "    cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"\n"
+            "    if [[ -f \"$FAKE_SOURCE_DIR/login.sql\" ]]; then cp \"$FAKE_SOURCE_DIR/login.sql\" \"$exported/login.sql\"; fi\n"
             "    if [[ \"${FAKE_EXPORT_MISMATCH:-0}\" == 1 ]]; then printf '%s\\n' '// race' >> \"$exported/application.apx\"; fi\n"
             "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then live=$(cat \"$FAKE_STATE_DIR/live.txt\"); db=$(cat \"$FAKE_STATE_DIR/database.txt\"); version=$(cat \"$FAKE_STATE_DIR/version.txt\"); else live=${FAKE_REVISION:-2026-09-26T09:30:00}; db=${FAKE_DATABASE_TIME:-2026-09-26T09:30:02}; version=${FAKE_VERSION:-Release 1.0}; fi\n"
             "    printf '%s|%s|%s\\n' \"$live\" \"$db\" \"$version\" > \"$PWD/.apex-export-before.txt\"\n"
@@ -122,6 +129,7 @@ class PublishAppCliTests(unittest.TestCase):
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["FAKE_SQL_LOG"] = str(sql_log)
         environment["FAKE_SQL_CWD"] = str(sql_cwd)
+        environment["FAKE_LOGIN_MARKER"] = str(root / "login-marker")
         environment["FAKE_SOURCE_DIR"] = str(app)
         return scripts / "publish_app.sh", sql_log, sql_cwd, environment
 
@@ -199,7 +207,7 @@ class PublishAppCliTests(unittest.TestCase):
         import_script = ROOT / "scripts" / "publish_app.sql"
         self.assertTrue(import_script.is_file(), f"missing import script: {import_script}")
         self.assertIn(
-            "apex import -input . -deployment &&deployment_file",
+            'apex import -input "&&application_source" -deployment "&&deployment_file"',
             import_script.read_text(encoding="utf-8"),
         )
         self.assertIn("APEX_IMPORT_VERIFIED:&&expected_app_id", import_script.read_text(encoding="utf-8"))
@@ -222,8 +230,28 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("-name", args)
             self.assertIn("docker-demo", args)
             self.assertIn(f"@{runner.parent / 'publish_app.sql'}", args)
-            self.assertIn("deployments/dev.json", args)
-            self.assertEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(root / "apps/DEMO/100"))
+            self.assertIn(str(root / "apps/DEMO/100"), args)
+            self.assertIn(str(root / "apps/DEMO/100" / "deployments/dev.json"), args)
+            self.assertNotEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(root / "apps/DEMO/100"))
+
+    def test_publish_does_not_start_sqlcl_in_application_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment = self.make_publish_fixture(root)
+            (root / "apps/DEMO/100/login.sql").write_text("HOST touch should-not-run\n", encoding="utf-8")
+
+            result = subprocess.run(
+                ["bash", str(runner), "100", "--force"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("login.sql", result.stdout + result.stderr)
+            self.assertFalse((root / "login-marker").exists())
 
     def test_symlinked_app_root_is_rejected_before_sqlcl_import(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

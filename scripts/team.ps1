@@ -43,17 +43,31 @@ switch ($Command) {
     . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
     & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target apex
     . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
-    $stdinFile = [System.IO.Path]::GetTempFileName()
+    $scratchPath = Join-Path ((Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path) "scratch"
+    [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
+    $sqlclWorkDir = Join-Path $scratchPath ("sqlcl-doctor-" + [Guid]::NewGuid().ToString("N"))
+    [System.IO.Directory]::CreateDirectory($sqlclWorkDir) | Out-Null
+    $stdinFile = Join-Path $sqlclWorkDir ".sqlcl-stdin"
+    $transcriptFile = Join-Path $sqlclWorkDir "sqlcl-output.log"
+    New-Item -ItemType File -Path $stdinFile | Out-Null
     try {
-      $sqlclExit = Invoke-Sqlcl -WorkingDirectory $PSScriptRoot -StdInFile $stdinFile -Arguments @(
+      $sqlclExit = Invoke-Sqlcl -WorkingDirectory $sqlclWorkDir -StdInFile $stdinFile `
+        -TranscriptFile $transcriptFile -Arguments @(
         "-S", "-noupdates", "-name", $env:APEX_SQLCL_CONNECTION,
         "@$(Join-Path $PSScriptRoot 'doctor.sql')",
         $env:APEX_PARSING_SCHEMA, $env:DB_ENVIRONMENT, $env:APEX_EXPECTED_USER
       )
       if ($sqlclExit -ne 0) { throw "SQLcl connection check failed with exit code $sqlclExit" }
+      $output = [System.IO.File]::ReadAllText($transcriptFile)
+      Write-Output $output
+      if ($output -notmatch "(?m)^\s*APEX_DOCTOR_VERIFIED:$([regex]::Escape($env:APEX_EXPECTED_USER))\s*$") {
+        throw "SQLcl did not verify the doctor script; the result is unknown"
+      }
       Write-Output "Doctor checks passed for the configured DEV connection."
     } finally {
-      Remove-Item -LiteralPath $stdinFile -Force -ErrorAction SilentlyContinue
+      if (Test-Path -LiteralPath $sqlclWorkDir) {
+        Remove-Item -LiteralPath $sqlclWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+      }
     }
   }
   "export" {

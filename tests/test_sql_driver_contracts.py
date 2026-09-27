@@ -28,6 +28,15 @@ class SqlDriverContractTests(unittest.TestCase):
                 contents = (ROOT / "scripts" / name).read_text(encoding="utf-8")
                 self.assertRegex(contents, r"(?im)^EXIT SUCCESS ROLLBACK\s*$")
 
+    def test_identity_and_drift_drivers_emit_verification_sentinels(self) -> None:
+        self.assertIn("APEX_DOCTOR_VERIFIED:&&expected_user", (ROOT / "scripts/doctor.sql").read_text(encoding="utf-8"))
+        self.assertIn("APEX_DRIFT_QUERY_VERIFIED", (ROOT / "scripts/check_builder_drift.sql").read_text(encoding="utf-8"))
+
+    def test_publish_driver_imports_an_explicit_source_and_descriptor(self) -> None:
+        contents = (ROOT / "scripts/publish_app.sql").read_text(encoding="utf-8")
+        self.assertIn('apex import -input "&&application_source" -deployment "&&deployment_file"', contents)
+        self.assertNotIn("apex import -input .", contents)
+
     def test_revision_queries_distinguish_imported_app_from_absent_app(self) -> None:
         # APEX leaves last_updated_on NULL on import, so NVL(MAX(...)) alone
         # would report an installed app as NOT_FOUND.

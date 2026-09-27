@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -79,6 +80,12 @@ def _query_live_timestamp(
     with tempfile.TemporaryDirectory(prefix="apex-builder-drift-") as temp_dir:
         stdin_path = Path(temp_dir) / "sqlcl-stdin"
         stdin_path.write_text("", encoding="utf-8")
+        environment = os.environ.copy()
+        # SQLcl must not inherit a login.sql from application source or from a
+        # user-configured search path. The SQL script is absolute and resolves
+        # its own @@ include relative to that script.
+        environment["SQLPATH"] = temp_dir
+        environment["ORACLE_PATH"] = temp_dir
         try:
             with stdin_path.open("r", encoding="utf-8") as stdin:
                 result = subprocess.run(
@@ -92,7 +99,8 @@ def _query_live_timestamp(
                         str(app_id),
                         expected_arg,
                     ],
-                    cwd=app_dir,
+                    cwd=temp_dir,
+                    env=environment,
                     stdin=stdin,
                     capture_output=True,
                     text=True,
@@ -106,6 +114,8 @@ def _query_live_timestamp(
     if result.returncode != 0 or re.search(r"\b(?:ORA|SP2|SQL)\s*-\d+", output, re.I):
         detail = output.strip() or f"SQLcl exited with status {result.returncode}"
         return None, None, detail
+    if not re.search(r"(?m)^\s*APEX_DRIFT_QUERY_VERIFIED\s*$", output):
+        return None, None, "SQLcl did not verify the drift query; the result is unknown"
     lines = DATABASE_STATE_LINE.findall(output)
     parsed = parse_state(lines[-1]) if lines else None
     if parsed is None:

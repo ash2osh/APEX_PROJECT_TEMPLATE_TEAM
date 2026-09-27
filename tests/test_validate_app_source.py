@@ -76,6 +76,18 @@ class ValidateAppSourceTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("outside the repository", result.stderr)
 
+    def test_sqlcl_startup_file_is_rejected_from_application_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / "apps" / "DEMO" / "100"
+            app.mkdir(parents=True)
+            (app / "login.sql").write_text("HOST touch should-not-run\n", encoding="utf-8")
+
+            result = self.run_validator(root, app)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("login.sql", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

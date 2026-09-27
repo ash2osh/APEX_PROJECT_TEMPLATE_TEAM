@@ -1,11 +1,12 @@
 -- Arguments: target parsing schema, target environment, expected session user,
--- deployment descriptor path relative to the application source, and numeric app ID.
+-- absolute APEXlang source directory, absolute deployment descriptor, and app ID.
 SET DEFINE ON
 DEFINE target_schema = '&1'
 DEFINE db_environment = '&2'
 DEFINE expected_user = '&3'
-DEFINE deployment_file = '&4'
-DEFINE expected_app_id = '&5'
+DEFINE application_source = '&4'
+DEFINE deployment_file = '&5'
+DEFINE expected_app_id = '&6'
 SET ENCODING UTF-8
 SET HEADING OFF
 SET FEEDBACK OFF
@@ -45,7 +46,7 @@ BEGIN
 END;
 /
 
-apex import -input . -deployment &&deployment_file
+apex import -input "&&application_source" -deployment "&&deployment_file"
 
 DECLARE
   v_application_count PLS_INTEGER;

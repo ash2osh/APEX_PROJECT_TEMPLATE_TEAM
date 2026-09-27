@@ -224,11 +224,13 @@ try {
     Write-Output "Stamped application version: $publishedVersion"
   }
 
-  $relativeDeployment = "deployments/$appEnvironment.json"
-  $sqlclExit = Invoke-Sqlcl -WorkingDirectory $appDir -StdInFile $stdinFile -Arguments @(
+  $applicationInput = $appDir
+  $deploymentFile = Join-Path $appDir "deployments/$appEnvironment.json"
+  $sqlclExit = Invoke-Sqlcl -WorkingDirectory $publishWorkDir -StdInFile $stdinFile -Arguments @(
     "-S", "-noupdates", "-name", $sqlclConnection,
     "@$(Join-Path $PSScriptRoot 'publish_app.sql')",
-    $parsingSchema, $targetEnvironment, $expectedUser, $relativeDeployment, $AppId
+    $parsingSchema, $targetEnvironment, $expectedUser,
+    $applicationInput, $deploymentFile, $AppId
   ) -TranscriptFile $transcriptFile
   $sqlclOutput = [System.IO.File]::ReadAllText($transcriptFile)
   if (-not [string]::IsNullOrEmpty($sqlclOutput)) { Write-Output $sqlclOutput }
@@ -305,7 +307,9 @@ try {
   }
 } finally {
   if ($restoreUnstamped) {
-    Copy-Item -LiteralPath $unstampedSource -Destination $applicationSource -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $unstampedSource -PathType Leaf) {
+      [System.IO.File]::Copy($unstampedSource, $applicationSource, $true)
+    }
   }
   Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $publishWorkDir) {

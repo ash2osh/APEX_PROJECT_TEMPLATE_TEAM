@@ -29,6 +29,7 @@ class ExportCliTests(unittest.TestCase):
                 "export_apps.sh",
                 "export_apps.sql",
                 "load_env.sh",
+                "sqlcl_safe.sh",
                 "check_db_target.sh",
                 "normalize_apx.sh",
                 "replace_mirror.sh",
@@ -119,6 +120,26 @@ class ExportCliTests(unittest.TestCase):
             result = self.run_export(script, powershell=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assert_descriptors_preserved(script, expected)
+
+    def test_bash_export_creates_missing_schema_parent_before_git_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, _ = self.make_checkout(Path(temporary), powershell=False)
+            env_file = script.parents[1] / ".env"
+            env_file.write_text(
+                env_file.read_text(encoding="utf-8").replace("APEX_PARSING_SCHEMA=DEMO", "APEX_PARSING_SCHEMA=NEW"),
+                encoding="utf-8",
+            )
+            fake_sql = script.parents[1] / "bin" / "sql"
+            fake_sql.write_text(
+                fake_sql.read_text(encoding="utf-8").replace("apps/DEMO/", "apps/NEW/"),
+                encoding="utf-8",
+            )
+            fake_sql.chmod(0o755)
+
+            result = self.run_export(script, powershell=False)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("could not open directory", result.stderr)
 
     @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
     def test_powershell_export_preserves_committed_environment_descriptors(self) -> None:

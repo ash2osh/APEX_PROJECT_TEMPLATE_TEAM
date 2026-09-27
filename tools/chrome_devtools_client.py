@@ -7,7 +7,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 try:
     from tools.chrome_mcp_daemon import ALLOWED_TOOLS, DEFAULT_REQUEST_TIMEOUT, default_socket_path
@@ -25,7 +25,7 @@ def _can_connect(socket_path: Path) -> bool:
         return False
 
 
-def ensure_daemon_running(socket_path: Optional[Path] = None, auto_spawn: bool = False) -> Path:
+def ensure_daemon_running(socket_path: Path | None = None, auto_spawn: bool = False) -> Path:
     path = socket_path or default_socket_path()
     if _can_connect(path):
         return path
@@ -46,7 +46,7 @@ def ensure_daemon_running(socket_path: Optional[Path] = None, auto_spawn: bool =
 class ChromeDevToolsClient:
     def __init__(
         self,
-        socket_path: Optional[Path] = None,
+        socket_path: Path | None = None,
         auto_spawn: bool = False,
         response_timeout: float = DEFAULT_REQUEST_TIMEOUT + 10.0,
     ):
@@ -54,7 +54,7 @@ class ChromeDevToolsClient:
         # slightly longer than the daemon's own request timeout so its error reaches us first
         self.response_timeout = response_timeout
 
-    def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         if name not in ALLOWED_TOOLS:
             raise ValueError(f"Chrome MCP tool is not allowed: {name!r}")
         ensure_daemon_running(self.socket_path)
@@ -69,7 +69,7 @@ class ChromeDevToolsClient:
                     if not chunk:
                         break
                     data += chunk
-            except socket.timeout as exc:
+            except TimeoutError as exc:
                 raise RuntimeError(
                     f"Chrome MCP daemon did not answer '{name}' within {self.response_timeout:g}s; request timed out"
                 ) from exc

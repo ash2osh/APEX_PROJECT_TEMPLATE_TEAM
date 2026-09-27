@@ -15,7 +15,7 @@ def observed_state(
 ) -> str:
     # SQLcl pads the query line; the guard must ignore that padding.
     version_text = "" if last_updated_on == "NOT_FOUND" else version
-    return f"{last_updated_on}|{database_time}|{version_text}   "
+    return f"{last_updated_on}|{database_time}|{version_text}   \nAPEX_DRIFT_QUERY_VERIFIED\n"
 
 
 class BuilderDriftTests(unittest.TestCase):

@@ -29,6 +29,7 @@ class BackupDbCliTests(unittest.TestCase):
                 "backup_db.sql",
                 "load_env.sh",
                 "check_db_target.sh",
+                "sqlcl_safe.sh",
                 "replace_mirror.sh",
             )
         for name in names:

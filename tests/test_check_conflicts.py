@@ -81,6 +81,24 @@ class MigrationConflictTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("SEQUENCE ORDER_SEQ", result.stdout)
 
+    def test_oracle_table_modifiers_still_conflict(self) -> None:
+        self.add_migration("alice", "one.sql", "CREATE IMMUTABLE TABLE AUDIT_LOG (ID NUMBER) NO DROP UNTIL 1 DAYS IDLE;\n")
+        self.add_migration("bob", "two.sql", "CREATE BLOCKCHAIN TABLE AUDIT_LOG (ID NUMBER) NO DROP UNTIL 1 DAYS IDLE;\n")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("TABLE AUDIT_LOG", result.stdout)
+
+    def test_editioning_view_modifier_still_conflicts(self) -> None:
+        self.add_migration("alice", "one.sql", "CREATE EDITIONING VIEW ACTIVE_ORDERS AS SELECT 1 X FROM DUAL;\n")
+        self.add_migration("bob", "two.sql", "CREATE OR REPLACE EDITIONING VIEW ACTIVE_ORDERS AS SELECT 2 X FROM DUAL;\n")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("VIEW ACTIVE_ORDERS", result.stdout)
+
     def test_duplicate_added_columns_conflict(self) -> None:
         self.add_migration("alice", "one.sql", "ALTER TABLE ORDERS ADD STATUS VARCHAR2(30);\n")
         self.add_migration("bob", "two.sql", "ALTER TABLE orders ADD (status VARCHAR2(50));\n")

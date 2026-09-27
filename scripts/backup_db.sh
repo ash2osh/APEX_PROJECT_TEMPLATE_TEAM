@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=load_env.sh
 source "$REPO_ROOT/scripts/load_env.sh" "${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+# shellcheck source=sqlcl_safe.sh
+source "$REPO_ROOT/scripts/sqlcl_safe.sh"
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read tables
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read code
 
@@ -137,8 +139,8 @@ run_backup_scope() {
     mkdir -p "$STAGING_DIR/database/$spool_schema/$scope_dir"
   done < <(scope_directories "$scope")
   (
-    cd "$STAGING_DIR"
-    sql -S -noupdates -name "$connection" \
+    invoke_sqlcl_safe "$STAGING_DIR" \
+      -S -noupdates -name "$connection" \
       "@$REPO_ROOT/scripts/backup_db.sql" \
       "$schema" "$scope" "$DB_ENVIRONMENT" "$expected_user" "$prefixes" "$spool_schema" \
       < "$SQLCL_STDIN"

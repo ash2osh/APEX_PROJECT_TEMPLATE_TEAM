@@ -105,7 +105,7 @@ class TeamCliTests(unittest.TestCase):
             root = Path(temporary)
             scripts = root / "scripts"
             scripts.mkdir()
-            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql"):
+            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh"):
                 shutil.copy2(ROOT / "scripts" / name, scripts / name)
             (root / "scripts" / "verify_db_access.sql").write_text(
                 "PROMPT identity checked\n", encoding="utf-8"
@@ -116,14 +116,25 @@ class TeamCliTests(unittest.TestCase):
             sql_log = root / "sql-args.txt"
             fake_sql = fake_bin / "sql"
             fake_sql.write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n",
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
+                "if [[ -f login.sql ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
+                "if [[ -n \"${SQLPATH:-}\" && -f \"$SQLPATH/login.sql\" ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
+                "printf 'APEX_DOCTOR_VERIFIED:DEMO\\n'\n",
                 encoding="utf-8",
             )
             fake_sql.chmod(0o755)
             environment = os.environ.copy()
             environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
             environment["FAKE_SQL_LOG"] = str(sql_log)
+            login_marker = root / "login-marker"
+            environment["FAKE_LOGIN_MARKER"] = str(login_marker)
             environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            (root / "login.sql").write_text("HOST touch should-not-run\n", encoding="utf-8")
+            malicious_sqlpath = root / "malicious-sqlpath"
+            malicious_sqlpath.mkdir()
+            (malicious_sqlpath / "login.sql").write_text("HOST touch should-not-run\n", encoding="utf-8")
+            environment["SQLPATH"] = str(malicious_sqlpath)
 
             result = subprocess.run(
                 ["bash", str(scripts / "team.sh"), "doctor"],
@@ -135,6 +146,7 @@ class TeamCliTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(login_marker.exists(), "SQLcl must not start in the caller's directory")
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("docker-demo", args)
             self.assertIn(f"@{scripts / 'doctor.sql'}", args)
@@ -149,6 +161,7 @@ class TeamCliTests(unittest.TestCase):
             "deploy.sh",
             "publish_app.sh",
             "publish_app.sql",
+            "sqlcl_safe.sh",
             "load_env.sh",
             "export_apps.sql",
             "verify_db_access.sql",
@@ -232,7 +245,8 @@ class TeamCliTests(unittest.TestCase):
                     "PROD_APP",
                     "production",
                     "PROD_DEPLOYER",
-                    "deployments/prod.json",
+                    str(script.parents[1] / "apps/DEMO/100"),
+                    str(script.parents[1] / "apps/DEMO/100/deployments/prod.json"),
                     "100",
                 ],
             )
@@ -286,7 +300,7 @@ class TeamCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("prod-db", args)
-            self.assertIn("deployments/prod.json", args)
+            self.assertIn(str(script.parents[1] / "apps/DEMO/100/deployments/prod.json"), args)
 
     def make_upgrade_fixture(self, root: Path) -> tuple[Path, Path]:
         template = root / "template"

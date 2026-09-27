@@ -88,10 +88,16 @@ if [ "$manual" = true ]; then
   esac
   printf '\nDBA runbook (this command did not connect to a database):\n'
   printf '1. Review the committed descriptor: %s\n' "$app_dir/deployments/$app_environment.json"
-  printf '2. From a shell with SQLcl and the approved connection configured, run:\n   cd %q\n   sql -S -noupdates -name %q %q %q %q %q %q %q\n' \
-    "$app_dir" "$sqlcl_connection" \
-    "@$REPO_ROOT/scripts/publish_app.sql" "$parsing_schema" \
-    "$target_environment" "$expected_user" "deployments/$app_environment.json" "$app_id"
+  printf '%s\n' \
+    '2. From a shell with SQLcl and the approved connection configured, run:' \
+    '   sqlcl_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-sqlcl-XXXXXX")' \
+    '   trap '\''rm -rf -- "$sqlcl_dir"'\'' EXIT' \
+    '   cd "$sqlcl_dir"' \
+    '   export SQLPATH="$sqlcl_dir" ORACLE_PATH="$sqlcl_dir"'
+  printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q\n' \
+    "$sqlcl_connection" "@$REPO_ROOT/scripts/publish_app.sql" "$parsing_schema" \
+    "$target_environment" "$expected_user" "$app_dir" \
+    "$app_dir/deployments/$app_environment.json" "$app_id"
   verify_parent="apps/$parsing_schema"
   printf '3. Check that import completed without SQLcl errors and printed "Import successful." and APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
   printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'
