@@ -1,0 +1,4 @@
+interface:
+  display_name: "APEXlang Export Debugging"
+  short_description: "Diagnose APEXlang and YAML export metadata failures"
+  default_prompt: "Use $apexlang-export-debugging to investigate this APEX export failure and prepare a repair supported by evidence."
