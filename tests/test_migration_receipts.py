@@ -5,7 +5,7 @@ from pathlib import Path
 
 from scripts.migrate import MigrationApplyError, build_receipt
 from scripts.migration_checks import CheckReport
-from scripts.migration_manifest import install_receipt, load_migration, validate_receipt
+from scripts.migration_manifest import MigrationManifestError, install_receipt, load_migration, validate_receipt
 from scripts.schema_catalog import SchemaSnapshot
 
 
@@ -88,7 +88,7 @@ class MigrationReceiptTests(unittest.TestCase):
         install_receipt(path, receipt)
         original = path.read_bytes()
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(MigrationManifestError):
             install_receipt(path, {**receipt, "payloadDigest": "changed"})
 
         self.assertEqual(path.read_bytes(), original)

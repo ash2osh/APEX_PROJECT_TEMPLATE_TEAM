@@ -56,14 +56,25 @@ for app_id in "${APP_IDS[@]}"; do
   RUN_DIR="$STAGING_DIR/runs/$app_id"
   RUN_STAGE_PARENT="$RUN_DIR/apps/$APEX_PARSING_SCHEMA"
   mkdir -p "$RUN_STAGE_PARENT"
+  SQLCL_OUTPUT="$RUN_DIR/sqlcl-output.log"
 
-  (
+  if ! (
     invoke_sqlcl_safe "$RUN_DIR" \
       -S -noupdates -name "$APEX_SQLCL_CONNECTION" \
       "@$REPO_ROOT/scripts/export_apps.sql" \
       "$APEX_PARSING_SCHEMA" "$app_id" "$DB_ENVIRONMENT" \
       "$APEX_EXPECTED_USER" < "$SQLCL_STDIN"
-  )
+  ) > "$SQLCL_OUTPUT" 2>&1; then
+    cat "$SQLCL_OUTPUT" >&2
+    echo "APEX export for application $app_id failed in SQLcl" >&2
+    exit 1
+  fi
+  if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:' "$SQLCL_OUTPUT"; then
+    cat "$SQLCL_OUTPUT" >&2
+    echo "APEX export for application $app_id reported a client or database error" >&2
+    exit 1
+  fi
+  cat "$SQLCL_OUTPUT"
 
   # SQLcl names each export directory after the application alias, which can
   # change independently of the immutable application id used by the mirror.

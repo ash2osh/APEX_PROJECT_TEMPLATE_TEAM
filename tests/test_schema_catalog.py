@@ -1,7 +1,5 @@
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -242,7 +240,7 @@ class SchemaCatalogTests(unittest.TestCase):
             with self.assertRaises(CatalogError):
                 capture_snapshot(target(), inventory_from_fixture(), (("X' OR '1'='1", "TABLE"),), Path(temporary), _runner=runner)
             self.assertNotIn("X' OR '1'='1", runner.driver)
-            self.assertIn("X' OR '1'='1".encode("utf-8").hex().upper(), runner.driver)
+            self.assertIn(b"X' OR '1'='1".hex().upper(), runner.driver)
 
 
 class SchemaCatalogIdentity:

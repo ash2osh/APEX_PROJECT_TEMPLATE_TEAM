@@ -11,9 +11,9 @@ import os
 import re
 import sys
 import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
 
 from .db_targets import Target, TargetResolutionError, resolve_target
 from .schema_catalog import (
@@ -201,9 +201,9 @@ def select_objects(
             return
         selected.add((table_name, "TABLE"))
 
-    for raw, parsed in zip(objects, parsed_objects):
+    for raw, parsed in zip(objects, parsed_objects, strict=True):
         matched = False
-        for candidate, sides in entries.items():
+        for candidate in entries:
             if _matched_exact(candidate, parsed):
                 selected.add(candidate)
                 matched = True
@@ -215,7 +215,7 @@ def select_objects(
         if not matched:
             errors.append({"code": "NOT_FOUND", "selector": raw, "message": "exact object was absent from both complete owner inventories"})
 
-    for raw, pattern in zip(patterns, parsed_patterns):
+    for raw, pattern in zip(patterns, parsed_patterns, strict=True):
         matched = False
         for candidate in entries:
             if _matched_pattern(candidate[0], pattern):
@@ -376,9 +376,9 @@ def compare_snapshots(source: SchemaSnapshot, target: SchemaSnapshot, selection:
                     object_type, source={"owner": source_definition.key.owner, "name": source_definition.key.name, "raw_ddl": source_definition.raw_ddl, "attributes": source_definition.attributes},
                     target={"owner": target_definition.key.owner, "name": target_definition.key.name, "raw_ddl": target_definition.raw_ddl, "attributes": target_definition.attributes},
                 ))
-        for definition, side in [(item[0], "source") for item in source_values[paired:]]:
+        for definition, _normalized in source_values[paired:]:
             differences.append(_difference("MISSING_ON_TARGET", definition.key.name, definition.key.object_type, source={"owner": definition.key.owner, "raw_ddl": definition.raw_ddl}, target=None))
-        for definition, side in [(item[0], "target") for item in target_values[paired:]]:
+        for definition, _normalized in target_values[paired:]:
             differences.append(_difference("EXTRA_ON_TARGET", definition.key.name, definition.key.object_type, source=None, target={"owner": definition.key.owner, "raw_ddl": definition.raw_ddl}))
 
     if not coverage["complete"]:

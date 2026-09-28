@@ -8,9 +8,9 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
 
 from .db_targets import Target
 from .migration_manifest import (
@@ -21,7 +21,7 @@ from .migration_manifest import (
     _strip_sql_comments_and_tokenize,
     validate_check_query,
 )
-from .schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
+from .schema_catalog import ObjectKey, SchemaSnapshot
 from .sqlcl_session import run_sqlcl
 
 
@@ -568,7 +568,7 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         f"  l_payload.put('phase', '{phase}');",
         "  l_payload.put('complete', TRUE);",
     ]
-    for index, check in enumerate(checks, start=1):
+    for check in checks:
         validate_check_query(check.sql)
         if not isinstance(check.id, str) or CHECK_ID_RE.fullmatch(check.id) is None:
             raise MigrationManifestError("check id must use lowercase kebab-case")
@@ -656,7 +656,7 @@ def _parse_check_output(output: str, checks: Sequence[QueryCheck], phase: str) -
     try:
         start = lines.index(begin)
         finish = lines.index(end, start + 1)
-    except ValueError as error:
+    except ValueError:
         return CheckReport(False, False, (), ({"code": "MISSING_FRAME", "message": "check result frame is missing or truncated"},), {"phase": phase, "complete": False})
     try:
         payload = json.loads("".join(lines[start + 1 : finish]))
@@ -669,7 +669,7 @@ def _parse_check_output(output: str, checks: Sequence[QueryCheck], phase: str) -
         return CheckReport(False, False, (), ({"code": "RESULT_COUNT", "message": "check result count does not match the requested checks"},), {"phase": phase, "complete": False})
     results: list[dict] = []
     errors: list[dict] = []
-    for check, result in zip(checks, raw_results):
+    for check, result in zip(checks, raw_results, strict=True):
         if not isinstance(result, dict) or result.get("id") != check.id:
             errors.append({"code": "RESULT_IDENTITY", "check": check.id, "message": "check result identity/order does not match the requested check"})
             continue

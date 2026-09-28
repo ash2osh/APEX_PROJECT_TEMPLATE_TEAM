@@ -54,18 +54,22 @@ try {
     $runPath = Join-Path $stagingPath "runs/$appId"
     $runStageParent = Join-Path $runPath "apps/$($env:APEX_PARSING_SCHEMA)"
     New-Item -ItemType Directory -Force -Path $runStageParent | Out-Null
+    $sqlclOutput = Join-Path $runPath "sqlcl-output.log"
 
     $sqlclExit = Invoke-Sqlcl -WorkingDirectory $runPath `
       -StdInFile (Join-Path $stagingPath ".sqlcl-stdin") `
+      -TranscriptFile $sqlclOutput `
       -Arguments @(
         "-S", "-noupdates", "-name", $env:APEX_SQLCL_CONNECTION,
         "@$(Join-Path $repoRoot 'scripts/export_apps.sql')",
         $env:APEX_PARSING_SCHEMA, $appId, $env:DB_ENVIRONMENT,
         $env:APEX_EXPECTED_USER
       )
-    if ($sqlclExit -ne 0) {
-      throw "SQLcl export for application $appId failed with exit code $sqlclExit"
+    $transcript = [System.IO.File]::ReadAllText($sqlclOutput)
+    if ($sqlclExit -ne 0 -or $transcript -match '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:') {
+      throw "SQLcl export for application $appId failed or reported a client or database error:`n$transcript"
     }
+    Write-Output $transcript
 
     # SQLcl names each export directory after the application alias, which can
     # change independently of the immutable application id used by the mirror.

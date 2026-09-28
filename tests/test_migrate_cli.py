@@ -192,7 +192,7 @@ class MigrateCliTests(unittest.TestCase):
                 migration = self.load(folder.name)
                 target = self.target(environment)
                 prompts = []
-                result, fake = self.apply(migration, target, confirm=lambda prompt: prompts.append(prompt) or False)
+                result, fake = self.apply(migration, target, confirm=lambda prompt, prompts=prompts: prompts.append(prompt) or False)
                 self.assertEqual(result, 1)
                 self.assertEqual(prompts, [f"Migrating to {environment.upper()}. Proceed? [y/N]"])
                 self.assertFalse(any(call[0] == "apply" for call in fake.calls))
@@ -303,6 +303,9 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertFalse((folder / "status.dev.json").exists())
         apply_count = len([call for call in fake.calls if call[0] == "apply"])
+        attempt_dirs = list((self.root / "scratch").glob("migration-attempt-*"))
+        self.assertEqual(len(attempt_dirs), 1)
+        attempt_dirs[0].rename(attempt_dirs[0].with_name("migration-attempt-with_underscore"))
 
         retry, fake = self.apply(migration, fake=fake)
         self.assertEqual(retry, 2)

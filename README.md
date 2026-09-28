@@ -65,7 +65,9 @@ git diff -- apps/DEMO/100/
 
 Review the APEXlang changes before committing. This route captures current
 Builder state; it does not import the app back into Builder. The exporter
-refuses to overwrite a dirty local source directory.
+refuses to overwrite a dirty local source directory. It first exports into
+`scratch/`, checks the SQLcl result and Builder revision, then replaces the
+local source mirror while preserving its authored deployment descriptors.
 
 ## File-first APEXlang workflow
 

@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from .db_targets import Target, looks_like_production_identity
 from .sqlcl_session import SqlclResult, run_sqlcl

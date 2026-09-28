@@ -8,13 +8,12 @@ import hashlib
 import json
 import os
 import re
-import stat
 import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from .validate_migration import validate_sql_only
 

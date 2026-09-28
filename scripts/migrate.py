@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target
 from .migration_checks import CheckReport, PreflightReport, analyze_batch, preflight, run_checks
@@ -22,7 +22,6 @@ from .migration_manifest import (
     Migration,
     MigrationFile,
     MigrationManifestError,
-    STATUS_ENVIRONMENTS,
     install_receipt,
     load_batch,
     load_migration,
@@ -36,7 +35,6 @@ from .schema_catalog import (
     SchemaSnapshot,
     capture_inventory,
     capture_snapshot,
-    same_database_scope,
 )
 from .schema_normalization import normalization_coverage
 from .sqlcl_session import SqlclError, run_sqlcl
@@ -46,7 +44,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_VERSION = "template-migration-v1"
 STATUS_SCHEMA_VERSION = 1
 RUN_MANIFEST_NAME = "run-manifest.json"
-RUN_ID_RE = re.compile(r"migration-attempt-[A-Za-z0-9-]+\Z", re.ASCII)
+RUN_ID_RE = re.compile(r"migration-attempt-[A-Za-z0-9_-]+\Z", re.ASCII)
 
 
 class MigrationApplyError(RuntimeError):
