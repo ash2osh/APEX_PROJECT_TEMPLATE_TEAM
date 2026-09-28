@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -5,122 +6,81 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECKER = ROOT / "scripts" / "check_conflicts.py"
+CHECKER = ROOT / "scripts" / "check_conflicts.sh"
 
 
-class MigrationConflictTests(unittest.TestCase):
-    def setUp(self) -> None:
+class MigrationPreflightCliTests(unittest.TestCase):
+    def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.migrations = Path(self.temporary.name) / "migrations"
-        self.migrations.mkdir()
+        self.root = Path(self.temporary.name)
+        (self.root / "migrations").mkdir()
 
-    def tearDown(self) -> None:
+    def tearDown(self):
         self.temporary.cleanup()
 
-    def add_migration(self, developer: str, name: str, source: str) -> Path:
-        directory = self.migrations / developer
-        directory.mkdir(exist_ok=True)
-        path = directory / name
-        path.write_text(source, encoding="utf-8")
-        return path
+    def add_folder(self, name, sql):
+        folder = self.root / "migrations" / name
+        folder.mkdir()
+        (folder / "001-change.sql").write_text(sql, encoding="utf-8", newline="\n")
+        (folder / "checks.json").write_text(json.dumps({"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]}) + "\n", encoding="utf-8")
+        return folder
 
-    def run_checker(self) -> subprocess.CompletedProcess[str]:
+    def run_checker(self, *arguments):
         return subprocess.run(
-            ["python3", str(CHECKER), "--migrations-dir", str(self.migrations)],
+            ["bash", str(CHECKER), "--repo-root", str(self.root), *arguments],
             cwd=ROOT,
             text=True,
             capture_output=True,
             check=False,
+            env={"PATH": __import__("os").environ["PATH"], "HOME": __import__("os").environ.get("HOME", "")},
         )
 
-    def test_distinct_objects_from_different_developers_are_clean(self) -> None:
-        self.add_migration("alice", "one.sql", "CREATE TABLE ORDERS (ID NUMBER);\n")
-        self.add_migration("bob", "two.sql", "CREATE SEQUENCE ORDER_SEQ;\n")
+    def test_local_mode_explicitly_reports_only_selected_scope_and_needs_no_env(self):
+        self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")
 
-        result = self.run_checker()
+        result = self.run_checker("migrations/2026-09-27_create-orders-r001", "--local")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("No cross-developer conflicts", result.stdout)
+        self.assertIn("Local selected-batch analysis only", result.stdout)
+        self.assertIn("Other repositories' pending migrations are not visible", result.stdout)
 
-    def test_same_table_name_conflicts_across_developers_and_schemas(self) -> None:
-        first = self.add_migration("alice", "one.sql", "CREATE TABLE app.ORDERS (ID NUMBER);\n")
-        second = self.add_migration("bob", "two.sql", "create table ORDERS (ID NUMBER);\n")
+    def test_no_folder_or_missing_mode_is_usage_error_and_never_claims_cross_developer_scan(self):
+        for arguments in ((), ("--local",)):
+            with self.subTest(arguments=arguments):
+                result = self.run_checker(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("usage:", result.stderr)
+                self.assertNotIn("No cross-developer conflicts", result.stdout)
 
-        result = self.run_checker()
+    def test_shared_oracle_namespace_conflict_is_found_within_selected_batch(self):
+        self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")
+        self.add_folder("2026-09-28_create-sequence-r001", "CREATE SEQUENCE ORDERS;\n")
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("TABLE ORDERS", result.stdout)
-        self.assertIn(str(first.relative_to(self.migrations)), result.stdout)
-        self.assertIn(str(second.relative_to(self.migrations)), result.stdout)
-
-    def test_duplicate_view_and_sequence_declarations_conflict(self) -> None:
-        self.add_migration("alice", "one.sql", "CREATE OR REPLACE VIEW ACTIVE_ORDERS AS SELECT 1 X FROM DUAL;\nCREATE SEQUENCE ORDER_SEQ;\n")
-        self.add_migration("bob", "two.sql", "CREATE OR REPLACE VIEW ACTIVE_ORDERS AS SELECT 2 X FROM DUAL;\nCREATE SEQUENCE ORDER_SEQ;\n")
-
-        result = self.run_checker()
+        result = self.run_checker("migrations/2026-09-27_create-orders-r001", "migrations/2026-09-28_create-sequence-r001", "--local")
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("VIEW ACTIVE_ORDERS", result.stdout)
-        self.assertIn("SEQUENCE ORDER_SEQ", result.stdout)
+        self.assertIn("BATCH_NAMESPACE_COLLISION", result.stdout)
 
-    def test_distinct_create_sequence_if_not_exists_names_are_clean(self) -> None:
-        self.add_migration("alice", "one.sql", "CREATE SEQUENCE IF NOT EXISTS ALICE_SEQ;\n")
-        self.add_migration("bob", "two.sql", "CREATE SEQUENCE IF NOT EXISTS BOB_SEQ;\n")
+    def test_historical_unselected_folders_are_not_treated_as_object_reservations(self):
+        self.add_folder("2026-09-27_old-create-r001", "CREATE TABLE CUSTOMERS (ID NUMBER);\n")
+        self.add_folder("2026-09-28_selected-create-r001", "CREATE TABLE CUSTOMERS (ID NUMBER, NAME VARCHAR2(20));\n")
 
-        result = self.run_checker()
+        result = self.run_checker("migrations/2026-09-28_selected-create-r001", "--local")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("No cross-developer conflicts", result.stdout)
 
-    def test_if_not_exists_sequence_duplicate_conflicts_with_plain_syntax(self) -> None:
-        self.add_migration("alice", "one.sql", "CREATE SEQUENCE IF NOT EXISTS ORDER_SEQ;\n")
-        self.add_migration("bob", "two.sql", "CREATE SEQUENCE ORDER_SEQ;\n")
+    def test_legacy_file_argument_is_rejected_with_conversion_guidance(self):
+        result = self.run_checker("migrations/2026-09-26_create-orders-r001/001-create-orders.sql", "--local")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("legacy file paths are not supported", result.stderr)
 
-        result = self.run_checker()
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("SEQUENCE ORDER_SEQ", result.stdout)
-
-    def test_oracle_table_modifiers_still_conflict(self) -> None:
-        self.add_migration("alice", "one.sql", "CREATE IMMUTABLE TABLE AUDIT_LOG (ID NUMBER) NO DROP UNTIL 1 DAYS IDLE;\n")
-        self.add_migration("bob", "two.sql", "CREATE BLOCKCHAIN TABLE AUDIT_LOG (ID NUMBER) NO DROP UNTIL 1 DAYS IDLE;\n")
-
-        result = self.run_checker()
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("TABLE AUDIT_LOG", result.stdout)
-
-    def test_editioning_view_modifier_still_conflicts(self) -> None:
-        self.add_migration("alice", "one.sql", "CREATE EDITIONING VIEW ACTIVE_ORDERS AS SELECT 1 X FROM DUAL;\n")
-        self.add_migration("bob", "two.sql", "CREATE OR REPLACE EDITIONING VIEW ACTIVE_ORDERS AS SELECT 2 X FROM DUAL;\n")
-
-        result = self.run_checker()
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("VIEW ACTIVE_ORDERS", result.stdout)
-
-    def test_duplicate_added_columns_conflict(self) -> None:
-        self.add_migration("alice", "one.sql", "ALTER TABLE ORDERS ADD STATUS VARCHAR2(30);\n")
-        self.add_migration("bob", "two.sql", "ALTER TABLE orders ADD (status VARCHAR2(50));\n")
-
-        result = self.run_checker()
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("COLUMN ORDERS.STATUS", result.stdout)
-
-    def test_comments_and_string_literals_do_not_create_false_declarations(self) -> None:
-        self.add_migration(
-            "alice",
-            "one.sql",
-            "-- CREATE TABLE HIDDEN_TABLE (ID NUMBER);\n"
-            "BEGIN\n  v_text := 'CREATE SEQUENCE HIDDEN_SEQ';\nEND;\n/\n",
-        )
-        self.add_migration("bob", "two.sql", "CREATE TABLE REAL_TABLE (ID NUMBER);\n")
-
-        result = self.run_checker()
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("No cross-developer conflicts", result.stdout)
+    def test_json_mode_reports_scope_and_coverage(self):
+        self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")
+        result = self.run_checker("migrations/2026-09-27_create-orders-r001", "--local", "--format", "json")
+        report = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(report["coverage"]["mode"], "local-only")
+        self.assertFalse(report["coverage"]["live_state_checked"])
 
 
 if __name__ == "__main__":

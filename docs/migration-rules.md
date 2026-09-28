@@ -1,0 +1,149 @@
+# Migration and schema comparison rules
+
+This template stores each migration as one dated folder containing an ordered
+set of SQL files. The files and receipts belong to the local repository. Each
+developer has an independent Git repository; repositories share Oracle state,
+not commits, migration files, or pending work. The live schema is the source of
+truth for what currently exists. No team metadata table, lock, roster, or
+database migration ledger is used.
+
+## Folder and file names
+
+Use this layout:
+
+```text
+migrations/
+├── 2026-09-28_create-customers-r002/
+│   ├── 001-add-status-column.sql
+│   ├── 002-update-customer-view.sql
+│   └── checks.json
+└── 2026-09-27_create-customers-r001/
+    ├── 001-create-table.sql
+    ├── 002-create-index.sql
+    ├── 003-create-view.sql
+    └── checks.json
+```
+
+The folder name is `YYYY-MM-DD_<migration-name>-rNNN`. Do not add a developer
+name. The date is the folder creation date and stays the same when the
+migration is promoted. The ISO date prefix sorts newer dates ahead when a file
+browser is sorted descending; the name cannot set the browser's sort direction.
+Folders created on the same date have a name-based tie-break, not an
+intraday creation order.
+
+The migration name uses lowercase kebab-case. Revisions begin at `r001` and
+increase by one for each later folder with the same migration name. For
+example, `create-customers-r001` and `create-customers-r002` are separate,
+sequential migrations for the same intent. `r002` contains the incremental
+follow-up, not a replacement copy of `r001`; its SQL sequence starts again at
+`001`.
+
+Each immediate SQL file is named `NNN-<step-name>.sql`; sequence numbers must
+be unique and consecutive from `001`. The runner executes those files in
+ascending numeric order in one migration session. When several folders are
+selected, it executes them in the order supplied on the command line. The
+descending folder display order is for browsing only and never determines
+execution order. Review dependencies and pass folders in the required order.
+
+Every folder requires a `checks.json` with read-only preconditions and
+postconditions. These checks validate the expected starting state and verify
+the committed result. The runner also performs structural catalog checks for
+SQL forms it can analyze. Unsupported or data-changing operations need explicit
+reviewed checks; incomplete verification blocks automated apply.
+
+## Immutability and status receipts
+
+Once a migration has been applied or a write attempt may have begun, keep its
+SQL bytes, names, order, and `checks.json` unchanged. A correction or recovery
+belongs in the next revision folder. A failed or ambiguous attempt may have
+left Oracle DDL committed, so inspect the live schema before deciding how to
+recover or retry.
+
+The runner creates `status.dev.json`, `status.staging.json`, or
+`status.prod.json` only after SQLcl confirms the apply session completed and a
+fresh connection verifies the target identity and postconditions. It records
+the exact SQL and checks hashes, target identity, and verification evidence.
+These files are evidence from this checkout; they are not a shared ledger.
+Never create a planned, pending, failed, or aspirational status file, and do
+not treat a receipt by itself as proof of today's live state.
+
+## Conflict checks and the independent-repository limit
+
+Run the conflict checker on the folders you intend to apply:
+
+```bash
+scripts/team.sh check-conflicts \
+  migrations/2026-09-27_create-customers-r001 --env dev
+scripts/team.sh check-conflicts \
+  migrations/2026-09-27_create-customers-r001 --local
+```
+
+`--local` checks the selected files and their ordered effects without a
+database connection. Live mode additionally checks those effects against the
+selected environment's observed catalog. `migrate` repeats the live
+preconditions before applying. The checker handles common object namespace
+collisions, table columns, and supported dependencies; it reports when an SQL
+form needs explicit checks or cannot be analyzed safely.
+
+This is selected-batch analysis plus live-state preflight, not discovery of
+other developers' pending files. Because independent repositories do not share
+migration files, two developers can both pass while the shared catalog is
+still empty. When one applies, the other's later live preflight should detect
+the resulting object. A concurrent change after preflight can still race the
+apply. The database's own DDL checks remain the final defense, and failures
+that may have partially committed require live reconciliation.
+
+## Environment targets
+
+Apply with an explicit environment:
+
+```bash
+scripts/team.sh migrate \
+  migrations/2026-09-27_create-customers-r001 --env dev
+scripts/team.sh migrate \
+  migrations/2026-09-27_create-customers-r001 --env staging
+scripts/team.sh migrate \
+  migrations/2026-09-27_create-customers-r001 --env prod
+```
+
+DEV uses `CODE_SQLCL_CONNECTION`, `CODE_EXPECTED_USER`, and `CODE_SCHEMA`.
+Staging and production reuse `STAGING_SQLCL_CONNECTION` /
+`STAGING_EXPECTED_USER` and `PROD_SQLCL_CONNECTION` / `PROD_EXPECTED_USER`,
+with explicit `STAGING_SCHEMA` and `PROD_SCHEMA`. Set the schema separately
+because the owner can differ between environments even when the saved
+connection and deployment roles are already configured. Do not assume staging
+or production has the same schema name as DEV, and do not fall back to DEV when
+a target is incomplete. The SQLcl login user may differ from the schema owner.
+
+Staging and production applies show the resolved target and require an
+interactive confirmation. The runner verifies the observed database identity
+and current schema before writing and verifies the committed result afterward.
+Receipts are written only for verified applies.
+
+## Comparing selected live objects
+
+Compare a list of objects or prefixes across two live environments:
+
+```bash
+scripts/team.sh compare-schema --from dev --to staging \
+  --object CUSTOMERS --object ORDERS
+scripts/team.sh compare-schema --from staging --to prod \
+  --pattern 'HR_*' --pattern 'GL_*'
+scripts/team.sh compare-schema --env prod --pattern 'HR_*'
+```
+
+The short form compares DEV with the selected `--env`. Repeat `--object` for
+exact object names and `--pattern` for uppercase names using `*` as the only
+wildcard. `_` is literal, so `HR_*` does not select `HRX_EMPLOYEES`. Selection
+is the union of objects found in either catalog. Comparison captures catalog
+inventory, table columns, views, sequences, and normalized metadata DDL for
+selected objects. It reports missing target objects/columns, changed
+definitions, target-only objects, and incomplete catalog visibility.
+
+This is a live schema drift check, not reliable migration-file attribution.
+Local `status.<env>.json` receipts can help an operator identify migrations to
+review, but each repository sees only its own receipts. Equivalent resulting
+DDL can come from different migration files, and an out-of-band manual change
+can mimic a migration. Conversely, normalization intentionally excludes some
+environment-specific metadata. Treat the output as a coarse comparison of
+selected current schema state, then review the implicated SQL and receipts.

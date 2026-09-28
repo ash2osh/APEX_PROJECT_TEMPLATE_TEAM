@@ -13,7 +13,8 @@ param([string]$EnvFile = $env:PROJECT_ENV_FILE)
 $ErrorActionPreference = "Stop"
 try {
 Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
-  Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
+  Env:PROD_SCHEMA, Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
+  Env:STAGING_SCHEMA,
   Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
@@ -37,8 +38,8 @@ $projectEnvAllowed = @(
   "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
   "INSTALL_UC_APX", "UC_APX_SKILLS_AGENT",
-  "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER",
-  "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER"
+  "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER", "PROD_SCHEMA",
+  "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA"
 )
 foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   $projectEnvLine = $projectEnvLine.TrimEnd("`r")
@@ -88,10 +89,15 @@ foreach ($projectEnvKey in $projectEnvRequired) {
 foreach ($projectEnvPrefix in @("PROD", "STAGING")) {
   $projectEnvConnectionKey = "${projectEnvPrefix}_SQLCL_CONNECTION"
   $projectEnvUserKey = "${projectEnvPrefix}_EXPECTED_USER"
+  $projectEnvSchemaKey = "${projectEnvPrefix}_SCHEMA"
   $projectEnvConnectionSeen = $projectEnvSeen.ContainsKey($projectEnvConnectionKey)
   $projectEnvUserSeen = $projectEnvSeen.ContainsKey($projectEnvUserKey)
+  $projectEnvSchemaSeen = $projectEnvSeen.ContainsKey($projectEnvSchemaKey)
   if ($projectEnvConnectionSeen -ne $projectEnvUserSeen) {
     throw "$projectEnvConnectionKey and $projectEnvUserKey must be configured together"
+  }
+  if ($projectEnvSchemaSeen -and -not $projectEnvConnectionSeen) {
+    throw "$projectEnvSchemaKey requires $projectEnvConnectionKey and $projectEnvUserKey"
   }
   if ($projectEnvConnectionSeen) {
     $projectEnvConnectionValue = [Environment]::GetEnvironmentVariable($projectEnvConnectionKey, "Process")
@@ -150,6 +156,13 @@ foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHE
     throw "$projectEnvKey must be an uppercase Oracle identifier"
   }
 }
+foreach ($projectEnvKey in @("STAGING_SCHEMA", "PROD_SCHEMA")) {
+  $projectEnvSchemaValue = [Environment]::GetEnvironmentVariable($projectEnvKey, "Process")
+  if (-not [string]::IsNullOrWhiteSpace($projectEnvSchemaValue) -and
+      $projectEnvSchemaValue -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
+    throw "$projectEnvKey must be an uppercase Oracle identifier"
+  }
+}
 foreach ($projectEnvKey in @("TABLES_SQLCL_CONNECTION", "CODE_SQLCL_CONNECTION", "APEX_SQLCL_CONNECTION")) {
   if ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process") -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
     throw "$projectEnvKey contains unsupported characters"
@@ -159,9 +172,9 @@ foreach ($projectEnvKey in @("TABLES_SQLCL_CONNECTION", "CODE_SQLCL_CONNECTION",
 Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvRequired, projectEnvLine, projectEnvKey, projectEnvValue,
   projectEnvPrefixValue, projectEnvPrefixItem, projectEnvQuoted,
-  projectEnvPrefix, projectEnvConnectionKey, projectEnvUserKey,
+  projectEnvPrefix, projectEnvConnectionKey, projectEnvUserKey, projectEnvSchemaKey,
   projectEnvConnectionSeen, projectEnvUserSeen, projectEnvConnectionValue,
-  projectEnvUserValue,
+  projectEnvUserValue, projectEnvSchemaSeen, projectEnvSchemaValue,
   projectEnvRootRelative `
   -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv -ErrorAction SilentlyContinue

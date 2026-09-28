@@ -10,8 +10,13 @@ Commands:
   doctor                                      Validate .env and the DEV SQLcl identity
   export <app_id>                             Export one numeric APEX app from DEV
   publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
-  check-conflicts                             Check migrations across developers
-  migrate <migration.sql> [...]               Check conflicts, then apply migration(s)
+  check-conflicts <folder> [...] (--env <env>|--local)
+                                              Preflight selected migrations against local/live scope
+  migrate <folder> [...] --env dev|staging|prod
+                                              Preflight, then apply selected migration folders
+  compare-schema [--from <env>] (--to <env>|--env <env>)
+                (--object <name>|--pattern <glob>) [...] [--format text|json]
+                                              Compare selected live schema objects read-only
   backup-db                                   Refresh the table and code mirrors
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
@@ -83,13 +88,19 @@ case "$command_name" in
       "$REPO_ROOT/scripts/publish_app.sh" "$@"
     ;;
   check-conflicts)
-    [ "$#" -eq 0 ] || fail "check-conflicts does not accept arguments"
-    python3 "$REPO_ROOT/scripts/check_conflicts.py"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      "$REPO_ROOT/scripts/check_conflicts.sh" "$@"
     ;;
   migrate)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migrations/<developer>/<file>.sql> [...]"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       "$REPO_ROOT/scripts/migrate.sh" "$@"
+    ;;
+  compare-schema)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      "$REPO_ROOT/scripts/compare_schema.sh" "$@"
     ;;
   backup-db)
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"

@@ -1,0 +1,20 @@
+{
+  "storageSource": {
+    "owner": "APP_DEV",
+    "name": "ORDERS",
+    "type": "TABLE",
+    "raw_ddl": "CREATE TABLE APP_DEV.ORDERS (ID NUMBER(10) NOT NULL) TABLESPACE USERS PCTFREE 10 STORAGE (INITIAL 65536 NEXT 1048576)",
+    "attributes": {"columns": [{"name": "ID", "data_type": "NUMBER", "data_precision": 10, "nullable": "N", "column_id": 1}], "tablespace": "USERS", "object_id": 101, "num_rows": 4},
+    "dependents": [],
+    "valid": true
+  },
+  "storageTarget": {
+    "owner": "APP_STAGE",
+    "name": "ORDERS",
+    "type": "TABLE",
+    "raw_ddl": "create table APP_STAGE.ORDERS ( ID NUMBER ( 10 ) NOT NULL ) TABLESPACE APP_DATA PCTFREE 20 STORAGE ( INITIAL 131072 NEXT 2097152 )",
+    "attributes": {"columns": [{"name": "ID", "data_type": "NUMBER", "data_precision": 10, "nullable": "N", "column_id": 1}], "tablespace": "APP_DATA", "object_id": 202, "num_rows": 900},
+    "dependents": [],
+    "valid": true
+  }
+}

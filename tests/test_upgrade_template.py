@@ -15,9 +15,9 @@ ENGINE = ROOT / "scripts" / "upgrade_template.py"
 MANIFEST = {
     "schemaVersion": 1,
     "upstream": "unused",
-    "templateOwned": ["AGENTS.md", "scripts/**", "template-manifest.json"],
+    "templateOwned": ["AGENTS.md", "scripts/**", "docs/migration-rules.md", "template-manifest.json"],
     "projectOwned": ["AGENTS.project.md"],
-    "templateOnly": ["docs/**"],
+    "templateOnly": ["docs/plan.md"],
 }
 
 
@@ -59,6 +59,7 @@ class UpgradeTemplateTests(unittest.TestCase):
             {
                 "template-manifest.json": json.dumps(template_manifest),
                 "AGENTS.md": "rules v1\n",
+                "docs/migration-rules.md": "migration rules v1\n",
                 "AGENTS.project.md": "<!-- placeholder -->\n",
                 "scripts/tool.sh": "echo v1\n",
                 "scripts/old.sh": "echo old\n",
@@ -73,10 +74,14 @@ class UpgradeTemplateTests(unittest.TestCase):
             {
                 "template-manifest.json": json.dumps(template_manifest),
                 "AGENTS.md": "rules v1\n",
+                "docs/migration-rules.md": "migration rules v1\n",
                 "AGENTS.project.md": "our project rules\n",
                 "scripts/tool.sh": "echo v1\n",
                 "scripts/old.sh": "echo old\n",
                 "apps/DEMO/100/application.apx": "app X ()\n",
+                "migrations/2026-09-27_create-customers-r001/001-create-table.sql": "CREATE TABLE CUSTOMERS (ID NUMBER);\n",
+                "migrations/2026-09-27_create-customers-r001/checks.json": "{\"schemaVersion\":1}\n",
+                "migrations/2026-09-27_create-customers-r001/status.dev.json": "{\"state\":\"verified\"}\n",
             },
         )
         commit_all(self.project, "created from template")
@@ -290,7 +295,34 @@ class UpgradeTemplateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.read("apps/DEMO/100/application.apx"), "app X ()\n")
-        self.assertFalse((self.project / "docs").exists())
+        self.assertEqual(self.read("docs/migration-rules.md"), "migration rules v1\n")
+        self.assertFalse((self.project / "docs/plan.md").exists())
+        self.assertEqual(
+            self.read("migrations/2026-09-27_create-customers-r001/001-create-table.sql"),
+            "CREATE TABLE CUSTOMERS (ID NUMBER);\n",
+        )
+        self.assertEqual(
+            self.read("migrations/2026-09-27_create-customers-r001/checks.json"),
+            "{\"schemaVersion\":1}\n",
+        )
+        self.assertEqual(
+            self.read("migrations/2026-09-27_create-customers-r001/status.dev.json"),
+            "{\"state\":\"verified\"}\n",
+        )
+
+    def test_migration_guide_is_updated_but_local_migration_files_and_receipts_are_untouched(self) -> None:
+        self.adopt()
+        self.release_v2({"docs/migration-rules.md": "migration rules v2\n"})
+
+        result = self.upgrade()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("UPDATE docs/migration-rules.md", result.stdout)
+        self.assertEqual(self.read("docs/migration-rules.md"), "migration rules v2\n")
+        self.assertEqual(
+            self.read("migrations/2026-09-27_create-customers-r001/status.dev.json"),
+            "{\"state\":\"verified\"}\n",
+        )
 
     def test_first_upgrade_never_overwrites_a_differing_file(self) -> None:
         write(self.project, {"AGENTS.md": "rules edited before any lock\n"})

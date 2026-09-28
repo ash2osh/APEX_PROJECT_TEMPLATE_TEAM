@@ -3,7 +3,8 @@
 
 project_env_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ENV_FILE="${1:-${PROJECT_ENV_FILE:-$project_env_repo_root/.env}}"
-unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER
+unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER PROD_SCHEMA
+unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
 unset INSTALL_UC_APX UC_APX_SKILLS_AGENT
 
 # README.md documents a relative PROJECT_ENV_FILE. Resolve it against the
@@ -61,8 +62,8 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
     CODE_SCHEMA|CODE_PREFIXES|CODE_SQLCL_CONNECTION|CODE_EXPECTED_USER|\
     APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
     INSTALL_UC_APX|UC_APX_SKILLS_AGENT|\
-    PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|\
-    STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER) ;;
+    PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|PROD_SCHEMA|\
+    STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER|STAGING_SCHEMA) ;;
     *)
       project_env_fail "unsupported setting in $PROJECT_ENV_FILE: $project_env_key"
       return 1 2>/dev/null || exit 1
@@ -125,14 +126,21 @@ done
 for project_env_prefix in PROD STAGING; do
   project_env_connection_key="${project_env_prefix}_SQLCL_CONNECTION"
   project_env_user_key="${project_env_prefix}_EXPECTED_USER"
+  project_env_schema_key="${project_env_prefix}_SCHEMA"
   project_env_connection_seen=false
   project_env_user_seen=false
+  project_env_schema_seen=false
   for project_env_seen_key in "${project_env_seen_keys[@]}"; do
     [ "$project_env_seen_key" = "$project_env_connection_key" ] && project_env_connection_seen=true
     [ "$project_env_seen_key" = "$project_env_user_key" ] && project_env_user_seen=true
+    [ "$project_env_seen_key" = "$project_env_schema_key" ] && project_env_schema_seen=true
   done
   if [ "$project_env_connection_seen" != "$project_env_user_seen" ]; then
     project_env_fail "$project_env_connection_key and $project_env_user_key must be configured together"
+    return 1 2>/dev/null || exit 1
+  fi
+  if [ "$project_env_schema_seen" = true ] && [ "$project_env_connection_seen" != true ]; then
+    project_env_fail "$project_env_schema_key requires $project_env_connection_key and $project_env_user_key"
     return 1 2>/dev/null || exit 1
   fi
   if [ "$project_env_connection_seen" = true ]; then
@@ -234,6 +242,13 @@ for project_env_key in TABLES_SCHEMA TABLES_EXPECTED_USER CODE_SCHEMA \
     return 1 2>/dev/null || exit 1
   fi
 done
+for project_env_key in STAGING_SCHEMA PROD_SCHEMA; do
+  project_env_value="${!project_env_key:-}"
+  if [ -n "$project_env_value" ] && [[ ! "$project_env_value" =~ $project_env_oracle_identifier_regex ]]; then
+    project_env_fail "$project_env_key must be an uppercase Oracle identifier"
+    return 1 2>/dev/null || exit 1
+  fi
+done
 for project_env_key in TABLES_SQLCL_CONNECTION CODE_SQLCL_CONNECTION APEX_SQLCL_CONNECTION; do
   if [[ ! "${!project_env_key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     project_env_fail "$project_env_key contains unsupported characters"
@@ -245,7 +260,7 @@ unset project_env_seen_keys project_env_seen_key project_env_seen_present
 unset project_env_prefix_items project_env_prefix_item project_env_quoted
 unset project_env_prefix project_env_connection_key project_env_user_key
 unset project_env_connection_seen project_env_user_seen project_env_connection_value
-unset project_env_user_value
+unset project_env_user_value project_env_schema_key project_env_schema_seen
 unset project_env_first_line project_env_oracle_identifier_regex project_env_oracle_prefix_regex
 unset project_env_repo_root
 # load_env.ps1 removes its helper and says it is mirroring this file. It was

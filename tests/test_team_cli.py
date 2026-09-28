@@ -46,22 +46,73 @@ class TeamCliTests(unittest.TestCase):
             "publish",
             "check-conflicts",
             "migrate",
+            "compare-schema",
             "backup-db",
             "deploy",
             "upgrade-template",
         ):
             self.assertIn(command, result.stdout)
+        self.assertIn("--env dev|staging|prod", result.stdout)
+        self.assertIn("--pattern", result.stdout)
 
-    def test_check_conflicts_command_does_not_require_database_configuration(self) -> None:
+    def test_team_migrate_rejects_missing_duplicate_and_invalid_environment_before_loading_env(self) -> None:
+        for arguments, expected in (
+            (["migrations/2026-09-27_create-sample-r001"], "exactly one --env"),
+            (["migrations/2026-09-27_create-sample-r001", "--env", "dev", "--env", "prod"], "exactly one --env"),
+            (["migrations/2026-09-27_create-sample-r001", "--env", "production"], "--env must be dev, staging, or prod"),
+        ):
+            with self.subTest(arguments=arguments):
+                environment = os.environ.copy()
+                environment["PROJECT_ENV_FILE"] = "/no/such/migration-env-file"
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts" / "team.sh"), "migrate", *arguments],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("configuration file not found", result.stderr)
+
+    def test_powershell_migrate_uses_the_same_early_environment_validation(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        environment = os.environ.copy()
+        environment["PROJECT_ENV_FILE"] = "/no/such/migration-env-file"
         result = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "team.sh"), "check-conflicts"],
+            [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/2026-09-27_create-sample-r001"],
             cwd=ROOT,
+            env=environment,
             text=True,
             capture_output=True,
             check=False,
         )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("specify exactly one --env", result.stderr)
+        self.assertNotIn("configuration file not found", result.stderr)
+
+    def test_local_check_conflicts_command_does_not_require_database_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = root / "migrations" / "2026-09-27_create-orders-r001"
+            folder.mkdir(parents=True)
+            (folder / "001-create-table.sql").write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
+            (folder / "checks.json").write_text(
+                '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ok","sql":"SELECT 1 FROM dual","expected":1}]}\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "team.sh"), "check-conflicts", f"migrations/{folder.name}", "--local", "--repo-root", str(root)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("No cross-developer conflicts", result.stdout)
+        self.assertIn("Local selected-batch analysis only", result.stdout)
 
     def test_publish_command_routes_non_dev_targets_to_deploy(self) -> None:
         result = subprocess.run(
@@ -99,6 +150,78 @@ class TeamCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "DEMO|DEMO|*|DEMO\n")
+
+    def test_bash_environment_loader_keeps_schema_separate_from_target_login(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = Path(temporary) / ".env"
+            content = (ROOT / ".env.example").read_text(encoding="utf-8")
+            content += (
+                "\nSTAGING_SQLCL_CONNECTION=stage-db\n"
+                "STAGING_EXPECTED_USER=STAGE_DEPLOYER\n"
+                "STAGING_SCHEMA=APP_STAGE\n"
+            )
+            environment.write_text(content, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "bash", "-c",
+                    'set -e; source "$1" "$2"; printf "%s|%s|%s\\n" "$STAGING_SQLCL_CONNECTION" "$STAGING_EXPECTED_USER" "$STAGING_SCHEMA"',
+                    "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment),
+                ],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "stage-db|STAGE_DEPLOYER|APP_STAGE\n")
+
+    def test_bash_environment_loader_requires_a_connection_pair_for_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = Path(temporary) / ".env"
+            content = (ROOT / ".env.example").read_text(encoding="utf-8")
+            environment.write_text(content + "\nSTAGING_SCHEMA=APP_STAGE\n", encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1" "$2"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("STAGING_SCHEMA requires", result.stderr)
+
+    def test_bash_environment_loader_clears_inherited_optional_schemas(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = Path(temporary) / ".env"
+            environment.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "bash", "-c",
+                    'export STAGING_SCHEMA=INHERITED PROD_SCHEMA=INHERITED; source "$1" "$2"; printf "%s|%s\\n" "${STAGING_SCHEMA-}" "${PROD_SCHEMA-}"',
+                    "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment),
+                ],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "|\n")
+
+    def test_powershell_loader_accepts_and_clears_target_schemas(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = Path(temporary) / ".env"
+            content = (ROOT / ".env.example").read_text(encoding="utf-8")
+            content += "\nSTAGING_SQLCL_CONNECTION=stage-db\nSTAGING_EXPECTED_USER=STAGE_DEPLOYER\nSTAGING_SCHEMA=APP_STAGE$\n"
+            environment.write_text(content, encoding="utf-8")
+            probe = Path(temporary) / "load-env-probe.ps1"
+            probe.write_text(
+                'param([string]$Loader, [string]$EnvironmentFile)\n'
+                '$env:STAGING_SCHEMA = "INHERITED"\n'
+                '. $Loader -EnvFile $EnvironmentFile\n'
+                'Write-Output "$($env:STAGING_SCHEMA)|$($env:PROD_SCHEMA)"\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [pwsh, "-NoProfile", "-File", str(probe), str(ROOT / "scripts" / "load_env.ps1"), str(environment)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "APP_STAGE$|")
 
     def test_doctor_uses_read_only_identity_sqlcl_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

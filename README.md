@@ -1,8 +1,8 @@
 # APEX project template for teams
 
 This template supports APEX 26.1+ applications authored as APEXlang. It uses
-plain Git source, explicit deployment JSON, and per-developer SQL migration
-files. No custom team metadata schema or database lock tables are required.
+plain Git source, explicit deployment JSON, and dated, ordered SQL migration
+folders. No custom team metadata schema or database lock tables are required.
 
 Projects created from this template use one Git repository per developer.
 Those repositories do not share commits or a remote; developers coordinate
@@ -21,9 +21,10 @@ scripts/team.sh doctor
 ```
 
 The example uses `docker-demo` / `DEMO`. Table, code, and APEX settings can
-share that connection. Staging and production profiles are optional and should
-be configured as connection/user pairs. Store credentials in SQLcl's secure
-connection store, never in `.env` or Git.
+share that connection. Staging and production app-deployment profiles are
+optional connection/user pairs; migrations and schema comparison also require
+an explicit target schema. Store credentials in SQLcl's secure connection
+store, never in `.env` or Git.
 
 On Windows, use the PowerShell wrapper:
 
@@ -126,34 +127,67 @@ every rule, what each message means, and what to do.
 
 ## Schema migrations
 
-Create timestamped SQL files in your own developer folder and keep them
-immutable after applying them to shared DEV:
+Create one dated folder per migration. Put each SQL step in its own numbered
+file and list the folder when checking or applying it:
 
 ```text
-migrations/alice/20260926_101500_add_status.sql
-migrations/bob/20260926_111000_create_audit_table.sql
+migrations/2026-09-27_create-customers-r001/
+├── 001-create-table.sql
+├── 002-create-index.sql
+├── 003-create-view.sql
+└── checks.json
 ```
 
-Check all developer folders before applying a selected migration:
+The folder date is a creation date. Names sort newest first only when the file
+browser is sorted descending; they do not control its sort setting. SQL steps
+run in ascending sequence, while multiple folders run in the explicit
+command-line order. `create-customers-r001` and
+`2026-09-28_create-customers-r002` are separate sequential migrations; the
+second contains the follow-up change. Keep a migration and its `checks.json`
+immutable once an apply attempt may have started. A recovery belongs in the
+next revision.
+
+Run a selected live preflight and apply with an explicit environment:
 
 ```bash
-scripts/team.sh check-conflicts
-scripts/team.sh migrate migrations/alice/20260926_101500_add_status.sql
+scripts/team.sh check-conflicts \
+  migrations/2026-09-27_create-customers-r001 --env dev
+scripts/team.sh migrate \
+  migrations/2026-09-27_create-customers-r001 --env dev
 ```
 
-Migration bodies run with SQLcl substitution disabled, so `&` is treated as
-ordinary SQL text. Migration files may contain SQL statements ending in
-semicolons and Oracle forms that use a standalone slash, including PL/SQL
-blocks, `CREATE TYPE`, `CREATE LIBRARY`, `CREATE JAVA`, and
-`CREATE MLE MODULE`. SQLcl client
-commands such as `SET DEFINE`, `PROMPT`, and `WHENEVER` are rejected before
-connecting.
+The offline `--local` checker analyzes selected files only. Live preflight
+compares the selected batch with the target catalog, but cannot see pending
+files in another developer's independent repository. Two developers can pass
+before either writes; preflight runs again before apply, though a concurrent
+change can still race it. See [docs/migration-rules.md](docs/migration-rules.md)
+for coverage and recovery limits.
 
-The conflict checker looks for duplicate table, view, sequence, and
-`ALTER TABLE ... ADD` column declarations. It is a guard for common collisions,
-not a substitute for reviewing the SQL. A successful migration changes shared
-DEV schema state. Other developers can refresh their local DBMS_METADATA
-mirrors with `scripts/team.sh backup-db`.
+`checks.json` requires read-only preconditions and postconditions.
+`status.<env>.json` appears only after the committed result has been verified
+through a fresh connection. It is local evidence, not a shared deployment
+ledger. Migration SQL can use standalone slash terminators for PL/SQL blocks,
+`CREATE TYPE`, `CREATE LIBRARY`, `CREATE JAVA`, and `CREATE MLE MODULE`.
+SQLcl client commands such as `SET DEFINE`, `PROMPT`, and `WHENEVER` are
+rejected before connecting.
+
+For staging or production, configure the existing connection and expected
+user plus `STAGING_SCHEMA` or `PROD_SCHEMA`. The migration schema can differ
+between environments, so these settings are explicit and never inferred from
+DEV. Direct staging and production applies require interactive confirmation.
+
+Compare selected live object names or prefixes with `compare-schema`:
+
+```bash
+scripts/team.sh compare-schema --from dev --to staging \
+  --object CUSTOMERS --object ORDERS
+scripts/team.sh compare-schema --env prod --pattern 'HR_*' --pattern 'GL_*'
+```
+
+This reports current catalog drift for the selection. Status receipts can help
+with follow-up review but cannot reliably prove which migration file caused a
+shape: separate migrations may produce the same DDL, and a manual change can
+mimic a migration.
 
 ## Staging and production deployments
 
@@ -174,9 +208,9 @@ scripts/team.sh deploy 100 --env prod --manual
 ```
 
 The runbook includes the explicit deployment descriptor and SQLcl identity
-check. A human DBA executes it using an approved saved connection. Database
-migrations remain a DEV workflow; do not use the deployment command to apply
-schema changes.
+check. A human DBA executes it using an approved saved connection. App
+promotion uses deployment descriptors; schema migrations use the separate
+`migrate --env` command and explicit target-schema settings.
 
 ## Upgrading from the template
 
@@ -234,8 +268,10 @@ restore those backups before retrying the upgrade.
 | `scripts/team.sh doctor` | Validate `.env` and check the DEV SQLcl identity. |
 | `scripts/team.sh export <id>` | Export one numeric app from shared DEV Builder. |
 | `scripts/team.sh publish <id> --env dev` | Drift-check and import one app to DEV. |
-| `scripts/team.sh check-conflicts` | Check DDL declarations across migration folders. |
-| `scripts/team.sh migrate <file> [...]` | Check conflicts, then apply selected migration files to DEV. |
+| `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
+| `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
+| `scripts/team.sh migrate <folder> [...] --env <env>` | Verify and apply selected migration folders to DEV, staging, or production. |
+| `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
@@ -249,7 +285,8 @@ Agents follow the same app ID, descriptor, drift, migration, and deployment
 rules as developers. Review source before editing; do not run database-writing
 commands unless the user asked; coordinate with the team before importing into
 shared DEV. Never claim an unavailable live check passed. See [AGENTS.md](AGENTS.md)
-for the full repository contract and [migrations/README.md](migrations/README.md)
-for migration naming and immutability rules. For browser runtime checks, see
+for the full repository contract, [migrations/README.md](migrations/README.md),
+and [docs/migration-rules.md](docs/migration-rules.md) for migration naming,
+verification, and comparison limits. For browser runtime checks, see
 [Chrome DevTools MCP](docs/CHROME_DEVTOOLS_MCP.md) and use the project browser
 [skill](.agents/skills/chrome-devtools-mcp/SKILL.md).

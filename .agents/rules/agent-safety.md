@@ -10,8 +10,16 @@
 - Do not run migrations, APEX imports, or deployments unless the user asked
   for that database write. Coordinate with teammates before importing into a
   shared DEV app; Git branches do not protect shared database state.
-- Use `scripts/team.sh check-conflicts` before applying a migration. Applied
-  SQL changes shared DEV state and migration files remain immutable.
+- Store migration SQL in numbered files under
+  `migrations/YYYY-MM-DD_<name>-rNNN/`; do not add a developer-name path.
+  Require `checks.json`, preflight selected folders, and apply only with an
+  explicit `--env`. Independent repositories' pending files cannot be seen by
+  the conflict checker. Treat a write attempt without a verified receipt as
+  requiring live reconciliation before retry. See
+  `docs/migration-rules.md`.
+- Use `scripts/team.sh compare-schema` with exact names or object prefixes for
+  read-only live drift reports. Receipts and resulting DDL cannot reliably
+  identify one unique migration file.
 - `scripts/team.sh deploy` requires confirmation for staging and production.
   `--manual` prints a runbook and makes no connection. Do not describe the
   manual output as an executed deployment.

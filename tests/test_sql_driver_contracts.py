@@ -1,5 +1,9 @@
 import unittest
 from pathlib import Path
+import tempfile
+
+from scripts.db_targets import Target
+from scripts.schema_catalog import _catalog_driver
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +14,7 @@ SQL_DRIVERS = (
     "export_apps.sql",
     "migrate.sql",
     "publish_app.sql",
+    "schema_catalog.sql",
 )
 
 
@@ -27,6 +32,14 @@ class SqlDriverContractTests(unittest.TestCase):
             with self.subTest(driver=name):
                 contents = (ROOT / "scripts" / name).read_text(encoding="utf-8")
                 self.assertRegex(contents, r"(?im)^EXIT SUCCESS ROLLBACK\s*$")
+
+    def test_generated_catalog_driver_exits_success_with_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = _catalog_driver(Path(temporary), "inventory", Target("dev", "dev-profile", "APP_DEV", "APP_DEV", "development"))
+            contents = driver.read_text(encoding="utf-8")
+        self.assertRegex(contents, r"(?im)^EXIT SUCCESS ROLLBACK\s*$")
+        self.assertNotIn("COMMIT", contents)
+        self.assertIn("ALTER SESSION SET CURRENT_SCHEMA = APP_DEV", contents)
 
     def test_identity_and_drift_drivers_emit_verification_sentinels(self) -> None:
         self.assertIn("APEX_DOCTOR_VERIFIED:&&expected_user", (ROOT / "scripts/doctor.sql").read_text(encoding="utf-8"))

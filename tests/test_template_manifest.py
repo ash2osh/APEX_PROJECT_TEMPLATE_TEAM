@@ -81,7 +81,9 @@ class TemplateManifestTests(unittest.TestCase):
                 "template-manifest.json": (ROOT / "template-manifest.json").read_text(encoding="utf-8"),
                 ".template-lock.json": json.dumps({"schemaVersion": 1, "upstream": "template", "commit": "abc", "files": {}}),
                 "apps/DEMO/100/application.apx": "app DEMO ()\n",
-                "migrations/alice/20260926_add.sql": "select 1 from dual;\n",
+                "migrations/2026-09-27_create-customers-r001/001-create-table.sql": "CREATE TABLE CUSTOMERS (ID NUMBER);\n",
+                "migrations/2026-09-27_create-customers-r001/checks.json": "{}\n",
+                "migrations/2026-09-27_create-customers-r001/status.dev.json": "{}\n",
                 "docs/architecture.md": "Downstream-owned documentation.\n",
             }
             for relative, contents in downstream_files.items():
@@ -98,7 +100,13 @@ class TemplateManifestTests(unittest.TestCase):
             ).stdout.splitlines()
 
         self.assert_tracked_ownership_valid(tracked)
-        for path in (".template-lock.json", "apps/DEMO/100/application.apx", "migrations/alice/20260926_add.sql"):
+        for path in (
+            ".template-lock.json",
+            "apps/DEMO/100/application.apx",
+            "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
+            "migrations/2026-09-27_create-customers-r001/checks.json",
+            "migrations/2026-09-27_create-customers-r001/status.dev.json",
+        ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), [])
 
@@ -108,11 +116,23 @@ class TemplateManifestTests(unittest.TestCase):
                 self.assertIn(path, self.tracked)
                 self.assertEqual(self.classify(path), ["projectOwned"])
 
+    def test_migration_guide_is_template_owned_and_migration_payload_is_not(self) -> None:
+        self.assertEqual(self.classify("docs/migration-rules.md"), ["templateOwned"])
+        for path in (
+            "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
+            "migrations/2026-09-27_create-customers-r001/checks.json",
+            "migrations/2026-09-27_create-customers-r001/status.dev.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), [])
+
     def test_project_data_is_never_managed(self) -> None:
         for path in (
             "apps/DEMO/100/application.apx",
             "database/DEMO/tables/T.sql",
-            "migrations/alice/20260926_add.sql",
+            "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
+            "migrations/2026-09-27_create-customers-r001/checks.json",
+            "migrations/2026-09-27_create-customers-r001/status.dev.json",
             "app_context/100/purpose.md",
             ".env",
             ".template-lock.json",

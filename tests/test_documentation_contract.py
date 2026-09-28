@@ -11,6 +11,8 @@ DOCS = (
     ROOT / ".agents" / "workflows" / "team-flow.md",
     ROOT / ".agents" / "rules" / "agent-safety.md",
     ROOT / "app_context" / "README.md",
+    ROOT / "migrations" / "README.md",
+    ROOT / "docs" / "migration-rules.md",
     ROOT / "docs" / "publish-rules.md",
 )
 # Each refusal the publish guide explains, and the script that prints it. The
@@ -71,7 +73,10 @@ class DocumentationContractTests(unittest.TestCase):
             "export 100",
             "publish 100",
             "check-conflicts",
-            "migrate migrations/",
+            "team.sh migrate",
+            "--env dev",
+            "compare-schema",
+            "status.<env>.json",
             "backup-db",
             "deploy 100 --env staging",
             "--manual",
@@ -91,6 +96,12 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("AGENTS.project.md", readme)
         self.assertIn(".template-new", readme)
         self.assertIn("python3 /tmp/apex-template/scripts/upgrade_template.py", readme)
+        self.assertIn("2026-09-27_create-customers-r001", readme)
+        migration_guide = contents[ROOT / "docs" / "migration-rules.md"]
+        self.assertIn("other developers' pending files", migration_guide)
+        self.assertIn("status.<env>.json", migration_guide)
+        self.assertIn("STAGING_SCHEMA", migration_guide)
+        self.assertIn("cannot reliably prove", readme)
 
     def test_publish_guide_explains_every_refusal_and_is_linked(self) -> None:
         guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
@@ -106,11 +117,29 @@ class DocumentationContractTests(unittest.TestCase):
         context = (ROOT / "app_context" / "README.md").read_text(encoding="utf-8")
         self.assertIn("app_context/<numeric-app-id>/", context)
         self.assertIn("apps/<schema>/<numeric-app-id>/", context)
-        self.assertIn("migrations/<developer>/", context)
+        self.assertIn("migrations/2026-09-27_create-customers-r001/", context)
         self.assertIn("release.json is not read", context)
         self.assertIn("do not enforce", context)
         self.assertNotIn("app_context/<alias>/", context)
         self.assertNotIn("release builder resolves", context)
+
+    def test_migration_guidance_covers_folder_order_receipts_and_comparison_limits(self) -> None:
+        guide = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
+        for required in (
+            "YYYY-MM-DD_<migration-name>-rNNN",
+            "NNN-<step-name>.sql",
+            "order supplied on the command line",
+            "not discovery of",
+            "STAGING_SCHEMA",
+            "PROD_SCHEMA",
+            "two developers can both pass",
+            "not reliable migration-file attribution",
+            "can mimic a migration",
+            "cannot set the browser's sort direction",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, guide)
+        self.assertNotIn("migrations/<developer>/", guide)
 
     def test_ci_runs_behavioral_unittest_suite(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")

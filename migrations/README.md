@@ -1,18 +1,32 @@
-# Per-developer migrations
+# Migrations
 
-Create one folder per developer under `migrations/`, then add immutable SQL
-files such as `migrations/alice/20260926_101500_add_status.sql`. Use a
-timestamp-prefixed, descriptive filename and do not edit a migration after it
-has been applied to the shared development database.
+Use one dated folder per migration, with one numbered SQL file per step:
 
-Before applying a file, run `scripts/team.sh check-conflicts`. The checker
-compares table, view, sequence, and added-column declarations across developer
-folders. Apply reviewed files with `scripts/team.sh migrate <file>`.
-The SQLcl driver verifies the expected session user and switches the session's
-current schema to the configured `CODE_SCHEMA` before executing the file.
-Migration files may contain SQL statements ending in semicolons and Oracle
-forms that use a standalone slash, including PL/SQL blocks, `CREATE TYPE`,
-`CREATE LIBRARY`, `CREATE JAVA`, and `CREATE MLE MODULE`. SQLcl client
-commands such as
-`SET DEFINE`, `PROMPT`, and `WHENEVER` are rejected before SQLcl connects;
-the driver controls substitution and transaction completion.
+```text
+migrations/2026-09-27_create-customers-r001/
+├── 001-create-table.sql
+├── 002-create-index.sql
+├── checks.json
+└── status.dev.json  # created only after a verified DEV apply
+```
+
+Folder names use `YYYY-MM-DD_<migration-name>-rNNN`; they contain no developer
+name. The creation date sorts lexically newest first when the folder view is
+sorted descending, but it cannot set the view's sort direction. Files execute
+by ascending sequence. Multiple selected folders execute in the explicit
+command-line order.
+
+Run `scripts/team.sh check-conflicts <folder> --env dev` for read-only live
+preflight or add `--local` for selected-batch analysis without a connection.
+Apply with `scripts/team.sh migrate <folder> --env dev|staging|prod`. Checks see
+the selected local files and live target state; they cannot discover pending
+migrations in another independent repository, and concurrent changes can race
+preflight. Each migration requires read-only `checks.json` conditions. Keep
+SQL and checks immutable after any apply attempt; put a correction in the next
+revision. Environment status JSON is written only after a successful apply and
+fresh verification. See [the migration guide](../docs/migration-rules.md) for
+the full contract, target configuration, comparison, and recovery limits.
+
+Migration SQL runs with SQLcl substitution disabled. SQLcl client commands
+such as `SET`, `PROMPT`, `HOST`, `WHENEVER`, `SPOOL`, and `CONNECT` are rejected
+before SQLcl connects.

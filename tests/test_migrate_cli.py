@@ -1,171 +1,358 @@
-import os
-import shutil
-import subprocess
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+
+from scripts.db_targets import Target
+from scripts.migrate import MigrationApplyError, apply_batch, apply_folder, main
+from scripts.migration_checks import CheckReport, analyze_batch
+from scripts.migration_manifest import load_batch, validate_receipt
+from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def now_text():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+class FakeDatabase:
+    def __init__(self, target):
+        self.target = target
+        self.objects = {}
+        self.calls = []
+        self.fail_file = None
+        self.mutate_source_during_apply = None
+        self.source_file_to_mutate = None
+        self.change_identity_after_apply = False
+
+    def identity(self):
+        environment = self.target.environment
+        return {
+            "session_user": self.target.expected_user,
+            "current_schema": self.target.schema,
+            "db_name": f"{environment.upper()}DB",
+            "db_unique_name": f"{environment.upper()}DB_UNIQUE",
+            "service_name": f"{environment}.service",
+            "container_id": "3",
+            "container_name": "APP_PDB",
+            "edition": "ORA$BASE",
+            "database_version": "19.0",
+        }
+
+    def _inventory(self):
+        identity = self.identity()
+        rows = {}
+        for (name, object_type), details in self.objects.items():
+            rows[ObjectKey(self.target.schema, name, object_type)] = {
+                "owner": self.target.schema,
+                "name": name,
+                "type": object_type,
+                "status": details.get("status", "VALID"),
+                "last_ddl_time": "2026-09-28T10:00:00",
+            }
+        return SchemaInventory(
+            identity,
+            rows,
+            {"ownerComplete": True, "path": "OWNER_SESSION", "catalogs": ["ALL_OBJECTS", "ALL_TABLES", "ALL_TAB_COLUMNS", "ALL_VIEWS", "ALL_SEQUENCES", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS", "ALL_INDEXES", "ALL_IND_COLUMNS", "ALL_TRIGGERS"]},
+            now_text(),
+            now_text(),
+        )
+
+    def capture_inventory(self, target, _run_dir):
+        self.calls.append(("inventory", target.environment))
+        return self._inventory()
+
+    def capture_snapshot(self, target, inventory, keys, _run_dir):
+        self.calls.append(("snapshot", target.environment, tuple(keys)))
+        definitions = {}
+        for name, object_type in keys:
+            details = self.objects.get((name, object_type))
+            if details is None:
+                continue
+            key = ObjectKey(target.schema, name, object_type)
+            attrs = {}
+            if object_type == "TABLE":
+                attrs["columns"] = [{"name": column, "data_type": "NUMBER", "nullable": "Y", "column_id": index} for index, column in enumerate(sorted(details.get("columns", set())), start=1)]
+            definitions[key] = ObjectDefinition(key, attrs, details.get("ddl", f"CREATE {object_type} {target.schema}.{name}"), (), details.get("status", "VALID") == "VALID")
+        return SchemaSnapshot(inventory.identity, inventory.objects, definitions, inventory.coverage, inventory.started_at, inventory.completed_at)
+
+    def run_checks(self, target, checks, run_dir, *, phase):
+        self.calls.append(("checks", target.environment, phase, tuple(check.id for check in checks)))
+        results = tuple({"id": check.id, "row_count": 1, "column_count": 1, "numeric": True, "value": 1, "passed": True} for check in checks)
+        return CheckReport(True, True, results, (), {"phase": phase, "complete": True})
+
+    def apply_folder(self, migration, target, run_dir):
+        self.calls.append(("apply", migration.folder.name, tuple(file.name for file in migration.files)))
+        operations = analyze_batch((migration,), target.schema)
+        operations_by_file = {}
+        for operation in operations:
+            operations_by_file.setdefault(operation["file"], []).append(operation)
+        executed = []
+        for file in migration.files:
+            self.calls.append(("sql-file", file.name))
+            executed.append(file.name)
+            for operation in operations_by_file.get(file.name, ()):
+                kind = operation["kind"]
+                name = operation.get("name")
+                if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE", "CREATE_INDEX"}:
+                    self.objects[(name, operation["object_type"])] = {
+                        "columns": set(operation.get("columns", ())),
+                        "status": "VALID",
+                        "ddl": file.source.decode("utf-8").strip(),
+                    }
+                elif kind == "ALTER_ADD_COLUMN":
+                    self.objects[(operation["table"], "TABLE")]["columns"].update(operation["columns"])
+            if file.name == self.fail_file:
+                raise MigrationApplyError(f"simulated apply failure after {file.name}")
+            if self.mutate_source_during_apply == file.name:
+                self.source_file_to_mutate.write_text("CREATE TABLE CHANGED_AFTER_FREEZE (ID NUMBER);\n", encoding="utf-8")
+        identity = self.identity()
+        if self.change_identity_after_apply:
+            identity["db_unique_name"] = "OTHERDB_UNIQUE"
+        return {
+            "committed": True,
+            "applyStartedAt": now_text(),
+            "applyCompletedAt": now_text(),
+            "identity": identity,
+            "payloadDigest": migration.payload_digest,
+            "executed_files": executed,
+        }
+
+
 class MigrateCliTests(unittest.TestCase):
-    def make_checkout(self, root: Path) -> tuple[Path, Path, Path]:
-        scripts = root / "scripts"
-        scripts.mkdir()
-        for name in (
-            "migrate.sh",
-            "migrate.sql",
-            "validate_migration.py",
-            "check_conflicts.py",
-            "load_env.sh",
-            "check_db_target.sh",
-            "sqlcl_safe.sh",
-            "verify_db_access.sql",
-        ):
-            source = ROOT / "scripts" / name
-            if source.exists():
-                shutil.copy2(source, scripts / name)
-        shutil.copy2(ROOT / ".env.example", root / ".env")
-        migrations = root / "migrations"
-        migrations.mkdir()
-        fake_bin = root / "bin"
-        fake_bin.mkdir()
-        sql_log = root / "sql-called"
-        fake_sql = fake_bin / "sql"
-        fake_sql.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf '%s\\n' \"$@\" >> \"$FAKE_SQL_LOG\"\n"
-            "for arg in \"$@\"; do\n"
-            "  case \"$arg\" in @*) cat \"${arg#@}\" > \"$FAKE_DRIVER_LOG\" ;; esac\n"
-            "done\n"
-            "printf '%s\\n' MIGRATION_SCRIPT_COMPLETED\n",
-            encoding="utf-8",
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        (self.root / "migrations").mkdir()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def add_folder(self, name, files, *, preconditions=(), postconditions=None):
+        folder = self.root / "migrations" / name
+        folder.mkdir()
+        for filename, content in files.items():
+            (folder / filename).write_text(content, encoding="utf-8", newline="\n")
+        checks = {
+            "schemaVersion": 1,
+            "preconditions": list(preconditions),
+            "postconditions": list(postconditions or [{"id": "after-change", "sql": "SELECT 1 FROM dual", "expected": 1}]),
+        }
+        (folder / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8")
+        return folder
+
+    def load(self, *names):
+        return load_batch(self.root, [f"migrations/{name}" for name in names])
+
+    def target(self, environment="dev"):
+        return Target(environment, f"{environment}-profile", f"LOGIN_{environment.upper()}", f"APP_{environment.upper()}", {"dev": "development", "staging": "staging", "prod": "production"}[environment])
+
+    def apply(self, migrations, target=None, *, confirm=None, fake=None, **overrides):
+        target = target or self.target()
+        fake = fake or FakeDatabase(target)
+        result = apply_batch(
+            self.root,
+            migrations,
+            target,
+            confirm or (lambda _prompt: True),
+            capture_inventory_fn=fake.capture_inventory,
+            capture_snapshot_fn=fake.capture_snapshot,
+            run_checks_fn=fake.run_checks,
+            apply_folder_fn=fake.apply_folder,
+            **overrides,
         )
-        fake_sql.chmod(0o755)
-        return scripts / "migrate.sh", migrations, sql_log
+        return result, fake
 
-    def run_migrate(self, script: Path, migration: Path, sql_log: Path) -> subprocess.CompletedProcess[str]:
-        environment = os.environ.copy()
-        environment["PATH"] = f"{sql_log.parent / 'bin'}{os.pathsep}{environment['PATH']}"
-        environment["FAKE_SQL_LOG"] = str(sql_log)
-        environment["FAKE_DRIVER_LOG"] = str(sql_log.with_suffix(".driver.sql"))
-        return subprocess.run(
-            ["bash", str(script), str(migration.relative_to(script.parents[1]))],
-            cwd=script.parents[1],
-            env=environment,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+    def test_apply_freezes_order_verifies_and_writes_receipt(self):
+        folder = self.add_folder("2026-09-28_create-orders-r001", {
+            "001-create-table.sql": "CREATE TABLE ORDERS (ID NUMBER);\n",
+            "002-add-status.sql": "ALTER TABLE ORDERS ADD STATUS VARCHAR2(20);\n",
+        })
+        migration = self.load(folder.name)
 
-    def test_conflict_checker_blocks_before_sqlcl(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            script, migrations, sql_log = self.make_checkout(Path(temporary))
-            alice = migrations / "alice"
-            bob = migrations / "bob"
-            alice.mkdir()
-            bob.mkdir()
-            first = alice / "one.sql"
-            second = bob / "two.sql"
-            first.write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
-            second.write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
+        result, fake = self.apply(migration)
 
-            result = self.run_migrate(script, first, sql_log)
+        self.assertEqual(result, 0)
+        self.assertEqual([call[1] for call in fake.calls if call[0] == "sql-file"], ["001-create-table.sql", "002-add-status.sql"])
+        receipt = validate_receipt(folder / "status.dev.json", migration[0], {
+            "environment": "dev", "connection": "dev-profile", "expected_user": "LOGIN_DEV", **fake.identity(),
+        })
+        self.assertEqual(receipt["state"], "verified")
+        self.assertEqual([item["kind"] for item in receipt["checks"] if item.get("kind")], ["catalog", "catalog"])
+        self.assertNotIn("developer", json.dumps(receipt).casefold())
+        self.assertNotIn("password", json.dumps(receipt).casefold())
 
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("TABLE ORDERS", result.stdout)
-            self.assertFalse(sql_log.exists(), "SQLcl must not run after a conflict")
+    def test_stage_and_prod_require_exact_confirmation_and_decline_performs_no_apply(self):
+        for environment in ("staging", "prod"):
+            with self.subTest(environment=environment):
+                folder = self.add_folder(f"2026-09-28_create-{environment}-r001", {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"})
+                migration = self.load(folder.name)
+                target = self.target(environment)
+                prompts = []
+                result, fake = self.apply(migration, target, confirm=lambda prompt: prompts.append(prompt) or False)
+                self.assertEqual(result, 1)
+                self.assertEqual(prompts, [f"Migrating to {environment.upper()}. Proceed? [y/N]"])
+                self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+                self.assertFalse((folder / f"status.{environment}.json").exists())
 
-    def test_clean_migration_uses_configured_sqlcl_connection(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            script, migrations, sql_log = self.make_checkout(Path(temporary))
-            alice = migrations / "alice"
-            alice.mkdir()
-            migration = alice / "20260926_create_orders.sql"
-            migration.write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
+    def test_second_file_failure_stops_third_and_later_folder_without_receipt(self):
+        first = self.add_folder("2026-09-28_create-first-r001", {
+            "001-create-a.sql": "CREATE TABLE A (ID NUMBER);\n",
+            "002-fail.sql": "CREATE TABLE B (ID NUMBER);\n",
+            "003-create-c.sql": "CREATE TABLE C (ID NUMBER);\n",
+        })
+        later = self.add_folder("2026-09-28_create-later-r001", {"001-create-d.sql": "CREATE TABLE D (ID NUMBER);\n"})
+        migrations = self.load(first.name, later.name)
+        fake = FakeDatabase(self.target())
+        fake.fail_file = "002-fail.sql"
 
-            result = self.run_migrate(script, migration, sql_log)
+        result, fake = self.apply(migrations, fake=fake)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = sql_log.read_text(encoding="utf-8").splitlines()
-            self.assertIn("-name", args)
-            self.assertIn("docker-demo", args)
-            driver = sql_log.with_suffix(".driver.sql").read_text(encoding="utf-8")
-            self.assertIn("@@../../scripts/migrate.sql DEMO development DEMO", driver)
-            self.assertIn("SET DEFINE OFF", driver)
-            self.assertIn("@@../../migrations/alice/20260926_create_orders.sql", driver)
-            self.assertLess(driver.index("SET DEFINE OFF"), driver.index("@@../../migrations/"))
+        self.assertEqual(result, 2)
+        executed = [call[1] for call in fake.calls if call[0] == "sql-file"]
+        self.assertEqual(executed, ["001-create-a.sql", "002-fail.sql"])
+        self.assertFalse((first / "status.dev.json").exists())
+        self.assertFalse((later / "status.dev.json").exists())
+        manifests = list((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        self.assertEqual(len(manifests), 1)
+        run = json.loads(manifests[0].read_text(encoding="utf-8"))
+        self.assertTrue(run["migrations"][0]["writeAttempted"])
 
-    def test_migration_driver_selects_configured_target_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            script, migrations, sql_log = self.make_checkout(Path(temporary))
-            env_path = script.parents[1] / ".env"
-            env_text = env_path.read_text(encoding="utf-8")
-            env_text = env_text.replace("CODE_SCHEMA=DEMO", "CODE_SCHEMA=APP_CODE")
-            env_text = env_text.replace("CODE_EXPECTED_USER=DEMO", "CODE_EXPECTED_USER=MIGRATION_USER")
-            env_path.write_text(env_text, encoding="utf-8")
-            developer = migrations / "alice"
-            developer.mkdir()
-            migration = developer / "20260926_create_orders.sql"
-            migration.write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
+    def test_failed_attempt_without_receipt_blocks_automatic_replay(self):
+        folder = self.add_folder("2026-09-28_create-replay-r001", {"001-create-a.sql": "CREATE TABLE A (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        fake.fail_file = "001-create-a.sql"
+        failed, _ = self.apply(migrations, fake=fake)
+        self.assertEqual(failed, 2)
+        fake.fail_file = None
+        apply_count = len([call for call in fake.calls if call[0] == "apply"])
 
-            result = self.run_migrate(script, migration, sql_log)
+        retry, fake = self.apply(migrations, fake=fake)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            generated = sql_log.with_suffix(".driver.sql").read_text(encoding="utf-8")
-            self.assertIn("@@../../scripts/migrate.sql APP_CODE development MIGRATION_USER", generated)
-            driver = (script.parent / "migrate.sql").read_text(encoding="utf-8")
-            set_schema = "ALTER SESSION SET CURRENT_SCHEMA = &&target_schema"
-            self.assertIn(set_schema, driver)
-            self.assertLess(driver.index("@@verify_db_access.sql"), driver.index(set_schema))
-            self.assertNotIn("@@&&migration_file", driver)
+        self.assertEqual(retry, 2)
+        self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
+        self.assertFalse((folder / "status.dev.json").exists())
 
-    def test_migration_failure_rolls_back_and_success_commits(self) -> None:
-        driver = (ROOT / "scripts" / "migrate.sql").read_text(encoding="utf-8")
-        self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", driver)
-        self.assertIn("WHENEVER OSERROR EXIT FAILURE ROLLBACK", driver)
-        with tempfile.TemporaryDirectory() as temporary:
-            script, migrations, sql_log = self.make_checkout(Path(temporary))
-            developer = migrations / "alice"
-            developer.mkdir()
-            migration = developer / "20260926_ampersand.sql"
-            migration.write_text(
-                "CREATE TABLE RESEARCH_DEVELOPMENT (NAME VARCHAR2(40) DEFAULT 'Research & Development');\n",
-                encoding="utf-8",
-            )
+    def test_matching_receipt_blocks_replay(self):
+        folder = self.add_folder("2026-09-28_create-once-r001", {"001-create-once.sql": "CREATE TABLE ONCE_T (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        first, fake = self.apply(migrations)
+        self.assertEqual(first, 0)
+        apply_count = len([call for call in fake.calls if call[0] == "apply"])
 
-            result = self.run_migrate(script, migration, sql_log)
+        second, fake = self.apply(migrations, fake=fake)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            generated = sql_log.with_suffix(".driver.sql").read_text(encoding="utf-8")
-            self.assertIn("EXIT SUCCESS COMMIT", generated)
-            self.assertLess(generated.index("SET DEFINE OFF"), generated.index("ampersand.sql"))
+        self.assertEqual(second, 2)
+        self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
 
-    def test_sqlcl_client_directives_are_rejected_before_sqlcl(self) -> None:
-        for body in (
-            "SET DEFINE ON\n",
-            "CREATE TABLE ORDERS (ID NUMBER);\nPROMPT after DML\n",
-            "WHENEVER SQLERROR CONTINUE\n",
-            "HOST echo unexpected\n",
-            "@@UPDATE.sql\nSELECT 1 FROM dual;\n",
-            "/* outer /* inner */\nPROMPT client directive\n/* close */ -- */\nSELECT 1 FROM dual;\n",
-            "BEGIN\nNULL;\nEND;\n.\nPROMPT client directive\n/\n",
-            'CREATE JAVA SOURCE NAMED "Test" AS\npublic class Test {}\n;\nPROMPT client directive\n/\n',
-            'CREATE JAVA SOURCE NAMED "Test" AS\npublic class Test {\n/*\n;\n*/\n}\nPROMPT client directive\n/\n',
-        ):
-            with self.subTest(body=body), tempfile.TemporaryDirectory() as temporary:
-                script, migrations, sql_log = self.make_checkout(Path(temporary))
-                developer = migrations / "alice"
-                developer.mkdir()
-                migration = developer / "unsafe.sql"
-                migration.write_text(body, encoding="utf-8")
+    def test_source_mutation_after_review_blocks_first_write(self):
+        folder = self.add_folder("2026-09-28_create-frozen-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migration = self.load(folder.name)
+        target = self.target("staging")
 
-                result = self.run_migrate(script, migration, sql_log)
+        def change_source(_prompt):
+            (folder / "001-create-t.sql").write_text("CREATE TABLE OTHER_T (ID NUMBER);\n", encoding="utf-8")
+            return True
 
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("SQL-only migration", result.stderr)
-                self.assertFalse(sql_log.exists(), "SQLcl must not run for client directives")
+        result, fake = self.apply(migration, target, confirm=change_source)
+
+        self.assertEqual(result, 2)
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+        self.assertFalse((folder / "status.staging.json").exists())
+
+    def test_source_mutation_during_apply_does_not_change_frozen_payload_or_receipt_digest(self):
+        folder = self.add_folder("2026-09-28_create-frozen-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migration = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        fake.mutate_source_during_apply = "001-create-t.sql"
+        fake.source_file_to_mutate = folder / "001-create-t.sql"
+
+        result, fake = self.apply(migration, fake=fake)
+
+        self.assertEqual(result, 2)
+        self.assertEqual((folder / "001-create-t.sql").read_text(encoding="utf-8"), "CREATE TABLE CHANGED_AFTER_FREEZE (ID NUMBER);\n")
+        self.assertFalse((folder / "status.dev.json").exists())
+        manifests = list((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        run = json.loads(manifests[0].read_text(encoding="utf-8"))
+        self.assertEqual(run["migrations"][0]["payloadDigest"], migration[0].payload_digest)
+
+    def test_changed_observed_target_after_commit_prevents_receipt(self):
+        folder = self.add_folder("2026-09-28_create-target-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migration = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        fake.change_identity_after_apply = True
+
+        result, _ = self.apply(migration, fake=fake)
+
+        self.assertEqual(result, 2)
+        self.assertFalse((folder / "status.dev.json").exists())
+
+    def test_receipt_install_failure_retains_attempt_and_blocks_retry(self):
+        folder = self.add_folder("2026-09-28_create-receipt-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migration = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+
+        def fail_receipt(_path, _receipt):
+            raise OSError("simulated disk failure")
+
+        result, fake = self.apply(migration, fake=fake, receipt_installer=fail_receipt)
+        self.assertEqual(result, 2)
+        self.assertFalse((folder / "status.dev.json").exists())
+        apply_count = len([call for call in fake.calls if call[0] == "apply"])
+
+        retry, fake = self.apply(migration, fake=fake)
+        self.assertEqual(retry, 2)
+        self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
+
+    def test_migrate_cli_requires_one_environment_and_rejects_missing_schema_without_fallback(self):
+        folder = self.add_folder("2026-09-28_create-cli-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SQLCL_CONNECTION": "dev-profile", "CODE_EXPECTED_USER": "APP_DEV", "CODE_SCHEMA": "APP_DEV",
+            "STAGING_SQLCL_CONNECTION": "stage-profile", "STAGING_EXPECTED_USER": "LOGIN_STAGE",
+        }
+        code = main([f"migrations/{folder.name}", "--env", "staging"], environ=values, repo_root=self.root, confirm=lambda _prompt: False)
+        self.assertEqual(code, 2)
+
+    def test_sql_apply_driver_uses_migration_guard_define_off_and_commit(self):
+        folder = self.add_folder("2026-09-28_create-driver-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migration = self.load(folder.name)[0]
+        staged_dir = self.root / "scratch" / "manual-driver"
+        staged_dir.mkdir(parents=True)
+        payload = staged_dir / "payload" / migration.folder.name
+        payload.mkdir(parents=True)
+        for file in migration.files:
+            path = payload / file.name
+            path.write_bytes(file.source)
+            path.chmod(0o600)
+        from dataclasses import replace
+        staged_files = tuple(replace(file, path=payload / file.name) for file in migration.files)
+        staged = replace(migration, folder=payload, files=staged_files)
+        run_dir = staged_dir / "apply"
+
+        # Inspect the generated driver without opening SQLcl by replacing its transport.
+        from unittest.mock import patch
+        from scripts.sqlcl_session import SqlclResult
+        fake_identity = json.dumps({
+            "session_user": "LOGIN_DEV", "current_schema": "APP_DEV", "db_name": "DEVDB",
+            "db_unique_name": "DEVDB_UNIQUE", "service_name": "dev.service", "container_id": "3",
+            "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "19.0",
+        })
+        def fake_sqlcl(_target, driver, working):
+            content = driver.read_text(encoding="utf-8")
+            self.assertIn("@@verify_migration_access.sql", (working / "migrate.sql").read_text(encoding="utf-8"))
+            self.assertIn("SET DEFINE OFF", content)
+            self.assertIn("@@../payload/2026-09-28_create-driver-r001/001-create-t.sql", content)
+            self.assertIn("EXIT SUCCESS COMMIT", content)
+            output = f"MIGRATION_IDENTITY_BEGIN\n{fake_identity}\nMIGRATION_IDENTITY_END\nMIGRATION_IDENTITY_VERIFIED\nMIGRATION_APPLY_COMPLETED\n"
+            return SqlclResult(0, output, working)
+        with patch("scripts.migrate.run_sqlcl", side_effect=fake_sqlcl):
+            evidence = apply_folder(staged, self.target(), run_dir)
+        self.assertTrue(evidence["committed"])
 
 
 if __name__ == "__main__":

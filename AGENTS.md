@@ -55,15 +55,22 @@ state.
   user explicitly directs an override after review. When publish refuses,
   follow [docs/publish-rules.md](docs/publish-rules.md), which lists every
   refusal, its meaning, and the fix.
-- **Migrations:** Add immutable files under `migrations/<developer>/`, run
-  `scripts/team.sh check-conflicts`, then apply selected files with
-  `scripts/team.sh migrate migrations/<developer>/<file>.sql`. A migration
-  changes the shared DEV schema for everyone. The checker reports duplicate
-  table, view, sequence, and added-column declarations across developer
-  folders; it does not replace SQL review. Migration files may contain SQL
-  statements and Oracle forms that use a standalone slash, such as PL/SQL
-  blocks, `CREATE TYPE`, `CREATE LIBRARY`, and `CREATE MLE MODULE`; SQLcl
-  client commands are rejected before connecting.
+- **Migrations:** Put each migration in
+  `migrations/YYYY-MM-DD_<name>-rNNN/` with consecutive named SQL steps such as
+  `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
+  path. Keep source immutable after a write attempt; a follow-up uses the next
+  revision folder. Run `scripts/team.sh check-conflicts <folder> --env dev`
+  before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
+  Checks cover only selected local migrations and observed live state; they
+  cannot see another independent repository's pending files. Staging and
+  production migrations require `STAGING_SCHEMA` or `PROD_SCHEMA` in addition
+  to the existing connection and expected-user settings. Receipts are written
+  only after a verified apply. See [docs/migration-rules.md](docs/migration-rules.md)
+  for naming, ordering, recovery, and detection limits.
+- **Schema comparison:** Use `scripts/team.sh compare-schema --env staging
+  --object CUSTOMERS` or `--from dev --to prod --pattern 'HR_*'` to compare
+  selected live objects. This reports schema drift; local receipts cannot
+  reliably attribute a shape to one migration file.
 - **Promotion:** Put an explicit deployment descriptor in the application
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
   each direct import requires the displayed `[y/N]` confirmation. Add
@@ -105,4 +112,5 @@ state.
   the check as unknown or unavailable rather than passed.
 
 See [README.md](README.md) for setup and command examples, and
-[migrations/README.md](migrations/README.md) for the migration file contract.
+[migrations/README.md](migrations/README.md) and
+[docs/migration-rules.md](docs/migration-rules.md) for the migration contract.

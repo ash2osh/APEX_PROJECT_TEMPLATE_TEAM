@@ -18,6 +18,7 @@
     "app_context/README.md",
     "apps/templates/**",
     "docs/CHROME_DEVTOOLS_MCP.md",
+    "docs/migration-rules.md",
     "docs/publish-rules.md",
     "migrations/README.md",
     "pyproject.toml",

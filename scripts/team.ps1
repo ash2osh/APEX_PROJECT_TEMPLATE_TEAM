@@ -14,8 +14,13 @@ Commands:
   doctor                                      Validate .env and the DEV SQLcl identity
   export <app_id>                             Export one numeric APEX app from DEV
   publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
-  check-conflicts                             Check migrations across developers
-  migrate <migration.sql> [...]               Check conflicts, then apply migration(s)
+  check-conflicts <folder> [...] (--env <env>|--local)
+                                              Preflight selected migrations against local/live scope
+  migrate <folder> [...] --env dev|staging|prod
+                                              Preflight, then apply selected migration folders
+  compare-schema [--from <env>] (--to <env>|--env <env>)
+                (--object <name>|--pattern <glob>) [...] [--format text|json]
+                                              Compare selected live schema objects read-only
   backup-db                                   Refresh the table and code mirrors
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
@@ -90,16 +95,16 @@ switch ($Command) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   }
   "check-conflicts" {
-    if ($Arguments.Count -ne 0) { throw "check-conflicts does not accept arguments" }
-    $python = Get-Command python3 -ErrorAction SilentlyContinue
-    if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-    if ($null -eq $python) { throw "Python 3 is required to check migration conflicts" }
-    & $python.Source (Join-Path $PSScriptRoot "check_conflicts.py")
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)" }
+    Invoke-TeamBash -ScriptName "check_conflicts.sh" -ScriptArguments $Arguments
   }
   "migrate" {
-    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 migrate <migrations/<developer>/<file>.sql> [...]" }
+    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod" }
     Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments $Arguments
+  }
+  "compare-schema" {
+    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }
+    Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments $Arguments
   }
   "backup-db" {
     if ($Arguments.Count -ne 0) { throw "backup-db does not accept arguments" }

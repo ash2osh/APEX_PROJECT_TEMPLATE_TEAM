@@ -33,7 +33,7 @@ HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 PROTECTED_SAMPLES = (
     "apps/DEMO/100/application.apx",
     "database/DEMO/tables/T.sql",
-    "migrations/alice/20260926_add.sql",
+    "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
     "app_context/100/purpose.md",
     ".env",
     LOCK_NAME,

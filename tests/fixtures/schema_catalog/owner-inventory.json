@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "inventory",
+  "complete": true,
+  "coverage": {
+    "ownerComplete": true,
+    "path": "OWNER_SESSION",
+    "catalogs": ["ALL_OBJECTS", "ALL_TABLES", "ALL_TAB_COLUMNS", "ALL_TAB_COLS", "ALL_TAB_IDENTITY_COLS", "ALL_VIEWS", "ALL_SEQUENCES", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS", "ALL_INDEXES", "ALL_IND_COLUMNS", "ALL_TRIGGERS"],
+    "unsupported": []
+  },
+  "identity": {
+    "session_user": "APP_DEV",
+    "current_schema": "APP_DEV",
+    "db_name": "DEVDB",
+    "db_unique_name": "DEVDB1",
+    "service_name": "dev-alias-a",
+    "container_id": "3",
+    "container_name": "APP_PDB",
+    "edition": "ORA$BASE",
+    "database_version": "19.24.0.0.0"
+  },
+  "started_at": "2026-09-28T10:00:00Z",
+  "completed_at": "2026-09-28T10:00:02Z",
+  "objects": [
+    {"owner": "APP_DEV", "name": "CUSTOMERS", "type": "TABLE", "status": "VALID", "last_ddl_time": "2026-09-27T12:00:00Z"},
+    {"owner": "APP_DEV", "name": "CUSTOMER_API", "type": "PACKAGE", "status": "VALID", "last_ddl_time": "2026-09-27T12:00:00Z"},
+    {"owner": "APP_DEV", "name": "CUSTOMER_API", "type": "PACKAGE BODY", "status": "VALID", "last_ddl_time": "2026-09-27T12:00:00Z"}
+  ]
+}

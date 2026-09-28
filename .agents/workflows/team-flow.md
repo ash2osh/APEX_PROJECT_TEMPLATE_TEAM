@@ -17,14 +17,20 @@ commits. Git branches do not isolate shared Builder or database state.
    version; the guard compares the live version to catch a teammate's
    import. Commit the stamped `application.apx` afterwards. When publish
    refuses, follow `docs/publish-rules.md`.
-3. **Schema work:** Add immutable SQL files under
-   `migrations/<developer>/`, run `scripts/team.sh check-conflicts`, then
-   apply selected files with `scripts/team.sh migrate <file>`. This changes
-   the shared DEV schema.
+3. **Schema work:** Add `NNN-<step-name>.sql` files and `checks.json` under
+   `migrations/YYYY-MM-DD_<name>-rNNN/`. Run
+   `scripts/team.sh check-conflicts <folder> --env dev`, then
+   `scripts/team.sh migrate <folder> --env dev` (or explicitly select staging
+   or production). Preflight sees only selected local files and the live
+   catalog; independent repositories' pending files are not visible. Follow
+   [docs/migration-rules.md](../../docs/migration-rules.md) for immutable
+   revisions and recovery.
 4. **Promotion:** Configure explicit workspace/app/schema descriptors and
    use `scripts/team.sh deploy <numeric-app-id> --env staging|prod`. The
    direct route asks for interactive confirmation. `--manual` prints a DBA
-   runbook without connecting.
+   runbook without connecting. Compare selected live schema objects with
+   `scripts/team.sh compare-schema --env staging --pattern 'HR_*'`; this
+   reports drift and does not prove migration-file attribution.
 
 Use `scripts/team.sh doctor` for the read-only connection and database
 identity check. Never invent live database or team coordination evidence.
