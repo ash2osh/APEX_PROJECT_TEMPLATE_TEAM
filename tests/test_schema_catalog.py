@@ -298,7 +298,7 @@ class SqlclTransportTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
 
     def test_transport_rejects_nonzero_or_oracle_error_with_saved_diagnostics(self) -> None:
-        for behavior in ("ora", "nonzero"):
+        for behavior, expected_error in (("ora", "database or client error"), ("nonzero", "exited with status 3")):
             with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 fake_bin = root / "bin"
@@ -308,12 +308,15 @@ class SqlclTransportTests(unittest.TestCase):
                 driver.parent.mkdir()
                 driver.write_text("EXIT SUCCESS ROLLBACK\n", encoding="utf-8")
                 environment = os.environ.copy()
-                environment.update({"PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}"})
+                record = root / "record.json"
+                environment.update({"PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}", "FAKE_RECORD": str(record)})
 
                 with self.assertRaises(SqlclError) as caught:
                     run_sqlcl(target(), driver, driver.parent, environment=environment)
 
+                self.assertTrue(record.exists())
                 self.assertTrue((driver.parent / "sqlcl-output.log").exists())
+                self.assertIn(expected_error, str(caught.exception))
                 self.assertIn("sqlcl-output.log", str(caught.exception))
 
     def test_timeout_retains_output_and_returns_stable_error(self) -> None:
@@ -326,10 +329,10 @@ class SqlclTransportTests(unittest.TestCase):
             driver.parent.mkdir()
             driver.write_text("EXIT SUCCESS ROLLBACK\n", encoding="utf-8")
             environment = os.environ.copy()
-            environment.update({"PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}"})
+            environment.update({"PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}", "FAKE_RECORD": str(root / "record.json")})
 
             with self.assertRaisesRegex(SqlclError, "timed out"):
-                run_sqlcl(target(), driver, driver.parent, environment=environment, timeout_seconds=0.05)
+                run_sqlcl(target(), driver, driver.parent, environment=environment, timeout_seconds=0.5)
 
             self.assertTrue((driver.parent / "sqlcl-output.log").exists())
 
