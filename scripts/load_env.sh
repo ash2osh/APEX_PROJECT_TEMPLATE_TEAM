@@ -321,6 +321,11 @@ done
 for project_env_key in STAGING_SCHEMA PROD_SCHEMA STAGING_SQLCL_CONNECTION PROD_SQLCL_CONNECTION; do
   if [ "$(project_env_count "${!project_env_key:-}")" -gt 1 ]; then project_env_multi=true; fi
 done
+# The project's one DEV schema (CODE_SCHEMA with exactly one entry), captured
+# before narrowing rewrites it. Only that schema may map to a differently named
+# staging or production schema; the Python resolver applies the same rule.
+project_env_dev_schema=""
+[ "$(project_env_count "$CODE_SCHEMA")" -ne 1 ] || project_env_dev_schema="$CODE_SCHEMA"
 PROJECT_SCHEMAS="$(IFS=,; printf '%s' "${project_env_union[*]}")"
 PROJECT_MULTI_SCHEMA="$project_env_multi"
 export PROJECT_SCHEMAS PROJECT_MULTI_SCHEMA
@@ -338,8 +343,10 @@ project_env_narrow() {
   done
   if [ "$index" -ge 0 ]; then
     export "$schema_key=${schemas[$index]}" "$connection_key=${connections[$index]}" "$user_key=${users[$index]}"
-  elif [ "$mode" = lenient ] && [ "$project_env_multi" != true ] && [ "${#schemas[@]}" -eq 1 ]; then
-    # A single-schema project may name staging or production differently.
+  elif [ "$mode" = lenient ] && [ "$project_env_multi" != true ] && [ "${#schemas[@]}" -eq 1 ] \
+      && [ -n "$project_env_dev_schema" ] && [ "$PROJECT_SCHEMA" = "$project_env_dev_schema" ]; then
+    # A project with one DEV schema may name staging or production differently,
+    # for that schema only.
     :
   else
     export "$schema_key=" "$connection_key=" "$user_key="
@@ -389,6 +396,7 @@ unset project_env_user_value project_env_schema_key project_env_schema_seen
 unset project_env_first_line project_env_oracle_identifier_regex project_env_oracle_prefix_regex
 unset project_env_union project_env_multi project_env_items project_env_item
 unset project_env_known project_env_union_item project_env_selected_known project_env_count_items
+unset project_env_dev_schema
 unset project_env_repo_root
 # project_env_fail and project_env_require_single stay defined for callers that
 # refuse an ambiguous schema; the parsing helpers do not.

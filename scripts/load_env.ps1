@@ -213,6 +213,11 @@ foreach ($projectEnvKey in @("STAGING_SCHEMA", "PROD_SCHEMA", "STAGING_SQLCL_CON
     $projectEnvMulti = $true
   }
 }
+# The project's one DEV schema (CODE_SCHEMA with exactly one entry), captured
+# before narrowing rewrites it. Only that schema may map to a differently named
+# staging or production schema; the Python resolver applies the same rule.
+$projectEnvDevSchema = ""
+if (@(Split-ProjectEnvList $env:CODE_SCHEMA).Count -eq 1) { $projectEnvDevSchema = $env:CODE_SCHEMA }
 $env:PROJECT_SCHEMAS = ($projectEnvUnion -join ",")
 $env:PROJECT_MULTI_SCHEMA = if ($projectEnvMulti) { "true" } else { "false" }
 
@@ -228,8 +233,10 @@ function Set-ProjectEnvNarrow([string]$SchemaKey, [string]$ConnectionKey, [strin
     Set-Item -LiteralPath "Env:$SchemaKey" -Value $schemas[$index]
     Set-Item -LiteralPath "Env:$ConnectionKey" -Value $connections[$index]
     Set-Item -LiteralPath "Env:$UserKey" -Value $users[$index]
-  } elseif ($Mode -eq "lenient" -and -not $projectEnvMulti -and $schemas.Count -eq 1) {
-    # A single-schema project may name staging or production differently.
+  } elseif ($Mode -eq "lenient" -and -not $projectEnvMulti -and $schemas.Count -eq 1 -and
+      $projectEnvDevSchema -ne "" -and $env:PROJECT_SCHEMA -ceq $projectEnvDevSchema) {
+    # A project with one DEV schema may name staging or production differently,
+    # for that schema only.
   } else {
     # An empty value would be removed by Set-Item on some hosts, so set it
     # through the .NET API, which keeps a defined-but-empty variable.
@@ -270,7 +277,7 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvPrefix, projectEnvConnectionKey, projectEnvUserKey, projectEnvSchemaKey,
   projectEnvConnectionSeen, projectEnvUserSeen, projectEnvConnectionValue,
   projectEnvUserValue, projectEnvSchemaSeen, projectEnvSchemaValue,
-  projectEnvRootRelative, projectEnvUnion, projectEnvMulti, projectEnvItems,
+  projectEnvRootRelative, projectEnvUnion, projectEnvMulti, projectEnvDevSchema, projectEnvItems,
   projectEnvItem, projectEnvConnectionCount `
   -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,

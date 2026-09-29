@@ -157,6 +157,24 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("APP_STAGE\n", result.stdout)
 
+    def test_only_the_projects_dev_schema_keeps_a_differently_named_staging_schema(self) -> None:
+        # Split profile: tables live in DATA, code and APEX in DEMO. DATA is a
+        # configured schema but not the project's DEV (CODE) schema, so it must
+        # not map onto the single staging entry.
+        replacements = {
+            "TABLES_SCHEMA=DEMO": "TABLES_SCHEMA=DATA",
+            "TABLES_EXPECTED_USER=DEMO": "TABLES_EXPECTED_USER=DATA",
+        }
+        extra = "\nSTAGING_SQLCL_CONNECTION=stage-db\nSTAGING_EXPECTED_USER=STAGE_DEPLOYER\nSTAGING_SCHEMA=APP_STAGE\n"
+        env_path = write_env(self.directory, replacements, extra)
+        probe = 'printf "[%s][%s][%s]\\n" "$STAGING_SQLCL_CONNECTION" "$STAGING_EXPECTED_USER" "$STAGING_SCHEMA"'
+        dev = load(env_path, probe=probe, project_schema="DEMO")
+        self.assertEqual(0, dev.returncode, dev.stderr)
+        self.assertEqual("[stage-db][STAGE_DEPLOYER][APP_STAGE]\n", dev.stdout)
+        other = load(env_path, probe=probe, project_schema="DATA")
+        self.assertEqual(0, other.returncode, other.stderr)
+        self.assertEqual("[][][]\n", other.stdout)
+
     def test_several_staging_connections_require_a_staging_schema_list(self) -> None:
         extra = "\nSTAGING_SQLCL_CONNECTION=stage-one,stage-two\nSTAGING_EXPECTED_USER=SONE,STWO\n"
         result = load(write_env(self.directory, MULTI, extra))
