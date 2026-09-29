@@ -25,6 +25,7 @@ FOLDER_RE = re.compile(
 )
 SQL_FILE_RE = re.compile(r"(?P<sequence>[0-9]{3})-(?P<name>[a-z][a-z0-9]*(?:-[a-z0-9]+)*)\.sql\Z", re.ASCII)
 CHECK_ID_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z", re.ASCII)
+SCHEMA_DIRECTORY_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 SQL_TOKEN_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9_$#]*|[0-9]+(?:\.[0-9]+)?|.)", re.ASCII | re.DOTALL)
 SAFE_FUNCTIONS = {
     "avg",
@@ -124,6 +125,7 @@ class Migration:
     checks_source: bytes
     checks_sha256: str
     payload_digest: str
+    schema: str | None = None
 
 
 def _decode_json(source: bytes, label: str) -> object:
@@ -278,40 +280,59 @@ def _folder_parts(folder_name: str) -> tuple[str, str, int]:
     return match.group("date"), match.group("family"), revision
 
 
-def _migration_directories(repo_root: Path) -> list[tuple[Path, str, int]]:
+def _migration_directories(repo_root: Path) -> list[tuple[Path, str | None, str, int]]:
     root = repo_root.resolve()
     migrations_dir = root / "migrations"
     if migrations_dir.is_symlink() or not migrations_dir.is_dir():
         raise MigrationManifestError(f"migrations directory does not exist or is unsafe: {migrations_dir}")
-    directories: list[tuple[Path, str, int]] = []
-    for path in sorted(migrations_dir.iterdir(), key=lambda entry: entry.name):
-        if path.is_symlink():
-            raise MigrationManifestError(f"symbolic link is not allowed in migrations/: {path.name}")
-        if path.name == ".gitkeep" and path.is_file():
-            continue
-        if not path.is_dir():
-            if path.suffix.lower() == ".sql":
-                raise MigrationManifestError("root-level SQL is not supported; put SQL in a dated migration folder")
-            continue
+    directories: list[tuple[Path, str | None, str, int]] = []
+
+    def add_dated(path: Path, schema: str | None) -> None:
         if FOLDER_RE.fullmatch(path.name) is None:
             raise MigrationManifestError(
                 f"legacy or invalid migration directory '{path.name}'; convert it to YYYY-MM-DD_<name>-rNNN"
             )
         _, family, revision = _folder_parts(path.name)
-        directories.append((path, family, revision))
+        directories.append((path, schema, family, revision))
 
-    seen: dict[tuple[str, int], Path] = {}
-    revisions: dict[str, set[int]] = {}
-    for path, family, revision in directories:
-        identity = (family, revision)
+    def skip_entry(path: Path, label: str) -> bool:
+        if path.is_symlink():
+            raise MigrationManifestError(f"symbolic link is not allowed in {label}: {path.name}")
+        if path.name == ".gitkeep" and path.is_file():
+            return True
+        if not path.is_dir():
+            if path.suffix.lower() == ".sql":
+                raise MigrationManifestError("root-level SQL is not supported; put SQL in a dated migration folder")
+            return True
+        return False
+
+    for path in sorted(migrations_dir.iterdir(), key=lambda entry: entry.name):
+        if skip_entry(path, "migrations/"):
+            continue
+        if FOLDER_RE.fullmatch(path.name) is not None:
+            add_dated(path, None)
+            continue
+        if SCHEMA_DIRECTORY_RE.fullmatch(path.name) is None:
+            raise MigrationManifestError(
+                f"legacy or invalid migration directory '{path.name}'; convert it to YYYY-MM-DD_<name>-rNNN"
+            )
+        for child in sorted(path.iterdir(), key=lambda entry: entry.name):
+            if skip_entry(child, f"migrations/{path.name}/"):
+                continue
+            add_dated(child, path.name)
+
+    seen: dict[tuple[str | None, str, int], Path] = {}
+    revisions: dict[tuple[str | None, str], set[int]] = {}
+    for path, schema, family, revision in directories:
+        identity = (schema, family, revision)
         if identity in seen:
             raise MigrationManifestError(
                 f"duplicate local migration identity {family}-r{revision:03d}: "
                 f"{seen[identity].name} and {path.name}"
             )
         seen[identity] = path
-        revisions.setdefault(family, set()).add(revision)
-    for family, values in revisions.items():
+        revisions.setdefault((schema, family), set()).add(revision)
+    for (schema, family), values in revisions.items():
         expected = set(range(1, max(values) + 1))
         if values != expected:
             raise MigrationManifestError(f"migration family {family} has a revision gap; revisions start at r001")
@@ -321,15 +342,21 @@ def _migration_directories(repo_root: Path) -> list[tuple[Path, str, int]]:
 def list_migration_folders(repo_root: Path) -> tuple[Path, ...]:
     """List valid migration folders newest first by descending folder name."""
     directories = _migration_directories(repo_root)
-    return tuple(sorted((path for path, _, _ in directories), key=lambda path: path.name, reverse=True))
+    return tuple(sorted((path for path, _, _, _ in directories), key=lambda path: path.name, reverse=True))
 
 
 def _validate_relative_folder(relative_folder: str) -> tuple[str, ...]:
     if not isinstance(relative_folder, str) or "\\" in relative_folder:
         raise MigrationManifestError("use a repository-relative migrations/<dated-folder> path")
     parts = tuple(relative_folder.split("/"))
-    if len(parts) != 2 or parts[0] != "migrations" or any(part in {"", ".", ".."} for part in parts):
-        raise MigrationManifestError("use a repository-relative migrations/<dated-folder> path; legacy file paths are not supported")
+    legacy = "use a repository-relative migrations/<dated-folder> path; legacy file paths are not supported"
+    if len(parts) not in (2, 3) or parts[0] != "migrations" or any(part in {"", ".", ".."} for part in parts):
+        raise MigrationManifestError(legacy)
+    if len(parts) == 3 and FOLDER_RE.fullmatch(parts[1]) is not None:
+        # migrations/<dated-folder>/<file>: a legacy file path, not a schema folder.
+        raise MigrationManifestError(legacy)
+    if len(parts) == 3 and SCHEMA_DIRECTORY_RE.fullmatch(parts[1]) is None:
+        raise MigrationManifestError("the schema directory in migrations/<SCHEMA>/<dated-folder> must be an uppercase Oracle identifier")
     return parts
 
 
@@ -433,8 +460,9 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
         raise MigrationManifestError(f"migration path is not a folder: {relative_folder}")
     _, family, revision = _folder_parts(folder.name)
     directories = _migration_directories(root)
-    if not any(candidate == folder for candidate, _, _ in directories):
-        raise MigrationManifestError(f"migration folder is not directly under migrations/: {relative_folder}")
+    schemas = [schema for candidate, schema, _, _ in directories if candidate == folder]
+    if not schemas:
+        raise MigrationManifestError(f"migration folder is not directly under migrations/ or migrations/<SCHEMA>/: {relative_folder}")
     files = _validate_folder_entries(folder)
     preconditions, postconditions, checks_source = _load_check_file(folder / "checks.json")
     checks_sha256 = hashlib.sha256(checks_source).hexdigest()
@@ -455,6 +483,7 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
         checks_source=checks_source,
         checks_sha256=checks_sha256,
         payload_digest=digest,
+        schema=schemas[0],
     )
 
 
@@ -466,12 +495,13 @@ def load_batch(repo_root: Path, relative_folders: Sequence[str]) -> tuple[Migrat
     names = [migration.folder.name for migration in batch]
     if len(set(names)) != len(names):
         raise MigrationManifestError("a migration folder may be selected only once")
-    previous: dict[str, int] = {}
+    previous: dict[tuple[str | None, str], int] = {}
     for migration in batch:
-        revision = previous.get(migration.family)
+        key = (migration.schema, migration.family)
+        revision = previous.get(key)
         if revision is not None and migration.revision <= revision:
             raise MigrationManifestError(f"migration family {migration.family} must be selected in ascending revision order")
-        previous[migration.family] = migration.revision
+        previous[key] = migration.revision
     return batch
 
 

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
 
-from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target
+from .db_targets import Target, TargetResolutionError, batch_schema, looks_like_production_identity, resolve_target
 from .migration_checks import CheckReport, PreflightReport, analyze_batch, preflight, run_checks
 from .migration_manifest import (
     Migration,
@@ -796,6 +796,7 @@ def main(
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folders", nargs="*")
     parser.add_argument("--env", action="append", choices=("dev", "staging", "prod"))
+    parser.add_argument("--schema")
     args = parser.parse_args(argv)
     if not args.folders:
         print("usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod", file=sys.stderr)
@@ -806,7 +807,9 @@ def main(
     try:
         migrations = load_batch(Path(repo_root), args.folders)
         values = os.environ if environ is None else environ
-        target = resolve_target(values, args.env[0], "migration")
+        requested = args.schema or values.get("PROJECT_SCHEMA") or None
+        schema = batch_schema([migration.schema for migration in migrations], requested, values)
+        target = resolve_target(values, args.env[0], "migration", schema=schema)
     except (MigrationManifestError, TargetResolutionError, OSError) as error:
         print(f"migration error: {error}", file=sys.stderr)
         return 2

@@ -883,6 +883,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("folders", nargs="*")
     parser.add_argument("--repo-root", type=Path, default=ROOT)
     parser.add_argument("--env", choices=("dev", "staging", "prod"))
+    parser.add_argument("--schema")
     parser.add_argument("--local", action="store_true")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     args = parser.parse_args(argv)
@@ -902,7 +903,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.local:
         report = _local_report(migrations, args.repo_root)
     else:
-        report = _live_report(migrations, args.env, args.repo_root)
+        report = _live_report(migrations, args.env, args.repo_root, args.schema)
     rendered = json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) if args.format == "json" else _render_preflight(report, args.local)
     print(rendered)
     return report.exit_code
@@ -921,13 +922,15 @@ def _local_report(migrations: Sequence[Migration], repo_root: Path) -> Preflight
     return PreflightReport(2 if errors else (1 if conflicts else 0), conflicts, tuple(errors), coverage)
 
 
-def _live_report(migrations: Sequence[Migration], environment: str, repo_root: Path) -> PreflightReport:
-    from .db_targets import TargetResolutionError, resolve_target
+def _live_report(migrations: Sequence[Migration], environment: str, repo_root: Path, schema: str | None = None) -> PreflightReport:
+    from .db_targets import TargetResolutionError, batch_schema, resolve_target
     from .schema_catalog import CatalogError, capture_inventory, capture_snapshot
 
     values = os.environ
     try:
-        target = resolve_target(values, environment, "read")
+        requested = schema or values.get("PROJECT_SCHEMA") or None
+        chosen = batch_schema([migration.schema for migration in migrations], requested, values)
+        target = resolve_target(values, environment, "read", schema=chosen)
         work_dir = repo_root / "scratch" / "migration-preflight"
         # Validate operation scope and dependencies before opening SQLcl.
         operations = analyze_batch(migrations, target.schema)

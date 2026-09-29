@@ -533,6 +533,7 @@ def _parser() -> _ArgumentParser:
     parser.add_argument("--to", action="append", dest="targets", choices=("dev", "staging", "prod"))
     parser.add_argument("--env", action="append", dest="environments", choices=("dev", "staging", "prod"), help="short form for --to; source defaults to dev")
     parser.add_argument("--object", action="append", default=[], help="exact object name; repeat for more")
+    parser.add_argument("--schema", help="configured schema to compare; required when several are configured")
     parser.add_argument("--pattern", action="append", default=[], help="object-name pattern; '*' is a wildcard and '_' is literal")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     return parser
@@ -572,8 +573,8 @@ def main(
 
     values = os.environ if environ is None else environ
     try:
-        source_target = resolve_target(values, source_environment, "read")
-        target_target = resolve_target(values, target_environment, "read")
+        source_target = resolve_target(values, source_environment, "read", schema=args.schema or values.get("PROJECT_SCHEMA") or None)
+        target_target = resolve_target(values, target_environment, "read", schema=args.schema or values.get("PROJECT_SCHEMA") or None)
     except TargetResolutionError as error:
         print(f"compare-schema error: {error}", file=sys.stderr)
         return 2
