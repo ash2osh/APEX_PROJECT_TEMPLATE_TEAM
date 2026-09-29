@@ -471,5 +471,123 @@ class ExportCliTests(unittest.TestCase):
             self.assertEqual(["export_apps.sql|docker-demo|DEMO|100"], self.calls(environment))
             self.assertTrue((root / "apps" / "DEMO" / "100").is_dir())
 
+class PublishCliTests(unittest.TestCase):
+    NAMES = (
+        "publish_app.sh", "publish_app.sql", "load_env.sh", "check_db_target.sh", "export_apps.sql",
+        "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.sh", "record_export_state.py",
+        "verify_publish_state.py", "validate_app_source.py", "stamp_publish_version.py",
+        "check_builder_drift.py", "check_builder_drift.sql", "sqlcl_safe.sh",
+    )
+
+    def make_fixture(self, root: Path, folder_schema: str, descriptor_schema: str, extra_env: str = "") -> tuple[Path, dict[str, str]]:
+        scripts = root / "scripts"
+        scripts.mkdir()
+        for name in self.NAMES:
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        (root / ".env").write_text(env_text({**TWO_SCHEMAS, "APEX_APP_ID=100,200": "APEX_APP_ID=117"}) + extra_env, encoding="utf-8")
+        app = root / "apps" / folder_schema / "117"
+        (app / "deployments").mkdir(parents=True)
+        (app / ".apex").mkdir()
+        (app / "application.apx").write_text('app SAMPLE (\n    name: Sample\n    version: "Release 1.0"\n)\n', encoding="utf-8")
+        (app / ".apex" / "apexlang.json").write_text('{"version":1}\n', encoding="utf-8")
+        import json
+        for environment_name in ("dev", "staging", "prod"):
+            (app / "deployments" / f"{environment_name}.json").write_text(
+                json.dumps({"workspace": {"name": "WS"}, "app": {"id": 117, "databaseSession": {"parsingSchema": descriptor_schema}}}),
+                encoding="utf-8",
+            )
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        fake_sql = fake_bin / "sql"
+        fake_sql.write_text(
+            "#!/usr/bin/env bash\n"
+            "connection=\"$4\"; script=\"$5\"\n"
+            "printf '%s|%s\\n' \"$(basename \"${script#@}\")\" \"$connection\" >> \"$FAKE_SQL_CALLS\"\n"
+            "case \"$script\" in\n"
+            "  *lookup_app_schema.sql) printf 'APEX_APP_SCHEMA:117:%s\\n' \"${FAKE_LIVE_SCHEMA:-NOT_FOUND}\" ;;\n"
+            "  *check_builder_drift.sql) printf 'APEX_DRIFT_QUERY_VERIFIED\\n' ;;\n"
+            "  *publish_app.sql) printf 'Import successful.\\nAPEX_IMPORT_VERIFIED:117\\n' ;;\n"
+            "  *) : ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake_sql.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+        environment["PROJECT_ENV_FILE"] = str(root / ".env")
+        environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
+        environment.pop("PROJECT_SCHEMA", None)
+        return scripts / "publish_app.sh", environment
+
+    def run_publish(self, script: Path, environment: dict[str, str], *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(script), "117", *arguments],
+            cwd=script.parents[1], env={**environment, **extra}, text=True, capture_output=True, check=False,
+        )
+
+    def calls(self, environment: dict[str, str]) -> list[str]:
+        path = Path(environment["FAKE_SQL_CALLS"])
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_describe_selects_the_entry_for_the_descriptors_schema(self) -> None:
+        extra = "\nSTAGING_SQLCL_CONNECTION=stage-one,stage-two\nSTAGING_EXPECTED_USER=SONE,STWO\nSTAGING_SCHEMA=ONE,TWO\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
+            result = self.run_publish(script, environment, "--env", "staging", "--describe")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertEqual(["TWO", "stage-two", "STWO"], [lines[2], lines[3], lines[4]])
+
+    def test_dev_describe_uses_the_apex_profile_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO")
+            result = self.run_publish(script, environment, "--describe")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertEqual(["TWO", "conn-two", "TWO"], [lines[2], lines[3], lines[4]])
+
+    def test_folder_and_descriptor_schema_must_agree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "ONE", "TWO")
+            result = self.run_publish(script, environment, "--describe")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("is stored under apps/ONE", result.stderr)
+            self.assertEqual([], self.calls(environment))
+
+    def test_schema_option_must_match_the_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO")
+            result = self.run_publish(script, environment, "--describe", PROJECT_SCHEMA="ONE")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("does not match the application's parsing schema", result.stderr)
+
+    def test_live_parsing_schema_must_agree_before_the_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO")
+            result = self.run_publish(script, environment, "--force", FAKE_LIVE_SCHEMA="ONE")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("is parsed by ONE", result.stderr)
+            self.assertFalse(any(call.startswith("publish_app.sql") for call in self.calls(environment)))
+
+    def test_schema_missing_from_the_staging_list_is_refused(self) -> None:
+        extra = "\nSTAGING_SQLCL_CONNECTION=stage-one\nSTAGING_EXPECTED_USER=SONE\nSTAGING_SCHEMA=ONE\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
+            result = self.run_publish(script, environment, "--env", "staging")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("is not listed in STAGING_SCHEMA", result.stderr)
+            self.assertEqual([], self.calls(environment))
+
+    def test_schema_missing_from_the_apex_profile_is_refused(self) -> None:
+        replacements = {**TWO_SCHEMAS, "APEX_PARSING_SCHEMA=ONE,TWO": "APEX_PARSING_SCHEMA=ONE,THREE", "APEX_EXPECTED_USER=ONE,TWO": "APEX_EXPECTED_USER=ONE,THREE"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_fixture(root, "TWO", "TWO")
+            (root / ".env").write_text(env_text({**replacements, "APEX_APP_ID=100,200": "APEX_APP_ID=117"}), encoding="utf-8")
+            result = self.run_publish(script, environment, "--force")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("is not listed in APEX_PARSING_SCHEMA", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

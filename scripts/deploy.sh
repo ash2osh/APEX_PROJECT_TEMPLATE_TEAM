@@ -66,14 +66,17 @@ expected_user="${description[4]}"
 target_environment="${description[5]}"
 
 if [ "$manual" != true ] && { [ -z "$sqlcl_connection" ] || [ -z "$expected_user" ]; }; then
+  if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+    fail "schema $parsing_schema is not listed in ${app_environment^^}_SCHEMA, so it cannot be deployed to $app_environment"
+  fi
   if [ "$app_environment" = staging ]; then
     fail "set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to deploy to staging"
   fi
   fail "set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to deploy to production"
 fi
 
-printf 'Application: %s\nWorkspace: %s\nTarget Schema: %s\n' \
-  "$app_id" "$workspace_name" "$parsing_schema"
+printf 'Application: %s\nWorkspace: %s\nTarget Schema: %s\nConnection: %s\n' \
+  "$app_id" "$workspace_name" "$parsing_schema" "${sqlcl_connection:-<not configured>}"
 
 if [ "$manual" = true ]; then
   case "$app_environment" in

@@ -60,7 +60,7 @@ source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
 # shellcheck source=sqlcl_safe.sh
 source "$REPO_ROOT/scripts/sqlcl_safe.sh"
 
-preferred_app_dir="$REPO_ROOT/apps/$APEX_PARSING_SCHEMA/$app_id"
+preferred_app_dir="$REPO_ROOT/apps/${PROJECT_SCHEMA:-$APEX_PARSING_SCHEMA}/$app_id"
 if [ -d "$preferred_app_dir" ]; then
   app_dir="$preferred_app_dir"
 else
@@ -116,6 +116,21 @@ PY
 )" || exit 2
 IFS=$'\t' read -r workspace_name parsing_schema <<< "$deployment_values"
 
+# With several schemas the descriptor's parsing schema selects the connection.
+# Folder, descriptor, --schema and (below) the live app must all agree.
+if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+  app_folder_schema="$(basename "$(dirname "$app_dir")")"
+  if [ "$app_folder_schema" != "$parsing_schema" ]; then
+    fail "application $app_id is stored under apps/$app_folder_schema but its descriptor parses as $parsing_schema; move the folder or fix the descriptor"
+  fi
+  if [ -n "${PROJECT_SCHEMA:-}" ] && [ "$PROJECT_SCHEMA" != "$parsing_schema" ]; then
+    fail "--schema $PROJECT_SCHEMA does not match the application's parsing schema $parsing_schema"
+  fi
+  export PROJECT_SCHEMA="$parsing_schema"
+  # shellcheck source=load_env.sh
+  source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+fi
+
 if [ ! -f "$app_dir/application.apx" ] && [ ! -f "$app_dir/.apex/apexlang.json" ] && \
    [ -z "$(find "$app_dir" -type f -name '*.apx' -print -quit)" ]; then
   fail "no APEXlang source found in $app_dir"
@@ -150,11 +165,24 @@ if [ "$describe" = true ]; then
   exit 0
 fi
 
-if [ "$app_environment" != dev ] && { [ -z "$sqlcl_connection" ] || [ -z "$expected_user" ]; }; then
-  if [ "$app_environment" = staging ]; then
-    fail "set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
-  fi
-  fail "set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
+if [ -z "$sqlcl_connection" ] || [ -z "$expected_user" ]; then
+  case "$app_environment" in
+    dev)
+      fail "schema $parsing_schema is not listed in APEX_PARSING_SCHEMA; add its connection and expected user to .env"
+      ;;
+    staging)
+      if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+        fail "schema $parsing_schema is not listed in STAGING_SCHEMA, so it cannot be published to staging"
+      fi
+      fail "set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
+      ;;
+    prod)
+      if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+        fail "schema $parsing_schema is not listed in PROD_SCHEMA, so it cannot be published to production"
+      fi
+      fail "set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
+      ;;
+  esac
 fi
 
 if [ "$app_environment" != dev ]; then
@@ -165,6 +193,25 @@ if [ "$app_environment" != dev ]; then
     y|yes) ;;
     *) printf 'Publish cancelled.\n' >&2; exit 1 ;;
   esac
+fi
+
+# The live application must be parsed by the schema the descriptor names. An
+# application that is not there yet (first import) is allowed.
+if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+  mkdir -p "$REPO_ROOT/scratch"
+  lookup_dir="$(mktemp -d "$REPO_ROOT/scratch/apex-lookup.XXXXXX")"
+  live_schema=""
+  if live_schema="$(sqlcl_app_parsing_schema "$sqlcl_connection" "$expected_user" "$parsing_schema" "$app_id" "$lookup_dir" 2>"$lookup_dir/error.txt")"; then
+    if [ "$live_schema" != "$parsing_schema" ]; then
+      rm -rf -- "$lookup_dir"
+      fail "application $app_id is parsed by $live_schema, not the descriptor's $parsing_schema; refusing to import"
+    fi
+  elif ! grep -Fq "was not found in the workspace" "$lookup_dir/error.txt"; then
+    cat "$lookup_dir/error.txt" >&2
+    rm -rf -- "$lookup_dir"
+    fail "could not verify the live parsing schema of application $app_id"
+  fi
+  rm -rf -- "$lookup_dir"
 fi
 
 # Classify the target before the drift guard opens its read-only session.

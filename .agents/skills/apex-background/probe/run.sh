@@ -71,6 +71,7 @@ PY
 db_environment="$(profile_value DB_ENVIRONMENT)" || fail 'DB_ENVIRONMENT must be set once in .env'
 profile_connection="$(profile_value APEX_SQLCL_CONNECTION)" || fail 'APEX_SQLCL_CONNECTION must be set once in .env'
 profile_schema="$(profile_value APEX_PARSING_SCHEMA)" || fail 'APEX_PARSING_SCHEMA must be set once in .env'
+[[ "$profile_schema" != *,* ]] || fail 'several schemas are configured; set PROJECT_SCHEMA and use a single APEX_PARSING_SCHEMA entry for the probe'
 expected_user="$(profile_value APEX_EXPECTED_USER)" || fail 'APEX_EXPECTED_USER must be set once in .env'
 [[ "$db_environment" == development ]] || fail 'probe phases are restricted to DB_ENVIRONMENT=development'
 [[ "$connection" == "$profile_connection" ]] || fail 'connection does not match APEX_SQLCL_CONNECTION in .env'

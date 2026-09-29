@@ -84,9 +84,19 @@ app and agreed with the team that your files should replace it.
 | `publish targets DEV only` | Use `scripts/team.sh deploy <id> --env staging\|prod`. |
 | `resembles production but DB_ENVIRONMENT` | The connection name looks like production. Check `.env`, and ask before continuing. |
 | `deployment descriptor not found` | Add `apps/<schema>/<id>/deployments/dev.json`; copy it from `apps/templates/deployments/`. |
+| `is stored under apps/` | The app folder and descriptor name different parsing schemas. Move the folder under `apps/<PARSING_SCHEMA>/` or correct the descriptor. |
+| `does not match the application's parsing schema` | The selected `--schema` differs from the descriptor. Drop or correct `--schema`. |
+| `is not listed in APEX_PARSING_SCHEMA` | The app's parsing schema has no DEV APEX profile entry. Add the schema, connection, and expected user to the aligned APEX profile lists in `.env`. |
+| `is not listed in STAGING_SCHEMA` / `is not listed in PROD_SCHEMA` | The app's parsing schema has no entry for that target. Add its schema, connection, and expected user to the aligned staging or production lists in `.env`. |
 | `application source is outside the repository` / `symbolic links or reparse points are not supported` | Keep the app source as real files inside the checkout. |
 | `DEV publish needs application.apx to stamp the publish tag` | The app source is incomplete; export it again. |
 | `could not stamp the application version` | Fix the `version:` line in `application.apx` as the message says (for example, a duplicate line or a version over 255 bytes). |
+
+**After connecting, before import.** Nothing is changed when this check refuses.
+
+| Message | Meaning and action |
+| --- | --- |
+| `is parsed by` | The live application uses a different parsing schema than the descriptor. Review the live app and correct the descriptor and folder, or arrange the intended schema change with the team before importing. |
 
 **During import.** Publish restores your unstamped `application.apx`; read the
 SQLcl output printed above the message.

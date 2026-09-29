@@ -57,7 +57,8 @@ if ($appEnvironment -notin @("dev", "staging", "prod")) {
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 
-$preferredAppDir = Join-Path $repoRoot "apps/$($env:APEX_PARSING_SCHEMA)/$AppId"
+$selectedSchema = if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA)) { $env:PROJECT_SCHEMA } else { $env:APEX_PARSING_SCHEMA }
+$preferredAppDir = Join-Path $repoRoot "apps/$selectedSchema/$AppId"
 if (Test-Path -LiteralPath $preferredAppDir -PathType Container) {
   $appDir = $preferredAppDir
 } else {
@@ -120,6 +121,19 @@ $parsingSchema = [string]$deployment.app.databaseSession.parsingSchema
 if ($parsingSchema -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
   throw "publish error: deployment parsingSchema must be an uppercase Oracle identifier"
 }
+# With several schemas the descriptor's parsing schema selects the connection.
+# Folder, descriptor, --schema and (below) the live app must all agree.
+if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
+  $appFolderSchema = Split-Path -Leaf (Split-Path -Parent $appDir)
+  if ($appFolderSchema -cne $parsingSchema) {
+    throw "publish error: application $AppId is stored under apps/$appFolderSchema but its descriptor parses as $parsingSchema; move the folder or fix the descriptor"
+  }
+  if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA) -and $env:PROJECT_SCHEMA -cne $parsingSchema) {
+    throw "publish error: --schema $($env:PROJECT_SCHEMA) does not match the application's parsing schema $parsingSchema"
+  }
+  $env:PROJECT_SCHEMA = $parsingSchema
+  . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
+}
 if (-not (Test-Path -LiteralPath (Join-Path $appDir "application.apx") -PathType Leaf) -and
     -not (Test-Path -LiteralPath (Join-Path $appDir ".apex/apexlang.json") -PathType Leaf) -and
     $null -eq (Get-ChildItem -LiteralPath $appDir -Filter *.apx -File -Recurse | Select-Object -First 1)) {
@@ -154,17 +168,56 @@ if ($describe) {
   exit 0
 }
 
-if ($appEnvironment -ne "dev" -and
-    ([string]::IsNullOrWhiteSpace($sqlclConnection) -or [string]::IsNullOrWhiteSpace($expectedUser))) {
-  if ($appEnvironment -eq "staging") {
-    throw "publish error: set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
+if ([string]::IsNullOrWhiteSpace($sqlclConnection) -or [string]::IsNullOrWhiteSpace($expectedUser)) {
+  switch ($appEnvironment) {
+    "dev" {
+      throw "publish error: schema $parsingSchema is not listed in APEX_PARSING_SCHEMA; add its connection and expected user to .env"
+    }
+    "staging" {
+      if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
+        throw "publish error: schema $parsingSchema is not listed in STAGING_SCHEMA, so it cannot be published to staging"
+      }
+      throw "publish error: set STAGING_SQLCL_CONNECTION and STAGING_EXPECTED_USER in .env to publish to staging"
+    }
+    "prod" {
+      if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
+        throw "publish error: schema $parsingSchema is not listed in PROD_SCHEMA, so it cannot be published to production"
+      }
+      throw "publish error: set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
+    }
   }
-  throw "publish error: set PROD_SQLCL_CONNECTION and PROD_EXPECTED_USER in .env to publish to production"
 }
 
 if ($appEnvironment -ne "dev") {
   $answer = Read-Host "Deploying to $targetLabel. Proceed? [y/N]"
   if ($answer -notmatch '^(?i:y|yes)$') { throw "Publish cancelled." }
+}
+
+# The live application must be parsed by the schema the descriptor names. An
+# application that is not there yet (first import) is allowed.
+if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
+  . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
+  $lookupDir = Join-Path $repoRoot ("scratch/apex-lookup-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    try {
+      $liveSchema = Get-AppParsingSchema -Connection $sqlclConnection -ExpectedUser $expectedUser `
+        -Schema $parsingSchema -AppId $AppId -WorkDirectory $lookupDir `
+        -ScriptPath (Join-Path $repoRoot "scripts/lookup_app_schema.sql")
+      if ($liveSchema -cne $parsingSchema) {
+        throw "publish error: application $AppId is parsed by $liveSchema, not the descriptor's $parsingSchema; refusing to import"
+      }
+    } catch {
+      if ($_.Exception.Message -like "*was not found in the workspace*") {
+        # First import: nothing to compare.
+      } elseif ($_.Exception.Message -like "publish error:*") {
+        throw
+      } else {
+        throw "publish error: could not verify the live parsing schema of application ${AppId}: $($_.Exception.Message)"
+      }
+    }
+  } finally {
+    if (Test-Path -LiteralPath $lookupDir) { Remove-Item -LiteralPath $lookupDir -Recurse -Force -ErrorAction SilentlyContinue }
+  }
 }
 
 # Classify the target before the drift guard opens its read-only session.
