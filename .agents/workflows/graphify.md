@@ -75,14 +75,21 @@ so the fix persists for every template user.
 
 ## Database mirror dependency
 
-An `.apx` reference to a table or package is linked to the real node from
-`database/<SCHEMA>/tables|views|packages/` when that file exists, and stays a
-name-only stub when it does not (`APEX_*` dictionary views, `DUAL`). `.sql` files
-under `database/` get the same treatment for foreign keys. Graphify caches
-extraction by file content, so a result cached before the mirror existed keeps
-its stubs. After the first `scripts/team.sh backup-db`, or after tables or
-packages are added or removed, run `python3 scripts/setup_graphify_apx.py`
-(it clears cached `.apx` and `.sql` extractions) and then `graphify update .`.
+An `.apx` reference to a table or package is linked to the real node from the
+database mirror when that file exists. Unqualified names resolve in the app's
+own schema first; qualified names resolve in the named schema. When a local
+object is absent, a mirrored private synonym can resolve one hop by reading
+its `FOR "SCHEMA"."OBJECT"` clause. Targets over database links and targets
+not present in the mirror stay name-only stubs. `.sql` files under `database/`
+get the same treatment for foreign keys. `APEX_*` dictionary views and `DUAL`
+remain stubs. Expression-style three-part package references without
+parentheses are not detected.
+
+Graphify caches its index by repository root, so extraction results cached
+before a mirror existed can retain stubs. After the first
+`scripts/team.sh backup-db`, or when database mirrors change, run
+`python3 scripts/setup_graphify_apx.py` (it clears cached `.apx` and `.sql`
+extractions) and then `graphify update .`.
 
 Two limits are inherent to Graphify rather than lost data: the graph is
 undirected, so a mutual foreign-key pair (`A -> B` and `B -> A`) shows as one

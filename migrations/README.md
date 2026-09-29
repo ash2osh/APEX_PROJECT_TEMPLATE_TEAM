@@ -1,20 +1,27 @@
 # Migrations
 
-Use one dated folder per migration, with one numbered SQL file per step:
+Use one dated folder per migration, with one numbered SQL file per step. For a
+multi-schema code profile, place it under `migrations/<SCHEMA>/`:
 
 ```text
-migrations/2026-09-27_create-customers-r001/
+migrations/DEMO/2026-09-27_create-customers-r001/
 ├── 001-create-table.sql
 ├── 002-create-index.sql
 ├── checks.json
 └── status.dev.json  # created only after a verified DEV apply
 ```
 
-Folder names use `YYYY-MM-DD_<migration-name>-rNNN`; they contain no developer
-name. The creation date sorts lexically newest first when the folder view is
-sorted descending, but it cannot set the view's sort direction. Files execute
-by ascending sequence. Multiple selected folders execute in the explicit
-command-line order.
+The full folder name is `migrations/<SCHEMA>/YYYY-MM-DD_<migration-name>-rNNN/`;
+it contains no developer name. When `CODE_SCHEMA` contains one schema, the
+existing flat `migrations/YYYY-MM-DD_<migration-name>-rNNN/` layout remains
+valid and the schema-folder layout is also accepted. With two or more code
+schemas, the schema folder is required and a flat folder is refused. One
+migration changes one schema. Revision numbers start at `r001` independently
+for each schema and migration-name family. The creation date sorts lexically
+newest first when the folder view is sorted descending, but it cannot set the
+view's sort direction. Files execute by ascending sequence. Multiple selected
+folders execute in the explicit command-line order. A cross-schema change such
+as a grant or a synonym is two coordinated migrations, one per schema.
 
 Run `scripts/team.sh check-conflicts <folder> --env dev` for read-only live
 preflight or add `--local` for selected-batch analysis without a connection.

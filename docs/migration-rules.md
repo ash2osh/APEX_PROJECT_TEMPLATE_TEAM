@@ -1,49 +1,59 @@
 # Migration and schema comparison rules
 
 This template stores each migration as one dated folder containing an ordered
-set of SQL files. The files and receipts belong to the local repository. Each
-developer has an independent Git repository; repositories share Oracle state,
-not commits, migration files, or pending work. The live schema is the source of
-truth for what currently exists. No team metadata table, lock, roster, or
-database migration ledger is used.
+set of SQL files. In a multi-schema project the folder is under
+`migrations/<SCHEMA>/`; a migration folder changes only that schema. The files
+and receipts belong to the local repository. Each developer has an independent
+Git repository; repositories share Oracle state, not commits, migration
+files, or pending work. The live schema is the source of truth for what
+currently exists. No team metadata table, lock, roster, or database migration
+ledger is used.
 
 ## Folder and file names
 
-Use this layout:
+Use this layout for a multi-schema code profile:
 
 ```text
 migrations/
-├── 2026-09-28_create-customers-r002/
-│   ├── 001-add-status-column.sql
-│   ├── 002-update-customer-view.sql
-│   └── checks.json
-└── 2026-09-27_create-customers-r001/
-    ├── 001-create-table.sql
-    ├── 002-create-index.sql
-    ├── 003-create-view.sql
-    └── checks.json
+└── DEMO/
+    ├── 2026-09-28_create-customers-r002/
+    │   ├── 001-add-status-column.sql
+    │   ├── 002-update-customer-view.sql
+    │   └── checks.json
+    └── 2026-09-27_create-customers-r001/
+        ├── 001-create-table.sql
+        ├── 002-create-index.sql
+        ├── 003-create-view.sql
+        └── checks.json
 ```
 
-The folder name is `YYYY-MM-DD_<migration-name>-rNNN`. Do not add a developer
-name. The date is the folder creation date and stays the same when the
+Each folder is `migrations/<SCHEMA>/YYYY-MM-DD_<migration-name>-rNNN/`; do not
+add a developer name. When `CODE_SCHEMA` contains exactly one schema, the
+existing flat `migrations/YYYY-MM-DD_<migration-name>-rNNN/` layout remains
+valid and the schema-folder layout is also accepted. When it contains two or
+more schemas, the schema folder is required and a flat migration folder is
+refused. The date is the folder creation date and stays the same when the
 migration is promoted. The ISO date prefix sorts newer dates ahead when a file
 browser is sorted descending; the name cannot set the browser's sort direction.
 Folders created on the same date have a name-based tie-break, not an
 intraday creation order.
 
 The migration name uses lowercase kebab-case. Revisions begin at `r001` and
-increase by one for each later folder with the same migration name. For
-example, `create-customers-r001` and `create-customers-r002` are separate,
-sequential migrations for the same intent. `r002` contains the incremental
-follow-up, not a replacement copy of `r001`; its SQL sequence starts again at
-`001`.
+increase by one for each later folder with the same migration name within the
+same schema. Each `(schema, migration name)` family has its own revision
+sequence. For example, `create-customers-r001` and `create-customers-r002` in
+one schema are separate, sequential migrations for the same intent. `r002`
+contains the incremental follow-up, not a replacement copy of `r001`; its SQL
+sequence starts again at `001`.
 
 Each immediate SQL file is named `NNN-<step-name>.sql`; sequence numbers must
 be unique and consecutive from `001`. The runner executes those files in
 ascending numeric order in one migration session. When several folders are
 selected, it executes them in the order supplied on the command line. The
 descending folder display order is for browsing only and never determines
-execution order. Review dependencies and pass folders in the required order.
+execution order. Review dependencies and pass folders in the required order. A
+cross-schema change such as a grant or a synonym is two coordinated migrations,
+one per schema.
 
 Every folder requires a `checks.json` with read-only preconditions and
 postconditions. These checks validate the expected starting state and verify

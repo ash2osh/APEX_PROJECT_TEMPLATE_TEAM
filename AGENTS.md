@@ -15,7 +15,10 @@ state.
   default points the table, code, and APEX profiles at the same DEV
   connection. Keep these profile values aligned unless the project needs
   separate connections. Staging and production connection/user pairs are
-  optional. Never put credentials in `.env` or tracked files.
+  optional. Each profile's schema, connection, and expected-user keys accept
+  position-aligned comma lists; one value keeps current behavior. Use
+  `--schema <NAME>` to narrow any command. `doctor` and `backup-db` default to
+  all schemas. Never put credentials in `.env` or tracked files.
 - Use numeric APEX application IDs in commands and descriptors. Store each
   app's APEXlang source and `deployments/{dev,staging,prod}.json` under
   `apps/<parsing-schema>/<app-id>/`. `apps/templates/deployments/` contains
@@ -65,8 +68,10 @@ state.
   cannot see another independent repository's pending files. Staging and
   production migrations require `STAGING_SCHEMA` or `PROD_SCHEMA` in addition
   to the existing connection and expected-user settings. Receipts are written
-  only after a verified apply. See [docs/migration-rules.md](docs/migration-rules.md)
-  for naming, ordering, recovery, and detection limits.
+  only after a verified apply. Multi-schema projects use
+  `migrations/<SCHEMA>/…`; one migration changes one schema. See
+  [docs/migration-rules.md](docs/migration-rules.md) for naming, ordering,
+  recovery, and detection limits.
 - **Schema comparison:** Use `scripts/team.sh compare-schema --env staging
   --object CUSTOMERS` or `--from dev --to prod --pattern 'HR_*'` to compare
   selected live objects. This reports schema drift; local receipts cannot
@@ -91,7 +96,9 @@ is gated on `graphify-out/graph.json` existing. Install it with
 `python3 scripts/setup_graphify_apx.py` (rerun after every Graphify upgrade;
 `--verify` checks without changing anything), then `graphify extract . --force`.
 The corpus is a domain allowlist of `apps/`, `database/`, and `app_context/`.
-The graph reflects this repository's files, not shared Builder state.
+Graphify links cross-schema references and mirrored synonyms when their targets
+are present in the database mirror. The graph reflects this repository's
+files, not shared Builder state.
 
 ## Project instructions
 

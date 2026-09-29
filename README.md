@@ -53,6 +53,70 @@ needed descriptors into each app and set its workspace name, numeric app ID,
 and target parsing schema. Keep `dev.json` aligned with the configured DEV
 profile. A staging descriptor is needed only when the project uses staging.
 
+## Several schemas in one workspace
+
+The schema, SQLcl connection, and expected-user values in each profile are
+comma-separated lists aligned by position. For example, this DEV setup uses
+two schemas in each profile:
+
+```dotenv
+TABLES_SCHEMA=EPROMHQ,TMS
+TABLES_SQLCL_CONNECTION=42_epromhq,42_tms
+TABLES_EXPECTED_USER=EPROMHQ,TMS
+
+CODE_SCHEMA=EPROMHQ,TMS
+CODE_SQLCL_CONNECTION=42_epromhq,42_tms
+CODE_EXPECTED_USER=EPROMHQ,TMS
+
+APEX_PARSING_SCHEMA=EPROMHQ,TMS
+APEX_SQLCL_CONNECTION=42_epromhq,42_tms
+APEX_EXPECTED_USER=EPROMHQ,TMS
+APEX_APP_ID=117,301
+```
+
+All three values in each profile must have the same number of entries, and a
+schema may appear only once in a profile. A single value keeps the existing
+single-schema behavior. Prefix filters apply to every schema in their profile.
+When staging or production profiles are configured, a DEV schema maps to the
+same name in those schema lists. One exception keeps today's behavior: a
+project with a single DEV schema may name its staging or production schema
+differently, and that mapping applies only to the project's one configured DEV
+schema. An unlisted schema is never mapped to a target.
+
+Pass `--schema <NAME>` to narrow a command to one schema. `doctor` and
+`backup-db` check or mirror all configured schemas by default.
+
+| Command | Multi-schema behavior |
+| --- | --- |
+| `doctor` | Checks every distinct `(connection, expected user, schema)` across the three profiles with one read-only SQLcl identity check each. It reports each schema and fails if any check fails. `--schema` narrows it. |
+| `export <id>` | Reads the app's parsing schema from `APEX_APPLICATIONS` using the first `APEX_SQLCL_CONNECTION` entry, requires that schema in `APEX_PARSING_SCHEMA`, then reconnects with that schema's own connection and writes `apps/<SCHEMA>/<id>/`. With no ID it resolves each configured app ID separately and installs all exports in one all-or-nothing mirror replacement. |
+| `backup-db` | Runs the tables scope for each tables schema and the code scope for each code schema. Each has a staging directory, manifest count check, and dirty-mirror check. Nothing is installed until every schema verifies; one mirror replacement installs them all. `--schema` narrows the run. |
+| `publish <id>` | Requires the app folder, descriptor, and live app parsing schema to agree and be listed, then uses that schema's connection. The drift guard, version stamp, and byte-equality verification remain unchanged. |
+| `deploy <id> --env staging\|prod` | The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection. |
+| `migrate`, `check-conflicts` | Uses `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/`; the folder selects the target entry. Scans, revision ordering, and receipts are scoped to one schema, and one invocation cannot mix schemas. |
+| `compare-schema` | Requires `--schema` when more than one schema is configured and compares that schema across the selected environments. |
+
+When `CODE_SCHEMA` has one schema, the existing flat
+`migrations/YYYY-MM-DD_<name>-rNNN/` layout remains valid and the
+`migrations/<SCHEMA>/` layout is also accepted. With two or more code schemas,
+the schema folder is required and a flat folder is refused. One migration
+changes one schema. A cross-schema change such as a grant or synonym is two
+coordinated migrations, one per schema. Private synonyms are mirrored under
+`database/<SCHEMA>/synonyms/` with the code objects.
+
+Limits:
+
+- Position-aligned lists rely on order; the loader cannot detect values that
+  were swapped consistently across a profile.
+- Schemas sharing one SQLcl connection share its privileges. Identity checks
+  confirm the session user, not that it can reach only one schema.
+- `--local` conflict checks load no `.env`, so they cannot enforce the
+  schema-folder layout rule.
+- `publish --force` skips the drift check, but still requires schema agreement
+  between the app folder, descriptor, and live app.
+- The backup manifest count guard accepts a non-empty subset of type rows.
+  This is pre-existing, and synonyms inherit the same limit.
+
 ## Builder-first workflow
 
 Make and save the change in shared APEX Builder, then export that app's source:

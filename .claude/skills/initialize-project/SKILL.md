@@ -153,6 +153,10 @@ INSTALL_UC_APX=<true-or-false>
 UC_APX_SKILLS_AGENT=<universal-or-claude-code>
 ```
 
+The schema, connection, and expected-user keys can use position-aligned comma
+lists for several schemas; see the README section "Several schemas in one
+workspace".
+
 Do not add unknown keys, comments containing user secrets, shell expansions,
 or credential material.
 
