@@ -931,14 +931,17 @@ In `scripts/load_env.ps1`:
 
 ```powershell
 function Split-ProjectEnvList([string]$Value) {
-  if ([string]::IsNullOrEmpty($Value)) { return ,@() }
-  return ,@($Value.Split(','))
+  # A function's output is unrolled, so callers must wrap the call in @( ):
+  # that restores an array for zero or one entries. (Do not use `return ,@(...)`;
+  # it emits the array as ONE object, and @( ) would then count it as one entry.)
+  if ([string]::IsNullOrEmpty($Value)) { return }
+  return $Value.Split(',')
 }
 function Assert-ProjectEnvList([string]$Name, [string]$Kind) {
   $projectEnvListValue = [Environment]::GetEnvironmentVariable($Name, "Process")
   if ([string]::IsNullOrEmpty($projectEnvListValue)) { return }
   if ($projectEnvListValue -cmatch '(^,|,$|,,)') { throw "$Name must not contain empty entries" }
-  foreach ($projectEnvListItem in (Split-ProjectEnvList $projectEnvListValue)) {
+  foreach ($projectEnvListItem in @(Split-ProjectEnvList $projectEnvListValue)) {
     if ($Kind -eq "identifier" -and $projectEnvListItem -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
       throw "$Name must be an uppercase Oracle identifier"
     }
@@ -957,6 +960,8 @@ function Assert-ProjectEnvTriple([string]$SchemaKey, [string]$ConnectionKey, [st
   Assert-ProjectEnvUniqueCsv -Name $SchemaKey -Value ([Environment]::GetEnvironmentVariable($SchemaKey, "Process"))
 }
 ```
+
+**PowerShell array-return rule (applies to `Split-ProjectEnvList`, `Split-BackupList` and `Split-ExportList`).** An earlier revision of this plan used `return ,@(...)` in these helpers. That is wrong for the way they are called: the comma emits the whole array as a single pipeline object, so `@(Split-ProjectEnvList "A,B").Count` is 1, not 2, and an empty list becomes a one-element array. If your `load_env.ps1` still has `return ,@()`, replace the two `return` lines with `if ([string]::IsNullOrEmpty($Value)) { return }` and `return $Value.Split(',')`, and make sure every caller wraps the call in `@( )`, including the `foreach` in `Assert-ProjectEnvList`. Because `pwsh` is not installed, reason about this from the semantics, not by running it.
 
 **4d.** Replace everything from the line `foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHEMA", …` through the end of the `try` block's last `Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv …` line with:
 
@@ -1902,8 +1907,11 @@ Replace the two `check_db_target.ps1` lines near the top with nothing (they move
 
 ```powershell
 function Split-BackupList([string] $Value) {
-  if ([string]::IsNullOrEmpty($Value)) { return ,@() }
-  return ,@($Value.Split(','))
+  # A function's output is unrolled, so callers must wrap the call in @( ):
+  # that restores an array for zero or one entries. (Do not use `return ,@(...)`;
+  # it emits the array as ONE object, and @( ) would then count it as one entry.)
+  if ([string]::IsNullOrEmpty($Value)) { return }
+  return $Value.Split(',')
 }
 $backupTargets = @()
 foreach ($profile in @(
@@ -2439,8 +2447,11 @@ function Invoke-PythonScript {
 }
 
 function Split-ExportList([string] $Value) {
-  if ([string]::IsNullOrEmpty($Value)) { return ,@() }
-  return ,@($Value.Split(','))
+  # A function's output is unrolled, so callers must wrap the call in @( ):
+  # that restores an array for zero or one entries. (Do not use `return ,@(...)`;
+  # it emits the array as ONE object, and @( ) would then count it as one entry.)
+  if ([string]::IsNullOrEmpty($Value)) { return }
+  return $Value.Split(',')
 }
 $apexSchemas = @(Split-ExportList $env:APEX_PARSING_SCHEMA)
 $apexConnections = @(Split-ExportList $env:APEX_SQLCL_CONNECTION)
