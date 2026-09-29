@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import sys
 
 
 ARCHITECTURAL_TYPES = {
@@ -36,23 +37,48 @@ DISPLAY_TYPES = {
     "build_option": "Build Option",
 }
 
+# Graphify's node type for anchors shared by many files. Nodes of this type are
+# exempt from cross-file id salting and merge by id.
+SHARED_ANCHOR_TYPE = "module"
 DECLARATION_RE = re.compile(
     r'^\s*([A-Za-z][A-Za-z0-9-]*)'
-    r'(?:\s+("(?:[^"\\]|\\.)*"|[A-Za-z0-9_.-]+))?\s*\(\s*$'
+    r'(?:\s+("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[A-Za-z0-9_.-]+))?\s*\(\s*$'
 )
 NAME_RE = re.compile(r'^\s*name\s*:\s*(.*?)\s*$')
 CLOSE_COMPONENT_RE = re.compile(r'^\s*\)\s*$')
 PROPERTY_RE = re.compile(r'^\s*([A-Za-z][A-Za-z0-9]*)\s*:\s*(.*?)\s*$')
 REFERENCE_RE = re.compile(r'^\s*([A-Za-z][A-Za-z0-9]*)\s*:\s*@([^\s\]}]+)')
 PAGE_TARGET_RE = re.compile(r'\bpage\s*:\s*(\d+)\b', re.IGNORECASE)
-APEX_URL_PAGE_RE = re.compile(r'f\?p=[^:\s]*:(\d+):', re.IGNORECASE)
+# The application segment is captured, not discarded: in a multi-application
+# workspace, attributing f?p=102:1: to the calling application silently routes
+# every cross-application link to the wrong page.
+APEX_URL_PAGE_RE = re.compile(r'f\?p=([^:\s]*):(\d+):', re.IGNORECASE)
+APPLICATION_PROPERTY_RE = re.compile(r'^\s*application\s*:\s*(\d+)\s*$', re.IGNORECASE)
 # A name part is a quoted identifier, an APEX substitution placeholder such as
 # #OWNER#, or a plain identifier. Placeholders appear as a schema qualifier in
 # exported queries and must not stop the match or leak into the node id.
 SQL_NAME_PART = r'(?:"[^"]+"|#[A-Za-z0-9_]+#|[A-Za-z][A-Za-z0-9_$#]*)'
 SQL_IDENTIFIER = rf'{SQL_NAME_PART}(?:\s*\.\s*{SQL_NAME_PART})*'
 SUBSTITUTION_PART_RE = re.compile(r'#[^#]*#')
-READ_RE = re.compile(rf'\b(?:FROM|JOIN)\s+({SQL_IDENTIFIER})', re.IGNORECASE)
+FROM_START_RE = re.compile(r'\b(?:FROM|JOIN)\b\s+', re.IGNORECASE)
+# Keywords that end a FROM list. SELECT/WITH/AS are included because an
+# unbalanced closing parenthesis is not the only way a clause can end.
+FROM_STOP_RE = re.compile(
+    r'\b(?:WHERE|GROUP|ORDER|HAVING|CONNECT|START|UNION|INTERSECT|MINUS|MODEL'
+    r'|FETCH|OFFSET|FOR|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|NATURAL|ON|USING|SET'
+    r'|RETURNING|INTO|VALUES|SELECT|WITH|AS)\b',
+    re.IGNORECASE,
+)
+FROM_ITEM_RE = re.compile(rf'^\s*({SQL_IDENTIFIER})')
+# Row sources that are syntax, not tables.
+FROM_KEYWORDS = {"table", "lateral", "xmltable", "json_table", "only", "the"}
+# A CTE may carry a column list, and may be marked (NOT) MATERIALIZED. Missing
+# one makes its later FROM reference look like a real table.
+CTE_RE = re.compile(
+    rf'\b({SQL_IDENTIFIER})\s*(?:\([^()]*\))?\s+AS\s*'
+    rf'(?:NOT\s+MATERIALIZED\s+|MATERIALIZED\s+)?\(\s*(?:WITH|SELECT)\b',
+    re.IGNORECASE,
+)
 WRITE_RE = re.compile(
     rf'\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+({SQL_IDENTIFIER})',
     re.IGNORECASE,
@@ -83,10 +109,18 @@ IGNORED_SQL_OBJECTS = {
 SQL_PROPERTY_NAMES = {
     "sqlquery",
     "plsqlcode",
+    "plsqlexpression",
     "plsqlfunctionbody",
     "functionbody",
     "whereclause",
 }
+# Declarative table source, e.g. a report region's `tableName: ORDERS`.
+TABLE_PROPERTY_NAMES = {"tablename"}
+# A bare `package.function` name rather than SQL, e.g. a custom authentication.
+FUNCTION_PROPERTY_NAMES = {"authfunctionname"}
+QUALIFIED_MEMBER_RE = re.compile(
+    r"(?<![\w$#.:])([A-Za-z_][\w$#]*)\s*\.\s*([A-Za-z_][\w$#]*)"
+)
 
 
 class ApexlangParseError(ValueError):
@@ -109,11 +143,97 @@ def make_id(*parts: object) -> str:
     return re.sub(r"_+", "_", normalized).strip("_").lower()
 
 
+class DatabaseMirror:
+    """Resolve references to objects mirrored under ``database/<SCHEMA>/``.
+
+    Graphify's SQL extractor names a table node ``<file id>_<schema>_<table>``
+    and cannot rewire a bare-name stub onto it: a schema-qualified label
+    contains a dot, which disqualifies it as a rewire target. A reference from
+    an application file therefore has to name that node id itself, or the
+    application and database halves of the graph never connect. Anything the
+    mirror does not hold (APEX dictionary views, DUAL, unexported objects)
+    stays a stub.
+    """
+
+    TABLE_FOLDERS = ("tables", "views")
+
+    def __init__(self, root: Path | None = None, schema: str | None = None) -> None:
+        self.root = root
+        self.schema = schema
+        self._tables: dict[str, str] | None = None
+        self._packages: dict[str, str] | None = None
+
+    @classmethod
+    def for_application_file(cls, source: Path) -> "DatabaseMirror":
+        """Locate the mirror from ``<root>/apps/<schema>/<app id>/...``."""
+        parts = source.parts
+        for index in range(len(parts) - 3, -1, -1):
+            if parts[index] == "apps" and parts[index + 2].isdigit():
+                return cls(Path(*parts[:index]) if index else Path(), parts[index + 1])
+        return cls()
+
+    @classmethod
+    def for_database_file(cls, source: Path) -> "DatabaseMirror":
+        """Locate the mirror from ``<root>/database/<schema>/<folder>/...``."""
+        parts = source.parts
+        for index in range(len(parts) - 4, -1, -1):
+            if parts[index] == "database":
+                return cls(Path(*parts[:index]) if index else Path(), parts[index + 1])
+        return cls()
+
+    def _scan(self) -> None:
+        self._tables, self._packages = {}, {}
+        if self.root is None or self.schema is None:
+            return
+        schema_dir = self.root / "database" / self.schema
+        for folder in self.TABLE_FOLDERS:
+            for file in self._sql_files(schema_dir / folder):
+                file_id = make_id(file.relative_to(self.root).with_suffix("").as_posix())
+                self._tables.setdefault(
+                    file.stem.upper(), make_id(file_id, self.schema, file.stem)
+                )
+        for file in self._sql_files(schema_dir / "packages"):
+            name = file.stem.upper()
+            for suffix in ("_SPEC", "_BODY"):
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)]
+                    break
+            file_id = make_id(file.relative_to(self.root).with_suffix("").as_posix())
+            # The specification is the package's public face; prefer it.
+            if file.stem.upper().endswith("_SPEC") or name not in self._packages:
+                self._packages[name] = file_id
+
+    @staticmethod
+    def _sql_files(directory: Path) -> list[Path]:
+        try:
+            return sorted(directory.glob("*.sql"))
+        except OSError:
+            return []
+
+    def table(self, label: str) -> str | None:
+        if self._tables is None:
+            self._scan()
+        parts = label.split(".")
+        if len(parts) == 2 and parts[0].upper() != (self.schema or "").upper():
+            return None
+        if len(parts) > 2:
+            return None
+        return self._tables.get(parts[-1].upper())
+
+    def package(self, label: str) -> str | None:
+        if self._packages is None:
+            self._scan()
+        parts = label.split(".")
+        if len(parts) == 3 and parts[0].upper() == (self.schema or "").upper():
+            parts = parts[1:]
+        return self._packages.get(parts[0].upper()) if len(parts) == 2 else None
+
+
 def _clean_identifier(value: str | None, fallback: str) -> str:
     if not value:
         return fallback
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] == '"':
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
     return value
 
@@ -123,10 +243,6 @@ def _application_id(path: Path, text: str) -> str:
     for index, part in enumerate(parts):
         if part == "apps" and index + 2 < len(parts) and parts[index + 2].isdigit():
             return parts[index + 2]
-        if part == "apps" and index + 1 < len(parts):
-            alias = parts[index + 1]
-            if re.fullmatch(r"[a-z][a-z0-9-]*", alias):
-                return alias
     match = re.search(r"(?m)^\s*app\s+(\d+)\s*\(\s*$", text)
     return match.group(1) if match else "unknown"
 
@@ -187,6 +303,24 @@ def _nearest_owner(frames: list[Frame], fallback: str) -> str:
     return fallback
 
 
+def _navigation_application(segment: str | None, current_app_id: str) -> str | None:
+    """Resolve the application an f?p target names.
+
+    A numeric segment is that application. An empty segment or an APEX
+    substitution such as &APP_ID. means this one. Anything else is an alias
+    this extractor cannot resolve without the workspace, and guessing would
+    reintroduce the misrouting this function exists to prevent.
+    """
+    if segment is None:
+        return current_app_id
+    segment = segment.strip()
+    if not segment or segment.startswith("&"):
+        return current_app_id
+    if segment.isdigit():
+        return segment
+    return None
+
+
 def _strip_sql_comments_and_literals(text: str) -> str:
     """Mask SQL comments and literals while preserving offsets and newlines."""
     masked = list(text)
@@ -230,6 +364,74 @@ def _blank_out(pattern: str, text: str) -> str:
     )
 
 
+def _from_clause_starts(text: str):
+    """Yield positions immediately after unquoted FROM/JOIN clause keywords."""
+    index = 0
+    in_quoted_identifier = False
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            if in_quoted_identifier and index + 1 < len(text) and text[index + 1] == '"':
+                index += 2
+                continue
+            in_quoted_identifier = not in_quoted_identifier
+        elif not in_quoted_identifier:
+            match = FROM_START_RE.match(text, index)
+            if match:
+                yield match.end()
+                index = match.end()
+                continue
+        index += 1
+
+
+def _from_items(text: str):
+    """Yield every top-level item of every FROM/JOIN clause in *text*.
+
+    A regex cannot do this: the clause ends at a keyword, at a top-level comma,
+    or at a closing parenthesis that belongs to an enclosing clause, and a lazy
+    match happily runs past that parenthesis into the next CTE.
+    """
+    for start in _from_clause_starts(text):
+        index = item_start = start
+        depth = 0
+        while index < len(text):
+            char = text[index]
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                if depth == 0:
+                    break
+                depth -= 1
+            elif char == ',' and depth == 0:
+                yield text[item_start:index]
+                item_start = index + 1
+            elif depth == 0 and (char.isalpha() or char == '_'):
+                if FROM_STOP_RE.match(text, index):
+                    if index > item_start:
+                        yield text[item_start:index]
+                    item_start = None
+                    break
+                index += re.match(r'[A-Za-z0-9_$#]*', text[index:]).end()
+                continue
+            index += 1
+        if item_start is not None:
+            yield text[item_start:index]
+
+
+def _qualified_members(text: str) -> set[str]:
+    """Return every ``a.b`` name in *text*, outside comments and literals.
+
+    A package function used as an expression (``where id = pkg.current_id``)
+    has neither parentheses nor a statement position, so the call patterns miss
+    it. Whether ``a`` is a package is only knowable from the database mirror.
+    """
+    clean = _strip_sql_comments_and_literals(text)
+    return {
+        f"{match.group(1)}.{match.group(2)}".upper()
+        for match in QUALIFIED_MEMBER_RE.finditer(clean)
+    }
+
+
 def _sql_dependencies(text: str) -> tuple[set[str], set[str], set[str]]:
     clean = _strip_sql_comments_and_literals(text)
     # DELETE FROM names a write target, not a queried source.
@@ -239,17 +441,18 @@ def _sql_dependencies(text: str) -> tuple[set[str], set[str], set[str]]:
     writes_clean = _blank_out(r'\bFOR\s+UPDATE\b', clean)
     cte_names = {
         _reference_label(match.group(1)).casefold()
-        for match in re.finditer(
-            rf'\b({SQL_IDENTIFIER})\s+AS\s*\(\s*SELECT\b',
-            reads_clean,
-            re.IGNORECASE,
-        )
+        for match in CTE_RE.finditer(reads_clean)
     }
-    reads = {
-        _reference_label(match.group(1))
-        for match in READ_RE.finditer(reads_clean)
-        if _reference_label(match.group(1)).casefold() not in cte_names
-    }
+    reads = set()
+    for item in _from_items(reads_clean):
+        item_match = FROM_ITEM_RE.match(item)
+        if not item_match:
+            continue
+        if item_match.group(1).casefold() in FROM_KEYWORDS:
+            continue
+        label = _reference_label(item_match.group(1))
+        if label.casefold() not in cte_names:
+            reads.add(label)
     writes = {_reference_label(match.group(1)) for match in WRITE_RE.finditer(writes_clean)}
     calls = {
         _reference_label(match.group(1))
@@ -326,6 +529,7 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
     in_fence = False
     in_block_comment = False
     pending_property: str | None = None
+    pending_application: str | None = None
     fence_owner: str | None = None
     fence_start = 0
     fence_lines: list[str] = []
@@ -335,6 +539,12 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
         return bool(node.get("metadata", {}).get("synthetic_reference"))
 
     def add_node(node: dict) -> None:
+        if is_synthetic(node):
+            # Graphify salts same-id nodes from different files apart by path,
+            # which would split a reference from the declaration it names.
+            # Its own cross-file anchors (`type: module`) are exempt from that
+            # pass and collapse onto one node, which is what a placeholder is.
+            node["type"] = SHARED_ANCHOR_TYPE
         existing = node_by_id.get(node["id"])
         if existing is None:
             node_by_id[node["id"]] = node
@@ -345,11 +555,20 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
             existing.clear()
             existing.update(node)
 
-    def add_reference_node(label: str) -> str:
+    mirror = DatabaseMirror.for_application_file(path)
+
+    def mirrored_members(text: str) -> set[str]:
+        return {name for name in _qualified_members(text) if mirror.package(name)}
+
+    def add_reference_node(label: str, relation: str) -> str:
+        mirrored = mirror.package(label) if relation == "calls" else mirror.table(label)
+        if mirrored:
+            return mirrored
         node_id = make_id(label)
         if node_id not in node_by_id:
             node = _node(node_id, label, "", None, origin_file=source_path)
             node["source_location"] = ""
+            node["type"] = SHARED_ANCHOR_TYPE
             node_by_id[node_id] = node
             nodes.append(node)
         return node_id
@@ -380,17 +599,19 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
                 block = "\n".join(fence_lines)
                 if fence_owner and fence_is_database_code:
                     reads, writes, calls = _sql_dependencies(block)
+                    calls |= mirrored_members(block)
                     for target in sorted(reads, key=str.casefold):
-                        add_edge(fence_owner, add_reference_node(target), "reads_from", fence_start)
+                        add_edge(fence_owner, add_reference_node(target, "reads_from"), "reads_from", fence_start)
                     for target in sorted(writes, key=str.casefold):
-                        add_edge(fence_owner, add_reference_node(target), "writes_to", fence_start)
+                        add_edge(fence_owner, add_reference_node(target, "writes_to"), "writes_to", fence_start)
                     for target in sorted(calls, key=str.casefold):
-                        add_edge(fence_owner, add_reference_node(target), "calls", fence_start)
+                        add_edge(fence_owner, add_reference_node(target, "calls"), "calls", fence_start)
                 in_fence = False
                 fence_owner = None
                 fence_lines = []
                 fence_is_database_code = False
                 pending_property = None
+                pending_application = None
             else:
                 fence_lines.append(raw_line)
             continue
@@ -460,6 +681,7 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
                 add_edge(parent_id, node_id, "contains", line_number)
                 owner = node_id
 
+            pending_application = None
             frames.append(
                 Frame(
                     kind=kind or token,
@@ -476,6 +698,7 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
                 raise ApexlangParseError(f"unexpected component close at {source_path}:L{line_number}")
             frames.pop()
             pending_property = None
+            pending_application = None
             continue
 
         name_match = NAME_RE.match(line)
@@ -496,14 +719,39 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
             if property_name in COMPONENT_REFERENCE_PROPERTIES and not is_template_reference:
                 target_kind = COMPONENT_REFERENCE_PROPERTIES[property_name]
                 target = make_id(app_node_id, target_kind, reference)
+                # A component declared in another file arrives with the same id
+                # and replaces this placeholder; one that is never declared at
+                # least leaves a visible dangling reference instead of an edge
+                # pointing at nothing.
+                add_node(
+                    _node(
+                        target,
+                        _label(target_kind, reference),
+                        source_path,
+                        line_number,
+                        component_type=target_kind,
+                        application_id=app_id,
+                        synthetic_reference=True,
+                    )
+                )
                 add_edge(owner, target, "references_component", line_number)
 
+        application_match = APPLICATION_PROPERTY_RE.match(line)
+        if application_match:
+            pending_application = application_match.group(1)
+
         for page_match in PAGE_TARGET_RE.finditer(line):
-            target = make_id("apex", "app", app_id, "page", page_match.group(1))
+            target_app = _navigation_application(pending_application, app_id)
+            if target_app is None:
+                continue
+            target = make_id("apex", "app", target_app, "page", page_match.group(1))
             if target != owner:
                 add_edge(owner, target, "navigates_to", line_number)
         for page_match in APEX_URL_PAGE_RE.finditer(line):
-            target = make_id("apex", "app", app_id, "page", page_match.group(1))
+            target_app = _navigation_application(page_match.group(1), app_id)
+            if target_app is None:
+                continue
+            target = make_id("apex", "app", target_app, "page", page_match.group(2))
             if target != owner:
                 add_edge(owner, target, "navigates_to", line_number)
 
@@ -527,14 +775,23 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
                     )
                 )
                 add_edge(owner, target, "secured_by", line_number)
+            if property_name in TABLE_PROPERTY_NAMES and property_value:
+                table = _reference_label(_clean_identifier(property_value, property_value))
+                if table and not _is_ignored_object(table):
+                    add_edge(owner, add_reference_node(table, "reads_from"), "reads_from", line_number)
+            if property_name in FUNCTION_PROPERTY_NAMES and property_value:
+                function = _reference_label(_clean_identifier(property_value, property_value))
+                if "." in function and not _is_ignored_object(function):
+                    add_edge(owner, add_reference_node(function, "calls"), "calls", line_number)
             if property_name in SQL_PROPERTY_NAMES and property_value:
                 reads, writes, calls = _sql_dependencies(property_value)
+                calls |= mirrored_members(property_value)
                 for target in sorted(reads, key=str.casefold):
-                    add_edge(owner, add_reference_node(target), "reads_from", line_number)
+                    add_edge(owner, add_reference_node(target, "reads_from"), "reads_from", line_number)
                 for target in sorted(writes, key=str.casefold):
-                    add_edge(owner, add_reference_node(target), "writes_to", line_number)
+                    add_edge(owner, add_reference_node(target, "writes_to"), "writes_to", line_number)
                 for target in sorted(calls, key=str.casefold):
-                    add_edge(owner, add_reference_node(target), "calls", line_number)
+                    add_edge(owner, add_reference_node(target, "calls"), "calls", line_number)
 
     if in_fence:
         raise ApexlangParseError(f"unclosed multiline fence in {source_path}")
@@ -548,10 +805,66 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
     return {"nodes": nodes, "edges": edges}
 
 
+def extract_sql_linked(path: Path) -> dict:
+    """Graphify's SQL extraction, with foreign keys pointed at mirrored tables.
+
+    The SQL extractor leaves a foreign key's parent table as a sourceless stub
+    and Graphify cannot rewire it onto the parent's real node, because a
+    schema-qualified label such as "DEMO"."USERS" contains a dot. The stub is
+    replaced here by the parent's node id whenever the parent is mirrored under
+    ``database/<schema>/``; anything else is left exactly as extracted.
+    """
+    from graphify.extractors.sql import extract_sql
+
+    result = extract_sql(path)
+    if result.get("error"):
+        return result
+    mirror = DatabaseMirror.for_database_file(path)
+    if mirror.root is None:
+        return result
+    remap: dict[str, str] = {}
+    for node in result.get("nodes", []):
+        if node.get("source_file"):
+            continue
+        target = mirror.table(_reference_label(str(node.get("label", ""))))
+        if target and target != node.get("id"):
+            remap[str(node["id"])] = target
+    if not remap:
+        return result
+    for edge in result.get("edges", []):
+        for end in ("source", "target"):
+            if edge.get(end) in remap:
+                edge[end] = remap[edge[end]]
+    referenced = {
+        edge.get(end) for edge in result.get("edges", []) for end in ("source", "target")
+    }
+    result["nodes"] = [
+        node
+        for node in result.get("nodes", [])
+        if node.get("id") not in remap or node.get("id") in referenced
+    ]
+    return result
+
+
 def extract_apexlang(path: Path) -> dict[str, object]:
-    """Graphify extractor entry point."""
+    """Graphify extractor entry point.
+
+    Never raises: one malformed file must not end a batch indexing run. The
+    warning matters as much as the catch -- returning an `error` nobody reads
+    is how a file silently vanishes from the graph.
+    """
     try:
         text = path.read_text(encoding="utf-8")
         return parse_apexlang(text, path)
-    except (OSError, UnicodeError, ApexlangParseError) as exc:
-        return {"nodes": [], "edges": [], "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        error = str(exc)
+        # splitlines covers CR/LF and the other line separators recognized by
+        # Python, while keeping the original error text for callers below.
+        display_error = " ".join(error.splitlines())
+        display_path = " ".join(str(path).splitlines())
+        print(
+            f"Warning: APEXlang extraction failed for {display_path}: "
+            f"{type(exc).__name__}: {display_error}",
+            file=sys.stderr,
+        )
+        return {"nodes": [], "edges": [], "error": error}

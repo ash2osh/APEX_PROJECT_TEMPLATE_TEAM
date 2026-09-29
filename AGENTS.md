@@ -80,6 +80,19 @@ state.
   read-only SQLcl identity check. `scripts/team.sh backup-db` refreshes the
   local table and code mirrors.
 
+## Optional Tooling
+
+`graphify` (a knowledge-graph indexer exposed via ignored `graphify-out/`) is
+optional; every script works without it. Its rules live in
+[`.agents/rules/graphify.md`](.agents/rules/graphify.md) and
+[`.agents/workflows/graphify.md`](.agents/workflows/graphify.md), and every rule
+is gated on `graphify-out/graph.json` existing. Install it with
+`uv tool install graphifyy --with tree-sitter-sql`, run
+`python3 scripts/setup_graphify_apx.py` (rerun after every Graphify upgrade;
+`--verify` checks without changing anything), then `graphify extract . --force`.
+The corpus is a domain allowlist of `apps/`, `database/`, and `app_context/`.
+The graph reflects this repository's files, not shared Builder state.
+
 ## Project instructions
 
 - `AGENTS.md`, `CLAUDE.md`, `README.md`, and `.agents/rules/agent-safety.md`

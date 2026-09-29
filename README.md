@@ -281,6 +281,37 @@ restore those backups before retrying the upgrade.
 `scripts/team.ps1` exposes the same commands for PowerShell. Migration and
 deployment helpers use Bash, such as Git Bash on Windows.
 
+## Optional knowledge graph
+
+Graphify is optional; every command in this template works without it, and
+agents fall back on grep. It indexes a domain-only corpus (`apps/`, `database/`,
+and `app_context/`) through a repository-owned APEXlang extractor, so `.apx`
+files are read as APEX architecture — containment, navigation, authorization,
+database reads and writes, and PL/SQL calls — rather than as generic SQL. The
+graph reflects this repository's files; export first when it must describe
+current Builder state.
+
+Install Graphify and its SQL parser (the distribution is `graphifyy`, the
+command is `graphify`), then configure a supported semantic backend:
+
+```bash
+uv tool install graphifyy --with tree-sitter-sql
+python3 scripts/setup_graphify_apx.py
+graphify extract . --force
+```
+
+- `python3 scripts/setup_graphify_apx.py --verify` checks the installation
+  without changing it; rerun setup after **every Graphify upgrade**.
+- `graphify update .` after APEXlang or database changes (local, no API cost).
+- `graphify extract .` after changing `app_context`.
+- `python3 scripts/setup_graphify_apx.py` then `graphify update .` after the first
+  `backup-db` or when tables or packages change, so pages link to the real
+  database nodes instead of cached stubs.
+- `graphify extract . --force` after changing `.graphifyignore`.
+
+`graphify-out/` is local and gitignored. See
+[`.agents/workflows/graphify.md`](.agents/workflows/graphify.md).
+
 ## Agent guidance
 
 Agents follow the same app ID, descriptor, drift, migration, and deployment

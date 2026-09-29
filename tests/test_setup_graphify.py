@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""Regression tests for setup_graphify_apx.py using scratch-only fixtures."""
+
+from __future__ import annotations
+
+import builtins
+from contextlib import redirect_stdout
+import importlib.util
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MODULE_PATH = REPO_ROOT / "scripts" / "setup_graphify_apx.py"
+sys.dont_write_bytecode = True
+SPEC = importlib.util.spec_from_file_location("setup_graphify_apx", MODULE_PATH)
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class GraphifyPatchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = REPO_ROOT / "scratch"
+        scratch.mkdir(exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix="graphify-test.", dir=scratch))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root)
+
+    def write_package_at(self, base: Path) -> None:
+        (base / "extractors").mkdir(parents=True, exist_ok=True)
+        (base / "detect.py").write_text(
+            "CODE_EXTENSIONS = {'.sql',}\n",
+            encoding="utf-8",
+        )
+        (base / "extract.py").write_text(
+            "from graphify.extractors.sql import extract_sql  # noqa: F401\n"
+            '_DISPATCH = {\n    ".sql": extract_sql,\n}\n'
+            '_EXTRA_FOR_EXTENSION = {\n    ".sql": "sql",\n}\n',
+            encoding="utf-8",
+        )
+
+    def write_package(self) -> None:
+        self.write_package_at(self.root)
+
+    def snapshot_tree(self, root: Path) -> dict[str, tuple[str, bytes | str]]:
+        snapshot: dict[str, tuple[str, bytes | str]] = {}
+        for path in sorted(root.rglob("*")):
+            relative = str(path.relative_to(root))
+            if path.is_symlink():
+                snapshot[relative] = ("symlink", os.readlink(path))
+            elif path.is_dir():
+                snapshot[relative] = ("directory", b"")
+            else:
+                snapshot[relative] = ("file", path.read_bytes())
+        return snapshot
+
+    def test_missing_required_module_fails(self) -> None:
+        (self.root / "detect.py").write_text("EXTENSIONS = {'.sql',}\n", encoding="utf-8")
+        self.assertFalse(MODULE.patch_graphify_dir(self.root))
+
+    def test_installs_canonical_extractor_and_routes_apx_to_it(self) -> None:
+        self.write_package()
+
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+
+        installed = self.root / "extractors" / "apexlang.py"
+        canonical = REPO_ROOT / "scripts" / "graphify_apexlang_extractor.py"
+        self.assertEqual(installed.read_bytes(), canonical.read_bytes())
+        extract = (self.root / "extract.py").read_text(encoding="utf-8")
+        detect = (self.root / "detect.py").read_text(encoding="utf-8")
+        self.assertIn("from graphify.extractors.apexlang import extract_apexlang", extract)
+        self.assertIn('".apx": extract_apexlang,', extract)
+        self.assertNotIn('".apx": extract_sql,', extract)
+        self.assertIn("'.apx'", detect)
+        # Foreign-key stubs only resolve when .sql goes through the wrapper.
+        self.assertIn("from graphify.extractors.apexlang import extract_sql_linked", extract)
+        self.assertIn('".sql": extract_sql_linked,', extract)
+        self.assertNotIn('".sql": extract_sql,', extract)
+        self.assertIn('".sql": "sql",', extract)
+
+    def test_repeated_install_is_byte_for_byte_idempotent(self) -> None:
+        self.write_package()
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+        paths = [
+            self.root / "detect.py",
+            self.root / "extract.py",
+            self.root / "extractors" / "apexlang.py",
+        ]
+        first = {path: path.read_bytes() for path in paths}
+
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+        self.assertEqual(first, {path: path.read_bytes() for path in paths})
+
+    def test_verify_mode_reports_an_unpatched_installation(self) -> None:
+        self.write_package()
+
+        with mock.patch.object(
+            MODULE, "find_graphify_dirs", return_value=[str(self.root)]
+        ):
+            self.assertEqual(MODULE.main(["--verify"]), 1)
+
+    def test_verify_mode_accepts_a_patched_installation(self) -> None:
+        self.write_package()
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+
+        with mock.patch.object(
+            MODULE, "find_graphify_dirs", return_value=[str(self.root)]
+        ):
+            self.assertEqual(MODULE.main(["--verify"]), 0)
+
+    def test_verify_mode_does_not_mutate_package_or_scratch(self) -> None:
+        self.write_package()
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+        scratch = REPO_ROOT / "scratch"
+        package_before = self.snapshot_tree(self.root)
+        scratch_before = self.snapshot_tree(scratch)
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+
+        sys.dont_write_bytecode = False
+        try:
+            with mock.patch.object(
+                MODULE, "find_graphify_dirs", return_value=[str(self.root)]
+            ):
+                self.assertEqual(MODULE.main(["--verify"]), 0)
+            self.assertFalse(sys.dont_write_bytecode)
+        finally:
+            sys.dont_write_bytecode = previous_dont_write_bytecode
+
+        self.assertEqual(package_before, self.snapshot_tree(self.root))
+        self.assertEqual(scratch_before, self.snapshot_tree(scratch))
+
+    def test_public_verify_fallback_discovery_does_not_mutate_package(self) -> None:
+        fake_parent = Path(tempfile.mkdtemp(prefix="graphify-fallback-test."))
+        fake_package = fake_parent / "graphify"
+        fake_package.mkdir()
+        (fake_package / "__init__.py").write_text(
+            "# fake Graphify package\n", encoding="utf-8"
+        )
+        self.write_package_at(fake_package)
+        self.assertTrue(MODULE.patch_graphify_dir(fake_package))
+        package_before = self.snapshot_tree(fake_package)
+        original_path = list(sys.path)
+        had_graphify = "graphify" in sys.modules
+        original_graphify = sys.modules.get("graphify")
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+
+        sys.path.insert(0, str(fake_parent))
+        sys.modules.pop("graphify", None)
+        sys.dont_write_bytecode = False
+        try:
+            with (
+                mock.patch.object(MODULE.shutil, "which", return_value=None),
+                mock.patch.object(MODULE.glob, "glob", return_value=[]),
+            ):
+                self.assertEqual(MODULE.main(["--verify"]), 0)
+            package_after = self.snapshot_tree(fake_package)
+        finally:
+            sys.path[:] = original_path
+            if had_graphify:
+                sys.modules["graphify"] = original_graphify
+            else:
+                sys.modules.pop("graphify", None)
+            sys.dont_write_bytecode = previous_dont_write_bytecode
+            shutil.rmtree(fake_parent)
+
+        self.assertEqual(package_before, package_after)
+        self.assertEqual(sys.path, original_path)
+        if had_graphify:
+            self.assertIs(sys.modules.get("graphify"), original_graphify)
+        else:
+            self.assertNotIn("graphify", sys.modules)
+        self.assertEqual(sys.dont_write_bytecode, previous_dont_write_bytecode)
+
+    def test_verify_mode_checks_all_candidates_after_a_malformed_installation(
+        self,
+    ) -> None:
+        malformed = self.root / "malformed"
+        (malformed / "extractors").mkdir(parents=True)
+        shutil.copyfile(
+            REPO_ROOT / "scripts" / "graphify_apexlang_extractor.py",
+            malformed / "extractors" / "apexlang.py",
+        )
+
+        valid = self.root / "valid"
+        self.write_package_at(valid)
+        self.assertTrue(MODULE.patch_graphify_dir(valid))
+        output = io.StringIO()
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "find_graphify_dirs",
+                return_value=[str(malformed), str(valid)],
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(MODULE.main(["--verify"]), 1)
+
+        self.assertIn(f"FAIL {malformed}:", output.getvalue())
+        self.assertIn(f"OK   {valid}:", output.getvalue())
+
+    def test_reports_tree_sitter_sql_install_failure(self) -> None:
+        output = io.StringIO()
+
+        with (
+            mock.patch.object(
+                MODULE, "graphify_console_interpreter", return_value="/mock/python"
+            ),
+            mock.patch.object(MODULE, "find_graphify_dirs", return_value=[]),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 1, "", "failed"),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertFalse(MODULE.setup_graphify_apx())
+
+        self.assertIn(
+            "could not install tree-sitter-sql into Graphify's interpreter",
+            output.getvalue(),
+        )
+
+    def test_repairs_outdated_installed_extractor(self) -> None:
+        self.write_package()
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+        installed = self.root / "extractors" / "apexlang.py"
+        installed.write_text("# stale extractor\n", encoding="utf-8")
+
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+        canonical = REPO_ROOT / "scripts" / "graphify_apexlang_extractor.py"
+        self.assertEqual(installed.read_bytes(), canonical.read_bytes())
+
+    def test_incompatible_dispatch_fails_without_partial_install(self) -> None:
+        (self.root / "extractors").mkdir()
+        (self.root / "detect.py").write_text("CODE_EXTENSIONS = {'.sql',}\n", encoding="utf-8")
+        (self.root / "extract.py").write_text("DISPATCH_CHANGED = {}\n", encoding="utf-8")
+        before = (self.root / "detect.py").read_bytes()
+
+        self.assertFalse(MODULE.patch_graphify_dir(self.root))
+        self.assertEqual((self.root / "detect.py").read_bytes(), before)
+        self.assertFalse((self.root / "extractors" / "apexlang.py").exists())
+
+    def test_replaces_legacy_apx_sql_route(self) -> None:
+        self.write_package()
+        extract_path = self.root / "extract.py"
+        extract_path.write_text(
+            extract_path.read_text(encoding="utf-8").replace(
+                '".sql": extract_sql,',
+                '".sql": extract_sql,\n    ".apx": extract_sql,',
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+        extract = extract_path.read_text(encoding="utf-8")
+        self.assertIn('".apx": extract_apexlang,', extract)
+        self.assertNotIn('".apx": extract_sql,', extract)
+
+    def test_unrecognized_existing_apx_handling_fails_closed(self) -> None:
+        """A future Graphify that mentions .apx its own way must not look patched."""
+        self.write_package()
+        detect_path = self.root / "detect.py"
+        detect_path.write_text(
+            "CODE_EXTENSIONS = {'.sql',}\n"
+            "MARKUP_EXTENSIONS = {'.apx',}\n",
+            encoding="utf-8",
+        )
+        before = detect_path.read_bytes()
+
+        self.assertFalse(
+            MODULE.patch_graphify_dir(self.root),
+            "an unrecognized .apx mention must fail closed, not report success",
+        )
+        self.assertEqual(detect_path.read_bytes(), before)
+        self.assertFalse((self.root / "extractors" / "apexlang.py").exists())
+
+    def test_exposes_apx_cache_invalidation(self) -> None:
+        self.assertTrue(
+            hasattr(MODULE, "invalidate_apx_cache"),
+            "invalidate_apx_cache(cache_root) is missing",
+        )
+
+    def test_invalidates_cached_apx_and_sql_extractions_only(self) -> None:
+        # Both kinds depend on the database mirror: an .apx result names mirrored
+        # tables and a .sql result names its foreign-key parents, and the cache
+        # is keyed by file content alone.
+        cache_root = self.root / "cache" / "ast" / "v0.9.35"
+        cache_root.mkdir(parents=True)
+        apx_cache = cache_root / "apx.json"
+        sql_cache = cache_root / "sql.json"
+        other_cache = cache_root / "other.json"
+        apx_cache.write_text(
+            '{"nodes":[{"source_file":"apps/DEMO/102/pages/p00004-home.apx"}],"edges":[]}',
+            encoding="utf-8",
+        )
+        sql_cache.write_text(
+            '{"nodes":[{"source_file":"database/DEMO/tables/ORDERS.sql"}],"edges":[]}',
+            encoding="utf-8",
+        )
+        other_cache.write_text(
+            '{"nodes":[{"source_file":"tools/helper.py"}],"edges":[]}',
+            encoding="utf-8",
+        )
+
+        removed = MODULE.invalidate_apx_cache(self.root / "cache" / "ast")
+
+        self.assertEqual(removed, 2)
+        self.assertFalse(apx_cache.exists())
+        self.assertFalse(sql_cache.exists())
+        self.assertTrue(other_cache.exists())
+
+    def test_invalidates_apx_cache_when_only_some_directories_patch(self) -> None:
+        good = self.root / "good"
+        broken = self.root / "broken"
+        self.write_package_at(good)
+        self.write_package_at(broken)
+        (broken / "extract.py").write_text("nothing to anchor on\n", encoding="utf-8")
+        # setup_graphify_apx() derives the cache path from REPO_ROOT. Point that
+        # at the throwaway fixture root: creating graphify-out/cache/ast/ in the
+        # real tree leaves an empty directory behind after the run, and a test
+        # must not deposit anything in the repository it is testing.
+        fake_repo_root = self.root / "repo"
+        cache = fake_repo_root / "graphify-out" / "cache" / "ast"
+        cache.mkdir(parents=True)
+        stale = cache / "partial-setup-fixture.json"
+        stale.write_text(
+            json.dumps({"nodes": [{"source_file": "apps/DEMO/101/pages/p1.apx"}]}),
+            encoding="utf-8",
+        )
+        with mock.patch.object(MODULE, "REPO_ROOT", fake_repo_root), mock.patch.object(
+            MODULE, "find_graphify_dirs", return_value=[str(good), str(broken)]
+        ):
+            self.assertFalse(MODULE.setup_graphify_apx())
+        self.assertFalse(
+            stale.exists(),
+            "a partially successful setup must still invalidate stale .apx cache",
+        )
+
+    def test_prefers_the_interpreter_behind_the_graphify_console_script(self) -> None:
+        console_script = self.root / "bin" / "graphify"
+        console_script.parent.mkdir()
+        console_script.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+        active_package = self.root / "active" / "site-packages" / "graphify"
+        active_package.mkdir(parents=True)
+        located = subprocess.CompletedProcess(
+            args=[sys.executable, "-c", ""],
+            returncode=0,
+            stdout=f"{active_package}\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(MODULE.shutil, "which", return_value=str(console_script)),
+            mock.patch.object(MODULE.subprocess, "run", return_value=located) as run,
+            mock.patch.object(
+                MODULE.glob,
+                "glob",
+                side_effect=AssertionError("resolved PATH installation must skip fallback scanning"),
+            ),
+        ):
+            self.assertEqual(MODULE.find_graphify_dirs(), [str(active_package)])
+
+        run.assert_called_once_with(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "import graphify, os; print(os.path.dirname(graphify.__file__))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def test_fallback_candidates_are_unique_sorted_and_warning_counts_unique_paths(self) -> None:
+        console_script = self.root / "bin" / "graphify"
+        console_script.parent.mkdir()
+        console_script.write_text("not a shebang\n", encoding="utf-8")
+        first = self.root / "z-fallback"
+        second = self.root / "a-fallback"
+        original_import = builtins.__import__
+
+        def import_without_graphify(name, *args, **kwargs):
+            if name == "graphify":
+                raise ImportError("graphify unavailable in test interpreter")
+            return original_import(name, *args, **kwargs)
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(MODULE.shutil, "which", return_value=str(console_script)),
+            mock.patch.object(
+                builtins, "__import__", side_effect=import_without_graphify
+            ),
+            mock.patch.object(
+                MODULE.glob,
+                "glob",
+                return_value=[str(first), str(second), str(first)],
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                MODULE.find_graphify_dirs(), sorted({str(first), str(second)})
+            )
+
+        self.assertIn(
+            "Warning: could not resolve the active Graphify from PATH; "
+            "patching 2 candidate installation(s)",
+            output.getvalue(),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

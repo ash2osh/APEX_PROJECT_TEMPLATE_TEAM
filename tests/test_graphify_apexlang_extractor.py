@@ -1,34 +1,1265 @@
+#!/usr/bin/env python3
+"""Regression tests for the repository-owned Graphify APEXlang extractor."""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import io
+import shutil
 import sys
+import tempfile
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from graphify_apexlang_extractor import parse_apexlang  # noqa: E402
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MODULE_PATH = REPO_ROOT / "scripts" / "graphify_apexlang_extractor.py"
 
 
-class GraphifyApexlangExtractorTests(unittest.TestCase):
+class ExtractorPresenceTests(unittest.TestCase):
+    def test_canonical_extractor_is_tracked_in_the_repository(self) -> None:
+        self.assertTrue(
+            MODULE_PATH.is_file(),
+            "scripts/graphify_apexlang_extractor.py is missing",
+        )
+
+
+@unittest.skipUnless(MODULE_PATH.is_file(), "canonical extractor is missing")
+class ApexlangExtractorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("graphify_apexlang_extractor", MODULE_PATH)
+        assert spec and spec.loader
+        cls.module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cls.module
+        spec.loader.exec_module(cls.module)
+
+    def setUp(self) -> None:
+        scratch = REPO_ROOT / "scratch"
+        scratch.mkdir(exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix="apexlang-extractor-test.", dir=scratch))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root)
+
+    def extract(self, source: str, relative: str = "apps/DEMO/102/pages/p00004-home.apx") -> dict:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        return self.module.extract_apexlang(path)
+
+    def edge_tuples(self, result: dict) -> set[tuple[str, str, str]]:
+        return {
+            (edge["source"], edge["target"], edge["relation"])
+            for edge in result["edges"]
+        }
+
     def test_comment_backticks_do_not_hide_following_multiline_sql(self) -> None:
-        source = """// SQL examples use ```sql in this note
-App 100 (
-  Page 1 (
-    SQLQuery: ```sql
-      SELECT * FROM ORDERS
-    ```
-  )
+        result = self.extract(
+            "// SQL examples use ```sql in this note\n"
+            "app 100 (\n"
+            "    page 1 (\n"
+            "        sqlQuery: ```sql\n"
+            "            SELECT * FROM ORDERS\n"
+            "        ```\n"
+            "    )\n"
+            ")\n"
+        )
+        self.assertNotIn("error", result)
+        reads = [edge for edge in result["edges"] if edge["relation"] == "reads_from"]
+        self.assertEqual(1, len(reads))
+        target = next(node for node in result["nodes"] if node["id"] == reads[0]["target"])
+        self.assertEqual("ORDERS", target["label"])
+
+    def test_single_quoted_component_identifier_keeps_the_frame_balanced(self) -> None:
+        # APEX exports report columns named after their SQL alias, such as
+        # `column '#A01#' (`. Not recognizing the opener made its closing
+        # parenthesis pop the enclosing region and abort the whole page.
+        result = self.extract(
+            "app 100 (\n"
+            "    page 5 (\n"
+            "        region report (\n"
+            "            name: Report\n"
+            "            column '#A01#' (\n"
+            "                heading: A01\n"
+            "            )\n"
+            "        )\n"
+            "        region after (\n"
+            "            name: After\n"
+            "            source {\n"
+            "                sqlQuery: select id from orders\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        self.assertNotIn("error", result)
+        labels = {node["label"] for node in result["nodes"]}
+        self.assertIn("orders", {label.lower() for label in labels})
+        self.assertTrue(any("after" in label.lower() for label in labels))
+
+    def write_database_object(self, relative: str, text: str = "-- ddl\n") -> None:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_database_references_link_to_the_mirrored_object_nodes(self) -> None:
+        # Graphify's SQL extractor names a table node
+        # <file id>_<schema>_<table> and cannot rewire a stub onto it (a
+        # schema-qualified label contains a dot), so the page has to point at
+        # that id itself or the app and database halves never connect.
+        self.write_database_object("database/DEMO/tables/ORDERS.sql")
+        self.write_database_object("database/DEMO/tables/AUDIT_LOG.sql")
+        self.write_database_object("database/DEMO/packages/HR_AUTH_PKG_SPEC.sql")
+        self.write_database_object("database/DEMO/packages/HR_AUTH_PKG_BODY.sql")
+        result = self.extract(
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region orders (\n"
+            "            source {\n"
+            "                sqlQuery: select o.id from orders o, dual\n"
+            "            }\n"
+            "        )\n"
+            "        process audit (\n"
+            "            source {\n"
+            "                plsql: ```plsql\n"
+            "                    insert into audit_log (id) values (1);\n"
+            "                    hr_auth_pkg.assert_super_admin;\n"
+            "                ```\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        edges = {(e["relation"], e["target"]) for e in result["edges"]}
+        self.assertIn(("reads_from", "database_demo_tables_orders_demo_orders"), edges)
+        self.assertIn(("writes_to", "database_demo_tables_audit_log_demo_audit_log"), edges)
+        self.assertIn(("calls", "database_demo_packages_hr_auth_pkg_spec"), edges)
+        node_ids = {node["id"] for node in result["nodes"]}
+        self.assertNotIn("orders", node_ids)
+        self.assertNotIn("audit_log", node_ids)
+
+    def relation_targets(self, result: dict) -> set[tuple[str, str]]:
+        return {(edge["relation"], edge["target"]) for edge in result["edges"]}
+
+    def test_table_name_property_reads_the_table(self) -> None:
+        self.write_database_object("database/DEMO/tables/ORDERS.sql")
+        result = self.extract(
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region r (\n"
+            "            source {\n"
+            "                location: localDatabase\n"
+            "                tableName: ORDERS\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        self.assertIn(
+            ("reads_from", "database_demo_tables_orders_demo_orders"),
+            self.relation_targets(result),
+        )
+
+    def test_table_name_property_without_a_mirror_reads_a_stub(self) -> None:
+        result = self.extract(
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region r (\n"
+            "            source {\n"
+            "                tableName: ORDERS\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        self.assertIn(("reads_from", "orders"), self.relation_targets(result))
+
+    def test_plsql_expression_and_auth_function_call_the_mirrored_package(self) -> None:
+        self.write_database_object("database/DEMO/packages/HR_AUTH_PKG_SPEC.sql")
+        result = self.extract(
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region r (\n"
+            "            serverSideCondition {\n"
+            "                type: expression\n"
+            "                plsqlExpression: hr_auth_pkg.is_employee(:APP_USER)\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        self.assertIn(
+            ("calls", "database_demo_packages_hr_auth_pkg_spec"),
+            self.relation_targets(result),
+        )
+        authentication = self.extract(
+            "authentication custom (\n"
+            "    settings {\n"
+            "        authFunctionName: hr_auth_pkg.authenticate\n"
+            "    }\n"
+            ")\n",
+            relative="apps/DEMO/102/shared-components/authentications.apx",
+        )
+        self.assertIn(
+            ("calls", "database_demo_packages_hr_auth_pkg_spec"),
+            self.relation_targets(authentication),
+        )
+
+    def test_package_function_used_in_sql_without_parentheses_is_a_call(self) -> None:
+        self.write_database_object("database/DEMO/packages/HR_USER_PKG_SPEC.sql")
+        source = (
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region r (\n"
+            "            source {\n"
+            "                sqlQuery: ```sql\n"
+            "                    select b.id from balances b\n"
+            "                     where b.user_id = hr_user_pkg.current_user_id\n"
+            "                ```\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.extract(source)
+        calls = {t for r, t in self.relation_targets(result) if r == "calls"}
+        # The table alias `b.` is not a package, and only a mirrored package counts.
+        self.assertEqual({"database_demo_packages_hr_user_pkg_spec"}, calls)
+
+    def test_package_function_in_sql_is_ignored_without_a_mirror(self) -> None:
+        result = self.extract(
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region r (\n"
+            "            source {\n"
+            "                sqlQuery: select id from t where user_id = hr_user_pkg.current_user_id\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        self.assertEqual(
+            set(), {t for r, t in self.relation_targets(result) if r == "calls"}
+        )
+
+    def linked_sql(self, relative: str, result: dict) -> dict:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("-- ddl\n", encoding="utf-8")
+        fake_package = types.ModuleType("graphify")
+        fake_extractors = types.ModuleType("graphify.extractors")
+        fake_sql = types.ModuleType("graphify.extractors.sql")
+        fake_sql.extract_sql = lambda _path: result
+        modules = {
+            "graphify": fake_package,
+            "graphify.extractors": fake_extractors,
+            "graphify.extractors.sql": fake_sql,
+        }
+        with mock.patch.dict(sys.modules, modules):
+            return self.module.extract_sql_linked(path)
+
+    @staticmethod
+    def foreign_key_result() -> dict:
+        return {
+            "nodes": [
+                {"id": "child_file", "label": "USER_ROLES.sql", "source_file": "x"},
+                {"id": "child", "label": '"DEMO"."USER_ROLES"', "source_file": "x"},
+                {"id": "demo_users", "label": '"DEMO"."USERS"', "source_file": ""},
+                {"id": "demo_missing", "label": '"DEMO"."MISSING"', "source_file": ""},
+            ],
+            "edges": [
+                {"source": "child", "target": "demo_users", "relation": "references"},
+                {"source": "child", "target": "demo_missing", "relation": "references"},
+            ],
+        }
+
+    def test_sql_foreign_keys_point_at_the_mirrored_table_nodes(self) -> None:
+        # Graphify cannot rewire a foreign-key stub onto a schema-qualified
+        # table node, so a mirrored parent table would otherwise never show
+        # which tables reference it.
+        self.write_database_object("database/DEMO/tables/USERS.sql")
+        result = self.linked_sql("database/DEMO/tables/USER_ROLES.sql", self.foreign_key_result())
+        targets = {edge["target"] for edge in result["edges"]}
+        self.assertIn("database_demo_tables_users_demo_users", targets)
+        self.assertIn("demo_missing", targets)
+        node_ids = {node["id"] for node in result["nodes"]}
+        self.assertNotIn("demo_users", node_ids)
+        self.assertIn("demo_missing", node_ids)
+
+    def test_sql_outside_the_database_mirror_is_left_alone(self) -> None:
+        self.write_database_object("database/DEMO/tables/USERS.sql")
+        original = self.foreign_key_result()
+        result = self.linked_sql(
+            "apps/DEMO/102/supporting-objects/install-scripts/create-tables.sql", original
+        )
+        self.assertIn("demo_users", {edge["target"] for edge in result["edges"]})
+
+    def test_sql_extraction_errors_pass_through(self) -> None:
+        result = self.linked_sql(
+            "database/DEMO/tables/BROKEN.sql", {"nodes": [], "edges": [], "error": "boom"}
+        )
+        self.assertEqual("boom", result["error"])
+
+    def test_database_reference_without_a_mirrored_object_stays_a_stub(self) -> None:
+        self.write_database_object("database/DEMO/tables/ORDERS.sql")
+        result = self.extract(
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region r (\n"
+            "            source {\n"
+            "                sqlQuery: select * from apex_tasks, missing_table\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        nodes = {node["id"]: node for node in result["nodes"]}
+        for stub in ("apex_tasks", "missing_table"):
+            self.assertIn(stub, nodes)
+            self.assertEqual("", nodes[stub]["source_file"])
+
+    def test_database_references_stay_stubs_without_a_mirror(self) -> None:
+        result = self.extract(
+            "app 102 (\n"
+            "    page 4 (\n"
+            "        region r (\n"
+            "            source {\n"
+            "                sqlQuery: select * from orders\n"
+            "            }\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        self.assertIn("orders", {node["id"] for node in result["nodes"]})
+
+    def test_exposes_graphify_extractor_entry_point(self) -> None:
+        self.assertTrue(
+            hasattr(self.module, "extract_apexlang"),
+            "extract_apexlang(path) is missing",
+        )
+
+    def test_reports_an_unexpected_failure_without_raising(self) -> None:
+        broken = Path("apps/DEMO/101/pages/does-not-exist.apx")
+        with mock.patch.object(
+            self.module, "parse_apexlang", side_effect=RuntimeError("boom")
+        ), mock.patch.object(Path, "read_text", return_value="app 1 (\n)\n"):
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                result = self.module.extract_apexlang(broken)
+        self.assertEqual(result["nodes"], [])
+        self.assertIn("boom", result["error"])
+        self.assertIn(str(broken), captured.getvalue())
+
+    def test_reports_multiline_failure_as_one_warning_line(self) -> None:
+        broken = Path("apps/DEMO/101/pages/does-not-exist.apx")
+        message = "first line\r\nsecond line\u2028third line"
+        with mock.patch.object(
+            self.module, "parse_apexlang", side_effect=RuntimeError(message)
+        ), mock.patch.object(Path, "read_text", return_value="app 1 (\n)\n"):
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                result = self.module.extract_apexlang(broken)
+
+        self.assertEqual(result["error"], message)
+        self.assertEqual(
+            captured.getvalue().splitlines(),
+            [
+                f"Warning: APEXlang extraction failed for {broken}: "
+                "RuntimeError: first line second line third line"
+            ],
+        )
+
+    def test_reports_newline_path_as_one_warning_line(self) -> None:
+        broken = Path("apps/DEMO/101/pages/first\nsecond.apx")
+        with mock.patch.object(
+            self.module, "parse_apexlang", side_effect=RuntimeError("boom")
+        ), mock.patch.object(Path, "read_text", return_value="app 1 (\n)\n"):
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                result = self.module.extract_apexlang(broken)
+
+        self.assertEqual(result["nodes"], [])
+        self.assertEqual(result["edges"], [])
+        self.assertEqual(result["error"], "boom")
+        # str(Path) renders with the platform separator, so a hardcoded
+        # forward-slash expectation passes on POSIX and fails on Windows for a
+        # reason the assertion is not about. Derive the path the same way the
+        # extractor does; what is under test is that the embedded newline
+        # collapses so the warning stays on exactly one line.
+        expected_path = " ".join(str(broken).splitlines())
+        self.assertNotIn("\n", expected_path)
+        self.assertEqual(
+            captured.getvalue().splitlines(),
+            [
+                f"Warning: APEXlang extraction failed for "
+                f"{expected_path}: RuntimeError: boom"
+            ],
+        )
+
+    def test_unqualified_calls_are_deliberately_not_detected(self) -> None:
+        # The dot requirement in PAREN_CALL_RE is load-bearing: without it every
+        # SQL built-in (NVL, TO_CHAR, SUBSTR) becomes a `calls` edge. Resolving
+        # unqualified names needs the database/ symbol table, which per-file
+        # extraction does not have. Do not "fix" this without that.
+        _reads, _writes, calls = self.module._sql_dependencies("begin log_event('m'); end;")
+        self.assertEqual(calls, set())
+        _reads, _writes, calls = self.module._sql_dependencies("begin pkg.proc(x); end;")
+        self.assertEqual(calls, {"PKG.PROC"})
+
+    def test_reads_every_table_in_a_comma_separated_from_list(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            "select o.id from orders o, customers c, order_items i where o.id = c.id"
+        )
+        self.assertEqual(reads, {"ORDERS", "CUSTOMERS", "ORDER_ITEMS"})
+
+    def test_does_not_treat_quoted_from_identifiers_as_clauses(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            'select "FROM", "actual_column" from orders'
+        )
+        self.assertEqual(reads, {"ORDERS"})
+        reads, _writes, _calls = self.module._sql_dependencies('select "FROM", "other"')
+        self.assertEqual(reads, set())
+
+    def test_does_not_treat_quoted_join_identifiers_as_clauses(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            'select "JOIN", "actual_column" from orders'
+        )
+        self.assertEqual(reads, {"ORDERS"})
+        reads, _writes, _calls = self.module._sql_dependencies('select "JOIN", "other"')
+        self.assertEqual(reads, set())
+
+    def test_does_not_treat_quoted_from_identifiers_with_spaces_as_clauses(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            'select "FROM ", "actual_column" from orders'
+        )
+        self.assertEqual(reads, {"ORDERS"})
+        reads, _writes, _calls = self.module._sql_dependencies('select "FROM ", "other"')
+        self.assertEqual(reads, set())
+
+    def test_does_not_treat_quoted_join_identifiers_with_spaces_as_clauses(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            'select "JOIN ", "actual_column" from orders'
+        )
+        self.assertEqual(reads, {"ORDERS"})
+        reads, _writes, _calls = self.module._sql_dependencies('select "JOIN ", "other"')
+        self.assertEqual(reads, set())
+
+    def test_does_not_treat_a_cte_with_a_column_list_as_a_table(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            "with t (a, b) as (select 1, 2 from dual) select a from t, orders"
+        )
+        self.assertEqual(reads, {"ORDERS"})
+
+    def test_does_not_treat_the_table_operator_as_a_table(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            "select 1 from table(pkg.pipe(x)), orders"
+        )
+        self.assertEqual(reads, {"ORDERS"})
+
+    def test_stops_a_from_list_at_a_clause_keyword(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            "select 1 from orders group by id"
+        )
+        self.assertEqual(reads, {"ORDERS"})
+
+    def test_reads_tables_from_multiple_ctes_and_the_main_query(self) -> None:
+        reads, _writes, _calls = self.module._sql_dependencies(
+            "with a as (select 1 x from dual), b (y) as (select 2 from dual) "
+            "select 1 from a, b, orders"
+        )
+        self.assertEqual(reads, {"ORDERS"})
+
+    def test_extracts_architectural_containment_and_source_lines(self) -> None:
+        result = self.extract(
+            """page 4 (
+    name: Home
+    region categories (
+        name: Categories
+    )
+    dynamicAction open-search (
+        name: Open Search
+    )
+    process create-order (
+        name: Create Order
+    )
 )
 """
+        )
 
-        extracted = parse_apexlang(source, Path("comment-fence.apx"))
+        self.assertNotIn("error", result)
+        nodes = {node["id"]: node for node in result["nodes"]}
+        self.assertEqual(nodes["apex_app_102_page_4"]["label"], "Page 4: Home")
+        self.assertEqual(nodes["apex_app_102_page_4"]["source_location"], "L1")
+        self.assertEqual(
+            nodes["apex_app_102_page_4_region_categories"]["label"],
+            "Region: Categories",
+        )
+        self.assertEqual(
+            nodes["apex_app_102_page_4_dynamic_action_open_search"]["label"],
+            "Dynamic Action: Open Search",
+        )
+        self.assertEqual(
+            nodes["apex_app_102_page_4_process_create_order"]["label"],
+            "Process: Create Order",
+        )
+        edges = self.edge_tuples(result)
+        self.assertIn(("apex_app_102", "apex_app_102_page_4", "contains"), edges)
+        self.assertIn(
+            (
+                "apex_app_102_page_4",
+                "apex_app_102_page_4_region_categories",
+                "contains",
+            ),
+            edges,
+        )
 
-        self.assertEqual({"nodes", "edges"}, set(extracted))
-        reads = [edge for edge in extracted["edges"] if edge["relation"] == "reads_from"]
-        self.assertEqual(1, len(reads))
-        target_id = reads[0]["target"]
-        target = next(node for node in extracted["nodes"] if node["id"] == target_id)
-        self.assertEqual("ORDERS", target["label"])
+    def test_extracts_application_and_shared_components(self) -> None:
+        result = self.extract(
+            """app 102 (
+    name: APEXToGo
+)
+list navigation-menu (
+    name: Navigation Menu
+)
+lov restaurant-lov (
+    name: Restaurants
+)
+authorization must-not-be-public-user (
+    name: Must Not Be Public User
+)
+""",
+            "apps/DEMO/102/application.apx",
+        )
+
+        nodes = {node["id"]: node for node in result["nodes"]}
+        self.assertEqual(nodes["apex_app_102"]["label"], "App 102: APEXToGo")
+        self.assertIn("apex_app_102_list_navigation_menu", nodes)
+        self.assertIn("apex_app_102_lov_restaurant_lov", nodes)
+        self.assertIn("apex_app_102_authorization_must_not_be_public_user", nodes)
+        edges = self.edge_tuples(result)
+        self.assertIn(
+            ("apex_app_102", "apex_app_102_list_navigation_menu", "contains"),
+            edges,
+        )
+
+    def test_keeps_nonarchitectural_components_out_of_nodes(self) -> None:
+        result = self.extract(
+            """page 4 (
+    button checkout (
+        name: Checkout
+    )
+    pageItem P4_QUERY (
+        name: Query
+    )
+    region cards (
+        column NAME (
+        )
+    )
+)
+"""
+        )
+
+        node_ids = {node["id"] for node in result["nodes"]}
+        self.assertFalse(any("checkout" in node_id for node_id in node_ids))
+        self.assertFalse(any("p4_query" in node_id for node_id in node_ids))
+        self.assertFalse(any("column" in node_id for node_id in node_ids))
+        self.assertIn("apex_app_102_page_4_region_cards", node_ids)
+
+    def test_scopes_same_named_regions_by_application_and_page(self) -> None:
+        first = self.extract("page 4 (\n region summary (\n )\n)\n")
+        second = self.extract(
+            "page 5 (\n region summary (\n )\n)\n",
+            "apps/DEMO/103/pages/p00005-summary.apx",
+        )
+
+        first_ids = {node["id"] for node in first["nodes"]}
+        second_ids = {node["id"] for node in second["nodes"]}
+        self.assertIn("apex_app_102_page_4_region_summary", first_ids)
+        self.assertIn("apex_app_103_page_5_region_summary", second_ids)
+        self.assertFalse(first_ids & second_ids - {""})
+
+    def test_ignores_delimiters_inside_fences_comments_arrays_and_values(self) -> None:
+        result = self.extract(
+            '''page 4 (
+    // a comment with ) and {
+    css {
+        inline:
+            ```css
+            .x::after { content: ")"; }
+            ```
+    }
+    appearance {
+        templateOptions: [
+            #DEFAULT#
+            body-height-fill
+        ]
+    }
+    region content (
+    )
+)
+'''
+        )
+
+        self.assertNotIn("error", result)
+        self.assertIn(
+            "apex_app_102_page_4_region_content",
+            {node["id"] for node in result["nodes"]},
+        )
+
+    def test_reports_unbalanced_component_or_fence_as_error(self) -> None:
+        component = self.extract("page 4 (\n region broken (\n )\n")
+        fence = self.extract("page 4 (\n code: ```plsql\n begin null; end;\n)\n")
+
+        self.assertEqual(component["nodes"], [])
+        self.assertIn("unclosed component", component["error"])
+        self.assertEqual(fence["nodes"], [])
+        self.assertIn("unclosed multiline fence", fence["error"])
+
+    def test_output_is_stable_across_repeated_extraction(self) -> None:
+        source = "page 4 (\n region categories (\n )\n)\n"
+        first = self.extract(source)
+        second = self.extract(source)
+        self.assertEqual(first, second)
+
+    def test_extracts_navigation_security_and_component_references(self) -> None:
+        result = self.extract(
+            """page 8 (
+    name: Cart
+    security {
+        authorizationScheme: @must-not-be-public-user
+    }
+    region cart-lines (
+        appearance {
+            template: @/content-block
+        }
+        source {
+            listOfValues: @restaurant-lov
+        }
+        action open-item (
+            behavior {
+                target: {
+                    page: 7
+                }
+            }
+        )
+    )
+)
+list navigation-menu (
+    entry cart (
+        link { target: { page: 8 } }
+    )
+    entry faq (
+        link {
+            targetUrl: f?p=&APP_ID.:13:&APP_SESSION.
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        self.assertIn(
+            (
+                "apex_app_102_page_8",
+                "apex_app_102_authorization_must_not_be_public_user",
+                "secured_by",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "apex_app_102_page_8_region_cart_lines",
+                "apex_app_102_lov_restaurant_lov",
+                "references_component",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "apex_app_102_page_8_region_cart_lines",
+                "apex_app_102_page_7",
+                "navigates_to",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "apex_app_102_list_navigation_menu",
+                "apex_app_102_page_8",
+                "navigates_to",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "apex_app_102_list_navigation_menu",
+                "apex_app_102_page_13",
+                "navigates_to",
+            ),
+            edges,
+        )
+
+    def test_component_reference_creates_a_placeholder_node(self) -> None:
+        source = (
+            "app 101 (\n"
+            "    page 5 (\n"
+            "        region picker (\n"
+            "            listOfValues: @DEPARTMENTS\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.module.parse_apexlang(
+            source, Path("apps/DEMO/101/pages/p00005.apx")
+        )
+        node_ids = {node["id"] for node in result["nodes"]}
+        reference_edges = [
+            edge for edge in result["edges"] if edge["relation"] == "references_component"
+        ]
+        self.assertEqual(len(reference_edges), 1)
+        self.assertIn(reference_edges[0]["target"], node_ids)
+
+    def test_navigation_to_another_application_targets_that_application(self) -> None:
+        source = (
+            "app 101 (\n"
+            "    name: Caller\n"
+            "    page 5 (\n"
+            "        name: Launcher\n"
+            "        region go (\n"
+            "            url: f?p=102:1:&SESSION.\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.module.parse_apexlang(source, Path("apps/DEMO/101/pages/p00005.apx"))
+        targets = {
+            edge["target"] for edge in result["edges"] if edge["relation"] == "navigates_to"
+        }
+        self.assertIn("apex_app_102_page_1", targets)
+        self.assertNotIn("apex_app_101_page_1", targets)
+
+    def test_navigation_with_a_substituted_application_stays_in_this_application(self) -> None:
+        source = (
+            "app 101 (\n"
+            "    page 5 (\n"
+            "        region go (\n"
+            "            url: f?p=&APP_ID.:9:&SESSION.\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.module.parse_apexlang(source, Path("apps/DEMO/101/pages/p00005.apx"))
+        targets = {
+            edge["target"] for edge in result["edges"] if edge["relation"] == "navigates_to"
+        }
+        self.assertEqual(targets, {"apex_app_101_page_9"})
+
+    def test_navigation_to_an_unresolvable_alias_emits_no_edge(self) -> None:
+        source = (
+            "app 101 (\n"
+            "    page 5 (\n"
+            "        region go (\n"
+            "            url: f?p=my-alias:3:&SESSION.\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.module.parse_apexlang(source, Path("apps/DEMO/101/pages/p00005.apx"))
+        targets = {
+            edge["target"] for edge in result["edges"] if edge["relation"] == "navigates_to"
+        }
+        self.assertEqual(targets, set())
+
+    def test_page_target_uses_a_sibling_application_property(self) -> None:
+        source = (
+            "app 101 (\n"
+            "    page 5 (\n"
+            "        region go (\n"
+            "            application: 102\n"
+            "            page: 7\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.module.parse_apexlang(source, Path("apps/DEMO/101/pages/p00005.apx"))
+        targets = {
+            edge["target"] for edge in result["edges"] if edge["relation"] == "navigates_to"
+        }
+        self.assertEqual(targets, {"apex_app_102_page_7"})
+
+    def test_pending_application_does_not_bleed_into_a_sibling_component(self) -> None:
+        source = (
+            "app 101 (\n"
+            "    page 5 (\n"
+            "        region first (\n"
+            "            application: 102\n"
+            "            page: 7\n"
+            "        )\n"
+            "        region second (\n"
+            "            page: 8\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.module.parse_apexlang(source, Path("apps/DEMO/101/pages/p00005.apx"))
+        targets = {
+            edge["target"] for edge in result["edges"] if edge["relation"] == "navigates_to"
+        }
+        self.assertEqual(
+            targets,
+            {"apex_app_102_page_7", "apex_app_101_page_8"},
+        )
+
+    def test_pending_application_does_not_bleed_past_a_multiline_fence(self) -> None:
+        source = (
+            "app 101 (\n"
+            "    page 5 (\n"
+            "        region go (\n"
+            "            application: 102\n"
+            "            content: ```text\n"
+            "            page: 7\n"
+            "            ```\n"
+            "            page: 8\n"
+            "        )\n"
+            "    )\n"
+            ")\n"
+        )
+        result = self.module.parse_apexlang(source, Path("apps/DEMO/101/pages/p00005.apx"))
+        targets = {
+            edge["target"] for edge in result["edges"] if edge["relation"] == "navigates_to"
+        }
+        self.assertEqual(targets, {"apex_app_101_page_8"})
+
+    def test_extracts_sql_reads_writes_and_plsql_calls(self) -> None:
+        result = self.extract(
+            """page 8 (
+    region cart-lines (
+        source {
+            sqlQuery:
+                ```sql
+                select i.name
+                  from sample_restaurant_items i
+                  join sample_restaurant_order_items oi on oi.item_id = i.id
+                 where i.notes <> 'from not_a_table'
+                   -- join ignored_comment_table x on 1 = 1
+                ```
+        }
+    )
+    process checkout (
+        source {
+            plsqlCode:
+                ```plsql
+                insert into sample_restaurant_orders(id) values (1);
+                update sample_restaurant_order_items set quantity = 2;
+                sample_restaurant_manage_orders.create_order;
+                apex_collection.create_collection('FROM ALSO_NOT_A_TABLE');
+                ```
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        region = "apex_app_102_page_8_region_cart_lines"
+        process = "apex_app_102_page_8_process_checkout"
+        self.assertIn((region, "sample_restaurant_items", "reads_from"), edges)
+        self.assertIn((region, "sample_restaurant_order_items", "reads_from"), edges)
+        self.assertIn((process, "sample_restaurant_orders", "writes_to"), edges)
+        self.assertIn((process, "sample_restaurant_order_items", "writes_to"), edges)
+        self.assertIn(
+            (process, "sample_restaurant_manage_orders_create_order", "calls"),
+            edges,
+        )
+        all_targets = {target for _, target, _ in edges}
+        self.assertNotIn("not_a_table", all_targets)
+        self.assertNotIn("ignored_comment_table", all_targets)
+        self.assertNotIn("also_not_a_table", all_targets)
+        self.assertNotIn("apex_collection_create_collection", all_targets)
+
+    def test_extracts_unqualified_authorization_and_inline_code(self) -> None:
+        result = self.extract(
+            """page 8 (
+    security {
+        authorizationScheme: mustNotBePublicUser
+    }
+    region order-summary (
+        source {
+            sqlQuery: select id from sample_restaurant_orders
+        }
+    )
+    process submit-order (
+        source {
+            plsqlCode: sample_restaurant_manage_orders.create_order;
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        node_ids = {node["id"] for node in result["nodes"]}
+        self.assertIn(
+            "apex_app_102_authorization_mustnotbepublicuser",
+            node_ids,
+            "built-in authorization references must have a graph endpoint",
+        )
+        self.assertIn(
+            (
+                "apex_app_102_page_8",
+                "apex_app_102_authorization_mustnotbepublicuser",
+                "secured_by",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "apex_app_102_page_8_region_order_summary",
+                "sample_restaurant_orders",
+                "reads_from",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "apex_app_102_page_8_process_submit_order",
+                "sample_restaurant_manage_orders_create_order",
+                "calls",
+            ),
+            edges,
+        )
+
+    def test_ignores_self_navigation_and_theme_template_list_references(self) -> None:
+        result = self.extract(
+            """page 8 (
+    action refresh-cart (
+        behavior {
+            target: { page: 8 }
+        }
+    )
+)
+theme universal-theme (
+    componentDefaults {
+        list: @/links-list
+    }
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        self.assertNotIn(
+            ("apex_app_102_page_8", "apex_app_102_page_8", "navigates_to"),
+            edges,
+        )
+        self.assertNotIn(
+            ("apex_app_102", "apex_app_102_list_links_list", "references_component"),
+            edges,
+        )
+
+    def test_does_not_scan_non_sql_fences_for_database_dependencies(self) -> None:
+        result = self.extract(
+            '''page 4 (
+    region banner (
+        css {
+            inline:
+                ```css
+                .update .Badge { content: "from fake_table"; }
+                ```
+        }
+        content {
+            html:
+                ```html
+                <p>Delete from fake_orders and update Icon.</p>
+                ```
+        }
+    )
+)
+'''
+        )
+
+        database_edges = {
+            edge
+            for edge in self.edge_tuples(result)
+            if edge[2] in {"reads_from", "writes_to", "calls"}
+        }
+        self.assertEqual(database_edges, set())
+
+    def test_does_not_treat_extract_operands_or_record_fields_as_dependencies(self) -> None:
+        result = self.extract(
+            """page 41 (
+    process measure-load (
+        source {
+            plsqlCode:
+                ```plsql
+                begin
+                    for c1 in (
+                        select extract(day from diff) total_days
+                          from (select systimestamp - created_on diff
+                                  from sample_restaurant_orders)
+                    ) loop
+                        :P41_TOTAL := c1.total_days;
+                    end loop;
+                    sample_restaurant_manage_orders.create_order;
+                end;
+                ```
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        process = "apex_app_102_page_41_process_measure_load"
+        self.assertIn((process, "sample_restaurant_orders", "reads_from"), edges)
+        self.assertIn(
+            (process, "sample_restaurant_manage_orders_create_order", "calls"),
+            edges,
+        )
+        targets = {target for _, target, _ in edges}
+        self.assertNotIn("diff", targets)
+        self.assertNotIn("c1_total_days", targets)
+
+    def test_resolves_owner_substitution_prefixed_database_objects(self) -> None:
+        result = self.extract(
+            """page 3 (
+    region history (
+        source {
+            sqlQuery:
+                ```sql
+                select h.id
+                  from #OWNER#.OOW_DEMO_SALES_HISTORY h
+                  join "#OWNER#"."OOW_DEMO_ITEMS" i on i.id = h.item_id
+                ```
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        region = "apex_app_102_page_3_region_history"
+        self.assertIn((region, "oow_demo_sales_history", "reads_from"), edges)
+        self.assertIn((region, "oow_demo_items", "reads_from"), edges)
+        targets = {target for _, target, _ in edges}
+        self.assertFalse(
+            [target for target in targets if target.startswith("owner_")],
+            "the #OWNER# substitution prefix must not become part of a node id",
+        )
+
+    def test_does_not_treat_comment_markers_inside_values_as_comments(self) -> None:
+        result = self.extract(
+            """page 4 (
+    region promo (
+        link: "https://apps.example.com/ords/f?p=102:7:0::NO"
+    )
+    region notes (
+        help {
+            text: "an unterminated /* marker inside a value"
+        }
+        source {
+            sqlQuery: select id from notes_table
+        }
+    )
+)
+"""
+        )
+
+        self.assertIsNone(
+            result.get("error"),
+            "a comment marker inside a quoted value must not break the parse",
+        )
+        edges = self.edge_tuples(result)
+        self.assertIn(
+            ("apex_app_102_page_4_region_promo", "apex_app_102_page_7", "navigates_to"),
+            edges,
+            "a '//' inside a URL value must not be treated as a line comment",
+        )
+        self.assertIn(
+            ("apex_app_102_page_4_region_notes", "notes_table", "reads_from"),
+            edges,
+        )
+
+    def test_does_not_treat_the_for_update_clause_as_a_write(self) -> None:
+        result = self.extract(
+            """page 5 (
+    region locked (
+        source {
+            sqlQuery: select id from orders_table for update of quantity nowait
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        region = "apex_app_102_page_5_region_locked"
+        self.assertIn((region, "orders_table", "reads_from"), edges)
+        self.assertFalse(
+            [edge for edge in edges if edge[2] == "writes_to"],
+            "a FOR UPDATE row-lock clause is not a write",
+        )
+
+    def test_does_not_treat_a_delete_target_as_a_read(self) -> None:
+        result = self.extract(
+            """page 6 (
+    process purge (
+        source {
+            plsqlCode: delete from purge_table where id = 1;
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        process = "apex_app_102_page_6_process_purge"
+        self.assertIn((process, "purge_table", "writes_to"), edges)
+        self.assertNotIn(
+            (process, "purge_table", "reads_from"),
+            edges,
+            "DELETE FROM is a write, not a read",
+        )
+
+    def test_does_not_treat_a_dml_column_list_as_a_procedure_call(self) -> None:
+        result = self.extract(
+            """page 7 (
+    process audit (
+        source {
+            plsqlCode: insert into app_data.audit_log(id) values (1);
+        }
+    )
+)
+"""
+        )
+
+        edges = self.edge_tuples(result)
+        process = "apex_app_102_page_7_process_audit"
+        self.assertIn((process, "app_data_audit_log", "writes_to"), edges)
+        self.assertNotIn(
+            (process, "app_data_audit_log", "calls"),
+            edges,
+            "a schema-qualified INSERT target is not a procedure call",
+        )
+
+    def test_ignores_schema_qualified_dual(self) -> None:
+        result = self.extract(
+            """page 9 (
+    region clock (
+        source {
+            sqlQuery: select systimestamp from sys.dual
+        }
+    )
+)
+"""
+        )
+
+        targets = {target for _, target, _ in self.edge_tuples(result)}
+        self.assertFalse(
+            [target for target in targets if "dual" in target],
+            "sys.dual is not application architecture",
+        )
+
+    def test_declared_authorization_replaces_an_earlier_synthetic_reference(self) -> None:
+        result = self.extract(
+            """app 102 (
+    page 10 (
+        security {
+            authorizationScheme: admin-only
+        }
+    )
+    authorization admin-only (
+        name: Administrators Only
+    )
+)
+"""
+        )
+
+        node_id = "apex_app_102_authorization_admin_only"
+        nodes = {node["id"]: node for node in result["nodes"]}
+        self.assertIn(node_id, nodes)
+        node = nodes[node_id]
+        self.assertNotIn(
+            "synthetic_reference",
+            node.get("metadata", {}),
+            "the real declaration must replace a forward reference",
+        )
+        self.assertEqual(
+            node["source_location"],
+            "L7",
+            "the node must point at the declaration, not the first reference",
+        )
+
+    def test_disambiguates_repeated_component_identifiers_in_one_page(self) -> None:
+        result = self.extract(
+            """page 11 (
+    region items (
+        source {
+            sqlQuery: select id from first_table
+        }
+    )
+    region items (
+        source {
+            sqlQuery: select id from second_table
+        }
+    )
+)
+"""
+        )
+
+        containment = {
+            target for source, target, relation in self.edge_tuples(result)
+            if relation == "contains" and source == "apex_app_102_page_11"
+        }
+        self.assertEqual(
+            len(containment),
+            2,
+            "two sibling declarations must not collapse into one node",
+        )
+        reads = {
+            (source, target) for source, target, relation in self.edge_tuples(result)
+            if relation == "reads_from"
+        }
+        self.assertEqual(
+            len({source for source, _ in reads}),
+            2,
+            "each sibling region must own its own database dependency",
+        )
+
+    def test_database_reference_labels_do_not_depend_on_first_seen_spelling(self) -> None:
+        template = """page 12 (
+    region one (
+        source {{
+            sqlQuery: select id from {first}
+        }}
+    )
+    region two (
+        source {{
+            sqlQuery: select id from {second}
+        }}
+    )
+)
+"""
+        forward = self.extract(
+            template.format(first="Orders_Table", second="ORDERS_TABLE"),
+            relative="apps/DEMO/102/pages/p00012-a.apx",
+        )
+        reverse = self.extract(
+            template.format(first="ORDERS_TABLE", second="Orders_Table"),
+            relative="apps/DEMO/102/pages/p00012-b.apx",
+        )
+
+        def label_of(result: dict) -> str:
+            return next(
+                node["label"] for node in result["nodes"] if node["id"] == "orders_table"
+            )
+
+        self.assertEqual(
+            label_of(forward),
+            label_of(reverse),
+            "reference labels must be canonical, not order-dependent",
+        )
 
 
 if __name__ == "__main__":

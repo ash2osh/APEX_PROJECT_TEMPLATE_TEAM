@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -19,45 +18,70 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CANONICAL_EXTRACTOR = REPO_ROOT / "scripts" / "graphify_apexlang_extractor.py"
 # The exact text this installer writes; the only proof that .apx is ours.
 DETECT_MARKER = "'.sql', '.apx',"
-
-# Patching another package's installed source is reverted silently by the next
-# upgrade of that package. Record what this installer was written against and
-# refuse anything else, so an upgrade surfaces as a clear message rather than
-# .apx support quietly disappearing.
-SUPPORTED_GRAPHIFY_VERSIONS = ("0.1", "0.2", "0.3")
+SQL_LINK_IMPORT = "from graphify.extractors.apexlang import extract_sql_linked  # noqa: F401"
 
 
-def _graphify_version(base):
-    for name in ("__version__.py", "version.py", "__init__.py"):
-        candidate = Path(base) / name
-        if not candidate.is_file():
-            continue
-        match = re.search(r"__version__\s*=\s*[\"']([^\"']+)[\"']", candidate.read_text(encoding="utf-8"))
-        if match:
-            return match.group(1)
-    return None
+def graphify_console_interpreter() -> str | None:
+    """Return the interpreter behind the `graphify` console script on PATH.
 
+    A `uv tool install` gives Graphify its own isolated interpreter, so
+    importing graphify in *this* process usually finds nothing, or finds a
+    different copy. The console script's shebang names the right one. Windows
+    shims are compiled .exe launchers with no shebang to read.
+    """
+    graphify_bin = shutil.which("graphify")
+    if not graphify_bin or not os.path.exists(graphify_bin):
+        return None
+    try:
+        with open(graphify_bin, "r", encoding="utf-8") as handle:
+            first_line = handle.readline()
+    except (UnicodeDecodeError, OSError):
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    interpreter = first_line.strip()[2:].strip()
+    return interpreter if os.path.exists(interpreter) else None
 
-def _version_is_supported(base):
-    if os.environ.get("TEAM_GRAPHIFY_ALLOW_UNTESTED") == "1":
-        return True, "override"
-    version = _graphify_version(base)
-    if version is None:
-        return False, "the installed Graphify version could not be determined"
-    if not any(version.startswith(supported) for supported in SUPPORTED_GRAPHIFY_VERSIONS):
-        return False, f"Graphify {version} is not one of {', '.join(SUPPORTED_GRAPHIFY_VERSIONS)}"
-    return True, version
 
 def find_graphify_dirs():
+    # 1. The interpreter behind `graphify` on PATH is the installation that
+    #    actually runs. Patch only that one when it can be resolved: sweeping
+    #    every globbed path makes an orphaned environment fail the whole setup.
+    interpreter = graphify_console_interpreter()
+    if interpreter:
+        try:
+            located = subprocess.run(
+                [
+                    interpreter,
+                    "-B",
+                    "-c",
+                    "import graphify, os; print(os.path.dirname(graphify.__file__))",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if located.returncode == 0 and located.stdout.strip():
+                candidate = located.stdout.strip()
+                if os.path.isdir(candidate):
+                    return [candidate]
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     dirs = []
-    # 1. Try importing graphify in current python
+    # 2. Fall back to this interpreter, then to a filesystem sweep.
     try:
-        import graphify
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            import graphify
+        finally:
+            sys.dont_write_bytecode = previous_dont_write_bytecode
         dirs.append(os.path.dirname(graphify.__file__))
     except Exception:
         pass
 
-    # 2. Search common uv / virtualenv locations (Linux/macOS)
+    # 3. Search common uv / virtualenv locations (Linux/macOS)
     user_home = os.path.expanduser("~")
     uv_paths = glob.glob(os.path.join(user_home, ".local/share/uv/tools/graphify*/lib/python*/site-packages/graphify"))
     dirs.extend(uv_paths)
@@ -65,7 +89,7 @@ def find_graphify_dirs():
     pip_paths = glob.glob(os.path.join(user_home, ".local/lib/python*/site-packages/graphify"))
     dirs.extend(pip_paths)
 
-    # 3. Search common uv / pip user-install locations (Windows)
+    # 4. Search common uv / pip user-install locations (Windows)
     appdata = os.environ.get("APPDATA")
     localappdata = os.environ.get("LOCALAPPDATA")
     if appdata:
@@ -74,7 +98,11 @@ def find_graphify_dirs():
     if localappdata:
         dirs.extend(glob.glob(os.path.join(localappdata, "uv", "tools", "graphify*", "Lib", "site-packages", "graphify")))
 
-    return sorted(set(dirs))
+    dirs = sorted(set(dirs))
+    if len(dirs) > 1:
+        print("Warning: could not resolve the active Graphify from PATH; "
+              f"patching {len(dirs)} candidate installation(s)")
+    return dirs
 
 
 def _patched_detector(text: str) -> tuple[str | None, str]:
@@ -117,14 +145,27 @@ def _patched_dispatch(text: str) -> str | None:
     # The project-owned APEXlang parser is standard-library-only. A legacy
     # setup mapped .apx to the optional SQL dependency; remove that false gate.
     text = text.replace('    ".apx": "sql",\n', "")
+
+    # Route .sql through the wrapper that links foreign keys to mirrored tables.
+    # The optional-dependency gate for .sql stays: the wrapper still calls the
+    # tree-sitter based SQL extractor.
+    if SQL_LINK_IMPORT not in text:
+        if import_line not in text:
+            return None
+        text = text.replace(import_line, f"{import_line}\n{SQL_LINK_IMPORT}", 1)
+    if '".sql": extract_sql,' in text:
+        text = text.replace('".sql": extract_sql,', '".sql": extract_sql_linked,', 1)
+    elif '".sql": extract_sql_linked,' not in text:
+        return None
     return text
 
 
 def _smoke_test_extractor(extractor_path: Path) -> tuple[bool, str]:
-    scratch = REPO_ROOT / "scratch"
-    scratch.mkdir(exist_ok=True)
-    smoke_root = Path(tempfile.mkdtemp(prefix="graphify-apexlang-smoke.", dir=scratch))
+    smoke_root = Path(tempfile.mkdtemp(prefix="graphify-apexlang-smoke."))
     module_name = f"graphify_apexlang_smoke_{os.getpid()}_{id(extractor_path)}"
+    module_was_present = module_name in sys.modules
+    previous_module = sys.modules.get(module_name)
+    previous_dont_write_bytecode = sys.dont_write_bytecode
     try:
         fixture = smoke_root / "apps" / "DEMO" / "102" / "pages" / "p00004-home.apx"
         fixture.parent.mkdir(parents=True)
@@ -144,7 +185,10 @@ def _smoke_test_extractor(extractor_path: Path) -> tuple[bool, str]:
             return False, "could not create an import specification"
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
+        sys.dont_write_bytecode = True
         spec.loader.exec_module(module)
+        if not callable(getattr(module, "extract_sql_linked", None)):
+            return False, "extractor does not define extract_sql_linked"
         result = module.extract_apexlang(fixture)
         if result.get("error"):
             return False, f"smoke extraction failed: {result['error']}"
@@ -155,7 +199,11 @@ def _smoke_test_extractor(extractor_path: Path) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"smoke extraction raised {type(exc).__name__}: {exc}"
     finally:
-        sys.modules.pop(module_name, None)
+        if module_was_present:
+            sys.modules[module_name] = previous_module
+        else:
+            sys.modules.pop(module_name, None)
+        sys.dont_write_bytecode = previous_dont_write_bytecode
         shutil.rmtree(smoke_root, ignore_errors=True)
 
 
@@ -177,11 +225,19 @@ def verify_installation(base: Path) -> tuple[bool, str]:
         return False, ".apx is not routed to extract_apexlang"
     if '".apx": extract_sql,' in extract:
         return False, "legacy .apx SQL route is still present"
+    if SQL_LINK_IMPORT not in extract or '".sql": extract_sql_linked,' not in extract:
+        return False, ".sql is not routed through extract_sql_linked"
     return _smoke_test_extractor(installed)
 
 
 def invalidate_apx_cache(cache_root: Path) -> int:
-    """Remove only AST cache records produced from .apx source files."""
+    """Remove AST cache records produced from .apx and .sql source files.
+
+    The cache is keyed by file content alone. An .apx result names the database
+    objects it reads and a .sql result names its foreign-key parents, so results
+    cached before the extractor (or the database mirror) changed keep stale
+    stubs until their files happen to change.
+    """
     if not cache_root.is_dir():
         return 0
     removed = 0
@@ -195,7 +251,7 @@ def invalidate_apx_cache(cache_root: Path) -> int:
             for node in payload.get("nodes", [])
             if isinstance(node, dict)
         }
-        if any(source.casefold().endswith(".apx") for source in source_files):
+        if any(source.casefold().endswith((".apx", ".sql")) for source in source_files):
             try:
                 cache_file.unlink()
                 removed += 1
@@ -235,14 +291,6 @@ def patch_graphify_dir(base: Path) -> bool:
         print(f"Warning: could not patch {extract_path}; extractor routing anchors not found")
         return False
 
-    supported, detail = _version_is_supported(base)
-    if not supported:
-        print(
-            f"Warning: refusing to patch Graphify at '{base}': {detail}. "
-            "Set TEAM_GRAPHIFY_ALLOW_UNTESTED=1 to proceed anyway."
-        )
-        return False
-
     try:
         detect_path.write_text(patched_detect, encoding="utf-8", newline="")
         extract_path.write_text(patched_extract, encoding="utf-8", newline="")
@@ -270,24 +318,30 @@ def patch_graphify_dir(base: Path) -> bool:
 def setup_graphify_apx() -> bool:
     print("Checking Graphify & tree-sitter-sql setup...")
 
-    # Attempt uv pip install first
-    graphify_bin = shutil.which("graphify")
-    if graphify_bin and os.path.exists(graphify_bin):
-        try:
-            with open(graphify_bin) as f:
-                first_line = f.readline()
-        except (UnicodeDecodeError, OSError):
-            # Windows pip/uv console-script shims are compiled .exe launchers,
-            # not shebang scripts — nothing to sniff, just skip this step.
-            first_line = ""
-        if first_line.startswith("#!"):
-            py_path = first_line.strip()[2:]
-            if os.path.exists(py_path):
-                subprocess.run([py_path, "-m", "pip", "install", "tree-sitter-sql"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                try:
-                    subprocess.run(["uv", "pip", "install", "--python", py_path, "tree-sitter-sql"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+    # Best-effort: the supported path is `uv tool install graphifyy --with
+    # tree-sitter-sql`. Report what happened rather than discarding it -- a
+    # silent failure here shows up much later as an unindexable database/ tree.
+    py_path = graphify_console_interpreter()
+    if py_path:
+        installed = False
+        for command in (
+            [py_path, "-m", "pip", "install", "tree-sitter-sql"],
+            ["uv", "pip", "install", "--python", py_path, "tree-sitter-sql"],
+        ):
+            try:
+                completed = subprocess.run(
+                    command, capture_output=True, text=True, timeout=300
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if completed.returncode == 0:
+                installed = True
+                break
+        if not installed:
+            print("Note: could not install tree-sitter-sql into Graphify's interpreter.\n"
+                  "      Without it, database/ and supporting-objects/*.sql cannot be indexed.\n"
+                  "      Install it with Graphify instead:\n"
+                  "        uv tool install graphifyy --with tree-sitter-sql --force")
 
     g_dirs = find_graphify_dirs()
     if not g_dirs:
@@ -295,14 +349,41 @@ def setup_graphify_apx() -> bool:
               "  uv tool install graphifyy --with tree-sitter-sql")
         return False
 
-    results = [patch_graphify_dir(Path(base)) for base in g_dirs]
-    if not all(results):
+    results = {base: patch_graphify_dir(Path(base)) for base in g_dirs}
+    for base, patched in results.items():
+        if not patched:
+            print(f"Warning: Graphify at '{base}' was not configured")
+    if not any(results.values()):
         return False
+    # A cache invalidation skipped because some *other* installation failed is
+    # how the graph ends up with cached .apx results from the former SQL route:
+    # zero architectural relationships, no error. Invalidate whenever any
+    # installation was actually patched.
     removed = invalidate_apx_cache(REPO_ROOT / "graphify-out" / "cache" / "ast")
     if removed:
         print(f"Invalidated {removed} stale APEXlang AST cache entr{'y' if removed == 1 else 'ies'}")
-    return True
+    return all(results.values())
+
+
+def main(argv: list[str]) -> int:
+    """Entry point. `--verify` checks the installation without changing it."""
+    if "--verify" in argv:
+        bases = find_graphify_dirs()
+        if not bases:
+            print("Graphify installation not found")
+            return 1
+        failed = False
+        for base in bases:
+            try:
+                verified, reason = verify_installation(Path(base))
+            except Exception as exc:
+                verified = False
+                reason = f"verification raised {type(exc).__name__}: {exc}"
+            print(f"{'OK  ' if verified else 'FAIL'} {base}: {reason}")
+            failed = failed or not verified
+        return 1 if failed else 0
+    return 0 if setup_graphify_apx() else 1
+
 
 if __name__ == "__main__":
-    raise SystemExit(0 if setup_graphify_apx() else 1)
-
+    raise SystemExit(main(sys.argv[1:]))
