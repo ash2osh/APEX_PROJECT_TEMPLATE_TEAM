@@ -123,6 +123,73 @@ for project_env_key in "${project_env_required[@]}"; do
   fi
 done
 
+project_env_validate_unique_csv() {
+  local project_env_csv_key="$1"
+  local project_env_csv_value="$2"
+  local project_env_csv_item project_env_csv_seen_item
+  local project_env_csv_items=() project_env_csv_seen_items=()
+  IFS=',' read -r -a project_env_csv_items <<< "$project_env_csv_value"
+  for project_env_csv_item in "${project_env_csv_items[@]}"; do
+    for project_env_csv_seen_item in "${project_env_csv_seen_items[@]}"; do
+      if [ "$project_env_csv_item" = "$project_env_csv_seen_item" ]; then
+        project_env_fail "$project_env_csv_key must not contain duplicate values: $project_env_csv_item"
+        return 1
+      fi
+    done
+    project_env_csv_seen_items+=("$project_env_csv_item")
+  done
+}
+
+
+# Comma lists. One value is the classic single-schema setup; several values
+# are position-aligned across a profile's schema, connection and user keys.
+project_env_csv_shape_ok() {
+  # `read -a` silently drops a trailing empty field, so reject empties here.
+  case "$1" in ,*|*,|*,,*) return 1 ;; esac
+  return 0
+}
+project_env_split_csv() {
+  local -n project_env_split_out="$1"
+  project_env_split_out=()
+  [ -z "$2" ] || IFS=',' read -r -a project_env_split_out <<< "$2"
+  return 0
+}
+project_env_count() {
+  local -a project_env_count_items=()
+  project_env_split_csv project_env_count_items "$1"
+  printf '%s' "${#project_env_count_items[@]}"
+}
+project_env_check_list() {
+  local key="$1" kind="$2" value item
+  local -a items=()
+  value="${!key:-}"
+  [ -n "$value" ] || return 0
+  project_env_csv_shape_ok "$value" || { project_env_fail "$key must not contain empty entries"; return 1; }
+  project_env_split_csv items "$value"
+  for item in "${items[@]}"; do
+    if [ "$kind" = identifier ] && [[ ! "$item" =~ $project_env_oracle_identifier_regex ]]; then
+      project_env_fail "$key must be an uppercase Oracle identifier"
+      return 1
+    fi
+    if [ "$kind" = alias ] && [[ ! "$item" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+      project_env_fail "$key contains unsupported characters"
+      return 1
+    fi
+  done
+}
+project_env_check_aligned() {
+  local schema_key="$1" connection_key="$2" user_key="$3"
+  local -a schemas=() connections=() users=()
+  project_env_split_csv schemas "${!schema_key:-}"
+  project_env_split_csv connections "${!connection_key:-}"
+  project_env_split_csv users "${!user_key:-}"
+  if [ "${#schemas[@]}" -ne "${#connections[@]}" ] || [ "${#schemas[@]}" -ne "${#users[@]}" ]; then
+    project_env_fail "$connection_key, $user_key and $schema_key must list the same number of entries"
+    return 1
+  fi
+  project_env_validate_unique_csv "$schema_key" "${!schema_key}"
+}
+
 for project_env_prefix in PROD STAGING; do
   project_env_connection_key="${project_env_prefix}_SQLCL_CONNECTION"
   project_env_user_key="${project_env_prefix}_EXPECTED_USER"
@@ -151,37 +218,27 @@ for project_env_prefix in PROD STAGING; do
       project_env_fail "$project_env_connection_key and $project_env_user_key must not be empty"
       return 1 2>/dev/null || exit 1
     fi
-    if [[ ! "$project_env_connection_value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-      project_env_fail "$project_env_connection_key contains unsupported characters"
-      return 1 2>/dev/null || exit 1
-    fi
-    if [[ ! "$project_env_user_value" =~ $project_env_oracle_identifier_regex ]]; then
-      project_env_fail "$project_env_user_key must be an uppercase Oracle identifier"
-      return 1 2>/dev/null || exit 1
+    project_env_check_list "$project_env_connection_key" alias || { return 1 2>/dev/null || exit 1; }
+    project_env_check_list "$project_env_user_key" identifier || { return 1 2>/dev/null || exit 1; }
+    if [ "$project_env_schema_seen" = true ]; then
+      project_env_check_aligned "$project_env_schema_key" "$project_env_connection_key" "$project_env_user_key" || {
+        return 1 2>/dev/null || exit 1
+      }
+    else
+      if [ "$(project_env_count "$project_env_connection_value")" -ne "$(project_env_count "$project_env_user_value")" ]; then
+        project_env_fail "$project_env_connection_key and $project_env_user_key must list the same number of entries"
+        return 1 2>/dev/null || exit 1
+      fi
+      if [ "$(project_env_count "$project_env_connection_value")" -gt 1 ]; then
+        project_env_fail "$project_env_schema_key is required when $project_env_connection_key lists several connections"
+        return 1 2>/dev/null || exit 1
+      fi
     fi
   fi
 done
-
 [[ "$APEX_APP_ID" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
   project_env_fail "APEX_APP_ID must be a comma-separated list of positive integers without spaces"
   return 1 2>/dev/null || exit 1
-}
-
-project_env_validate_unique_csv() {
-  local project_env_csv_key="$1"
-  local project_env_csv_value="$2"
-  local project_env_csv_item project_env_csv_seen_item
-  local project_env_csv_items=() project_env_csv_seen_items=()
-  IFS=',' read -r -a project_env_csv_items <<< "$project_env_csv_value"
-  for project_env_csv_item in "${project_env_csv_items[@]}"; do
-    for project_env_csv_seen_item in "${project_env_csv_seen_items[@]}"; do
-      if [ "$project_env_csv_item" = "$project_env_csv_seen_item" ]; then
-        project_env_fail "$project_env_csv_key must not contain duplicate values: $project_env_csv_item"
-        return 1
-      fi
-    done
-    project_env_csv_seen_items+=("$project_env_csv_item")
-  done
 }
 
 project_env_validate_unique_csv APEX_APP_ID "$APEX_APP_ID" || {
@@ -236,25 +293,93 @@ case "$UC_APX_SKILLS_AGENT" in
     ;;
 esac
 for project_env_key in TABLES_SCHEMA TABLES_EXPECTED_USER CODE_SCHEMA \
-  CODE_EXPECTED_USER APEX_PARSING_SCHEMA APEX_EXPECTED_USER; do
-  if [[ ! "${!project_env_key}" =~ $project_env_oracle_identifier_regex ]]; then
-    project_env_fail "$project_env_key must be an uppercase Oracle identifier"
-    return 1 2>/dev/null || exit 1
-  fi
-done
-for project_env_key in STAGING_SCHEMA PROD_SCHEMA; do
-  project_env_value="${!project_env_key:-}"
-  if [ -n "$project_env_value" ] && [[ ! "$project_env_value" =~ $project_env_oracle_identifier_regex ]]; then
-    project_env_fail "$project_env_key must be an uppercase Oracle identifier"
-    return 1 2>/dev/null || exit 1
-  fi
+  CODE_EXPECTED_USER APEX_PARSING_SCHEMA APEX_EXPECTED_USER STAGING_SCHEMA PROD_SCHEMA; do
+  project_env_check_list "$project_env_key" identifier || { return 1 2>/dev/null || exit 1; }
 done
 for project_env_key in TABLES_SQLCL_CONNECTION CODE_SQLCL_CONNECTION APEX_SQLCL_CONNECTION; do
-  if [[ ! "${!project_env_key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-    project_env_fail "$project_env_key contains unsupported characters"
+  project_env_check_list "$project_env_key" alias || { return 1 2>/dev/null || exit 1; }
+done
+project_env_check_aligned TABLES_SCHEMA TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER || { return 1 2>/dev/null || exit 1; }
+project_env_check_aligned CODE_SCHEMA CODE_SQLCL_CONNECTION CODE_EXPECTED_USER || { return 1 2>/dev/null || exit 1; }
+project_env_check_aligned APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER || { return 1 2>/dev/null || exit 1; }
+
+# The configured schemas, and whether any list names more than one.
+project_env_union=()
+project_env_multi=false
+for project_env_key in TABLES_SCHEMA CODE_SCHEMA APEX_PARSING_SCHEMA; do
+  project_env_items=()
+  project_env_split_csv project_env_items "${!project_env_key}"
+  [ "${#project_env_items[@]}" -le 1 ] || project_env_multi=true
+  for project_env_item in "${project_env_items[@]}"; do
+    project_env_known=false
+    for project_env_union_item in ${project_env_union[@]+"${project_env_union[@]}"}; do
+      [ "$project_env_union_item" = "$project_env_item" ] && project_env_known=true
+    done
+    [ "$project_env_known" = true ] || project_env_union+=("$project_env_item")
+  done
+done
+for project_env_key in STAGING_SCHEMA PROD_SCHEMA STAGING_SQLCL_CONNECTION PROD_SQLCL_CONNECTION; do
+  if [ "$(project_env_count "${!project_env_key:-}")" -gt 1 ]; then project_env_multi=true; fi
+done
+PROJECT_SCHEMAS="$(IFS=,; printf '%s' "${project_env_union[*]}")"
+PROJECT_MULTI_SCHEMA="$project_env_multi"
+export PROJECT_SCHEMAS PROJECT_MULTI_SCHEMA
+
+project_env_narrow() {
+  # <schema-key> <connection-key> <user-key> <strict|lenient>
+  local schema_key="$1" connection_key="$2" user_key="$3" mode="$4"
+  local index=-1 i
+  local -a schemas=() connections=() users=()
+  project_env_split_csv schemas "${!schema_key:-}"
+  project_env_split_csv connections "${!connection_key:-}"
+  project_env_split_csv users "${!user_key:-}"
+  for ((i = 0; i < ${#schemas[@]}; i++)); do
+    if [ "${schemas[$i]}" = "$PROJECT_SCHEMA" ]; then index="$i"; break; fi
+  done
+  if [ "$index" -ge 0 ]; then
+    export "$schema_key=${schemas[$index]}" "$connection_key=${connections[$index]}" "$user_key=${users[$index]}"
+  elif [ "$mode" = lenient ] && [ "$project_env_multi" != true ] && [ "${#schemas[@]}" -eq 1 ]; then
+    # A single-schema project may name staging or production differently.
+    :
+  else
+    export "$schema_key=" "$connection_key=" "$user_key="
+  fi
+}
+
+if [ -n "${PROJECT_SCHEMA:-}" ]; then
+  if [[ ! "$PROJECT_SCHEMA" =~ $project_env_oracle_identifier_regex ]]; then
+    project_env_fail "PROJECT_SCHEMA must be an uppercase Oracle identifier"
     return 1 2>/dev/null || exit 1
   fi
-done
+  project_env_selected_known=false
+  project_env_items=()
+  project_env_split_csv project_env_items "$PROJECT_SCHEMAS"
+  for project_env_item in "${project_env_items[@]}"; do
+    [ "$project_env_item" = "$PROJECT_SCHEMA" ] && project_env_selected_known=true
+  done
+  if [ "$project_env_selected_known" != true ]; then
+    project_env_fail "schema $PROJECT_SCHEMA is not configured; configured schemas: $PROJECT_SCHEMAS"
+    return 1 2>/dev/null || exit 1
+  fi
+  project_env_narrow TABLES_SCHEMA TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER strict
+  project_env_narrow CODE_SCHEMA CODE_SQLCL_CONNECTION CODE_EXPECTED_USER strict
+  project_env_narrow APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER strict
+  for project_env_prefix in STAGING PROD; do
+    project_env_schema_key="${project_env_prefix}_SCHEMA"
+    if [ -n "${!project_env_schema_key:-}" ]; then
+      project_env_narrow "$project_env_schema_key" "${project_env_prefix}_SQLCL_CONNECTION" "${project_env_prefix}_EXPECTED_USER" lenient
+    fi
+  done
+fi
+
+# Kept after the load so a script can refuse to guess between schemas.
+project_env_require_single() {
+  if [ "${PROJECT_MULTI_SCHEMA:-false}" = true ] && [ -z "${PROJECT_SCHEMA:-}" ]; then
+    project_env_fail "$1 needs one schema because several are configured ($PROJECT_SCHEMAS); pass --schema <NAME>"
+    return 1
+  fi
+  return 0
+}
 unset project_env_line project_env_key project_env_value project_env_required
 unset project_env_seen_keys project_env_seen_key project_env_seen_present
 unset project_env_prefix_items project_env_prefix_item project_env_quoted
@@ -262,7 +387,10 @@ unset project_env_prefix project_env_connection_key project_env_user_key
 unset project_env_connection_seen project_env_user_seen project_env_connection_value
 unset project_env_user_value project_env_schema_key project_env_schema_seen
 unset project_env_first_line project_env_oracle_identifier_regex project_env_oracle_prefix_regex
+unset project_env_union project_env_multi project_env_items project_env_item
+unset project_env_known project_env_union_item project_env_selected_known project_env_count_items
 unset project_env_repo_root
-# load_env.ps1 removes its helper and says it is mirroring this file. It was
-# not: only variables were unset, leaving two functions in the caller's shell.
-unset -f project_env_fail project_env_validate_unique_csv
+# project_env_fail and project_env_require_single stay defined for callers that
+# refuse an ambiguous schema; the parsing helpers do not.
+unset -f project_env_validate_unique_csv project_env_csv_shape_ok project_env_split_csv \
+  project_env_count project_env_check_list project_env_check_aligned project_env_narrow
