@@ -162,6 +162,16 @@ class MultiSchemaTargetTests(unittest.TestCase):
         target = self.api().resolve_target(BASE_ENV, "staging", "read", schema="APP_DEV")
         self.assertEqual("APP_STAGE", target.schema)
 
+    def test_single_schema_project_refuses_an_unknown_schema_for_staging_and_prod(self) -> None:
+        # The differently-named-staging exception covers the project's own DEV
+        # schema only; it must never turn an arbitrary name into a target.
+        api = self.api()
+        for environment in ("staging", "prod"):
+            with self.subTest(environment=environment):
+                with self.assertRaises(api.TargetResolutionError) as raised:
+                    api.resolve_target(BASE_ENV, environment, "read", schema="OTHER")
+                self.assertIn("OTHER", str(raised.exception))
+
     def test_single_schema_dev_still_rejects_a_wrong_schema_name(self) -> None:
         api = self.api()
         with self.assertRaises(api.TargetResolutionError):

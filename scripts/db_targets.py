@@ -78,10 +78,11 @@ def _select_index(
     _validate_identifier(requested, "--schema")
     if requested in schemas:
         return schemas.index(requested)
-    multi = len(schemas) > 1 or len(split_list(values.get("CODE_SCHEMA"))) > 1
-    if len(schemas) == 1 and not multi and environment != "dev":
-        # A single-schema project may name its staging or production schema
-        # differently from DEV. Several schemas map by name only.
+    dev_schemas = split_list(values.get("CODE_SCHEMA"))
+    if environment != "dev" and len(schemas) == 1 and len(dev_schemas) == 1 and requested in dev_schemas:
+        # A project with one DEV schema may name its staging or production
+        # schema differently. That mapping covers the project's own schema
+        # only; several schemas map by name, and any other name is refused.
         return 0
     raise TargetResolutionError(
         f"schema {requested} is not listed in {schema_key} for {environment}; "
