@@ -696,6 +696,11 @@ class PowerShellDoctorCliTests(DoctorCliTests):
 class PowerShellBackupCliTests(BackupCliTests):
     NAMES = ("backup_db.ps1", "backup_db.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "replace_mirror.ps1")
 
+    def test_backup_profile_loop_does_not_shadow_automatic_profile_variable(self) -> None:
+        source = (ROOT / "scripts" / "backup_db.ps1").read_text(encoding="utf-8")
+        self.assertRegex(source, r"(?im)^foreach \(\$backupProfile in @\(")
+        self.assertNotRegex(source, r"(?i)\$profile\b")
+
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellExportCliTests(ExportCliTests):

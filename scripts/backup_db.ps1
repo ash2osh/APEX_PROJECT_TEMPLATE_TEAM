@@ -75,20 +75,20 @@ function Split-BackupList([string] $Value) {
   return $Value.Split(',')
 }
 $backupTargets = @()
-foreach ($profile in @(
+foreach ($backupProfile in @(
     @{ Scope = "tables"; Schemas = $env:TABLES_SCHEMA; Connections = $env:TABLES_SQLCL_CONNECTION; Users = $env:TABLES_EXPECTED_USER; Prefixes = $env:TABLES_PREFIXES },
     @{ Scope = "code"; Schemas = $env:CODE_SCHEMA; Connections = $env:CODE_SQLCL_CONNECTION; Users = $env:CODE_EXPECTED_USER; Prefixes = $env:CODE_PREFIXES }
   )) {
-  $schemaList = @(Split-BackupList $profile.Schemas)
-  $connectionList = @(Split-BackupList $profile.Connections)
-  $userList = @(Split-BackupList $profile.Users)
+  $schemaList = @(Split-BackupList $backupProfile.Schemas)
+  $connectionList = @(Split-BackupList $backupProfile.Connections)
+  $userList = @(Split-BackupList $backupProfile.Users)
   for ($index = 0; $index -lt $schemaList.Count; $index++) {
     $backupTargets += [PSCustomObject]@{
-      Scope = $profile.Scope
+      Scope = $backupProfile.Scope
       Schema = $schemaList[$index]
       Connection = $connectionList[$index]
       ExpectedUser = $userList[$index]
-      Prefixes = $profile.Prefixes
+      Prefixes = $backupProfile.Prefixes
     }
   }
 }
