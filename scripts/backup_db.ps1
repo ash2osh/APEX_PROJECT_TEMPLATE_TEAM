@@ -4,8 +4,6 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
-& (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target tables
-& (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target code
 
 # A failed SPOOL inside the generated driver prints an SP2- message that does
 # not stop SQLcl, so an object can go missing without any non-zero exit code.
@@ -14,7 +12,7 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 function Get-ScopeDirectory {
   param([Parameter(Mandatory = $true)][ValidateSet("tables", "code")][string] $Scope)
   if ($Scope -eq "tables") { return @("tables") }
-  return @("views", "packages", "procedures", "functions", "triggers")
+  return @("views", "packages", "procedures", "functions", "triggers", "synonyms")
 }
 
 function Get-SqlclSpoolSchemaName {
@@ -69,23 +67,36 @@ function Test-ScopeComplete {
   }
 }
 
-$backupTargets = @(
-  [PSCustomObject]@{
-    Scope = "tables"
-    Schema = $env:TABLES_SCHEMA
-    Connection = $env:TABLES_SQLCL_CONNECTION
-    ExpectedUser = $env:TABLES_EXPECTED_USER
-    Prefixes = $env:TABLES_PREFIXES
-  },
-  [PSCustomObject]@{
-    Scope = "code"
-    Schema = $env:CODE_SCHEMA
-    Connection = $env:CODE_SQLCL_CONNECTION
-    ExpectedUser = $env:CODE_EXPECTED_USER
-    Prefixes = $env:CODE_PREFIXES
+function Split-BackupList([string] $Value) {
+  # A function's output is unrolled, so callers must wrap the call in @( ):
+  # that restores an array for zero or one entries. (Do not use `return ,@(...)`;
+  # it emits the array as ONE object, and @( ) would then count it as one entry.)
+  if ([string]::IsNullOrEmpty($Value)) { return }
+  return $Value.Split(',')
+}
+$backupTargets = @()
+foreach ($profile in @(
+    @{ Scope = "tables"; Schemas = $env:TABLES_SCHEMA; Connections = $env:TABLES_SQLCL_CONNECTION; Users = $env:TABLES_EXPECTED_USER; Prefixes = $env:TABLES_PREFIXES },
+    @{ Scope = "code"; Schemas = $env:CODE_SCHEMA; Connections = $env:CODE_SQLCL_CONNECTION; Users = $env:CODE_EXPECTED_USER; Prefixes = $env:CODE_PREFIXES }
+  )) {
+  $schemaList = @(Split-BackupList $profile.Schemas)
+  $connectionList = @(Split-BackupList $profile.Connections)
+  $userList = @(Split-BackupList $profile.Users)
+  for ($index = 0; $index -lt $schemaList.Count; $index++) {
+    $backupTargets += [PSCustomObject]@{
+      Scope = $profile.Scope
+      Schema = $schemaList[$index]
+      Connection = $connectionList[$index]
+      ExpectedUser = $userList[$index]
+      Prefixes = $profile.Prefixes
+    }
   }
-)
-$backupSchemas = @($backupTargets.Schema | Select-Object -Unique)
+}
+if ($backupTargets.Count -eq 0) { throw "backup error: no profile lists schema $($env:PROJECT_SCHEMA); nothing to back up" }
+foreach ($target in $backupTargets) {
+  & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target $target.Scope -Schema $target.Schema
+}
+$backupSchemas = @($backupTargets | ForEach-Object { $_.Schema } | Select-Object -Unique)
 
 # Refuse local mirror edits before making either database connection.
 foreach ($schema in $backupSchemas) {

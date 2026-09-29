@@ -192,5 +192,140 @@ class CheckDbTargetTests(unittest.TestCase):
         self.assertIn("resembles production", result.stderr)
 
 
+class BackupCliTests(unittest.TestCase):
+    NAMES = (
+        "backup_db.sh", "backup_db.sql", "load_env.sh", "check_db_target.sh", "sqlcl_safe.sh", "replace_mirror.sh",
+    )
+
+    def make_checkout(self, root: Path, replacements: dict[str, str]) -> tuple[Path, dict[str, str]]:
+        scripts = root / "scripts"
+        scripts.mkdir()
+        for name in self.NAMES:
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        (root / ".env").write_text(env_text(replacements), encoding="utf-8")
+        git_init(root)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        fake_sql = fake_bin / "sql"
+        # Positional: -S -noupdates -name <conn> @<script> <schema> <scope> <env> <user> <prefixes> <spool_schema>
+        fake_sql.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "connection=\"$4\"; schema=\"$6\"; scope=\"$7\"; spool_schema=\"${11}\"\n"
+            "printf '%s|%s|%s\\n' \"$connection\" \"$schema\" \"$scope\" >> \"$FAKE_SQL_CALLS\"\n"
+            "if [[ \"${FAKE_FAIL_SCHEMA:-}\" == \"$schema\" ]]; then printf 'ORA-01017: invalid credentials\\n'; exit 1; fi\n"
+            "if [[ \"$scope\" == tables ]]; then\n"
+            "  mkdir -p \"database/$spool_schema/tables\"\n"
+            "  printf 'CREATE TABLE T_%s;\\n' \"$schema\" > \"database/$spool_schema/tables/T_$schema.sql\"\n"
+            "  printf 'TABLE=1\\n' > \"database/$spool_schema/manifest-tables.txt\"\n"
+            "else\n"
+            "  mkdir -p \"database/$spool_schema/views\" \"database/$spool_schema/synonyms\"\n"
+            "  printf 'CREATE VIEW V_%s;\\n' \"$schema\" > \"database/$spool_schema/views/V_$schema.sql\"\n"
+            "  printf 'CREATE SYNONYM S_%s;\\n' \"$schema\" > \"database/$spool_schema/synonyms/S_$schema.sql\"\n"
+            "  if [[ \"${FAKE_SHORT_MANIFEST:-}\" == \"$schema\" ]]; then extra=2; else extra=1; fi\n"
+            "  printf 'VIEW=1\\nSYNONYM=%s\\n' \"$extra\" > \"database/$spool_schema/manifest-code.txt\"\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        fake_sql.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+        environment["PROJECT_ENV_FILE"] = str(root / ".env")
+        environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
+        environment.pop("PROJECT_SCHEMA", None)
+        return scripts / "backup_db.sh", environment
+
+    def run_backup(self, script: Path, environment: dict[str, str], **extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(script)],
+            cwd=script.parents[1],
+            env={**environment, **extra},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def calls(self, environment: dict[str, str]) -> list[str]:
+        path = Path(environment["FAKE_SQL_CALLS"])
+        return sorted(path.read_text().splitlines()) if path.exists() else []
+
+    def test_every_listed_schema_is_mirrored_with_tables_code_and_synonyms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_backup(script, environment)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(
+                ["conn-one|ONE|code", "conn-one|ONE|tables", "conn-two|TWO|code", "conn-two|TWO|tables"],
+                self.calls(environment),
+            )
+            for schema in ("ONE", "TWO"):
+                mirror = root / "database" / schema
+                self.assertTrue((mirror / "tables" / f"T_{schema}.sql").is_file())
+                self.assertTrue((mirror / "views" / f"V_{schema}.sql").is_file())
+                self.assertTrue((mirror / "synonyms" / f"S_{schema}.sql").is_file())
+            self.assertEqual(["ONE", "TWO"], sorted(path.name for path in (root / "database").iterdir()))
+
+    def test_schema_option_mirrors_only_that_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_backup(script, environment, PROJECT_SCHEMA="TWO")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(["conn-two|TWO|code", "conn-two|TWO|tables"], self.calls(environment))
+            self.assertEqual(["TWO"], sorted(path.name for path in (root / "database").iterdir()))
+
+    def test_a_profile_that_does_not_list_the_schema_skips_that_scope(self) -> None:
+        replacements = {
+            **TWO_SCHEMAS,
+            "TABLES_SCHEMA=ONE,TWO": "TABLES_SCHEMA=ONE",
+            "TABLES_SQLCL_CONNECTION=conn-one,conn-two": "TABLES_SQLCL_CONNECTION=conn-one",
+            "TABLES_EXPECTED_USER=ONE,TWO": "TABLES_EXPECTED_USER=ONE",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, replacements)
+            result = self.run_backup(script, environment, PROJECT_SCHEMA="TWO")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(["conn-two|TWO|code"], self.calls(environment))
+            self.assertFalse((root / "database" / "TWO" / "tables").exists())
+
+    def test_an_unlisted_schema_is_refused_before_any_sqlcl_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
+            result = self.run_backup(script, environment, PROJECT_SCHEMA="NOPE")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("not configured", result.stderr)
+            self.assertEqual([], self.calls(environment))
+
+    def test_a_failing_schema_installs_nothing_for_any_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_backup(script, environment, FAKE_FAIL_SCHEMA="TWO")
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse((root / "database").exists(), "no mirror may be installed after a failure")
+
+    def test_a_short_manifest_installs_nothing_for_any_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_backup(script, environment, FAKE_SHORT_MANIFEST="TWO")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("incomplete", result.stderr)
+            self.assertFalse((root / "database").exists())
+
+    def test_a_dirty_mirror_for_any_schema_is_refused_before_connecting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            dirty = root / "database" / "TWO"
+            dirty.mkdir(parents=True)
+            (dirty / "local-edit.sql").write_text("-- edit\n", encoding="utf-8")
+            result = self.run_backup(script, environment)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("refusing to back up over dirty mirror: database/TWO", result.stderr)
+            self.assertEqual([], self.calls(environment))
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,20 +7,41 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 source "$REPO_ROOT/scripts/load_env.sh" "${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
 # shellcheck source=sqlcl_safe.sh
 source "$REPO_ROOT/scripts/sqlcl_safe.sh"
-PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read tables
-PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read code
+split_csv() {
+  # split_csv <array-name> <value>: an empty value is an empty array.
+  local -n split_out="$1"
+  split_out=()
+  [ -z "$2" ] || IFS=',' read -r -a split_out <<< "$2"
+  return 0
+}
+split_csv TABLES_SCHEMAS "$TABLES_SCHEMA"
+split_csv TABLES_CONNECTIONS "$TABLES_SQLCL_CONNECTION"
+split_csv TABLES_USERS "$TABLES_EXPECTED_USER"
+split_csv CODE_SCHEMAS "$CODE_SCHEMA"
+split_csv CODE_CONNECTIONS "$CODE_SQLCL_CONNECTION"
+split_csv CODE_USERS "$CODE_EXPECTED_USER"
+if [ "${#TABLES_SCHEMAS[@]}" -eq 0 ] && [ "${#CODE_SCHEMAS[@]}" -eq 0 ]; then
+  echo "backup error: no profile lists schema ${PROJECT_SCHEMA:-?}; nothing to back up" >&2
+  exit 2
+fi
+for ((index = 0; index < ${#TABLES_SCHEMAS[@]}; index++)); do
+  PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read tables "${TABLES_SCHEMAS[$index]}"
+done
+for ((index = 0; index < ${#CODE_SCHEMAS[@]}; index++)); do
+  PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read code "${CODE_SCHEMAS[$index]}"
+done
 
 BACKUP_SCHEMAS=()
 add_backup_schema() {
   local candidate="$1"
   local existing
-  for existing in "${BACKUP_SCHEMAS[@]}"; do
+  for existing in ${BACKUP_SCHEMAS[@]+"${BACKUP_SCHEMAS[@]}"}; do
     [ "$existing" = "$candidate" ] && return
   done
   BACKUP_SCHEMAS+=("$candidate")
 }
-add_backup_schema "$TABLES_SCHEMA"
-add_backup_schema "$CODE_SCHEMA"
+for ((index = 0; index < ${#TABLES_SCHEMAS[@]}; index++)); do add_backup_schema "${TABLES_SCHEMAS[$index]}"; done
+for ((index = 0; index < ${#CODE_SCHEMAS[@]}; index++)); do add_backup_schema "${CODE_SCHEMAS[$index]}"; done
 
 # Use a reversible URL-safe Base64 name for SQLcl spool directories. SQLcl can
 # misread '$' in SPOOL paths. The encoding is injective, contains no '$', and
@@ -71,7 +92,7 @@ SQLCL_STDIN="$STAGING_DIR/.sqlcl-stdin"
 scope_directories() {
   case "$1" in
     tables) printf '%s\n' tables ;;
-    code)   printf '%s\n' views packages procedures functions triggers ;;
+    code)   printf '%s\n' views packages procedures functions triggers synonyms ;;
     *) echo "unsupported backup scope: $1" >&2; return 1 ;;
   esac
 }
@@ -153,10 +174,14 @@ run_backup_scope() {
 }
 
 # Both exports and manifests must complete before any generated mirror changes.
-run_backup_scope tables "$TABLES_SCHEMA" "$TABLES_SQLCL_CONNECTION" \
-  "$TABLES_EXPECTED_USER" "$TABLES_PREFIXES"
-run_backup_scope code "$CODE_SCHEMA" "$CODE_SQLCL_CONNECTION" \
-  "$CODE_EXPECTED_USER" "$CODE_PREFIXES"
+for ((index = 0; index < ${#TABLES_SCHEMAS[@]}; index++)); do
+  run_backup_scope tables "${TABLES_SCHEMAS[$index]}" "${TABLES_CONNECTIONS[$index]}" \
+    "${TABLES_USERS[$index]}" "$TABLES_PREFIXES"
+done
+for ((index = 0; index < ${#CODE_SCHEMAS[@]}; index++)); do
+  run_backup_scope code "${CODE_SCHEMAS[$index]}" "${CODE_CONNECTIONS[$index]}" \
+    "${CODE_USERS[$index]}" "$CODE_PREFIXES"
+done
 
 REPLACE_ARGS=()
 for schema in "${BACKUP_SCHEMAS[@]}"; do

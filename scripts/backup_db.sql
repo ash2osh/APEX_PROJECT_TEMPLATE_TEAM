@@ -62,7 +62,7 @@ BEGIN
         (LOWER('&&object_scope') = 'tables' AND object_type = 'TABLE')
         OR
         (LOWER('&&object_scope') = 'code' AND object_type IN (
-          'VIEW', 'PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER'
+          'VIEW', 'PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SYNONYM'
         ))
       )
       -- A table dropped without PURGE, and any trigger it dragged with it,
@@ -266,6 +266,31 @@ WHERE LOWER('&&object_scope') = 'code'
   )
 ORDER BY object_name;
 
+SELECT 'SPOOL database/&&spool_schema/synonyms/' || REPLACE(object_name, '$', '-S-') || '.sql'
+       || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''SYNONYM'', ''' || object_name
+       || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
+       || CHR(10) || 'SPOOL OFF'
+FROM all_objects objects_to_export
+WHERE LOWER('&&object_scope') = 'code'
+  -- A private synonym is owned by the schema; PUBLIC synonyms are owned by
+  -- PUBLIC and are deliberately not mirrored here.
+  AND objects_to_export.owner = UPPER('&&target_schema')
+  AND objects_to_export.object_type = 'SYNONYM'
+  AND objects_to_export.object_name NOT LIKE 'BIN$%'
+  AND (
+    '&&object_prefixes' = '*'
+    OR EXISTS (
+      SELECT 1
+      FROM (
+        SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+        FROM dual
+        CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+      ) configured_prefixes
+      WHERE INSTR(objects_to_export.object_name, configured_prefixes.object_prefix) = 1
+    )
+  )
+ORDER BY object_name;
+
 SPOOL OFF
 
 @scripts/_backup_db_driver_&&object_scope..sql
@@ -285,6 +310,7 @@ WITH expected_types (object_type, object_scope) AS (
   SELECT 'PACKAGE BODY', 'code' FROM dual UNION ALL
   SELECT 'PROCEDURE', 'code' FROM dual UNION ALL
   SELECT 'FUNCTION', 'code' FROM dual UNION ALL
+  SELECT 'SYNONYM', 'code' FROM dual UNION ALL
   SELECT 'TRIGGER', 'code' FROM dual
 )
 SELECT expected_types.object_type || '=' || COUNT(all_objects.object_name)

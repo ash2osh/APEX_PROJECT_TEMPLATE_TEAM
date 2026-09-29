@@ -127,5 +127,17 @@ class BackupDbCliTests(unittest.TestCase):
         self.assertNotIn("SPOOL database/&&target_schema/", script)
 
 
+    def test_sql_driver_mirrors_private_synonyms_and_counts_them(self) -> None:
+        script = (ROOT / "scripts" / "backup_db.sql").read_text(encoding="utf-8")
+        self.assertIn("SPOOL database/&&spool_schema/synonyms/", script)
+        self.assertIn("GET_DDL(''SYNONYM''", script)
+        self.assertIn("SELECT 'SYNONYM', 'code' FROM dual", script)
+        self.assertIn("'VIEW', 'PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SYNONYM'", script)
+        # Only the schema's own (private) synonyms: filtered by owner, never PUBLIC.
+        self.assertIn(
+            "AND objects_to_export.owner = UPPER('&&target_schema')\n  AND objects_to_export.object_type = 'SYNONYM'",
+            script,
+        )
+
 if __name__ == "__main__":
     unittest.main()
