@@ -12,6 +12,7 @@ SQL_DRIVERS = (
     "check_builder_drift.sql",
     "doctor.sql",
     "export_apps.sql",
+    "lookup_app_schema.sql",
     "migrate.sql",
     "publish_app.sql",
     "schema_catalog.sql",
@@ -28,7 +29,7 @@ class SqlDriverContractTests(unittest.TestCase):
                 self.assertNotIn("SQL.SQLCODE", contents)
 
     def test_read_only_drivers_exit_success_with_rollback(self) -> None:
-        for name in ("check_builder_drift.sql", "doctor.sql", "export_apps.sql", "backup_db.sql"):
+        for name in ("check_builder_drift.sql", "doctor.sql", "export_apps.sql", "lookup_app_schema.sql", "backup_db.sql"):
             with self.subTest(driver=name):
                 contents = (ROOT / "scripts" / name).read_text(encoding="utf-8")
                 self.assertRegex(contents, r"(?im)^EXIT SUCCESS ROLLBACK\s*$")

@@ -32,6 +32,7 @@ class PublishAppCliTests(unittest.TestCase):
             "load_env.sh",
             "check_db_target.sh",
             "export_apps.sql",
+            "lookup_app_schema.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
             "record_export_state.py",

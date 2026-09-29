@@ -327,5 +327,149 @@ class BackupCliTests(unittest.TestCase):
             self.assertIn("refusing to back up over dirty mirror: database/TWO", result.stderr)
             self.assertEqual([], self.calls(environment))
 
+class ExportCliTests(unittest.TestCase):
+    NAMES = (
+        "export_apps.sh", "export_apps.sql", "lookup_app_schema.sql", "load_env.sh", "check_db_target.sh",
+        "sqlcl_safe.sh", "normalize_apx.sh", "replace_mirror.sh", "verify_db_access.sql",
+        "record_export_state.py", "preserve_deployments.py",
+    )
+    APP_SCHEMAS = "117:ONE,301:TWO,205:THREE"
+
+    def make_checkout(self, root: Path, replacements: dict[str, str], app_ids: str = "117,301") -> tuple[Path, dict[str, str]]:
+        scripts = root / "scripts"
+        scripts.mkdir()
+        for name in self.NAMES:
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        (root / ".env").write_text(env_text({**replacements, "APEX_APP_ID=100,200": f"APEX_APP_ID={app_ids}"}), encoding="utf-8")
+        git_init(root)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        fake_sql = fake_bin / "sql"
+        # lookup:  -S -noupdates -name <conn> @lookup_app_schema.sql <schema> <app> <env> <user>
+        # export:  -S -noupdates -name <conn> @export_apps.sql      <schema> <app> <env> <user>
+        fake_sql.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "connection=\"$4\"; script=\"$5\"; schema=\"$6\"; app=\"$7\"\n"
+            "printf '%s|%s|%s|%s\\n' \"$(basename \"${script#@}\")\" \"$connection\" \"$schema\" \"$app\" >> \"$FAKE_SQL_CALLS\"\n"
+            "case \"$script\" in\n"
+            "  *lookup_app_schema.sql)\n"
+            "    for pair in ${FAKE_APP_SCHEMAS//,/ }; do\n"
+            "      if [[ \"${pair%%:*}\" == \"$app\" ]]; then printf 'APEX_APP_SCHEMA:%s:%s\\n' \"$app\" \"${pair##*:}\"; exit 0; fi\n"
+            "    done\n"
+            "    printf 'APEX_APP_SCHEMA:%s:NOT_FOUND\\n' \"$app\"\n"
+            "    ;;\n"
+            "  *export_apps.sql)\n"
+            "    if [[ \"${FAKE_FAIL_APP:-}\" == \"$app\" ]]; then printf 'ORA-01017: invalid credentials\\n'; exit 1; fi\n"
+            "    mkdir -p \"apps/$schema/exported/.apex\"\n"
+            "    printf 'source of %s\\n' \"$app\" > \"apps/$schema/exported/application.apx\"\n"
+            "    printf '{\"v\":1}\\n' > \"apps/$schema/exported/.apex/apexlang.json\"\n"
+            "    printf '2026-09-26T08:00:00|2026-09-26T09:00:00|Release 1.0\\n' > .apex-export-before.txt\n"
+            "    printf '2026-09-26T08:00:00|2026-09-26T09:00:02|Release 1.0\\n' > .apex-export-after.txt\n"
+            "    ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake_sql.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+        environment["PROJECT_ENV_FILE"] = str(root / ".env")
+        environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
+        environment["FAKE_APP_SCHEMAS"] = self.APP_SCHEMAS
+        environment.pop("PROJECT_SCHEMA", None)
+        return scripts / "export_apps.sh", environment
+
+    def run_export(self, script: Path, environment: dict[str, str], *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(script), *arguments],
+            cwd=script.parents[1],
+            env={**environment, **extra},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def calls(self, environment: dict[str, str]) -> list[str]:
+        path = Path(environment["FAKE_SQL_CALLS"])
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_each_app_is_exported_under_its_own_schema_with_its_own_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_export(script, environment)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("source of 117\n", (root / "apps" / "ONE" / "117" / "application.apx").read_text())
+            self.assertEqual("source of 301\n", (root / "apps" / "TWO" / "301" / "application.apx").read_text())
+            exports = [call for call in self.calls(environment) if call.startswith("export_apps.sql")]
+            self.assertEqual(["export_apps.sql|conn-one|ONE|117", "export_apps.sql|conn-two|TWO|301"], exports)
+            lookups = [call for call in self.calls(environment) if call.startswith("lookup_app_schema.sql")]
+            self.assertEqual(["lookup_app_schema.sql|conn-one|ONE|117", "lookup_app_schema.sql|conn-one|ONE|301"], lookups)
+
+    def test_single_app_argument_exports_only_that_app(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_export(script, environment, "301")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertTrue((root / "apps" / "TWO" / "301").is_dir())
+            self.assertFalse((root / "apps" / "ONE").exists())
+
+    def test_app_owned_by_an_unlisted_schema_is_refused_before_any_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS, app_ids="205")
+            result = self.run_export(script, environment)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("THREE", result.stderr)
+            self.assertIn("not listed in APEX_PARSING_SCHEMA", result.stderr)
+            self.assertFalse(any(call.startswith("export_apps.sql") for call in self.calls(environment)))
+            self.assertFalse((root / "apps").exists())
+
+    def test_unknown_app_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS, app_ids="999")
+            result = self.run_export(script, environment)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("999", result.stderr)
+
+    def test_schema_option_must_match_the_apps_parsing_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
+            result = self.run_export(script, environment, "117", PROJECT_SCHEMA="TWO")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("117", result.stderr)
+            self.assertIn("ONE", result.stderr)
+            self.assertFalse(any(call.startswith("export_apps.sql") for call in self.calls(environment)))
+
+    def test_a_failing_export_installs_no_application(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_export(script, environment, FAKE_FAIL_APP="301")
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse((root / "apps").exists(), "an earlier app must not be installed after a later failure")
+
+    def test_dirty_destination_is_refused_before_any_export_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            dirty = root / "apps" / "TWO" / "301"
+            dirty.mkdir(parents=True)
+            (dirty / "application.apx").write_text("local edit\n", encoding="utf-8")
+            result = self.run_export(script, environment)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("refusing to export over dirty mirror: apps/TWO/301", result.stderr)
+            self.assertFalse(any(call.startswith("export_apps.sql") for call in self.calls(environment)))
+
+    def test_single_schema_export_makes_no_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, {}, app_ids="100")
+            result = self.run_export(script, environment, "100")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(["export_apps.sql|docker-demo|DEMO|100"], self.calls(environment))
+            self.assertTrue((root / "apps" / "DEMO" / "100").is_dir())
+
 if __name__ == "__main__":
     unittest.main()

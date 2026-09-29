@@ -1,12 +1,11 @@
 #Requires -Version 5.1
-# Export the configured APEX application as an APEXlang mirror.
+# Export the configured APEX applications as APEXlang mirrors.
 param([string] $AppId)
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
-& (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target apex
 
 function Invoke-PythonScript {
   param([string] $ScriptPath, [string[]] $ScriptArguments)
@@ -22,6 +21,20 @@ function Invoke-PythonScript {
   if ($LASTEXITCODE -ne 0) { throw "Python export helper failed with exit code $LASTEXITCODE" }
 }
 
+function Split-ExportList([string] $Value) {
+  # A function's output is unrolled, so callers must wrap the call in @( ):
+  # that restores an array for zero or one entries. (Do not use `return ,@(...)`;
+  # it emits the array as ONE object, and @( ) would then count it as one entry.)
+  if ([string]::IsNullOrEmpty($Value)) { return }
+  return $Value.Split(',')
+}
+$apexSchemas = @(Split-ExportList $env:APEX_PARSING_SCHEMA)
+$apexConnections = @(Split-ExportList $env:APEX_SQLCL_CONNECTION)
+$apexUsers = @(Split-ExportList $env:APEX_EXPECTED_USER)
+if ($apexSchemas.Count -eq 0) {
+  throw "export error: the APEX profile does not list schema $($env:PROJECT_SCHEMA)"
+}
+
 if (-not [string]::IsNullOrWhiteSpace($AppId)) {
   if ($AppId -cnotmatch '^[1-9][0-9]*$') { throw "export error: expected a positive numeric application id" }
   $appIds = @($AppId)
@@ -29,30 +42,62 @@ if (-not [string]::IsNullOrWhiteSpace($AppId)) {
   $appIds = @($env:APEX_APP_ID.Split(','))
 }
 
-# Refuse any dirty destination before making the first database connection.
-# Git warns when the schema parent does not exist on a first export; suppress
-# that diagnostic while preserving the command's failure status.
-foreach ($appId in $appIds) {
-  $destination = "apps/$($env:APEX_PARSING_SCHEMA)/$appId"
-  $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination 2>$null)
-  if ($LASTEXITCODE -ne 0) { throw "unable to inspect Git status for mirror: $destination" }
-  if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
-    throw "refusing to export over dirty mirror: $destination; commit, stash, or remove local changes first"
-  }
-}
-
 $scratchPath = Join-Path $repoRoot "scratch"
 # New-Item has no -LiteralPath parameter on either Windows PowerShell 5.1 or
 # PowerShell 7. The .NET API is literal and has the same create-if-missing behavior.
 [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
 $stagingPath = Join-Path $scratchPath ("apex-export-" + [Guid]::NewGuid().ToString("N"))
-$stageParent = Join-Path $stagingPath "staged/apps/$($env:APEX_PARSING_SCHEMA)"
-New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
+[System.IO.Directory]::CreateDirectory($stagingPath) | Out-Null
 
 try {
+  # Which schema parses each application. With one schema configured that is
+  # the schema itself; with several it is read from the live workspace, using
+  # the first connection of the profile (the selected schema's, under --schema).
+  $appSchemaOf = @{}
   foreach ($appId in $appIds) {
+    if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
+      try {
+        $appSchema = Get-AppParsingSchema -Connection $apexConnections[0] -ExpectedUser $apexUsers[0] `
+          -Schema $apexSchemas[0] -AppId $appId `
+          -WorkDirectory (Join-Path $stagingPath "lookup/$appId") `
+          -ScriptPath (Join-Path $repoRoot "scripts/lookup_app_schema.sql")
+      } catch {
+        throw "export error: could not determine the parsing schema of application ${appId}: $($_.Exception.Message)"
+      }
+      if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA) -and $appSchema -cne $env:PROJECT_SCHEMA) {
+        throw "export error: application $appId is parsed by $appSchema, not $($env:PROJECT_SCHEMA)"
+      }
+    } else {
+      $appSchema = $apexSchemas[0]
+    }
+    if ($apexSchemas -cnotcontains $appSchema) {
+      throw "export error: application $appId is parsed by $appSchema, which is not listed in APEX_PARSING_SCHEMA ($($apexSchemas -join ' '))"
+    }
+    $appSchemaOf[[string]$appId] = $appSchema
+    & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target apex -Schema $appSchema
+  }
+
+  # Refuse any dirty destination before opening the first export session. Git
+  # warns when the schema parent does not exist on a first export; suppress
+  # that diagnostic while preserving the command's failure status.
+  foreach ($appId in $appIds) {
+    $destination = "apps/$($appSchemaOf[[string]$appId])/$appId"
+    $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "unable to inspect Git status for mirror: $destination" }
+    if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
+      throw "refusing to export over dirty mirror: $destination; commit, stash, or remove local changes first"
+    }
+  }
+
+  foreach ($appId in $appIds) {
+    $appSchema = $appSchemaOf[[string]$appId]
+    $schemaIndex = [Array]::IndexOf($apexSchemas, $appSchema)
+    $appConnection = $apexConnections[$schemaIndex]
+    $appUser = $apexUsers[$schemaIndex]
+    $stageParent = Join-Path $stagingPath "staged/apps/$appSchema"
+    New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
     $runPath = Join-Path $stagingPath "runs/$appId"
-    $runStageParent = Join-Path $runPath "apps/$($env:APEX_PARSING_SCHEMA)"
+    $runStageParent = Join-Path $runPath "apps/$appSchema"
     New-Item -ItemType Directory -Force -Path $runStageParent | Out-Null
     $sqlclOutput = Join-Path $runPath "sqlcl-output.log"
 
@@ -60,10 +105,9 @@ try {
       -StdInFile (Join-Path $stagingPath ".sqlcl-stdin") `
       -TranscriptFile $sqlclOutput `
       -Arguments @(
-        "-S", "-noupdates", "-name", $env:APEX_SQLCL_CONNECTION,
+        "-S", "-noupdates", "-name", $appConnection,
         "@$(Join-Path $repoRoot 'scripts/export_apps.sql')",
-        $env:APEX_PARSING_SCHEMA, $appId, $env:DB_ENVIRONMENT,
-        $env:APEX_EXPECTED_USER
+        $appSchema, $appId, $env:DB_ENVIRONMENT, $appUser
       )
     $transcript = [System.IO.File]::ReadAllText($sqlclOutput)
     if ($sqlclExit -ne 0 -or $transcript -match '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:') {
@@ -97,7 +141,7 @@ try {
       )
     Invoke-PythonScript -ScriptPath (Join-Path $PSScriptRoot "preserve_deployments.py") `
       -ScriptArguments @(
-        (Join-Path $repoRoot "apps/$($env:APEX_PARSING_SCHEMA)/$appId"),
+        (Join-Path $repoRoot "apps/$appSchema/$appId"),
         $appStage
       )
   }
@@ -106,8 +150,9 @@ try {
   # leave the earlier ones replaced.
   $replaceArgs = @()
   foreach ($appId in $appIds) {
-    $replaceArgs += (Join-Path $stageParent $appId)
-    $replaceArgs += "apps/$($env:APEX_PARSING_SCHEMA)/$appId"
+    $appSchema = $appSchemaOf[[string]$appId]
+    $replaceArgs += (Join-Path $stagingPath "staged/apps/$appSchema/$appId")
+    $replaceArgs += "apps/$appSchema/$appId"
   }
   & (Join-Path $PSScriptRoot "replace_mirror.ps1") @replaceArgs
 } finally {

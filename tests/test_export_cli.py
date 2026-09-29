@@ -18,6 +18,7 @@ class ExportCliTests(unittest.TestCase):
             names = (
                 "export_apps.ps1",
                 "export_apps.sql",
+                "lookup_app_schema.sql",
                 "load_env.ps1",
                 "check_db_target.ps1",
                 "invoke_sqlcl.ps1",
@@ -28,6 +29,7 @@ class ExportCliTests(unittest.TestCase):
             names = (
                 "export_apps.sh",
                 "export_apps.sql",
+                "lookup_app_schema.sql",
                 "load_env.sh",
                 "sqlcl_safe.sh",
                 "check_db_target.sh",

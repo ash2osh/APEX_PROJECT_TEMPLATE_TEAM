@@ -82,3 +82,29 @@ function Invoke-Sqlcl {
     Remove-Item -LiteralPath $stdinRedirectFile -Force -ErrorAction SilentlyContinue
   }
 }
+
+# Return the parsing schema that owns an APEX application, or throw.
+function Get-AppParsingSchema {
+  param(
+    [Parameter(Mandatory = $true)][string] $Connection,
+    [Parameter(Mandatory = $true)][string] $ExpectedUser,
+    [Parameter(Mandatory = $true)][string] $Schema,
+    [Parameter(Mandatory = $true)][string] $AppId,
+    [Parameter(Mandatory = $true)][string] $WorkDirectory,
+    [Parameter(Mandatory = $true)][string] $ScriptPath
+  )
+  [System.IO.Directory]::CreateDirectory($WorkDirectory) | Out-Null
+  $transcript = Join-Path $WorkDirectory "lookup-output.log"
+  $exit = Invoke-Sqlcl -WorkingDirectory $WorkDirectory `
+    -StdInFile (Join-Path $WorkDirectory ".sqlcl-stdin") -TranscriptFile $transcript `
+    -Arguments @("-S", "-noupdates", "-name", $Connection, "@$ScriptPath", $Schema, $AppId, $env:DB_ENVIRONMENT, $ExpectedUser)
+  $text = [System.IO.File]::ReadAllText($transcript)
+  if ($exit -ne 0 -or $text -match '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:') {
+    throw "could not look up the parsing schema of application ${AppId}:`n$text"
+  }
+  $match = [regex]::Match($text, "(?m)^\s*APEX_APP_SCHEMA:$([regex]::Escape($AppId)):(.*?)\s*$")
+  if (-not $match.Success) { throw "the parsing-schema lookup for application $AppId returned no result" }
+  $owner = $match.Groups[1].Value
+  if ($owner -eq "NOT_FOUND") { throw "application $AppId was not found in the workspace visible to this connection" }
+  return $owner
+}
