@@ -1649,6 +1649,11 @@ Add the same `Options:` line to `Show-Usage`. Replace the `"doctor"` case body w
           return $false
         }
         return $true
+      } catch {
+        # Invoke-Sqlcl uses Start-Process, which throws when SQLcl cannot start.
+        # That is a failed check, not a reason to skip the remaining schemas.
+        [Console]::Error.WriteLine("team error: SQLcl doctor check failed for schema $SchemaName (connection $Connection): $($_.Exception.Message)")
+        return $false
       } finally {
         if (Test-Path -LiteralPath $sqlclWorkDir) {
           Remove-Item -LiteralPath $sqlclWorkDir -Recurse -Force -ErrorAction SilentlyContinue
