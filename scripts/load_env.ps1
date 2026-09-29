@@ -220,6 +220,7 @@ $projectEnvDevSchema = ""
 if (@(Split-ProjectEnvList $env:CODE_SCHEMA).Count -eq 1) { $projectEnvDevSchema = $env:CODE_SCHEMA }
 $env:PROJECT_SCHEMAS = ($projectEnvUnion -join ",")
 $env:PROJECT_MULTI_SCHEMA = if ($projectEnvMulti) { "true" } else { "false" }
+$env:PROJECT_CODE_SCHEMAS = $env:CODE_SCHEMA
 
 function Set-ProjectEnvNarrow([string]$SchemaKey, [string]$ConnectionKey, [string]$UserKey, [string]$Mode) {
   $schemas = @(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($SchemaKey, "Process")))

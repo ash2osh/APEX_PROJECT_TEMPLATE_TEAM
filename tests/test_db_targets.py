@@ -198,6 +198,16 @@ class MultiSchemaTargetTests(unittest.TestCase):
         with self.assertRaises(api.TargetResolutionError):
             api.batch_schema(["AAA"], "BBB", multi)
 
+    def test_batch_schema_ignores_multiple_schemas_in_other_profiles(self) -> None:
+        values = {**BASE_ENV, "PROJECT_MULTI_SCHEMA": "true"}
+        self.assertIsNone(self.api().batch_schema([None], None, values))
+
+    def test_batch_schema_uses_raw_code_schema_after_narrowing(self) -> None:
+        narrowed = {**MULTI_ENV, "CODE_SCHEMA": "AAA", "PROJECT_CODE_SCHEMAS": "AAA,BBB,CCC"}
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().batch_schema([None], "AAA", narrowed)
+        self.assertIn("migrations/<SCHEMA>/", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

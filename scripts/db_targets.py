@@ -158,7 +158,8 @@ def batch_schema(
     if len(folder_schemas) > 1:
         raise TargetResolutionError("selected migrations belong to different schemas; run one schema at a time")
     folder_schema = next(iter(folder_schemas), None)
-    multi = values.get("PROJECT_MULTI_SCHEMA") == "true" or len(split_list(values.get("CODE_SCHEMA"))) > 1
+    code_schemas = split_list(values.get("PROJECT_CODE_SCHEMAS") or values.get("CODE_SCHEMA"))
+    multi = len(code_schemas) > 1
     if multi and folder_schema is None:
         raise TargetResolutionError(
             "several schemas are configured, so migrations must live under migrations/<SCHEMA>/; "

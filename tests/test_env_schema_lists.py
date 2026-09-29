@@ -72,6 +72,15 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("true|ONE,TWO|TWO|conn-two|TWO|TWO|conn-two\n", result.stdout)
 
+    def test_project_code_schemas_stays_unnarrowed(self) -> None:
+        result = load(
+            write_env(self.directory, MULTI),
+            probe='printf "%s|%s\\n" "$PROJECT_CODE_SCHEMAS" "$CODE_SCHEMA"',
+            project_schema="TWO",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("ONE,TWO|TWO\n", result.stdout)
+
     def test_a_profile_that_does_not_list_the_schema_is_blanked(self) -> None:
         replacements = {
             **MULTI,
@@ -227,6 +236,13 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
             unknown = self.run_probe(env_path, probe, "NOPE")
             self.assertNotEqual(0, unknown.returncode)
             self.assertIn("not configured", unknown.stderr)
+
+    def test_project_code_schemas_stays_unnarrowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env_path = write_env(Path(temporary), MULTI)
+            probe = '"$($env:PROJECT_CODE_SCHEMAS)|$($env:CODE_SCHEMA)"'
+            narrowed = self.run_probe(env_path, probe, "TWO")
+            self.assertEqual("ONE,TWO|TWO", narrowed.stdout.strip())
 
     def test_unequal_lengths_and_empty_entries_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

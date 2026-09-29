@@ -328,7 +328,8 @@ project_env_dev_schema=""
 [ "$(project_env_count "$CODE_SCHEMA")" -ne 1 ] || project_env_dev_schema="$CODE_SCHEMA"
 PROJECT_SCHEMAS="$(IFS=,; printf '%s' "${project_env_union[*]}")"
 PROJECT_MULTI_SCHEMA="$project_env_multi"
-export PROJECT_SCHEMAS PROJECT_MULTI_SCHEMA
+PROJECT_CODE_SCHEMAS="$CODE_SCHEMA"
+export PROJECT_SCHEMAS PROJECT_MULTI_SCHEMA PROJECT_CODE_SCHEMAS
 
 project_env_narrow() {
   # <schema-key> <connection-key> <user-key> <strict|lenient>
