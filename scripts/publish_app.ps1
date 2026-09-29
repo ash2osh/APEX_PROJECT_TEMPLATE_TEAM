@@ -165,6 +165,21 @@ switch ($appEnvironment) {
   }
 }
 
+if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
+  switch ($appEnvironment) {
+    "staging" {
+      if ($env:STAGING_SCHEMA -cne $parsingSchema) {
+        throw "publish error: schema $parsingSchema is not listed in STAGING_SCHEMA, so it cannot be published to staging"
+      }
+    }
+    "prod" {
+      if ($env:PROD_SCHEMA -cne $parsingSchema) {
+        throw "publish error: schema $parsingSchema is not listed in PROD_SCHEMA, so it cannot be published to production"
+      }
+    }
+  }
+}
+
 if ($describe) {
   # Internal read-only interface for deployment summaries and DBA runbooks.
   Write-Output (@($appDir, $deployment.workspace.name, $parsingSchema,
@@ -206,7 +221,7 @@ if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
     try {
       $liveSchema = Get-AppParsingSchema -Connection $sqlclConnection -ExpectedUser $expectedUser `
         -Schema $parsingSchema -AppId $AppId -WorkDirectory $lookupDir `
-        -ScriptPath (Join-Path $repoRoot "scripts/lookup_app_schema.sql")
+        -ScriptPath (Join-Path $repoRoot "scripts/lookup_app_schema.sql") -Environment $targetEnvironment
       if ($liveSchema -cne $parsingSchema) {
         throw "publish error: application $AppId is parsed by $liveSchema, not the descriptor's $parsingSchema; refusing to import"
       }

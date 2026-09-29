@@ -29,20 +29,23 @@ invoke_sqlcl_safe() {
 
 # Print the parsing schema that owns an APEX application, or fail. The caller
 # supplies a newly-created work directory (never application source) and has
-# REPO_ROOT and DB_ENVIRONMENT set. NOT_FOUND is reported as a failure.
+# REPO_ROOT and DB_ENVIRONMENT set. An optional sixth argument overrides the
+# environment classification for a selected staging or production target.
+# NOT_FOUND is reported as a failure.
 sqlcl_app_parsing_schema() {
-  [ "$#" -eq 5 ] || {
-    printf 'usage: sqlcl_app_parsing_schema <connection> <expected-user> <schema> <app-id> <work-dir>\n' >&2
+  [ "$#" -ge 5 ] && [ "$#" -le 6 ] || {
+    printf 'usage: sqlcl_app_parsing_schema <connection> <expected-user> <schema> <app-id> <work-dir> [environment]\n' >&2
     return 2
   }
   local connection="$1" expected_user="$2" schema="$3" app_id="$4" work_dir="$5"
+  local environment="${6:-$DB_ENVIRONMENT}"
   local stdin_file="$work_dir/.sqlcl-stdin" output_file="$work_dir/lookup-output.log" owner
   mkdir -p -- "$work_dir"
   : > "$stdin_file"
   if ! invoke_sqlcl_safe "$work_dir" \
     -S -noupdates -name "$connection" \
     "@$REPO_ROOT/scripts/lookup_app_schema.sql" \
-    "$schema" "$app_id" "$DB_ENVIRONMENT" "$expected_user" \
+    "$schema" "$app_id" "$environment" "$expected_user" \
     < "$stdin_file" > "$output_file" 2>&1; then
     cat "$output_file" >&2
     printf 'could not look up the parsing schema of application %s\n' "$app_id" >&2

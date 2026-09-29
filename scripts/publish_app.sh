@@ -157,6 +157,19 @@ case "$app_environment" in
     ;;
 esac
 
+if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+  case "$app_environment" in
+    staging)
+      [ "${STAGING_SCHEMA:-}" = "$parsing_schema" ] || \
+        fail "schema $parsing_schema is not listed in STAGING_SCHEMA, so it cannot be published to staging"
+      ;;
+    prod)
+      [ "${PROD_SCHEMA:-}" = "$parsing_schema" ] || \
+        fail "schema $parsing_schema is not listed in PROD_SCHEMA, so it cannot be published to production"
+      ;;
+  esac
+fi
+
 if [ "$describe" = true ]; then
   # Internal read-only interface for deploy.sh to show the selected descriptor
   # before it asks the operator to confirm or prints a DBA runbook.
@@ -201,7 +214,7 @@ if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
   mkdir -p "$REPO_ROOT/scratch"
   lookup_dir="$(mktemp -d "$REPO_ROOT/scratch/apex-lookup.XXXXXX")"
   live_schema=""
-  if live_schema="$(sqlcl_app_parsing_schema "$sqlcl_connection" "$expected_user" "$parsing_schema" "$app_id" "$lookup_dir" 2>"$lookup_dir/error.txt")"; then
+  if live_schema="$(sqlcl_app_parsing_schema "$sqlcl_connection" "$expected_user" "$parsing_schema" "$app_id" "$lookup_dir" "$target_environment" 2>"$lookup_dir/error.txt")"; then
     if [ "$live_schema" != "$parsing_schema" ]; then
       rm -rf -- "$lookup_dir"
       fail "application $app_id is parsed by $live_schema, not the descriptor's $parsing_schema; refusing to import"

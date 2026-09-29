@@ -504,7 +504,7 @@ class PublishCliTests(unittest.TestCase):
             "connection=\"$4\"; script=\"$5\"\n"
             "printf '%s|%s\\n' \"$(basename \"${script#@}\")\" \"$connection\" >> \"$FAKE_SQL_CALLS\"\n"
             "case \"$script\" in\n"
-            "  *lookup_app_schema.sql) printf 'APEX_APP_SCHEMA:117:%s\\n' \"${FAKE_LIVE_SCHEMA:-NOT_FOUND}\" ;;\n"
+            "  *lookup_app_schema.sql) printf '%s\\n' \"$8\" >> \"$FAKE_SQL_LOOKUP_ENVIRONMENTS\"; printf 'APEX_APP_SCHEMA:117:%s\\n' \"${FAKE_LIVE_SCHEMA:-NOT_FOUND}\" ;;\n"
             "  *check_builder_drift.sql) printf 'APEX_DRIFT_QUERY_VERIFIED\\n' ;;\n"
             "  *publish_app.sql) printf 'Import successful.\\nAPEX_IMPORT_VERIFIED:117\\n' ;;\n"
             "  *) : ;;\n"
@@ -516,13 +516,14 @@ class PublishCliTests(unittest.TestCase):
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["PROJECT_ENV_FILE"] = str(root / ".env")
         environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
+        environment["FAKE_SQL_LOOKUP_ENVIRONMENTS"] = str(root / "lookup-environments.txt")
         environment.pop("PROJECT_SCHEMA", None)
         return scripts / "publish_app.sh", environment
 
-    def run_publish(self, script: Path, environment: dict[str, str], *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
+    def run_publish(self, script: Path, environment: dict[str, str], *arguments: str, input_text: str | None = None, **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(script), "117", *arguments],
-            cwd=script.parents[1], env={**environment, **extra}, text=True, capture_output=True, check=False,
+            cwd=script.parents[1], env={**environment, **extra}, input=input_text, text=True, capture_output=True, check=False,
         )
 
     def calls(self, environment: dict[str, str]) -> list[str]:
@@ -577,6 +578,40 @@ class PublishCliTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("is not listed in STAGING_SCHEMA", result.stderr)
             self.assertEqual([], self.calls(environment))
+
+    def test_multischema_staging_and_production_require_a_schema_list(self) -> None:
+        for target in ("STAGING", "PROD"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                extra = f"\n{target}_SQLCL_CONNECTION=target-only\n{target}_EXPECTED_USER=TARGET_USER\n"
+                script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
+                result = self.run_publish(script, environment, "--env", "staging" if target == "STAGING" else "prod", "--describe")
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn(f"is not listed in {target}_SCHEMA", result.stderr)
+                self.assertEqual([], self.calls(environment))
+
+    def test_live_schema_lookup_uses_the_selected_publish_environment(self) -> None:
+        extra = (
+            "\nSTAGING_SQLCL_CONNECTION=stage-one,stage-two\nSTAGING_EXPECTED_USER=SONE,STWO\nSTAGING_SCHEMA=ONE,TWO\n"
+            "PROD_SQLCL_CONNECTION=prod-one,prod-two\nPROD_EXPECTED_USER=PONE,PTWO\nPROD_SCHEMA=ONE,TWO\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
+            for app_environment, expected_lookup_environment in (("staging", "staging"), ("prod", "production")):
+                with self.subTest(app_environment=app_environment):
+                    lookup_path = Path(environment["FAKE_SQL_LOOKUP_ENVIRONMENTS"])
+                    lookup_path.unlink(missing_ok=True)
+                    result = self.run_publish(
+                        script,
+                        environment,
+                        "--env",
+                        app_environment,
+                        "--force",
+                        input_text="yes\n",
+                        FAKE_LIVE_SCHEMA="ONE",
+                    )
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                    self.assertIn("is parsed by ONE", result.stderr)
+                    self.assertEqual([expected_lookup_environment], lookup_path.read_text(encoding="utf-8").splitlines())
 
     def test_schema_missing_from_the_apex_profile_is_refused(self) -> None:
         replacements = {**TWO_SCHEMAS, "APEX_PARSING_SCHEMA=ONE,TWO": "APEX_PARSING_SCHEMA=ONE,THREE", "APEX_EXPECTED_USER=ONE,TWO": "APEX_EXPECTED_USER=ONE,THREE"}

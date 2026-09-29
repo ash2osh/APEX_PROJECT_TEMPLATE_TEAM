@@ -91,13 +91,14 @@ function Get-AppParsingSchema {
     [Parameter(Mandatory = $true)][string] $Schema,
     [Parameter(Mandatory = $true)][string] $AppId,
     [Parameter(Mandatory = $true)][string] $WorkDirectory,
-    [Parameter(Mandatory = $true)][string] $ScriptPath
+    [Parameter(Mandatory = $true)][string] $ScriptPath,
+    [string] $Environment = $env:DB_ENVIRONMENT
   )
   [System.IO.Directory]::CreateDirectory($WorkDirectory) | Out-Null
   $transcript = Join-Path $WorkDirectory "lookup-output.log"
   $exit = Invoke-Sqlcl -WorkingDirectory $WorkDirectory `
     -StdInFile (Join-Path $WorkDirectory ".sqlcl-stdin") -TranscriptFile $transcript `
-    -Arguments @("-S", "-noupdates", "-name", $Connection, "@$ScriptPath", $Schema, $AppId, $env:DB_ENVIRONMENT, $ExpectedUser)
+    -Arguments @("-S", "-noupdates", "-name", $Connection, "@$ScriptPath", $Schema, $AppId, $Environment, $ExpectedUser)
   $text = [System.IO.File]::ReadAllText($transcript)
   if ($exit -ne 0 -or $text -match '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:') {
     throw "could not look up the parsing schema of application ${AppId}:`n$text"
