@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -8,6 +9,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PWSH = shutil.which("pwsh")
+
+
+def plain(text: str) -> str:
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return re.sub(r"\s*\n\s*\|?\s*", " ", text)
+
 
 MULTI = {
     "TABLES_SCHEMA=DEMO": "TABLES_SCHEMA=ONE,TWO",
@@ -225,17 +232,17 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             env_path = write_env(Path(temporary), MULTI)
             probe = '"$($env:PROJECT_MULTI_SCHEMA)|$($env:PROJECT_SCHEMAS)|$($env:TABLES_SCHEMA)|$($env:CODE_SQLCL_CONNECTION)"'
-            plain = self.run_probe(env_path, probe)
-            self.assertEqual(0, plain.returncode, plain.stderr)
-            self.assertEqual("true|ONE,TWO|ONE,TWO|conn-one,conn-two", plain.stdout.strip())
+            unselected = self.run_probe(env_path, probe)
+            self.assertEqual(0, unselected.returncode, unselected.stderr)
+            self.assertEqual("true|ONE,TWO|ONE,TWO|conn-one,conn-two", unselected.stdout.strip())
             narrowed = self.run_probe(env_path, probe, "TWO")
             self.assertEqual("true|ONE,TWO|TWO|conn-two", narrowed.stdout.strip())
             refused = self.run_probe(env_path, 'Assert-ProjectEnvSingleSchema -Label "unit test"')
             self.assertNotEqual(0, refused.returncode)
-            self.assertIn("--schema", refused.stderr)
+            self.assertIn("--schema", plain(refused.stderr))
             unknown = self.run_probe(env_path, probe, "NOPE")
             self.assertNotEqual(0, unknown.returncode)
-            self.assertIn("not configured", unknown.stderr)
+            self.assertIn("not configured", plain(unknown.stderr))
 
     def test_project_code_schemas_stays_unnarrowed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -249,11 +256,11 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
             unequal = write_env(Path(temporary), {**MULTI, "CODE_EXPECTED_USER=ONE,TWO": "CODE_EXPECTED_USER=ONE"})
             result = self.run_probe(unequal, "'loaded'")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("must list the same number of entries", result.stderr)
+            self.assertIn("must list the same number of entries", plain(result.stderr))
             empty = write_env(Path(temporary), {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,,TWO"})
             result = self.run_probe(empty, "'loaded'")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("must not contain empty entries", result.stderr)
+            self.assertIn("must not contain empty entries", plain(result.stderr))
 
 
 if __name__ == "__main__":

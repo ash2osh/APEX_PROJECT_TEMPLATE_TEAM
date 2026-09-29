@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -8,6 +9,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PWSH = shutil.which("pwsh")
+
+
+def plain(text: str) -> str:
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return re.sub(r"\s*\n\s*\|?\s*", " ", text)
+
+
+def script_command(script: Path, *arguments: str) -> list[str]:
+    if script.suffix.casefold() == ".ps1":
+        return ["pwsh", "-NoProfile", "-File", str(script), *arguments]
+    return ["bash", str(script), *arguments]
+
 
 TWO_SCHEMAS = {
     "TABLES_SCHEMA=DEMO": "TABLES_SCHEMA=ONE,TWO",
@@ -66,11 +79,12 @@ class DoctorCliTests(unittest.TestCase):
         environment["PROJECT_ENV_FILE"] = str(root / ".env")
         environment["FAKE_SQL_CALLS"] = str(calls)
         environment.pop("PROJECT_SCHEMA", None)
-        return scripts / "team.sh", environment
+        script_name = "team.ps1" if "team.ps1" in self.NAMES else "team.sh"
+        return scripts / script_name, environment
 
     def run_team(self, script: Path, environment: dict[str, str], *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(script), *arguments],
+            script_command(script, *arguments),
             cwd=script.parents[1],
             env=environment,
             text=True,
@@ -83,7 +97,7 @@ class DoctorCliTests(unittest.TestCase):
             script, environment = self.make_checkout(Path(temporary), {})
             result = self.run_team(script, environment, "doctor")
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertIn("Doctor checks passed for the configured DEV connection.", result.stdout)
+            self.assertIn("Doctor checks passed for the configured DEV connection.", plain(result.stdout))
             self.assertEqual(["docker-demo|DEMO|DEMO"], Path(environment["FAKE_SQL_CALLS"]).read_text().splitlines())
 
     def test_multi_schema_doctor_checks_every_schema_once(self) -> None:
@@ -93,7 +107,7 @@ class DoctorCliTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             calls = Path(environment["FAKE_SQL_CALLS"]).read_text().splitlines()
             self.assertEqual(["conn-one|ONE|ONE", "conn-two|TWO|TWO"], sorted(calls))
-            self.assertIn("Doctor checks passed for all 2 configured DEV schema connections.", result.stdout)
+            self.assertIn("Doctor checks passed for all 2 configured DEV schema connections.", plain(result.stdout))
 
     def test_schema_option_narrows_doctor_to_one_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -110,7 +124,7 @@ class DoctorCliTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             calls = Path(environment["FAKE_SQL_CALLS"]).read_text().splitlines()
             self.assertEqual(["conn-one|ONE|ONE", "conn-two|TWO|TWO"], sorted(calls))
-            self.assertIn("ONE", result.stderr)
+            self.assertIn("ONE", plain(result.stderr))
 
     def test_unknown_or_malformed_schema_is_refused_before_any_sqlcl_call(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -119,7 +133,7 @@ class DoctorCliTests(unittest.TestCase):
                 with self.subTest(schema=value):
                     result = self.run_team(script, environment, "doctor", "--schema", value)
                     self.assertNotEqual(0, result.returncode)
-                    self.assertIn(expected, result.stderr)
+                    self.assertIn(expected, plain(result.stderr))
             self.assertFalse(Path(environment["FAKE_SQL_CALLS"]).exists())
 
     def test_schema_option_requires_a_value(self) -> None:
@@ -127,7 +141,7 @@ class DoctorCliTests(unittest.TestCase):
             script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
             result = self.run_team(script, environment, "doctor", "--schema")
             self.assertEqual(2, result.returncode)
-            self.assertIn("--schema requires a schema name", result.stderr)
+            self.assertIn("--schema requires a schema name", plain(result.stderr))
 
     def test_split_profile_project_still_checks_each_distinct_identity(self) -> None:
         # Tables in one schema, code and APEX in another: no --schema needed.
@@ -233,11 +247,12 @@ class BackupCliTests(unittest.TestCase):
         environment["PROJECT_ENV_FILE"] = str(root / ".env")
         environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
         environment.pop("PROJECT_SCHEMA", None)
-        return scripts / "backup_db.sh", environment
+        script_name = "backup_db.ps1" if "backup_db.ps1" in self.NAMES else "backup_db.sh"
+        return scripts / script_name, environment
 
     def run_backup(self, script: Path, environment: dict[str, str], **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(script)],
+            script_command(script),
             cwd=script.parents[1],
             env={**environment, **extra},
             text=True,
@@ -295,7 +310,7 @@ class BackupCliTests(unittest.TestCase):
             script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
             result = self.run_backup(script, environment, PROJECT_SCHEMA="NOPE")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("not configured", result.stderr)
+            self.assertIn("not configured", plain(result.stderr))
             self.assertEqual([], self.calls(environment))
 
     def test_a_failing_schema_installs_nothing_for_any_schema(self) -> None:
@@ -312,7 +327,7 @@ class BackupCliTests(unittest.TestCase):
             script, environment = self.make_checkout(root, TWO_SCHEMAS)
             result = self.run_backup(script, environment, FAKE_SHORT_MANIFEST="TWO")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("incomplete", result.stderr)
+            self.assertIn("incomplete", plain(result.stderr))
             self.assertFalse((root / "database").exists())
 
     def test_a_dirty_mirror_for_any_schema_is_refused_before_connecting(self) -> None:
@@ -324,7 +339,7 @@ class BackupCliTests(unittest.TestCase):
             (dirty / "local-edit.sql").write_text("-- edit\n", encoding="utf-8")
             result = self.run_backup(script, environment)
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("refusing to back up over dirty mirror: database/TWO", result.stderr)
+            self.assertIn("refusing to back up over dirty mirror: database/TWO", plain(result.stderr))
             self.assertEqual([], self.calls(environment))
 
 class ExportCliTests(unittest.TestCase):
@@ -377,11 +392,15 @@ class ExportCliTests(unittest.TestCase):
         environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
         environment["FAKE_APP_SCHEMAS"] = self.APP_SCHEMAS
         environment.pop("PROJECT_SCHEMA", None)
-        return scripts / "export_apps.sh", environment
+        script_name = "export_apps.ps1" if "export_apps.ps1" in self.NAMES else "export_apps.sh"
+        return scripts / script_name, environment
 
     def run_export(self, script: Path, environment: dict[str, str], *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        command_arguments = arguments
+        if script.suffix.casefold() == ".ps1" and arguments:
+            command_arguments = ("-AppId", arguments[0], *arguments[1:])
         return subprocess.run(
-            ["bash", str(script), *arguments],
+            script_command(script, *command_arguments),
             cwd=script.parents[1],
             env={**environment, **extra},
             text=True,
@@ -421,8 +440,8 @@ class ExportCliTests(unittest.TestCase):
             script, environment = self.make_checkout(root, TWO_SCHEMAS, app_ids="205")
             result = self.run_export(script, environment)
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("THREE", result.stderr)
-            self.assertIn("not listed in APEX_PARSING_SCHEMA", result.stderr)
+            self.assertIn("THREE", plain(result.stderr))
+            self.assertIn("not listed in APEX_PARSING_SCHEMA", plain(result.stderr))
             self.assertFalse(any(call.startswith("export_apps.sql") for call in self.calls(environment)))
             self.assertFalse((root / "apps").exists())
 
@@ -431,15 +450,15 @@ class ExportCliTests(unittest.TestCase):
             script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS, app_ids="999")
             result = self.run_export(script, environment)
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("999", result.stderr)
+            self.assertIn("999", plain(result.stderr))
 
     def test_schema_option_must_match_the_apps_parsing_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
             result = self.run_export(script, environment, "117", PROJECT_SCHEMA="TWO")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("117", result.stderr)
-            self.assertIn("ONE", result.stderr)
+            self.assertIn("117", plain(result.stderr))
+            self.assertIn("ONE", plain(result.stderr))
             self.assertFalse(any(call.startswith("export_apps.sql") for call in self.calls(environment)))
 
     def test_a_failing_export_installs_no_application(self) -> None:
@@ -459,7 +478,7 @@ class ExportCliTests(unittest.TestCase):
             (dirty / "application.apx").write_text("local edit\n", encoding="utf-8")
             result = self.run_export(script, environment)
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("refusing to export over dirty mirror: apps/TWO/301", result.stderr)
+            self.assertIn("refusing to export over dirty mirror: apps/TWO/301", plain(result.stderr))
             self.assertFalse(any(call.startswith("export_apps.sql") for call in self.calls(environment)))
 
     def test_single_schema_export_makes_no_lookup(self) -> None:
@@ -485,7 +504,7 @@ class ExportCliTests(unittest.TestCase):
             )
             result = self.run_export(script, environment, "117")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("resembles production", result.stderr)
+            self.assertIn("resembles production", plain(result.stderr))
             self.assertFalse(Path(environment["FAKE_SQL_CALLS"]).exists())
 
 class PublishCliTests(unittest.TestCase):
@@ -535,11 +554,12 @@ class PublishCliTests(unittest.TestCase):
         environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
         environment["FAKE_SQL_LOOKUP_ENVIRONMENTS"] = str(root / "lookup-environments.txt")
         environment.pop("PROJECT_SCHEMA", None)
-        return scripts / "publish_app.sh", environment
+        script_name = "publish_app.ps1" if "publish_app.ps1" in self.NAMES else "publish_app.sh"
+        return scripts / script_name, environment
 
     def run_publish(self, script: Path, environment: dict[str, str], *arguments: str, input_text: str | None = None, **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(script), "117", *arguments],
+            script_command(script, "117", *arguments),
             cwd=script.parents[1], env={**environment, **extra}, input=input_text, text=True, capture_output=True, check=False,
         )
 
@@ -569,7 +589,7 @@ class PublishCliTests(unittest.TestCase):
             script, environment = self.make_fixture(Path(temporary), "ONE", "TWO")
             result = self.run_publish(script, environment, "--describe")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("is stored under apps/ONE", result.stderr)
+            self.assertIn("is stored under apps/ONE", plain(result.stderr))
             self.assertEqual([], self.calls(environment))
 
     def test_schema_option_must_match_the_descriptor(self) -> None:
@@ -577,14 +597,14 @@ class PublishCliTests(unittest.TestCase):
             script, environment = self.make_fixture(Path(temporary), "TWO", "TWO")
             result = self.run_publish(script, environment, "--describe", PROJECT_SCHEMA="ONE")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("does not match the application's parsing schema", result.stderr)
+            self.assertIn("does not match the application's parsing schema", plain(result.stderr))
 
     def test_live_parsing_schema_must_agree_before_the_import(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             script, environment = self.make_fixture(Path(temporary), "TWO", "TWO")
             result = self.run_publish(script, environment, "--force", FAKE_LIVE_SCHEMA="ONE")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("is parsed by ONE", result.stderr)
+            self.assertIn("is parsed by ONE", plain(result.stderr))
             self.assertFalse(any(call.startswith("publish_app.sql") for call in self.calls(environment)))
 
     def test_schema_missing_from_the_staging_list_is_refused(self) -> None:
@@ -593,7 +613,7 @@ class PublishCliTests(unittest.TestCase):
             script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
             result = self.run_publish(script, environment, "--env", "staging")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("is not listed in STAGING_SCHEMA", result.stderr)
+            self.assertIn("is not listed in STAGING_SCHEMA", plain(result.stderr))
             self.assertEqual([], self.calls(environment))
 
     def test_multischema_staging_and_production_require_a_schema_list(self) -> None:
@@ -603,7 +623,7 @@ class PublishCliTests(unittest.TestCase):
                 script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
                 result = self.run_publish(script, environment, "--env", "staging" if target == "STAGING" else "prod", "--describe")
                 self.assertNotEqual(0, result.returncode, result.stdout)
-                self.assertIn(f"is not listed in {target}_SCHEMA", result.stderr)
+                self.assertIn(f"is not listed in {target}_SCHEMA", plain(result.stderr))
                 self.assertEqual([], self.calls(environment))
 
     def test_live_schema_lookup_uses_the_selected_publish_environment(self) -> None:
@@ -627,7 +647,7 @@ class PublishCliTests(unittest.TestCase):
                         FAKE_LIVE_SCHEMA="ONE",
                     )
                     self.assertNotEqual(0, result.returncode, result.stdout)
-                    self.assertIn("is parsed by ONE", result.stderr)
+                    self.assertIn("is parsed by ONE", plain(result.stderr))
                     self.assertEqual([expected_lookup_environment], lookup_path.read_text(encoding="utf-8").splitlines())
 
     def test_schema_missing_from_the_apex_profile_is_refused(self) -> None:
@@ -638,7 +658,7 @@ class PublishCliTests(unittest.TestCase):
             (root / ".env").write_text(env_text({**replacements, "APEX_APP_ID=100,200": "APEX_APP_ID=117"}), encoding="utf-8")
             result = self.run_publish(script, environment, "--force")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("is not listed in APEX_PARSING_SCHEMA", result.stderr)
+            self.assertIn("is not listed in APEX_PARSING_SCHEMA", plain(result.stderr))
 
     def test_production_looking_dev_lookup_connection_is_refused_before_any_sqlcl_call(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -654,8 +674,67 @@ class PublishCliTests(unittest.TestCase):
             )
             result = self.run_publish(script, environment, "--force")
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("resembles production", result.stderr)
+            self.assertIn("resembles production", plain(result.stderr))
             self.assertFalse(Path(environment["FAKE_SQL_CALLS"]).exists())
+
+
+@unittest.skipUnless(PWSH, "PowerShell Core is not installed")
+class PowerShellDoctorCliTests(DoctorCliTests):
+    NAMES = ("team.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "doctor.sql", "verify_db_access.sql")
+
+    def test_schema_option_requires_a_value(self) -> None:
+        # PowerShell reports this usage error with exit code 1; Bash uses 2.
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
+            result = self.run_team(script, environment, "doctor", "--schema")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("--schema requires a schema name", plain(result.stderr))
+            self.assertEqual([], Path(environment["FAKE_SQL_CALLS"]).read_text().splitlines() if Path(environment["FAKE_SQL_CALLS"]).exists() else [])
+
+
+@unittest.skipUnless(PWSH, "PowerShell Core is not installed")
+class PowerShellBackupCliTests(BackupCliTests):
+    NAMES = ("backup_db.ps1", "backup_db.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "replace_mirror.ps1")
+
+
+@unittest.skipUnless(PWSH, "PowerShell Core is not installed")
+class PowerShellExportCliTests(ExportCliTests):
+    NAMES = (
+        "export_apps.ps1", "export_apps.sql", "lookup_app_schema.sql", "load_env.ps1", "check_db_target.ps1",
+        "invoke_sqlcl.ps1", "normalize_apx.ps1", "replace_mirror.ps1", "verify_db_access.sql",
+        "record_export_state.py", "preserve_deployments.py",
+    )
+
+
+@unittest.skipUnless(PWSH, "PowerShell Core is not installed")
+class PowerShellPublishCliTests(PublishCliTests):
+    NAMES = (
+        "publish_app.ps1", "publish_app.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1",
+        "export_apps.sql", "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.ps1",
+        "record_export_state.py", "verify_publish_state.py", "validate_app_source.py",
+        "stamp_publish_version.py", "check_builder_drift.py", "check_builder_drift.sql",
+    )
+
+    def test_describe_selects_the_entry_for_the_descriptors_schema(self) -> None:
+        # PowerShell emits --describe as one tab-delimited record; the Bash test
+        # checks the same schema, connection, and user in a multi-line layout.
+        extra = "\nSTAGING_SQLCL_CONNECTION=stage-one,stage-two\nSTAGING_EXPECTED_USER=SONE,STWO\nSTAGING_SCHEMA=ONE,TWO\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
+            result = self.run_publish(script, environment, "--env", "staging", "--describe")
+            self.assertEqual(0, result.returncode, plain(result.stdout + result.stderr))
+            fields = result.stdout.rstrip("\r\n").split("\t")
+            self.assertEqual(["TWO", "stage-two", "STWO"], fields[2:5])
+
+    def test_dev_describe_uses_the_apex_profile_entry(self) -> None:
+        # See the staging equivalent above: assert the target tuple from the
+        # PowerShell record rather than Bash's line-number-specific rendering.
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "TWO", "TWO")
+            result = self.run_publish(script, environment, "--describe")
+            self.assertEqual(0, result.returncode, plain(result.stdout + result.stderr))
+            fields = result.stdout.rstrip("\r\n").split("\t")
+            self.assertEqual(["TWO", "conn-two", "TWO"], fields[2:5])
 
 
 if __name__ == "__main__":
