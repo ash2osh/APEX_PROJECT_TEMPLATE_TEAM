@@ -54,6 +54,10 @@ if ($appEnvironment -notin @("dev", "staging", "prod")) {
   throw "publish error: unsupported environment '$appEnvironment'; use dev, staging, or prod"
 }
 
+# An & script call has its own variables but shares the caller's process
+# environment. Restore the loader's narrowed values on every exit path.
+$publishEnvSnapshot = [Environment]::GetEnvironmentVariables("Process")
+try {
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 
@@ -367,5 +371,18 @@ try {
   Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $publishWorkDir) {
     Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+} finally {
+  $publishEnvNow = [Environment]::GetEnvironmentVariables("Process")
+  foreach ($publishEnvName in @($publishEnvNow.Keys)) {
+    if (-not $publishEnvSnapshot.Contains($publishEnvName)) {
+      [Environment]::SetEnvironmentVariable($publishEnvName, $null, "Process")
+    }
+  }
+  foreach ($publishEnvName in @($publishEnvSnapshot.Keys)) {
+    if ($publishEnvNow[$publishEnvName] -cne $publishEnvSnapshot[$publishEnvName]) {
+      [Environment]::SetEnvironmentVariable($publishEnvName, [string]$publishEnvSnapshot[$publishEnvName], "Process")
+    }
   }
 }
