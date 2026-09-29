@@ -606,6 +606,24 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("APP_STAGE\n", result.stdout)
 
+    def test_only_the_projects_dev_schema_keeps_a_differently_named_staging_schema(self) -> None:
+        # Split profile: tables live in DATA, code and APEX in DEMO. DATA is a
+        # configured schema but not the project's DEV (CODE) schema, so it must
+        # not map onto the single staging entry.
+        replacements = {
+            "TABLES_SCHEMA=DEMO": "TABLES_SCHEMA=DATA",
+            "TABLES_EXPECTED_USER=DEMO": "TABLES_EXPECTED_USER=DATA",
+        }
+        extra = "\nSTAGING_SQLCL_CONNECTION=stage-db\nSTAGING_EXPECTED_USER=STAGE_DEPLOYER\nSTAGING_SCHEMA=APP_STAGE\n"
+        env_path = write_env(self.directory, replacements, extra)
+        probe = 'printf "[%s][%s][%s]\\n" "$STAGING_SQLCL_CONNECTION" "$STAGING_EXPECTED_USER" "$STAGING_SCHEMA"'
+        dev = load(env_path, probe=probe, project_schema="DEMO")
+        self.assertEqual(0, dev.returncode, dev.stderr)
+        self.assertEqual("[stage-db][STAGE_DEPLOYER][APP_STAGE]\n", dev.stdout)
+        other = load(env_path, probe=probe, project_schema="DATA")
+        self.assertEqual(0, other.returncode, other.stderr)
+        self.assertEqual("[][][]\n", other.stdout)
+
     def test_several_staging_connections_require_a_staging_schema_list(self) -> None:
         extra = "\nSTAGING_SQLCL_CONNECTION=stage-one,stage-two\nSTAGING_EXPECTED_USER=SONE,STWO\n"
         result = load(write_env(self.directory, MULTI, extra))
@@ -821,6 +839,11 @@ done
 for project_env_key in STAGING_SCHEMA PROD_SCHEMA STAGING_SQLCL_CONNECTION PROD_SQLCL_CONNECTION; do
   if [ "$(project_env_count "${!project_env_key:-}")" -gt 1 ]; then project_env_multi=true; fi
 done
+# The project's one DEV schema (CODE_SCHEMA with exactly one entry), captured
+# before narrowing rewrites it. Only that schema may map to a differently named
+# staging or production schema; the Python resolver applies the same rule.
+project_env_dev_schema=""
+[ "$(project_env_count "$CODE_SCHEMA")" -ne 1 ] || project_env_dev_schema="$CODE_SCHEMA"
 PROJECT_SCHEMAS="$(IFS=,; printf '%s' "${project_env_union[*]}")"
 PROJECT_MULTI_SCHEMA="$project_env_multi"
 export PROJECT_SCHEMAS PROJECT_MULTI_SCHEMA
@@ -838,8 +861,10 @@ project_env_narrow() {
   done
   if [ "$index" -ge 0 ]; then
     export "$schema_key=${schemas[$index]}" "$connection_key=${connections[$index]}" "$user_key=${users[$index]}"
-  elif [ "$mode" = lenient ] && [ "$project_env_multi" != true ] && [ "${#schemas[@]}" -eq 1 ]; then
-    # A single-schema project may name staging or production differently.
+  elif [ "$mode" = lenient ] && [ "$project_env_multi" != true ] && [ "${#schemas[@]}" -eq 1 ] \
+      && [ -n "$project_env_dev_schema" ] && [ "$PROJECT_SCHEMA" = "$project_env_dev_schema" ]; then
+    # A project with one DEV schema may name staging or production differently,
+    # for that schema only.
     :
   else
     export "$schema_key=" "$connection_key=" "$user_key="
@@ -882,7 +907,7 @@ project_env_require_single() {
 }
 ```
 
-**3d.** Update the cleanup at the very end. Add these to the `unset` variable lines: `project_env_union project_env_multi project_env_items project_env_item project_env_known project_env_union_item project_env_selected_known project_env_count_items`. Replace the last two lines (the comment and `unset -f project_env_fail project_env_validate_unique_csv`) with:
+**3d.** Update the cleanup at the very end. Add these to the `unset` variable lines: `project_env_union project_env_multi project_env_items project_env_item project_env_known project_env_union_item project_env_selected_known project_env_count_items project_env_dev_schema`. Replace the last two lines (the comment and `unset -f project_env_fail project_env_validate_unique_csv`) with:
 
 ```bash
 # project_env_fail and project_env_require_single stay defined for callers that
@@ -992,6 +1017,11 @@ foreach ($projectEnvKey in @("STAGING_SCHEMA", "PROD_SCHEMA", "STAGING_SQLCL_CON
     $projectEnvMulti = $true
   }
 }
+# The project's one DEV schema (CODE_SCHEMA with exactly one entry), captured
+# before narrowing rewrites it. Only that schema may map to a differently named
+# staging or production schema; the Python resolver applies the same rule.
+$projectEnvDevSchema = ""
+if (@(Split-ProjectEnvList $env:CODE_SCHEMA).Count -eq 1) { $projectEnvDevSchema = $env:CODE_SCHEMA }
 $env:PROJECT_SCHEMAS = ($projectEnvUnion -join ",")
 $env:PROJECT_MULTI_SCHEMA = if ($projectEnvMulti) { "true" } else { "false" }
 
@@ -1007,8 +1037,10 @@ function Set-ProjectEnvNarrow([string]$SchemaKey, [string]$ConnectionKey, [strin
     Set-Item -LiteralPath "Env:$SchemaKey" -Value $schemas[$index]
     Set-Item -LiteralPath "Env:$ConnectionKey" -Value $connections[$index]
     Set-Item -LiteralPath "Env:$UserKey" -Value $users[$index]
-  } elseif ($Mode -eq "lenient" -and -not $projectEnvMulti -and $schemas.Count -eq 1) {
-    # A single-schema project may name staging or production differently.
+  } elseif ($Mode -eq "lenient" -and -not $projectEnvMulti -and $schemas.Count -eq 1 -and
+      $projectEnvDevSchema -ne "" -and $env:PROJECT_SCHEMA -ceq $projectEnvDevSchema) {
+    # A project with one DEV schema may name staging or production differently,
+    # for that schema only.
   } else {
     # An empty value would be removed by Set-Item on some hosts, so set it
     # through the .NET API, which keeps a defined-but-empty variable.
@@ -1050,7 +1082,7 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvConnectionSeen, projectEnvUserSeen, projectEnvConnectionValue,
   projectEnvUserValue, projectEnvSchemaSeen, projectEnvSchemaValue,
   projectEnvRootRelative, projectEnvUnion, projectEnvMulti, projectEnvItems,
-  projectEnvItem, projectEnvConnectionCount `
+  projectEnvItem, projectEnvConnectionCount, projectEnvDevSchema `
   -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,
   Function:Assert-ProjectEnvList, Function:Assert-ProjectEnvTriple,
