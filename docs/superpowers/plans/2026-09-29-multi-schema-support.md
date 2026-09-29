@@ -30,6 +30,7 @@ Copied from the spec. Every task's requirements include these.
 - Synonyms: `backup_db.sql` exports each schema's own private synonyms (`PUBLIC` excluded) with `DBMS_METADATA.GET_DDL('SYNONYM', …)` into `database/<SCHEMA>/synonyms/`; the unsafe-filename check, manifest counts and fail-closed install cover it. Sequences are **not** mirrored.
 - Graphify: an unqualified name resolves in the app's own schema first; a qualified name resolves in the schema it names; otherwise follow a mirrored synonym one hop via its `FOR "SCHEMA"."OBJECT"` clause. A database-link target (`@`) or anything not in the mirror stays a stub; never invent an edge.
 - Preserve all existing safety properties: per-target identity checks, production markers, read-only production, all-or-nothing mirror installs, the drift guard, byte-equality publish verification.
+- PowerShell scripts run through `&` share the caller's process environment: a child that writes `$env:` (a schema selection, or a dot-sourced loader) changes the caller's values. Any `.ps1` that writes `$env:` and is *called* by another script must restore the environment it found; `check_db_target.ps1` does. A script that is meant to select a schema for itself (`publish_app.ps1`, `team.ps1 --schema`) sets `$env:PROJECT_SCHEMA` deliberately.
 - Keep APEXlang and SQL files in LF line endings. Bash scripts are Bash 4.3+ (they already use `mapfile` and `${var,,}`).
 - Out of scope: per-schema prefix filters, sequences, different schema names across environments, cross-schema migrations, and the one-time `epromhq_all` adoption script.
 
@@ -1393,9 +1394,17 @@ Leave the production-marker and `DB_ENVIRONMENT=production` sections after it un
 
 - [ ] **Step 4: Implement `check_db_target.ps1` (twin)**
 
-Change the `param` block and the start of the script:
+**PowerShell does not isolate `$env:` between scripts.** `& script.ps1` gives the child its own *variable scope*, not its own *process environment*: anything the child writes to `$env:` (its `PROJECT_SCHEMA`, and every value the dot-sourced loader sets or blanks) is still there when it returns. `doctor` (Task 3), `backup-db` (Task 4), `export` (Task 5) and `publish` (Task 6) all call this script in a loop or before reading `$env:` values themselves, so it must leave the process environment exactly as it found it. Bash does not have the problem because `check_db_target.sh` runs as a separate process.
+
+Replace the whole of `scripts/check_db_target.ps1` with:
 
 ```powershell
+#Requires -Version 5.1
+# Pre-connect environment classification. Database identity is verified in SQL.
+#
+# Production safety in this template is an instruction to the client, not a
+# privilege audit: read targets are allowed, write operation classes are
+# refused, and the operator is told to run SELECT statements only.
 param(
   [Parameter(Mandatory = $true)][ValidateSet("read", "write")][string]$Operation,
   [Parameter(Mandatory = $true)][ValidateSet("tables", "code", "apex")][string]$Target,
@@ -1403,23 +1412,57 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-# A schema argument is the same selection as --schema; the loader narrows on it.
-if (-not [string]::IsNullOrEmpty($Schema)) { $env:PROJECT_SCHEMA = $Schema }
-. (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
+# `&` isolates variables, not the process environment. This script selects a
+# schema and dot-sources the loader, both of which rewrite $env:, so restore the
+# caller's environment exactly on the way out (also when it throws).
+$checkTargetEnvSnapshot = [Environment]::GetEnvironmentVariables("Process")
+try {
+  # A schema argument is the same selection as --schema; the loader narrows on it.
+  if (-not [string]::IsNullOrEmpty($Schema)) { $env:PROJECT_SCHEMA = $Schema }
+  . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 
-switch ($Target) {
-  "tables" { $targetConnection = $env:TABLES_SQLCL_CONNECTION }
-  "code"   { $targetConnection = $env:CODE_SQLCL_CONNECTION }
-  "apex"   { $targetConnection = $env:APEX_SQLCL_CONNECTION }
-}
+  switch ($Target) {
+    "tables" { $targetConnection = $env:TABLES_SQLCL_CONNECTION }
+    "code"   { $targetConnection = $env:CODE_SQLCL_CONNECTION }
+    "apex"   { $targetConnection = $env:APEX_SQLCL_CONNECTION }
+  }
 
-Assert-ProjectEnvSingleSchema -Label "check_db_target ($Target)"
-if ([string]::IsNullOrEmpty($targetConnection)) {
-  throw "the $Target profile does not list schema $($env:PROJECT_SCHEMA)"
+  Assert-ProjectEnvSingleSchema -Label "check_db_target ($Target)"
+  if ([string]::IsNullOrEmpty($targetConnection)) {
+    throw "the $Target profile does not list schema $($env:PROJECT_SCHEMA)"
+  }
+
+  $productionPattern = '(?i)(^|[-_.])(prod|prd|production|live)[0-9]*([-_.]|$)'
+  if ($targetConnection -match $productionPattern -and $env:DB_ENVIRONMENT -ne "production") {
+    throw "$Target connection '$targetConnection' resembles production but DB_ENVIRONMENT=$($env:DB_ENVIRONMENT); ask the user whether this is production"
+  }
+  if ($env:DB_ENVIRONMENT -eq "production") {
+    if ($Operation -ne "read") { throw "production database operations are always read-only; '$Operation' is blocked" }
+    Write-Warning @"
+PRODUCTION SESSION - READ ONLY
+  Run SELECT statements only.
+  Do NOT run INSERT, UPDATE, DELETE, MERGE, or any other DML.
+  Do NOT run CREATE, ALTER, DROP, TRUNCATE, or any other DDL.
+  Do NOT COMMIT. Prepare changes for an approved deployment instead.
+  This is not enforced by the database. It is your contract.
+"@
+  }
+} finally {
+  $checkTargetEnvNow = [Environment]::GetEnvironmentVariables("Process")
+  foreach ($checkTargetName in @($checkTargetEnvNow.Keys)) {
+    if (-not $checkTargetEnvSnapshot.Contains($checkTargetName)) {
+      [Environment]::SetEnvironmentVariable($checkTargetName, $null, "Process")
+    }
+  }
+  foreach ($checkTargetName in @($checkTargetEnvSnapshot.Keys)) {
+    if ($checkTargetEnvNow[$checkTargetName] -cne $checkTargetEnvSnapshot[$checkTargetName]) {
+      [Environment]::SetEnvironmentVariable($checkTargetName, [string]$checkTargetEnvSnapshot[$checkTargetName], "Process")
+    }
+  }
 }
 ```
 
-Leave the production-pattern block below unchanged.
+Before committing, compare it with the current file: the only differences must be the `param` block's `[string]$Schema`, the snapshot/`try`/`finally`, the schema line, the single-schema guard and the unlisted-profile error. The production block is otherwise byte-for-byte the original. The `"@` that closes the here-string must stay at column 0 or PowerShell will not parse it.
 
 - [ ] **Step 5: Implement `--schema` parsing and `doctor` in `team.sh`**
 
@@ -1594,7 +1637,9 @@ Add the same `Options:` line to `Show-Usage`. Replace the `"doctor"` case body w
           $SchemaName, $env:DB_ENVIRONMENT, $ExpectedUser
         )
         $output = [System.IO.File]::ReadAllText($transcriptFile)
-        Write-Output $output
+        # Write-Host, not Write-Output: this function returns a status, and anything
+        # written to the output stream would become part of that return value.
+        Write-Host $output
         if ($sqlclExit -ne 0) {
           [Console]::Error.WriteLine("team error: SQLcl doctor check failed for schema $SchemaName (connection $Connection)")
           return $false
@@ -1646,7 +1691,7 @@ Add the same `Options:` line to `Show-Usage`. Replace the `"doctor"` case body w
   }
 ```
 
-Note: the existing PowerShell `doctor` dot-sourced `load_env.ps1` and called `check_db_target.ps1 -Operation read -Target apex` first. The loop above now runs `check_db_target.ps1` per schema. Because `check_db_target.ps1` dot-sources the loader in the child script scope (invoked with `&`), it does not disturb the parent's narrowing.
+Note: the existing PowerShell `doctor` dot-sourced `load_env.ps1` and called `check_db_target.ps1 -Operation read -Target apex` first. The loop above now runs `check_db_target.ps1` per schema. `&` does **not** isolate `$env:` changes, so `check_db_target.ps1` restores the process environment itself (Step 4); that is what keeps each iteration reading the original, un-narrowed profile values.
 
 - [ ] **Step 7: Run tests and commit**
 
