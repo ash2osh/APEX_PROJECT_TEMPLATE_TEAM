@@ -212,6 +212,11 @@ if ($appEnvironment -ne "dev") {
   if ($answer -notmatch '^(?i:y|yes)$') { throw "Publish cancelled." }
 }
 
+# Classify the target before the live lookup opens its read-only session.
+if ($appEnvironment -eq "dev") {
+  & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation write -Target apex
+}
+
 # The live application must be parsed by the schema the descriptor names. An
 # application that is not there yet (first import) is allowed.
 if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
@@ -237,11 +242,6 @@ if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
   } finally {
     if (Test-Path -LiteralPath $lookupDir) { Remove-Item -LiteralPath $lookupDir -Recurse -Force -ErrorAction SilentlyContinue }
   }
-}
-
-# Classify the target before the drift guard opens its read-only session.
-if ($appEnvironment -eq "dev") {
-  & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation write -Target apex
 }
 
 if ($appEnvironment -eq "dev" -and -not $force) {

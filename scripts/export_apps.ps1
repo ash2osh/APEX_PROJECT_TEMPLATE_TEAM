@@ -53,6 +53,9 @@ try {
   # Which schema parses each application. With one schema configured that is
   # the schema itself; with several it is read from the live workspace, using
   # the first connection of the profile (the selected schema's, under --schema).
+  if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
+    & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation read -Target apex -Schema $apexSchemas[0]
+  }
   $appSchemaOf = @{}
   foreach ($appId in $appIds) {
     if ($env:PROJECT_MULTI_SCHEMA -eq "true") {

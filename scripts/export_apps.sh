@@ -51,6 +51,11 @@ SQLCL_STDIN="$STAGING_DIR/.sqlcl-stdin"
 # Which schema parses each application. With one schema configured that is the
 # schema itself; with several it is read from the live workspace, using the
 # first connection of the profile (the selected schema's, under --schema).
+if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+  # Classify the lookup connection before any SQLcl session opens: the lookups
+  # below use the first profile entry (the selected schema's, under --schema).
+  PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" "$REPO_ROOT/scripts/check_db_target.sh" read apex "${APEX_SCHEMAS[0]}"
+fi
 declare -A APP_SCHEMA_OF
 for app_id in "${APP_IDS[@]}"; do
   if [ "$PROJECT_MULTI_SCHEMA" = true ]; then

@@ -208,6 +208,11 @@ if [ "$app_environment" != dev ]; then
   esac
 fi
 
+# Classify the target before the live lookup opens its read-only session.
+if [ "$app_environment" = dev ]; then
+  PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" write apex
+fi
+
 # The live application must be parsed by the schema the descriptor names. An
 # application that is not there yet (first import) is allowed.
 if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
@@ -225,11 +230,6 @@ if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
     fail "could not verify the live parsing schema of application $app_id"
   fi
   rm -rf -- "$lookup_dir"
-fi
-
-# Classify the target before the drift guard opens its read-only session.
-if [ "$app_environment" = dev ]; then
-  PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" write apex
 fi
 
 if [ "$app_environment" = dev ] && [ "$force" != true ]; then

@@ -471,6 +471,23 @@ class ExportCliTests(unittest.TestCase):
             self.assertEqual(["export_apps.sql|docker-demo|DEMO|100"], self.calls(environment))
             self.assertTrue((root / "apps" / "DEMO" / "100").is_dir())
 
+    def test_production_looking_lookup_connection_is_refused_before_any_sqlcl_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
+            env_path = root / ".env"
+            env_path.write_text(
+                env_path.read_text(encoding="utf-8").replace(
+                    "APEX_SQLCL_CONNECTION=conn-one,conn-two",
+                    "APEX_SQLCL_CONNECTION=conn-prod,conn-two",
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_export(script, environment, "117")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("resembles production", result.stderr)
+            self.assertFalse(Path(environment["FAKE_SQL_CALLS"]).exists())
+
 class PublishCliTests(unittest.TestCase):
     NAMES = (
         "publish_app.sh", "publish_app.sql", "load_env.sh", "check_db_target.sh", "export_apps.sql",
@@ -622,6 +639,23 @@ class PublishCliTests(unittest.TestCase):
             result = self.run_publish(script, environment, "--force")
             self.assertNotEqual(0, result.returncode)
             self.assertIn("is not listed in APEX_PARSING_SCHEMA", result.stderr)
+
+    def test_production_looking_dev_lookup_connection_is_refused_before_any_sqlcl_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_fixture(root, "ONE", "ONE")
+            env_path = root / ".env"
+            env_path.write_text(
+                env_path.read_text(encoding="utf-8").replace(
+                    "APEX_SQLCL_CONNECTION=conn-one,conn-two",
+                    "APEX_SQLCL_CONNECTION=conn-prod,conn-two",
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_publish(script, environment, "--force")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("resembles production", result.stderr)
+            self.assertFalse(Path(environment["FAKE_SQL_CALLS"]).exists())
 
 
 if __name__ == "__main__":
