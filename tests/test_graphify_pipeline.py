@@ -45,6 +45,13 @@ FILES = {
         "  FUNCTION is_admin(p_user VARCHAR2) RETURN BOOLEAN;\n"
         "END auth_pkg;\n"
     ),
+    "database/OTHER/tables/WIDGETS.sql": (
+        'CREATE TABLE "OTHER"."WIDGETS"\n'
+        '   ("ID" NUMBER NOT NULL ENABLE) ;\n'
+    ),
+    "database/DEMO/synonyms/WIDGET_SYN.sql": (
+        '  CREATE OR REPLACE EDITIONABLE SYNONYM "DEMO"."WIDGET_SYN" FOR "OTHER"."WIDGETS";\n'
+    ),
     "apps/DEMO/102/shared-components/authorizations.apx": (
         "authorization is-admin (\n"
         "    name: IS_ADMIN\n"
@@ -75,6 +82,23 @@ FILES = {
         "        name: Users\n"
         "        security {\n"
         "            authorizationScheme: @is-admin\n"
+        "        }\n"
+        "    )\n"
+        ")\n"
+    ),
+    "apps/DEMO/102/pages/p00006-widgets.apx": (
+        "page 6 (\n"
+        "    name: Widgets\n"
+        "    region direct (\n"
+        "        name: Direct\n"
+        "        source {\n"
+        "            sqlQuery: select w.id from other.widgets w\n"
+        "        }\n"
+        "    )\n"
+        "    region via-synonym (\n"
+        "        name: Via synonym\n"
+        "        source {\n"
+        "            sqlQuery: select s.id from widget_syn s\n"
         "        }\n"
         "    )\n"
         ")\n"
@@ -154,6 +178,7 @@ class GraphifyPipelineTests(unittest.TestCase):
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
         nodes = {node["id"]: node for node in graph["nodes"]}
         cls.result = {
+            "stubs": sorted(node["label"] for node in graph["nodes"] if not node.get("source_file")),
             "edges": [
                 {
                     "source": link["source"],
@@ -180,12 +205,19 @@ class GraphifyPipelineTests(unittest.TestCase):
         self.assertTrue(reads, "no reads_from edges were built")
         for edge in reads:
             self.assertTrue(
-                edge["target_file"].startswith("database/DEMO/tables/"),
+                edge["target_file"].startswith(("database/DEMO/tables/", "database/OTHER/tables/")),
                 f"{edge['target_label']} is a stub, not a mirrored table",
             )
         self.assertEqual(
-            {'"DEMO"."ORDERS"', '"DEMO"."USERS"'}, {edge["target_label"] for edge in reads}
+            {'"DEMO"."ORDERS"', '"DEMO"."USERS"', '"OTHER"."WIDGETS"'}, {edge["target_label"] for edge in reads}
         )
+
+    def test_cross_schema_and_synonym_reads_land_on_the_other_schemas_table(self) -> None:
+        widget_edges = [edge for edge in self.edges("reads_from") if "WIDGETS" in edge["target_label"]]
+        self.assertTrue(widget_edges, "the page never linked to OTHER.WIDGETS")
+        for edge in widget_edges:
+            self.assertEqual("database/OTHER/tables/WIDGETS.sql", edge["target_file"], edge)
+        self.assertNotIn("WIDGET_SYN", self.result["stubs"])
 
     def test_foreign_key_lands_on_the_mirrored_parent_table(self) -> None:
         references = self.edges("references")

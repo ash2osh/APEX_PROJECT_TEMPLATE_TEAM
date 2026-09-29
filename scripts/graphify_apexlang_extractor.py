@@ -151,17 +151,29 @@ class DatabaseMirror:
     contains a dot, which disqualifies it as a rewire target. A reference from
     an application file therefore has to name that node id itself, or the
     application and database halves of the graph never connect. Anything the
-    mirror does not hold (APEX dictionary views, DUAL, unexported objects)
-    stays a stub.
+    mirror does not hold (APEX dictionary views, DUAL, unexported objects, a
+    synonym over a database link) stays a stub.
+
+    Every ``database/*`` schema is indexed, so a qualified name reaches another
+    schema's object, and a mirrored synonym is followed one hop to its target.
     """
 
     TABLE_FOLDERS = ("tables", "views")
+    # CREATE ... SYNONYM "S"."N" FOR "T"."O";  A database link ("O"@link) has
+    # no ';' straight after the name, so it does not match.
+    SYNONYM_TARGET_RE = re.compile(
+        r'\bFOR\s+(?:"?([A-Za-z0-9_$#]+)"?\s*\.\s*)?"?([A-Za-z0-9_$#]+)"?\s*;',
+        re.IGNORECASE,
+    )
+    _INDEX_CACHE: dict[str, dict[str, dict[str, dict]]] = {}
 
     def __init__(self, root: Path | None = None, schema: str | None = None) -> None:
         self.root = root
         self.schema = schema
-        self._tables: dict[str, str] | None = None
-        self._packages: dict[str, str] | None = None
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._INDEX_CACHE.clear()
 
     @classmethod
     def for_application_file(cls, source: Path) -> "DatabaseMirror":
@@ -181,28 +193,6 @@ class DatabaseMirror:
                 return cls(Path(*parts[:index]) if index else Path(), parts[index + 1])
         return cls()
 
-    def _scan(self) -> None:
-        self._tables, self._packages = {}, {}
-        if self.root is None or self.schema is None:
-            return
-        schema_dir = self.root / "database" / self.schema
-        for folder in self.TABLE_FOLDERS:
-            for file in self._sql_files(schema_dir / folder):
-                file_id = make_id(file.relative_to(self.root).with_suffix("").as_posix())
-                self._tables.setdefault(
-                    file.stem.upper(), make_id(file_id, self.schema, file.stem)
-                )
-        for file in self._sql_files(schema_dir / "packages"):
-            name = file.stem.upper()
-            for suffix in ("_SPEC", "_BODY"):
-                if name.endswith(suffix):
-                    name = name[: -len(suffix)]
-                    break
-            file_id = make_id(file.relative_to(self.root).with_suffix("").as_posix())
-            # The specification is the package's public face; prefer it.
-            if file.stem.upper().endswith("_SPEC") or name not in self._packages:
-                self._packages[name] = file_id
-
     @staticmethod
     def _sql_files(directory: Path) -> list[Path]:
         try:
@@ -210,23 +200,86 @@ class DatabaseMirror:
         except OSError:
             return []
 
+    @classmethod
+    def _scan_root(cls, root: Path) -> dict[str, dict[str, dict]]:
+        """Index tables, packages and synonyms of every mirrored schema."""
+        index: dict[str, dict[str, dict]] = {}
+        try:
+            schema_dirs = sorted(path for path in (root / "database").iterdir() if path.is_dir())
+        except OSError:
+            return index
+        for schema_dir in schema_dirs:
+            entry: dict[str, dict] = {"tables": {}, "packages": {}, "synonyms": {}}
+            for folder in cls.TABLE_FOLDERS:
+                for file in cls._sql_files(schema_dir / folder):
+                    file_id = make_id(file.relative_to(root).with_suffix("").as_posix())
+                    entry["tables"].setdefault(
+                        file.stem.upper(), make_id(file_id, schema_dir.name, file.stem)
+                    )
+            for file in cls._sql_files(schema_dir / "packages"):
+                name = file.stem.upper()
+                for suffix in ("_SPEC", "_BODY"):
+                    if name.endswith(suffix):
+                        name = name[: -len(suffix)]
+                        break
+                file_id = make_id(file.relative_to(root).with_suffix("").as_posix())
+                # The specification is the package's public face; prefer it.
+                if file.stem.upper().endswith("_SPEC") or name not in entry["packages"]:
+                    entry["packages"][name] = file_id
+            for file in cls._sql_files(schema_dir / "synonyms"):
+                try:
+                    text = file.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                match = cls.SYNONYM_TARGET_RE.search(text)
+                if match:
+                    target_schema = (match.group(1) or schema_dir.name).upper()
+                    entry["synonyms"][file.stem.upper()] = (target_schema, match.group(2).upper())
+            index[schema_dir.name.upper()] = entry
+        return index
+
+    def _index(self) -> dict[str, dict[str, dict]]:
+        if self.root is None:
+            return {}
+        key = str(self.root.resolve())
+        if key not in self._INDEX_CACHE:
+            self._INDEX_CACHE[key] = self._scan_root(self.root)
+        return self._INDEX_CACHE[key]
+
+    def _resolve(self, schema: str, name: str, kind: str) -> str | None:
+        """Find *name* in *schema*, or through one synonym of that schema."""
+        index = self._index()
+        entry = index.get(schema.upper())
+        if entry is None:
+            return None
+        found = entry[kind].get(name)
+        if found:
+            return found
+        target = entry["synonyms"].get(name)
+        if target is None:
+            return None
+        target_entry = index.get(target[0])
+        return target_entry[kind].get(target[1]) if target_entry else None
+
     def table(self, label: str) -> str | None:
-        if self._tables is None:
-            self._scan()
-        parts = label.split(".")
-        if len(parts) == 2 and parts[0].upper() != (self.schema or "").upper():
+        parts = label.upper().split(".")
+        if len(parts) == 1:
+            schema, name = (self.schema or ""), parts[0]
+        elif len(parts) == 2:
+            schema, name = parts
+        else:
             return None
-        if len(parts) > 2:
-            return None
-        return self._tables.get(parts[-1].upper())
+        return self._resolve(schema, name, "tables")
 
     def package(self, label: str) -> str | None:
-        if self._packages is None:
-            self._scan()
-        parts = label.split(".")
-        if len(parts) == 3 and parts[0].upper() == (self.schema or "").upper():
-            parts = parts[1:]
-        return self._packages.get(parts[0].upper()) if len(parts) == 2 else None
+        parts = label.upper().split(".")
+        if len(parts) == 3:
+            schema, name = parts[0], parts[1]
+        elif len(parts) == 2:
+            schema, name = (self.schema or ""), parts[0]
+        else:
+            return None
+        return self._resolve(schema, name, "packages")
 
 
 def _clean_identifier(value: str | None, fallback: str) -> str:
