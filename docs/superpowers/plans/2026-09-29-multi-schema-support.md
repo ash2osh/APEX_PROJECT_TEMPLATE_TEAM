@@ -17,7 +17,8 @@ Copied from the spec. Every task's requirements include these.
 - Configuration stays in `.env` using the existing keys with comma-separated values, the same style as `APEX_APP_ID=100,200`. No new key families, no registry file, no per-schema env files.
 - A profile's schema, connection and expected-user lists have equal length, are position-aligned, and schemas within a list are unique. A repeated connection is allowed.
 - One value in any key is exactly today's behavior; every existing single-schema `.env` stays valid and the existing test suite passes unchanged (except where a task says a test is updated).
-- `STAGING_*` and `PROD_*` follow the same list convention. A DEV schema maps to the **same name** in the staging and production lists; a schema absent from a target's list is an error stating it is not deployable there.
+- `STAGING_*` and `PROD_*` follow the same list convention. A DEV schema maps to the **same name** in the staging and production lists; a schema absent from a target's list is an error stating it is not deployable there. One exception keeps today's behavior: a project with a **single** DEV schema may name its staging or production schema differently, and that mapping is allowed **only for the project's one configured DEV schema**; any other schema name is refused.
+- The loaders validate list **syntax** only (identifiers, SQLcl alias pattern, lengths, uniqueness). They do **not** check production markers and must not start to: `PROD_*` connections legitimately contain "prod". Production markers, read-only production and `DB_ENVIRONMENT` classification stay in `check_db_target` and `resolve_target`, applied to the entry that is selected.
 - `TABLES_PREFIXES` and `CODE_PREFIXES` keep their meaning and apply to every schema in the profile. No per-schema prefixes.
 - The tables profile mirrors tables for the schemas it lists; the code profile mirrors code for the schemas it lists. Split (`TABLES_SCHEMA=A`, `CODE_SCHEMA=B`) keeps working unchanged.
 - `--schema <NAME>` narrows any command to one configured schema. `doctor` and `backup-db` default to all configured schemas. `publish` and `export` run one app at a time.
@@ -214,6 +215,16 @@ class MultiSchemaTargetTests(unittest.TestCase):
         target = self.api().resolve_target(BASE_ENV, "staging", "read", schema="APP_DEV")
         self.assertEqual("APP_STAGE", target.schema)
 
+    def test_single_schema_project_refuses_an_unknown_schema_for_staging_and_prod(self) -> None:
+        # The differently-named-staging exception covers the project's own DEV
+        # schema only; it must never turn an arbitrary name into a target.
+        api = self.api()
+        for environment in ("staging", "prod"):
+            with self.subTest(environment=environment):
+                with self.assertRaises(api.TargetResolutionError) as raised:
+                    api.resolve_target(BASE_ENV, environment, "read", schema="OTHER")
+                self.assertIn("OTHER", str(raised.exception))
+
     def test_single_schema_dev_still_rejects_a_wrong_schema_name(self) -> None:
         api = self.api()
         with self.assertRaises(api.TargetResolutionError):
@@ -289,10 +300,11 @@ def _select_index(
     _validate_identifier(requested, "--schema")
     if requested in schemas:
         return schemas.index(requested)
-    multi = len(schemas) > 1 or len(split_list(values.get("CODE_SCHEMA"))) > 1
-    if len(schemas) == 1 and not multi and environment != "dev":
-        # A single-schema project may name its staging or production schema
-        # differently from DEV. Several schemas map by name only.
+    dev_schemas = split_list(values.get("CODE_SCHEMA"))
+    if environment != "dev" and len(schemas) == 1 and len(dev_schemas) == 1 and requested in dev_schemas:
+        # A project with one DEV schema may name its staging or production
+        # schema differently. That mapping covers the project's own schema
+        # only; several schemas map by name, and any other name is refused.
         return 0
     raise TargetResolutionError(
         f"schema {requested} is not listed in {schema_key} for {environment}; "
@@ -403,6 +415,17 @@ Expected: same counts as the baseline plus the new tests, `OK`.
 
 ---
 
+- [ ] **Step 6 (correction, only if your Task 1 commit predates it): tighten the single-schema fallback**
+
+An earlier revision of this plan let `_select_index` map **any** requested schema to the sole staging or production entry in a single-schema project. That made `resolve_target(BASE_ENV, "staging", "read", schema="OTHER")` succeed. If your `scripts/db_targets.py` still contains `multi = len(schemas) > 1 or len(split_list(values.get("CODE_SCHEMA"))) > 1`, apply the corrected code shown in Step 3 (the `dev_schemas` version) and add the test `test_single_schema_project_refuses_an_unknown_schema_for_staging_and_prod` from Step 1. Run `python3 -m unittest tests.test_db_targets -v` (all pass, including `test_single_schema_project_still_maps_dev_name_to_a_differently_named_staging_schema`), then commit:
+
+```bash
+git add scripts/db_targets.py tests/test_db_targets.py
+git commit -m "fix: refuse unknown schemas instead of mapping them to a single staging target"
+```
+
+---
+
 ### Task 2: Environment loader (list validation, `PROJECT_SCHEMA` narrowing)
 
 **Files:**
@@ -411,6 +434,7 @@ Expected: same counts as the baseline plus the new tests, `OK`.
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks (Python is separate).
+- Do **not** add a production-marker check to either loader; see Global Constraints. The loaders validate list syntax only, exactly like today.
 - Produces, for every later shell task:
   - Exported `PROJECT_SCHEMAS` (comma list: the union of schemas in the tables, code and APEX profiles, first-seen order) and `PROJECT_MULTI_SCHEMA` (`true` when any list key has more than one entry, else `false`). Both reflect configuration, not the selection.
   - `PROJECT_SCHEMA` is honored on load. When set: it must be an uppercase Oracle identifier and be in `PROJECT_SCHEMAS`; then each profile's three keys are narrowed to that schema's entry. A profile that does not list it gets those three variables set to the **empty string**. `STAGING_*`/`PROD_*` (when their schema key is present) are narrowed the same way, except a non-multi project with a single-entry list is left alone (legacy differently-named staging schema).
@@ -1933,7 +1957,7 @@ Expected: all pass. The existing `test_backup_db_cli` `DEMO$` tests must still p
 - Produces:
   - `scripts/lookup_app_schema.sql <schema> <app-id> <environment> <expected-user>` prints `APEX_APP_SCHEMA:<app-id>:<OWNER>` (`NOT_FOUND` when the app is absent).
   - Bash: `sqlcl_app_parsing_schema <connection> <expected-user> <schema> <app-id> <work-dir>` in `sqlcl_safe.sh`; prints the owner on stdout, returns non-zero on any SQLcl or parse failure. It needs `REPO_ROOT` and `DB_ENVIRONMENT` set by the caller.
-  - PowerShell: `Get-AppParsingSchema -Connection -ExpectedUser -Schema -AppId -WorkDirectory` in `invoke_sqlcl.ps1`, returns the owner string or throws.
+  - PowerShell: `Get-AppParsingSchema -Connection -ExpectedUser -Schema -AppId -WorkDirectory -ScriptPath` in `invoke_sqlcl.ps1` (`-ScriptPath` is the absolute path of `scripts/lookup_app_schema.sql`; Task 6 passes it too), returns the owner string or throws.
   - `export_apps.sh` / `.ps1` with several schemas configured: for every app ID, resolve the parsing schema (live lookup), require it in `APEX_PARSING_SCHEMA` (and equal to `PROJECT_SCHEMA` when set), export with that schema's connection into `apps/<SCHEMA>/<id>/`, and install every app in one `replace_mirror` call.
 
 - [ ] **Step 1: Write the failing tests**

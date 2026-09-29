@@ -1,7 +1,7 @@
 # Multi-schema support design
 
 Date: 2026-09-29
-Status: draft, awaiting review
+Status: approved (design approved in conversation; implementation plan requested 2026-09-29)
 
 ## Summary
 
@@ -52,7 +52,10 @@ Sixteen synonym files in `epromhq_all` point across schemas.
   meaning and apply to every schema in the profile.
 - Mirroring sequences. Only synonyms are added to the code scope.
 - Different schema names between DEV, staging and production. A DEV schema maps
-  to the same name in the staging and production lists.
+  to the same name in the staging and production lists. One exception keeps
+  today's behavior: a project with a single DEV schema may name its staging or
+  production schema differently, and that mapping applies only to the project's
+  one configured DEV schema. An unlisted schema is never mapped to a target.
 - A registry file, per-schema env files, or new key families.
 - Cross-schema migrations. One migration changes one schema.
 - The one-time adoption script for `epromhq_all`. It is a separate follow-up in
@@ -87,9 +90,12 @@ Rules enforced by `load_env.sh` and `load_env.ps1`, which must agree:
 - A profile's schema, connection and expected-user lists have equal length.
 - Schemas within a list are unique. A repeated connection is allowed, for
   schemas that share one saved connection.
-- Every entry passes the existing validation: uppercase Oracle identifiers for
-  schemas and users, the SQLcl alias pattern for connections, and the
-  production-marker check.
+- Every entry passes the loaders' existing syntax validation: uppercase Oracle
+  identifiers for schemas and users, and the SQLcl alias pattern for
+  connections. The loaders do not check production markers today, and must not
+  start to (`PROD_*` connections legitimately contain "prod"). That check stays
+  where it is, on the entry actually selected (`check_db_target` and
+  `resolve_target`), and every command that uses an entry selects it first.
 - `APEX_APP_ID` stays a flat list of unique positive integers.
 - The prefix keys keep their current format. They apply to every schema in
   their profile.
@@ -184,7 +190,7 @@ migrations, one per schema.
 - Identity is verified per schema, so a wrong or leaked connection for one
   schema cannot export or publish as another.
 - Production markers, read-only production and `DB_ENVIRONMENT`
-  classification apply to every entry in every list.
+  classification apply to each entry when it is selected for use, as today.
 
 ## Testing
 
