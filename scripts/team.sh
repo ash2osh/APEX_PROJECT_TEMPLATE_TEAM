@@ -22,6 +22,8 @@ Commands:
                                               Confirm a promotion or print a DBA runbook
   upgrade-template [--source <url|path>] [--ref <ref>] [--dry-run]
                                               Update template-owned files from the template
+Options:
+  --schema <NAME>                             Run one configured schema (any command except upgrade-template)
   --help                                      Show this help
 USAGE
 }
@@ -35,6 +37,33 @@ fi
 
 command_name="$1"
 shift
+# --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
+# so every child script's loader narrows to that schema.
+if [ "$command_name" != upgrade-template ]; then
+  schema_filtered=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --schema)
+        [ "$#" -ge 2 ] || fail "--schema requires a schema name"
+        export PROJECT_SCHEMA="$2"
+        shift 2
+        ;;
+      --schema=*)
+        export PROJECT_SCHEMA="${1#--schema=}"
+        shift
+        ;;
+      *)
+        schema_filtered+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- ${schema_filtered[@]+"${schema_filtered[@]}"}
+  if [ -n "${PROJECT_SCHEMA:-}" ]; then
+    schema_pattern='^[A-Z][A-Z0-9_$#]{0,127}$'
+    [[ "$PROJECT_SCHEMA" =~ $schema_pattern ]] || fail "--schema must be an uppercase Oracle identifier"
+  fi
+fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 case "$command_name" in
@@ -43,30 +72,72 @@ case "$command_name" in
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
     # shellcheck source=load_env.sh
     source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
-    PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" read apex
-    mkdir -p "$REPO_ROOT/scratch"
-    # Never let SQLcl start in the caller's directory: SQLcl executes a
-    # login.sql found there before doctor.sql.
-    sqlcl_workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
-    sqlcl_stdin="$sqlcl_workdir/.sqlcl-stdin"
-    : > "$sqlcl_stdin"
-    sqlcl_output="$sqlcl_workdir/sqlcl-output.log"
     # shellcheck source=sqlcl_safe.sh
     source "$REPO_ROOT/scripts/sqlcl_safe.sh"
-    cleanup() { rm -rf -- "$sqlcl_workdir"; }
-    trap cleanup EXIT
-    if ! invoke_sqlcl_safe "$sqlcl_workdir" \
-      -S -noupdates -name "$APEX_SQLCL_CONNECTION" \
-      "@$REPO_ROOT/scripts/doctor.sql" \
-      "$APEX_PARSING_SCHEMA" "$DB_ENVIRONMENT" "$APEX_EXPECTED_USER" \
-      < "$sqlcl_stdin" > "$sqlcl_output" 2>&1; then
-      cat "$sqlcl_output" >&2
-      fail "SQLcl doctor check failed"
+    mkdir -p "$REPO_ROOT/scratch"
+
+    doctor_one() {
+      # Never let SQLcl start in the caller's directory: SQLcl executes a
+      # login.sql found there before doctor.sql.
+      local connection="$1" expected_user="$2" schema="$3" workdir stdin output status=0
+      workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
+      stdin="$workdir/.sqlcl-stdin"
+      : > "$stdin"
+      output="$workdir/sqlcl-output.log"
+      if ! invoke_sqlcl_safe "$workdir" \
+        -S -noupdates -name "$connection" \
+        "@$REPO_ROOT/scripts/doctor.sql" \
+        "$schema" "$DB_ENVIRONMENT" "$expected_user" \
+        < "$stdin" > "$output" 2>&1; then
+        cat "$output" >&2
+        printf 'team error: SQLcl doctor check failed for schema %s (connection %s)\n' "$schema" "$connection" >&2
+        status=1
+      else
+        cat "$output"
+        if ! grep -Fxq "APEX_DOCTOR_VERIFIED:$expected_user" "$output"; then
+          printf 'team error: SQLcl did not verify the doctor script for schema %s; the result is unknown\n' "$schema" >&2
+          status=1
+        fi
+      fi
+      rm -rf -- "$workdir"
+      return "$status"
+    }
+
+    doctor_seen="|"
+    doctor_total=0
+    doctor_failed=0
+    for doctor_profile in apex tables code; do
+      case "$doctor_profile" in
+        apex)   doctor_schemas="$APEX_PARSING_SCHEMA"; doctor_connections="$APEX_SQLCL_CONNECTION"; doctor_users="$APEX_EXPECTED_USER" ;;
+        tables) doctor_schemas="$TABLES_SCHEMA"; doctor_connections="$TABLES_SQLCL_CONNECTION"; doctor_users="$TABLES_EXPECTED_USER" ;;
+        code)   doctor_schemas="$CODE_SCHEMA"; doctor_connections="$CODE_SQLCL_CONNECTION"; doctor_users="$CODE_EXPECTED_USER" ;;
+      esac
+      [ -n "$doctor_schemas" ] || continue
+      IFS=',' read -r -a doctor_schema_list <<< "$doctor_schemas"
+      IFS=',' read -r -a doctor_connection_list <<< "$doctor_connections"
+      IFS=',' read -r -a doctor_user_list <<< "$doctor_users"
+      for ((doctor_index = 0; doctor_index < ${#doctor_schema_list[@]}; doctor_index++)); do
+        doctor_key="${doctor_connection_list[$doctor_index]}|${doctor_user_list[$doctor_index]}|${doctor_schema_list[$doctor_index]}"
+        case "$doctor_seen" in *"|$doctor_key|"*) continue ;; esac
+        doctor_seen="$doctor_seen$doctor_key|"
+        doctor_total=$((doctor_total + 1))
+        PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" read "$doctor_profile" \
+          "${doctor_schema_list[$doctor_index]}"
+        if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
+          printf 'Doctor: schema %s via connection %s as %s\n' \
+            "${doctor_schema_list[$doctor_index]}" "${doctor_connection_list[$doctor_index]}" "${doctor_user_list[$doctor_index]}"
+        fi
+        doctor_one "${doctor_connection_list[$doctor_index]}" "${doctor_user_list[$doctor_index]}" \
+          "${doctor_schema_list[$doctor_index]}" || doctor_failed=$((doctor_failed + 1))
+      done
+    done
+    [ "$doctor_total" -gt 0 ] || fail "no configured profile lists schema ${PROJECT_SCHEMA:-?}"
+    [ "$doctor_failed" -eq 0 ] || fail "$doctor_failed of $doctor_total doctor check(s) failed"
+    if [ "$doctor_total" -eq 1 ]; then
+      printf 'Doctor checks passed for the configured DEV connection.\n'
+    else
+      printf 'Doctor checks passed for all %s configured DEV schema connections.\n' "$doctor_total"
     fi
-    cat "$sqlcl_output"
-    grep -Fxq "APEX_DOCTOR_VERIFIED:$APEX_EXPECTED_USER" "$sqlcl_output" || \
-      fail "SQLcl did not verify the doctor script; the result is unknown"
-    printf 'Doctor checks passed for the configured DEV connection.\n'
     ;;
   export)
     [ "$#" -eq 1 ] || fail "usage: scripts/team.sh export <numeric_app_id>"

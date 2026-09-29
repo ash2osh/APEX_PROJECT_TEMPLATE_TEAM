@@ -6,9 +6,12 @@
 # refused, and the operator is told to run SELECT statements only.
 set -euo pipefail
 
-OPERATION="${1:?usage: check_db_target.sh <read|write> <tables|code|apex>}"
-TARGET="${2:?usage: check_db_target.sh <read|write> <tables|code|apex>}"
+OPERATION="${1:?usage: check_db_target.sh <read|write> <tables|code|apex> [schema]}"
+TARGET="${2:?usage: check_db_target.sh <read|write> <tables|code|apex> [schema]}"
+SCHEMA_ARG="${3:-}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+# A schema argument is the same selection as --schema; the loader narrows on it.
+if [ -n "$SCHEMA_ARG" ]; then export PROJECT_SCHEMA="$SCHEMA_ARG"; fi
 # shellcheck source=load_env.sh
 source "$REPO_ROOT/scripts/load_env.sh" "${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
 
@@ -23,6 +26,12 @@ case "$TARGET" in
   apex)   TARGET_CONNECTION="$APEX_SQLCL_CONNECTION" ;;
   *) echo "unsupported database target: $TARGET" >&2; exit 2 ;;
 esac
+
+project_env_require_single "check_db_target ($TARGET)" || exit 2
+if [ -z "$TARGET_CONNECTION" ]; then
+  echo "the $TARGET profile does not list schema ${PROJECT_SCHEMA:-}" >&2
+  exit 2
+fi
 
 shopt -s nocasematch
 if [[ "$TARGET_CONNECTION" =~ (^|[-_.])(prod|prd|production|live)[0-9]*([-_.]|$) ]] && \
