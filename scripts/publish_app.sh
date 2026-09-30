@@ -235,12 +235,30 @@ fi
 mkdir -p "$REPO_ROOT/scratch"
 staging_dir="$(mktemp -d "$REPO_ROOT/scratch/apex-publish.XXXXXX")"
 restore_unstamped=false
+# Replace <target> with <replacement> only while <target> still holds the bytes
+# of <expected>. The target is renamed aside before the comparison and the
+# replacement is installed without overwriting, so an editor save at any
+# moment is kept rather than replaced.
+swap_if_unchanged() {
+  local target="$1" expected="$2" replacement="$3" aside="$4"
+  mv -- "$target" "$aside" 2>/dev/null || return 1
+  if ! cmp -s -- "$aside" "$expected"; then
+    [ -e "$target" ] || mv -- "$aside" "$target"
+    return 1
+  fi
+  if [ -e "$target" ]; then
+    return 1
+  fi
+  mv -n -- "$replacement" "$target" 2>/dev/null || true
+  # GNU and BSD mv -n may exit 0 without moving; the replacement's presence tells.
+  [ ! -e "$replacement" ]
+}
+
 cleanup() {
   if [ "$restore_unstamped" = true ]; then
     # Undo only our own stamp. An edit saved while the publish ran is kept.
-    if cmp -s -- "$staging_dir/application.apx.stamped" "$app_dir/application.apx"; then
-      cp -p -- "$staging_dir/application.apx.unstamped" "$app_dir/application.apx" || true
-    else
+    if ! swap_if_unchanged "$app_dir/application.apx" "$staging_dir/application.apx.stamped" \
+        "$staging_dir/application.apx.restore" "$staging_dir/application.apx.displaced"; then
       printf 'publish warning: %s changed while publishing; left as is (check its version line)\n' \
         "${app_dir#"$REPO_ROOT/"}/application.apx" >&2
     fi
@@ -279,10 +297,11 @@ if [ "$app_environment" = dev ]; then
   published_version="$(python3 "$REPO_ROOT/scripts/stamp_publish_version.py" \
     "$staging_dir/application.apx.stamping" "$DEVELOPER_NAME")" || exit 2
   cp -p -- "$staging_dir/application.apx.stamping" "$staging_dir/application.apx.stamped"
-  cmp -s -- "$staging_dir/application.apx.unstamped" "$app_dir/application.apx" || \
+  cp -p -- "$staging_dir/application.apx.unstamped" "$staging_dir/application.apx.restore"
+  # scratch/ is inside the repository, so these renames stay on one filesystem.
+  swap_if_unchanged "$app_dir/application.apx" "$staging_dir/application.apx.unstamped" \
+    "$staging_dir/application.apx.stamping" "$staging_dir/application.apx.before-stamp" || \
     fail "application.apx changed while the publish tag was stamped; publish again"
-  # scratch/ is inside the repository, so this rename stays on one filesystem.
-  mv -f -- "$staging_dir/application.apx.stamping" "$app_dir/application.apx"
   restore_unstamped=true
   printf 'Stamped application version: %s\n' "$published_version"
 fi

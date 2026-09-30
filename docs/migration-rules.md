@@ -65,8 +65,9 @@ reviewed checks; incomplete verification blocks automated apply.
 
 SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
 so the apply session ends with its own check. Every package, package body,
-type, type body, procedure, function, trigger, view or library that the
-migration's own `CREATE` or `ALTER ... COMPILE` statements name is looked up in
+type, type body, procedure, function, trigger, view, library, Java source or
+MLE module that the migration's own `CREATE` or `ALTER ... COMPILE` statements
+name is looked up in
 `ALL_ERRORS`; one with errors fails the apply with
 `ORA-20986: Migration left objects with compilation errors`. Objects the
 migration does not name, including a teammate's unrelated work, are never

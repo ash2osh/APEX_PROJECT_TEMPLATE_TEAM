@@ -286,16 +286,26 @@ def classify(template_root: Path, manifest: dict) -> tuple[list[str], list[str]]
 
 
 def read_lock(project_root: Path) -> dict:
+    return read_lock_with_hash(project_root)[0]
+
+
+def read_lock_with_hash(project_root: Path) -> tuple[dict, str | None]:
+    """Parse the lock and return the hash of the same bytes (None when absent)."""
     path = safe_project_path(project_root, LOCK_NAME)
     info = _lstat(path)
     if info is None:
-        return {"files": {}}
+        return {"files": {}}, None
     if not stat.S_ISREG(info.st_mode):
         raise UpgradeError(f"{LOCK_NAME} is not a regular file")
     try:
-        lock = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = path.read_bytes()
+        lock = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise UpgradeError(f"{LOCK_NAME} is invalid: {exc}") from exc
+    return _validated_lock(lock), hashlib.sha256(raw).hexdigest()
+
+
+def _validated_lock(lock: object) -> dict:
     if not isinstance(lock, dict) or type(lock.get("schemaVersion")) is not int or lock["schemaVersion"] != 1:
         raise UpgradeError(f"{LOCK_NAME} has an unsupported or missing schemaVersion")
     if not isinstance(lock.get("files"), dict):
@@ -406,6 +416,25 @@ def _read_template_bytes(template_root: Path, relative: str) -> tuple[bytes, int
     return source.read_bytes(), stat.S_IMODE(info.st_mode)
 
 
+def _install_no_replace(source: Path, target: Path) -> None:
+    """Install source at target without overwriting a file that appeared there.
+
+    The old target was moved aside just before; an editor that saves a new
+    file in that moment keeps it, and the upgrade stops instead.
+    """
+    try:
+        os.link(source, target)
+    except FileExistsError as exc:
+        raise UpgradeError(f"{target} was recreated during the upgrade; rerun the upgrade") from exc
+    except OSError:
+        # No hard links on this filesystem: fall back to a checked rename.
+        if _lstat(target) is not None:
+            raise UpgradeError(f"{target} was recreated during the upgrade; rerun the upgrade") from None
+        os.replace(source, target)
+        return
+    source.unlink()
+
+
 def apply_actions(
     project_root: Path,
     template_root: Path,
@@ -503,7 +532,7 @@ def apply_actions(
                 if observed != planned_local[relative]:
                     raise UpgradeError(f"{relative} changed after the upgrade was planned; rerun the upgrade")
             if has_replacement:
-                os.replace(staged[relative], target)
+                _install_no_replace(staged[relative], target)
                 mutation.replacement_installed = True
     except (OSError, UpgradeError) as exc:
         rollback_errors: list[str] = []
@@ -514,6 +543,10 @@ def apply_actions(
                     if target_info is not None:
                         mutation.target.unlink()
                 if mutation.original_moved:
+                    if not mutation.replacement_installed and _lstat(mutation.target) is not None:
+                        # Something saved a new file after the original moved
+                        # aside; keep it and leave the original in the backups.
+                        raise OSError(f"{mutation.target} was recreated; its previous version is {mutation.backup}")
                     os.replace(mutation.backup, mutation.target)
             except OSError as rollback_exc:
                 rollback_errors.append(str(rollback_exc))
@@ -560,8 +593,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project_root = Path(run_git(args.project_root, "rev-parse", "--show-toplevel").strip()).resolve()
         check_project(project_root)
-        lock_hash = sha256(project_root / LOCK_NAME)
-        lock = read_lock(project_root)
+        lock, lock_hash = read_lock_with_hash(project_root)
         source = args.source or lock.get("upstream")
         if not source:
             source = load_manifest(project_root)["upstream"]

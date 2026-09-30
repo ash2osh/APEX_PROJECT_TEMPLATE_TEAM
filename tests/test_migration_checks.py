@@ -44,6 +44,10 @@ class MigrationChecksTests(unittest.TestCase):
                 "CREATE OR REPLACE FORCE VIEW zz_v AS SELECT 1 x FROM dual;\n"
                 "ALTER PACKAGE zz_old COMPILE;\n"
                 "ALTER TYPE zz_t COMPILE BODY;\n"
+                "ALTER PACKAGE zz_spec COMPILE DEBUG SPECIFICATION;\n"
+                "CREATE OR REPLACE AND COMPILE JAVA SOURCE NAMED \"ZzJava\" AS\npublic class ZzJava {}\n/\n"
+                "CREATE OR REPLACE MLE MODULE zz_mle LANGUAGE JAVASCRIPT AS\nexport function f() { return 1; }\n/\n"
+                "ALTER TRIGGER zz_trg ENABLE;\n"
                 "ALTER TABLE t ADD (c NUMBER);\n"
                 "CREATE TABLE zz_x (id NUMBER);\n"
             ),
@@ -59,6 +63,9 @@ class MigrationChecksTests(unittest.TestCase):
                 ("APP", "PACKAGE", "ZZ_OLD"),
                 ("APP", "PACKAGE BODY", "ZZ_OLD"),
                 ("APP", "TYPE BODY", "ZZ_T"),
+                ("APP", "PACKAGE", "ZZ_SPEC"),
+                ("APP", "JAVA SOURCE", "ZzJava"),
+                ("APP", "MLE MODULE", "ZZ_MLE"),
             ),
         )
 

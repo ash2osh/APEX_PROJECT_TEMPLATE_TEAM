@@ -172,6 +172,30 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
         self.assertEqual(self.read(".template-lock.json"), original_lock)
 
+    def test_file_recreated_while_moved_aside_is_kept(self) -> None:
+        self.adopt()
+        self.release_v2({"scripts/tool.sh": "echo v2\n"})
+        manifest = upgrade_engine.load_manifest(self.template)
+        template_owned, placeholders = upgrade_engine.classify(self.template, manifest)
+        lock, lock_hash = upgrade_engine.read_lock_with_hash(self.project)
+        actions, new_lock = upgrade_engine.plan_upgrade(self.project, self.template, template_owned, placeholders, lock)
+        real_replace = os.replace
+        tool = self.project / "scripts" / "tool.sh"
+
+        def save_after_move_aside(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+            real_replace(source, target)
+            if Path(source) == tool:
+                tool.write_text("echo saved meanwhile\n", encoding="utf-8")
+
+        with patch("scripts.upgrade_template.os.replace", side_effect=save_after_move_aside):
+            with self.assertRaisesRegex(upgrade_engine.UpgradeError, "recreated"):
+                upgrade_engine.apply_actions(
+                    self.project, self.template, actions, str(self.template),
+                    git(self.template, "rev-parse", "HEAD"), new_lock, lock_hash=lock_hash,
+                )
+
+        self.assertEqual(self.read("scripts/tool.sh"), "echo saved meanwhile\n")
+
     def test_lock_changed_after_it_was_read_is_not_overwritten(self) -> None:
         self.adopt()
         self.release_v2({"scripts/tool.sh": "echo v2\n"})
@@ -207,7 +231,8 @@ class UpgradeTemplateTests(unittest.TestCase):
         def fail_during_second_file(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
             nonlocal calls
             calls += 1
-            if calls == 4:
+            # Moves aside: 1 lock, 2 AGENTS.md, 3 scripts/tool.sh (installs use os.link).
+            if calls == 3:
                 raise OSError("injected filesystem failure")
             real_replace(source, target)
 
@@ -240,7 +265,8 @@ class UpgradeTemplateTests(unittest.TestCase):
         def fail_update_and_restore(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
             nonlocal calls
             calls += 1
-            if calls in {6, 7}:
+            # 3 moves scripts/tool.sh aside; 4 is the first rollback restore (AGENTS.md).
+            if calls in {3, 4}:
                 raise OSError(f"injected replace failure {calls}")
             real_replace(source, target)
 
@@ -261,7 +287,7 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertNotIn("was rolled back", message)
         recovery = Path(message.split("recovery backups retained at ", 1)[1])
         self.assertTrue(recovery.is_dir())
-        self.assertIn(b"echo v1\n", [path.read_bytes() for path in recovery.iterdir() if path.is_file()])
+        self.assertIn(b"rules v1\n", [path.read_bytes() for path in recovery.iterdir() if path.is_file()])
 
     def test_locally_modified_file_changed_upstream_is_a_conflict(self) -> None:
         self.adopt()

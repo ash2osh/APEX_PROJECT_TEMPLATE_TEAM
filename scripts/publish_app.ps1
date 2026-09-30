@@ -283,7 +283,31 @@ $applicationSource = Join-Path $appDir "application.apx"
 $unstampedSource = Join-Path $publishWorkDir "application.apx.unstamped"
 $stampedSource = Join-Path $publishWorkDir "application.apx.stamped"
 $stampingSource = Join-Path $publishWorkDir "application.apx.stamping"
+$restoreSource = Join-Path $publishWorkDir "application.apx.restore"
 $restoreUnstamped = $false
+
+# Replace Target with Replacement only while Target still holds the bytes of
+# Expected. Target is renamed aside before the comparison and the replacement
+# is installed with File.Move, which never overwrites, so an editor save at any
+# moment is kept rather than replaced. On Windows the file's own ACL is kept.
+function Invoke-SwapIfUnchanged([string]$Target, [string]$Expected, [string]$Replacement, [string]$Aside) {
+  $acl = $null
+  if ($PSVersionTable.PSEdition -eq "Desktop" -or $IsWindows) {
+    try { $acl = Get-Acl -LiteralPath $Target } catch { $acl = $null }
+  }
+  try { [System.IO.File]::Move($Target, $Aside) } catch { return $false }
+  if ((Get-FileHash -LiteralPath $Aside -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $Expected -Algorithm SHA256).Hash) {
+    if (-not (Test-Path -LiteralPath $Target)) {
+      try { [System.IO.File]::Move($Aside, $Target) } catch { }
+    }
+    return $false
+  }
+  try { [System.IO.File]::Move($Replacement, $Target) } catch { return $false }
+  if ($null -ne $acl) {
+    try { Set-Acl -LiteralPath $Target -AclObject $acl } catch { }
+  }
+  return $true
+}
 $publishedVersion = ""
 try {
   # An import leaves no Builder timestamp, so a DEV publish stamps its own tag
@@ -310,10 +334,11 @@ try {
     }
     if ($LASTEXITCODE -ne 0) { throw "publish error: could not stamp the application version" }
     Copy-Item -LiteralPath $stampingSource -Destination $stampedSource
-    if ((Get-FileHash -LiteralPath $unstampedSource -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $applicationSource -Algorithm SHA256).Hash) {
+    Copy-Item -LiteralPath $unstampedSource -Destination $restoreSource
+    if (-not (Invoke-SwapIfUnchanged -Target $applicationSource -Expected $unstampedSource `
+        -Replacement $stampingSource -Aside (Join-Path $publishWorkDir "application.apx.before-stamp"))) {
       throw "publish error: application.apx changed while the publish tag was stamped; publish again"
     }
-    Move-Item -LiteralPath $stampingSource -Destination $applicationSource -Force
     $restoreUnstamped = $true
     Write-Output "Stamped application version: $publishedVersion"
   }
@@ -402,12 +427,8 @@ try {
 } finally {
   if ($restoreUnstamped) {
     # Undo only our own stamp. An edit saved while the publish ran is kept.
-    $stampStillCurrent = (Test-Path -LiteralPath $stampedSource -PathType Leaf) -and
-      (Test-Path -LiteralPath $applicationSource -PathType Leaf) -and
-      ((Get-FileHash -LiteralPath $stampedSource -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $applicationSource -Algorithm SHA256).Hash)
-    if ($stampStillCurrent -and (Test-Path -LiteralPath $unstampedSource -PathType Leaf)) {
-      [System.IO.File]::Copy($unstampedSource, $applicationSource, $true)
-    } elseif (Test-Path -LiteralPath $unstampedSource -PathType Leaf) {
+    if (-not (Invoke-SwapIfUnchanged -Target $applicationSource -Expected $stampedSource `
+        -Replacement $restoreSource -Aside (Join-Path $publishWorkDir "application.apx.displaced"))) {
       Write-Warning "publish warning: $applicationSource changed while publishing; left as is (check its version line)"
     }
   }

@@ -533,15 +533,25 @@ def _compiled_unit(statement: Sequence[_Token], target_schema: str) -> list[tupl
     else:
         return []
     object_type = None
-    for candidate in ("PACKAGE", "TYPE"):
-        if _word(statement, index, candidate):
-            if _word(statement, index + 1, "BODY"):
-                object_type = f"{candidate} BODY"
-                index += 2
-            else:
-                object_type = candidate
-                index += 1
-            break
+    if _word(statement, index, "JAVA") and _word(statement, index + 1, "SOURCE"):
+        # CREATE JAVA SOURCE NAMED <name> ...; ALTER JAVA SOURCE <name> COMPILE
+        object_type = "JAVA SOURCE"
+        index += 2
+        if not alter:
+            if not _word(statement, index, "NAMED"):
+                return []
+            index += 1
+    elif _word(statement, index, "MLE") and _word(statement, index + 1, "MODULE"):
+        object_type = "MLE MODULE"
+        index += 2
+    elif any(_word(statement, index, candidate) for candidate in ("PACKAGE", "TYPE")):
+        candidate = statement[index].value
+        if _word(statement, index + 1, "BODY"):
+            object_type = f"{candidate} BODY"
+            index += 2
+        else:
+            object_type = candidate
+            index += 1
     else:
         for candidate in ("PROCEDURE", "FUNCTION", "TRIGGER", "VIEW", "LIBRARY"):
             if _word(statement, index, candidate):
@@ -561,6 +571,8 @@ def _compiled_unit(statement: Sequence[_Token], target_schema: str) -> list[tupl
         if "COMPILE" not in words:
             return []
         after = words[words.index("COMPILE") + 1 :]
+        if after[:1] == ["DEBUG"]:
+            after = after[1:]
         if object_type in {"PACKAGE", "TYPE"}:
             if after[:1] == ["BODY"]:
                 return [(owner, f"{object_type} BODY", name)]
