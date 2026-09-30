@@ -323,10 +323,12 @@ def compare_snapshots(source: SchemaSnapshot, target: SchemaSnapshot, selection:
             coverage["complete"] = False
     source_missing = _scope_missing(source_identity)
     target_missing = _scope_missing(target_identity)
+    self_comparison = False
     if source_missing or target_missing:
         differences.append(_unknown("IDENTITY_INCOMPLETE", "database/container/schema/edition identity is insufficient to establish comparison scope", source_missing=source_missing, target_missing=target_missing))
         coverage["complete"] = False
     elif same_database_scope(source_identity, target_identity):
+        self_comparison = True
         self_error = {
             "code": "SELF_COMPARISON",
             "message": "source and target resolve to the same database/container/schema/edition",
@@ -350,13 +352,14 @@ def compare_snapshots(source: SchemaSnapshot, target: SchemaSnapshot, selection:
     # A selected root present in a complete inventory but absent from its
     # supposedly complete snapshot is an extraction failure, never a missing
     # object claim.
-    for name, object_type in selection.keys:
-        for side, snapshot in (("source", source), ("target", target)):
-            owner = str(snapshot.identity.get("current_schema", ""))
-            key = ObjectKey(owner, name, object_type)
-            if key in snapshot.inventory and key not in snapshot.objects:
-                differences.append(_unknown("MISSING_SELECTED_DEFINITION", "selected object exists in ALL_OBJECTS but its complete DDL was not returned", side=side, name=name, object_type=object_type))
-                coverage["complete"] = False
+    if not self_comparison:
+        for name, object_type in selection.keys:
+            for side, snapshot in (("source", source), ("target", target)):
+                owner = str(snapshot.identity.get("current_schema", ""))
+                key = ObjectKey(owner, name, object_type)
+                if key in snapshot.inventory and key not in snapshot.objects:
+                    differences.append(_unknown("MISSING_SELECTED_DEFINITION", "selected object exists in ALL_OBJECTS but its complete DDL was not returned", side=side, name=name, object_type=object_type))
+                    coverage["complete"] = False
 
     for key in sorted(set(source_index) | set(target_index)):
         source_values = source_index.get(key, [])
@@ -397,7 +400,7 @@ def compare_snapshots(source: SchemaSnapshot, target: SchemaSnapshot, selection:
     selection_errors = list(selection.errors)
     if _scope_missing(source_identity) or _scope_missing(target_identity):
         selection_errors.append({"code": "IDENTITY_INCOMPLETE", "message": "database/container/schema/edition identity is insufficient to establish comparison scope"})
-    elif same_database_scope(source_identity, target_identity):
+    elif self_comparison:
         selection_errors.append({
             "code": "SELF_COMPARISON",
             "message": "source and target resolve to the same database/container/schema/edition",

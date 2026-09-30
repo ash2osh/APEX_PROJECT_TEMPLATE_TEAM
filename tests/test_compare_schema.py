@@ -170,6 +170,18 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 2)
         self.assertTrue(any(item["code"] == "SELF_COMPARISON" for item in report.selection["errors"]))
 
+    def test_self_comparison_does_not_report_missing_selected_definitions(self) -> None:
+        source_inv = inventory("APP_DEV", "DEVDB", [("T", "TABLE", {})])
+        target_inv = inventory("APP_DEV", "DEVDB", [("T", "TABLE", {})])
+        selection = select_objects(source_inv, target_inv, ("T",), ())
+
+        report = compare_snapshots(snap(source_inv, []), snap(target_inv, []), selection)
+
+        self.assertEqual(report.exit_code, 2)
+        self.assertFalse(report.coverage["complete"])
+        self.assertEqual([item["code"] for item in report.differences], ["SELF_COMPARISON"])
+        self.assertFalse(any(item["code"] == "MISSING_SELECTED_DEFINITION" for item in report.differences))
+
 
 if __name__ == "__main__":
     unittest.main()
