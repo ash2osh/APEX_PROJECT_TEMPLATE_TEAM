@@ -328,7 +328,10 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_sql_apply_driver_uses_migration_guard_define_off_and_commit(self):
-        folder = self.add_folder("2026-09-28_create-driver-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        folder = self.add_folder("2026-09-28_create-driver-r001", {
+            "001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n",
+            "002-create-pkg.sql": "CREATE OR REPLACE PACKAGE zz_pkg AS\n  PROCEDURE p;\nEND;\n/\nCREATE OR REPLACE PACKAGE BODY zz_pkg AS\n  PROCEDURE p IS BEGIN NULL; END;\nEND;\n/\n",
+        }, preconditions=[{"id": "before-change", "sql": "SELECT 1 FROM dual", "expected": 1}])
         migration = self.load(folder.name)[0]
         staged_dir = self.root / "scratch" / "manual-driver"
         staged_dir.mkdir(parents=True)
@@ -363,13 +366,15 @@ class MigrateCliTests(unittest.TestCase):
             self.assertLess(guard_at, payload_at)
             self.assertIn("!= 'DEVDB_UNIQUE'", content)
             self.assertIn("!= 'dev.service'", content)
-            # The compile guard runs after the payload and before the commit.
+            # The compile guard runs after the payload and before the commit,
+            # and checks only the units this migration compiles.
             compile_at = content.index("-20986")
             self.assertLess(payload_at, compile_at)
             self.assertLess(compile_at, content.index("MIGRATION_APPLY_COMPLETED"))
-            self.assertIn("all_errors", content)
-            self.assertIn("WHERE o.owner = 'APP_DEV'", content)
-            self.assertLess(content.index(":migration_started :="), payload_at)
+            self.assertIn("FROM all_errors", content)
+            self.assertIn("check_unit('APP_DEV', 'PACKAGE', 'ZZ_PKG');", content)
+            self.assertIn("check_unit('APP_DEV', 'PACKAGE BODY', 'ZZ_PKG');", content)
+            self.assertNotIn("check_unit('APP_DEV', 'TABLE'", content)
             output = f"MIGRATION_IDENTITY_BEGIN\n{fake_identity}\nMIGRATION_IDENTITY_END\nMIGRATION_IDENTITY_VERIFIED\nMIGRATION_APPLY_COMPLETED\n"
             return SqlclResult(0, output, working)
         expected_identity = json.loads(fake_identity)

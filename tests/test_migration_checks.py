@@ -7,7 +7,7 @@ from pathlib import Path
 from scripts.db_targets import Target
 from scripts.migration_manifest import QueryCheck, load_batch
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
-from scripts.migration_checks import CheckReport, analyze_batch, preflight, run_checks
+from scripts.migration_checks import CheckReport, analyze_batch, compiled_units, preflight, run_checks
 
 
 class MigrationChecksTests(unittest.TestCase):
@@ -33,6 +33,38 @@ class MigrationChecksTests(unittest.TestCase):
         }
         (folder / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8")
         return folder
+
+    def test_compiled_units_names_only_what_the_migration_compiles(self):
+        self.add_folder("2026-09-30_units-r001", {
+            "001-units.sql": (
+                "-- CREATE PACKAGE in_a_comment AS\n"
+                "CREATE OR REPLACE EDITIONABLE PACKAGE other.zz_pkg AS\n  PROCEDURE p;\nEND;\n/\n"
+                "create or replace package body \"Zz_Pkg\" as procedure p is begin null; end; end;\n/\n"
+                "CREATE OR REPLACE TRIGGER zz_trg BEFORE INSERT ON t FOR EACH ROW BEGIN NULL; END;\n/\n"
+                "CREATE OR REPLACE FORCE VIEW zz_v AS SELECT 1 x FROM dual;\n"
+                "ALTER PACKAGE zz_old COMPILE;\n"
+                "ALTER TYPE zz_t COMPILE BODY;\n"
+                "ALTER TABLE t ADD (c NUMBER);\n"
+                "CREATE TABLE zz_x (id NUMBER);\n"
+            ),
+        })
+        migration = self.migration_batch("2026-09-30_units-r001")[0]
+        self.assertEqual(
+            compiled_units(migration, "APP"),
+            (
+                ("OTHER", "PACKAGE", "ZZ_PKG"),
+                ("APP", "PACKAGE BODY", "Zz_Pkg"),
+                ("APP", "TRIGGER", "ZZ_TRG"),
+                ("APP", "VIEW", "ZZ_V"),
+                ("APP", "PACKAGE", "ZZ_OLD"),
+                ("APP", "PACKAGE BODY", "ZZ_OLD"),
+                ("APP", "TYPE BODY", "ZZ_T"),
+            ),
+        )
+
+    def test_table_only_migration_compiles_no_units(self):
+        self.add_folder("2026-09-30_table-r001", "CREATE TABLE zz_x (id NUMBER);\n")
+        self.assertEqual(compiled_units(self.migration_batch("2026-09-30_table-r001")[0], "APP"), ())
 
     def migration_batch(self, *folders):
         return load_batch(self.root, [f"migrations/{folder}" for folder in folders])

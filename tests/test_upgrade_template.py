@@ -172,6 +172,27 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
         self.assertEqual(self.read(".template-lock.json"), original_lock)
 
+    def test_lock_changed_after_it_was_read_is_not_overwritten(self) -> None:
+        self.adopt()
+        self.release_v2({"scripts/tool.sh": "echo v2\n"})
+        lock_hash = upgrade_engine.sha256(self.project / ".template-lock.json")
+        manifest = upgrade_engine.load_manifest(self.template)
+        template_owned, placeholders = upgrade_engine.classify(self.template, manifest)
+        actions, new_lock = upgrade_engine.plan_upgrade(
+            self.project, self.template, template_owned, placeholders, upgrade_engine.read_lock(self.project),
+        )
+        changed_lock = self.read(".template-lock.json").replace('"schemaVersion": 1', '"schemaVersion": 1 ')
+        (self.project / ".template-lock.json").write_text(changed_lock, encoding="utf-8")
+
+        with self.assertRaisesRegex(upgrade_engine.UpgradeError, "changed after the upgrade was planned"):
+            upgrade_engine.apply_actions(
+                self.project, self.template, actions, str(self.template),
+                git(self.template, "rev-parse", "HEAD"), new_lock, lock_hash=lock_hash,
+            )
+
+        self.assertEqual(self.read(".template-lock.json"), changed_lock)
+        self.assertEqual(self.read("scripts/tool.sh"), "echo v1\n")
+
     def test_filesystem_failure_rolls_back_prior_updates_and_lock(self) -> None:
         self.adopt()
         original_lock = self.read(".template-lock.json")

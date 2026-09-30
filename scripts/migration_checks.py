@@ -509,6 +509,86 @@ def analyze_batch(migrations: Sequence[Migration], target_schema: str) -> tuple[
     return tuple(operations)
 
 
+def _compiled_unit(statement: Sequence[_Token], target_schema: str) -> list[tuple[str, str, str]]:
+    """Name the stored units a CREATE or ALTER ... COMPILE statement compiles."""
+    if not statement or statement[0].kind != "WORD":
+        return []
+    if statement[0].value == "CREATE":
+        index = 1
+        if _word(statement, index, "OR") and _word(statement, index + 1, "REPLACE"):
+            index += 2
+        while True:
+            if _word(statement, index, "AND") and (_word(statement, index + 1, "RESOLVE") or _word(statement, index + 1, "COMPILE")):
+                index += 2
+            elif _word(statement, index, "NO") and _word(statement, index + 1, "FORCE"):
+                index += 2
+            elif any(_word(statement, index, modifier) for modifier in ("NOFORCE", "FORCE", "EDITIONABLE", "NONEDITIONABLE", "EDITIONING")):
+                index += 1
+            else:
+                break
+        alter = False
+    elif statement[0].value == "ALTER":
+        index = 1
+        alter = True
+    else:
+        return []
+    object_type = None
+    for candidate in ("PACKAGE", "TYPE"):
+        if _word(statement, index, candidate):
+            if _word(statement, index + 1, "BODY"):
+                object_type = f"{candidate} BODY"
+                index += 2
+            else:
+                object_type = candidate
+                index += 1
+            break
+    else:
+        for candidate in ("PROCEDURE", "FUNCTION", "TRIGGER", "VIEW", "LIBRARY"):
+            if _word(statement, index, candidate):
+                object_type = candidate
+                index += 1
+                break
+    if object_type is None:
+        return []
+    if _word(statement, index, "IF") and _word(statement, index + 1, "NOT") and _word(statement, index + 2, "EXISTS"):
+        index += 3
+    try:
+        owner, name, index = _parse_name(statement, index, target_schema)
+    except MigrationAnalysisError:
+        return []
+    if alter:
+        words = [token.value for token in statement[index:] if token.kind == "WORD"]
+        if "COMPILE" not in words:
+            return []
+        after = words[words.index("COMPILE") + 1 :]
+        if object_type in {"PACKAGE", "TYPE"}:
+            if after[:1] == ["BODY"]:
+                return [(owner, f"{object_type} BODY", name)]
+            if after[:1] == ["SPECIFICATION"]:
+                return [(owner, object_type, name)]
+            return [(owner, object_type, name), (owner, f"{object_type} BODY", name)]
+    return [(owner, object_type, name)]
+
+
+def compiled_units(migration: Migration, target_schema: str) -> tuple[tuple[str, str, str], ...]:
+    """Stored units (owner, type, name) that the migration's own statements compile.
+
+    SQLcl reports their compilation errors as warnings, so the apply session
+    checks ALL_ERRORS for exactly these units, never for unrelated objects a
+    teammate may be compiling at the same time.
+    """
+    units: dict[tuple[str, str, str], None] = {}
+    for file in migration.files:
+        try:
+            statements = _split_statements(file.source.decode("utf-8"))
+        except (MigrationAnalysisError, UnicodeError):
+            continue
+        for statement in statements:
+            for unit in _compiled_unit(statement, target_schema):
+                units[unit] = None
+    return tuple(units)
+
+
 def _check_bind_target(sql: str) -> bool:
     tokens = _strip_sql_comments_and_tokenize(sql)
     binds = []

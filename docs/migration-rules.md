@@ -64,14 +64,18 @@ SQL forms it can analyze. Unsupported or data-changing operations need explicit
 reviewed checks; incomplete verification blocks automated apply.
 
 SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
-so the apply session ends with its own check: any object in the target schema
-whose DDL ran during the apply and still has errors in `ALL_ERRORS` fails the
-apply with `ORA-20986: Migration left objects with compilation errors`. The
-DDL has already committed by then; no receipt is written, and the next revision
-fixes the object. The check sees only objects the login user can see in
-`ALL_ERRORS`, so a login user without access to the owner's objects gets no
-protection from it; keep such units covered by an explicit postcondition, for
-example a count of `INVALID` objects in `ALL_OBJECTS`.
+so the apply session ends with its own check. Every package, package body,
+type, type body, procedure, function, trigger, view or library that the
+migration's own `CREATE` or `ALTER ... COMPILE` statements name is looked up in
+`ALL_ERRORS`; one with errors fails the apply with
+`ORA-20986: Migration left objects with compilation errors`. Objects the
+migration does not name, including a teammate's unrelated work, are never
+checked. The DDL has already committed by then; no receipt is written, and the
+next revision fixes the object. Units created through dynamic SQL
+(`EXECUTE IMMEDIATE`) are not named in the file, and a login user that cannot
+see the owner's objects in `ALL_ERRORS` gets no protection from the check;
+cover those with an explicit postcondition, for example a count of `INVALID`
+objects in `ALL_OBJECTS`.
 
 ## Immutability and status receipts
 

@@ -1,3 +1,5 @@
+import re
+import sys
 import unittest
 from pathlib import Path
 import tempfile
@@ -81,7 +83,11 @@ class SqlDriverContractTests(unittest.TestCase):
         self.assertIn("DEFINE expected_live_state = '&7'", contents)
         recheck = contents.index("-20016")
         self.assertLess(recheck, contents.index("apex import -input"))
-        self.assertIn("RAWTOHEX(UTL_I18N.STRING_TO_RAW(RTRIM(MAX(version)), 'AL32UTF8'))", contents)
+        self.assertIn("REGEXP_REPLACE(MAX(version), '[' || c_python_whitespace || ']+$')", contents)
+        # The SQL trims exactly the characters Python's str.rstrip() trims.
+        listed = set(re.findall(r"\\([0-9A-F]{4})", contents[contents.index("c_python_whitespace CONSTANT"):contents.index("BEGIN", contents.index("c_python_whitespace CONSTANT"))]))
+        python = {f"{code:04X}" for code in range(sys.maxunicode + 1) if chr(code).isspace()}
+        self.assertEqual(listed, python)
 
     def test_revision_queries_distinguish_imported_app_from_absent_app(self) -> None:
         # APEX leaves last_updated_on NULL on import, so NVL(MAX(...)) alone

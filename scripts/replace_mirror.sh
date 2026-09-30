@@ -267,22 +267,33 @@ release_locks() {
 }
 
 unwind_replacements() {
-  local index
+  local index rollback_failed=false
   # Reverse order: undo the staged move first, then restore the old mirror.
+  # `mv dir existing-dir` nests instead of replacing, so each move requires
+  # its target to be gone first.
   for (( index=${#STAGED_DIRS[@]} - 1; index >= 0; index-- )); do
     case " ${INSTALLED_INDEXES[*]:-} " in
       *" $index "*)
-        mv -- "${DEST_DIRS[$index]}" "${STAGED_DIRS[$index]}" 2>/dev/null || \
+        if [ -e "${STAGED_DIRS[$index]}" ] || \
+           ! mv -- "${DEST_DIRS[$index]}" "${STAGED_DIRS[$index]}" 2>/dev/null; then
           echo "rollback could not return ${DEST_DIRS[$index]} to staging" >&2
+          rollback_failed=true
+        fi
         ;;
     esac
     case " ${MOVED_DEST_INDEXES[*]:-} " in
       *" $index "*)
-        mv -- "${BACKUP_DIRS[$index]}" "${DEST_DIRS[$index]}" 2>/dev/null || \
+        if [ -e "${DEST_DIRS[$index]}" ] || \
+           ! mv -- "${BACKUP_DIRS[$index]}" "${DEST_DIRS[$index]}" 2>/dev/null; then
           echo "rollback failed; the previous mirror is at ${BACKUP_DIRS[$index]}" >&2
+          rollback_failed=true
+        fi
         ;;
     esac
   done
+  if [ "$rollback_failed" = true ]; then
+    echo "mirror replacement failed and the rollback is INCOMPLETE; recover manually from the paths above" >&2
+  fi
 }
 
 cleanup_replacement() {

@@ -17,7 +17,7 @@ from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
 
 from .db_targets import Target, TargetResolutionError, batch_schema, looks_like_production_identity, resolve_target
-from .migration_checks import CheckReport, PreflightReport, analyze_batch, preflight, run_checks
+from .migration_checks import CheckReport, PreflightReport, analyze_batch, compiled_units, preflight, run_checks
 from .migration_manifest import (
     Migration,
     MigrationFile,
@@ -470,37 +470,44 @@ def _identity_guard_lines(expected_identity: Mapping[str, str]) -> list[str]:
     return lines
 
 
-def _compile_guard_lines(target_schema: str) -> list[str]:
-    """Fail the apply when an object compiled during it is left with errors.
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _compile_guard_lines(units: Sequence[tuple[str, str, str]]) -> list[str]:
+    """Fail the apply when a unit this migration compiled is left with errors.
 
     SQLcl reports a PL/SQL or view compilation error as a warning and keeps
-    going; WHENEVER SQLERROR does not fire. ALL_ERRORS is the only reliable
-    signal, limited to objects whose DDL time falls inside this apply.
+    going; WHENEVER SQLERROR does not fire. ALL_ERRORS is the reliable signal,
+    checked only for the units the migration's own CREATE and ALTER ... COMPILE
+    statements name, so a teammate's unrelated DDL cannot fail this apply.
     """
-    return [
+    if not units:
+        return []
+    lines = [
         "DECLARE",
-        "  l_started DATE := TO_DATE(:migration_started, 'YYYYMMDDHH24MISS');",
         "  l_failed VARCHAR2(4000);",
+        "  PROCEDURE check_unit(p_owner VARCHAR2, p_type VARCHAR2, p_name VARCHAR2) IS",
+        "    l_count PLS_INTEGER;",
+        "  BEGIN",
+        "    SELECT COUNT(*) INTO l_count FROM all_errors",
+        "    WHERE owner = p_owner AND type = p_type AND name = p_name AND attribute = 'ERROR';",
+        "    IF l_count > 0 THEN",
+        "      l_failed := SUBSTR(l_failed || ' ' || p_type || ' ' || p_owner || '.' || p_name || ';', 1, 3000);",
+        "    END IF;",
+        "  END;",
         "BEGIN",
-        "  FOR r IN (",
-        "    SELECT o.object_type, o.object_name",
-        "    FROM all_objects o",
-        f"    WHERE o.owner = '{target_schema}'",
-        "      AND o.last_ddl_time >= l_started",
-        "      AND EXISTS (",
-        "        SELECT 1 FROM all_errors e",
-        "        WHERE e.owner = o.owner AND e.name = o.object_name",
-        "          AND e.type = o.object_type AND e.attribute = 'ERROR')",
-        "    ORDER BY o.object_type, o.object_name",
-        "  ) LOOP",
-        "    l_failed := SUBSTR(l_failed || ' ' || r.object_type || ' ' || r.object_name || ';', 1, 3000);",
-        "  END LOOP;",
+    ]
+    for owner, object_type, name in units:
+        lines.append(f"  check_unit({_sql_literal(owner)}, {_sql_literal(object_type)}, {_sql_literal(name)});")
+    lines.extend([
         "  IF l_failed IS NOT NULL THEN",
         "    RAISE_APPLICATION_ERROR(-20986, 'Migration left objects with compilation errors:' || l_failed);",
         "  END IF;",
         "END;",
         "/",
-    ]
+    ])
+    return lines
 
 
 def apply_folder(
@@ -538,14 +545,9 @@ def apply_folder(
     ]
     if expected_identity is not None:
         driver_lines.extend(_identity_guard_lines(expected_identity))
-    driver_lines.extend((
-        "VARIABLE migration_started VARCHAR2(14)",
-        "BEGIN :migration_started := TO_CHAR(SYSDATE, 'YYYYMMDDHH24MISS'); END;",
-        "/",
-    ))
     for file in migration.files:
         driver_lines.append(f"@@../payload/{migration.folder.name}/{file.name}")
-    driver_lines.extend(("SET DEFINE OFF", *_compile_guard_lines(target.schema)))
+    driver_lines.extend(("SET DEFINE OFF", *_compile_guard_lines(compiled_units(migration, target.schema))))
     driver_lines.extend(("PROMPT MIGRATION_APPLY_COMPLETED", "EXIT SUCCESS COMMIT", ""))
     driver = run_dir / "migration-driver.sql"
     driver.write_text("\n".join(driver_lines), encoding="utf-8", newline="\n")

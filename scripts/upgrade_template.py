@@ -413,8 +413,14 @@ def apply_actions(
     upstream: str,
     commit: str,
     files: dict[str, str],
+    *,
+    lock_hash: str | None = "",
 ) -> None:
-    """Stage every write and roll back completed filesystem operations on failure."""
+    """Stage every write and roll back completed filesystem operations on failure.
+
+    lock_hash is the lock file's hash when it was read (None when absent, ""
+    when not recorded); a lock changed since then is refused, not overwritten.
+    """
     writes: dict[str, tuple[bytes, int]] = {}
     deletes: set[str] = set()
     # What each target held when the plan was made. A file saved after the
@@ -434,6 +440,8 @@ def apply_actions(
             if action.local != "":
                 planned_local[action.path] = action.local
     writes[LOCK_NAME] = (_lock_bytes(upstream, commit, files), 0o644)
+    if lock_hash != "":
+        planned_local[LOCK_NAME] = lock_hash
 
     overlap = deletes.intersection(writes)
     if overlap:
@@ -552,6 +560,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project_root = Path(run_git(args.project_root, "rev-parse", "--show-toplevel").strip()).resolve()
         check_project(project_root)
+        lock_hash = sha256(project_root / LOCK_NAME)
         lock = read_lock(project_root)
         source = args.source or lock.get("upstream")
         if not source:
@@ -569,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
             for action in actions:
                 print(f"{action.kind} {action.path}")
             if not args.dry_run:
-                apply_actions(project_root, template_root, actions, source, commit, new_lock)
+                apply_actions(project_root, template_root, actions, source, commit, new_lock, lock_hash=lock_hash)
     except UpgradeError as exc:
         print(f"template upgrade error: {exc}", file=sys.stderr)
         return 2

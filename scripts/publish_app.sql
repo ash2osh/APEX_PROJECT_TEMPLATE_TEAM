@@ -56,12 +56,19 @@ END;
 DECLARE
   v_expected VARCHAR2(1024) := '&&expected_live_state';
   v_observed VARCHAR2(1024);
+  -- The characters Python's str.rstrip() removes; the drift guard's token is
+  -- built from a version stripped that way.
+  c_python_whitespace CONSTANT VARCHAR2(200) := UNISTR(
+    '\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\0085\00A0\1680'
+    || '\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A'
+    || '\2028\2029\202F\205F\3000');
 BEGIN
   IF v_expected != '-' THEN
     SELECT CASE
              WHEN COUNT(*) = 0 THEN 'ABSENT'
              ELSE 'P|' || NVL(TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS'), 'NONE')
-                  || '|' || RAWTOHEX(UTL_I18N.STRING_TO_RAW(RTRIM(MAX(version)), 'AL32UTF8'))
+                  || '|' || RAWTOHEX(UTL_I18N.STRING_TO_RAW(
+                       REGEXP_REPLACE(MAX(version), '[' || c_python_whitespace || ']+$'), 'AL32UTF8'))
            END
       INTO v_observed
       FROM apex_applications

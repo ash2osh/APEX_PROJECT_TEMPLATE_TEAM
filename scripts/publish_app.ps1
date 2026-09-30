@@ -282,6 +282,7 @@ $publishWorkDir = Join-Path $repoRoot ("scratch/apex-publish-" + [Guid]::NewGuid
 $applicationSource = Join-Path $appDir "application.apx"
 $unstampedSource = Join-Path $publishWorkDir "application.apx.unstamped"
 $stampedSource = Join-Path $publishWorkDir "application.apx.stamped"
+$stampingSource = Join-Path $publishWorkDir "application.apx.stamping"
 $restoreUnstamped = $false
 $publishedVersion = ""
 try {
@@ -293,20 +294,27 @@ try {
     if (-not (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
       throw "publish error: DEV publish needs application.apx to stamp the publish tag"
     }
+    # Stamp a private copy, then swap it in only if nobody saved the file
+    # meanwhile; a failed stamp leaves the working file untouched.
     Copy-Item -LiteralPath $applicationSource -Destination $unstampedSource
-    $restoreUnstamped = $true
+    Copy-Item -LiteralPath $applicationSource -Destination $stampingSource
     $stampPython = Get-Command python3 -ErrorAction SilentlyContinue
     if ($null -eq $stampPython) { $stampPython = Get-Command python -ErrorAction SilentlyContinue }
     if ($null -eq $stampPython) { $stampPython = Get-Command py -ErrorAction SilentlyContinue }
     if ($null -eq $stampPython) { throw "Python 3 is required to stamp the publish tag" }
-    $stampArgs = @((Join-Path $PSScriptRoot "stamp_publish_version.py"), $applicationSource, $env:DEVELOPER_NAME)
+    $stampArgs = @((Join-Path $PSScriptRoot "stamp_publish_version.py"), $stampingSource, $env:DEVELOPER_NAME)
     if ($stampPython.Name -in @("py.exe", "py")) {
       $publishedVersion = & $stampPython.Source -3 @stampArgs
     } else {
       $publishedVersion = & $stampPython.Source @stampArgs
     }
     if ($LASTEXITCODE -ne 0) { throw "publish error: could not stamp the application version" }
-    Copy-Item -LiteralPath $applicationSource -Destination $stampedSource
+    Copy-Item -LiteralPath $stampingSource -Destination $stampedSource
+    if ((Get-FileHash -LiteralPath $unstampedSource -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $applicationSource -Algorithm SHA256).Hash) {
+      throw "publish error: application.apx changed while the publish tag was stamped; publish again"
+    }
+    Move-Item -LiteralPath $stampingSource -Destination $applicationSource -Force
+    $restoreUnstamped = $true
     Write-Output "Stamped application version: $publishedVersion"
   }
 

@@ -99,13 +99,15 @@ class BuilderDriftTests(unittest.TestCase):
             cases = (
                 ("2026-09-26T09:00:00", "2026-09-26T08:00:00", "Release 1.0", "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper()),
                 (None, "NO_TIMESTAMP", "ASHARIF-2026-09-30r001 | ü", "P|NONE|" + "ASHARIF-2026-09-30r001 | ü".encode().hex().upper()),
+                ("2026-09-26T09:00:00", "2026-09-26T08:00:00", "Release 1.0\u00a0\t", "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper()),
             )
             for index, (baseline, live, version, expected) in enumerate(cases):
                 with self.subTest(live=live):
                     state_out = Path(temporary) / f"state-{index}.txt"
                     result = self.run_guard(
                         baseline=baseline,
-                        version=version,
+                        # A real export records the version as parsed, trailing whitespace dropped.
+                        version=version.rstrip(),
                         sql_output=observed_state(live, version=version),
                         state_out=state_out,
                     )

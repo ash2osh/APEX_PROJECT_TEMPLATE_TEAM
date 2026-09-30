@@ -272,11 +272,18 @@ sqlcl_output="$staging_dir/sqlcl-output.log"
 published_version=""
 if [ "$app_environment" = dev ]; then
   [ -f "$app_dir/application.apx" ] || fail "DEV publish needs application.apx to stamp the publish tag"
+  # Stamp a private copy, then swap it in only if nobody saved the file
+  # meanwhile; a failed stamp leaves the working file untouched.
   cp -p -- "$app_dir/application.apx" "$staging_dir/application.apx.unstamped"
-  restore_unstamped=true
+  cp -p -- "$app_dir/application.apx" "$staging_dir/application.apx.stamping"
   published_version="$(python3 "$REPO_ROOT/scripts/stamp_publish_version.py" \
-    "$app_dir/application.apx" "$DEVELOPER_NAME")" || exit 2
-  cp -p -- "$app_dir/application.apx" "$staging_dir/application.apx.stamped"
+    "$staging_dir/application.apx.stamping" "$DEVELOPER_NAME")" || exit 2
+  cp -p -- "$staging_dir/application.apx.stamping" "$staging_dir/application.apx.stamped"
+  cmp -s -- "$staging_dir/application.apx.unstamped" "$app_dir/application.apx" || \
+    fail "application.apx changed while the publish tag was stamped; publish again"
+  # scratch/ is inside the repository, so this rename stays on one filesystem.
+  mv -f -- "$staging_dir/application.apx.stamping" "$app_dir/application.apx"
+  restore_unstamped=true
   printf 'Stamped application version: %s\n' "$published_version"
 fi
 

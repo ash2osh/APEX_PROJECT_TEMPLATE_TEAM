@@ -175,6 +175,40 @@ class MirrorSafetyTests(unittest.TestCase):
                     self.assertEqual((mirror / "tables" / "t.sql").read_text(encoding="utf-8"), "old\n")
 
 
+    def test_failure_on_the_second_mirror_rolls_back_the_first(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        for shell in ("bash", "pwsh"):
+            if shell == "pwsh" and not PWSH:
+                continue
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                staged_database, mirror = self.make_repo(root)
+                app = root / "apps" / "DEMO" / "100"
+                staged_app = root / "scratch" / "app-stage"
+                staged_app.mkdir()
+                (staged_app / "application.apx").write_text("new\n", encoding="utf-8")
+                # The app installs first; database/ is read-only, so the second
+                # pair cannot move its old mirror aside and the first must roll back.
+                database = root / "database"
+                database.chmod(0o500)
+                try:
+                    pairs = [str(staged_app), "apps/DEMO/100", str(staged_database), "database/DEMO"]
+                    if shell == "bash":
+                        command = ["bash", str(root / "scripts" / "replace_mirror.sh"), *pairs]
+                    else:
+                        command = [PWSH, "-NoProfile", "-File", str(root / "scripts" / "replace_mirror.ps1"), *pairs]
+                    result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+                finally:
+                    database.chmod(0o700)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertEqual((app / "application.apx").read_text(encoding="utf-8"), "old\n", output)
+                self.assertEqual((staged_app / "application.apx").read_text(encoding="utf-8"), "new\n", output)
+                self.assertEqual((mirror / "tables" / "t.sql").read_text(encoding="utf-8"), "old\n", output)
+                self.assertNotIn("INCOMPLETE", output)
+
+
 class PreserveDeploymentsTests(unittest.TestCase):
     def test_symlinked_deployments_directory_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -73,8 +73,10 @@ def get_export_baseline(app_dir: Path, app_id: int) -> AppState | None:
 def live_state_token(state: AppState) -> str:
     """Encode an approved live state for publish_app.sql to re-check before import.
 
-    The version is free text, so it travels as hex of its UTF-8 bytes; the SQL
-    side compares RAWTOHEX(UTL_I18N.STRING_TO_RAW(RTRIM(version))).
+    The version is free text, so it travels as hex of its UTF-8 bytes. SQLcl
+    pads the drift query line, so trailing whitespace is not observable here;
+    both sides drop exactly what str.rstrip() drops (publish_app.sql lists the
+    same characters).
     """
     if not state.present:
         return "ABSENT"
