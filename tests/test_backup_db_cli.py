@@ -61,13 +61,18 @@ class BackupDbCliTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             "case \"$scope\" in\n"
-            "  tables) scope_dir=tables; object=FAKE_TABLE; object_type=TABLE ;;\n"
-            "  code) scope_dir=views; object=FAKE_VIEW; object_type=VIEW ;;\n"
+            "  tables) scope_dir=tables; object=FAKE_TABLE ;;\n"
+            "  code) scope_dir=views; object=FAKE_VIEW ;;\n"
             "  *) exit 4 ;;\n"
             "esac\n"
             "mkdir -p \"database/$spool_schema/$scope_dir\"\n"
             "printf 'CREATE FAKE OBJECT;\\n' > \"database/$spool_schema/$scope_dir/$object.sql\"\n"
-            "printf '%s=1\\n' \"$object_type\" > \"database/$spool_schema/manifest-$scope.txt\"\n",
+            "# Mirrors the real driver's complete, alphabetically ordered type rows.\n"
+            "if [[ \"$scope\" == tables ]]; then\n"
+            "  printf 'TABLE=1\\n' > \"database/$spool_schema/manifest-$scope.txt\"\n"
+            "else\n"
+            "  printf 'FUNCTION=0\\nPACKAGE=0\\nPACKAGE BODY=0\\nPROCEDURE=0\\nSYNONYM=0\\nTRIGGER=0\\nVIEW=1\\n' > \"database/$spool_schema/manifest-$scope.txt\"\n"
+            "fi\n",
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
@@ -95,7 +100,10 @@ class BackupDbCliTests(unittest.TestCase):
         mirror = script.parents[1] / "database" / "DEMO$"
         self.assertTrue(mirror.is_dir(), output)
         self.assertEqual((mirror / "manifest-tables.txt").read_text(encoding="utf-8"), "TABLE=1\n")
-        self.assertEqual((mirror / "manifest-code.txt").read_text(encoding="utf-8"), "VIEW=1\n")
+        self.assertEqual(
+            (mirror / "manifest-code.txt").read_text(encoding="utf-8"),
+            "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n",
+        )
         self.assertTrue((mirror / "tables" / "FAKE_TABLE.sql").is_file())
         self.assertTrue((mirror / "views" / "FAKE_VIEW.sql").is_file())
         database_entries = [path.name for path in (script.parents[1] / "database").iterdir()]

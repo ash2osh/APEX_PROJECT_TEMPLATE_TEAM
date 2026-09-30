@@ -228,6 +228,7 @@ class BackupCliTests(unittest.TestCase):
             "connection=\"$4\"; schema=\"$6\"; scope=\"$7\"; spool_schema=\"${11}\"\n"
             "printf '%s|%s|%s\\n' \"$connection\" \"$schema\" \"$scope\" >> \"$FAKE_SQL_CALLS\"\n"
             "if [[ \"${FAKE_FAIL_SCHEMA:-}\" == \"$schema\" ]]; then printf 'ORA-01017: invalid credentials\\n'; exit 1; fi\n"
+            "# Mirrors the real driver's complete, alphabetically ordered type rows.\n"
             "if [[ \"$scope\" == tables ]]; then\n"
             "  mkdir -p \"database/$spool_schema/tables\"\n"
             "  printf 'CREATE TABLE T_%s;\\n' \"$schema\" > \"database/$spool_schema/tables/T_$schema.sql\"\n"
@@ -237,7 +238,15 @@ class BackupCliTests(unittest.TestCase):
             "  printf 'CREATE VIEW V_%s;\\n' \"$schema\" > \"database/$spool_schema/views/V_$schema.sql\"\n"
             "  printf 'CREATE SYNONYM S_%s;\\n' \"$schema\" > \"database/$spool_schema/synonyms/S_$schema.sql\"\n"
             "  if [[ \"${FAKE_SHORT_MANIFEST:-}\" == \"$schema\" ]]; then extra=2; else extra=1; fi\n"
-            "  printf 'VIEW=1\\nSYNONYM=%s\\n' \"$extra\" > \"database/$spool_schema/manifest-code.txt\"\n"
+            "  manifest_rows=(\"FUNCTION=0\" \"PACKAGE=0\" \"PACKAGE BODY=0\" \"PROCEDURE=0\" \"SYNONYM=$extra\" \"TRIGGER=0\" \"VIEW=1\")\n"
+            "  if [[ \"${FAKE_OMIT_MANIFEST_SCHEMA:-}\" == \"$schema\" ]]; then\n"
+            "    remaining_rows=()\n"
+            "    for manifest_row in \"${manifest_rows[@]}\"; do\n"
+            "      [[ \"${manifest_row%=*}\" == \"${FAKE_OMIT_MANIFEST_TYPE:-}\" ]] || remaining_rows+=(\"$manifest_row\")\n"
+            "    done\n"
+            "    manifest_rows=(\"${remaining_rows[@]}\")\n"
+            "  fi\n"
+            "  printf '%s\\n' \"${manifest_rows[@]}\" > \"database/$spool_schema/manifest-code.txt\"\n"
             "fi\n",
             encoding="utf-8",
         )
@@ -329,6 +338,37 @@ class BackupCliTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("incomplete", plain(result.stderr))
             self.assertFalse((root / "database").exists())
+
+    def test_missing_required_manifest_type_installs_nothing_for_any_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_backup(
+                script,
+                environment,
+                FAKE_OMIT_MANIFEST_SCHEMA="TWO",
+                FAKE_OMIT_MANIFEST_TYPE="TRIGGER",
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(
+                "database backup manifest for TWO (code) is missing the TRIGGER row; the mirror was not replaced",
+                plain(result.stderr),
+            )
+            self.assertFalse((root / "database").exists())
+
+    def test_complete_manifest_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script, environment = self.make_checkout(root, TWO_SCHEMAS)
+            result = self.run_backup(script, environment)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            for schema in ("ONE", "TWO"):
+                mirror = root / "database" / schema
+                self.assertEqual("TABLE=1\n", (mirror / "manifest-tables.txt").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=1\nTRIGGER=0\nVIEW=1\n",
+                    (mirror / "manifest-code.txt").read_text(encoding="utf-8"),
+                )
 
     def test_a_dirty_mirror_for_any_schema_is_refused_before_connecting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

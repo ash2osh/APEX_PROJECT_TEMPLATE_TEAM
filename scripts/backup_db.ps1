@@ -34,9 +34,11 @@ function Test-ScopeComplete {
   $manifestPath = Join-Path $StagingPath "database/$spoolSchema/manifest-$Scope.txt"
   $expected = 0
   $counted = 0
+  $manifestTypes = @()
   foreach ($line in (Get-Content -LiteralPath $manifestPath)) {
     $separator = $line.LastIndexOf('=')
     if ($separator -lt 0) { continue }
+    $manifestTypes += $line.Substring(0, $separator)
     $count = $line.Substring($separator + 1).Trim()
     $parsed = 0
     if ([int]::TryParse($count, [ref] $parsed)) {
@@ -50,6 +52,17 @@ function Test-ScopeComplete {
   if ($counted -eq 0) {
     throw ("database backup manifest for $Schema ($Scope) has no readable " +
       "object counts; the mirror was not replaced")
+  }
+
+  if ($Scope -eq "tables") {
+    $requiredTypes = @("TABLE")
+  } else {
+    $requiredTypes = @("VIEW", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "SYNONYM", "TRIGGER")
+  }
+  foreach ($requiredType in $requiredTypes) {
+    if ($manifestTypes -cnotcontains $requiredType) {
+      throw "database backup manifest for $Schema ($Scope) is missing the $requiredType row; the mirror was not replaced"
+    }
   }
 
   $scopeDirs = Get-ScopeDirectory -Scope $Scope

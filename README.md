@@ -114,8 +114,6 @@ Limits:
   schema-folder layout rule.
 - `publish --force` skips the drift check, but still requires schema agreement
   between the app folder, descriptor, and live app.
-- The backup manifest count guard accepts a non-empty subset of type rows.
-  This is pre-existing, and synonyms inherit the same limit.
 
 ## Builder-first workflow
 

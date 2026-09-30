@@ -110,15 +110,18 @@ verify_scope_complete() {
   local manifest="$mirror_stage/manifest-$scope.txt"
   local expected=0
   local counted=0
-  local line count
+  local manifest_types='|'
+  local line object_type count
   while IFS= read -r line || [ -n "$line" ]; do
     # SQLcl spools with the platform's line terminator, so on Windows every
     # manifest line arrives with a trailing CR. Left in place it defeats the
     # numeric test below, every count is skipped, and the guard silently
     # compares 0 against 0 -- passing an empty mirror straight through.
     line="${line%$'\r'}"
-    count="${line##*=}"
     [[ "$line" == *=* ]] || continue
+    object_type="${line%=*}"
+    manifest_types+="$object_type|"
+    count="${line##*=}"
     [[ "$count" =~ ^[0-9]+$ ]] || continue
     expected=$((expected + count))
     counted=$((counted + 1))
@@ -131,6 +134,20 @@ verify_scope_complete() {
     echo "counts; the mirror was not replaced" >&2
     exit 1
   fi
+
+  local -a required_types
+  case "$scope" in
+    tables) required_types=(TABLE) ;;
+    code) required_types=(VIEW PACKAGE 'PACKAGE BODY' PROCEDURE FUNCTION SYNONYM TRIGGER) ;;
+    *) echo "unsupported backup scope: $scope" >&2; exit 1 ;;
+  esac
+  local required_type
+  for required_type in "${required_types[@]}"; do
+    if [[ "$manifest_types" != *"|$required_type|"* ]]; then
+      echo "database backup manifest for $schema ($scope) is missing the $required_type row; the mirror was not replaced" >&2
+      exit 1
+    fi
+  done
 
   local actual=0
   local scope_dir found
