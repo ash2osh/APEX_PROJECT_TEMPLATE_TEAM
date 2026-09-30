@@ -255,7 +255,8 @@ swap_if_unchanged() {
 }
 
 cleanup() {
-  if [ "$restore_unstamped" = true ]; then
+  local aside
+  if [ "$restore_unstamped" = true ] && [ -e "$app_dir/application.apx" ]; then
     # Undo only our own stamp. An edit saved while the publish ran is kept.
     if ! swap_if_unchanged "$app_dir/application.apx" "$staging_dir/application.apx.stamped" \
         "$staging_dir/application.apx.restore" "$staging_dir/application.apx.displaced"; then
@@ -263,6 +264,17 @@ cleanup() {
         "${app_dir#"$REPO_ROOT/"}/application.apx" >&2
     fi
   fi
+  # Interrupted or failed between moving application.apx aside and installing
+  # its replacement: put the moved-aside file back before scratch is deleted.
+  for aside in "$staging_dir/application.apx.before-stamp" "$staging_dir/application.apx.displaced"; do
+    if [ ! -e "$app_dir/application.apx" ] && [ -e "$aside" ]; then
+      mv -n -- "$aside" "$app_dir/application.apx" 2>/dev/null || true
+      if [ -e "$aside" ] && [ ! -e "$app_dir/application.apx" ]; then
+        printf 'publish error: could not put application.apx back; recover it from %s\n' "$aside" >&2
+        return
+      fi
+    fi
+  done
   rm -rf -- "$staging_dir"
 }
 trap cleanup EXIT

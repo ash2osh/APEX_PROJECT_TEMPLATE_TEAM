@@ -304,7 +304,9 @@ function Invoke-SwapIfUnchanged([string]$Target, [string]$Expected, [string]$Rep
   }
   try { [System.IO.File]::Move($Replacement, $Target) } catch { return $false }
   if ($null -ne $acl) {
-    try { Set-Acl -LiteralPath $Target -AclObject $acl } catch { }
+    try { Set-Acl -LiteralPath $Target -AclObject $acl } catch {
+      Write-Warning "publish warning: could not restore the Windows permissions of ${Target}: $($_.Exception.Message)"
+    }
   }
   return $true
 }
@@ -425,15 +427,26 @@ try {
     Write-Output "Commit the stamped version in ${relativeSource}: $publishedVersion"
   }
 } finally {
-  if ($restoreUnstamped) {
+  if ($restoreUnstamped -and (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
     # Undo only our own stamp. An edit saved while the publish ran is kept.
     if (-not (Invoke-SwapIfUnchanged -Target $applicationSource -Expected $stampedSource `
         -Replacement $restoreSource -Aside (Join-Path $publishWorkDir "application.apx.displaced"))) {
       Write-Warning "publish warning: $applicationSource changed while publishing; left as is (check its version line)"
     }
   }
+  # Interrupted or failed between moving application.apx aside and installing
+  # its replacement: put the moved-aside file back before scratch is deleted.
+  $keepPublishWorkDir = $false
+  foreach ($aside in @((Join-Path $publishWorkDir "application.apx.before-stamp"), (Join-Path $publishWorkDir "application.apx.displaced"))) {
+    if (-not (Test-Path -LiteralPath $applicationSource) -and (Test-Path -LiteralPath $aside -PathType Leaf)) {
+      try { [System.IO.File]::Move($aside, $applicationSource) } catch {
+        Write-Warning "publish error: could not put application.apx back; recover it from $aside"
+        $keepPublishWorkDir = $true
+      }
+    }
+  }
   Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue
-  if (Test-Path -LiteralPath $publishWorkDir) {
+  if (-not $keepPublishWorkDir -and (Test-Path -LiteralPath $publishWorkDir)) {
     Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 }

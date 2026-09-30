@@ -225,19 +225,16 @@ class UpgradeTemplateTests(unittest.TestCase):
             upgrade_engine.Action("UPDATE", "AGENTS.md"),
             upgrade_engine.Action("UPDATE", "scripts/tool.sh"),
         ]
-        real_replace = os.replace
-        calls = 0
+        real_install = upgrade_engine._install_no_replace
 
-        def fail_during_second_file(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
-            nonlocal calls
-            calls += 1
-            # Moves aside: 1 lock, 2 AGENTS.md, 3 scripts/tool.sh (installs use os.link).
-            if calls == 3:
+        def fail_installing_tool(source: Path, target: Path) -> None:
+            # scripts/tool.sh has already moved aside when its install fails.
+            if target.name == "tool.sh":
                 raise OSError("injected filesystem failure")
-            real_replace(source, target)
+            real_install(source, target)
 
-        with patch("scripts.upgrade_template.os.replace", side_effect=fail_during_second_file):
-            with self.assertRaisesRegex(upgrade_engine.UpgradeError, "filesystem update failed"):
+        with patch("scripts.upgrade_template._install_no_replace", side_effect=fail_installing_tool):
+            with self.assertRaisesRegex(upgrade_engine.UpgradeError, "filesystem update failed and was rolled back"):
                 upgrade_engine.apply_actions(
                     self.project,
                     self.template,
@@ -259,18 +256,22 @@ class UpgradeTemplateTests(unittest.TestCase):
             upgrade_engine.Action("UPDATE", "AGENTS.md"),
             upgrade_engine.Action("UPDATE", "scripts/tool.sh"),
         ]
+        real_install = upgrade_engine._install_no_replace
         real_replace = os.replace
-        calls = 0
 
-        def fail_update_and_restore(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
-            nonlocal calls
-            calls += 1
-            # 3 moves scripts/tool.sh aside; 4 is the first rollback restore (AGENTS.md).
-            if calls in {3, 4}:
-                raise OSError(f"injected replace failure {calls}")
+        def fail_installing_tool(source: Path, target: Path) -> None:
+            if target.name == "tool.sh":
+                raise OSError("injected install failure")
+            real_install(source, target)
+
+        def fail_restoring_tool(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+            # Moving scripts/tool.sh aside works; restoring it fails.
+            if Path(target).name == "tool.sh":
+                raise OSError("injected restore failure")
             real_replace(source, target)
 
-        with patch("scripts.upgrade_template.os.replace", side_effect=fail_update_and_restore):
+        with patch("scripts.upgrade_template._install_no_replace", side_effect=fail_installing_tool), \
+                patch("scripts.upgrade_template.os.replace", side_effect=fail_restoring_tool):
             with self.assertRaises(upgrade_engine.UpgradeError) as caught:
                 upgrade_engine.apply_actions(
                     self.project,
@@ -287,7 +288,34 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertNotIn("was rolled back", message)
         recovery = Path(message.split("recovery backups retained at ", 1)[1])
         self.assertTrue(recovery.is_dir())
-        self.assertIn(b"rules v1\n", [path.read_bytes() for path in recovery.iterdir() if path.is_file()])
+        self.assertIn(b"echo v1\n", [path.read_bytes() for path in recovery.iterdir() if path.is_file()])
+        self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+
+    def test_rollback_keeps_an_edit_saved_after_install(self) -> None:
+        self.adopt()
+        self.release_v2({"AGENTS.md": "rules v2\n", "scripts/tool.sh": "echo v2\n"})
+        actions = [
+            upgrade_engine.Action("UPDATE", "AGENTS.md"),
+            upgrade_engine.Action("UPDATE", "scripts/tool.sh"),
+        ]
+        real_install = upgrade_engine._install_no_replace
+
+        def edit_agents_then_fail(source: Path, target: Path) -> None:
+            if target.name == "tool.sh":
+                (self.project / "AGENTS.md").write_text("rules edited during upgrade\n", encoding="utf-8")
+                raise OSError("injected install failure")
+            real_install(source, target)
+
+        with patch("scripts.upgrade_template._install_no_replace", side_effect=edit_agents_then_fail):
+            with self.assertRaisesRegex(upgrade_engine.UpgradeError, "changed after the upgrade installed it"):
+                upgrade_engine.apply_actions(
+                    self.project, self.template, actions, str(self.template),
+                    git(self.template, "rev-parse", "HEAD"),
+                    {"AGENTS.md": "a" * 64, "scripts/tool.sh": "b" * 64},
+                )
+
+        self.assertEqual(self.read("AGENTS.md"), "rules edited during upgrade\n")
+        self.assertEqual(self.read("scripts/tool.sh"), "echo v1\n")
 
     def test_locally_modified_file_changed_upstream_is_a_conflict(self) -> None:
         self.adopt()

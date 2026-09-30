@@ -60,6 +60,9 @@ class Mutation:
     had_original: bool
     original_moved: bool = False
     replacement_installed: bool = False
+    # Hash of the bytes this upgrade installed, so rollback can tell them from
+    # a later save.
+    installed_hash: str | None = None
 
 
 def validate_relative_path(value: object, *, pattern: bool = False) -> str:
@@ -427,7 +430,9 @@ def _install_no_replace(source: Path, target: Path) -> None:
     except FileExistsError as exc:
         raise UpgradeError(f"{target} was recreated during the upgrade; rerun the upgrade") from exc
     except OSError:
-        # No hard links on this filesystem: fall back to a checked rename.
+        # No hard links on this filesystem (FAT, some network shares): fall
+        # back to a checked rename. Only here can a save land between the
+        # check and the rename; refusing would make upgrades impossible there.
         if _lstat(target) is not None:
             raise UpgradeError(f"{target} was recreated during the upgrade; rerun the upgrade") from None
         os.replace(source, target)
@@ -532,6 +537,7 @@ def apply_actions(
                 if observed != planned_local[relative]:
                     raise UpgradeError(f"{relative} changed after the upgrade was planned; rerun the upgrade")
             if has_replacement:
+                mutation.installed_hash = hashlib.sha256(writes[relative][0]).hexdigest()
                 _install_no_replace(staged[relative], target)
                 mutation.replacement_installed = True
     except (OSError, UpgradeError) as exc:
@@ -541,6 +547,12 @@ def apply_actions(
                 if mutation.replacement_installed:
                     target_info = _lstat(mutation.target)
                     if target_info is not None:
+                        if not stat.S_ISREG(target_info.st_mode) or sha256(mutation.target) != mutation.installed_hash:
+                            # Saved after this upgrade installed it; keep the save.
+                            raise OSError(
+                                f"{mutation.target} changed after the upgrade installed it; kept as is"
+                                + (f", its previous version is {mutation.backup}" if mutation.original_moved else "")
+                            )
                         mutation.target.unlink()
                 if mutation.original_moved:
                     if not mutation.replacement_installed and _lstat(mutation.target) is not None:

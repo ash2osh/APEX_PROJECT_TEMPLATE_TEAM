@@ -107,7 +107,11 @@ app and agreed with the team that your files should replace it.
 **During import.** Publish restores your unstamped `application.apx`; read the
 SQLcl output printed above the message. If the file changed while publish ran
 (you saved it in an editor), publish leaves your edit in place and warns
-`changed while publishing; left as is`; check its `version:` line.
+`changed while publishing; left as is`; check its `version:` line. Publish
+swaps `application.apx` by moving it into `scratch/apex-publish.*` first; if a
+publish is killed at that moment the file is missing from the app folder, and
+its previous bytes are in that scratch folder as `application.apx.before-stamp`
+or `application.apx.displaced`.
 
 | Message | Meaning and action |
 | --- | --- |
