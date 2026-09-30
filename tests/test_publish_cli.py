@@ -69,6 +69,7 @@ class PublishAppCliTests(unittest.TestCase):
         fake_sql = fake_bin / "sql"
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
+            "cat > /dev/null\n"
             "mode=other\n"
             "for arg in \"$@\"; do\n"
             "  case \"$arg\" in\n"
@@ -676,6 +677,7 @@ class PublishAppCliTests(unittest.TestCase):
                 fake_sql = fake_bin / "sql"
                 fake_sql.write_text(
                     "#!/usr/bin/env bash\n"
+                    "cat > /dev/null\n"
                     "mode=other\n"
                     "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
                     "if [[ $mode == import ]]; then\n"

@@ -68,6 +68,7 @@ class ExportCliTests(unittest.TestCase):
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
+            "cat > /dev/null\n"
             "mkdir -p apps/DEMO/exported/.apex apps/DEMO/exported/deployments\n"
             "printf 'new app source\\n' > apps/DEMO/exported/application.apx\n"
             "printf '{\\\"mmdVersion\\\":1}\\n' > apps/DEMO/exported/.apex/apexlang.json\n"

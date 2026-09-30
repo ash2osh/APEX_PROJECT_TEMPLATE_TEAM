@@ -240,6 +240,7 @@ class TeamCliTests(unittest.TestCase):
             fake_sql = fake_bin / "sql"
             fake_sql.write_text(
                 "#!/usr/bin/env bash\n"
+                "cat > /dev/null\n"
                 "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
                 "if [[ -f login.sql ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
                 "if [[ -n \"${SQLPATH:-}\" && -f \"$SQLPATH/login.sql\" ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
@@ -317,6 +318,7 @@ class TeamCliTests(unittest.TestCase):
         fake_sql = fake_bin / "sql"
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
+            "cat > /dev/null\n"
             "mode=other; export_schema=DEMO\n"
             "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
             "if [[ $mode == export ]]; then found_script=0; for arg in \"$@\"; do if [[ $found_script == 1 ]]; then export_schema=$arg; break; fi; case \"$arg\" in *@*export_apps.sql) found_script=1 ;; esac; done; fi\n"

@@ -53,6 +53,7 @@ class BackupDbCliTests(unittest.TestCase):
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
+            "cat > /dev/null\n"
             "schema=\"$6\"\n"
             "scope=\"$7\"\n"
             "spool_schema=\"${11:-}\"\n"
