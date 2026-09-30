@@ -202,6 +202,15 @@ def mask_java_quoted_values(source: str) -> str:
 
 def validate_sql_only(source: str) -> None:
     """Allow terminated SQL statements and PL/SQL blocks, but no SQLcl commands."""
+    statement_spans(source)
+
+
+def statement_spans(source: str) -> list[tuple[int, int]]:
+    """Validate SQL-only source and return each statement's (start, end) offsets.
+
+    The end excludes the ';' or the standalone '/' that terminates it.
+    """
+    spans: list[tuple[int, int]] = []
     masked = mask_comments_and_literals(source)
     index = 0
     while index < len(masked):
@@ -244,6 +253,7 @@ def validate_sql_only(source: str) -> None:
                 raise ValueError(
                     f"SQL-only migration rejects SQLcl buffer terminator in PL/SQL block at line {terminator_line}"
                 )
+            spans.append((statement_start, index + slash.start()))
             index += slash.end()
             continue
 
@@ -262,7 +272,9 @@ def validate_sql_only(source: str) -> None:
                 f"SQL-only migration rejects SQLcl/client command or unsupported statement "
                 f"'{first}' at line {line_number}"
             )
+        spans.append((statement_start, statement_end))
         index = statement_end + 1
+    return spans
 
 
 def main(argv: list[str] | None = None) -> int:

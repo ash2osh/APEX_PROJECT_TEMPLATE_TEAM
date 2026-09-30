@@ -1,5 +1,8 @@
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,6 +13,7 @@ except ImportError:
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SQLCL_ALIAS_TEST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 BASE_ENV = {
@@ -223,10 +227,13 @@ class ProductionMarkerTests(unittest.TestCase):
     PRODUCTION = (
         "prod", "PROD", "prod1", "prod-db", "prod_db", "erp-prod", "hr.live", "production",
         "PRODDB", "proddb2", "ERPPROD", "erpprd01", "erpprod.example.com", "hr_live01",
+        "prod-preprod", "preprod-live",
     )
     NOT_PRODUCTION = (
         "docker-demo", "dev", "product-dev", "products", "olive", "deliver", "livewire-dev",
-        "reproduce", "prodigy", "freepdb1",
+        "reproduce", "prodigy", "freepdb1", "PREPROD", "preprod", "nonprod", "dev-nonprod",
+        "uat_preprod", "pre-prod", "non_prd", "NONPROD01", "preproddb", "preproduction",
+        "erp.preprod.example.com",
     )
 
     def test_python_marker(self) -> None:
@@ -238,26 +245,59 @@ class ProductionMarkerTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertFalse(looks_like_production_identity(value))
 
-    def test_bash_marker_matches_python(self) -> None:
-        source = (ROOT / "scripts" / "check_db_target.sh").read_text(encoding="utf-8")
-        pattern = re.search(r"^production_marker='([^']+)'$", source, re.MULTILINE).group(1)
-        script = 'shopt -s nocasematch; p="$1"; shift; for v in "$@"; do if [[ "$v" =~ $p ]]; then echo 1; else echo 0; fi; done'
-        values = [*self.PRODUCTION, *self.NOT_PRODUCTION]
-        result = subprocess.run(["bash", "-c", script, "bash", pattern, *values], capture_output=True, text=True, check=True)
-        expected = ["1"] * len(self.PRODUCTION) + ["0"] * len(self.NOT_PRODUCTION)
-        self.assertEqual(expected, result.stdout.split())
+    def run_guard(self, command: list[str], connection: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "scripts").mkdir()
+            for name in ("check_db_target.sh", "check_db_target.ps1", "load_env.sh", "load_env.ps1"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            env_text = (ROOT / ".env.example").read_text(encoding="utf-8")
+            (root / ".env").write_text(
+                env_text.replace("TABLES_SQLCL_CONNECTION=docker-demo", f"TABLES_SQLCL_CONNECTION={connection}"),
+                encoding="utf-8",
+            )
+            environment = {key: value for key, value in os.environ.items() if key != "PROJECT_SCHEMA"}
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            return subprocess.run(
+                [*command[:-1], str(root / "scripts" / command[-1]), "read", "tables"],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+
+    def assert_guard_matches_python(self, command: list[str]) -> None:
+        for value, production in [*((v, True) for v in self.PRODUCTION), *((v, False) for v in self.NOT_PRODUCTION)]:
+            if not SQLCL_ALIAS_TEST.fullmatch(value):
+                continue
+            with self.subTest(value=value):
+                result = self.run_guard(command, value)
+                refused = "resembles production" in result.stderr
+                self.assertEqual(production, refused, result.stdout + result.stderr)
+                if not production:
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_bash_guard_matches_python(self) -> None:
+        self.assert_guard_matches_python(["bash", "check_db_target.sh"])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is not installed")
+    def test_powershell_guard_matches_python(self) -> None:
+        self.assert_guard_matches_python(["pwsh", "-NoProfile", "-NonInteractive", "-File", "check_db_target.ps1"])
 
     def test_every_guard_uses_the_same_marker(self) -> None:
-        from scripts.db_targets import PRODUCTION_MARKER_RE
+        from scripts.db_targets import NON_PRODUCTION_MARKER_RE, PRODUCTION_MARKER_RE
         python = PRODUCTION_MARKER_RE.pattern.replace("[^A-Za-z0-9]", "[^[:alnum:]]")
-        bash = re.search(r"^production_marker='([^']+)'$", (ROOT / "scripts" / "check_db_target.sh").read_text(encoding="utf-8"), re.MULTILINE).group(1)
+        bash_source = (ROOT / "scripts" / "check_db_target.sh").read_text(encoding="utf-8")
+        bash = re.search(r"^production_marker='([^']+)'$", bash_source, re.MULTILINE).group(1)
         self.assertEqual(python, bash)
-        powershell = re.search(r"\$productionPattern = '\(\?i\)([^']+)'", (ROOT / "scripts" / "check_db_target.ps1").read_text(encoding="utf-8")).group(1)
+        self.assertIn(f"non_production_marker='{NON_PRODUCTION_MARKER_RE.pattern}'", bash_source)
+        powershell_source = (ROOT / "scripts" / "check_db_target.ps1").read_text(encoding="utf-8")
+        powershell = re.search(r"\$productionPattern = '\(\?i\)([^']+)'", powershell_source).group(1)
         self.assertEqual(PRODUCTION_MARKER_RE.pattern, powershell)
+        self.assertIn(f"$nonProductionPattern = '(?i){NON_PRODUCTION_MARKER_RE.pattern}'", powershell_source)
         sql_pattern = python.replace("[0-9]", "[[:digit:]]")
         for name in ("verify_db_access.sql", "verify_migration_access.sql", "publish_app.sql"):
             source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
             with self.subTest(script=name):
                 self.assertIn(f"'{sql_pattern}'", source)
+                self.assertIn(f"c_non_production_marker CONSTANT VARCHAR2(64) := '{NON_PRODUCTION_MARKER_RE.pattern}'", source)
                 for field in ("DB_NAME", "DB_UNIQUE_NAME", "SERVICE_NAME"):
-                    self.assertIn(f"'{field}'", source)
+                    self.assertIn(f"resembles_production(SYS_CONTEXT('USERENV', '{field}'))", source) if name != "verify_migration_access.sql" else self.assertIn(f"'{field}'", source)
+                self.assertNotIn("REGEXP_LIKE(SYS_CONTEXT", source)

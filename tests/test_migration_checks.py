@@ -56,17 +56,61 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual(
             compiled_units(migration, "APP"),
             (
-                ("OTHER", "PACKAGE", "ZZ_PKG"),
-                ("APP", "PACKAGE BODY", "Zz_Pkg"),
-                ("APP", "TRIGGER", "ZZ_TRG"),
-                ("APP", "VIEW", "ZZ_V"),
-                ("APP", "PACKAGE", "ZZ_OLD"),
-                ("APP", "PACKAGE BODY", "ZZ_OLD"),
-                ("APP", "TYPE BODY", "ZZ_T"),
-                ("APP", "PACKAGE", "ZZ_SPEC"),
-                ("APP", "JAVA SOURCE", "ZzJava"),
-                ("APP", "MLE MODULE", "ZZ_MLE"),
+                ("OTHER", "PACKAGE", "ZZ_PKG", True),
+                ("APP", "PACKAGE BODY", "Zz_Pkg", True),
+                ("APP", "TRIGGER", "ZZ_TRG", True),
+                ("APP", "VIEW", "ZZ_V", True),
+                ("APP", "PACKAGE", "ZZ_OLD", True),
+                # A plain ALTER PACKAGE ... COMPILE checks a body only if one exists.
+                ("APP", "PACKAGE BODY", "ZZ_OLD", False),
+                ("APP", "TYPE BODY", "ZZ_T", True),
+                ("APP", "PACKAGE", "ZZ_SPEC", True),
+                ("APP", "JAVA SOURCE", "ZzJava", True),
+                ("APP", "MLE MODULE", "ZZ_MLE", True),
             ),
+        )
+
+    def test_compiled_units_follow_the_session_schema_across_files(self):
+        self.add_folder("2026-09-30_schema-r001", {
+            "001-switch.sql": "ALTER SESSION SET CURRENT_SCHEMA = other;\nCREATE OR REPLACE PROCEDURE zz_p IS BEGIN NULL; END;\n/\n",
+            "002-later.sql": "CREATE OR REPLACE FUNCTION zz_f RETURN NUMBER IS BEGIN RETURN 1; END;\n/\n",
+            "003-back.sql": "ALTER SESSION SET CURRENT_SCHEMA = \"APP\";\nCREATE OR REPLACE VIEW zz_v AS SELECT 1 x FROM dual;\n",
+        })
+        self.assertEqual(
+            compiled_units(self.migration_batch("2026-09-30_schema-r001")[0], "APP"),
+            (
+                ("OTHER", "PROCEDURE", "ZZ_P", True),
+                ("OTHER", "FUNCTION", "ZZ_F", True),
+                ("APP", "VIEW", "ZZ_V", True),
+            ),
+        )
+
+    def test_compiled_units_skip_what_the_migration_drops_again(self):
+        self.add_folder("2026-09-30_drop-r001", (
+            "CREATE OR REPLACE PROCEDURE zz_tmp IS BEGIN NULL; END;\n/\n"
+            "CREATE OR REPLACE PACKAGE zz_pkg AS PROCEDURE p; END;\n/\n"
+            "CREATE OR REPLACE PACKAGE BODY zz_pkg AS PROCEDURE p IS BEGIN NULL; END; END;\n/\n"
+            "BEGIN zz_tmp; END;\n/\n"
+            "DROP PROCEDURE zz_tmp;\n"
+            "DROP PACKAGE BODY zz_pkg;\n"
+            "DROP VIEW IF EXISTS zz_v;\n"
+        ))
+        self.assertEqual(
+            compiled_units(self.migration_batch("2026-09-30_drop-r001")[0], "APP"),
+            (("APP", "PACKAGE", "ZZ_PKG", True),),
+        )
+
+    def test_compiled_units_read_a_file_the_sql_tokenizer_cannot(self):
+        # The apostrophe in the Java comment is not SQL; the SQL tokenizer
+        # alone would give up on the whole file and name no units.
+        self.add_folder("2026-09-30_java-r001", (
+            "CREATE OR REPLACE AND COMPILE JAVA SOURCE NAMED \"ZzJava\" AS\n"
+            "public class ZzJava {\n  // it's a comment\n  static int f() { return 1; }\n}\n/\n"
+            "CREATE OR REPLACE PROCEDURE zz_p IS BEGIN NULL; END;\n/\n"
+        ))
+        self.assertEqual(
+            compiled_units(self.migration_batch("2026-09-30_java-r001")[0], "APP"),
+            (("APP", "JAVA SOURCE", "ZzJava", True), ("APP", "PROCEDURE", "ZZ_P", True)),
         )
 
     def test_table_only_migration_compiles_no_units(self):

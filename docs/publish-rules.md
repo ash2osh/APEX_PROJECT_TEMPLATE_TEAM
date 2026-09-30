@@ -96,6 +96,9 @@ app and agreed with the team that your files should replace it.
 | `the application path contains characters SQLcl cannot pass` | The repository path contains `'`, `"` or `&`, which SQLcl would cut short or substitute. Move the checkout to a path without them. |
 | `DEV publish needs application.apx to stamp the publish tag` | The app source is incomplete; export it again. |
 | `could not stamp the application version` | Fix the `version:` line in `application.apx` as the message says (for example, a duplicate line or a version over 255 bytes). |
+| `application.apx changed while the publish tag was stamped` | You saved `application.apx` while publish was stamping it. Your save is kept; publish again. |
+| `could not move application.apx to stamp the publish tag` | The file or its folder cannot be renamed: on Windows an editor or another program usually holds it open; elsewhere check the folder's permissions. Close it or fix the permissions and publish again. |
+| `could not install the stamped application.apx` | The stamped copy could not be moved into place; your file was put back and nothing was imported. Publish again. |
 
 **After connecting, before import.** Nothing is changed when this check refuses.
 
@@ -107,7 +110,10 @@ app and agreed with the team that your files should replace it.
 **During import.** Publish restores your unstamped `application.apx`; read the
 SQLcl output printed above the message. If the file changed while publish ran
 (you saved it in an editor), publish leaves your edit in place and warns
-`changed while publishing; left as is`; check its `version:` line. Publish
+`changed while publishing; left as is`; check its `version:` line. If the
+file could not be swapped back (for example an editor holds it open), publish
+warns `could not remove the publish tag`; remove the tag from its `version:`
+line by hand. Publish
 swaps `application.apx` by moving it into `scratch/apex-publish.*` first; if a
 publish is killed at that moment the file is missing from the app folder, and
 its previous bytes are in that scratch folder as `application.apx.before-stamp`

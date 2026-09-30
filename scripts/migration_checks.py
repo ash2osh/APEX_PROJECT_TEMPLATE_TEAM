@@ -8,7 +8,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,11 +18,13 @@ from .migration_manifest import (
     Migration,
     MigrationManifestError,
     QueryCheck,
+    assert_single_layout,
     _strip_sql_comments_and_tokenize,
     validate_check_query,
 )
 from .schema_catalog import ObjectKey, SchemaSnapshot
 from .sqlcl_session import run_sqlcl
+from .validate_migration import statement_spans
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,7 +113,25 @@ def _quoted_end(source: str, start: int, quote: str) -> int:
 
 
 def _tokens(source: str) -> list[_Token]:
+    return list(_iter_tokens(source))
+
+
+def _leading_tokens(source: str) -> list[_Token]:
+    """Tokens up to the first one this SQL tokenizer cannot read.
+
+    A Java source body is not SQL, so a quote in a Java comment can end the
+    SQL tokenizer early; a statement's leading words are all a unit needs.
+    """
     result: list[_Token] = []
+    try:
+        for token in _iter_tokens(source):
+            result.append(token)
+    except MigrationAnalysisError:
+        pass
+    return result
+
+
+def _iter_tokens(source: str) -> Iterator[_Token]:
     index = 0
     length = len(source)
     while index < length:
@@ -145,30 +165,30 @@ def _tokens(source: str) -> list[_Token]:
             if end < 0:
                 raise MigrationAnalysisError("unterminated Oracle alternative-quoted literal")
             end += len(terminator)
-            result.append(_Token("LITERAL", "", index, end))
+            yield _Token("LITERAL", "", index, end)
             index = end
             continue
         if char in "nN" and index + 1 < length and source[index + 1] == "'":
             end = _quoted_end(source, index + 1, "'")
-            result.append(_Token("LITERAL", "", index, end))
+            yield _Token("LITERAL", "", index, end)
             index = end
             continue
         if char == "'":
             end = _quoted_end(source, index, "'")
-            result.append(_Token("LITERAL", "", index, end))
+            yield _Token("LITERAL", "", index, end)
             index = end
             continue
         if char == '"':
             end = _quoted_end(source, index, '"')
             value = source[index + 1 : end - 1].replace('""', '"')
-            result.append(_Token("QIDENT", value, index, end))
+            yield _Token("QIDENT", value, index, end)
             index = end
             continue
         if _is_word_start(char):
             end = index + 1
             while end < length and _is_word_continue(source[end]):
                 end += 1
-            result.append(_Token("WORD", source[index:end].upper(), index, end))
+            yield _Token("WORD", source[index:end].upper(), index, end)
             index = end
             continue
         if char == "/":
@@ -178,12 +198,11 @@ def _tokens(source: str) -> list[_Token]:
                 line_end = length
             remainder = source[index + 1 : line_end].strip()
             if not source[line_start:index].strip() and (not remainder or remainder.startswith("--")):
-                result.append(_Token("SLASH", "/", index, index + 1))
+                yield _Token("SLASH", "/", index, index + 1)
                 index += 1
                 continue
-        result.append(_Token("SYMBOL", char, index, index + 1))
+        yield _Token("SYMBOL", char, index, index + 1)
         index += 1
-    return result
 
 
 def _is_plsql_statement(tokens: Sequence[_Token]) -> bool:
@@ -509,8 +528,46 @@ def analyze_batch(migrations: Sequence[Migration], target_schema: str) -> tuple[
     return tuple(operations)
 
 
-def _compiled_unit(statement: Sequence[_Token], target_schema: str) -> list[tuple[str, str, str]]:
-    """Name the stored units a CREATE or ALTER ... COMPILE statement compiles."""
+def _stored_unit_type(statement: Sequence[_Token], index: int, *, named: bool) -> tuple[str | None, int]:
+    """Read a stored unit's object type at index; named expects CREATE JAVA SOURCE's NAMED."""
+    if _word(statement, index, "JAVA") and _word(statement, index + 1, "SOURCE"):
+        index += 2
+        if named:
+            if not _word(statement, index, "NAMED"):
+                return None, index
+            index += 1
+        return "JAVA SOURCE", index
+    if _word(statement, index, "MLE") and _word(statement, index + 1, "MODULE"):
+        return "MLE MODULE", index + 2
+    for candidate in ("PACKAGE", "TYPE"):
+        if _word(statement, index, candidate):
+            if _word(statement, index + 1, "BODY"):
+                return f"{candidate} BODY", index + 2
+            return candidate, index + 1
+    for candidate in ("PROCEDURE", "FUNCTION", "TRIGGER", "VIEW", "LIBRARY"):
+        if _word(statement, index, candidate):
+            return candidate, index + 1
+    return None, index
+
+
+def _unit_name(statement: Sequence[_Token], index: int, schema: str) -> tuple[str, str, int] | None:
+    if _word(statement, index, "IF") and _word(statement, index + 1, "NOT") and _word(statement, index + 2, "EXISTS"):
+        index += 3
+    elif _word(statement, index, "IF") and _word(statement, index + 1, "EXISTS"):
+        index += 2
+    try:
+        return _parse_name(statement, index, schema)
+    except MigrationAnalysisError:
+        return None
+
+
+def _compiled_unit(statement: Sequence[_Token], schema: str) -> list[tuple[str, str, str, bool]]:
+    """Name the stored units a CREATE or ALTER ... COMPILE statement compiles.
+
+    Each unit is (owner, type, name, required). A plain ALTER PACKAGE or ALTER
+    TYPE ... COMPILE also recompiles a body when one exists, so that body is
+    checked but not required to exist.
+    """
     if not statement or statement[0].kind != "WORD":
         return []
     if statement[0].value == "CREATE":
@@ -532,40 +589,13 @@ def _compiled_unit(statement: Sequence[_Token], target_schema: str) -> list[tupl
         alter = True
     else:
         return []
-    object_type = None
-    if _word(statement, index, "JAVA") and _word(statement, index + 1, "SOURCE"):
-        # CREATE JAVA SOURCE NAMED <name> ...; ALTER JAVA SOURCE <name> COMPILE
-        object_type = "JAVA SOURCE"
-        index += 2
-        if not alter:
-            if not _word(statement, index, "NAMED"):
-                return []
-            index += 1
-    elif _word(statement, index, "MLE") and _word(statement, index + 1, "MODULE"):
-        object_type = "MLE MODULE"
-        index += 2
-    elif any(_word(statement, index, candidate) for candidate in ("PACKAGE", "TYPE")):
-        candidate = statement[index].value
-        if _word(statement, index + 1, "BODY"):
-            object_type = f"{candidate} BODY"
-            index += 2
-        else:
-            object_type = candidate
-            index += 1
-    else:
-        for candidate in ("PROCEDURE", "FUNCTION", "TRIGGER", "VIEW", "LIBRARY"):
-            if _word(statement, index, candidate):
-                object_type = candidate
-                index += 1
-                break
+    object_type, index = _stored_unit_type(statement, index, named=not alter)
     if object_type is None:
         return []
-    if _word(statement, index, "IF") and _word(statement, index + 1, "NOT") and _word(statement, index + 2, "EXISTS"):
-        index += 3
-    try:
-        owner, name, index = _parse_name(statement, index, target_schema)
-    except MigrationAnalysisError:
+    parsed = _unit_name(statement, index, schema)
+    if parsed is None:
         return []
+    owner, name, index = parsed
     if alter:
         words = [token.value for token in statement[index:] if token.kind == "WORD"]
         if "COMPILE" not in words:
@@ -575,30 +605,74 @@ def _compiled_unit(statement: Sequence[_Token], target_schema: str) -> list[tupl
             after = after[1:]
         if object_type in {"PACKAGE", "TYPE"}:
             if after[:1] == ["BODY"]:
-                return [(owner, f"{object_type} BODY", name)]
+                return [(owner, f"{object_type} BODY", name, True)]
             if after[:1] == ["SPECIFICATION"]:
-                return [(owner, object_type, name)]
-            return [(owner, object_type, name), (owner, f"{object_type} BODY", name)]
+                return [(owner, object_type, name, True)]
+            return [(owner, object_type, name, True), (owner, f"{object_type} BODY", name, False)]
+    return [(owner, object_type, name, True)]
+
+
+def _dropped_units(statement: Sequence[_Token], schema: str) -> list[tuple[str, str, str]]:
+    """Name the stored units a DROP statement removes."""
+    if not _word(statement, 0, "DROP"):
+        return []
+    object_type, index = _stored_unit_type(statement, 1, named=False)
+    if object_type is None:
+        return []
+    parsed = _unit_name(statement, index, schema)
+    if parsed is None:
+        return []
+    owner, name, _index = parsed
+    if object_type in {"PACKAGE", "TYPE"}:
+        return [(owner, object_type, name), (owner, f"{object_type} BODY", name)]
     return [(owner, object_type, name)]
 
 
-def compiled_units(migration: Migration, target_schema: str) -> tuple[tuple[str, str, str], ...]:
-    """Stored units (owner, type, name) that the migration's own statements compile.
+def _current_schema_change(statement: Sequence[_Token]) -> str | None:
+    """The schema an ALTER SESSION SET CURRENT_SCHEMA statement switches to."""
+    if not (_word(statement, 0, "ALTER") and _word(statement, 1, "SESSION") and _word(statement, 2, "SET")):
+        return None
+    for index in range(3, len(statement) - 2):
+        if (
+            _word(statement, index, "CURRENT_SCHEMA")
+            and statement[index + 1].kind == "SYMBOL"
+            and statement[index + 1].value == "="
+            and statement[index + 2].kind in {"WORD", "QIDENT"}
+        ):
+            return statement[index + 2].value
+    return None
+
+
+def compiled_units(migration: Migration, target_schema: str) -> tuple[tuple[str, str, str, bool], ...]:
+    """Stored units (owner, type, name, required) the migration's own statements compile.
 
     SQLcl reports their compilation errors as warnings, so the apply session
     checks ALL_ERRORS for exactly these units, never for unrelated objects a
-    teammate may be compiling at the same time.
+    teammate may be compiling at the same time. Statements are split where the
+    SQL-only migration validator splits them. Files run in one session, so an
+    ALTER SESSION SET CURRENT_SCHEMA carries into later files, and a unit the
+    migration drops again is not checked.
     """
-    units: dict[tuple[str, str, str], None] = {}
+    schema = target_schema
+    units: dict[tuple[str, str, str], bool] = {}
     for file in migration.files:
         try:
-            statements = _split_statements(file.source.decode("utf-8"))
-        except (MigrationAnalysisError, UnicodeError):
-            continue
-        for statement in statements:
-            for unit in _compiled_unit(statement, target_schema):
-                units[unit] = None
-    return tuple(units)
+            source = file.source.decode("utf-8")
+            spans = statement_spans(source)
+        except (UnicodeError, ValueError) as error:
+            raise MigrationAnalysisError(f"the compile check cannot read {file.name}: {error}") from error
+        for start, end in spans:
+            statement = _leading_tokens(source[start:end])
+            changed = _current_schema_change(statement)
+            if changed is not None:
+                schema = changed
+                continue
+            for unit in _dropped_units(statement, schema):
+                units.pop(unit, None)
+            for owner, object_type, name, required in _compiled_unit(statement, schema):
+                key = (owner, object_type, name)
+                units[key] = units.get(key, False) or required
+    return tuple((*key, required) for key, required in units.items())
 
 
 def _check_bind_target(sql: str) -> bool:
@@ -1032,7 +1106,7 @@ def _local_report(migrations: Sequence[Migration], repo_root: Path) -> Preflight
 
 
 def _live_report(migrations: Sequence[Migration], environment: str, repo_root: Path, schema: str | None = None) -> PreflightReport:
-    from .db_targets import TargetResolutionError, batch_schema, resolve_target
+    from .db_targets import TargetResolutionError, batch_schema, flat_migrations_apply, resolve_target
     from .schema_catalog import CatalogError, capture_inventory, capture_snapshot
 
     values = os.environ
@@ -1040,6 +1114,7 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
         requested = schema or values.get("PROJECT_SCHEMA") or None
         chosen = batch_schema([migration.schema for migration in migrations], requested, values)
         target = resolve_target(values, environment, "read", schema=chosen)
+        assert_single_layout(repo_root, migrations, target.schema, flat_folders_apply=flat_migrations_apply(values))
         work_dir = repo_root / "scratch" / "migration-preflight"
         # Validate operation scope and dependencies before opening SQLcl.
         operations = analyze_batch(migrations, target.schema)
@@ -1053,6 +1128,8 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
         checks = tuple(check for migration in migrations for check in migration.preconditions)
         checks_result = run_checks(target, checks, work_dir, phase="preconditions")
         return preflight(migrations, snapshot, checks_result)
+    except MigrationManifestError as error:
+        return PreflightReport(2, (), ({"code": "MIGRATION_LAYOUT", "message": str(error)},), {"complete": False, "mode": "live", "environment": environment, "limitations": [LIMITATION]})
     except (TargetResolutionError, CatalogError, OSError, RuntimeError, MigrationAnalysisError) as error:
         return PreflightReport(2, (), ({"code": "LIVE_PREFLIGHT_UNAVAILABLE", "message": str(error)},), {"complete": False, "mode": "live", "environment": environment, "limitations": [LIMITATION]})
 

@@ -83,7 +83,12 @@ class SqlDriverContractTests(unittest.TestCase):
         self.assertIn("DEFINE expected_live_state = '&7'", contents)
         recheck = contents.index("-20016")
         self.assertLess(recheck, contents.index("apex import -input"))
-        self.assertIn("REGEXP_REPLACE(MAX(version), '[' || c_python_whitespace || ']+$')", contents)
+        self.assertIn("REGEXP_REPLACE(v_version, '[' || c_python_whitespace || ']+$')", contents)
+        # Built in PL/SQL (32767-byte strings), not in SQL, so a long
+        # multibyte version still fits once hex-encoded.
+        block = contents[contents.index("c_python_whitespace CONSTANT") - 400 : recheck]
+        self.assertIn("v_observed VARCHAR2(32767);", block)
+        self.assertNotIn("RAWTOHEX(UTL_I18N.STRING_TO_RAW(REGEXP_REPLACE(MAX(", contents)
         # The SQL trims exactly the characters Python's str.rstrip() trims.
         listed = set(re.findall(r"\\([0-9A-F]{4})", contents[contents.index("c_python_whitespace CONSTANT"):contents.index("BEGIN", contents.index("c_python_whitespace CONSTANT"))]))
         python = {f"{code:04X}" for code in range(sys.maxunicode + 1) if chr(code).isspace()}

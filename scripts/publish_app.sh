@@ -238,10 +238,12 @@ restore_unstamped=false
 # Replace <target> with <replacement> only while <target> still holds the bytes
 # of <expected>. The target is renamed aside before the comparison and the
 # replacement is installed without overwriting, so an editor save at any
-# moment is kept rather than replaced.
+# moment is kept rather than replaced. Returns 0 when swapped, 1 when the
+# target changed or reappeared, 2 when the target could not be moved aside,
+# and 3 when the replacement could not be moved into place.
 swap_if_unchanged() {
   local target="$1" expected="$2" replacement="$3" aside="$4"
-  mv -- "$target" "$aside" 2>/dev/null || return 1
+  mv -- "$target" "$aside" 2>/dev/null || return 2
   if ! cmp -s -- "$aside" "$expected"; then
     [ -e "$target" ] || mv -- "$aside" "$target"
     return 1
@@ -251,16 +253,23 @@ swap_if_unchanged() {
   fi
   mv -n -- "$replacement" "$target" 2>/dev/null || true
   # GNU and BSD mv -n may exit 0 without moving; the replacement's presence tells.
-  [ ! -e "$replacement" ]
+  [ ! -e "$replacement" ] && return 0
+  [ -e "$target" ] && return 1
+  return 3
 }
 
 cleanup() {
   local aside
   if [ "$restore_unstamped" = true ] && [ -e "$app_dir/application.apx" ]; then
     # Undo only our own stamp. An edit saved while the publish ran is kept.
-    if ! swap_if_unchanged "$app_dir/application.apx" "$staging_dir/application.apx.stamped" \
-        "$staging_dir/application.apx.restore" "$staging_dir/application.apx.displaced"; then
+    local restore_status=0
+    swap_if_unchanged "$app_dir/application.apx" "$staging_dir/application.apx.stamped" \
+      "$staging_dir/application.apx.restore" "$staging_dir/application.apx.displaced" || restore_status=$?
+    if [ "$restore_status" -eq 1 ]; then
       printf 'publish warning: %s changed while publishing; left as is (check its version line)\n' \
+        "${app_dir#"$REPO_ROOT/"}/application.apx" >&2
+    elif [ "$restore_status" -ne 0 ]; then
+      printf 'publish warning: could not remove the publish tag from %s; restore its version line by hand\n' \
         "${app_dir#"$REPO_ROOT/"}/application.apx" >&2
     fi
   fi
@@ -288,7 +297,7 @@ if [ "$app_environment" = dev ] && [ "$force" != true ]; then
   python3 "$drift_guard" "$app_id" "$sqlcl_connection" "$app_dir" \
     --expected-user "$expected_user" --state-out "$staging_dir/approved-live-state.txt"
   expected_live_state="$(head -n 1 "$staging_dir/approved-live-state.txt")"
-  [[ "$expected_live_state" =~ ^(ABSENT|P\|([0-9T:-]+|NONE)\|[0-9A-F]*)$ ]] || \
+  [[ "$expected_live_state" =~ ^(ABSENT|P\.([0-9T:-]+|NONE)\.[0-9A-F]*)$ ]] || \
     fail "Builder drift guard did not record the approved live state; refusing import"
 fi
 sqlcl_stdin="$staging_dir/.sqlcl-stdin"
@@ -311,9 +320,15 @@ if [ "$app_environment" = dev ]; then
   cp -p -- "$staging_dir/application.apx.stamping" "$staging_dir/application.apx.stamped"
   cp -p -- "$staging_dir/application.apx.unstamped" "$staging_dir/application.apx.restore"
   # scratch/ is inside the repository, so these renames stay on one filesystem.
+  stamp_status=0
   swap_if_unchanged "$app_dir/application.apx" "$staging_dir/application.apx.unstamped" \
-    "$staging_dir/application.apx.stamping" "$staging_dir/application.apx.before-stamp" || \
-    fail "application.apx changed while the publish tag was stamped; publish again"
+    "$staging_dir/application.apx.stamping" "$staging_dir/application.apx.before-stamp" || stamp_status=$?
+  case "$stamp_status" in
+    0) ;;
+    2) fail "could not move application.apx to stamp the publish tag; check its permissions and publish again" ;;
+    3) fail "could not install the stamped application.apx; nothing was imported, publish again" ;;
+    *) fail "application.apx changed while the publish tag was stamped; publish again" ;;
+  esac
   restore_unstamped=true
   printf 'Stamped application version: %s\n' "$published_version"
 fi

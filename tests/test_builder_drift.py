@@ -97,9 +97,9 @@ class BuilderDriftTests(unittest.TestCase):
     def test_approved_state_is_recorded_for_the_import_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cases = (
-                ("2026-09-26T09:00:00", "2026-09-26T08:00:00", "Release 1.0", "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper()),
-                (None, "NO_TIMESTAMP", "ASHARIF-2026-09-30r001 | ü", "P|NONE|" + "ASHARIF-2026-09-30r001 | ü".encode().hex().upper()),
-                ("2026-09-26T09:00:00", "2026-09-26T08:00:00", "Release 1.0\u00a0\t", "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper()),
+                ("2026-09-26T09:00:00", "2026-09-26T08:00:00", "Release 1.0", "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper()),
+                (None, "NO_TIMESTAMP", "ASHARIF-2026-09-30r001 | ü", "P.NONE." + "ASHARIF-2026-09-30r001 | ü".encode().hex().upper()),
+                ("2026-09-26T09:00:00", "2026-09-26T08:00:00", "Release 1.0\u00a0\t", "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper()),
             )
             for index, (baseline, live, version, expected) in enumerate(cases):
                 with self.subTest(live=live):
@@ -113,6 +113,8 @@ class BuilderDriftTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(state_out.read_text(encoding="utf-8").strip(), expected)
+                    # No character a Windows .cmd/.bat wrapper for SQLcl would interpret.
+                    self.assertRegex(expected, r"\A[A-Z0-9.:-]+\Z")
 
     def test_absent_app_records_absent_state_and_drift_records_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

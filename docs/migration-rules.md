@@ -32,9 +32,11 @@ add a developer name. When `CODE_SCHEMA` contains exactly one schema, the
 existing flat `migrations/YYYY-MM-DD_<migration-name>-rNNN/` layout remains
 valid and the schema-folder layout is also accepted. When it contains two or
 more schemas, the schema folder is required and a flat migration folder is
-refused. Keep each migration family in one layout: a name that appears both
-flat and under `migrations/<SCHEMA>/` is refused, because both folders could
-target the same schema and apply the same revision twice. The date is the folder creation date and stays the same when the
+refused. With one schema, keep each migration family in one layout: `migrate`
+and `check-conflicts` refuse a family that appears both flat and under
+`migrations/<SCHEMA>/` for that schema, because both folders target it and
+could apply the same revision twice. The same family under another schema's
+folder targets a different schema and is allowed. The date is the folder creation date and stays the same when the
 migration is promoted. The ISO date prefix sorts newer dates ahead when a file
 browser is sorted descending; the name cannot set the browser's sort direction.
 Folders created on the same date have a name-based tie-break, not an
@@ -67,16 +69,18 @@ SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
 so the apply session ends with its own check. Every package, package body,
 type, type body, procedure, function, trigger, view, library, Java source or
 MLE module that the migration's own `CREATE` or `ALTER ... COMPILE` statements
-name is looked up in
-`ALL_ERRORS`; one with errors fails the apply with
-`ORA-20986: Migration left objects with compilation errors`. Objects the
-migration does not name, including a teammate's unrelated work, are never
-checked. The DDL has already committed by then; no receipt is written, and the
-next revision fixes the object. Units created through dynamic SQL
-(`EXECUTE IMMEDIATE`) are not named in the file, and a login user that cannot
-see the owner's objects in `ALL_ERRORS` gets no protection from the check;
-cover those with an explicit postcondition, for example a count of `INVALID`
-objects in `ALL_OBJECTS`.
+name is looked up in `ALL_OBJECTS` and `ALL_ERRORS`. One with errors, or one
+the session cannot find or see, fails the apply with `ORA-20986: Migration left
+objects with compilation errors or that it cannot see`. A name without a schema
+prefix belongs to the session's current schema, including after an
+`ALTER SESSION SET CURRENT_SCHEMA` earlier in the migration; a unit the
+migration drops again is not checked. A plain `ALTER PACKAGE` or `ALTER TYPE
+... COMPILE` also checks the body when one exists. Objects the migration does
+not name, including a teammate's unrelated work, are never checked. The DDL
+has already committed by then; no receipt is written, and the next revision
+fixes the object. Units created through dynamic SQL (`EXECUTE IMMEDIATE`) are
+not named in the file; cover those with an explicit postcondition, for example
+a count of `INVALID` objects in `ALL_OBJECTS`.
 
 ## Immutability and status receipts
 
@@ -154,7 +158,8 @@ refused. Receipts are written only for verified applies.
 A connection name, database name, unique name or service name that looks like
 production (`prod`, `prd`, `production` or `live` as a word, `PRODDB`,
 `ERPPROD`, `erpprod.example.com`) is refused unless the selected target is
-production. This is a naming heuristic, not a guarantee: name non-production
+production. Pre-production names such as `PREPROD`, `NONPROD`, `pre-prod` and
+`non_prd` do not count as production. This is a naming heuristic, not a guarantee: name non-production
 databases so they do not match it, and rely on the expected-user check and the
 team's review for the rest.
 

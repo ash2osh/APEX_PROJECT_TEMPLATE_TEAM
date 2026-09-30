@@ -36,7 +36,13 @@ fi
 shopt -s nocasematch
 # Same production marker as scripts/db_targets.py.
 production_marker='(^|[^[:alnum:]])(production|live)[0-9]*([^[:alnum:]]|$)|(prod|prd)[0-9]*([^[:alnum:]]|$)|(^|[^[:alnum:]])(prod|prd)(db|[0-9])'
-if [[ "$TARGET_CONNECTION" =~ $production_marker ]] && \
+non_production_marker='(pre|non)[-_.]?(prod|prd)'
+# Remove pre-production words (PREPROD, non-prod) before looking for a marker.
+connection_words="$TARGET_CONNECTION"
+while [[ "$connection_words" =~ $non_production_marker ]]; do
+  connection_words="${connection_words/"${BASH_REMATCH[0]}"/ }"
+done
+if [[ "$connection_words" =~ $production_marker ]] && \
    [ "$DB_ENVIRONMENT" != production ]; then
   echo "$TARGET connection '$TARGET_CONNECTION' resembles production but DB_ENVIRONMENT=$DB_ENVIRONMENT" >&2
   echo "ask the user whether this is production before continuing" >&2

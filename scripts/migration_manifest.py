@@ -332,15 +332,6 @@ def _migration_directories(repo_root: Path) -> list[tuple[Path, str | None, str,
             )
         seen[identity] = path
         revisions.setdefault((schema, family), set()).add(revision)
-    # A flat folder and a schema folder can target the same schema, so one
-    # family in both layouts could apply the same revision twice.
-    flat_families = {family for schema, family in revisions if schema is None}
-    for schema, family in sorted(revisions, key=lambda item: (item[1], item[0] or "")):
-        if schema is not None and family in flat_families:
-            raise MigrationManifestError(
-                f"migration family {family} exists in both migrations/ and migrations/{schema}/; "
-                "keep each family in one layout"
-            )
     for (_schema, family), values in revisions.items():
         expected = set(range(1, max(values) + 1))
         if values != expected:
@@ -494,6 +485,36 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
         payload_digest=digest,
         schema=schemas[0],
     )
+
+
+def assert_single_layout(
+    repo_root: Path,
+    migrations: Sequence[Migration],
+    target_schema: str,
+    *,
+    flat_folders_apply: bool,
+) -> None:
+    """Refuse a selected family found both flat and under migrations/<target_schema>/.
+
+    Flat folders run only when one code schema is configured, and then they
+    target that schema. When it also has a schema folder holding the same
+    family, the two layouts could apply the same revision twice. With several
+    schemas a flat folder cannot run, and the same family under another
+    schema's folder targets a different schema; neither is refused.
+    """
+    if not flat_folders_apply:
+        return
+    families = {migration.family for migration in migrations}
+    layouts: dict[str, set[str | None]] = {}
+    for _path, schema, family, _revision in _migration_directories(repo_root):
+        if family in families and schema in (None, target_schema):
+            layouts.setdefault(family, set()).add(schema)
+    for family in sorted(families):
+        if len(layouts.get(family, ())) > 1:
+            raise MigrationManifestError(
+                f"migration family {family} exists in both migrations/ and migrations/{target_schema}/, "
+                f"which both target schema {target_schema}; keep the family in one layout"
+            )
 
 
 def load_batch(repo_root: Path, relative_folders: Sequence[str]) -> tuple[Migration, ...]:

@@ -13,18 +13,24 @@ SQLCL_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
 CLASSIFICATIONS = {"development", "test", "staging", "production"}
 # A production marker is "production" or "live" as a whole token, "prod" or
 # "prd" ending a token (PROD, ERPPROD, erpprod.example.com), or starting one
-# before "db" or a digit (PRODDB, PROD1). The Bash, PowerShell and SQL guards
-# use the same pattern; keep them aligned.
+# before "db" or a digit (PRODDB, PROD1). Pre-production words (PREPROD,
+# NONPROD, pre-prod, non_prd) are removed first, so they are not production.
+# The Bash, PowerShell and SQL guards use the same two patterns; keep them
+# aligned.
 PRODUCTION_MARKER_RE = re.compile(
     r"(^|[^A-Za-z0-9])(production|live)[0-9]*([^A-Za-z0-9]|$)"
     r"|(prod|prd)[0-9]*([^A-Za-z0-9]|$)"
     r"|(^|[^A-Za-z0-9])(prod|prd)(db|[0-9])",
     re.IGNORECASE | re.ASCII,
 )
+NON_PRODUCTION_MARKER_RE = re.compile(r"(pre|non)[-_.]?(prod|prd)", re.IGNORECASE | re.ASCII)
 
 
 def looks_like_production_identity(*values: str) -> bool:
-    return any(PRODUCTION_MARKER_RE.search(str(value)) is not None for value in values)
+    return any(
+        PRODUCTION_MARKER_RE.search(NON_PRODUCTION_MARKER_RE.sub(" ", str(value))) is not None
+        for value in values
+    )
 
 
 class TargetResolutionError(ValueError):
@@ -153,6 +159,11 @@ def resolve_target(
     return Target(environment, connection, expected_user, target_schema, classification)
 
 
+def flat_migrations_apply(values: Mapping[str, str]) -> bool:
+    """Whether a flat migrations/<folder> can run: only with one configured code schema."""
+    return len(split_list(values.get("PROJECT_CODE_SCHEMAS") or values.get("CODE_SCHEMA"))) <= 1
+
+
 def batch_schema(
     schemas: Iterable[str | None],
     requested: str | None,
@@ -167,9 +178,7 @@ def batch_schema(
     if len(folder_schemas) > 1:
         raise TargetResolutionError("selected migrations belong to different schemas; run one schema at a time")
     folder_schema = next(iter(folder_schemas), None)
-    code_schemas = split_list(values.get("PROJECT_CODE_SCHEMAS") or values.get("CODE_SCHEMA"))
-    multi = len(code_schemas) > 1
-    if multi and folder_schema is None:
+    if folder_schema is None and not flat_migrations_apply(values):
         raise TargetResolutionError(
             "several schemas are configured, so migrations must live under migrations/<SCHEMA>/; "
             "move the folder into its schema directory"

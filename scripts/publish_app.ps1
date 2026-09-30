@@ -268,7 +268,7 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   } finally {
     Remove-Item -LiteralPath $approvedStateFile -Force -ErrorAction SilentlyContinue
   }
-  if ($expectedLiveState -cnotmatch '^(ABSENT|P\|([0-9T:-]+|NONE)\|[0-9A-F]*)$') {
+  if ($expectedLiveState -cnotmatch '^(ABSENT|P\.([0-9T:-]+|NONE)\.[0-9A-F]*)$') {
     throw "publish error: Builder drift guard did not record the approved live state; refusing import"
   }
 }
@@ -290,25 +290,32 @@ $restoreUnstamped = $false
 # Expected. Target is renamed aside before the comparison and the replacement
 # is installed with File.Move, which never overwrites, so an editor save at any
 # moment is kept rather than replaced. On Windows the file's own ACL is kept.
+# Returns "swapped", "changed" (Target differs from Expected or reappeared),
+# "locked" (Target could not be moved aside, for example an editor holds it
+# open), or "not-installed" (the replacement could not be moved into place).
 function Invoke-SwapIfUnchanged([string]$Target, [string]$Expected, [string]$Replacement, [string]$Aside) {
   $acl = $null
   if ($PSVersionTable.PSEdition -eq "Desktop" -or $IsWindows) {
     try { $acl = Get-Acl -LiteralPath $Target } catch { $acl = $null }
   }
-  try { [System.IO.File]::Move($Target, $Aside) } catch { return $false }
+  try { [System.IO.File]::Move($Target, $Aside) } catch { return "locked" }
   if ((Get-FileHash -LiteralPath $Aside -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $Expected -Algorithm SHA256).Hash) {
     if (-not (Test-Path -LiteralPath $Target)) {
       try { [System.IO.File]::Move($Aside, $Target) } catch { }
     }
-    return $false
+    return "changed"
   }
-  try { [System.IO.File]::Move($Replacement, $Target) } catch { return $false }
+  if (Test-Path -LiteralPath $Target) { return "changed" }
+  try { [System.IO.File]::Move($Replacement, $Target) } catch {
+    if (Test-Path -LiteralPath $Target) { return "changed" }
+    return "not-installed"
+  }
   if ($null -ne $acl) {
     try { Set-Acl -LiteralPath $Target -AclObject $acl } catch {
       Write-Warning "publish warning: could not restore the Windows permissions of ${Target}: $($_.Exception.Message)"
     }
   }
-  return $true
+  return "swapped"
 }
 $publishedVersion = ""
 try {
@@ -337,8 +344,15 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "publish error: could not stamp the application version" }
     Copy-Item -LiteralPath $stampingSource -Destination $stampedSource
     Copy-Item -LiteralPath $unstampedSource -Destination $restoreSource
-    if (-not (Invoke-SwapIfUnchanged -Target $applicationSource -Expected $unstampedSource `
-        -Replacement $stampingSource -Aside (Join-Path $publishWorkDir "application.apx.before-stamp"))) {
+    $stampResult = Invoke-SwapIfUnchanged -Target $applicationSource -Expected $unstampedSource `
+      -Replacement $stampingSource -Aside (Join-Path $publishWorkDir "application.apx.before-stamp")
+    if ($stampResult -eq "locked") {
+      throw "publish error: could not move application.apx to stamp the publish tag; close any program holding it open and publish again"
+    }
+    if ($stampResult -eq "not-installed") {
+      throw "publish error: could not install the stamped application.apx; nothing was imported, publish again"
+    }
+    if ($stampResult -ne "swapped") {
       throw "publish error: application.apx changed while the publish tag was stamped; publish again"
     }
     $restoreUnstamped = $true
@@ -429,9 +443,12 @@ try {
 } finally {
   if ($restoreUnstamped -and (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
     # Undo only our own stamp. An edit saved while the publish ran is kept.
-    if (-not (Invoke-SwapIfUnchanged -Target $applicationSource -Expected $stampedSource `
-        -Replacement $restoreSource -Aside (Join-Path $publishWorkDir "application.apx.displaced"))) {
+    $restoreResult = Invoke-SwapIfUnchanged -Target $applicationSource -Expected $stampedSource `
+      -Replacement $restoreSource -Aside (Join-Path $publishWorkDir "application.apx.displaced")
+    if ($restoreResult -eq "changed") {
       Write-Warning "publish warning: $applicationSource changed while publishing; left as is (check its version line)"
+    } elseif ($restoreResult -ne "swapped") {
+      Write-Warning "publish warning: could not remove the publish tag from $applicationSource ($restoreResult); restore its version line by hand"
     }
   }
   # Interrupted or failed between moving application.apx aside and installing

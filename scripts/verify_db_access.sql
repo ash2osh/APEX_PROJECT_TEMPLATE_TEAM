@@ -19,10 +19,17 @@ DECLARE
   v_expected_user     VARCHAR2(128) := UPPER('&&expected_user');
   v_session_user      VARCHAR2(128) := SYS_CONTEXT('USERENV', 'SESSION_USER');
   v_current_schema    VARCHAR2(128) := SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA');
-  -- Same production marker as scripts/db_targets.py, applied to each name.
   c_production_marker CONSTANT VARCHAR2(256) :=
     '(^|[^[:alnum:]])(production|live)[[:digit:]]*([^[:alnum:]]|$)|(prod|prd)[[:digit:]]*([^[:alnum:]]|$)|(^|[^[:alnum:]])(prod|prd)(db|[[:digit:]])';
+  c_non_production_marker CONSTANT VARCHAR2(64) := '(pre|non)[-_.]?(prod|prd)';
   v_count             PLS_INTEGER;
+  -- Same production marker as scripts/db_targets.py, applied to each name
+  -- after removing pre-production words such as PREPROD and NON-PROD.
+  FUNCTION resembles_production(p_name VARCHAR2) RETURN BOOLEAN IS
+  BEGIN
+    RETURN REGEXP_LIKE(REGEXP_REPLACE(p_name, c_non_production_marker, ' ', 1, 0, 'i'),
+                       c_production_marker, 'i');
+  END;
 BEGIN
   IF v_session_user != v_expected_user THEN
     RAISE_APPLICATION_ERROR(-20001,
@@ -37,9 +44,9 @@ BEGIN
       'Target schema does not exist or is not visible: ' || v_target_schema);
   END IF;
 
-  IF (REGEXP_LIKE(SYS_CONTEXT('USERENV', 'DB_NAME'), c_production_marker, 'i')
-      OR REGEXP_LIKE(SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME'), c_production_marker, 'i')
-      OR REGEXP_LIKE(SYS_CONTEXT('USERENV', 'SERVICE_NAME'), c_production_marker, 'i'))
+  IF (resembles_production(SYS_CONTEXT('USERENV', 'DB_NAME'))
+      OR resembles_production(SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME'))
+      OR resembles_production(SYS_CONTEXT('USERENV', 'SERVICE_NAME')))
      AND v_environment != 'production' THEN
     RAISE_APPLICATION_ERROR(-20002,
       'Database/service identity resembles production; ask the user to classify it before continuing');

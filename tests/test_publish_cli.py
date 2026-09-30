@@ -447,6 +447,32 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("changed while publishing; left as is", result.stderr)
             self.assertIn("// saved during publish", (app / "application.apx").read_text(encoding="utf-8"))
 
+    def test_application_source_that_cannot_be_moved_is_reported_as_such(self) -> None:
+        # On Windows an editor holding the file open blocks the rename; a
+        # read-only folder blocks it the same way here.
+        pwsh = shutil.which("pwsh")
+        shells = [("bash", None)] + ([("pwsh", pwsh)] if pwsh else [])
+        for shell, executable in shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                original = (app / "application.apx").read_bytes()
+                if shell == "bash":
+                    command = ["bash", str(runner), "100"]
+                else:
+                    command = [executable, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+                app.chmod(0o555)
+                try:
+                    result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+                finally:
+                    app.chmod(0o755)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("could not move application.apx", result.stdout + result.stderr)
+                self.assertNotIn("changed while the publish tag was stamped", result.stdout + result.stderr)
+                self.assertEqual((app / "application.apx").read_bytes(), original)
+                self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "0")
+
     def test_import_session_receives_the_approved_live_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -459,7 +485,7 @@ class PublishAppCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             arguments = sql_log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(arguments[-1], "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper())
+            self.assertEqual(arguments[-1], "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper())
 
             forced = subprocess.run(
                 ["bash", str(runner), "100", "--force"], cwd=root, env=environment,
@@ -538,7 +564,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(
                 sql_log.read_text(encoding="utf-8").splitlines()[-1],
-                "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper(),
+                "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper(),
             )
 
     def test_powershell_import_that_clears_builder_timestamp_publishes(self) -> None:

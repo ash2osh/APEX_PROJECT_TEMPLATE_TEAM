@@ -14,6 +14,14 @@ DECLARE
   l_owner_count PLS_INTEGER;
   c_production_marker CONSTANT VARCHAR2(256) :=
     '(^|[^[:alnum:]])(production|live)[[:digit:]]*([^[:alnum:]]|$)|(prod|prd)[[:digit:]]*([^[:alnum:]]|$)|(^|[^[:alnum:]])(prod|prd)(db|[[:digit:]])';
+  c_non_production_marker CONSTANT VARCHAR2(64) := '(pre|non)[-_.]?(prod|prd)';
+  -- Same production marker as scripts/db_targets.py, applied to each name
+  -- after removing pre-production words such as PREPROD and NON-PROD.
+  FUNCTION resembles_production(p_name VARCHAR2) RETURN BOOLEAN IS
+  BEGIN
+    RETURN REGEXP_LIKE(REGEXP_REPLACE(p_name, c_non_production_marker, ' ', 1, 0, 'i'),
+                       c_production_marker, 'i');
+  END;
 BEGIN
   IF l_session_user != c_expected_user THEN
     RAISE_APPLICATION_ERROR(-20980, 'Migration expected session user ' || c_expected_user || ' but found ' || l_session_user);
@@ -25,11 +33,10 @@ BEGIN
   IF l_owner_count != 1 THEN
     RAISE_APPLICATION_ERROR(-20982, 'Migration target schema is not visible: ' || c_target_schema);
   END IF;
-  -- Same production marker as scripts/db_targets.py, applied to each name.
   IF c_target_environment != 'prod' AND (
-       REGEXP_LIKE(l_database_name, c_production_marker, 'i')
-       OR REGEXP_LIKE(l_db_unique_name, c_production_marker, 'i')
-       OR REGEXP_LIKE(l_service_name, c_production_marker, 'i')) THEN
+       resembles_production(l_database_name)
+       OR resembles_production(l_db_unique_name)
+       OR resembles_production(l_service_name)) THEN
     RAISE_APPLICATION_ERROR(-20983, 'Target identity resembles production but the selected environment is not prod');
   END IF;
 END;

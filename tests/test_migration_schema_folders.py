@@ -49,13 +49,32 @@ class SchemaFolderManifestTests(unittest.TestCase):
         add_folder(self.root, "migrations/APR/2026-09-29_add-flag-r001")
         self.assertEqual(2, len(manifest.list_migration_folders(self.root)))
 
-    def test_one_family_in_flat_and_schema_layouts_is_refused(self) -> None:
+    def test_one_family_in_flat_and_schema_layouts_is_refused_for_the_same_schema(self) -> None:
         add_folder(self.root, "migrations/2026-09-29_rebuild-r001")
         add_folder(self.root, "migrations/APP/2026-09-30_rebuild-r001")
-        with self.assertRaisesRegex(manifest.MigrationManifestError, "both migrations/ and migrations/APP/"):
-            manifest.list_migration_folders(self.root)
-        with self.assertRaises(manifest.MigrationManifestError):
-            manifest.load_batch(self.root, ["migrations/APP/2026-09-30_rebuild-r001"])
+        # Listing and loading still work; only a command aimed at APP refuses.
+        self.assertEqual(2, len(manifest.list_migration_folders(self.root)))
+        for folder in ("migrations/APP/2026-09-30_rebuild-r001", "migrations/2026-09-29_rebuild-r001"):
+            batch = manifest.load_batch(self.root, [folder])
+            with self.subTest(folder=folder):
+                with self.assertRaisesRegex(manifest.MigrationManifestError, "both migrations/ and migrations/APP/"):
+                    manifest.assert_single_layout(self.root, batch, "APP", flat_folders_apply=True)
+
+    def test_one_family_flat_and_under_a_schema_folder_is_allowed_when_flat_cannot_run(self) -> None:
+        # With several schemas configured a flat folder cannot be applied, so
+        # SALES/ holds the only runnable copy.
+        add_folder(self.root, "migrations/2026-09-29_add-audit-r001")
+        add_folder(self.root, "migrations/SALES/2026-09-29_add-audit-r001")
+        batch = manifest.load_batch(self.root, ["migrations/SALES/2026-09-29_add-audit-r001"])
+        manifest.assert_single_layout(self.root, batch, "SALES", flat_folders_apply=False)
+
+    def test_one_family_under_two_schema_folders_is_allowed(self) -> None:
+        add_folder(self.root, "migrations/2026-09-29_add-audit-r001")
+        add_folder(self.root, "migrations/SALES/2026-09-29_add-audit-r001")
+        add_folder(self.root, "migrations/HR/2026-09-29_add-audit-r001")
+        batch = manifest.load_batch(self.root, ["migrations/HR/2026-09-29_add-audit-r001"])
+        # The flat copy targets APP here; HR/ and SALES/ are other schemas.
+        manifest.assert_single_layout(self.root, batch, "HR", flat_folders_apply=False)
 
     def test_different_families_may_use_different_layouts(self) -> None:
         add_folder(self.root, "migrations/2026-09-29_create-t1-r001")
@@ -126,6 +145,19 @@ class SchemaFolderCliTests(unittest.TestCase):
             ["migrations/2026-09-29_create-t1-r001", "--env", "dev"],
             environ=self.MULTI_ENV, repo_root=self.root, confirm=lambda prompt: False,
         )
+        self.assertEqual(2, code)
+
+    def test_migrate_refuses_one_family_in_both_layouts_before_connecting(self) -> None:
+        from unittest.mock import patch
+        from scripts import migrate
+        single = {**self.MULTI_ENV, "CODE_SQLCL_CONNECTION": "conn-tms", "CODE_EXPECTED_USER": "TMS", "CODE_SCHEMA": "TMS", "PROJECT_MULTI_SCHEMA": "false"}
+        add_folder(self.root, "migrations/2026-09-29_rebuild-r001")
+        add_folder(self.root, "migrations/TMS/2026-09-30_rebuild-r001")
+        with patch.object(migrate, "apply_batch", side_effect=AssertionError("must refuse before applying")):
+            code = migrate.main(
+                ["migrations/TMS/2026-09-30_rebuild-r001", "--env", "dev"],
+                environ=single, repo_root=self.root, confirm=lambda prompt: False,
+            )
         self.assertEqual(2, code)
 
     def test_migrate_refuses_a_batch_that_mixes_schemas(self) -> None:

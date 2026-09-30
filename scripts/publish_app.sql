@@ -22,10 +22,17 @@ DECLARE
   v_environment   VARCHAR2(32) := LOWER('&&db_environment');
   v_expected_user VARCHAR2(128) := UPPER('&&expected_user');
   v_session_user  VARCHAR2(128) := SYS_CONTEXT('USERENV', 'SESSION_USER');
-  -- Same production marker as scripts/db_targets.py, applied to each name.
   c_production_marker CONSTANT VARCHAR2(256) :=
     '(^|[^[:alnum:]])(production|live)[[:digit:]]*([^[:alnum:]]|$)|(prod|prd)[[:digit:]]*([^[:alnum:]]|$)|(^|[^[:alnum:]])(prod|prd)(db|[[:digit:]])';
+  c_non_production_marker CONSTANT VARCHAR2(64) := '(pre|non)[-_.]?(prod|prd)';
   v_schema_count  PLS_INTEGER;
+  -- Same production marker as scripts/db_targets.py, applied to each name
+  -- after removing pre-production words such as PREPROD and NON-PROD.
+  FUNCTION resembles_production(p_name VARCHAR2) RETURN BOOLEAN IS
+  BEGIN
+    RETURN REGEXP_LIKE(REGEXP_REPLACE(p_name, c_non_production_marker, ' ', 1, 0, 'i'),
+                       c_production_marker, 'i');
+  END;
 BEGIN
   IF v_session_user != v_expected_user THEN
     RAISE_APPLICATION_ERROR(-20001,
@@ -40,9 +47,9 @@ BEGIN
       'Target parsing schema does not exist or is not visible: ' || v_target_schema);
   END IF;
 
-  IF (REGEXP_LIKE(SYS_CONTEXT('USERENV', 'DB_NAME'), c_production_marker, 'i')
-      OR REGEXP_LIKE(SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME'), c_production_marker, 'i')
-      OR REGEXP_LIKE(SYS_CONTEXT('USERENV', 'SERVICE_NAME'), c_production_marker, 'i'))
+  IF (resembles_production(SYS_CONTEXT('USERENV', 'DB_NAME'))
+      OR resembles_production(SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME'))
+      OR resembles_production(SYS_CONTEXT('USERENV', 'SERVICE_NAME')))
      AND v_environment != 'production' THEN
     RAISE_APPLICATION_ERROR(-20002,
       'Database/service identity resembles production but the selected target is not production');
@@ -52,10 +59,14 @@ END;
 
 -- The drift guard ran in an earlier session. Re-read the live revision in this
 -- import session so a Builder save or teammate import since then is refused
--- instead of overwritten.
+-- instead of overwritten. The token is built in PL/SQL, whose strings hold
+-- 32767 bytes, so a long multibyte version still fits once hex-encoded.
 DECLARE
-  v_expected VARCHAR2(1024) := '&&expected_live_state';
-  v_observed VARCHAR2(1024);
+  v_expected VARCHAR2(32767) := '&&expected_live_state';
+  v_observed VARCHAR2(32767);
+  v_count    PLS_INTEGER;
+  v_updated  DATE;
+  v_version  VARCHAR2(32767);
   -- The characters Python's str.rstrip() removes; the drift guard's token is
   -- built from a version stripped that way.
   c_python_whitespace CONSTANT VARCHAR2(200) := UNISTR(
@@ -64,15 +75,19 @@ DECLARE
     || '\2028\2029\202F\205F\3000');
 BEGIN
   IF v_expected != '-' THEN
-    SELECT CASE
-             WHEN COUNT(*) = 0 THEN 'ABSENT'
-             ELSE 'P|' || NVL(TO_CHAR(MAX(last_updated_on), 'YYYY-MM-DD"T"HH24:MI:SS'), 'NONE')
-                  || '|' || RAWTOHEX(UTL_I18N.STRING_TO_RAW(
-                       REGEXP_REPLACE(MAX(version), '[' || c_python_whitespace || ']+$'), 'AL32UTF8'))
-           END
-      INTO v_observed
+    SELECT COUNT(*), MAX(last_updated_on), MAX(version)
+      INTO v_count, v_updated, v_version
       FROM apex_applications
      WHERE application_id = TO_NUMBER('&&expected_app_id');
+    IF v_count = 0 THEN
+      v_observed := 'ABSENT';
+    ELSE
+      v_version := REGEXP_REPLACE(v_version, '[' || c_python_whitespace || ']+$');
+      v_observed := 'P.' || NVL(TO_CHAR(v_updated, 'YYYY-MM-DD"T"HH24:MI:SS'), 'NONE') || '.';
+      IF v_version IS NOT NULL THEN
+        v_observed := v_observed || RAWTOHEX(UTL_I18N.STRING_TO_RAW(v_version, 'AL32UTF8'));
+      END IF;
+    END IF;
     IF v_observed != v_expected THEN
       RAISE_APPLICATION_ERROR(-20016,
         'Live application changed after the Builder drift check; export and reconcile before publishing');

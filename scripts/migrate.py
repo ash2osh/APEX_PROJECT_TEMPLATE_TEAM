@@ -16,12 +16,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
 
-from .db_targets import Target, TargetResolutionError, batch_schema, looks_like_production_identity, resolve_target
+from .db_targets import (
+    Target,
+    TargetResolutionError,
+    batch_schema,
+    flat_migrations_apply,
+    looks_like_production_identity,
+    resolve_target,
+)
 from .migration_checks import CheckReport, PreflightReport, analyze_batch, compiled_units, preflight, run_checks
 from .migration_manifest import (
     Migration,
     MigrationFile,
     MigrationManifestError,
+    assert_single_layout,
     install_receipt,
     load_batch,
     load_migration,
@@ -474,22 +482,32 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _compile_guard_lines(units: Sequence[tuple[str, str, str]]) -> list[str]:
+def _compile_guard_lines(units: Sequence[tuple[str, str, str, bool]]) -> list[str]:
     """Fail the apply when a unit this migration compiled is left with errors.
 
     SQLcl reports a PL/SQL or view compilation error as a warning and keeps
     going; WHENEVER SQLERROR does not fire. ALL_ERRORS is the reliable signal,
     checked only for the units the migration's own CREATE and ALTER ... COMPILE
-    statements name, so a teammate's unrelated DDL cannot fail this apply.
+    statements name, so a teammate's unrelated DDL cannot fail this apply. A
+    required unit this session cannot see would pass ALL_ERRORS unseen, so it
+    fails the apply too.
     """
     if not units:
         return []
     lines = [
         "DECLARE",
         "  l_failed VARCHAR2(4000);",
-        "  PROCEDURE check_unit(p_owner VARCHAR2, p_type VARCHAR2, p_name VARCHAR2) IS",
+        "  PROCEDURE check_unit(p_owner VARCHAR2, p_type VARCHAR2, p_name VARCHAR2, p_required BOOLEAN) IS",
         "    l_count PLS_INTEGER;",
         "  BEGIN",
+        "    SELECT COUNT(*) INTO l_count FROM all_objects",
+        "    WHERE owner = p_owner AND object_type = p_type AND object_name = p_name;",
+        "    IF l_count = 0 THEN",
+        "      IF p_required THEN",
+        "        l_failed := SUBSTR(l_failed || ' ' || p_type || ' ' || p_owner || '.' || p_name || ' (not found or not visible);', 1, 3000);",
+        "      END IF;",
+        "      RETURN;",
+        "    END IF;",
         "    SELECT COUNT(*) INTO l_count FROM all_errors",
         "    WHERE owner = p_owner AND type = p_type AND name = p_name AND attribute = 'ERROR';",
         "    IF l_count > 0 THEN",
@@ -498,11 +516,14 @@ def _compile_guard_lines(units: Sequence[tuple[str, str, str]]) -> list[str]:
         "  END;",
         "BEGIN",
     ]
-    for owner, object_type, name in units:
-        lines.append(f"  check_unit({_sql_literal(owner)}, {_sql_literal(object_type)}, {_sql_literal(name)});")
+    for owner, object_type, name, required in units:
+        lines.append(
+            f"  check_unit({_sql_literal(owner)}, {_sql_literal(object_type)}, {_sql_literal(name)}, "
+            f"{'TRUE' if required else 'FALSE'});"
+        )
     lines.extend([
         "  IF l_failed IS NOT NULL THEN",
-        "    RAISE_APPLICATION_ERROR(-20986, 'Migration left objects with compilation errors:' || l_failed);",
+        "    RAISE_APPLICATION_ERROR(-20986, 'Migration left objects with compilation errors or that it cannot see:' || l_failed);",
         "  END IF;",
         "END;",
         "/",
@@ -547,7 +568,14 @@ def apply_folder(
         driver_lines.extend(_identity_guard_lines(expected_identity))
     for file in migration.files:
         driver_lines.append(f"@@../payload/{migration.folder.name}/{file.name}")
-    driver_lines.extend(("SET DEFINE OFF", *_compile_guard_lines(compiled_units(migration, target.schema))))
+    # The payload may have changed these settings (for example WHENEVER
+    # SQLERROR CONTINUE); the compile guard's error must still stop the commit.
+    driver_lines.extend((
+        "SET DEFINE OFF",
+        "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
+        "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
+        *_compile_guard_lines(compiled_units(migration, target.schema)),
+    ))
     driver_lines.extend(("PROMPT MIGRATION_APPLY_COMPLETED", "EXIT SUCCESS COMMIT", ""))
     driver = run_dir / "migration-driver.sql"
     driver.write_text("\n".join(driver_lines), encoding="utf-8", newline="\n")
@@ -905,6 +933,7 @@ def main(
         requested = args.schema or values.get("PROJECT_SCHEMA") or None
         schema = batch_schema([migration.schema for migration in migrations], requested, values)
         target = resolve_target(values, args.env[0], "migration", schema=schema)
+        assert_single_layout(Path(repo_root), migrations, target.schema, flat_folders_apply=flat_migrations_apply(values))
     except (MigrationManifestError, TargetResolutionError, OSError) as error:
         print(f"migration error: {error}", file=sys.stderr)
         return 2

@@ -73,7 +73,9 @@ def get_export_baseline(app_dir: Path, app_id: int) -> AppState | None:
 def live_state_token(state: AppState) -> str:
     """Encode an approved live state for publish_app.sql to re-check before import.
 
-    The version is free text, so it travels as hex of its UTF-8 bytes. SQLcl
+    The version is free text, so it travels as hex of its UTF-8 bytes; the
+    token uses only letters, digits, '.', ':' and '-', which no Windows
+    command wrapper treats specially. SQLcl
     pads the drift query line, so trailing whitespace is not observable here;
     both sides drop exactly what str.rstrip() drops (publish_app.sql lists the
     same characters).
@@ -81,7 +83,7 @@ def live_state_token(state: AppState) -> str:
     if not state.present:
         return "ABSENT"
     version = (state.version or "").rstrip()
-    return f"P|{state.last_updated_on or 'NONE'}|{version.encode('utf-8').hex().upper()}"
+    return f"P.{state.last_updated_on or 'NONE'}.{version.encode('utf-8').hex().upper()}"
 
 
 def _write_state(path: Path | None, state: AppState) -> None:

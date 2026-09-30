@@ -372,9 +372,15 @@ class MigrateCliTests(unittest.TestCase):
             self.assertLess(payload_at, compile_at)
             self.assertLess(compile_at, content.index("MIGRATION_APPLY_COMPLETED"))
             self.assertIn("FROM all_errors", content)
-            self.assertIn("check_unit('APP_DEV', 'PACKAGE', 'ZZ_PKG');", content)
-            self.assertIn("check_unit('APP_DEV', 'PACKAGE BODY', 'ZZ_PKG');", content)
+            self.assertIn("FROM all_objects", content)
+            self.assertIn("check_unit('APP_DEV', 'PACKAGE', 'ZZ_PKG', TRUE);", content)
+            self.assertIn("check_unit('APP_DEV', 'PACKAGE BODY', 'ZZ_PKG', TRUE);", content)
             self.assertNotIn("check_unit('APP_DEV', 'TABLE'", content)
+            # A payload's WHENEVER SQLERROR CONTINUE must not let the guard's
+            # error fall through to the commit.
+            last_payload_at = content.rindex("@@../payload/")
+            whenever_at = content.index("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", last_payload_at)
+            self.assertLess(whenever_at, compile_at)
             output = f"MIGRATION_IDENTITY_BEGIN\n{fake_identity}\nMIGRATION_IDENTITY_END\nMIGRATION_IDENTITY_VERIFIED\nMIGRATION_APPLY_COMPLETED\n"
             return SqlclResult(0, output, working)
         expected_identity = json.loads(fake_identity)
