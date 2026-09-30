@@ -1,4 +1,7 @@
+import json
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +17,9 @@ DOCS = (
     ROOT / "migrations" / "README.md",
     ROOT / "docs" / "migration-rules.md",
     ROOT / "docs" / "publish-rules.md",
+    ROOT / "docs" / "GETTING_STARTED.md",
+    ROOT / "docs" / "EXAMPLES.md",
+    ROOT / "docs" / "TROUBLESHOOTING.md",
 )
 # Each refusal the publish guide explains, and the script that prints it. The
 # guide quotes these verbatim, so rewording a message must update the guide.
@@ -162,6 +168,130 @@ class DocumentationContractTests(unittest.TestCase):
                 resolved = (path.parent / relative_target).resolve()
                 with self.subTest(file=path.relative_to(ROOT), target=target):
                     self.assertTrue(resolved.exists(), f"broken local Markdown link: {target}")
+
+
+def heading_slugs(markdown: str) -> set[str]:
+    """GitHub-style anchors for every heading outside fenced code blocks."""
+    slugs = set()
+    in_fence = False
+    for line in markdown.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+        match = None if in_fence else re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if match:
+            text = re.sub(r"[`*_]", "", match.group(1)).lower()
+            slugs.add(re.sub(r"\s", "-", re.sub(r"[^\w\s-]", "", text)))
+    return slugs
+
+
+def team_commands() -> list[str]:
+    """The command names `scripts/team.sh --help` lists."""
+    help_text = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "team.sh"), "--help"], capture_output=True, text=True, check=True
+    ).stdout
+    commands = re.findall(r"^  ([a-z][a-z-]+)(?: |$)", help_text.split("Options:")[0], re.MULTILINE)
+    return [name for name in commands if name != "help"]
+
+
+class GuideContractTests(unittest.TestCase):
+    """The newcomer guides must stay true to the code and the skill folders."""
+
+    def readme_section(self, heading: str) -> str:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        start = readme.index(f"## {heading}")
+        end = readme.find("\n## ", start + 1)
+        return readme[start:] if end == -1 else readme[start:end]
+
+    def test_readme_lists_every_skill_and_only_real_skills(self) -> None:
+        skills = {path.name for path in (ROOT / ".agents" / "skills").iterdir() if path.is_dir()}
+        mirrored = {path.name for path in (ROOT / ".claude" / "skills").iterdir() if path.is_dir()}
+        self.assertEqual(skills, mirrored, ".agents/skills and .claude/skills must list the same skills")
+        section = self.readme_section("Skills and agent support")
+        named = set(re.findall(r"`([a-z][a-z0-9-]+)`", section))
+        self.assertEqual(set(), skills - named, "skills missing from the README skills list")
+        ghosts = {
+            name for name in named - skills
+            if re.search(rf"(^\| `{re.escape(name)}` \|)", section, re.MULTILINE)
+        }
+        self.assertEqual(set(), ghosts, "README lists skills that do not exist")
+
+    def test_readme_states_the_real_number_of_skills(self) -> None:
+        skills = [path for path in (ROOT / ".agents" / "skills").iterdir() if path.is_dir()]
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        counts = {int(number) for number in re.findall(r"\b(\d+) skills\b", readme)}
+        self.assertEqual({len(skills)}, counts)
+
+    def test_every_skill_folder_has_a_described_skill_file(self) -> None:
+        for path in sorted((ROOT / ".agents" / "skills").iterdir()):
+            if path.is_dir():
+                with self.subTest(skill=path.name):
+                    text = (path / "SKILL.md").read_text(encoding="utf-8")
+                    self.assertRegex(text, r"(?m)^description:\s*\S")
+
+    def test_readme_command_reference_covers_every_team_command(self) -> None:
+        reference = self.readme_section("Command reference")
+        commands = team_commands()
+        self.assertGreaterEqual(len(commands), 9)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIn(f"scripts/team.sh {command}", reference)
+
+    def test_guides_only_use_real_team_commands(self) -> None:
+        commands = set(team_commands())
+        for name in ("GETTING_STARTED.md", "EXAMPLES.md", "TROUBLESHOOTING.md"):
+            text = (ROOT / "docs" / name).read_text(encoding="utf-8")
+            for used in re.findall(r"scripts/team\.(?:sh|ps1) ([a-z][a-z-]+)", text):
+                with self.subTest(file=name, command=used):
+                    self.assertIn(used, commands)
+
+    def test_local_links_point_at_real_headings(self) -> None:
+        for path in DOCS:
+            content = path.read_text(encoding="utf-8")
+            for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", content):
+                if "://" in target or "#" not in target:
+                    continue
+                file_part, fragment = target.split("#", 1)
+                linked = path if not file_part else (path.parent / file_part).resolve()
+                if linked.suffix != ".md" or not linked.exists():
+                    continue
+                with self.subTest(file=path.relative_to(ROOT), target=target):
+                    self.assertIn(fragment, heading_slugs(linked.read_text(encoding="utf-8")))
+
+    def test_json_examples_in_the_guides_parse(self) -> None:
+        for name in ("GETTING_STARTED.md", "EXAMPLES.md"):
+            text = (ROOT / "docs" / name).read_text(encoding="utf-8")
+            for index, block in enumerate(re.findall(r"```json\n(.*?)```", text, re.DOTALL), start=1):
+                with self.subTest(file=name, block=index):
+                    json.loads(block)
+
+    def test_deployment_descriptor_example_has_the_keys_publish_reads(self) -> None:
+        text = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+        descriptors = [
+            json.loads(block) for block in re.findall(r"```json\n(.*?)```", text, re.DOTALL) if '"workspace"' in block
+        ]
+        self.assertEqual(1, len(descriptors))
+        descriptor = descriptors[0]
+        self.assertIsInstance(descriptor["workspace"]["name"], str)
+        self.assertIsInstance(descriptor["app"]["id"], int)
+        self.assertRegex(descriptor["app"]["databaseSession"]["parsingSchema"], r"^[A-Z][A-Z0-9_$#]*$")
+
+    def test_checks_json_examples_are_accepted_by_the_migration_loader(self) -> None:
+        from scripts import migration_manifest
+
+        found = 0
+        for name in ("GETTING_STARTED.md", "EXAMPLES.md"):
+            text = (ROOT / "docs" / name).read_text(encoding="utf-8")
+            for block in re.findall(r"```json\n(.*?)```", text, re.DOTALL):
+                if '"schemaVersion"' not in block:
+                    continue
+                found += 1
+                with self.subTest(file=name, block=found), tempfile.TemporaryDirectory() as temporary:
+                    folder = Path(temporary) / "migrations" / "2026-09-30_example-r001"
+                    folder.mkdir(parents=True)
+                    (folder / "001-example.sql").write_text("ALTER TABLE HR_USERS ADD (NOTES VARCHAR2(200));\n", encoding="utf-8")
+                    (folder / "checks.json").write_text(block, encoding="utf-8")
+                    migration_manifest.load_migration(Path(temporary), "migrations/2026-09-30_example-r001")
+        self.assertGreaterEqual(found, 2)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,82 @@ Those repositories do not share commits or a remote; developers coordinate
 through the shared development database and APEX Builder workspace. Branches
 separate file changes only and do not isolate a shared APEX application.
 
+## Start here
+
+| I want to… | Read |
+| --- | --- |
+| set everything up for the first time | [Getting started](docs/GETTING_STARTED.md) |
+| do a specific task, step by step | [Examples](docs/EXAMPLES.md) |
+| understand an error message | [Troubleshooting](docs/TROUBLESHOOTING.md) |
+| look up a command | [Command reference](#command-reference) |
+| know exactly when publish or migrate refuses | [publish-rules](docs/publish-rules.md), [migration-rules](docs/migration-rules.md) |
+| see what an AI assistant can do here | [Skills and agent support](#skills-and-agent-support) |
+
+## What you get
+
+| Feature | What it does |
+| --- | --- |
+| APEX apps as text in Git | `export` copies a live app into APEXlang files you can review, diff and commit. |
+| Two ways to work | **Builder-first** (change it in APEX, export it) or **file-first** (edit the files, publish them). |
+| Safe publish | Refuses to overwrite newer Builder work, stamps who published and when, then re-exports the app and checks it byte for byte against your files. |
+| SQL migrations | Dated folders of numbered SQL plus `checks.json`; a live check for conflicts before applying; a verified receipt after. |
+| Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production. |
+| Several schemas per workspace | Comma-separated lists in `.env` and `--schema`; apps, database copies and migrations are kept per schema. |
+| Staging and production | Per-app descriptors, an explicit `[y/N]` confirmation, and `--manual` to print a runbook for a DBA. |
+| Read-only database copy | `backup-db` mirrors tables, views, packages, procedures, functions, triggers and synonyms (structure only, never data). |
+| Safety built in | Every connection is identity-checked, production-looking names are caught, production is read-only, file installs are all-or-nothing, and your uncommitted work is never overwritten. |
+| Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
+| Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
+| AI-assistant support | Repository rules, workflows, 25 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
+| Bash and PowerShell | `scripts/team.sh` and `scripts/team.ps1` expose the same commands. |
+
+## Skills and agent support
+
+AI coding assistants read [AGENTS.md](AGENTS.md) (Claude Code loads it through
+`CLAUDE.md`) for the rules and load a skill on their own when a task matches
+its description. The same 25 skills are kept in `.agents/skills/` (for agents
+that follow the `AGENTS.md` convention) and `.claude/skills/` (for Claude Code).
+You do not have to call them by name.
+
+**APEX and database skills**
+
+| Skill | Use it when |
+| --- | --- |
+| `initialize-project` | Setting up a new copy: `/init` asks a few questions, checks your tools and writes `.env`. It never handles passwords. |
+| `apex-background` | Writing or debugging PL/SQL in automations, workflow activities, task actions or background chains. |
+| `apex-session-context` | SQL or PL/SQL outside a page request reads task or workflow views or calls workflow APIs (SQLcl, schedulers). |
+| `apex-workflow-lifecycle` | Importing or moving an app that has live workflow or task instances, or diagnosing a missing schedule. |
+| `apexlang-export-debugging` | An APEXlang export fails with `ORA-01403` in `WWV_META_META_DATA`. |
+| `optimizing-apex-task-inboxes` | Task inboxes are slow from repeated task API or view calls. |
+| `safeguarding-apexlang-text-messages` | Localizing or repairing `textMessages` without breaking substitutions or tokens. |
+| `sqlcl-mcp-r0` | An assistant operates SQLcl through MCP at restriction level 0. |
+| `sqlcl-script-path-debugging` | Nested SQLcl scripts load the wrong file, or relative `SPOOL` and include paths misbehave. |
+| `chrome-devtools-mcp` | Inspecting or driving your running web app in Chrome through the project's persistent DevTools daemon. |
+| `install-uc-apx` | Installing or verifying the optional `uc-apx` command-line tool when `INSTALL_UC_APX=true`. |
+
+**Workflow skills** (from the Superpowers collection): `brainstorming`,
+`writing-plans`, `executing-plans`, `subagent-driven-development`,
+`dispatching-parallel-agents`, `test-driven-development`,
+`systematic-debugging`, `verification-before-completion`,
+`requesting-code-review`, `receiving-code-review`,
+`finishing-a-development-branch`, `using-superpowers`, `writing-skills` and
+`diagnosing-superpowers`. They guide how an assistant designs, implements,
+debugs and reviews a change.
+
+Rules and workflows that apply to everyone, human or assistant, live in
+`.agents/rules/` (`agent-safety.md`, `graphify.md`) and `.agents/workflows/`
+(`team-flow.md`, `graphify.md`, `uc-apx.md`). Put your project's own
+instructions in `AGENTS.project.md`, `.agents/rules/project.md` and
+`PROJECT.md`; template upgrades never overwrite those.
+
 ## Quickstart
+
+New here? Follow [Getting started](docs/GETTING_STARTED.md): it walks through
+everything below with the output you should see. You need SQLcl 26.1 or newer,
+Git, Python 3.10 or newer, Bash 4.3 or newer, and an Oracle database with
+APEX 26.1 or newer. To practice locally, the
+[United Codes `uc-local-apex-dev`](https://github.com/United-Codes/uc-local-apex-dev)
+containers give you one.
 
 Copy the example configuration, set `DEVELOPER_NAME` to your uppercase name
 (for example `ASHARIF`), adjust SQLcl saved connection names and expected

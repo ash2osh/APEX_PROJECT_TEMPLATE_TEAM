@@ -1,0 +1,85 @@
+# Troubleshooting
+
+Find the message you saw, then read what it means and what to do. Messages are
+quoted as the scripts print them; `<...>` marks a value that differs for you.
+For the full list of publish refusals see [publish-rules.md](publish-rules.md);
+for migration rules see [migration-rules.md](migration-rules.md).
+
+## Setup and connection
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `configuration file not found: ... (copy .env.example to .env)` | There is no `.env` yet. | `cp .env.example .env`, then edit it. |
+| `project environment error: PROJECT_NAME is required in .env` (or another setting) | A required setting is missing or empty. | Copy the missing line from `.env.example`. |
+| `unsupported setting in .env: <KEY>` | `.env` contains a setting this template does not know, often a leftover from an older version. | Delete that line. Compare with `.env.example`. |
+| `DEVELOPER_NAME must be uppercase letters, digits, or underscores...` | The name is lowercase or has other characters. | Use capitals, for example `ALICE`. |
+| `<KEY> has an inline comment` | A value in `.env` is followed by `# ...` on the same line. | Move the comment to its own line. |
+| `<KEY> must list the same number of entries` | The schema, connection and user settings of one profile have different numbers of comma-separated values. | Give all three the same number of entries, in the same order. |
+| `ORA-12541: TNS:no listener` or `Connection refused` | The database is not running or not reachable. | Start it (with the local setup: `./local-26ai.sh start`) and retry. |
+| `ORA-28000: the account is locked` / "Account Is Locked" | The schema's password expired or was locked. | With the local setup: `./local-26ai.sh unexpire-accounts`. Otherwise ask your DBA. |
+| `Expected session user <X> but found <Y>` | The saved connection logs in as a different user than `*_EXPECTED_USER` says. | Fix the saved connection or the `*_EXPECTED_USER` value. This check prevents working in the wrong schema. |
+| `Target schema does not exist or is not visible: <X>` | The schema name in `.env` is wrong, or that user cannot see it. | Correct the `*_SCHEMA` value. |
+| `<profile> connection '<name>' resembles production but DB_ENVIRONMENT=development` | The saved connection's name contains a word like `prod` or `live`. | Rename the saved connection, or, if it really is production, set `DB_ENVIRONMENT=production` (which makes the scripts read-only). |
+| `sql: command not found` | SQLcl is not installed or not on your `PATH`. | Install SQLcl 26.1 or newer and open a new terminal. |
+| `local: -n: invalid option` (or other odd Bash errors) on macOS | macOS's built-in Bash (3.2) is too old. | `brew install bash`, then run the scripts with it. |
+| `bash` is not found on Windows | Bash is not installed. | Install Git for Windows, which includes Git Bash. |
+
+## Export and backup
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `refusing to export over dirty mirror: apps/<SCHEMA>/<id>` | You have uncommitted changes in that app's folder. Export would overwrite them. | Commit or stash them, then export again. |
+| `refusing to back up over dirty mirror: database/<SCHEMA>` | Same, for the database copy. | Commit or discard the changes there, then run `backup-db` again. |
+| `application <id> was not found in the workspace visible to this connection` | The app ID is wrong, or the connection cannot see that workspace. | Check `APEX_APP_ID` and the connection. |
+| `... is parsed by <X>, which is not listed in APEX_PARSING_SCHEMA` | The app belongs to a schema you have not configured. | Add that schema (with its connection and user) to the `APEX_*` settings. |
+| export refuses because the app's last update matches "the current database second" | The app changed in the same second, so the revision is ambiguous. | Wait one second and run it again. |
+| `database backup is incomplete for <SCHEMA>` or `...manifest ... is missing the <TYPE> row` | SQLcl did not write every object it listed, so nothing was installed. | Run `backup-db` again. If it repeats, check disk space and SQLcl output. |
+
+## Publish
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `[DRIFT DETECTED] Live APEX App <id> was modified in Builder on ...` | Someone changed the live app after your last export. | `scripts/team.sh export <id>`, review and merge, publish again. Use `--force` only after reviewing the difference. |
+| `[DRIFT UNKNOWN] Database export baseline is unavailable` | No export has recorded this app's state yet. | Run `scripts/team.sh export <id>` first. |
+| `deployment descriptor not found: ...` | `deployments/dev.json` is missing. | Copy `apps/templates/deployments/dev.json` and fill it in. |
+| `application <id> is stored under apps/<A> but its descriptor parses as <B>` | The folder name and the descriptor disagree about the schema (several schemas only). | Move the folder, or fix `parsingSchema` in the descriptor. |
+| `application <id> is parsed by <A>, not the descriptor's <B>` | The live app belongs to a different schema than your descriptor says. | Fix the descriptor, or publish from the right app folder. |
+| `SQLcl did not report a successful APEX import` | SQLcl exited without importing, for example because the workspace name in the descriptor is wrong. | Check `workspace.name` in the descriptor. |
+| `APEXlang source bytes do not match the post-import re-export` | APEX normalized the source on import. | Run `export`, commit the canonical source, and publish again. |
+
+## Migrations
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `checks.json must contain exactly schemaVersion, preconditions, and postconditions` | The file has a missing or extra key. | Match the layout in [GETTING_STARTED.md](GETTING_STARTED.md#10-make-your-first-database-change). |
+| `... expected value must be integer 1` | A check's `expected` is not `1`. | Every check is a query returning `1`; set `"expected": 1`. |
+| `INCOMPLETE [LIVE_PREREQUISITE_UNKNOWN]` from `--local` | Offline analysis cannot know what exists in the database. | Expected. Use `--env dev` for a real answer. |
+| `CONFLICT [COLUMN_ALREADY_EXISTS]` (or `LIVE_NAMESPACE_OCCUPIED`) | The object your change creates is already there. | The change may already be applied. Inspect the database; do not re-apply. |
+| `CONFLICT [CHECK_FAILED]: check must return exactly one row and one numeric column equal to 1` | A precondition is false, for example the column already exists. | Read the check's `id`, then fix the data or the migration. |
+| `<migration> already has a verified dev receipt` | It was already applied and verified. | Nothing to do. For a follow-up change, create the next revision folder. |
+| `<migration> may be partially applied; stop and reconcile` | The apply failed part-way. | Inspect the database, then fix forward with a new revision. Never edit the failed folder. |
+| `several schemas are configured, so migrations must live under migrations/<SCHEMA>/` | A flat migration folder in a multi-schema project. | Move it to `migrations/<SCHEMA>/`. |
+| `selected migrations belong to different schemas; run one schema at a time` | One command listed folders for two schemas. | Run separate commands. |
+| `--schema <X> does not match the migration folder's schema <Y>` | The option and the folder disagree. | Drop `--schema`, or use the right folder. |
+| `LIVE_PREFLIGHT_UNAVAILABLE` | The live check could not read the catalog. | Read the message after it. Run `doctor` to check the connection. |
+
+## Several schemas
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `<command> needs one schema because several are configured (<list>); pass --schema <NAME>` | The command works on one schema at a time. | Add `--schema <NAME>`. |
+| `schema <X> is not configured; configured schemas: ...` | `--schema` names a schema that is not in `.env`. | Use one of the listed names. Schema names are uppercase. |
+| `schema <X> is not listed in STAGING_SCHEMA` (or `PROD_SCHEMA`) | The schema is not set up for that target. | Add it, with the same name, to the `STAGING_*` or `PROD_*` settings. |
+
+## Knowledge graph
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `installed extractor is missing` | Graphify was installed or upgraded after setup last ran. | `python3 scripts/setup_graphify_apx.py`. Rerun it after every Graphify upgrade. |
+| Pages show as unconnected stubs | Graphify cached results from before the database copy existed. | `scripts/team.sh backup-db`, then `python3 scripts/setup_graphify_apx.py` and `graphify update .`. |
+
+## Still stuck?
+
+Run `scripts/team.sh doctor` and read every line: it prints which connection and
+schema it used. Keep the exact message, because the scripts are written so the
+text says what to do next. If an AI assistant is helping, paste the full output.
