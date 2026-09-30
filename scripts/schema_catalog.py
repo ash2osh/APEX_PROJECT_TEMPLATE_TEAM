@@ -396,6 +396,7 @@ def _catalog_driver(run_dir: Path, phase: str, target: Target, keys: Sequence[tu
         "SET ECHO OFF",
         "SET VERIFY OFF",
         "SET FEEDBACK OFF",
+        "SET DDL INSERT OFF",
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         "SET DEFINE ON",
     ]
