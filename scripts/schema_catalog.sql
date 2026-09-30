@@ -94,18 +94,21 @@ DECLARE
     l_valid VARCHAR2(16);
   BEGIN
     IF p_type = 'CONSTRAINT' THEN
-      SELECT COUNT(*), NVL(MAX('VALID'), 'VALID') INTO l_found_local, l_valid
+      SELECT COUNT(*), NVL(MAX('VALID'), 'VALID'),
+             CASE WHEN MAX(constraint_type) = 'R' THEN 'REF_CONSTRAINT'
+                  ELSE 'CONSTRAINT' END
+        INTO l_found_local, l_valid, l_metadata_type
         FROM all_constraints
        WHERE owner = p_owner AND constraint_name = p_name;
     ELSE
       SELECT COUNT(*), MAX(status) INTO l_found_local, l_valid
         FROM all_objects
        WHERE owner = p_owner AND object_name = p_name AND object_type = p_type;
+      l_metadata_type := REPLACE(p_type, ' ', '_');
     END IF;
     IF l_found_local = 0 THEN
       RETURN;
     END IF;
-    l_metadata_type := REPLACE(p_type, ' ', '_');
     BEGIN
       DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', FALSE);
       DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE);

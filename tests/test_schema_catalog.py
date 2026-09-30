@@ -226,6 +226,15 @@ class SchemaCatalogTests(unittest.TestCase):
             capture_inventory(target(), run_dir, _runner=Capture())
             self.assertIn("ALL_OBJECTS", (ROOT / "scripts/schema_catalog.sql").read_text(encoding="utf-8"))
 
+    def test_foreign_key_constraints_use_ref_constraint_metadata_type(self) -> None:
+        source = " ".join((ROOT / "scripts/schema_catalog.sql").read_text(encoding="utf-8").split())
+
+        self.assertTrue(
+            "CASE WHEN MAX(constraint_type) = 'R' THEN 'REF_CONSTRAINT' "
+            "ELSE 'CONSTRAINT' END" in source,
+            "foreign-key metadata type must be REF_CONSTRAINT; other constraints stay CONSTRAINT",
+        )
+
     def test_selected_key_input_is_encoded_without_sql_interpolation(self) -> None:
         class Capture:
             def __init__(self) -> None:
