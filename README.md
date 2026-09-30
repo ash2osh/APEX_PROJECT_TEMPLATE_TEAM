@@ -42,8 +42,10 @@ separate file changes only and do not isolate a shared APEX application.
 
 AI coding assistants read [AGENTS.md](AGENTS.md) (Claude Code loads it through
 `CLAUDE.md`) for the rules and load a skill on their own when a task matches
-its description. The same 25 skills are kept in `.agents/skills/` (for agents
+its description. The same 25 skills are listed in `.agents/skills/` (for agents
 that follow the `AGENTS.md` convention) and `.claude/skills/` (for Claude Code).
+Three Claude Code entries (`chrome-devtools-mcp`, `safeguarding-apexlang-text-messages`
+and `sqlcl-mcp-r0`) are short pointers to the full `.agents/skills/` copy.
 You do not have to call them by name.
 
 **APEX and database skills**

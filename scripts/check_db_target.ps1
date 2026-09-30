@@ -31,7 +31,8 @@ try {
     throw "the $Target profile does not list schema $($env:PROJECT_SCHEMA)"
   }
 
-  $productionPattern = '(?i)(^|[-_.])(prod|prd|production|live)[0-9]*([-_.]|$)'
+  # Same production marker as scripts/db_targets.py.
+  $productionPattern = '(?i)(^|[^A-Za-z0-9])(production|live)[0-9]*([^A-Za-z0-9]|$)|(prod|prd)[0-9]*([^A-Za-z0-9]|$)|(^|[^A-Za-z0-9])(prod|prd)(db|[0-9])'
   if ($targetConnection -match $productionPattern -and $env:DB_ENVIRONMENT -ne "production") {
     throw "$Target connection '$targetConnection' resembles production but DB_ENVIRONMENT=$($env:DB_ENVIRONMENT); ask the user whether this is production"
   }

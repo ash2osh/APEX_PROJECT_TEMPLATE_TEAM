@@ -97,10 +97,10 @@ if [ "$manual" = true ]; then
     '   trap '\''rm -rf -- "$sqlcl_dir"'\'' EXIT' \
     '   cd "$sqlcl_dir"' \
     '   export SQLPATH="$sqlcl_dir" ORACLE_PATH="$sqlcl_dir"'
-  printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q\n' \
+  printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q %q\n' \
     "$sqlcl_connection" "@$REPO_ROOT/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "$app_dir" \
-    "$app_dir/deployments/$app_environment.json" "$app_id"
+    "$app_dir/deployments/$app_environment.json" "$app_id" -
   verify_parent="apps/$parsing_schema"
   printf '3. Check that import completed without SQLcl errors and printed "Import successful." and APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
   printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'

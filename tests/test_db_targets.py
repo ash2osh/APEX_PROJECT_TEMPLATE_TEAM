@@ -1,9 +1,15 @@
+import re
+import subprocess
 import unittest
+from pathlib import Path
 
 try:
     from scripts import db_targets as targets
 except ImportError:
     targets = None
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 BASE_ENV = {
@@ -211,3 +217,47 @@ class MultiSchemaTargetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductionMarkerTests(unittest.TestCase):
+    PRODUCTION = (
+        "prod", "PROD", "prod1", "prod-db", "prod_db", "erp-prod", "hr.live", "production",
+        "PRODDB", "proddb2", "ERPPROD", "erpprd01", "erpprod.example.com", "hr_live01",
+    )
+    NOT_PRODUCTION = (
+        "docker-demo", "dev", "product-dev", "products", "olive", "deliver", "livewire-dev",
+        "reproduce", "prodigy", "freepdb1",
+    )
+
+    def test_python_marker(self) -> None:
+        from scripts.db_targets import looks_like_production_identity
+        for value in self.PRODUCTION:
+            with self.subTest(value=value):
+                self.assertTrue(looks_like_production_identity(value))
+        for value in self.NOT_PRODUCTION:
+            with self.subTest(value=value):
+                self.assertFalse(looks_like_production_identity(value))
+
+    def test_bash_marker_matches_python(self) -> None:
+        source = (ROOT / "scripts" / "check_db_target.sh").read_text(encoding="utf-8")
+        pattern = re.search(r"^production_marker='([^']+)'$", source, re.MULTILINE).group(1)
+        script = 'shopt -s nocasematch; p="$1"; shift; for v in "$@"; do if [[ "$v" =~ $p ]]; then echo 1; else echo 0; fi; done'
+        values = [*self.PRODUCTION, *self.NOT_PRODUCTION]
+        result = subprocess.run(["bash", "-c", script, "bash", pattern, *values], capture_output=True, text=True, check=True)
+        expected = ["1"] * len(self.PRODUCTION) + ["0"] * len(self.NOT_PRODUCTION)
+        self.assertEqual(expected, result.stdout.split())
+
+    def test_every_guard_uses_the_same_marker(self) -> None:
+        from scripts.db_targets import PRODUCTION_MARKER_RE
+        python = PRODUCTION_MARKER_RE.pattern.replace("[^A-Za-z0-9]", "[^[:alnum:]]")
+        bash = re.search(r"^production_marker='([^']+)'$", (ROOT / "scripts" / "check_db_target.sh").read_text(encoding="utf-8"), re.MULTILINE).group(1)
+        self.assertEqual(python, bash)
+        powershell = re.search(r"\$productionPattern = '\(\?i\)([^']+)'", (ROOT / "scripts" / "check_db_target.ps1").read_text(encoding="utf-8")).group(1)
+        self.assertEqual(PRODUCTION_MARKER_RE.pattern, powershell)
+        sql_pattern = python.replace("[0-9]", "[[:digit:]]")
+        for name in ("verify_db_access.sql", "verify_migration_access.sql", "publish_app.sql"):
+            source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            with self.subTest(script=name):
+                self.assertIn(f"'{sql_pattern}'", source)
+                for field in ("DB_NAME", "DB_UNIQUE_NAME", "SERVICE_NAME"):
+                    self.assertIn(f"'{field}'", source)

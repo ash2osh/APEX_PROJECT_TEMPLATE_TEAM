@@ -48,6 +48,9 @@ class UpgradeError(Exception):
 class Action:
     kind: str
     path: str
+    # The project file's hash when the plan was made: None when it was absent,
+    # "" when not recorded. apply_actions refuses a target that changed since.
+    local: str | None = ""
 
 
 @dataclass
@@ -367,7 +370,7 @@ def plan_upgrade(
             conflict_path = safe_project_path(project_root, path + CONFLICT_SUFFIX)
             if _lstat(conflict_path) is not None:
                 raise UpgradeError(f"pending {CONFLICT_SUFFIX} file already exists: {path}{CONFLICT_SUFFIX}")
-        actions.append(Action(kind, path))
+        actions.append(Action(kind, path, local))
 
     for path, last in sorted(installed.items()):
         if path in current_files:
@@ -376,11 +379,12 @@ def plan_upgrade(
         local = sha256(target)
         if local is None:
             continue
-        actions.append(Action("DELETE" if local == last else "KEEP-REMOVED", path))
+        actions.append(Action("DELETE" if local == last else "KEEP-REMOVED", path, local))
 
     for path in placeholders:
         target = safe_project_path(project_root, path)
-        actions.append(Action("KEEP-PLACEHOLDER" if sha256(target) is not None else "PLACEHOLDER", path))
+        local = sha256(target)
+        actions.append(Action("KEEP-PLACEHOLDER" if local is not None else "PLACEHOLDER", path, local))
     return actions, new_lock
 
 
@@ -413,14 +417,22 @@ def apply_actions(
     """Stage every write and roll back completed filesystem operations on failure."""
     writes: dict[str, tuple[bytes, int]] = {}
     deletes: set[str] = set()
+    # What each target held when the plan was made. A file saved after the
+    # plan must not be overwritten or deleted with the plan's decision.
+    planned_local: dict[str, str | None] = {}
     for action in actions:
         if action.kind in {"CREATE", "UPDATE", "PLACEHOLDER"}:
             writes[action.path] = _read_template_bytes(template_root, action.path)
+            if action.local != "":
+                planned_local[action.path] = action.local
         elif action.kind == "CONFLICT":
             conflict_path = action.path + CONFLICT_SUFFIX
             writes[conflict_path] = _read_template_bytes(template_root, action.path)
+            planned_local[conflict_path] = None
         elif action.kind == "DELETE":
             deletes.add(action.path)
+            if action.local != "":
+                planned_local[action.path] = action.local
     writes[LOCK_NAME] = (_lock_bytes(upstream, commit, files), 0o644)
 
     overlap = deletes.intersection(writes)
@@ -476,6 +488,12 @@ def apply_actions(
                     raise UpgradeError(f"managed target is not a regular file: {relative}")
                 os.replace(target, backup)
                 mutation.original_moved = True
+            if relative in planned_local:
+                # Compare the bytes actually moved aside, so a save racing this
+                # check cannot slip between the comparison and the replacement.
+                observed = sha256(backup) if info is not None else None
+                if observed != planned_local[relative]:
+                    raise UpgradeError(f"{relative} changed after the upgrade was planned; rerun the upgrade")
             if has_replacement:
                 os.replace(staged[relative], target)
                 mutation.replacement_installed = True

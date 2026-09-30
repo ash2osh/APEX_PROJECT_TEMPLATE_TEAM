@@ -34,6 +34,16 @@ def validate_app_source(repo_root: Path, source_dir: Path) -> Path:
     except ValueError as exc:
         raise ValueError(f"application source is outside the repository: {candidate}") from exc
 
+    # publish_app.sql receives this path as a SQLcl substitution argument. A
+    # quote ends the value early and '&' starts another substitution, so the
+    # import would read a different, truncated path.
+    unsafe = sorted({character for character in str(candidate) if character in "'\"&"})
+    if unsafe:
+        raise ValueError(
+            "the application path contains characters SQLcl cannot pass to its import script "
+            f"({' '.join(unsafe)}); move the repository to a path without them: {candidate}"
+        )
+
     current = root
     for component in relative.parts:
         current = current / component

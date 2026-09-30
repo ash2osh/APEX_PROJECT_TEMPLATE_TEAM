@@ -18,6 +18,8 @@ def main() -> int:
     args = parser.parse_args()
 
     existing = args.existing_app / "deployments"
+    if existing.is_symlink():
+        parser.error(f"deployments directory must not be a symbolic link: {existing}")
     if not existing.is_dir():
         return 0
 

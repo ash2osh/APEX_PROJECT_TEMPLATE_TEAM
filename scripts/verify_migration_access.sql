@@ -12,6 +12,8 @@ DECLARE
   l_db_unique_name VARCHAR2(128) := SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME');
   l_service_name VARCHAR2(256) := SYS_CONTEXT('USERENV', 'SERVICE_NAME');
   l_owner_count PLS_INTEGER;
+  c_production_marker CONSTANT VARCHAR2(256) :=
+    '(^|[^[:alnum:]])(production|live)[[:digit:]]*([^[:alnum:]]|$)|(prod|prd)[[:digit:]]*([^[:alnum:]]|$)|(^|[^[:alnum:]])(prod|prd)(db|[[:digit:]])';
 BEGIN
   IF l_session_user != c_expected_user THEN
     RAISE_APPLICATION_ERROR(-20980, 'Migration expected session user ' || c_expected_user || ' but found ' || l_session_user);
@@ -23,9 +25,11 @@ BEGIN
   IF l_owner_count != 1 THEN
     RAISE_APPLICATION_ERROR(-20982, 'Migration target schema is not visible: ' || c_target_schema);
   END IF;
-  IF c_target_environment != 'prod' AND REGEXP_LIKE(
-       NVL(l_db_unique_name, '') || '.' || NVL(l_service_name, ''),
-       '(^|[^[:alnum:]])(prod|prd|production|live)[[:digit:]]*([^[:alnum:]]|$)', 'i') THEN
+  -- Same production marker as scripts/db_targets.py, applied to each name.
+  IF c_target_environment != 'prod' AND (
+       REGEXP_LIKE(l_database_name, c_production_marker, 'i')
+       OR REGEXP_LIKE(l_db_unique_name, c_production_marker, 'i')
+       OR REGEXP_LIKE(l_service_name, c_production_marker, 'i')) THEN
     RAISE_APPLICATION_ERROR(-20983, 'Target identity resembles production but the selected environment is not prod');
   END IF;
 END;

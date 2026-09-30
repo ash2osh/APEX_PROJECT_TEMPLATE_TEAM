@@ -32,7 +32,9 @@ add a developer name. When `CODE_SCHEMA` contains exactly one schema, the
 existing flat `migrations/YYYY-MM-DD_<migration-name>-rNNN/` layout remains
 valid and the schema-folder layout is also accepted. When it contains two or
 more schemas, the schema folder is required and a flat migration folder is
-refused. The date is the folder creation date and stays the same when the
+refused. Keep each migration family in one layout: a name that appears both
+flat and under `migrations/<SCHEMA>/` is refused, because both folders could
+target the same schema and apply the same revision twice. The date is the folder creation date and stays the same when the
 migration is promoted. The ISO date prefix sorts newer dates ahead when a file
 browser is sorted descending; the name cannot set the browser's sort direction.
 Folders created on the same date have a name-based tie-break, not an
@@ -60,6 +62,16 @@ postconditions. These checks validate the expected starting state and verify
 the committed result. The runner also performs structural catalog checks for
 SQL forms it can analyze. Unsupported or data-changing operations need explicit
 reviewed checks; incomplete verification blocks automated apply.
+
+SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
+so the apply session ends with its own check: any object in the target schema
+whose DDL ran during the apply and still has errors in `ALL_ERRORS` fails the
+apply with `ORA-20986: Migration left objects with compilation errors`. The
+DDL has already committed by then; no receipt is written, and the next revision
+fixes the object. The check sees only objects the login user can see in
+`ALL_ERRORS`, so a login user without access to the owner's objects gets no
+protection from it; keep such units covered by an explicit postcondition, for
+example a count of `INVALID` objects in `ALL_OBJECTS`.
 
 ## Immutability and status receipts
 
@@ -128,7 +140,18 @@ a target is incomplete. The SQLcl login user may differ from the schema owner.
 Staging and production applies show the resolved target and require an
 interactive confirmation. The runner verifies the observed database identity
 and current schema before writing and verifies the committed result afterward.
-Receipts are written only for verified applies.
+The apply session compares its database name, unique name, service, container,
+edition and version with the preflight observation before it runs the first
+SQL file (`ORA-20987`), and every precondition and postcondition session
+reports its identity too, so results observed on a different database are
+refused. Receipts are written only for verified applies.
+
+A connection name, database name, unique name or service name that looks like
+production (`prod`, `prd`, `production` or `live` as a word, `PRODDB`,
+`ERPPROD`, `erpprod.example.com`) is refused unless the selected target is
+production. This is a naming heuristic, not a guarantee: name non-production
+databases so they do not match it, and rely on the expected-user check and the
+team's review for the rest.
 
 ## Comparing selected live objects
 

@@ -70,6 +70,23 @@ def get_export_baseline(app_dir: Path, app_id: int) -> AppState | None:
     return AppState(present, baseline, version)
 
 
+def live_state_token(state: AppState) -> str:
+    """Encode an approved live state for publish_app.sql to re-check before import.
+
+    The version is free text, so it travels as hex of its UTF-8 bytes; the SQL
+    side compares RAWTOHEX(UTL_I18N.STRING_TO_RAW(RTRIM(version))).
+    """
+    if not state.present:
+        return "ABSENT"
+    version = (state.version or "").rstrip()
+    return f"P|{state.last_updated_on or 'NONE'}|{version.encode('utf-8').hex().upper()}"
+
+
+def _write_state(path: Path | None, state: AppState) -> None:
+    if path is not None:
+        path.write_text(live_state_token(state) + "\n", encoding="utf-8")
+
+
 def _query_live_timestamp(
     app_id: int, connection: str, expected_user: str | None, app_dir: Path
 ) -> tuple[AppState | None, datetime | None, str | None]:
@@ -130,6 +147,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("connection", help="SQLcl saved connection alias")
     parser.add_argument("app_dir", type=Path, help="local APEXlang application directory")
     parser.add_argument("--expected-user", help="expected Oracle session user")
+    parser.add_argument(
+        "--state-out",
+        type=Path,
+        help="write the approved live state here so the import session can re-check it",
+    )
     args = parser.parse_args(argv)
 
     if args.app_id < 1:
@@ -165,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     live_at = parse_timestamp(live.last_updated_on)
     if not baseline.present and not live.present:
         print(f"[DRIFT OK] APEX App {args.app_id} remains absent since the local export.")
+        _write_state(args.state_out, live)
         return 0
     if not baseline.present:
         reason = "was created after the local export."
@@ -183,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"[DRIFT OK] APEX App {args.app_id} has no Builder edits since its last import "
                 f"(version {live.version!r})."
             )
+            _write_state(args.state_out, live)
             return 0
     elif live_at is None:
         reason = "was re-imported after the local export (APEX clears last_updated_on on import)."
@@ -204,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print("[DRIFT OK] No uncaptured Builder edits detected.")
+        _write_state(args.state_out, live)
         return 0
 
     print(f"[DRIFT DETECTED] Live APEX App {args.app_id} {reason}")

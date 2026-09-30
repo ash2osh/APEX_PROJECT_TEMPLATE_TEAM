@@ -7,6 +7,7 @@ import glob
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CANONICAL_EXTRACTOR = REPO_ROOT / "scripts" / "graphify_apexlang_extractor.py"
 # The exact text this installer writes; the only proof that .apx is ours.
 DETECT_MARKER = "'.sql', '.apx',"
+# Graphify's code-extension set, one line: CODE_EXTENSIONS = {..., '.sql', ...}
+CODE_EXTENSIONS_RE = re.compile(r"^CODE_EXTENSIONS\s*=\s*\{[^}\n]*'\.sql',[^}\n]*\}", re.MULTILINE)
 SQL_LINK_IMPORT = "from graphify.extractors.apexlang import extract_sql_linked  # noqa: F401"
 
 
@@ -112,14 +115,22 @@ def _patched_detector(text: str) -> tuple[str | None, str]:
     could mention the extension for its own reasons and we would report
     success without having registered anything.
     """
-    if DETECT_MARKER in text:
+    declaration = CODE_EXTENSIONS_RE.search(text)
+    if declaration is None:
+        return None, "CODE_EXTENSIONS declaration with '.sql' not found"
+    if DETECT_MARKER in declaration.group(0):
         return text, "already registered"
     if "'.apx'" in text or '".apx"' in text:
         return None, "unrecognized pre-existing .apx handling; refusing to patch"
-    anchor = "'.sql',"
-    if anchor not in text:
-        return None, "SQL extension anchor not found"
-    return text.replace(anchor, DETECT_MARKER, 1), "registered"
+    # Patch inside the declaration only: an earlier '.sql', in a comment or
+    # another collection would otherwise take the marker and prove nothing.
+    patched = declaration.group(0).replace("'.sql',", DETECT_MARKER, 1)
+    return text[: declaration.start()] + patched + text[declaration.end():], "registered"
+
+
+def _apx_registered(detect_text: str) -> bool:
+    declaration = CODE_EXTENSIONS_RE.search(detect_text)
+    return declaration is not None and DETECT_MARKER in declaration.group(0)
 
 
 def _patched_dispatch(text: str) -> str | None:
@@ -217,7 +228,7 @@ def verify_installation(base: Path) -> tuple[bool, str]:
         return False, "installed extractor differs from canonical source"
     detect = detect_path.read_text(encoding="utf-8")
     extract = extract_path.read_text(encoding="utf-8")
-    if DETECT_MARKER not in detect:
+    if not _apx_registered(detect):
         return False, ".apx is not registered beside .sql as a code extension"
     if "from graphify.extractors.apexlang import extract_apexlang" not in extract:
         return False, "APEXlang extractor import is missing"

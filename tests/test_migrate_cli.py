@@ -27,6 +27,8 @@ class FakeDatabase:
         self.mutate_source_during_apply = None
         self.source_file_to_mutate = None
         self.change_identity_after_apply = False
+        self.check_identity_override = {}
+        self.apply_expected_identities = []
 
     def identity(self):
         environment = self.target.environment
@@ -82,10 +84,14 @@ class FakeDatabase:
     def run_checks(self, target, checks, run_dir, *, phase):
         self.calls.append(("checks", target.environment, phase, tuple(check.id for check in checks)))
         results = tuple({"id": check.id, "row_count": 1, "column_count": 1, "numeric": True, "value": 1, "passed": True} for check in checks)
-        return CheckReport(True, True, results, (), {"phase": phase, "complete": True})
+        identity = self.identity()
+        if self.check_identity_override and phase in self.check_identity_override:
+            identity = {**identity, **self.check_identity_override[phase]}
+        return CheckReport(True, True, results, (), {"phase": phase, "complete": True, "identity": identity})
 
-    def apply_folder(self, migration, target, run_dir):
+    def apply_folder(self, migration, target, run_dir, *, expected_identity=None):
         self.calls.append(("apply", migration.folder.name, tuple(file.name for file in migration.files)))
+        self.apply_expected_identities.append(expected_identity)
         operations = analyze_batch((migration,), target.schema)
         operations_by_file = {}
         for operation in operations:
@@ -351,11 +357,59 @@ class MigrateCliTests(unittest.TestCase):
             self.assertIn("SET DEFINE OFF", content)
             self.assertIn("@@../payload/2026-09-28_create-driver-r001/001-create-t.sql", content)
             self.assertIn("EXIT SUCCESS COMMIT", content)
+            payload_at = content.index("@@../payload/")
+            # The identity guard runs before any payload and pins every field.
+            guard_at = content.index("-20987")
+            self.assertLess(guard_at, payload_at)
+            self.assertIn("!= 'DEVDB_UNIQUE'", content)
+            self.assertIn("!= 'dev.service'", content)
+            # The compile guard runs after the payload and before the commit.
+            compile_at = content.index("-20986")
+            self.assertLess(payload_at, compile_at)
+            self.assertLess(compile_at, content.index("MIGRATION_APPLY_COMPLETED"))
+            self.assertIn("all_errors", content)
+            self.assertIn("WHERE o.owner = 'APP_DEV'", content)
+            self.assertLess(content.index(":migration_started :="), payload_at)
             output = f"MIGRATION_IDENTITY_BEGIN\n{fake_identity}\nMIGRATION_IDENTITY_END\nMIGRATION_IDENTITY_VERIFIED\nMIGRATION_APPLY_COMPLETED\n"
             return SqlclResult(0, output, working)
+        expected_identity = json.loads(fake_identity)
         with patch("scripts.migrate.run_sqlcl", side_effect=fake_sqlcl):
-            evidence = apply_folder(staged, self.target(), run_dir)
+            evidence = apply_folder(staged, self.target(), run_dir, expected_identity=expected_identity)
         self.assertTrue(evidence["committed"])
+
+        # An identity value that cannot be embedded safely refuses before SQLcl runs.
+        with patch("scripts.migrate.run_sqlcl", side_effect=AssertionError("SQLcl must not run")):
+            with self.assertRaisesRegex(MigrationApplyError, "cannot be enforced"):
+                apply_folder(staged, self.target(), staged_dir / "apply-quote", expected_identity={**expected_identity, "service_name": "x'y"})
+
+    def test_apply_receives_the_preflight_identity(self):
+        migration = self.load(self.add_folder("2026-09-28_pin-identity-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"}).name)
+        result, fake = self.apply(migration)
+        self.assertEqual(result, 0)
+        self.assertEqual(len(fake.apply_expected_identities), 1)
+        pinned = fake.apply_expected_identities[0]
+        for field, value in fake.identity().items():
+            self.assertEqual(pinned[field], value)
+
+    def test_postcondition_session_on_another_database_writes_no_receipt(self):
+        folder = self.add_folder("2026-09-28_other-db-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migration = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        fake.check_identity_override = {"postconditions": {"db_unique_name": "OTHERDB"}}
+        result, fake = self.apply(migration, fake=fake)
+        self.assertEqual(result, 2)
+        self.assertFalse((folder / "status.dev.json").exists())
+
+    def test_precondition_session_on_another_database_blocks_the_write(self):
+        migration = self.load(self.add_folder(
+            "2026-09-28_other-pre-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"},
+            preconditions=[{"id": "before-change", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        ).name)
+        fake = FakeDatabase(self.target())
+        fake.check_identity_override = {"preconditions": {"db_name": "OTHERDB"}}
+        result, fake = self.apply(migration, fake=fake)
+        self.assertEqual(result, 2)
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
 
 
 if __name__ == "__main__":

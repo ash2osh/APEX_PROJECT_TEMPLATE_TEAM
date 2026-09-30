@@ -99,3 +99,101 @@ class ReplaceMirrorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MirrorSafetyTests(unittest.TestCase):
+    """Refusals shared by the Bash and PowerShell mirror replacements."""
+
+    def make_repo(self, root: Path) -> tuple[Path, Path]:
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True)
+        for name in ("replace_mirror.sh", "replace_mirror.ps1"):
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        (root / ".gitignore").write_text("scratch/\n*.local\napps/**/apex-team-export.json\n", encoding="utf-8")
+        mirror = root / "database" / "DEMO"
+        (mirror / "tables").mkdir(parents=True)
+        (mirror / "tables" / "t.sql").write_text("old\n", encoding="utf-8")
+        app = root / "apps" / "DEMO" / "100"
+        app.mkdir(parents=True)
+        (app / "application.apx").write_text("old\n", encoding="utf-8")
+        (app / "apex-team-export.json").write_text("{}\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@example.test", "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@example.test", "commit", "-qm", "seed"], check=True)
+        staged = root / "scratch" / "stage"
+        (staged / "tables").mkdir(parents=True)
+        (staged / "tables" / "t.sql").write_text("new\n", encoding="utf-8")
+        return staged, mirror
+
+    def commands(self, root: Path, staged: Path, destination: str, environment=None):
+        yield "bash", subprocess.run(
+            ["bash", str(root / "scripts" / "replace_mirror.sh"), str(staged), destination],
+            cwd=root, env=environment, text=True, capture_output=True, check=False,
+        )
+        if PWSH:
+            yield "pwsh", subprocess.run(
+                [PWSH, "-NoProfile", "-File", str(root / "scripts" / "replace_mirror.ps1"), str(staged), destination],
+                cwd=root, env=environment, text=True, capture_output=True, check=False,
+            )
+
+    def test_ignored_file_in_mirror_is_not_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged, mirror = self.make_repo(root)
+            sidecar = mirror / "notes.local"
+            sidecar.write_text("keep me\n", encoding="utf-8")
+            for shell, result in self.commands(root, staged, "database/DEMO"):
+                with self.subTest(shell=shell):
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("ignored local files", result.stdout + result.stderr)
+                    self.assertEqual(sidecar.read_text(encoding="utf-8"), "keep me\n")
+                    self.assertEqual((mirror / "tables" / "t.sql").read_text(encoding="utf-8"), "old\n")
+
+    def test_regenerated_export_marker_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_repo(root)
+            staged = root / "scratch" / "app-stage"
+            staged.mkdir(parents=True)
+            (staged / "application.apx").write_text("new\n", encoding="utf-8")
+            result = subprocess.run(
+                ["bash", str(root / "scripts" / "replace_mirror.sh"), str(staged), "apps/DEMO/100"],
+                cwd=root, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "apps/DEMO/100/application.apx").read_text(encoding="utf-8"), "new\n")
+
+    def test_short_lock_window_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged, mirror = self.make_repo(root)
+            environment = {**os.environ, "MIRROR_LOCK_STALE_SECONDS": "0"}
+            for shell, result in self.commands(root, staged, "database/DEMO", environment):
+                with self.subTest(shell=shell):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("at least 60", result.stdout + result.stderr)
+                    self.assertEqual((mirror / "tables" / "t.sql").read_text(encoding="utf-8"), "old\n")
+
+
+class PreserveDeploymentsTests(unittest.TestCase):
+    def test_symlinked_deployments_directory_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "dev.json").write_text("{}\n", encoding="utf-8")
+            existing = root / "existing"
+            existing.mkdir()
+            try:
+                os.symlink(outside, existing / "deployments", target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks are unavailable: {error}")
+            staged = root / "staged"
+            staged.mkdir()
+            result = subprocess.run(
+                ["python3", str(ROOT / "scripts" / "preserve_deployments.py"), str(existing), str(staged)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must not be a symbolic link", result.stderr)
+            self.assertFalse((staged / "deployments").exists())

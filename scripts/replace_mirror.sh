@@ -92,6 +92,29 @@ check_clean_mirror() {
     echo "commit, stash, or remove local changes first" >&2
     return 1
   fi
+  # The swap deletes the old directory, so ignored files there would be lost
+  # without Git noticing. Only the two ignored files an export regenerates
+  # are expected in a mirror.
+  local ignored_status ignored_path ignored_files=()
+  if ! ignored_status="$(git -C "$REPO_ROOT" status --porcelain --ignored --untracked-files=all -- "$DEST_REL")"; then
+    echo "unable to inspect ignored files for mirror: $DEST_REL" >&2
+    return 1
+  fi
+  while IFS= read -r ignored_path; do
+    case "$ignored_path" in
+      '!! '*) ignored_path="${ignored_path#'!! '}" ;;
+      *) continue ;;
+    esac
+    [ "$ignored_path" = "$DEST_REL/apex-team-export.json" ] && continue
+    [ "$ignored_path" = "$DEST_REL/deployments/default.json" ] && continue
+    ignored_files+=("$ignored_path")
+  done <<< "$ignored_status"
+  if [ "${#ignored_files[@]}" -gt 0 ]; then
+    echo "refusing to replace mirror with ignored local files that would be deleted: $DEST_REL" >&2
+    printf '  %s\n' "${ignored_files[@]}" >&2
+    echo "move them out of the mirror first" >&2
+    return 1
+  fi
 }
 check_clean_mirror
 
@@ -160,6 +183,12 @@ BACKUP_DIRS+=("$BACKUP_DIR")
 # namespaces differ under MSYS), so cross-impl contention degrades to the
 # staleness window. Same-impl contention is always detected exactly.
 MIRROR_LOCK_STALE_SECONDS="${MIRROR_LOCK_STALE_SECONDS:-900}"
+# A short window would let a contender break a lock the other shell still
+# holds, because cross-shell liveness cannot be checked.
+if [[ ! "$MIRROR_LOCK_STALE_SECONDS" =~ ^[0-9]+$ ]] || [ "$((10#$MIRROR_LOCK_STALE_SECONDS))" -lt 60 ]; then
+  echo "MIRROR_LOCK_STALE_SECONDS must be a whole number of seconds, at least 60" >&2
+  exit 2
+fi
 
 lock_digest() {
   if command -v sha256sum >/dev/null 2>&1; then

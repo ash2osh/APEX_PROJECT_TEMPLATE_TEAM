@@ -232,23 +232,35 @@ if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
   rm -rf -- "$lookup_dir"
 fi
 
-if [ "$app_environment" = dev ] && [ "$force" != true ]; then
-  drift_guard="$REPO_ROOT/scripts/check_builder_drift.py"
-  [ -f "$drift_guard" ] || fail "Builder drift guard is missing; refusing import"
-  python3 "$drift_guard" "$app_id" "$sqlcl_connection" "$app_dir" \
-    --expected-user "$expected_user"
-fi
-
 mkdir -p "$REPO_ROOT/scratch"
 staging_dir="$(mktemp -d "$REPO_ROOT/scratch/apex-publish.XXXXXX")"
 restore_unstamped=false
 cleanup() {
   if [ "$restore_unstamped" = true ]; then
-    cp -p -- "$staging_dir/application.apx.unstamped" "$app_dir/application.apx" || true
+    # Undo only our own stamp. An edit saved while the publish ran is kept.
+    if cmp -s -- "$staging_dir/application.apx.stamped" "$app_dir/application.apx"; then
+      cp -p -- "$staging_dir/application.apx.unstamped" "$app_dir/application.apx" || true
+    else
+      printf 'publish warning: %s changed while publishing; left as is (check its version line)\n' \
+        "${app_dir#"$REPO_ROOT/"}/application.apx" >&2
+    fi
   fi
   rm -rf -- "$staging_dir"
 }
 trap cleanup EXIT
+
+# The import session re-checks the live state the drift guard approved; '-'
+# skips that re-check for --force and for staging or production.
+expected_live_state="-"
+if [ "$app_environment" = dev ] && [ "$force" != true ]; then
+  drift_guard="$REPO_ROOT/scripts/check_builder_drift.py"
+  [ -f "$drift_guard" ] || fail "Builder drift guard is missing; refusing import"
+  python3 "$drift_guard" "$app_id" "$sqlcl_connection" "$app_dir" \
+    --expected-user "$expected_user" --state-out "$staging_dir/approved-live-state.txt"
+  expected_live_state="$(head -n 1 "$staging_dir/approved-live-state.txt")"
+  [[ "$expected_live_state" =~ ^(ABSENT|P\|([0-9T:-]+|NONE)\|[0-9A-F]*)$ ]] || \
+    fail "Builder drift guard did not record the approved live state; refusing import"
+fi
 sqlcl_stdin="$staging_dir/.sqlcl-stdin"
 : > "$sqlcl_stdin"
 sqlcl_output="$staging_dir/sqlcl-output.log"
@@ -264,6 +276,7 @@ if [ "$app_environment" = dev ]; then
   restore_unstamped=true
   published_version="$(python3 "$REPO_ROOT/scripts/stamp_publish_version.py" \
     "$app_dir/application.apx" "$DEVELOPER_NAME")" || exit 2
+  cp -p -- "$app_dir/application.apx" "$staging_dir/application.apx.stamped"
   printf 'Stamped application version: %s\n' "$published_version"
 fi
 
@@ -274,7 +287,7 @@ if ! (
     -S -noupdates -name "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/publish_app.sql" \
     "$parsing_schema" "$target_environment" "$expected_user" \
-    "$application_source" "$deployment_file" "$app_id" \
+    "$application_source" "$deployment_file" "$app_id" "$expected_live_state" \
     < "$sqlcl_stdin"
 ) > "$sqlcl_output" 2>&1; then
   cat "$sqlcl_output" >&2

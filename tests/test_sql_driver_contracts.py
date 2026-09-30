@@ -76,6 +76,13 @@ class SqlDriverContractTests(unittest.TestCase):
         self.assertIn('apex import -input "&&application_source" -deployment "&&deployment_file"', contents)
         self.assertNotIn("apex import -input .", contents)
 
+    def test_publish_driver_rechecks_the_approved_live_state_before_import(self) -> None:
+        contents = (ROOT / "scripts/publish_app.sql").read_text(encoding="utf-8")
+        self.assertIn("DEFINE expected_live_state = '&7'", contents)
+        recheck = contents.index("-20016")
+        self.assertLess(recheck, contents.index("apex import -input"))
+        self.assertIn("RAWTOHEX(UTL_I18N.STRING_TO_RAW(RTRIM(MAX(version)), 'AL32UTF8'))", contents)
+
     def test_revision_queries_distinguish_imported_app_from_absent_app(self) -> None:
         # APEX leaves last_updated_on NULL on import, so NVL(MAX(...)) alone
         # would report an installed app as NOT_FOUND.

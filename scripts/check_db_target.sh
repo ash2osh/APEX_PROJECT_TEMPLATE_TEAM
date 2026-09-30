@@ -34,7 +34,9 @@ if [ -z "$TARGET_CONNECTION" ]; then
 fi
 
 shopt -s nocasematch
-if [[ "$TARGET_CONNECTION" =~ (^|[-_.])(prod|prd|production|live)[0-9]*([-_.]|$) ]] && \
+# Same production marker as scripts/db_targets.py.
+production_marker='(^|[^[:alnum:]])(production|live)[0-9]*([^[:alnum:]]|$)|(prod|prd)[0-9]*([^[:alnum:]]|$)|(^|[^[:alnum:]])(prod|prd)(db|[0-9])'
+if [[ "$TARGET_CONNECTION" =~ $production_marker ]] && \
    [ "$DB_ENVIRONMENT" != production ]; then
   echo "$TARGET connection '$TARGET_CONNECTION' resembles production but DB_ENVIRONMENT=$DB_ENVIRONMENT" >&2
   echo "ask the user whether this is production before continuing" >&2

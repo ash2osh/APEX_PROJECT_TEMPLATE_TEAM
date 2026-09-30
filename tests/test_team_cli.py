@@ -373,6 +373,7 @@ class TeamCliTests(unittest.TestCase):
                     str(script.parents[1] / "apps/DEMO/100"),
                     str(script.parents[1] / "apps/DEMO/100/deployments/prod.json"),
                     "100",
+                    "-",
                 ],
             )
             self.assertEqual(

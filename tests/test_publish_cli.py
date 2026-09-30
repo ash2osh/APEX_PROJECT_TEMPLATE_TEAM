@@ -106,6 +106,7 @@ class PublishAppCliTests(unittest.TestCase):
             "    fi\n"
             "    case \"${FAKE_SQL_MODE:-success}\" in\n"
             "      sp2) printf '%s\\n' 'SP2-0640: Not connected' ;;\n"
+            "      edit-then-fail) printf '%s\\n' '// saved during publish' >> \"$FAKE_SOURCE_DIR/application.apx\"; printf '%s\\n' 'SP2-0640: Not connected' ;;\n"
             "      no-sentinel) printf '%s\\n' 'Import successful.' ;;\n"
             "      skipped) printf '%s\\n' 'Workspace: NO_SUCH_WORKSPACE from deployment file: deployments/dev.json is invalid' 'APEX_IMPORT_VERIFIED:100' ;;\n"
             "      *) printf '%s\\n' 'Import successful.' 'APEX_IMPORT_VERIFIED:100' ;;\n"
@@ -431,6 +432,42 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("Stamped application version", result.stdout)
             self.assertEqual((app / "application.apx").read_bytes(), original)
 
+    def test_failed_import_keeps_an_edit_saved_during_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["FAKE_SQL_MODE"] = "edit-then-fail"
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("changed while publishing; left as is", result.stderr)
+            self.assertIn("// saved during publish", (app / "application.apx").read_text(encoding="utf-8"))
+
+    def test_import_session_receives_the_approved_live_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, _, environment, _, _ = self.make_stateful_dev_fixture(root)
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            arguments = sql_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(arguments[-1], "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper())
+
+            forced = subprocess.run(
+                ["bash", str(runner), "100", "--force"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
+            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-1], "-")
+
     # SQLcl prints "...is invalid" and exits 0 when the descriptor workspace
     # does not exist, without importing (verified on docker-demo).
     def test_import_skipped_by_sqlcl_is_a_failure_and_restores_the_source(self) -> None:
@@ -468,6 +505,41 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("did not report a successful APEX import", result.stdout + result.stderr)
             self.assertNotIn("Published APEX App", result.stdout)
             self.assertEqual((app / "application.apx").read_bytes(), original)
+
+    def test_powershell_failed_import_keeps_an_edit_saved_during_publish(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            environment["FAKE_SQL_MODE"] = "edit-then-fail"
+            command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+
+            result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("changed while publishing; left as is", result.stdout + result.stderr)
+            self.assertIn("// saved during publish", (app / "application.apx").read_text(encoding="utf-8"))
+
+    def test_powershell_import_session_receives_the_approved_live_state(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, sql_log, _, environment, _, _ = self.make_stateful_dev_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+
+            result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                sql_log.read_text(encoding="utf-8").splitlines()[-1],
+                "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper(),
+            )
 
     def test_powershell_import_that_clears_builder_timestamp_publishes(self) -> None:
         pwsh = shutil.which("pwsh")

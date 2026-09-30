@@ -244,6 +244,9 @@ if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
   }
 }
 
+# The import session re-checks the live state the drift guard approved; '-'
+# skips that re-check for -Force and for staging or production.
+$expectedLiveState = "-"
 if ($appEnvironment -eq "dev" -and -not $force) {
   $driftGuard = Join-Path $repoRoot "scripts/check_builder_drift.py"
   if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
@@ -253,12 +256,21 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
   if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
   if ($null -eq $python) { throw "Python 3 is required to check Builder drift" }
-  if ($python.Name -in @("py.exe", "py")) {
-    & $python.Source -3 $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser
-  } else {
-    & $python.Source $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser
+  $approvedStateFile = [System.IO.Path]::GetTempFileName()
+  try {
+    if ($python.Name -in @("py.exe", "py")) {
+      & $python.Source -3 $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile
+    } else {
+      & $python.Source $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile
+    }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $expectedLiveState = ([System.IO.File]::ReadAllText($approvedStateFile)).Trim()
+  } finally {
+    Remove-Item -LiteralPath $approvedStateFile -Force -ErrorAction SilentlyContinue
   }
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  if ($expectedLiveState -cnotmatch '^(ABSENT|P\|([0-9T:-]+|NONE)\|[0-9A-F]*)$') {
+    throw "publish error: Builder drift guard did not record the approved live state; refusing import"
+  }
 }
 
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
@@ -269,6 +281,7 @@ $publishWorkDir = Join-Path $repoRoot ("scratch/apex-publish-" + [Guid]::NewGuid
 [System.IO.Directory]::CreateDirectory($publishWorkDir) | Out-Null
 $applicationSource = Join-Path $appDir "application.apx"
 $unstampedSource = Join-Path $publishWorkDir "application.apx.unstamped"
+$stampedSource = Join-Path $publishWorkDir "application.apx.stamped"
 $restoreUnstamped = $false
 $publishedVersion = ""
 try {
@@ -293,6 +306,7 @@ try {
       $publishedVersion = & $stampPython.Source @stampArgs
     }
     if ($LASTEXITCODE -ne 0) { throw "publish error: could not stamp the application version" }
+    Copy-Item -LiteralPath $applicationSource -Destination $stampedSource
     Write-Output "Stamped application version: $publishedVersion"
   }
 
@@ -302,7 +316,7 @@ try {
     "-S", "-noupdates", "-name", $sqlclConnection,
     "@$(Join-Path $PSScriptRoot 'publish_app.sql')",
     $parsingSchema, $targetEnvironment, $expectedUser,
-    $applicationInput, $deploymentFile, $AppId
+    $applicationInput, $deploymentFile, $AppId, $expectedLiveState
   ) -TranscriptFile $transcriptFile
   $sqlclOutput = [System.IO.File]::ReadAllText($transcriptFile)
   if (-not [string]::IsNullOrEmpty($sqlclOutput)) { Write-Output $sqlclOutput }
@@ -379,8 +393,14 @@ try {
   }
 } finally {
   if ($restoreUnstamped) {
-    if (Test-Path -LiteralPath $unstampedSource -PathType Leaf) {
+    # Undo only our own stamp. An edit saved while the publish ran is kept.
+    $stampStillCurrent = (Test-Path -LiteralPath $stampedSource -PathType Leaf) -and
+      (Test-Path -LiteralPath $applicationSource -PathType Leaf) -and
+      ((Get-FileHash -LiteralPath $stampedSource -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $applicationSource -Algorithm SHA256).Hash)
+    if ($stampStillCurrent -and (Test-Path -LiteralPath $unstampedSource -PathType Leaf)) {
       [System.IO.File]::Copy($unstampedSource, $applicationSource, $true)
+    } elseif (Test-Path -LiteralPath $unstampedSource -PathType Leaf) {
+      Write-Warning "publish warning: $applicationSource changed while publishing; left as is (check its version line)"
     }
   }
   Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue

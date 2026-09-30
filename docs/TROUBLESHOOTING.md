@@ -20,7 +20,7 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `ORA-28000: the account is locked` / "Account Is Locked" | The schema's password expired or was locked. | With the local setup, from the `uc-local-apex-dev` folder: `./local-26ai.sh unexpire-accounts`. Otherwise ask your DBA. |
 | `Expected session user <X> but found <Y>` | The saved connection logs in as a different user than `*_EXPECTED_USER` says. | Fix the saved connection or the `*_EXPECTED_USER` value. This check prevents working in the wrong schema. |
 | `Target schema does not exist or is not visible: <X>` | The schema name in `.env` is wrong, or that user cannot see it. | Correct the `*_SCHEMA` value. |
-| `<profile> connection '<name>' resembles production but DB_ENVIRONMENT=development` | The saved connection's name contains a word like `prod` or `live`. | Rename the saved connection, or, if it really is production, set `DB_ENVIRONMENT=production` (which makes the scripts read-only). |
+| `<profile> connection '<name>' resembles production but DB_ENVIRONMENT=development` | The saved connection's name looks like production: `prod`, `prd`, `production` or `live` as a word, or names like `PRODDB` and `ERPPROD`. The database, unique and service names are checked the same way once connected. | Rename the saved connection, or, if it really is production, set `DB_ENVIRONMENT=production` (which makes the scripts read-only). |
 | `sql: command not found` | SQLcl is not installed or not on your `PATH`. | Install SQLcl 26.1 or newer and open a new terminal. |
 | `local: -n: invalid option` (or other odd Bash errors) on macOS | macOS's built-in Bash (3.2) is too old. | `brew install bash`, then run the scripts with it. |
 | `bash` is not found on Windows | Bash is not installed. | Install Git for Windows, which includes Git Bash. |
@@ -31,6 +31,8 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | --- | --- | --- |
 | `refusing to export over dirty mirror: apps/<SCHEMA>/<id>` | You have uncommitted changes in that app's folder. Export would overwrite them. | Commit or stash them, then export again. |
 | `refusing to back up over dirty mirror: database/<SCHEMA>` | Same, for the database copy. | Commit or discard the changes there, then run `backup-db` again. |
+| `refusing to replace mirror with ignored local files that would be deleted` | A Git-ignored file sits inside the mirror folder. Replacing the mirror would delete it without Git noticing. | Move the listed files out of `apps/<SCHEMA>/<id>/` or `database/<SCHEMA>/`, then retry. |
+| `MIRROR_LOCK_STALE_SECONDS must be a whole number of seconds, at least 60` | The lock timeout override is too short or not a number. | Unset it, or set it to 60 or more. |
 | `application <id> was not found in the workspace visible to this connection` | The app ID is wrong, or the connection cannot see that workspace. | Check `APEX_APP_ID` and the connection. |
 | `... is parsed by <X>, which is not listed in APEX_PARSING_SCHEMA` | The app belongs to a schema you have not configured. | Add that schema (with its connection and user) to the `APEX_*` settings. |
 | export refuses because the app's last update matches "the current database second" | The app changed in the same second, so the revision is ambiguous. | Wait one second and run it again. |
@@ -45,6 +47,8 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `deployment descriptor not found: ...` | `deployments/dev.json` is missing. | Copy `apps/templates/deployments/dev.json` and fill it in. |
 | `application <id> is stored under apps/<A> but its descriptor parses as <B>` | The folder name and the descriptor disagree about the schema (several schemas only). | Move the folder, or fix `parsingSchema` in the descriptor. |
 | `application <id> is parsed by <A>, not the descriptor's <B>` | The live app belongs to a different schema than your descriptor says. | Fix the descriptor, or publish from the right app folder. |
+| `ORA-20016: Live application changed after the Builder drift check` | Someone saved or imported the app in the moments between the drift check and the import. Nothing was imported. | `scripts/team.sh export <id>`, review and merge, publish again. |
+| `the application path contains characters SQLcl cannot pass` | The repository path contains `'`, `"` or `&`. | Move the checkout to a path without them. |
 | `SQLcl did not report a successful APEX import` | SQLcl exited without importing, for example because the workspace name in the descriptor is wrong. | Check `workspace.name` in the descriptor. |
 | `APEXlang source bytes do not match the post-import re-export` | APEX normalized the source on import. | Run `export`, commit the canonical source, and publish again. |
 
@@ -59,6 +63,9 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `CONFLICT [CHECK_FAILED]: check must return exactly one row and one numeric column equal to 1` | A precondition is false, for example the column already exists. | Read the check's `id`, then fix the data or the migration. |
 | `<migration> already has a verified dev receipt` | It was already applied and verified. | Nothing to do. For a follow-up change, create the next revision folder. |
 | `<migration> may be partially applied; stop and reconcile` | The apply failed part-way. | Inspect the database, then fix forward with a new revision. Never edit the failed folder. |
+| `ORA-20986: Migration left objects with compilation errors: ...` (with `may be partially applied`) | A package, procedure, trigger or view in the migration compiled with errors. The DDL ran, but no receipt was written. | Fix the code in the next revision folder and apply it. |
+| `ORA-20987: Migration apply session differs from the preflight target` | The saved connection reached a different database than the preflight did. Nothing was run. | Check the saved connection and retry. |
+| `migration family <name> exists in both migrations/ and migrations/<SCHEMA>/` | The same migration name is used in the flat layout and a schema folder. | Keep each family in one layout; rename or move the newer folder before any write attempt. |
 | `several schemas are configured, so migrations must live under migrations/<SCHEMA>/` | A flat migration folder in a multi-schema project. | Move it to `migrations/<SCHEMA>/`. |
 | `selected migrations belong to different schemas; run one schema at a time` | One command listed folders for two schemas. | Run separate commands. |
 | `--schema <X> does not match the migration folder's schema <Y>` | The option and the folder disagree. | Drop `--schema`, or use the right folder. |

@@ -49,6 +49,19 @@ class SchemaFolderManifestTests(unittest.TestCase):
         add_folder(self.root, "migrations/APR/2026-09-29_add-flag-r001")
         self.assertEqual(2, len(manifest.list_migration_folders(self.root)))
 
+    def test_one_family_in_flat_and_schema_layouts_is_refused(self) -> None:
+        add_folder(self.root, "migrations/2026-09-29_rebuild-r001")
+        add_folder(self.root, "migrations/APP/2026-09-30_rebuild-r001")
+        with self.assertRaisesRegex(manifest.MigrationManifestError, "both migrations/ and migrations/APP/"):
+            manifest.list_migration_folders(self.root)
+        with self.assertRaises(manifest.MigrationManifestError):
+            manifest.load_batch(self.root, ["migrations/APP/2026-09-30_rebuild-r001"])
+
+    def test_different_families_may_use_different_layouts(self) -> None:
+        add_folder(self.root, "migrations/2026-09-29_create-t1-r001")
+        add_folder(self.root, "migrations/APP/2026-09-30_create-t2-r001")
+        self.assertEqual(2, len(manifest.list_migration_folders(self.root)))
+
     def test_revision_gap_is_checked_per_schema(self) -> None:
         add_folder(self.root, "migrations/TMS/2026-09-29_add-flag-r001")
         add_folder(self.root, "migrations/APR/2026-09-29_add-flag-r001")

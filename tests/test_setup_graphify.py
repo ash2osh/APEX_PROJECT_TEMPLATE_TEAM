@@ -267,6 +267,33 @@ class GraphifyPatchTests(unittest.TestCase):
         self.assertIn('".apx": extract_apexlang,', extract)
         self.assertNotIn('".apx": extract_sql,', extract)
 
+    def test_sql_mention_before_the_extension_set_is_not_patched(self) -> None:
+        self.write_package()
+        detect_path = self.root / "detect.py"
+        detect_path.write_text(
+            "# handles '.sql', files among others\n"
+            "CODE_EXTENSIONS = {'.py', '.sql', '.sh'}\n",
+            encoding="utf-8",
+        )
+
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+
+        detect = detect_path.read_text(encoding="utf-8")
+        self.assertIn("# handles '.sql', files among others\n", detect)
+        self.assertIn("CODE_EXTENSIONS = {'.py', '.sql', '.apx', '.sh'}", detect)
+        self.assertTrue(MODULE.verify_installation(self.root)[0])
+
+    def test_marker_outside_the_extension_set_does_not_verify(self) -> None:
+        self.write_package()
+        self.assertTrue(MODULE.patch_graphify_dir(self.root))
+        detect_path = self.root / "detect.py"
+        detect_path.write_text("# '.sql', '.apx',\nCODE_EXTENSIONS = {'.py', '.sql', '.sh'}\n", encoding="utf-8")
+
+        ok, reason = MODULE.verify_installation(self.root)
+
+        self.assertFalse(ok)
+        self.assertIn("not registered", reason)
+
     def test_unrecognized_existing_apx_handling_fails_closed(self) -> None:
         """A future Graphify that mentions .apx its own way must not look patched."""
         self.write_package()

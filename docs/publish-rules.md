@@ -21,7 +21,11 @@ what the live app looked like at that moment:
   live.
 
 Before importing, publish reads the same two values from the live app and
-compares them with your baseline.
+compares them with your baseline. The import session then reads them once more,
+immediately before `apex import`, and refuses if they changed after the drift
+check approved them. That shrinks the window for a save to slip in to the
+import itself; it still cannot see Builder edits that were never saved, so tell
+the team before you publish.
 
 ## The usual fix
 
@@ -89,6 +93,7 @@ app and agreed with the team that your files should replace it.
 | `is not listed in APEX_PARSING_SCHEMA` | The app's parsing schema has no DEV APEX profile entry. Add the schema, connection, and expected user to the aligned APEX profile lists in `.env`. |
 | `is not listed in STAGING_SCHEMA` / `is not listed in PROD_SCHEMA` | The app's parsing schema has no entry for that target. Add its schema, connection, and expected user to the aligned staging or production lists in `.env`. |
 | `application source is outside the repository` / `symbolic links or reparse points are not supported` | Keep the app source as real files inside the checkout. |
+| `the application path contains characters SQLcl cannot pass` | The repository path contains `'`, `"` or `&`, which SQLcl would cut short or substitute. Move the checkout to a path without them. |
 | `DEV publish needs application.apx to stamp the publish tag` | The app source is incomplete; export it again. |
 | `could not stamp the application version` | Fix the `version:` line in `application.apx` as the message says (for example, a duplicate line or a version over 255 bytes). |
 
@@ -97,9 +102,12 @@ app and agreed with the team that your files should replace it.
 | Message | Meaning and action |
 | --- | --- |
 | `is parsed by` | The live application uses a different parsing schema than the descriptor. Review the live app and correct the descriptor and folder, or arrange the intended schema change with the team before importing. |
+| `Live application changed after the Builder drift check` (ORA-20016) | Someone saved or imported the app between the drift check and the import. Nothing was imported. Export, merge, publish. |
 
 **During import.** Publish restores your unstamped `application.apx`; read the
-SQLcl output printed above the message.
+SQLcl output printed above the message. If the file changed while publish ran
+(you saved it in an editor), publish leaves your edit in place and warns
+`changed while publishing; left as is`; check its `version:` line.
 
 | Message | Meaning and action |
 | --- | --- |

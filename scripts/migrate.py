@@ -45,6 +45,10 @@ VERIFIER_VERSION = "template-migration-v1"
 STATUS_SCHEMA_VERSION = 1
 RUN_MANIFEST_NAME = "run-manifest.json"
 RUN_ID_RE = re.compile(r"migration-attempt-[A-Za-z0-9_-]+\Z", re.ASCII)
+IDENTITY_FIELDS = (
+    "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
+    "container_id", "container_name", "edition", "database_version",
+)
 
 
 class MigrationApplyError(RuntimeError):
@@ -191,10 +195,7 @@ def _freeze_batch(migrations: Sequence[Migration], run_dir: Path) -> tuple[_Froz
 
 def _identity_for_receipt(inventory: SchemaInventory | SchemaSnapshot, target: Target) -> dict:
     identity = inventory.identity
-    required = (
-        "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
-        "container_id", "container_name", "edition", "database_version",
-    )
+    required = IDENTITY_FIELDS
     missing = [field for field in required if not str(identity.get(field, "")).strip()]
     if missing:
         raise MigrationApplyError("observed migration target identity is incomplete: " + ", ".join(missing))
@@ -219,10 +220,7 @@ def _identity_summary(identity: Mapping[str, str]) -> dict:
 
 
 def _assert_same_target(expected: Mapping[str, str], observed: Mapping[str, str]) -> None:
-    required = (
-        "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
-        "container_id", "container_name", "edition", "database_version",
-    )
+    required = IDENTITY_FIELDS
     if any(not str(expected.get(field, "")).strip() or not str(observed.get(field, "")).strip() for field in required):
         raise MigrationApplyError("target identity became incomplete during migration; result is unknown")
     if any(expected[field] != observed[field] for field in required):
@@ -265,6 +263,16 @@ def _explicit_checks(migrations: Sequence[Migration], phase: str) -> tuple:
 
 def _check_report(target: Target, migrations: Sequence[Migration], phase: str, run_dir: Path, run_checks_fn: Callable) -> CheckReport:
     return run_checks_fn(target, _explicit_checks(migrations, phase), run_dir, phase=phase)
+
+
+def _assert_check_identity(expected: Mapping[str, str], report: CheckReport) -> None:
+    """Refuse check results that were observed on a different database."""
+    if not report.results:
+        return
+    observed = report.coverage.get("identity")
+    if not isinstance(observed, Mapping):
+        raise MigrationApplyError(f"{report.coverage.get('phase', 'check')} session did not report its target identity")
+    _assert_same_target(expected, observed)
 
 
 def _verify_receipts_and_attempts(
@@ -421,13 +429,87 @@ def _apply_identity_from_output(output: str) -> dict:
         identity = json.loads("".join(lines[start + 1 : end]))
     except json.JSONDecodeError as error:
         raise MigrationApplyError("apply target identity JSON is malformed") from error
-    required = ("session_user", "current_schema", "db_name", "db_unique_name", "service_name", "container_id", "container_name", "edition", "database_version")
+    required = IDENTITY_FIELDS
     if not isinstance(identity, dict) or any(not isinstance(identity.get(key), str) or not identity[key] for key in required):
         raise MigrationApplyError("apply target identity is incomplete")
     return identity
 
 
-def apply_folder(migration: Migration, target: Target, run_dir: Path) -> dict:
+IDENTITY_SQL_EXPRESSIONS = {
+    "session_user": "SYS_CONTEXT('USERENV', 'SESSION_USER')",
+    "current_schema": "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')",
+    "db_name": "SYS_CONTEXT('USERENV', 'DB_NAME')",
+    "db_unique_name": "SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME')",
+    "service_name": "NVL(SYS_CONTEXT('USERENV', 'SERVICE_NAME'), '<NO_SERVICE>')",
+    "container_id": "NVL(SYS_CONTEXT('USERENV', 'CON_ID'), '0')",
+    "container_name": "NVL(SYS_CONTEXT('USERENV', 'CON_NAME'), 'NON-CDB')",
+    "edition": "NVL(SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'), '<NONEDITIONED>')",
+    "database_version": "TO_CHAR(DBMS_DB_VERSION.VERSION) || '.' || TO_CHAR(DBMS_DB_VERSION.RELEASE)",
+}
+IDENTITY_VALUE_RE = re.compile(r"[^\x00-\x1f'&]{1,512}\Z")
+
+
+def _identity_guard_lines(expected_identity: Mapping[str, str]) -> list[str]:
+    """Refuse, inside the apply session and before any payload, a different target."""
+    lines = ["DECLARE", "  l_mismatch VARCHAR2(4000);", "BEGIN"]
+    for field in IDENTITY_FIELDS:
+        value = expected_identity.get(field)
+        if not isinstance(value, str) or IDENTITY_VALUE_RE.fullmatch(value) is None:
+            raise MigrationApplyError(f"preflight identity field {field} cannot be enforced in the apply session")
+        lines.append(
+            f"  IF NVL({IDENTITY_SQL_EXPRESSIONS[field]}, '<NULL>') != '{value}' THEN "
+            f"l_mismatch := l_mismatch || ' {field}'; END IF;"
+        )
+    lines.extend([
+        "  IF l_mismatch IS NOT NULL THEN",
+        "    RAISE_APPLICATION_ERROR(-20987, 'Migration apply session differs from the preflight target:' || l_mismatch);",
+        "  END IF;",
+        "END;",
+        "/",
+    ])
+    return lines
+
+
+def _compile_guard_lines(target_schema: str) -> list[str]:
+    """Fail the apply when an object compiled during it is left with errors.
+
+    SQLcl reports a PL/SQL or view compilation error as a warning and keeps
+    going; WHENEVER SQLERROR does not fire. ALL_ERRORS is the only reliable
+    signal, limited to objects whose DDL time falls inside this apply.
+    """
+    return [
+        "DECLARE",
+        "  l_started DATE := TO_DATE(:migration_started, 'YYYYMMDDHH24MISS');",
+        "  l_failed VARCHAR2(4000);",
+        "BEGIN",
+        "  FOR r IN (",
+        "    SELECT o.object_type, o.object_name",
+        "    FROM all_objects o",
+        f"    WHERE o.owner = '{target_schema}'",
+        "      AND o.last_ddl_time >= l_started",
+        "      AND EXISTS (",
+        "        SELECT 1 FROM all_errors e",
+        "        WHERE e.owner = o.owner AND e.name = o.object_name",
+        "          AND e.type = o.object_type AND e.attribute = 'ERROR')",
+        "    ORDER BY o.object_type, o.object_name",
+        "  ) LOOP",
+        "    l_failed := SUBSTR(l_failed || ' ' || r.object_type || ' ' || r.object_name || ';', 1, 3000);",
+        "  END LOOP;",
+        "  IF l_failed IS NOT NULL THEN",
+        "    RAISE_APPLICATION_ERROR(-20986, 'Migration left objects with compilation errors:' || l_failed);",
+        "  END IF;",
+        "END;",
+        "/",
+    ]
+
+
+def apply_folder(
+    migration: Migration,
+    target: Target,
+    run_dir: Path,
+    *,
+    expected_identity: Mapping[str, str] | None = None,
+) -> dict:
     """Apply the exact staged SQL files in one SQLcl session and commit on clean exit."""
     run_dir = Path(run_dir)
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -454,8 +536,16 @@ def apply_folder(migration: Migration, target: Target, run_dir: Path) -> dict:
         f"@@migrate.sql {target.schema} {target.environment} {target.expected_user}",
         "SET DEFINE OFF",
     ]
+    if expected_identity is not None:
+        driver_lines.extend(_identity_guard_lines(expected_identity))
+    driver_lines.extend((
+        "VARIABLE migration_started VARCHAR2(14)",
+        "BEGIN :migration_started := TO_CHAR(SYSDATE, 'YYYYMMDDHH24MISS'); END;",
+        "/",
+    ))
     for file in migration.files:
         driver_lines.append(f"@@../payload/{migration.folder.name}/{file.name}")
+    driver_lines.extend(("SET DEFINE OFF", *_compile_guard_lines(target.schema)))
     driver_lines.extend(("PROMPT MIGRATION_APPLY_COMPLETED", "EXIT SUCCESS COMMIT", ""))
     driver = run_dir / "migration-driver.sql"
     driver.write_text("\n".join(driver_lines), encoding="utf-8", newline="\n")
@@ -634,6 +724,7 @@ def apply_batch(
             migrations, target, run_dir / "initial", capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
         )
         initial_target_identity = _identity_for_receipt(initial_inventory, target)
+        _assert_check_identity(initial_target_identity, initial_checks)
         _verify_receipts_and_attempts(repo_root, migrations, initial_target_identity)
         if initial_preflight.exit_code != 0:
             print(json.dumps(initial_preflight.to_dict(), ensure_ascii=False, sort_keys=True, indent=2), file=sys.stderr)
@@ -677,6 +768,7 @@ def apply_batch(
             )
             current_identity = _identity_for_receipt(current_inventory, target)
             _assert_same_target(initial_target_identity, current_identity)
+            _assert_check_identity(initial_target_identity, current_checks)
             if current_preflight.exit_code != 0:
                 raise MigrationApplyError(
                     f"live preflight refused {original.folder.name} at its apply boundary: "
@@ -698,7 +790,7 @@ def apply_batch(
 
             folder_run_dir = run_dir / f"apply-{folder_index:03d}"
             try:
-                apply_evidence = apply_folder_fn(staged, target, folder_run_dir)
+                apply_evidence = apply_folder_fn(staged, target, folder_run_dir, expected_identity=initial_target_identity)
             except (MigrationApplyError, OSError, RuntimeError) as error:
                 record["state"] = "apply-failed-or-unknown"
                 record["error"] = str(error)
@@ -727,6 +819,7 @@ def apply_batch(
             operations = analyze_batch((original,), target.schema)
             fresh_snapshot = _snapshot_for(target, fresh_inventory, _selected_keys(operations), run_dir / f"verify-snapshot-{folder_index:03d}", capture_snapshot_fn)
             post_checks = _check_report(target, (original,), "postconditions", run_dir / f"postconditions-{folder_index:03d}", run_checks_fn)
+            _assert_check_identity(initial_target_identity, post_checks)
             catalog_results, catalog_errors = _verify_structural_postconditions(original, fresh_snapshot, target.schema)
             if not post_checks.complete or not post_checks.passed or catalog_errors:
                 record["state"] = "committed-verification-failed"

@@ -332,6 +332,15 @@ def _migration_directories(repo_root: Path) -> list[tuple[Path, str | None, str,
             )
         seen[identity] = path
         revisions.setdefault((schema, family), set()).add(revision)
+    # A flat folder and a schema folder can target the same schema, so one
+    # family in both layouts could apply the same revision twice.
+    flat_families = {family for schema, family in revisions if schema is None}
+    for schema, family in sorted(revisions, key=lambda item: (item[1], item[0] or "")):
+        if schema is not None and family in flat_families:
+            raise MigrationManifestError(
+                f"migration family {family} exists in both migrations/ and migrations/{schema}/; "
+                "keep each family in one layout"
+            )
     for (_schema, family), values in revisions.items():
         expected = set(range(1, max(values) + 1))
         if values != expected:

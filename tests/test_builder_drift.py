@@ -29,6 +29,7 @@ class BuilderDriftTests(unittest.TestCase):
         application_present: bool | None = True,
         version: str | None = "Release 1.0",
         legacy_marker: bool = False,
+        state_out: Path | None = None,
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -66,6 +67,7 @@ class BuilderDriftTests(unittest.TestCase):
                     str(app),
                     "--expected-user",
                     "DEMO",
+                    *(["--state-out", str(state_out)] if state_out is not None else []),
                 ],
                 cwd=ROOT,
                 env=environment,
@@ -91,6 +93,39 @@ class BuilderDriftTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[DRIFT OK] No uncaptured Builder edits detected.", result.stdout)
+
+    def test_approved_state_is_recorded_for_the_import_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cases = (
+                ("2026-09-26T09:00:00", "2026-09-26T08:00:00", "Release 1.0", "P|2026-09-26T08:00:00|" + b"Release 1.0".hex().upper()),
+                (None, "NO_TIMESTAMP", "ASHARIF-2026-09-30r001 | ü", "P|NONE|" + "ASHARIF-2026-09-30r001 | ü".encode().hex().upper()),
+            )
+            for index, (baseline, live, version, expected) in enumerate(cases):
+                with self.subTest(live=live):
+                    state_out = Path(temporary) / f"state-{index}.txt"
+                    result = self.run_guard(
+                        baseline=baseline,
+                        version=version,
+                        sql_output=observed_state(live, version=version),
+                        state_out=state_out,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(state_out.read_text(encoding="utf-8").strip(), expected)
+
+    def test_absent_app_records_absent_state_and_drift_records_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            absent_out = Path(temporary) / "absent.txt"
+            result = self.run_guard(
+                baseline=None, application_present=False, sql_output=observed_state("NOT_FOUND"), state_out=absent_out,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(absent_out.read_text(encoding="utf-8").strip(), "ABSENT")
+            drift_out = Path(temporary) / "drift.txt"
+            result = self.run_guard(
+                baseline="2026-09-26T08:00:00", sql_output=observed_state("2026-09-26T09:00:00"), state_out=drift_out,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(drift_out.exists())
 
     def test_missing_database_export_baseline_fails_closed(self) -> None:
         result = self.run_guard(

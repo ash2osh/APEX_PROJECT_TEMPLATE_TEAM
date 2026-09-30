@@ -14,6 +14,28 @@ $scratchPath = Join-Path $repoRoot "scratch"
 [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
 $scratchRoot = (Resolve-Path -LiteralPath $scratchPath).Path
 
+function Assert-NoIgnoredMirrorFiles([string]$RepoRoot, [string]$Relative) {
+  # The swap deletes the old directory, so ignored files there would be lost
+  # without Git noticing. Only the two ignored files an export regenerates
+  # are expected in a mirror.
+  $Relative = $Relative.Replace('\', '/').TrimEnd('/')
+  $ignoredStatus = @(git -C $RepoRoot status --porcelain --ignored --untracked-files=all -- ":(literal)$Relative")
+  if ($LASTEXITCODE -ne 0) { throw "unable to inspect ignored files for mirror: $Relative" }
+  $allowed = @("$Relative/apex-team-export.json", "$Relative/deployments/default.json")
+  $ignoredFiles = @(
+    foreach ($line in $ignoredStatus) {
+      if ($line -is [string] -and $line.StartsWith("!! ")) {
+        $path = $line.Substring(3)
+        if ($allowed -cnotcontains $path) { $path }
+      }
+    }
+  )
+  if ($ignoredFiles.Count -gt 0) {
+    throw ("refusing to replace mirror with ignored local files that would be deleted: $Relative`n  " +
+      ($ignoredFiles -join "`n  ") + "`nmove them out of the mirror first")
+  }
+}
+
 function Assert-NoReparsePointsBelowRepository {
   param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
 
@@ -95,6 +117,7 @@ if ($gitExitCode -ne 0) {
 if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
   throw "refusing to replace dirty mirror: $Destination"
 }
+Assert-NoIgnoredMirrorFiles -RepoRoot $repoRoot -Relative $relativeDestination
 
 $resolvedDestinationParent = (Resolve-Path -LiteralPath $destinationParent).Path
 $destinationPath = Join-Path $resolvedDestinationParent (Split-Path -Leaf $destinationPath)
@@ -163,7 +186,14 @@ for ($i = 0; $i -lt $Pairs.Count; $i += 2) {
 # staleness window. Same-impl contention is always detected exactly.
 $mirrorLockStaleSeconds = 900
 if (-not [string]::IsNullOrWhiteSpace($env:MIRROR_LOCK_STALE_SECONDS)) {
-  $mirrorLockStaleSeconds = [int]$env:MIRROR_LOCK_STALE_SECONDS
+  # A short window would let a contender break a lock the other shell still
+  # holds, because cross-shell liveness cannot be checked.
+  [int]$parsedStaleSeconds = 0
+  if ($env:MIRROR_LOCK_STALE_SECONDS -notmatch '^[0-9]+$' -or
+      -not [int]::TryParse($env:MIRROR_LOCK_STALE_SECONDS, [ref]$parsedStaleSeconds) -or $parsedStaleSeconds -lt 60) {
+    throw "MIRROR_LOCK_STALE_SECONDS must be a whole number of seconds, at least 60"
+  }
+  $mirrorLockStaleSeconds = $parsedStaleSeconds
 }
 
 function Get-MirrorLockField([string]$Path, [string]$Key) {
@@ -251,6 +281,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
       throw "refusing to replace dirty mirror: $($pair.CanonicalRelative)"
     }
+    Assert-NoIgnoredMirrorFiles -RepoRoot $repoRoot -Relative $pair.CanonicalRelative
   }
 
   foreach ($pair in $validated) {
@@ -266,13 +297,28 @@ try {
 } catch {
   $originalErrorMessage = $_.Exception.Message
   # Reverse order: undo the staged move first, then restore the old mirror.
+  $rollbackProblems = @()
   [array]::Reverse($installed)
   foreach ($pair in $installed) {
-    Move-Item -LiteralPath $pair.DestinationPath -Destination $pair.StagedPath -ErrorAction SilentlyContinue
+    try {
+      Move-Item -LiteralPath $pair.DestinationPath -Destination $pair.StagedPath -ErrorAction Stop
+    } catch {
+      $rollbackProblems += "rollback could not return $($pair.DestinationPath) to staging: $($_.Exception.Message)"
+    }
   }
   [array]::Reverse($movedDestination)
   foreach ($pair in $movedDestination) {
-    Move-Item -LiteralPath $pair.BackupPath -Destination $pair.DestinationPath -ErrorAction SilentlyContinue
+    try {
+      if (Test-Path -LiteralPath $pair.DestinationPath) { throw "destination still exists" }
+      Move-Item -LiteralPath $pair.BackupPath -Destination $pair.DestinationPath -ErrorAction Stop
+    } catch {
+      $rollbackProblems += "rollback failed; the previous mirror is at $($pair.BackupPath): $($_.Exception.Message)"
+      # Keep the backup: the success path below deletes backups, this path must not.
+    }
+  }
+  if ($rollbackProblems.Count -gt 0) {
+    throw ("mirror replacement failed and the rollback is INCOMPLETE; recover manually:`n  " +
+      ($rollbackProblems -join "`n  ") + "`nOriginal error: $originalErrorMessage")
   }
   throw "mirror replacement failed and was rolled back. Original error: $originalErrorMessage"
 } finally {

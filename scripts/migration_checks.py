@@ -567,6 +567,19 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         "  l_payload.put('schemaVersion', 1);",
         f"  l_payload.put('phase', '{phase}');",
         "  l_payload.put('complete', TRUE);",
+        # The session reports where it ran so the caller can refuse results
+        # observed on a different database than the migration target.
+        "  l_result := JSON_OBJECT_T();",
+        "  l_result.put('session_user', SYS_CONTEXT('USERENV', 'SESSION_USER'));",
+        "  l_result.put('current_schema', SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'));",
+        "  l_result.put('db_name', SYS_CONTEXT('USERENV', 'DB_NAME'));",
+        "  l_result.put('db_unique_name', SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME'));",
+        "  l_result.put('service_name', NVL(SYS_CONTEXT('USERENV', 'SERVICE_NAME'), '<NO_SERVICE>'));",
+        "  l_result.put('container_id', NVL(SYS_CONTEXT('USERENV', 'CON_ID'), '0'));",
+        "  l_result.put('container_name', NVL(SYS_CONTEXT('USERENV', 'CON_NAME'), 'NON-CDB'));",
+        "  l_result.put('edition', NVL(SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'), '<NONEDITIONED>'));",
+        "  l_result.put('database_version', TO_CHAR(DBMS_DB_VERSION.VERSION) || '.' || TO_CHAR(DBMS_DB_VERSION.RELEASE));",
+        "  l_payload.put('identity', l_result);",
     ]
     for check in checks:
         validate_check_query(check.sql)
@@ -686,7 +699,11 @@ def _parse_check_output(output: str, checks: Sequence[QueryCheck], phase: str) -
         if not passed:
             errors.append({"code": "CHECK_FAILED", "check": check.id, "message": result.get("error") or "check must return exactly one row and one numeric column equal to 1", "observed": normalized})
     complete = len(results) == len(checks) and not any(error["code"] == "RESULT_IDENTITY" for error in errors)
-    return CheckReport(complete and not errors, complete, tuple(results), tuple(errors), {"phase": phase, "complete": complete})
+    coverage: dict = {"phase": phase, "complete": complete}
+    identity = payload.get("identity")
+    if isinstance(identity, dict) and all(isinstance(value, str) for value in identity.values()):
+        coverage["identity"] = dict(identity)
+    return CheckReport(complete and not errors, complete, tuple(results), tuple(errors), coverage)
 
 
 def run_checks(

@@ -28,6 +28,27 @@ class ValidateAppSourceTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_path_characters_sqlcl_cannot_pass_are_rejected(self) -> None:
+        for name in ("o'neil", 'quote"d', "a&b"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / name
+                app = root / "apps" / "DEMO" / "100"
+                (app / ".apex").mkdir(parents=True)
+                (app / ".apex" / "apexlang.json").write_text("{}\n", encoding="utf-8")
+
+                result = self.run_validator(root, app)
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("SQLcl cannot pass", result.stderr)
+
+    def test_path_with_spaces_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "my projects"
+            app = root / "apps" / "DEMO" / "100"
+            (app / ".apex").mkdir(parents=True)
+            (app / ".apex" / "apexlang.json").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(self.run_validator(root, app).returncode, 0)
+
     def test_symlinked_application_root_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "checkout"

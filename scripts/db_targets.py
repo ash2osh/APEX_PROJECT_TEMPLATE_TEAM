@@ -11,7 +11,16 @@ from collections.abc import Iterable, Mapping
 ORACLE_IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 SQLCL_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
 CLASSIFICATIONS = {"development", "test", "staging", "production"}
-PRODUCTION_MARKER_RE = re.compile(r"(^|[-_.])(prod|prd|production|live)[0-9]*([-_.]|$)", re.IGNORECASE | re.ASCII)
+# A production marker is "production" or "live" as a whole token, "prod" or
+# "prd" ending a token (PROD, ERPPROD, erpprod.example.com), or starting one
+# before "db" or a digit (PRODDB, PROD1). The Bash, PowerShell and SQL guards
+# use the same pattern; keep them aligned.
+PRODUCTION_MARKER_RE = re.compile(
+    r"(^|[^A-Za-z0-9])(production|live)[0-9]*([^A-Za-z0-9]|$)"
+    r"|(prod|prd)[0-9]*([^A-Za-z0-9]|$)"
+    r"|(^|[^A-Za-z0-9])(prod|prd)(db|[0-9])",
+    re.IGNORECASE | re.ASCII,
+)
 
 
 def looks_like_production_identity(*values: str) -> bool:

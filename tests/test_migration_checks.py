@@ -216,6 +216,27 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertNotIn(check.sql, observed["driver"])
         self.assertIn("DBMS_SQL.BIND_VARIABLE(l_cursor, ':target_schema', 'APP')", observed["driver"])
 
+    def test_check_session_reports_its_database_identity(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("one", "SELECT 1 FROM dual", 1)
+        identity = {"session_user": "MIGRATOR", "current_schema": "APP", "db_name": "DEVDB"}
+        observed = {}
+
+        def runner(_target, driver, run_dir):
+            observed["driver"] = driver.read_text(encoding="utf-8")
+            payload = {"schemaVersion": 1, "phase": "postconditions", "complete": True, "identity": identity,
+                       "results": [{"id": "one", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
+            output = "CHECK_PAYLOAD_BEGIN:postconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:postconditions\nCHECK_VERIFIED:postconditions\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        report = run_checks(target, (check,), Path(self.temporary.name), phase="postconditions", _runner=runner)
+
+        self.assertTrue(report.passed)
+        self.assertEqual(report.coverage["identity"], identity)
+        for field in ("db_unique_name", "service_name", "container_name", "edition", "database_version"):
+            self.assertIn(f"l_result.put('{field}'", observed["driver"])
+        self.assertIn("l_payload.put('identity', l_result);", observed["driver"])
+
 
 if __name__ == "__main__":
     unittest.main()
