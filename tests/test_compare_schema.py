@@ -65,6 +65,19 @@ class SelectionTests(unittest.TestCase):
         self.assertIn(("HR_EMPLOYEES", "TABLE"), selection.keys)
         self.assertEqual(selection.keys, (("GL_CODES", "TABLE"), ("HR_DEPARTMENTS", "TABLE"), ("HR_EMPLOYEES", "TABLE")))
 
+    def test_wildcard_omits_lob_storage_objects_represented_by_table_ddl(self) -> None:
+        source = inventory("APP_DEV", "DEVDB", [
+            ("HR_USERS", "TABLE", {}), ("SYS_LOB00000101C00001$$", "LOB", {}),
+        ])
+        target = inventory("APP_STAGE", "STAGEDB", [
+            ("HR_USERS", "TABLE", {}), ("SYS_LOB00000202C00001$$", "LOB", {}),
+        ])
+
+        selection = select_objects(source, target, (), ("*",))
+
+        self.assertEqual(selection.keys, (("HR_USERS", "TABLE"),))
+        self.assertEqual(selection.errors, ())
+
     def test_exact_selectors_fold_unquoted_preserve_quoted_and_qualify_type(self) -> None:
         self.assertEqual(parse_exact_selector("customers"), ("CUSTOMERS", None))
         self.assertEqual(parse_exact_selector('"Customer Details"'), ("Customer Details", None))

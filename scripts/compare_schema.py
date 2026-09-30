@@ -183,6 +183,9 @@ def select_objects(
         for key, row in inventory.objects.items():
             if key.owner != _identity_owner(inventory):
                 continue
+            # Oracle's LOB storage rows are represented by their owning table's DDL.
+            if key.object_type == "LOB":
+                continue
             candidate = (key.name, key.object_type)
             if _row_is_identity_sequence(row):
                 identity_sequences.setdefault(candidate, []).append((inventory, row))
