@@ -54,7 +54,7 @@ Check each row. The command in the last column prints the version.
 
 | You need | Version | Check with |
 | --- | --- | --- |
-| An Oracle database with **APEX 26.1 or newer** and a workspace | 26.1+ | `select version_no from apex_release;` |
+| An Oracle database with **APEX 26.1 or newer** and a workspace | 26.1+ | see the check at the end of step 5 |
 | **SQLcl** | 26.1 or newer | `sql -V` |
 | **Git** | any recent | `git --version` |
 | **Python** | 3.10 or newer | `python3 --version` |
@@ -93,6 +93,10 @@ helpers, such as `upgrade-apex` (if you need 26.1 or newer) and
 [documentation](https://www.united-codes.com/products/uc-local-apex-dev/docs/)
 is the authority for that setup; this template only needs a schema, a
 workspace, and a saved connection.
+
+This gives you a schema and a workspace, **not an APEX application**. Before
+step 8, create or import an app in App Builder and note its numeric ID;
+`export` can only export an app that already exists.
 
 ## 4. Create your project
 
@@ -140,6 +144,13 @@ connections with:
 ```bash
 sql /nolog
 SQL> connmgr list
+```
+
+While you are connected, check the APEX version (step 2 asks for 26.1 or newer):
+
+```text
+SQL> connect -name my-dev
+SQL> select version_no from apex_release;
 ```
 
 ## 6. Configure `.env`
@@ -206,6 +217,7 @@ apps/DEMO/100/
 ├── pages/                 one .apx file per page, e.g. p00001-dashboard.apx
 ├── shared-components/     authorizations, lists, LOVs, and so on
 ├── workspace-components/
+├── .apex/apexlang.json    export metadata (commit it with the rest)
 ├── deployments/           environment settings (next step; starts with default.json)
 └── apex-team-export.json  records when the export was taken (used by publish)
 ```
@@ -260,7 +272,14 @@ git add apps/ && git commit -m "Change the dashboard title"
    change `title: Employee Self Service` to `title: Employee Self Service Portal`.
 2. **Tell your team which app you are publishing**, and check that nobody has
    unsaved work in Builder on it. Git cannot see Builder.
-3. Publish:
+3. Commit your edit. The source you import should be the source in Git:
+
+```bash
+git add apps/DEMO/100/
+git commit -m "Change the dashboard title"
+```
+
+4. Publish:
 
 ```bash
 scripts/team.sh publish 100 --env dev
@@ -276,10 +295,11 @@ Published APEX App 100 to DEV (DEMO / DEMO).
 Commit the stamped version in apps/DEMO/100/application.apx: Release 1.0 [ALICE-2026-09-30r001]
 ```
 
-Commit that change too:
+Commit that stamp as its own commit:
 
 ```bash
-git add apps/ && git commit -m "Publish app 100"
+git add apps/DEMO/100/application.apx
+git commit -m "Record app 100 publish version"
 ```
 
 ## 10. Make your first database change
@@ -299,6 +319,10 @@ migrations/2026-09-30_add-notes-to-hr-users-r001/
 ALTER TABLE HR_USERS ADD (NOTES VARCHAR2(200));
 ```
 
+This example assumes the table `HR_USERS` already exists in your schema. If it
+does not, first apply a migration that creates it, or pick a table you have.
+The precondition below fails when the table is missing, which is what you want.
+
 `checks.json` (each check is a query that must return exactly one row containing
 the number `1`; `expected` is always `1`):
 
@@ -308,7 +332,7 @@ the number `1`; `expected` is always `1`):
   "preconditions": [
     {
       "id": "notes-column-absent",
-      "sql": "SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM user_tab_columns WHERE table_name = 'HR_USERS' AND column_name = 'NOTES'",
+      "sql": "SELECT CASE WHEN EXISTS (SELECT 1 FROM user_tables WHERE table_name = 'HR_USERS') AND NOT EXISTS (SELECT 1 FROM user_tab_columns WHERE table_name = 'HR_USERS' AND column_name = 'NOTES') THEN 1 ELSE 0 END FROM dual",
       "expected": 1
     }
   ],

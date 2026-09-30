@@ -45,7 +45,9 @@ diff of the `.apx` files that changed.
 1. Edit a file, for example `apps/DEMO/100/pages/p00001-dashboard.apx`.
 2. Tell your team you are publishing app 100 and check nobody is editing it in
    Builder. Git cannot see Builder.
-3. Run:
+3. Commit your edit, so the imported source is the source in Git:
+   `git add apps/DEMO/100/ && git commit -m "Change the dashboard title"`.
+4. Run:
 
 ```bash
 scripts/team.sh publish 100 --env dev
@@ -74,7 +76,9 @@ import is live.
 **When:** a table needs a new column and you want it checked, applied and
 recorded.
 
-Create `migrations/2026-09-30_add-notes-to-hr-users-r001/` with two files.
+Create `migrations/2026-09-30_add-notes-to-hr-users-r001/` with two files. The
+example assumes the table `HR_USERS` exists; its precondition fails if it does
+not. Use one of your own tables when you try it.
 
 `001-add-notes-column.sql`:
 
@@ -90,7 +94,7 @@ ALTER TABLE HR_USERS ADD (NOTES VARCHAR2(200));
   "preconditions": [
     {
       "id": "notes-column-absent",
-      "sql": "SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM user_tab_columns WHERE table_name = 'HR_USERS' AND column_name = 'NOTES'",
+      "sql": "SELECT CASE WHEN EXISTS (SELECT 1 FROM user_tables WHERE table_name = 'HR_USERS') AND NOT EXISTS (SELECT 1 FROM user_tab_columns WHERE table_name = 'HR_USERS' AND column_name = 'NOTES') THEN 1 ELSE 0 END FROM dual",
       "expected": 1
     }
   ],
@@ -147,9 +151,9 @@ git add database/ && git commit -m "Refresh database mirror"
 ```
 
 **You should see** a stream of SQLcl output, then object counts per type
-(`PACKAGE=5`, `TRIGGER=12`, ...). The copy lands in `database/DEMO/tables/`,
-`views/`, `packages/`, `procedures/`, `functions/`, `triggers/` and
-`synonyms/`. It holds structure only, never data. Never edit it by hand.
+(`PACKAGE=5`, `TRIGGER=12`, ...). The copy lands in `database/DEMO/`, with a folder
+for each object type the schema has (`tables/`, `packages/`, `triggers/`, and
+so on). A type with no objects has no folder. It holds structure only, never data. Never edit it by hand.
 
 **If it goes wrong:** `refusing to back up over dirty mirror: database/DEMO`
 means you have uncommitted changes there. Commit or discard them first.
@@ -222,7 +226,10 @@ scripts/team.sh deploy 100 --env staging
 then `Deploying to STAGING. Proceed? [y/N]:`. Nothing happens until you answer
 `y`.
 
-**Prefer a DBA to run it?** Produce a runbook without connecting:
+**Prefer a DBA to run it?** Produce a runbook without connecting. It needs a
+production descriptor too: copy `apps/templates/deployments/prod.json` to
+`apps/DEMO/100/deployments/prod.json` and fill in the production workspace and
+parsing schema.
 
 ```bash
 scripts/team.sh deploy 100 --env prod --manual

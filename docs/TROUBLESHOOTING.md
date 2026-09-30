@@ -12,11 +12,12 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `configuration file not found: ... (copy .env.example to .env)` | There is no `.env` yet. | `cp .env.example .env`, then edit it. |
 | `project environment error: PROJECT_NAME is required in .env` (or another setting) | A required setting is missing or empty. | Copy the missing line from `.env.example`. |
 | `unsupported setting in .env: <KEY>` | `.env` contains a setting this template does not know, often a leftover from an older version. | Delete that line. Compare with `.env.example`. |
-| `DEVELOPER_NAME must be uppercase letters, digits, or underscores...` | The name is lowercase or has other characters. | Use capitals, for example `ALICE`. |
+| `project environment error: DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF` | The name is lowercase or has other characters. | Use capitals, for example `ALICE`. |
+| `Unknown connection <name>` (followed by `team error: N of M doctor check(s) failed`) | SQLcl printed this: the saved connection named in `.env` does not exist, often a typo. | Run `sql /nolog`, then `connmgr list`, and correct the matching `*_SQLCL_CONNECTION` value, or save the connection (step 5 of the getting started guide). |
 | `<KEY> has an inline comment` | A value in `.env` is followed by `# ...` on the same line. | Move the comment to its own line. |
 | `<KEY> must list the same number of entries` | The schema, connection and user settings of one profile have different numbers of comma-separated values. | Give all three the same number of entries, in the same order. |
-| `ORA-12541: TNS:no listener` or `Connection refused` | The database is not running or not reachable. | Start it (with the local setup: `./local-26ai.sh start`) and retry. |
-| `ORA-28000: the account is locked` / "Account Is Locked" | The schema's password expired or was locked. | With the local setup: `./local-26ai.sh unexpire-accounts`. Otherwise ask your DBA. |
+| `ORA-12541: TNS:no listener` or `Connection refused` | The database is not running or not reachable. | Start it (with the local setup, from the `uc-local-apex-dev` folder you created in step 3 of the getting started guide: `./local-26ai.sh start`) and retry. |
+| `ORA-28000: the account is locked` / "Account Is Locked" | The schema's password expired or was locked. | With the local setup, from the `uc-local-apex-dev` folder: `./local-26ai.sh unexpire-accounts`. Otherwise ask your DBA. |
 | `Expected session user <X> but found <Y>` | The saved connection logs in as a different user than `*_EXPECTED_USER` says. | Fix the saved connection or the `*_EXPECTED_USER` value. This check prevents working in the wrong schema. |
 | `Target schema does not exist or is not visible: <X>` | The schema name in `.env` is wrong, or that user cannot see it. | Correct the `*_SCHEMA` value. |
 | `<profile> connection '<name>' resembles production but DB_ENVIRONMENT=development` | The saved connection's name contains a word like `prod` or `live`. | Rename the saved connection, or, if it really is production, set `DB_ENVIRONMENT=production` (which makes the scripts read-only). |
