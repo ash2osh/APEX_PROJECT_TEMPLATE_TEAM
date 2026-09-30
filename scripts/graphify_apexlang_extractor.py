@@ -151,8 +151,9 @@ class DatabaseMirror:
     contains a dot, which disqualifies it as a rewire target. A reference from
     an application file therefore has to name that node id itself, or the
     application and database halves of the graph never connect. Anything the
-    mirror does not hold (APEX dictionary views, DUAL, unexported objects, a
-    synonym over a database link) stays a stub.
+    mirror does not hold (APEX dictionary views, unexported objects, a
+    synonym over a database link) stays a sourceless stub, while DUAL is
+    ignored (no node or edge).
 
     Every ``database/*`` schema is indexed, so a qualified name reaches another
     schema's object, and a mirrored synonym is followed one hop to its target.
