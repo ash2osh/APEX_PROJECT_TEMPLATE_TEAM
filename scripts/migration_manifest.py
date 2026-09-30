@@ -332,7 +332,7 @@ def _migration_directories(repo_root: Path) -> list[tuple[Path, str | None, str,
             )
         seen[identity] = path
         revisions.setdefault((schema, family), set()).add(revision)
-    for (schema, family), values in revisions.items():
+    for (_schema, family), values in revisions.items():
         expected = set(range(1, max(values) + 1))
         if values != expected:
             raise MigrationManifestError(f"migration family {family} has a revision gap; revisions start at r001")

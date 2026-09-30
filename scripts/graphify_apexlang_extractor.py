@@ -177,7 +177,7 @@ class DatabaseMirror:
         cls._INDEX_CACHE.clear()
 
     @classmethod
-    def for_application_file(cls, source: Path) -> "DatabaseMirror":
+    def for_application_file(cls, source: Path) -> DatabaseMirror:
         """Locate the mirror from ``<root>/apps/<schema>/<app id>/...``."""
         parts = source.parts
         for index in range(len(parts) - 3, -1, -1):
@@ -186,7 +186,7 @@ class DatabaseMirror:
         return cls()
 
     @classmethod
-    def for_database_file(cls, source: Path) -> "DatabaseMirror":
+    def for_database_file(cls, source: Path) -> DatabaseMirror:
         """Locate the mirror from ``<root>/database/<schema>/<folder>/...``."""
         parts = source.parts
         for index in range(len(parts) - 4, -1, -1):

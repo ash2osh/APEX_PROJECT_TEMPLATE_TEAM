@@ -33,7 +33,7 @@ def graphify_console_interpreter() -> str | None:
     if not graphify_bin or not os.path.exists(graphify_bin):
         return None
     try:
-        with open(graphify_bin, "r", encoding="utf-8") as handle:
+        with open(graphify_bin, encoding="utf-8") as handle:
             first_line = handle.readline()
     except (UnicodeDecodeError, OSError):
         return None
