@@ -12,6 +12,9 @@
   shared DEV app; Git branches do not protect shared database state.
 - Store migration SQL in numbered files under
   `migrations/YYYY-MM-DD_<name>-rNNN/`; do not add a developer-name path.
+  When several schemas are configured, use
+  `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/` instead: one migration changes
+  one schema, and a flat folder is refused.
   Require `checks.json`, preflight selected folders, and apply only with an
   explicit `--env`. Independent repositories' pending files cannot be seen by
   the conflict checker. Treat a write attempt without a verified receipt as

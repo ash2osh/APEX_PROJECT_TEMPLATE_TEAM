@@ -306,6 +306,14 @@ in `.template-lock.json`; commit it with the upgraded files. Use `--ref <tag>`
 to install a specific template version and `--source <url>` for a fork. If the
 upgrade reports that `.env` needs attention, compare it with `.env.example`.
 
+A project upgraded to a template version with multi-schema support needs no
+`.env` change: one value per key is still the single-schema setup. Its next
+`scripts/team.sh backup-db` also mirrors each schema's private synonyms under
+`database/<SCHEMA>/synonyms/`; review and commit that new folder. The upgrade
+never moves existing migration folders, and the flat
+`migrations/YYYY-MM-DD_<name>-rNNN/` layout stays valid while `CODE_SCHEMA` has
+one schema.
+
 Projects created before `template-manifest.json` existed do not have the
 upgrade script yet. Run it once from a fresh template clone. When the target
 repository has no `.template-lock.json`, the source resolves from its own

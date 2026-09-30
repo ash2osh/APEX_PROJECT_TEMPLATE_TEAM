@@ -81,8 +81,8 @@ own schema first; qualified names resolve in the named schema. When a local
 object is absent, a mirrored private synonym can resolve one hop by reading
 its `FOR "SCHEMA"."OBJECT"` clause. Targets over database links and targets
 not present in the mirror stay name-only stubs. `.sql` files under `database/`
-get the same treatment for foreign keys. `APEX_*` dictionary views and `DUAL`
-remain stubs. Expression-style three-part package references without
+get the same treatment for foreign keys. `APEX_*` dictionary views remain
+name-only stubs; `DUAL` is ignored and produces no node or edge. Expression-style three-part package references without
 parentheses are not detected.
 
 Graphify caches its index by repository root, so extraction results cached
