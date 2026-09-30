@@ -42,6 +42,23 @@ class SqlDriverContractTests(unittest.TestCase):
         self.assertNotIn("COMMIT", contents)
         self.assertIn("ALTER SESSION SET CURRENT_SCHEMA = APP_DEV", contents)
 
+    def test_generated_catalog_driver_terminates_alter_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = _catalog_driver(Path(temporary), "inventory", Target("dev", "dev-profile", "APP_DEV", "APP_DEV", "development"))
+            lines = driver.read_text(encoding="utf-8").splitlines()
+
+        alter_session = next(line for line in lines if line.startswith("ALTER SESSION SET CURRENT_SCHEMA ="))
+        self.assertTrue(alter_session.endswith(";"))
+
+    def test_generated_catalog_driver_silences_sqlcl_before_first_include(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = _catalog_driver(Path(temporary), "inventory", Target("dev", "dev-profile", "APP_DEV", "APP_DEV", "development"))
+            lines = driver.read_text(encoding="utf-8").splitlines()
+
+        first_include = next(index for index, line in enumerate(lines) if line.startswith("@@schema_catalog.sql"))
+        self.assertIn("SET VERIFY OFF", lines[:first_include])
+        self.assertIn("SET FEEDBACK OFF", lines[:first_include])
+
     def test_identity_and_drift_drivers_emit_verification_sentinels(self) -> None:
         self.assertIn("APEX_DOCTOR_VERIFIED:&&expected_user", (ROOT / "scripts/doctor.sql").read_text(encoding="utf-8"))
         self.assertIn("APEX_DRIFT_QUERY_VERIFIED", (ROOT / "scripts/check_builder_drift.sql").read_text(encoding="utf-8"))

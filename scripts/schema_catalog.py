@@ -392,7 +392,13 @@ def _catalog_driver(run_dir: Path, phase: str, target: Target, keys: Sequence[tu
     key_rows = [{"name": name, "type": object_type} for name, object_type in keys]
     encoded_keys = _hex(json.dumps(key_rows, ensure_ascii=False, separators=(",", ":")))
     wrapper = run_dir / "catalog-driver.sql"
-    lines = ["SET ECHO OFF", f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema}", "SET DEFINE ON"]
+    lines = [
+        "SET ECHO OFF",
+        "SET VERIFY OFF",
+        "SET FEEDBACK OFF",
+        f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
+        "SET DEFINE ON",
+    ]
     # Keep SQLcl's single substitution token small; multiple includes share
     # one SQLcl process and each carries a bounded, hex-only key batch.
     if len(encoded_keys) <= 16000:
