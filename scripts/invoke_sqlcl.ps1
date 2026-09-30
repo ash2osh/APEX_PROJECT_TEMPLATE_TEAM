@@ -84,6 +84,13 @@ function Invoke-Sqlcl {
 }
 
 # Return the parsing schema that owns an APEX application, or throw.
+#
+# A lookup only reads, so a transient failure to start SQLcl (Start-Process can
+# throw "Broken pipe" while it feeds stdin to a process that has already exited)
+# or to capture its output (the transcript can still be empty when SQLcl has
+# just exited) is retried instead of being reported as a lookup failure. A real
+# SQLcl or database error, and an application that does not exist, are never
+# retried.
 function Get-AppParsingSchema {
   param(
     [Parameter(Mandatory = $true)][string] $Connection,
@@ -94,18 +101,37 @@ function Get-AppParsingSchema {
     [Parameter(Mandatory = $true)][string] $ScriptPath,
     [string] $Environment = $env:DB_ENVIRONMENT
   )
-  [System.IO.Directory]::CreateDirectory($WorkDirectory) | Out-Null
-  $transcript = Join-Path $WorkDirectory "lookup-output.log"
-  $exit = Invoke-Sqlcl -WorkingDirectory $WorkDirectory `
-    -StdInFile (Join-Path $WorkDirectory ".sqlcl-stdin") -TranscriptFile $transcript `
-    -Arguments @("-S", "-noupdates", "-name", $Connection, "@$ScriptPath", $Schema, $AppId, $Environment, $ExpectedUser)
-  $text = [System.IO.File]::ReadAllText($transcript)
-  if ($exit -ne 0 -or $text -match '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:') {
-    throw "could not look up the parsing schema of application ${AppId}:`n$text"
+  $errorPattern = '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:'
+  $resultPattern = "(?m)^\s*APEX_APP_SCHEMA:$([regex]::Escape($AppId)):(.*?)\s*$"
+  $problem = "the parsing-schema lookup for application $AppId returned no result"
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    $attemptDirectory = Join-Path $WorkDirectory "attempt$attempt"
+    [System.IO.Directory]::CreateDirectory($attemptDirectory) | Out-Null
+    $transcript = Join-Path $attemptDirectory "lookup-output.log"
+    try {
+      $exit = Invoke-Sqlcl -WorkingDirectory $attemptDirectory `
+        -StdInFile (Join-Path $attemptDirectory ".sqlcl-stdin") -TranscriptFile $transcript `
+        -Arguments @("-S", "-noupdates", "-name", $Connection, "@$ScriptPath", $Schema, $AppId, $Environment, $ExpectedUser)
+    } catch {
+      $problem = "SQLcl could not be run for the lookup of application ${AppId}: $($_.Exception.Message)"
+      continue
+    }
+    $text = ""
+    for ($read = 0; $read -lt 10; $read++) {
+      if (Test-Path -LiteralPath $transcript -PathType Leaf) { $text = [System.IO.File]::ReadAllText($transcript) }
+      if ($exit -ne 0 -or $text -match $errorPattern -or $text -match $resultPattern) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    if ($exit -ne 0 -or $text -match $errorPattern) {
+      throw "could not look up the parsing schema of application ${AppId}:`n$text"
+    }
+    $match = [regex]::Match($text, $resultPattern)
+    if ($match.Success) {
+      $owner = $match.Groups[1].Value
+      if ($owner -eq "NOT_FOUND") { throw "application $AppId was not found in the workspace visible to this connection" }
+      return $owner
+    }
+    $problem = "the parsing-schema lookup for application $AppId returned no result"
   }
-  $match = [regex]::Match($text, "(?m)^\s*APEX_APP_SCHEMA:$([regex]::Escape($AppId)):(.*?)\s*$")
-  if (-not $match.Success) { throw "the parsing-schema lookup for application $AppId returned no result" }
-  $owner = $match.Groups[1].Value
-  if ($owner -eq "NOT_FOUND") { throw "application $AppId was not found in the workspace visible to this connection" }
-  return $owner
+  throw $problem
 }

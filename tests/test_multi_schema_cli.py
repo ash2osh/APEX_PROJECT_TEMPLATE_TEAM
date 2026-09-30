@@ -68,6 +68,9 @@ class DoctorCliTests(unittest.TestCase):
         # Positional: -S -noupdates -name <conn> @<script> <schema> <env> <user>
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
+            # Drain stdin first. PowerShell feeds it through a pipe; a fake that exits before the
+            # pipe is closed races Start-Process ("Broken pipe", or a transcript read too early).
+            "cat > /dev/null\n"
             "printf '%s|%s|%s\\n' \"$4\" \"$6\" \"$8\" >> \"$FAKE_SQL_CALLS\"\n"
             "if [[ \"${FAKE_FAIL_CONNECTION:-}\" == \"$4\" ]]; then printf 'ORA-01017: invalid credentials\\n'; exit 1; fi\n"
             "printf 'APEX_DOCTOR_VERIFIED:%s\\n' \"$8\"\n",
@@ -224,6 +227,9 @@ class BackupCliTests(unittest.TestCase):
         # Positional: -S -noupdates -name <conn> @<script> <schema> <scope> <env> <user> <prefixes> <spool_schema>
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
+            # Drain stdin first. PowerShell feeds it through a pipe; a fake that exits before the
+            # pipe is closed races Start-Process ("Broken pipe", or a transcript read too early).
+            "cat > /dev/null\n"
             "set -euo pipefail\n"
             "connection=\"$4\"; schema=\"$6\"; scope=\"$7\"; spool_schema=\"${11}\"\n"
             "printf '%s|%s|%s\\n' \"$connection\" \"$schema\" \"$scope\" >> \"$FAKE_SQL_CALLS\"\n"
@@ -404,6 +410,9 @@ class ExportCliTests(unittest.TestCase):
         # export:  -S -noupdates -name <conn> @export_apps.sql      <schema> <app> <env> <user>
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
+            # Drain stdin first. PowerShell feeds it through a pipe; a fake that exits before the
+            # pipe is closed races Start-Process ("Broken pipe", or a transcript read too early).
+            "cat > /dev/null\n"
             "set -euo pipefail\n"
             "connection=\"$4\"; script=\"$5\"; schema=\"$6\"; app=\"$7\"\n"
             "printf '%s|%s|%s|%s\\n' \"$(basename \"${script#@}\")\" \"$connection\" \"$schema\" \"$app\" >> \"$FAKE_SQL_CALLS\"\n"
@@ -577,6 +586,9 @@ class PublishCliTests(unittest.TestCase):
         fake_sql = fake_bin / "sql"
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
+            # Drain stdin first. PowerShell feeds it through a pipe; a fake that exits before the
+            # pipe is closed races Start-Process ("Broken pipe", or a transcript read too early).
+            "cat > /dev/null\n"
             "connection=\"$4\"; script=\"$5\"\n"
             "printf '%s|%s\\n' \"$(basename \"${script#@}\")\" \"$connection\" >> \"$FAKE_SQL_CALLS\"\n"
             "case \"$script\" in\n"
