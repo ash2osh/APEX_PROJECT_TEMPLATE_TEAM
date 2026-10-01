@@ -450,9 +450,13 @@ class PublishAppCliTests(unittest.TestCase):
         # before publish has read its output; the old source is put back, so
         # the developer must be told that DEV may have changed.
         pwsh = shutil.which("pwsh")
-        shells = [("bash", signal.SIGTERM, "team.sh")] + ([("pwsh", signal.SIGINT, "team.ps1")] if pwsh else [])
+        # PowerShell gets SIGTERM too: pwsh itself ends at once on it, skipping every
+        # finally block, unless team.ps1 turns it into Ctrl-C (Unix only).
+        shells = [("bash", signal.SIGTERM, "team.sh")] + (
+            [("pwsh", signal.SIGINT, "team.ps1"), ("pwsh", signal.SIGTERM, "team.ps1")] if pwsh else []
+        )
         for shell, sig, wrapper in shells:
-            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+            with self.subTest(shell=shell, signal=sig.name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 runner, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
                 environment["PROJECT_ENV_FILE"] = str(root / ".env")
@@ -479,6 +483,7 @@ class PublishAppCliTests(unittest.TestCase):
                 if shell == "pwsh":
                     # pwsh used to exit 0 here, which a caller reads as success.
                     self.assertEqual(process.returncode, 130, output)
+                    self.assertEqual(sorted(path.name for path in (root / "scratch").glob("apex-publish*")), [])
                 plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", output).split())
                 self.assertIn("interrupted while the import was running", plain)
                 self.assertIn("its result is unknown", plain)
