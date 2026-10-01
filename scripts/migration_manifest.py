@@ -279,6 +279,8 @@ def validate_check_query(sql: str) -> None:
                     "STRING:'USERENV'", ",", "STRING:'CURRENT_SCHEMA'", ")"
                 ]:
                     raise MigrationManifestError("SYS_CONTEXT checks may inspect only USERENV session identity")
+        if token.startswith("QIDENT:") and tokens[index + 1] == "(" and not (index > 0 and tokens[index - 1] == "."):
+            raise MigrationManifestError(f"check query calls unsupported or user-defined function {token[7:]}")
         if token == "." and index + 2 < len(tokens) and tokens[index + 2] == "(":
             raise MigrationManifestError("schema-qualified function calls are not allowed in checks")
 

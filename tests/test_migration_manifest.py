@@ -241,6 +241,28 @@ class MigrationManifestTests(unittest.TestCase):
                 with self.assertRaises(api.MigrationManifestError):
                     api.validate_check_query(query)
 
+    def test_a_quoted_name_before_a_parenthesis_is_a_function_call(self) -> None:
+        # "MY_FUNC"(1) calls MY_FUNC just as MY_FUNC(1) does, but only unquoted
+        # names were checked, so a quoted one was accepted.
+        api = self.require_manifest()
+        for query in (
+            'SELECT CASE WHEN "MY_FUNC"(1) = 1 THEN 1 ELSE 0 END FROM dual',
+            'SELECT CASE WHEN "my_func" (1) = 1 THEN 1 ELSE 0 END FROM dual',
+            'SELECT 1 FROM dual WHERE "COUNT"(1) = 1',
+            'SELECT 1 FROM dual WHERE x = "Dangerous"(1, 2)',
+        ):
+            with self.subTest(query=query):
+                with self.assertRaises(api.MigrationManifestError) as caught:
+                    api.validate_check_query(query)
+                self.assertIn("function", str(caught.exception))
+        for query in (
+            'SELECT COUNT(*) FROM "USER_TABLES" WHERE "TABLE_NAME" IN (\'T\', \'U\')',
+            'SELECT COUNT(*) AS "TOTAL" FROM user_tables WHERE ("TABLE_NAME" = \'T\')',
+            'SELECT COUNT(*) FROM user_tables t WHERE t."TABLE_NAME" = \'T\' AND ("NUM_ROWS" > 0 OR "NUM_ROWS" IS NULL)',
+        ):
+            with self.subTest(query=query):
+                api.validate_check_query(query)
+
     def test_file_rename_and_checks_content_change_the_payload_digest(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")
