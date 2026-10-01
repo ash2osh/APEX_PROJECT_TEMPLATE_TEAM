@@ -156,6 +156,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="write the approved live state here so the import session can re-check it",
     )
+    parser.add_argument(
+        "--wrapper",
+        choices=("team.sh", "team.ps1"),
+        default="team.sh",
+        help="the wrapper the developer ran, so refusals name its export command",
+    )
     args = parser.parse_args(argv)
 
     if args.app_id < 1:
@@ -168,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     baseline = get_export_baseline(app_dir, args.app_id)
-    export_command = f"scripts/team.sh export {args.app_id}"
+    export_command = f"scripts/{args.wrapper} export {args.app_id}"
     if baseline is None:
         print(
             f"[DRIFT UNKNOWN] Database export baseline is unavailable for APEX App {args.app_id}.\n"
@@ -236,7 +242,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(f"[DRIFT DETECTED] Live APEX App {args.app_id} {reason}")
-    print(f"To prevent accidental overwrites, run: {export_command} to review and merge changes.")
+    if not live.present:
+        # Nothing is live to export. An import would recreate the app, which
+        # is the team's call (docs/publish-rules.md), not a merge.
+        print("Ask the team before recreating it; there is nothing to export or merge.")
+    else:
+        print(f"To prevent accidental overwrites, run: {export_command} to review and merge changes.")
     return 1
 
 

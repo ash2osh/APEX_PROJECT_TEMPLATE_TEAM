@@ -416,6 +416,33 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("[BOB-2026-09-26r001]", second.stdout)
             self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
 
+    def test_drift_refusal_names_the_export_command_of_the_shell_in_use(self) -> None:
+        # A PowerShell user must not be told to run the Bash wrapper.
+        pwsh = shutil.which("pwsh")
+        shells = [("bash", "team.sh")] + ([("pwsh", "team.ps1")] if pwsh else [])
+        for shell, wrapper in shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, _, _, environment, _, state_dir = self.make_stateful_dev_fixture(root)
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
+                if shell == "bash":
+                    command = ["bash", str(runner), "100"]
+                else:
+                    command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+                first = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                (state_dir / "version.txt").write_text("Release 1.0 [BOB-2026-09-26r001]\n", encoding="utf-8")
+
+                second = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+                self.assertNotEqual(second.returncode, 0, second.stdout + second.stderr)
+                output = second.stdout + second.stderr
+                self.assertIn("[DRIFT DETECTED]", output)
+                self.assertIn(f"scripts/{wrapper} export 100", output)
+                other = "team.ps1" if wrapper == "team.sh" else "team.sh"
+                self.assertNotIn(f"scripts/{other} export", output)
+
     def test_failed_import_restores_the_unstamped_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

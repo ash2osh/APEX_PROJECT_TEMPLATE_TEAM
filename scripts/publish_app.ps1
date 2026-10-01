@@ -259,9 +259,9 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   $approvedStateFile = [System.IO.Path]::GetTempFileName()
   try {
     if ($python.Name -in @("py.exe", "py")) {
-      & $python.Source -3 $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile
+      & $python.Source -3 $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile --wrapper team.ps1
     } else {
-      & $python.Source $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile
+      & $python.Source $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile --wrapper team.ps1
     }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $expectedLiveState = ([System.IO.File]::ReadAllText($approvedStateFile)).Trim()

@@ -30,6 +30,7 @@ class BuilderDriftTests(unittest.TestCase):
         version: str | None = "Release 1.0",
         legacy_marker: bool = False,
         state_out: Path | None = None,
+        extra_arguments: tuple[str, ...] = (),
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -68,6 +69,7 @@ class BuilderDriftTests(unittest.TestCase):
                     "--expected-user",
                     "DEMO",
                     *(["--state-out", str(state_out)] if state_out is not None else []),
+                    *extra_arguments,
                 ],
                 cwd=ROOT,
                 env=environment,
@@ -181,6 +183,34 @@ class BuilderDriftTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("[DRIFT DETECTED]", result.stdout)
         self.assertIn("no longer exists", result.stdout)
+
+    def test_removed_app_refusal_does_not_recommend_an_export_that_cannot_succeed(self) -> None:
+        # There is no live app to export; docs/publish-rules.md says to ask the team.
+        result = self.run_guard(
+            baseline="2026-09-26T08:00:00",
+            sql_output=observed_state("NOT_FOUND"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("team.sh export", result.stdout)
+        self.assertNotIn("team.ps1 export", result.stdout)
+        self.assertIn("Ask the team", result.stdout)
+
+    def test_refusals_name_the_export_command_of_the_wrapper_in_use(self) -> None:
+        for wrapper in ("team.sh", "team.ps1"):
+            with self.subTest(wrapper=wrapper):
+                drift = self.run_guard(
+                    baseline="2026-09-26T08:00:00",
+                    sql_output=observed_state("2026-09-26T09:00:00"),
+                    extra_arguments=("--wrapper", wrapper),
+                )
+                self.assertIn(f"scripts/{wrapper} export 100", drift.stdout)
+                self.assertNotIn("team.sh export" if wrapper == "team.ps1" else "team.ps1", drift.stdout)
+                unknown = self.run_guard(
+                    baseline=None, marker_present=False,
+                    sql_output=observed_state("2026-09-26T09:00:00"),
+                    extra_arguments=("--wrapper", wrapper),
+                )
+                self.assertIn(f"scripts/{wrapper} export 100", unknown.stderr)
 
     def test_ambiguous_same_second_timestamp_fails_closed(self) -> None:
         timestamp = "2026-09-26T09:00:00"
