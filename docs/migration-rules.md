@@ -82,6 +82,16 @@ the committed result. The runner also performs structural catalog checks for
 SQL forms it can analyze. Unsupported or data-changing operations need explicit
 reviewed checks; incomplete verification blocks automated apply.
 
+Each check is one `SELECT` (or `WITH ... SELECT`) that returns the number `1`.
+It may use ordinary query syntax, including parenthesized conditions and
+subqueries, and these functions: `AVG`, `CAST`, `COALESCE`, `COUNT`, `LENGTH`,
+`LOWER`, `MAX`, `MIN`, `NVL`, `REGEXP_LIKE`, `SUBSTR`, `SUM`, `TO_CHAR`,
+`TO_NUMBER`, `UPPER`, and `SYS_CONTEXT` for `USERENV` `SESSION_USER` or
+`CURRENT_SCHEMA`. Its only bind is `:target_schema`. A call to any other
+function (yours or a built-in not listed) is refused, so is a sequence
+`NEXTVAL`/`CURRVAL`, `FOR UPDATE`, a database link, or any statement that
+writes; express other tests with `CASE` and the listed functions.
+
 SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
 so the apply session ends with its own check. Every package, package body,
 type, type body, procedure, function, trigger, view, library, Java source or

@@ -46,6 +46,17 @@ SAFE_FUNCTIONS = {
     "lower",
 }
 SAFE_SQL_FORMS = {"as", "exists", "filter", "in", "over", "within"}
+# Reserved words (V$RESERVED_WORDS) cannot name a function, so one before '(' is
+# SQL grammar: AND (...), FROM (subquery), ON (...), GROUP BY (...).
+RESERVED_BEFORE_PAREN = {
+    "all", "and", "any", "between", "by", "connect", "distinct", "else", "from", "group", "having", "intersect",
+    "is", "like", "minus", "not", "of", "on", "or", "order", "prior", "select", "start", "then", "to", "union",
+    "unique", "where", "with",
+}
+# Keywords that are not reserved could in principle name a function. They count
+# as grammar only where one cannot be called: after the keyword that opens the
+# construct (WHEN inside a CASE, JOIN ... USING inside a FROM).
+CONTEXTUAL_BEFORE_PAREN = {"case": None, "when": "case", "join": "from", "using": "from", "lateral": "from", "some": "from"}
 FORBIDDEN_WORDS = {
     "alter",
     "begin",
@@ -252,7 +263,15 @@ def validate_check_query(sql: str) -> None:
     for index, token in enumerate(tokens[:-1]):
         if token.startswith("WORD:") and tokens[index + 1] == "(":
             name = token[5:]
-            if name not in SAFE_FUNCTIONS and name not in SAFE_SQL_FORMS:
+            qualified = index > 0 and tokens[index - 1] == "."
+            keyword = not qualified and (
+                name in RESERVED_BEFORE_PAREN
+                or (name in CONTEXTUAL_BEFORE_PAREN and (
+                    CONTEXTUAL_BEFORE_PAREN[name] is None
+                    or f"WORD:{CONTEXTUAL_BEFORE_PAREN[name]}" in tokens[:index]
+                ))
+            )
+            if name not in SAFE_FUNCTIONS and name not in SAFE_SQL_FORMS and not keyword:
                 raise MigrationManifestError(f"check query calls unsupported or user-defined function {name.upper()}")
             if name == "sys_context":
                 arguments = tokens[index + 2 : index + 6]

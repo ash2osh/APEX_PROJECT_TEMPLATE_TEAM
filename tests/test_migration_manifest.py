@@ -193,6 +193,54 @@ class MigrationManifestTests(unittest.TestCase):
             expected_file_hash = hashlib.sha256((first / "001-create-table.sql").read_bytes()).hexdigest()
             self.assertEqual(first_migration.files[0].sha256, expected_file_hash)
 
+    def test_sql_keywords_before_a_parenthesis_are_not_function_calls(self) -> None:
+        # A word followed by '(' was treated as a function call, so ordinary
+        # read-only SQL such as AND (...) or FROM (subquery) was refused as a
+        # call to a "user-defined function" named AND or FROM.
+        api = self.require_manifest()
+        allowed = (
+            "SELECT CASE WHEN (SELECT COUNT(*) FROM user_tables WHERE table_name = 'T') = 1 THEN 1 ELSE 0 END FROM dual",
+            "SELECT COUNT(*) FROM user_tables WHERE table_name = 'T' AND (num_rows = 1 OR num_rows IS NULL)",
+            "SELECT COUNT(*) FROM user_tables WHERE table_name = 'T' OR (table_name = 'U' AND num_rows = 1)",
+            "SELECT COUNT(*) FROM user_tables WHERE (table_name = 'T')",
+            "SELECT COUNT(*) FROM user_tables WHERE NOT (table_name = 'T')",
+            "SELECT CASE WHEN COUNT(*) > 0 THEN (1) ELSE (0) END FROM user_tables",
+            "SELECT (COUNT(*)) FROM user_tables",
+            "SELECT COUNT(*) FROM (SELECT table_name FROM user_tables)",
+            "SELECT COUNT(*) FROM user_tables t JOIN (SELECT table_name FROM user_tables) u ON (t.table_name = u.table_name)",
+            "SELECT COUNT(*) FROM user_tables t JOIN user_tab_columns c USING (table_name)",
+            "SELECT COUNT(*) FROM user_tables WHERE num_rows > ALL (SELECT num_rows FROM user_tables WHERE table_name = 'X')",
+            "SELECT COUNT(*) FROM user_tab_columns GROUP BY (table_name, column_name)",
+            "SELECT COUNT(*) FROM user_tab_columns GROUP BY table_name HAVING (COUNT(*) > 1)",
+            "SELECT table_name FROM user_tables ORDER BY (table_name)",
+            "SELECT 1 FROM dual UNION (SELECT 1 FROM dual)",
+            "SELECT COUNT(*) FROM user_tables WHERE num_rows BETWEEN (1) AND (5)",
+            "SELECT COUNT(*) FROM user_tables WHERE table_name LIKE ('A' || '%')",
+            "SELECT (1 + 2) * (3 + 4) FROM dual",
+        )
+        for query in allowed:
+            with self.subTest(query=query):
+                api.validate_check_query(query)
+
+        # Keywords do not open a way to call a function: a user-defined function
+        # (including one named after a non-reserved keyword) is still refused.
+        rejected = (
+            "SELECT my_func(1) FROM dual",
+            "SELECT when(1) FROM dual",
+            "SELECT join(1) FROM dual",
+            "SELECT using(1) FROM dual",
+            "SELECT some(1) FROM dual",
+            "SELECT lateral(1) FROM dual",
+            "SELECT pkg.when(1) FROM dual",
+            "SELECT 1 FROM dual WHERE x = my_func (1)",
+            "SELECT CASE WHEN my_func(1) = 1 THEN 1 ELSE 0 END FROM dual",
+            "SELECT 1 FROM dual WHERE a AND dangerous(1)",
+        )
+        for query in rejected:
+            with self.subTest(query=query):
+                with self.assertRaises(api.MigrationManifestError):
+                    api.validate_check_query(query)
+
     def test_file_rename_and_checks_content_change_the_payload_digest(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")
