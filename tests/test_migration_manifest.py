@@ -288,6 +288,28 @@ class MigrationManifestTests(unittest.TestCase):
             with self.subTest(query=query):
                 api.validate_check_query(query)
 
+    def test_a_quoted_sequence_pseudo_column_is_refused_in_a_check(self) -> None:
+        # Oracle reads my_seq."NEXTVAL" as the pseudo-column (it accepts
+        # dual."ROWID"), and NEXTVAL advances the sequence, so a check must not
+        # use it quoted any more than unquoted.
+        api = self.require_manifest()
+        for query in (
+            'SELECT CASE WHEN my_seq."NEXTVAL" > 0 THEN 1 ELSE 0 END FROM dual',
+            'SELECT CASE WHEN app.my_seq."CURRVAL" > 0 THEN 1 ELSE 0 END FROM dual',
+            'SELECT 1 FROM dual WHERE s."NEXTVAL" IS NOT NULL',
+        ):
+            with self.subTest(query=query):
+                with self.assertRaises(api.MigrationManifestError) as caught:
+                    api.validate_check_query(query)
+                self.assertIn("forbidden", str(caught.exception))
+        for query in (
+            'SELECT COUNT(*) FROM user_tab_columns WHERE column_name = \'NEXTVAL\'',
+            'SELECT COUNT(*) FROM dual WHERE dual."DUMMY" = \'X\'',
+            'SELECT 1 FROM dual WHERE "nextval_count" = 1 OR "Nextval" = 2',
+        ):
+            with self.subTest(query=query):
+                api.validate_check_query(query)
+
     def test_file_rename_and_checks_content_change_the_payload_digest(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")

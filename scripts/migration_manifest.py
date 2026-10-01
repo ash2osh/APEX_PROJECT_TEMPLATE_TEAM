@@ -253,6 +253,10 @@ def validate_check_query(sql: str) -> None:
     forbidden = sorted(FORBIDDEN_WORDS.intersection(words))
     if forbidden:
         raise MigrationManifestError(f"check query contains forbidden operation/token {forbidden[0].upper()}")
+    # my_seq."NEXTVAL" is the same pseudo-column as my_seq.nextval.
+    for token in tokens:
+        if token in {'QIDENT:"NEXTVAL"', 'QIDENT:"CURRVAL"'}:
+            raise MigrationManifestError(f"check query contains forbidden operation/token {token[8:-1]}")
     if "for" in words and any(words[i + 1] == "update" for i, word in enumerate(words[:-1]) if word == "for"):
         raise MigrationManifestError("FOR UPDATE is not allowed in checks")
 
