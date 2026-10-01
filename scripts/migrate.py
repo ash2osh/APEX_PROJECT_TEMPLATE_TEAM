@@ -24,7 +24,15 @@ from .db_targets import (
     looks_like_production_identity,
     resolve_target,
 )
-from .migration_checks import CheckReport, PreflightReport, analyze_batch, compiled_units, preflight, run_checks
+from .migration_checks import (
+    CheckReport,
+    PreflightReport,
+    analyze_batch,
+    batch_preconditions,
+    compiled_units,
+    preflight,
+    run_checks,
+)
 from .migration_manifest import (
     Migration,
     MigrationFile,
@@ -265,7 +273,9 @@ def _snapshot_for(
 
 def _explicit_checks(migrations: Sequence[Migration], phase: str) -> tuple:
     if phase == "preconditions":
-        return tuple(check for migration in migrations for check in migration.preconditions)
+        # Later folders' preconditions run at their own apply boundary, where
+        # the folders before them have already been applied.
+        return batch_preconditions(migrations)
     return tuple(check for migration in migrations for check in migration.postconditions)
 
 

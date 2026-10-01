@@ -235,6 +235,9 @@ fi
 mkdir -p "$REPO_ROOT/scratch"
 staging_dir="$(mktemp -d "$REPO_ROOT/scratch/apex-publish.XXXXXX")"
 restore_unstamped=false
+# Set once the import changed the target and cleared after its verification,
+# so a failure in between can say what to do next.
+import_unverified=false
 # Replace <target> with <replacement> only while <target> still holds the bytes
 # of <expected>. The target is renamed aside before the comparison and the
 # replacement is installed without overwriting, so an editor save at any
@@ -260,6 +263,19 @@ swap_if_unchanged() {
 
 cleanup() {
   local aside
+  if [ "$import_unverified" = true ]; then
+    if [ "$app_environment" = dev ]; then
+      if [ -n "$published_version" ]; then
+        printf 'publish: DEV now runs the imported source, but it was not verified. Commit the stamped %s first (it is what was imported), then run scripts/team.sh export %s to see what is live, reconcile, and commit.\n' \
+          "${app_dir#"$REPO_ROOT/"}/application.apx" "$app_id" >&2
+      else
+        printf 'publish: DEV now runs the imported source, but it was not verified. Run scripts/team.sh export %s to see what is live, reconcile, and commit.\n' "$app_id" >&2
+      fi
+    else
+      printf 'publish: %s now runs the imported source, but it was not verified; compare it with the committed source before importing again.\n' \
+        "$target_label" >&2
+    fi
+  fi
   if [ "$restore_unstamped" = true ] && [ -e "$app_dir/application.apx" ]; then
     # Undo only our own stamp. An edit saved while the publish ran is kept.
     local restore_status=0
@@ -360,6 +376,7 @@ if ! grep -Eq '^[[:space:]]*Import successful\.[[:space:]]*$' "$sqlcl_output"; t
 fi
 # The stamped source is live now; keep it for the developer to commit.
 restore_unstamped=false
+import_unverified=true
 
 # Re-export from the selected target and compare exact APEXlang bytes before
 # claiming success. In DEV this same stable observation advances the drift
@@ -404,6 +421,7 @@ if [ "$app_environment" = dev ]; then
   verify_args+=(--record-baseline)
 fi
 python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}"
+import_unverified=false
 printf 'Published APEX App %s to %s (%s / %s).\n' \
   "$app_id" "$target_label" "$workspace_name" "$parsing_schema"
 if [ -n "$published_version" ]; then

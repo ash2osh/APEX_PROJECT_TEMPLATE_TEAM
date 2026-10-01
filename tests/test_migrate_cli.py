@@ -29,6 +29,8 @@ class FakeDatabase:
         self.change_identity_after_apply = False
         self.check_identity_override = {}
         self.apply_expected_identities = []
+        # check id -> (object name, object type) that must exist for it to pass
+        self.check_requires_object = {}
 
     def identity(self):
         environment = self.target.environment
@@ -83,11 +85,16 @@ class FakeDatabase:
 
     def run_checks(self, target, checks, run_dir, *, phase):
         self.calls.append(("checks", target.environment, phase, tuple(check.id for check in checks)))
-        results = tuple({"id": check.id, "row_count": 1, "column_count": 1, "numeric": True, "value": 1, "passed": True} for check in checks)
+        missing = [check.id for check in checks if check.id in self.check_requires_object and self.check_requires_object[check.id] not in self.objects]
+        results = tuple(
+            {"id": check.id, "row_count": 1, "column_count": 1, "numeric": True, "value": 0 if check.id in missing else 1, "passed": check.id not in missing}
+            for check in checks
+        )
+        errors = tuple({"code": "CHECK_FAILED", "check": check_id, "message": "ORA-00942: table or view does not exist"} for check_id in missing)
         identity = self.identity()
         if self.check_identity_override and phase in self.check_identity_override:
             identity = {**identity, **self.check_identity_override[phase]}
-        return CheckReport(True, True, results, (), {"phase": phase, "complete": True, "identity": identity})
+        return CheckReport(not missing, True, results, errors, {"phase": phase, "complete": True, "identity": identity})
 
     def apply_folder(self, migration, target, run_dir, *, expected_identity=None):
         self.calls.append(("apply", migration.folder.name, tuple(file.name for file in migration.files)))
@@ -392,6 +399,37 @@ class MigrateCliTests(unittest.TestCase):
         with patch("scripts.migrate.run_sqlcl", side_effect=AssertionError("SQLcl must not run")):
             with self.assertRaisesRegex(MigrationApplyError, "cannot be enforced"):
                 apply_folder(staged, self.target(), staged_dir / "apply-quote", expected_identity={**expected_identity, "service_name": "x'y"})
+
+    def test_a_later_folder_precondition_may_depend_on_an_earlier_folder(self):
+        # r002's precondition queries the table r001 creates; it runs at r002's
+        # own boundary, after r001, not against the state before the batch.
+        first = self.add_folder("2026-09-28_orders-r001", {"001-create.sql": "CREATE TABLE ORDERS (ID NUMBER);\n"})
+        second = self.add_folder(
+            "2026-09-28_orders-r002", {"001-add.sql": "ALTER TABLE ORDERS ADD STATUS VARCHAR2(20);\n"},
+            preconditions=[{"id": "orders-exists", "sql": "SELECT COUNT(*) FROM orders WHERE ROWNUM = 1", "expected": 1}],
+        )
+        fake = FakeDatabase(self.target())
+        fake.check_requires_object = {"orders-exists": ("ORDERS", "TABLE")}
+
+        result, fake = self.apply(self.load(first.name, second.name), fake=fake)
+
+        self.assertEqual(result, 0)
+        self.assertTrue((first / "status.dev.json").exists())
+        self.assertTrue((second / "status.dev.json").exists())
+        initial = [call for call in fake.calls if call[0] == "checks" and call[2] == "preconditions"]
+        self.assertEqual(initial[0][3], ())
+        self.assertIn(("orders-exists",), [call[3] for call in initial[1:]])
+
+    def test_a_first_folder_precondition_still_blocks_the_batch_before_any_write(self):
+        first = self.add_folder(
+            "2026-09-28_needs-r001", {"001-add.sql": "ALTER TABLE MISSING_T ADD STATUS VARCHAR2(20);\n"},
+            preconditions=[{"id": "missing-exists", "sql": "SELECT COUNT(*) FROM missing_t WHERE ROWNUM = 1", "expected": 1}],
+        )
+        fake = FakeDatabase(self.target())
+        fake.check_requires_object = {"missing-exists": ("MISSING_T", "TABLE")}
+        result, fake = self.apply(self.load(first.name), fake=fake)
+        self.assertNotEqual(result, 0)
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
 
     def test_apply_receives_the_preflight_identity(self):
         migration = self.load(self.add_folder("2026-09-28_pin-identity-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"}).name)

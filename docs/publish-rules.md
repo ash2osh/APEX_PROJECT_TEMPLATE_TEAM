@@ -129,8 +129,9 @@ or `application.apx.displaced`.
 **After import.** The import has already changed DEV, but publish could not
 prove the result, so it keeps your old baseline and the next publish refuses.
 Your stamped `application.apx` is kept, because that is what was imported.
-Run `scripts/team.sh export <id>` to see exactly what is live, reconcile, and
-commit.
+Commit it first (export refuses to write over uncommitted changes), then run
+`scripts/team.sh export <id>` to see exactly what is live, reconcile, and
+commit. Publish prints these steps when it stops here.
 
 | Message | Meaning |
 | --- | --- |

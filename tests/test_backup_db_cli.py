@@ -54,6 +54,8 @@ class BackupDbCliTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "cat > /dev/null\n"
+            "# SQLcl prints this advisory for backup_db.sql's large LONG setting.\n"
+            "printf '%s\\n' 'Warning: This LONG setting may cause Java memory problems.' 'It is recommended to reduce the setting and/or increase the memory available to Java.' 'FAKE SQLCL PROGRESS LINE'\n"
             "schema=\"$6\"\n"
             "scope=\"$7\"\n"
             "spool_schema=\"${11:-}\"\n"
@@ -107,6 +109,10 @@ class BackupDbCliTests(unittest.TestCase):
         )
         self.assertTrue((mirror / "tables" / "FAKE_TABLE.sql").is_file())
         self.assertTrue((mirror / "views" / "FAKE_VIEW.sql").is_file())
+        # The LONG advisory is dropped; the rest of SQLcl's output is kept.
+        self.assertNotIn("LONG setting may cause Java memory problems", output)
+        self.assertNotIn("increase the memory available to Java", output)
+        self.assertIn("FAKE SQLCL PROGRESS LINE", output)
         database_entries = [path.name for path in (script.parents[1] / "database").iterdir()]
         self.assertEqual(database_entries, ["DEMO$"])
 

@@ -285,6 +285,9 @@ $stampedSource = Join-Path $publishWorkDir "application.apx.stamped"
 $stampingSource = Join-Path $publishWorkDir "application.apx.stamping"
 $restoreSource = Join-Path $publishWorkDir "application.apx.restore"
 $restoreUnstamped = $false
+# Set once the import changed the target and cleared after its verification,
+# so a failure in between can say what to do next.
+$importUnverified = $false
 
 # Replace Target with Replacement only while Target still holds the bytes of
 # Expected. Target is renamed aside before the comparison and the replacement
@@ -383,6 +386,7 @@ try {
   }
   # The stamped source is live now; keep it for the developer to commit.
   $restoreUnstamped = $false
+  $importUnverified = $true
 
   # Re-export the selected target and compare exact APEXlang bytes before
   # reporting success. Only a DEV publish updates the local DEV drift marker.
@@ -435,12 +439,25 @@ try {
   if ($LASTEXITCODE -ne 0) {
     throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
   }
+  $importUnverified = $false
   Write-Output "Published APEX App $AppId to $targetLabel ($($deployment.workspace.name) / $parsingSchema)."
   if ($publishedVersion) {
     $relativeSource = $applicationSource.Substring($repoRoot.Length).TrimStart('\', '/')
     Write-Output "Commit the stamped version in ${relativeSource}: $publishedVersion"
   }
 } finally {
+  if ($importUnverified) {
+    if ($appEnvironment -eq "dev") {
+      $nextStep = "Run scripts/team.ps1 export $AppId to see what is live, reconcile, and commit."
+      if ($publishedVersion) {
+        $relativeStamped = $applicationSource.Substring($repoRoot.Length).TrimStart('\', '/')
+        $nextStep = "Commit the stamped $relativeStamped first (it is what was imported), then run scripts/team.ps1 export $AppId to see what is live, reconcile, and commit."
+      }
+      Write-Warning "publish: DEV now runs the imported source, but it was not verified. $nextStep"
+    } else {
+      Write-Warning "publish: $targetLabel now runs the imported source, but it was not verified; compare it with the committed source before importing again."
+    }
+  }
   if ($restoreUnstamped -and (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
     # Undo only our own stamp. An edit saved while the publish ran is kept.
     $restoreResult = Invoke-SwapIfUnchanged -Target $applicationSource -Expected $stampedSource `

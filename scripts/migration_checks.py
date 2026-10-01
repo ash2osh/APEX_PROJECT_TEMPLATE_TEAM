@@ -363,6 +363,36 @@ def _dependencies(tokens: Sequence[_Token], target_schema: str) -> tuple[tuple[s
     return tuple(dict.fromkeys(dependencies))
 
 
+def _opaque_created_object(statement: Sequence[_Token], target_schema: str) -> tuple[str, str] | None:
+    """(owner, name) that a CREATE outside the structural analyzer adds to name resolution.
+
+    Synonyms, materialized views and stored units are not analyzed, but a later
+    view in the same batch may select from them. A public synonym's owner is
+    PUBLIC; an unqualified name in a view can resolve to it.
+    """
+    if not _word(statement, 0, "CREATE"):
+        return None
+    index, _replace = _skip_create_modifiers(statement, 1)
+    if _word(statement, index, "PUBLIC") and _word(statement, index + 1, "SYNONYM"):
+        parsed = _unit_name(statement, index + 2, "PUBLIC")
+        return ("PUBLIC", parsed[1]) if parsed else None
+    if _word(statement, index, "SYNONYM"):
+        index += 1
+    elif _word(statement, index, "MATERIALIZED") and _word(statement, index + 1, "VIEW"):
+        index += 2
+    else:
+        index, _replace = _skip_create_modifiers(statement, index)
+        while _word(statement, index, "AND") and (_word(statement, index + 1, "RESOLVE") or _word(statement, index + 1, "COMPILE")):
+            index += 2
+        if _word(statement, index, "NOFORCE"):
+            index += 1
+        object_type, index = _stored_unit_type(statement, index, named=True)
+        if object_type is None or object_type.endswith(" BODY"):
+            return None
+    parsed = _unit_name(statement, index, target_schema)
+    return (parsed[0], parsed[1]) if parsed else None
+
+
 def _parse_operation(statement: Sequence[_Token], target_schema: str) -> dict:
     words = [token.value if token.kind == "WORD" else "" for token in statement]
     if not statement:
@@ -373,6 +403,9 @@ def _parse_operation(statement: Sequence[_Token], target_schema: str) -> dict:
         "manual_checks_required": True,
         "owner": target_schema,
     }
+    created = _opaque_created_object(statement, target_schema)
+    if created is not None:
+        base["creates"] = list(created)
     if _is_plsql_statement(statement):
         return {**base, "kind": "OPAQUE", "reason": "PL/SQL or a stored program unit requires reviewed checks"}
 
@@ -921,6 +954,20 @@ def _has_explicit_reviews(migration: Migration) -> bool:
     return bool(migration.preconditions and migration.postconditions)
 
 
+def batch_preconditions(migrations: Sequence[Migration]) -> tuple[QueryCheck, ...]:
+    """The preconditions a batch can check before any write: the first folder's.
+
+    A later folder's preconditions may query what earlier folders in the same
+    batch create, so migrate runs them at that folder's own apply boundary.
+    """
+    return tuple(migrations[0].preconditions) if migrations else ()
+
+
+def deferred_precondition_folders(migrations: Sequence[Migration]) -> list[str]:
+    """Selected folders after the first whose preconditions run at their own boundary."""
+    return [migration.folder.name for migration in migrations[1:] if migration.preconditions]
+
+
 def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks: CheckReport) -> PreflightReport:
     """Compare only the selected effects with a complete current schema observation."""
     conflicts: list[dict] = []
@@ -934,6 +981,12 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
     }
     if not migrations:
         errors.append({"code": "NO_MIGRATIONS", "message": "select one or more migration folders"})
+    deferred = deferred_precondition_folders(migrations)
+    if deferred:
+        coverage["deferred_preconditions"] = {
+            "folders": deferred,
+            "reason": "checked when each folder is applied, after the folders before it",
+        }
     if not checks.complete:
         errors.extend(checks.errors or ({"code": "CHECKS_INCOMPLETE", "message": "live checks are incomplete"},))
         coverage["complete"] = False
@@ -964,6 +1017,9 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
     staged_common: set[str] = set()
     staged_indexes: set[str] = set()
     staged_tables: dict[str, set[str]] = {}
+    # Names that reviewed opaque CREATEs (synonyms, stored units, materialized
+    # views) add earlier in the batch; a later view may select from them.
+    staged_opaque: set[str] = set()
     coverage["operations"] = []
 
     migrations_by_name = {migration.folder.name: migration for migration in migrations}
@@ -974,6 +1030,9 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
             "supported": operation.get("supported", False),
         })
         migration = migrations_by_name.get(operation.get("migration"))
+        created = operation.get("creates")
+        if isinstance(created, list) and len(created) == 2 and created[0] in {owner, "PUBLIC"}:
+            staged_opaque.add(created[1])
         if not operation.get("supported") or operation.get("kind") in {"OPAQUE", "UNKNOWN", "REVIEWED_OPERATION", "REVIEWED_ALTER"}:
             if migration is None or not _has_explicit_reviews(migration):
                 errors.append({"code": "UNSUPPORTED_OPERATION", "migration": operation.get("migration"), "file": operation.get("file"), "reason": operation.get("reason", "SQL effect needs explicit reviewed preconditions and postconditions")})
@@ -1029,7 +1088,7 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
                     coverage["complete"] = False
                 elif dependency_name.upper() == "DUAL":
                     continue
-                elif dependency_name not in staged_common and dependency_name not in live_common:
+                elif dependency_name not in staged_common and dependency_name not in live_common and dependency_name not in staged_opaque:
                     conflicts.append({"code": "MISSING_PREREQUISITE", "name": dependency_name, "required_by": name, **location})
         elif kind == "ALTER_ADD_COLUMN":
             table_name = operation["table"]
@@ -1125,8 +1184,7 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
             (operation.get("name"), operation.get("object_type")) for operation in operations if operation.get("name") and operation.get("object_type") in {"TABLE", "VIEW", "SEQUENCE", "INDEX"}
         })
         snapshot = capture_snapshot(target, inventory, keys, work_dir) if keys else SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
-        checks = tuple(check for migration in migrations for check in migration.preconditions)
-        checks_result = run_checks(target, checks, work_dir, phase="preconditions")
+        checks_result = run_checks(target, batch_preconditions(migrations), work_dir, phase="preconditions")
         return preflight(migrations, snapshot, checks_result)
     except MigrationManifestError as error:
         return PreflightReport(2, (), ({"code": "MIGRATION_LAYOUT", "message": str(error)},), {"complete": False, "mode": "live", "environment": environment, "limitations": [LIMITATION]})
@@ -1141,6 +1199,12 @@ def _render_preflight(report: PreflightReport, local: bool) -> str:
         lines.append(f"CONFLICT [{conflict.get('code', 'UNKNOWN')}]: {conflict.get('name') or conflict.get('message') or conflict}")
     for error in report.errors:
         lines.append(f"INCOMPLETE [{error.get('code', 'UNKNOWN')}]: {error.get('message') or error.get('reason') or error}")
+    deferred = report.coverage.get("deferred_preconditions")
+    if isinstance(deferred, Mapping) and deferred.get("folders"):
+        lines.append(
+            "NOTE: preconditions of " + ", ".join(deferred["folders"])
+            + " are not checked here; migrate checks each when it reaches that folder, after the folders before it."
+        )
     return "\n".join(lines)
 
 

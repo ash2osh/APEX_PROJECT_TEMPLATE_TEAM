@@ -55,7 +55,13 @@ be unique and consecutive from `001`. The runner executes those files in
 ascending numeric order in one migration session. When several folders are
 selected, it executes them in the order supplied on the command line. The
 descending folder display order is for browsing only and never determines
-execution order. Review dependencies and pass folders in the required order. A
+execution order. Review dependencies and pass folders in the required order.
+Before the first write, a batch checks the first folder's preconditions; each
+later folder's preconditions run just before that folder is applied, so they
+may depend on what the earlier folders create. `check-conflicts` names the
+folders whose preconditions it could not check yet. A later SQL step or folder
+may also select from a synonym, stored unit or materialized view that an
+earlier one creates. A
 cross-schema change such as a grant or a synonym is two coordinated migrations,
 one per schema.
 

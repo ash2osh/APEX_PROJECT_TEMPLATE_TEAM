@@ -176,12 +176,18 @@ run_backup_scope() {
   while IFS= read -r scope_dir; do
     mkdir -p "$STAGING_DIR/database/$spool_schema/$scope_dir"
   done < <(scope_directories "$scope")
+  # backup_db.sql sets LONG far above SQLcl's ~2 MB warning threshold so the
+  # largest package body is never truncated; drop that advisory, keep the rest.
   (
     invoke_sqlcl_safe "$STAGING_DIR" \
       -S -noupdates -name "$connection" \
       "@$REPO_ROOT/scripts/backup_db.sql" \
       "$schema" "$scope" "$DB_ENVIRONMENT" "$expected_user" "$prefixes" "$spool_schema" \
-      < "$SQLCL_STDIN"
+      < "$SQLCL_STDIN" | awk '
+        $0 == "Warning: This LONG setting may cause Java memory problems." { next }
+        $0 == "It is recommended to reduce the setting and/or increase the memory available to Java." { next }
+        { print }
+      '
   )
   test -f "$STAGING_DIR/database/$spool_schema/manifest-$scope.txt" || {
     echo "database backup did not create manifest-$scope.txt for $schema" >&2

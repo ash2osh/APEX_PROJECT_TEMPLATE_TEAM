@@ -473,6 +473,35 @@ class PublishAppCliTests(unittest.TestCase):
                 self.assertEqual((app / "application.apx").read_bytes(), original)
                 self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "0")
 
+    def test_unverified_import_says_to_commit_the_stamp_before_exporting(self) -> None:
+        # Export refuses to write over uncommitted changes, so the kept stamp
+        # must be committed before the documented recovery export.
+        pwsh = shutil.which("pwsh")
+        shells = [("bash", "team.sh")] + ([("pwsh", "team.ps1")] if pwsh else [])
+        for shell, wrapper in shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                if shell == "bash":
+                    command = ["bash", str(runner), "100"]
+                else:
+                    command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+                ok = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+                self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+                self.assertNotIn("was not verified", ok.stdout + ok.stderr)
+                subprocess.run(["git", "-C", str(root), "add", "-A"], check=False, capture_output=True)
+
+                environment["FAKE_EXPORT_MISMATCH"] = "1"
+                failed = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+                output = " ".join((failed.stdout + failed.stderr).split())
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn("DEV now runs the imported source, but it was not verified", output)
+                self.assertIn("Commit the stamped", output)
+                self.assertIn(f"scripts/{wrapper} export 100", output)
+                self.assertRegex((app / "application.apx").read_text(encoding="utf-8"), r"r002")
+
     def test_import_session_receives_the_approved_live_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

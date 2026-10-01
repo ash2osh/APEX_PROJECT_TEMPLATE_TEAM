@@ -113,6 +113,39 @@ class MigrationChecksTests(unittest.TestCase):
             (("APP", "JAVA SOURCE", "ZzJava", True), ("APP", "PROCEDURE", "ZZ_P", True)),
         )
 
+    def test_batch_checks_only_the_first_folder_preconditions_up_front(self):
+        from scripts.migration_checks import batch_preconditions, deferred_precondition_folders, _render_preflight
+        pre = [{"id": "ready", "sql": "SELECT 1 FROM dual", "expected": 1}]
+        self.add_folder("2026-09-30_dep-r001", "CREATE TABLE zz_dep (id NUMBER);\n", preconditions=pre)
+        self.add_folder("2026-09-30_dep-r002", "ALTER TABLE zz_dep ADD (c NUMBER);\n", preconditions=[{"id": "dep-ready", "sql": "SELECT 1 FROM dual", "expected": 1}])
+        batch = self.migration_batch("2026-09-30_dep-r001", "2026-09-30_dep-r002")
+        self.assertEqual([check.id for check in batch_preconditions(batch)], ["ready"])
+        self.assertEqual(deferred_precondition_folders(batch), ["2026-09-30_dep-r002"])
+        report = preflight(batch, self.snapshot(), CheckReport(True, True, (), (), {"complete": True}))
+        self.assertEqual(report.coverage["deferred_preconditions"]["folders"], ["2026-09-30_dep-r002"])
+        self.assertIn("preconditions of 2026-09-30_dep-r002 are not checked here", _render_preflight(report, False))
+
+    def test_view_may_use_a_synonym_created_earlier_in_the_batch(self):
+        reviewed = [{"id": "synonym-absent", "sql": "SELECT 1 FROM dual", "expected": 1}]
+        self.add_folder("2026-09-30_link-r001", {
+            "001-create-synonym.sql": "CREATE SYNONYM zz_link_s FOR other.zz_link_t;\n",
+            "002-create-view.sql": "CREATE VIEW zz_link_v AS SELECT id FROM zz_link_s;\n",
+        }, preconditions=reviewed)
+        report = preflight(self.migration_batch("2026-09-30_link-r001"), self.snapshot(), CheckReport(True, True, (), (), {"complete": True}))
+        self.assertNotIn("MISSING_PREREQUISITE", [conflict.get("code") for conflict in report.conflicts], report.conflicts)
+
+    def test_view_on_a_name_nothing_creates_is_still_a_missing_prerequisite(self):
+        reviewed = [{"id": "synonym-absent", "sql": "SELECT 1 FROM dual", "expected": 1}]
+        self.add_folder("2026-09-30_nolink-r001", {
+            "001-create-synonym.sql": "CREATE SYNONYM zz_other_s FOR other.zz_link_t;\n",
+            "002-create-view.sql": "CREATE VIEW zz_link_v AS SELECT id FROM zz_link_s;\n",
+        }, preconditions=reviewed)
+        report = preflight(self.migration_batch("2026-09-30_nolink-r001"), self.snapshot(), CheckReport(True, True, (), (), {"complete": True}))
+        self.assertIn(
+            ("MISSING_PREREQUISITE", "ZZ_LINK_S"),
+            [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+        )
+
     def test_table_only_migration_compiles_no_units(self):
         self.add_folder("2026-09-30_table-r001", "CREATE TABLE zz_x (id NUMBER);\n")
         self.assertEqual(compiled_units(self.migration_batch("2026-09-30_table-r001")[0], "APP"), ())

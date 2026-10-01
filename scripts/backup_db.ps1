@@ -140,14 +140,28 @@ try {
       New-Item -ItemType Directory -Force `
         -Path (Join-Path $stagingPath "database/$spoolSchema/$scopeDir") | Out-Null
     }
+    $transcriptPath = Join-Path $stagingPath ".sqlcl-transcript.txt"
     $sqlclExit = Invoke-Sqlcl -WorkingDirectory $stagingPath `
       -StdInFile (Join-Path $stagingPath ".sqlcl-stdin") `
+      -TranscriptFile $transcriptPath `
       -Arguments @(
         "-S", "-noupdates", "-name", $target.Connection,
         "@$(Join-Path $repoRoot 'scripts/backup_db.sql')",
         $target.Schema, $target.Scope, $env:DB_ENVIRONMENT,
         $target.ExpectedUser, $target.Prefixes, $spoolSchema
       )
+    # backup_db.sql sets LONG far above SQLcl's ~2 MB warning threshold so the
+    # largest package body is never truncated; drop that advisory, keep the rest.
+    if (Test-Path -LiteralPath $transcriptPath -PathType Leaf) {
+      $longAdvisory = @(
+        "Warning: This LONG setting may cause Java memory problems.",
+        "It is recommended to reduce the setting and/or increase the memory available to Java."
+      )
+      foreach ($line in [System.IO.File]::ReadAllLines($transcriptPath)) {
+        if ($longAdvisory -cnotcontains $line) { Write-Output $line }
+      }
+      Remove-Item -LiteralPath $transcriptPath -Force -ErrorAction SilentlyContinue
+    }
     if ($sqlclExit -ne 0) {
       throw "SQLcl $($target.Scope) metadata backup failed with exit code $sqlclExit"
     }
