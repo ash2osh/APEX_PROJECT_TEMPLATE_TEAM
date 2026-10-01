@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -585,7 +586,8 @@ def main(
         print(f"compare-schema error: {error}", file=sys.stderr)
         return 2
 
-    if run_dir is None:
+    own_run_dir = run_dir is None
+    if own_run_dir:
         scratch = ROOT / "scratch"
         scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         run_dir = Path(tempfile.mkdtemp(prefix="compare-schema-", dir=scratch))
@@ -593,13 +595,25 @@ def main(
         run_dir = Path(run_dir)
         run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    report = _build_live_report(
-        source_target, target_target, args.object, args.pattern, run_dir,
-        capture_inventory_fn=capture_inventory_fn,
-        capture_snapshot_fn=capture_snapshot_fn,
-    )
-    print(render_report(report, args.format))
-    return report.exit_code
+    # The SQLcl logs in run_dir are diagnostics: a comparison that finished (exit
+    # 0 or 1) needs none, so they are kept only when it could not (exit 2).
+    keep_logs = True
+    try:
+        report = _build_live_report(
+            source_target, target_target, args.object, args.pattern, run_dir,
+            capture_inventory_fn=capture_inventory_fn,
+            capture_snapshot_fn=capture_snapshot_fn,
+        )
+        print(render_report(report, args.format))
+        keep_logs = report.exit_code not in (0, 1)
+        return report.exit_code
+    except KeyboardInterrupt:
+        keep_logs = False
+        print("compare-schema interrupted; it only reads, so nothing was changed", file=sys.stderr)
+        return 130
+    finally:
+        if own_run_dir and not keep_logs:
+            shutil.rmtree(run_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

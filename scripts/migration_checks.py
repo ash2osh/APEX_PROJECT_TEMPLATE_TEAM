@@ -7,7 +7,9 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1142,10 +1144,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except MigrationManifestError as error:
         print(f"preflight error: {error}", file=sys.stderr)
         return 2
-    if args.local:
-        report = _local_report(migrations, args.repo_root)
-    else:
-        report = _live_report(migrations, args.env, args.repo_root, args.schema)
+    try:
+        if args.local:
+            report = _local_report(migrations, args.repo_root)
+        else:
+            report = _live_report(migrations, args.env, args.repo_root, args.schema)
+    except KeyboardInterrupt:
+        print("preflight interrupted; it only reads, so nothing was changed", file=sys.stderr)
+        return 130
     rendered = json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) if args.format == "json" else _render_preflight(report, args.local)
     print(rendered)
     return report.exit_code
@@ -1169,14 +1175,20 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
     from .schema_catalog import CatalogError, capture_inventory, capture_snapshot
 
     values = os.environ
+    work_dir: Path | None = None
+    # The SQLcl logs in work_dir are diagnostics: a preflight that finished (exit
+    # 0 or 1) needs none, so they are kept only when it could not (exit 2).
+    keep_logs = True
     try:
         requested = schema or values.get("PROJECT_SCHEMA") or None
         chosen = batch_schema([migration.schema for migration in migrations], requested, values)
         target = resolve_target(values, environment, "read", schema=chosen)
         assert_single_layout(repo_root, migrations, target.schema, flat_folders_apply=flat_migrations_apply(values))
-        work_dir = repo_root / "scratch" / "migration-preflight"
         # Validate operation scope and dependencies before opening SQLcl.
         operations = analyze_batch(migrations, target.schema)
+        scratch = repo_root / "scratch"
+        scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
+        work_dir = Path(tempfile.mkdtemp(prefix="migration-preflight-", dir=scratch))
         inventory = capture_inventory(target, work_dir)
         keys = sorted({
             (operation.get("table"), "TABLE") for operation in operations if operation.get("table")
@@ -1185,11 +1197,19 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
         })
         snapshot = capture_snapshot(target, inventory, keys, work_dir) if keys else SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
         checks_result = run_checks(target, batch_preconditions(migrations), work_dir, phase="preconditions")
-        return preflight(migrations, snapshot, checks_result)
+        report = preflight(migrations, snapshot, checks_result)
+        keep_logs = report.exit_code not in (0, 1)
+        return report
+    except KeyboardInterrupt:
+        keep_logs = False
+        raise
     except MigrationManifestError as error:
         return PreflightReport(2, (), ({"code": "MIGRATION_LAYOUT", "message": str(error)},), {"complete": False, "mode": "live", "environment": environment, "limitations": [LIMITATION]})
     except (TargetResolutionError, CatalogError, OSError, RuntimeError, MigrationAnalysisError) as error:
         return PreflightReport(2, (), ({"code": "LIVE_PREFLIGHT_UNAVAILABLE", "message": str(error)},), {"complete": False, "mode": "live", "environment": environment, "limitations": [LIMITATION]})
+    finally:
+        if work_dir is not None and not keep_logs:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _render_preflight(report: PreflightReport, local: bool) -> str:
