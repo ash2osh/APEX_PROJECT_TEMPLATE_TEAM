@@ -371,6 +371,39 @@ class TeamCliTests(unittest.TestCase):
                     bash_result.stderr.replace("team.sh", "team.ps1").strip(),
                 )
 
+    def test_a_refusal_raised_inside_a_helper_script_is_one_line_with_bash_s_status_in_both_wrappers(self) -> None:
+        # check_db_target.ps1 and load_env.ps1 refuse by throwing a string, which
+        # pwsh prints as an exception block (script path, line, caret) and turns
+        # into status 1; Bash prints the message alone and the guard exits 2.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        template = (ROOT / ".env.example").read_text(encoding="utf-8")
+        for label, replacements, expected_status, expected_text in (
+            ("a connection that resembles production", {"APEX_SQLCL_CONNECTION=docker-demo": "APEX_SQLCL_CONNECTION=docker-prod"}, 2,
+             "resembles production but DB_ENVIRONMENT=development"),
+            ("an invalid DB_ENVIRONMENT", {"DB_ENVIRONMENT=development": "DB_ENVIRONMENT=Development"}, 1,
+             "DB_ENVIRONMENT must be development, test, staging, or production"),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as temporary:
+                environment_file = Path(temporary) / ".env"
+                content = template
+                for old, new_value in replacements.items():
+                    self.assertIn(old, content)
+                    content = content.replace(old, new_value)
+                environment_file.write_text(content, encoding="utf-8")
+                environment = {**os.environ, "PROJECT_ENV_FILE": str(environment_file)}
+                results = {}
+                for name, command in (("bash", ["bash", str(ROOT / "scripts" / "team.sh"), "doctor"]),
+                                      ("powershell", [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "doctor"])):
+                    result = subprocess.run(command, env=environment, text=True, capture_output=True, check=False, cwd=ROOT)
+                    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+                    self.assertEqual(result.returncode, expected_status, f"{name}: {plain}")
+                    self.assertIn(expected_text, " ".join(plain.split()), name)
+                    results[name] = plain
+                self.assertNotIn("Exception:", results["powershell"])
+                self.assertNotIn("Line |", results["powershell"])
+
     def test_powershell_exits_130_when_interrupted_while_a_helper_runs(self) -> None:
         # Ctrl-C stops PowerShell's own pipeline as well as the helper, so the
         # line that passes the helper's status on never ran and pwsh exited 0,

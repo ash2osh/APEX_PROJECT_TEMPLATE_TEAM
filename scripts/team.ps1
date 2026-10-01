@@ -290,6 +290,21 @@ try {
   $finished = $true
 } catch {
   $finished = $true
+  # A helper script refuses by throwing a string, which pwsh would print as an
+  # exception block (script path, line, caret) and turn into status 1. Bash prints
+  # the message alone and exits 2, or 1 for a bad .env: do the same. Any other
+  # error is a bug or the platform failing; it is rethrown so its position stays.
+  if ($_.Exception -is [System.Management.Automation.RuntimeException] -and $_.FullyQualifiedErrorId -ceq $_.Exception.Message) {
+    $refusal = $_.Exception.Message
+    $refusalStatus = 2
+    if ([System.IO.Path]::GetFileName([string] $_.InvocationInfo.ScriptName) -eq "load_env.ps1") {
+      # Bash's loader puts this prefix on every message; the PowerShell one does not.
+      if (-not $refusal.StartsWith("project environment error: ")) { $refusal = "project environment error: $refusal" }
+      $refusalStatus = 1
+    }
+    [Console]::Error.WriteLine($refusal)
+    exit $refusalStatus
+  }
   throw
 } finally {
   # Ctrl-C stops this script as well as the helper it was running, so nothing
