@@ -100,7 +100,7 @@ subqueries, and these functions: `AVG`, `CAST`, `COALESCE`, `COUNT`, `LENGTH`,
 `LOWER`, `MAX`, `MIN`, `NVL`, `REGEXP_LIKE`, `SUBSTR`, `SUM`, `TO_CHAR`,
 `TO_NUMBER`, `UPPER`, and `SYS_CONTEXT` for `USERENV` `SESSION_USER` or
 `CURRENT_SCHEMA`. Its only bind is `:target_schema`. Non-ASCII text belongs
-inside a string literal or a quoted name. A call to any other function (yours
+inside a string literal, a quoted name or a comment. A call to any other function (yours
 or a built-in not listed) is refused when it is written with parentheses, so is
 a sequence `NEXTVAL`/`CURRVAL`, `FOR UPDATE`, a database link, or any statement
 that writes; express other tests with `CASE` and the listed functions. The
