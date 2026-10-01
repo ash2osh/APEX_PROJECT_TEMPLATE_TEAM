@@ -185,7 +185,7 @@ scripts/team.sh doctor
 You should see:
 
 ```text
-SQLcl target: session_user=DEMO, current_schema=DEMO, db_name=FREEPDB1, service=freepdb1
+SQLcl target: session_user=DEMO, current_schema=DEMO, db_name=FREEPDB1, db_unique_name=FREE, service=freepdb1
 ...
 SQLcl connection and database identity checks passed.
 APEX_DOCTOR_VERIFIED:DEMO
