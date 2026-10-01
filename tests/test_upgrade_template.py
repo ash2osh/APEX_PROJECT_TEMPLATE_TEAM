@@ -286,6 +286,38 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(git(self.project, "status", "--porcelain"), "")
         self.assertEqual(list(self.project.glob(".apex-template-upgrade-*")), [])
 
+    def test_interrupt_right_after_a_file_is_moved_aside_still_restores_it(self) -> None:
+        # The signal can land after the original moved to its backup but before
+        # the bookkeeping flag is set; rollback must look at the files, not the flag.
+        self.adopt()
+        original_lock = self.read(".template-lock.json")
+        self.release_v2({"AGENTS.md": "rules v2\n"})
+        actions = [upgrade_engine.Action("UPDATE", "AGENTS.md")]
+        real_replace = upgrade_engine.os.replace
+        interrupted = []
+
+        def replace_then_interrupt(source, destination, *args, **keywords):
+            real_replace(source, destination, *args, **keywords)
+            if Path(destination).name.startswith("backup-") and not interrupted:
+                interrupted.append(destination)
+                raise KeyboardInterrupt
+
+        with patch("scripts.upgrade_template.os.replace", side_effect=replace_then_interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                upgrade_engine.apply_actions(
+                    self.project,
+                    self.template,
+                    actions,
+                    str(self.template),
+                    git(self.template, "rev-parse", "HEAD"),
+                    {"AGENTS.md": "a" * 64},
+                )
+
+        self.assertTrue(interrupted, "the injected interrupt never fired")
+        self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+        self.assertEqual(self.read(".template-lock.json"), original_lock)
+        self.assertEqual(git(self.project, "status", "--porcelain"), "")
+
     def test_interrupt_message_says_the_project_was_restored(self) -> None:
         self.adopt()
         self.release_v2({"AGENTS.md": "rules v2\n"})

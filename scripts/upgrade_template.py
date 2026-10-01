@@ -557,7 +557,9 @@ def apply_actions(
                                 + (f", its previous version is {mutation.backup}" if mutation.original_moved else "")
                             )
                         mutation.target.unlink()
-                if mutation.original_moved:
+                # A signal can land after the move but before original_moved is
+                # set, so look for the backup itself, not only the flag.
+                if mutation.original_moved or (mutation.had_original and _lstat(mutation.backup) is not None):
                     if not mutation.replacement_installed and _lstat(mutation.target) is not None:
                         # Something saved a new file after the original moved
                         # aside; keep it and leave the original in the backups.
