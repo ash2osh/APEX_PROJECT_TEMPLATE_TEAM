@@ -17,6 +17,8 @@ Get-ChildItem -LiteralPath $TargetDir -Filter *.apx -Recurse | ForEach-Object {
   # perl -pi is byte-oriented and preserves a BOM. Detect and re-emit it so the
   # two normalizers produce identical bytes for identical input.
   $bytes = [System.IO.File]::ReadAllBytes($path)
+  # perl -pi never runs on an empty file, so Bash leaves it empty; match it.
+  if ($bytes.Length -eq 0) { return }
   $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
   $text = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n" -replace "`r", "`n"
   $text = $text.TrimEnd("`n") + "`n"
