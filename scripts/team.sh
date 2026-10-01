@@ -77,11 +77,18 @@ case "$command_name" in
     source "$REPO_ROOT/scripts/sqlcl_safe.sh"
     mkdir -p "$REPO_ROOT/scratch"
 
+    # Ctrl-C or SIGTERM while SQLcl runs must not leave its working directory behind.
+    doctor_workdir=""
+    trap '[ -z "$doctor_workdir" ] || rm -rf -- "$doctor_workdir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+
     doctor_one() {
       # Never let SQLcl start in the caller's directory: SQLcl executes a
       # login.sql found there before doctor.sql.
       local connection="$1" expected_user="$2" schema="$3" workdir stdin output status=0
       workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
+      doctor_workdir="$workdir"
       stdin="$workdir/.sqlcl-stdin"
       : > "$stdin"
       output="$workdir/sqlcl-output.log"
@@ -101,6 +108,7 @@ case "$command_name" in
         fi
       fi
       rm -rf -- "$workdir"
+      doctor_workdir=""
       return "$status"
     }
 

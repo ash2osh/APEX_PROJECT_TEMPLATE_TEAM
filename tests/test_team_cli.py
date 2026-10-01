@@ -519,6 +519,44 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", doctor_sql)
             self.assertIn("@@verify_db_access.sql", doctor_sql)
 
+    def test_interrupting_doctor_removes_its_working_directory(self) -> None:
+        # Doctor makes scratch/sqlcl-doctor.* for SQLcl; Ctrl-C used to end the
+        # script before the line that removes it.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh"):
+                shutil.copy2(ROOT / "scripts" / name, scripts / name)
+            (scripts / "verify_db_access.sql").write_text("PROMPT identity checked\n", encoding="utf-8")
+            (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"))
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            started = root / "sql-started"
+            fake_sql = fake_bin / "sql"
+            fake_sql.write_text(f"#!/bin/sh\n: > '{started}'\nsleep 30\n", encoding="utf-8")
+            fake_sql.chmod(0o755)
+            environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", "PROJECT_ENV_FILE": str(root / ".env")}
+            process = subprocess.Popen(
+                ["bash", str(scripts / "team.sh"), "doctor"], cwd=root, env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                # A background job in a non-interactive shell inherits SIGINT as ignored.
+                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while not started.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(started.exists(), "SQLcl never started")
+                os.killpg(process.pid, signal.SIGINT)
+                process.communicate(timeout=60)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+            self.assertEqual(process.returncode, 130)
+            self.assertEqual(sorted(path.name for path in (root / "scratch").glob("sqlcl-doctor.*")), [])
+
     def make_deploy_checkout(self, root: Path, configure_profile: bool = True) -> tuple[Path, Path]:
         scripts = root / "scripts"
         scripts.mkdir()
