@@ -263,6 +263,31 @@ class MigrationManifestTests(unittest.TestCase):
             with self.subTest(query=query):
                 api.validate_check_query(query)
 
+    def test_non_ascii_text_outside_a_quoted_value_is_refused_in_a_check(self) -> None:
+        # Oracle accepts accented letters in an unquoted name, so é(1) or
+        # my_func_é(1) calls a function, but the tokenizer saw only ASCII words
+        # and let the call through.
+        api = self.require_manifest()
+        for query in (
+            "SELECT \u00e9(1) FROM dual",
+            "SELECT CASE WHEN my_func_\u00e9(1) = 1 THEN 1 ELSE 0 END FROM dual",
+            "SELECT CASE WHEN pkg.func_\u00e9(1) = 1 THEN 1 ELSE 0 END FROM dual",
+            "SELECT CASE WHEN \uff46unc(1) = 1 THEN 1 ELSE 0 END FROM dual",
+            "SELECT 1 FROM caf\u00e9",
+        ):
+            with self.subTest(query=query):
+                with self.assertRaises(api.MigrationManifestError) as caught:
+                    api.validate_check_query(query)
+                self.assertIn("non-ASCII", str(caught.exception))
+        for query in (
+            "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CAF\u00c9'",
+            'SELECT COUNT(*) FROM user_tables WHERE table_name = "CAF\u00c9"',
+            "SELECT 1 FROM dual -- caf\u00e9",
+            "SELECT 1 /* caf\u00e9 */ FROM dual",
+        ):
+            with self.subTest(query=query):
+                api.validate_check_query(query)
+
     def test_file_rename_and_checks_content_change_the_payload_digest(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")

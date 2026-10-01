@@ -59,6 +59,7 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | --- | --- | --- |
 | `checks.json must contain exactly schemaVersion, preconditions, and postconditions` | The file has a missing or extra key. | Match the layout in [GETTING_STARTED.md](GETTING_STARTED.md#10-make-your-first-database-change). |
 | `check query calls unsupported or user-defined function <NAME>` | A check calls a function outside the allowed read-only set, or it is a function you wrote. Ordinary SQL keywords before a parenthesis (`AND (...)`, `FROM (subquery)`) are fine. | Rewrite the check with `CASE` and the functions listed for checks in [migration-rules.md](migration-rules.md). |
+| `check query has a non-ASCII character outside a quoted value` | An accented or other non-ASCII letter stands in a check outside a string literal, a quoted name or a comment. Oracle allows it in an unquoted name, which the validator cannot read safely. | Put the text in a string literal, or quote the name, for example `"CAFÉ"`. |
 | `... expected value must be integer 1` | A check's `expected` is not `1`. | Every check is a query returning `1`; set `"expected": 1`. |
 | `INCOMPLETE [LIVE_PREREQUISITE_UNKNOWN]` from `--local` | Offline analysis cannot know what exists in the database. | Expected. Use `--env dev` for a real answer. |
 | `CONFLICT [COLUMN_ALREADY_EXISTS]` (or `LIVE_NAMESPACE_OCCUPIED`) | The object your change creates is already there. | The change may already be applied. Inspect the database; do not re-apply. |

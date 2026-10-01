@@ -204,6 +204,13 @@ def _strip_sql_comments_and_tokenize(source: str) -> list[str]:
             continue
         if char in "qQ" and index + 1 < len(source) and source[index + 1] == "'":
             raise MigrationManifestError("Oracle q-quoted literals are not supported in checks")
+        if not char.isascii():
+            # Oracle accepts accented letters in an unquoted name, so as_é(1) is a
+            # call, but the ASCII word pattern would end the word before it.
+            raise MigrationManifestError(
+                f"check query has a non-ASCII character outside a quoted value: {char!r}; "
+                "put the text in a string literal or quote the name"
+            )
         match = SQL_TOKEN_RE.match(source, index)
         if match is None:
             raise MigrationManifestError("check query contains an invalid token")
