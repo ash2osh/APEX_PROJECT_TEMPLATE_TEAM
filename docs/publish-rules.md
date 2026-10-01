@@ -120,15 +120,14 @@ app and agreed with the team that your files should replace it.
 **During import.** Publish restores your unstamped `application.apx`; read the
 SQLcl output printed above the message. If the file changed while publish ran
 (you saved it in an editor), publish leaves your edit in place and warns
-`changed while publishing; left as is`; check its `version:` line. If the
-file could not be swapped back (for example an editor holds it open), publish
-warns `could not remove the publish tag`; remove the tag from its `version:`
-line by hand. Publish
-swaps `application.apx` by moving it into `scratch/apex-publish.*` (PowerShell:
-`scratch/apex-publish-*`) first; if a
-publish is killed at that moment the file is missing from the app folder, and
-its previous bytes are in that scratch folder as `application.apx.before-stamp`
-or `application.apx.displaced`.
+`changed while publishing; left as is`; check its `version:` line. If the file
+could not be swapped back (for example an editor holds it open), publish warns
+`could not remove the publish tag`; remove the tag from its `version:` line by
+hand. Publish swaps `application.apx` by moving it into `scratch/apex-publish.*`
+(PowerShell: `scratch/apex-publish-*`) first; if a publish is killed at that
+moment the file is missing from the app folder, and its previous bytes are in
+that scratch folder as `application.apx.before-stamp` or
+`application.apx.displaced`.
 
 Ctrl-C is handled by both wrappers, and `kill` (SIGTERM) by Bash. A publish
 stopped any other way (`kill -9`, closing the window, SIGTERM sent to
