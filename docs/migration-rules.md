@@ -72,7 +72,11 @@ validator rejects them before SQLcl connects: a line holding only `/` or `.`
 inside a SQL statement (SQLcl ends the statement there and runs the next line
 as a command), a line holding only `/` inside a comment, and a line starting
 with `@` inside a statement or block (SQLcl splices the named file into it,
-bytes that were never reviewed or hashed). Blank lines inside a statement are
+bytes that were never reviewed or hashed), a quoted identifier that spans
+lines, a string or quoted name standing between two statements (SQLcl reads
+it as a command and the statement after it may not run), and the comment
+opener `/*/` (SQLcl's parser fails on it and runs the comment's lines as
+commands; write `/* /` or `/**/`). Blank lines inside a statement are
 accepted: the apply session sets `SQLBLANKLINES ON`, so an `UPDATE` with a blank
 line before its `WHERE` runs as written.
 

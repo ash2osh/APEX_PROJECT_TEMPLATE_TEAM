@@ -191,6 +191,63 @@ class ValidateMigrationTests(unittest.TestCase):
                 self.assertIn("SQL-only migration", result.stderr)
                 self.assertIn("comment", result.stderr)
 
+    def test_the_comment_opener_slash_star_slash_is_rejected(self) -> None:
+        # '/*/' is a valid Oracle comment opener, but SQLcl's parser throws on it
+        # and then runs the comment's own lines as commands (HOST ran in a live
+        # test). The validator saw only a comment.
+        for source in (
+            "SELECT 1 FROM dual;\n/*/\nHOST echo CLIENT_DIRECTIVE_EXECUTED\n*/\nSELECT 2 FROM dual;\n",
+            "/*/ x */\nSELECT 1 FROM dual;\n",
+            "SELECT 1 FROM dual;\n/*/*/\nSELECT 2 FROM dual;\n",
+            "SELECT 1 /*/ y */ FROM dual;\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SQL-only migration", result.stderr)
+                self.assertIn("/*/", result.stderr)
+
+    def test_comment_forms_that_only_resemble_the_slash_star_slash_opener_are_accepted(self) -> None:
+        for source in (
+            "SELECT 1 FROM dual; /**/\nSELECT 2 FROM dual;\n",
+            "SELECT 1 FROM dual; /***/\nSELECT 2 FROM dual;\n",
+            "SELECT 1 FROM dual; /* / */\nSELECT 2 FROM dual;\n",
+            "SELECT '/*/' FROM dual;\n",
+            "-- /*/ in a line comment\nSELECT 1 FROM dual;\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_quoted_value_between_statements_is_rejected(self) -> None:
+        # The validator blanked it, so it never saw it; SQLcl reads it as a
+        # command ("Unknown Command") and the script still completes.
+        for source in (
+            "SELECT 1 FROM dual;\n'/'\nSELECT 2 FROM dual;\n",
+            'INSERT INTO T VALUES (1);\n"x"\nUPDATE T SET A = 2;\n',
+            "q'[stray]'\nSELECT 1 FROM dual;\n",
+            "SELECT 1 FROM dual; 'trailing'\nSELECT 2 FROM dual;\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SQL-only migration", result.stderr)
+                self.assertIn("quoted value", result.stderr)
+
+    def test_quoted_values_inside_statements_and_comments_between_them_are_accepted(self) -> None:
+        for source in (
+            "SELECT 'a' FROM dual;\nSELECT 'b' FROM dual;\n",
+            "SELECT 1 FROM dual;\n-- 'note'\n/* \"x\" */\nSELECT 2 FROM dual;\n",
+            "INSERT INTO T VALUES ('a;b');\nUPDATE T SET A = q'[x;y]';\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_quoted_identifier_spanning_lines_is_rejected(self) -> None:
         # SQLcl ends the statement at a '/' line inside the identifier, then
         # runs what follows as client commands.

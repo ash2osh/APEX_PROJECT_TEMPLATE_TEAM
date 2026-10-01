@@ -60,8 +60,11 @@ def reject_sqlcl_line_hazards(masked: str, start: int, end: int, *, plsql: bool)
         )
 
 
-def mask_comments_and_literals(source: str) -> str:
-    """Blank comments and quoted values while preserving offsets and newlines."""
+def mask_comments_and_literals(source: str, quoted_spans: list[tuple[int, int]] | None = None) -> str:
+    """Blank comments and quoted values while preserving offsets and newlines.
+
+    ``quoted_spans``, when given, receives the (start, end) of every string,
+    q-quoted literal and quoted identifier that was blanked."""
     characters = list(source)
     index = 0
     length = len(source)
@@ -80,6 +83,13 @@ def mask_comments_and_literals(source: str) -> str:
             index = end
             continue
 
+        if source.startswith("/*/", index):
+            # A valid Oracle comment opener, but SQLcl's parser throws on it and
+            # then runs the comment's lines as commands.
+            raise ValueError(
+                f"SQL-only migration rejects the comment opener '/*/' at line {source.count(chr(10), 0, index) + 1}; "
+                "SQLcl cannot parse it and would run the comment's lines as commands. Write '/* /' or '/**/' instead"
+            )
         if source.startswith("/*", index):
             start = index
             comment_end = source.find("*/", index + 2)
@@ -145,6 +155,8 @@ def mask_comments_and_literals(source: str) -> str:
                 raise ValueError(f"unterminated Oracle quoted literal at line {source.count(chr(10), 0, start) + 1}")
             index = end + len(terminator)
             blank(start, index)
+            if quoted_spans is not None:
+                quoted_spans.append((start, index))
             continue
 
         if source[index] in "'\"":
@@ -170,6 +182,8 @@ def mask_comments_and_literals(source: str) -> str:
                     "keep it on one line"
                 )
             blank(start, index)
+            if quoted_spans is not None:
+                quoted_spans.append((start, index))
             continue
 
         index += 1
@@ -254,8 +268,10 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
     The end excludes the ';' or the standalone '/' that terminates it.
     """
     spans: list[tuple[int, int]] = []
-    masked = mask_comments_and_literals(source)
+    quoted: list[tuple[int, int]] = []
+    masked = mask_comments_and_literals(source, quoted)
     index = 0
+    previous_end = 0
     while index < len(masked):
         while index < len(masked) and masked[index].isspace():
             index += 1
@@ -264,6 +280,14 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
 
         statement_start = index
         line_number = masked.count("\n", 0, statement_start) + 1
+        # Blanked quoted text between statements would be skipped here, but
+        # SQLcl reads it as a command ("Unknown Command") and carries on.
+        for quoted_start, quoted_end in quoted:
+            if quoted_start >= previous_end and quoted_end <= statement_start:
+                raise ValueError(
+                    f"SQL-only migration rejects a quoted value outside any statement at line "
+                    f"{source.count(chr(10), 0, quoted_start) + 1}; SQLcl would not run the statement that follows it"
+                )
         head = masked[index:]
         first_match = re.match(r"([A-Za-z][A-Za-z0-9_$#]*)", head, flags=re.ASCII)
         if first_match is None:
@@ -292,6 +316,7 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
             reject_sqlcl_line_hazards(masked, index, index + slash.start(), plsql=True)
             spans.append((statement_start, index + slash.start()))
             index += slash.end()
+            previous_end = index
             continue
 
         statement_end = masked.find(";", index)
@@ -312,6 +337,7 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
         reject_sqlcl_line_hazards(masked, statement_start, statement_end, plsql=False)
         spans.append((statement_start, statement_end))
         index = statement_end + 1
+        previous_end = index
     return spans
 
 
