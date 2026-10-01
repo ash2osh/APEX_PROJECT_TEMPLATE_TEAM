@@ -1,5 +1,6 @@
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -9,7 +10,7 @@ VALIDATOR = ROOT / "scripts" / "validate_migration.py"
 
 
 class ValidateMigrationTests(unittest.TestCase):
-    def run_validator(self, source: str) -> subprocess.CompletedProcess[str]:
+    def run_validator(self, source: str, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "migration.sql"
             path.write_text(source, encoding="utf-8")
@@ -18,6 +19,7 @@ class ValidateMigrationTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=timeout,
             )
 
     def test_sql_literals_and_comments_may_contain_client_command_text(self) -> None:
@@ -323,6 +325,30 @@ class ValidateMigrationTests(unittest.TestCase):
                 result = self.run_validator(source)
 
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_validation_time_grows_with_the_size_of_the_migration_not_its_square(self) -> None:
+        # A seed-data migration is tens of thousands of INSERTs, and a legacy
+        # package body is hundreds of kilobytes in one block. The scan once
+        # copied the rest of the file at every character, so these took minutes.
+        inserts = "".join(
+            f"INSERT INTO ZZ_LOOKUP (ID, CODE, LABEL) VALUES ({number}, 'C{number}', 'Label number {number}');\n"
+            for number in range(20000)
+        )
+        package = (
+            "CREATE OR REPLACE PACKAGE BODY P_BIG AS\n  PROCEDURE RUN IS\n  BEGIN\n"
+            + "    NULL;\n" * 150000
+            + "  END;\nEND;\n/\n"
+        )
+        for label, source in (("20000 INSERT statements", inserts), ("one 150000-line package body", package)):
+            with self.subTest(label):
+                started = time.perf_counter()
+                try:
+                    result = self.run_validator(source, timeout=45)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"{label} took more than 45 seconds to validate")
+                elapsed = time.perf_counter() - started
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertLess(elapsed, 20, f"{label} took {elapsed:.1f}s to validate")
 
     def test_migration_cannot_take_transaction_completion_away_from_driver(self) -> None:
         for source in ("COMMIT;\n", "ROLLBACK;\n"):

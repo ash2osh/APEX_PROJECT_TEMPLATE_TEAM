@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import sys
+from bisect import bisect_left
 from pathlib import Path
 
 
@@ -41,10 +42,31 @@ LONE_TERMINATOR = re.compile(r"(?m)^[ \t]*([/.])[ \t\r]*$")
 AT_LINE = re.compile(r"(?m)^[ \t]*@")
 
 
+# CREATE [OR REPLACE] [AND RESOLVE|COMPILE] [NOFORCE] JAVA [IF NOT EXISTS]
+# SOURCE|CLASS|RESOURCE, with comments allowed between the words.
+_GAP = r"(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+"
+JAVA_HEADER = re.compile(
+    rf"CREATE{_GAP}"
+    rf"(?:OR{_GAP}REPLACE{_GAP})?"
+    rf"(?:AND{_GAP}(?:RESOLVE|COMPILE){_GAP})?"
+    rf"(?:NOFORCE{_GAP})?"
+    rf"JAVA{_GAP}"
+    rf"(?:IF{_GAP}NOT{_GAP}EXISTS{_GAP})?"
+    r"(?:SOURCE|CLASS|RESOURCE)\b",
+    re.IGNORECASE | re.ASCII | re.DOTALL,
+)
+FIRST_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_$#]*", re.ASCII)
+STANDALONE_SLASH = re.compile(r"(?m)^[ \t]*/[ \t]*(?:\r?\n|$)")
+
+
+def line_at(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
 def reject_sqlcl_line_hazards(masked: str, start: int, end: int, *, plsql: bool) -> None:
     """Refuse lines inside one statement that SQLcl does not read as part of it."""
     for terminator in LONE_TERMINATOR.finditer(masked, start, end):
-        line = masked.count("\n", 0, terminator.start()) + 1
+        line = line_at(masked, terminator.start())
         if plsql and terminator.group(1) == ".":
             raise ValueError(f"SQL-only migration rejects SQLcl buffer terminator in PL/SQL block at line {line}")
         raise ValueError(
@@ -53,7 +75,7 @@ def reject_sqlcl_line_hazards(masked: str, start: int, end: int, *, plsql: bool)
         )
     at_line = AT_LINE.search(masked, start, end)
     if at_line is not None:
-        line = masked.count("\n", 0, at_line.start()) + 1
+        line = line_at(masked, at_line.start())
         raise ValueError(
             f"SQL-only migration rejects a line starting with '@' at line {line}; "
             "SQLcl would splice the named file into the statement"
@@ -87,14 +109,14 @@ def mask_comments_and_literals(source: str, quoted_spans: list[tuple[int, int]] 
             # A valid Oracle comment opener, but SQLcl's parser throws on it and
             # then runs the comment's lines as commands.
             raise ValueError(
-                f"SQL-only migration rejects the comment opener '/*/' at line {source.count(chr(10), 0, index) + 1}; "
+                f"SQL-only migration rejects the comment opener '/*/' at line {line_at(source, index)}; "
                 "SQLcl cannot parse it and would run the comment's lines as commands. Write '/* /' or '/**/' instead"
             )
         if source.startswith("/*", index):
             start = index
             comment_end = source.find("*/", index + 2)
             if comment_end < 0:
-                raise ValueError(f"unterminated block comment at line {source.count(chr(10), 0, start) + 1}")
+                raise ValueError(f"unterminated block comment at line {line_at(source, start)}")
             index = comment_end + 2
             # SQLcl ends the statement or PL/SQL block at a line holding only
             # '/', even inside a comment, and runs the rest as commands.
@@ -102,28 +124,16 @@ def mask_comments_and_literals(source: str, quoted_spans: list[tuple[int, int]] 
                 if lone.group(1) == "/":
                     raise ValueError(
                         "SQL-only migration rejects a line holding only '/' inside a comment at line "
-                        f"{source.count(chr(10), 0, lone.start()) + 1}; SQLcl ends the statement there"
+                        f"{line_at(source, lone.start())}; SQLcl ends the statement there"
                     )
             blank(start, index)
             continue
 
-        java_header = re.match(
-            r"CREATE(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+"
-            r"(?:OR(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+"
-            r"REPLACE(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+)?"
-            r"(?:AND(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+"
-            r"(?:RESOLVE|COMPILE)(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+)?"
-            r"(?:NOFORCE(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+)?"
-            r"JAVA(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+"
-            r"(?:IF(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+"
-            r"NOT(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+"
-            r"EXISTS(?:\s+|/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))+)?"
-            r"(?:SOURCE|CLASS|RESOURCE)\b",
-            source[index:],
-            flags=re.IGNORECASE | re.ASCII | re.DOTALL,
-        )
+        # Matching in place, and only where a CREATE can start, keeps the scan
+        # linear: slicing the rest of the source at every character is quadratic.
+        java_header = JAVA_HEADER.match(source, index) if source[index] in "cC" else None
         if java_header is not None:
-            payload_start = index + java_header.end()
+            payload_start = java_header.end()
             for comment in re.finditer(r"/\*.*?\*/|--[^\r\n]*", source[index:payload_start], flags=re.DOTALL):
                 blank(index + comment.start(), index + comment.end())
             slash = re.search(
@@ -135,7 +145,7 @@ def mask_comments_and_literals(source: str, quoted_spans: list[tuple[int, int]] 
                 java_payload = mask_java_quoted_values(source[payload_start:payload_end])
                 buffer_terminator = re.search(r"(?m)^[ \t]*;[ \t]*(?:\r?\n|$)", java_payload)
                 if buffer_terminator is not None:
-                    terminator_line = source.count("\n", 0, payload_start + buffer_terminator.start()) + 1
+                    terminator_line = line_at(source, payload_start + buffer_terminator.start())
                     raise ValueError(
                         f"SQL-only migration rejects SQLcl buffer terminator in Java source at line {terminator_line}"
                     )
@@ -146,13 +156,13 @@ def mask_comments_and_literals(source: str, quoted_spans: list[tuple[int, int]] 
         if source[index] in "qQ" and index + 1 < length and source[index + 1] == "'":
             start = index
             if index + 2 >= length:
-                raise ValueError(f"unterminated Oracle quoted literal at line {source.count(chr(10), 0, start) + 1}")
+                raise ValueError(f"unterminated Oracle quoted literal at line {line_at(source, start)}")
             opening = source[index + 2]
             closing = {"[": "]", "{": "}", "(": ")", "<": ">"}.get(opening, opening)
             terminator = closing + "'"
             end = source.find(terminator, index + 3)
             if end < 0:
-                raise ValueError(f"unterminated Oracle quoted literal at line {source.count(chr(10), 0, start) + 1}")
+                raise ValueError(f"unterminated Oracle quoted literal at line {line_at(source, start)}")
             index = end + len(terminator)
             blank(start, index)
             if quoted_spans is not None:
@@ -172,13 +182,13 @@ def mask_comments_and_literals(source: str, quoted_spans: list[tuple[int, int]] 
                     break
                 index += 1
             else:
-                raise ValueError(f"unterminated quoted value at line {source.count(chr(10), 0, start) + 1}")
+                raise ValueError(f"unterminated quoted value at line {line_at(source, start)}")
             # SQLcl does not keep a quoted identifier together across lines: a
             # line holding only '/' inside one ends the statement. A string
             # literal is kept whole, so only identifiers are refused.
             if quote == '"' and "\n" in source[start:index]:
                 raise ValueError(
-                    f"SQL-only migration rejects a quoted identifier that spans lines at line {source.count(chr(10), 0, start) + 1}; "
+                    f"SQL-only migration rejects a quoted identifier that spans lines at line {line_at(source, start)}; "
                     "keep it on one line"
                 )
             blank(start, index)
@@ -210,7 +220,7 @@ def mask_java_quoted_values(source: str) -> str:
         if source.startswith("/*", index):
             comment_end = source.find("*/", index + 2)
             if comment_end < 0:
-                line = source.count("\n", 0, index) + 1
+                line = line_at(source, index)
                 raise ValueError(f"unterminated Java block comment at line {line}")
             index = comment_end + 2
             continue
@@ -227,7 +237,7 @@ def mask_java_quoted_values(source: str) -> str:
                 else:
                     index += 1
             else:
-                line = source.count("\n", 0, start) + 1
+                line = line_at(source, start)
                 raise ValueError(f"unterminated Java text block at line {line}")
             blank(start, index)
             continue
@@ -243,12 +253,12 @@ def mask_java_quoted_values(source: str) -> str:
                     index += 1
                     break
                 elif source[index] in "\r\n":
-                    line = source.count("\n", 0, start) + 1
+                    line = line_at(source, start)
                     raise ValueError(f"unterminated Java quoted value at line {line}")
                 else:
                     index += 1
             else:
-                line = source.count("\n", 0, start) + 1
+                line = line_at(source, start)
                 raise ValueError(f"unterminated Java quoted value at line {line}")
             blank(start, index)
             continue
@@ -277,37 +287,37 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
             index += 1
         # Blanked quoted text between statements (or after the last one) would
         # be skipped here, but SQLcl reads it as a command ("Unknown Command")
-        # and carries on.
-        for quoted_start, quoted_end in quoted:
-            if quoted_start >= previous_end and quoted_end <= index:
-                raise ValueError(
-                    f"SQL-only migration rejects a quoted value outside any statement at line "
-                    f"{source.count(chr(10), 0, quoted_start) + 1}; SQLcl would read it as a command"
-                )
+        # and carries on. The spans are in source order and never overlap, so
+        # only the first one at or after the previous statement can lie in the gap.
+        gap_quoted = bisect_left(quoted, (previous_end,))
+        if gap_quoted < len(quoted) and quoted[gap_quoted][1] <= index:
+            raise ValueError(
+                f"SQL-only migration rejects a quoted value outside any statement at line "
+                f"{line_at(source, quoted[gap_quoted][0])}; SQLcl would read it as a command"
+            )
         if index >= len(masked):
             break
 
         statement_start = index
-        line_number = masked.count("\n", 0, statement_start) + 1
-        head = masked[index:]
-        first_match = re.match(r"([A-Za-z][A-Za-z0-9_$#]*)", head, flags=re.ASCII)
+        first_match = FIRST_WORD.match(masked, index)
         if first_match is None:
             raise ValueError(
-                f"SQL-only migration rejects a client command or non-SQL token at line {line_number}"
+                f"SQL-only migration rejects a client command or non-SQL token at line {line_at(masked, statement_start)}"
             )
         # SQLcl decides what a statement is from its first whitespace-delimited
         # word. 'DECLARE,~' is an unknown command to it, so it runs the lines
         # after it one by one while this validator would read the keyword and
         # skip the rest as one block. Judge the source, not the masked text, so
         # a comment glued to the word ('DECLARE/**/') does not count as a gap.
-        word_end = statement_start + first_match.end()
+        word_end = first_match.end()
         if word_end < len(source) and source[word_end] not in " \t\r\n":
             raise ValueError(
-                f"SQL-only migration rejects '{source[statement_start:word_end + 1].strip()}' at line {line_number}: "
-                f"SQLcl reads a statement's first word up to the next space, so put a space after '{first_match.group(1)}'"
+                f"SQL-only migration rejects '{source[statement_start:word_end + 1].strip()}' at line "
+                f"{line_at(masked, statement_start)}: SQLcl reads a statement's first word up to the next space, "
+                f"so put a space after '{first_match.group()}'"
             )
-        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_$#]*", head[:240], flags=re.ASCII)
-        first = first_match.group(1).upper()
+        tokens = FIRST_WORD.findall(masked[index:index + 240])
+        first = first_match.group().upper()
 
         is_plsql_block = first in {"BEGIN", "DECLARE"}
         if first == "CREATE":
@@ -322,21 +332,25 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
             )
 
         if is_plsql_block:
-            slash = re.search(r"(?m)^[ \t]*/[ \t]*(?:\r?\n|$)", masked[index:])
+            slash = STANDALONE_SLASH.search(masked, index)
             if slash is None:
-                raise ValueError(f"SQL-only migration PL/SQL block must end with a standalone slash at line {line_number}")
-            reject_sqlcl_line_hazards(masked, index, index + slash.start(), plsql=True)
-            spans.append((statement_start, index + slash.start()))
-            index += slash.end()
+                raise ValueError(
+                    f"SQL-only migration PL/SQL block must end with a standalone slash at line {line_at(masked, statement_start)}"
+                )
+            reject_sqlcl_line_hazards(masked, index, slash.start(), plsql=True)
+            spans.append((statement_start, slash.start()))
+            index = slash.end()
             previous_end = index
             continue
 
         statement_end = masked.find(";", index)
         if statement_end < 0:
-            raise ValueError(f"SQL-only migration statement must end with a semicolon at line {line_number}")
+            raise ValueError(
+                f"SQL-only migration statement must end with a semicolon at line {line_at(masked, statement_start)}"
+            )
         words = [word.upper() for word in re.findall(r"[A-Za-z][A-Za-z0-9_$#]*", masked[index:statement_end])]
         if not words:
-            raise ValueError(f"SQL-only migration has an empty statement at line {line_number}")
+            raise ValueError(f"SQL-only migration has an empty statement at line {line_at(masked, statement_start)}")
         first = words[0]
         allowed = first in SQL_STARTERS
         if first == "SET":
@@ -344,7 +358,7 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
         if not allowed:
             raise ValueError(
                 f"SQL-only migration rejects SQLcl/client command or unsupported statement "
-                f"'{first}' at line {line_number}"
+                f"'{first}' at line {line_at(masked, statement_start)}"
             )
         reject_sqlcl_line_hazards(masked, statement_start, statement_end, plsql=False)
         spans.append((statement_start, statement_end))
