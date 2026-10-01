@@ -39,6 +39,17 @@ if [ ! -f "$PROJECT_ENV_FILE" ]; then
   return 1 2>/dev/null || exit 1
 fi
 
+# Windows PowerShell 5.1 writes UTF-16 for `>` and Out-File, and PowerShell
+# decodes it, but Bash would read garbage and fail with an unreadable
+# "invalid line" message. Say what is wrong instead.
+project_env_bom="$(head -c 2 "$PROJECT_ENV_FILE" | od -An -tx1 | tr -d ' \n')"
+if [ "$project_env_bom" = fffe ] || [ "$project_env_bom" = feff ]; then
+  project_env_fail "$PROJECT_ENV_FILE is UTF-16; save it as UTF-8 (a UTF-8 byte-order mark is fine)"
+  unset project_env_bom
+  return 1 2>/dev/null || exit 1
+fi
+unset project_env_bom
+
 project_env_seen_keys=()
 project_env_first_line=true
 project_env_oracle_identifier_regex='^[A-Z][A-Z0-9_$#]{0,127}$'

@@ -1,4 +1,5 @@
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -284,6 +285,32 @@ class TeamCliTests(unittest.TestCase):
                         text=True, capture_output=True, check=False,
                     )
                     self.assertNotEqual(powershell_result.returncode, 0, powershell_result.stdout)
+
+    def test_both_loaders_refuse_a_utf16_env_file_with_a_clear_message(self) -> None:
+        # Windows PowerShell 5.1 writes UTF-16 for `>` and Out-File. PowerShell
+        # decoded it, Bash read garbage: doctor passed and migrate then failed
+        # with an unreadable "invalid line" message.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        text = (ROOT / ".env.example").read_text(encoding="utf-8")
+        for label, content in (
+            ("utf-16-le", b"\xff\xfe" + text.encode("utf-16-le")),
+            ("utf-16-be", b"\xfe\xff" + text.encode("utf-16-be")),
+        ):
+            with self.subTest(encoding=label), tempfile.TemporaryDirectory() as temporary:
+                environment = Path(temporary) / ".env"
+                environment.write_bytes(content)
+                bash_result = self.run_bash_env_loader(environment)
+                powershell_result = subprocess.run(
+                    [pwsh, "-NoProfile", "-Command", f". '{ROOT / 'scripts' / 'load_env.ps1'}' -EnvFile '{environment}'"],
+                    text=True, capture_output=True, check=False,
+                )
+                for name, result in (("bash", bash_result), ("powershell", powershell_result)):
+                    self.assertNotEqual(result.returncode, 0, f"{name} accepted a {label} file: {result.stdout}")
+                    # PowerShell wraps its error text across lines and colours it.
+                    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stderr).split())
+                    self.assertIn("is UTF-16; save it as UTF-8", plain, f"{name}: {result.stderr}")
 
     def test_powershell_runs_bash_helpers_with_the_bash_named_by_team_bash(self) -> None:
         # On Windows the first bash on PATH may be the WSL launcher, or absent

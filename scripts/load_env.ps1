@@ -31,6 +31,16 @@ if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
   throw "project environment error: configuration file not found: $EnvFile (copy .env.example to .env)"
 }
 
+# [System.IO.File]::ReadAllLines decodes UTF-16 from its byte-order mark, which
+# Windows PowerShell 5.1 writes for `>` and Out-File. load_env.sh cannot read it,
+# so refuse it here too instead of passing doctor and failing in Bash later.
+$projectEnvHead = [byte[]]::new(2)
+$projectEnvStream = [System.IO.File]::OpenRead($EnvFile)
+try { $null = $projectEnvStream.Read($projectEnvHead, 0, 2) } finally { $projectEnvStream.Dispose() }
+if (($projectEnvHead[0] -eq 0xFF -and $projectEnvHead[1] -eq 0xFE) -or ($projectEnvHead[0] -eq 0xFE -and $projectEnvHead[1] -eq 0xFF)) {
+  throw "project environment error: $EnvFile is UTF-16; save it as UTF-8 (a UTF-8 byte-order mark is fine)"
+}
+
 $projectEnvSeen = @{}
 $projectEnvAllowed = @(
   "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
@@ -282,7 +292,7 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvConnectionSeen, projectEnvUserSeen, projectEnvConnectionValue,
   projectEnvUserValue, projectEnvSchemaSeen, projectEnvSchemaValue,
   projectEnvRootRelative, projectEnvUnion, projectEnvMulti, projectEnvDevSchema, projectEnvItems,
-  projectEnvItem, projectEnvConnectionCount `
+  projectEnvItem, projectEnvConnectionCount, projectEnvHead, projectEnvStream `
   -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,
   Function:Assert-ProjectEnvList, Function:Assert-ProjectEnvTriple,
