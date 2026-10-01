@@ -63,6 +63,15 @@ class CompareSchemaCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([target.environment for target in self.targets], ["staging", "prod"])
 
+    def test_text_report_says_comments_are_not_compared(self):
+        # A changed table or column comment is not reported (GET_DDL for a table
+        # holds no comments); the report must not imply it was compared.
+        code, stdout, _ = self.run_cli(["--from", "dev", "--to", "staging", "--object", "CUSTOMERS"])
+
+        self.assertEqual(code, 0)
+        exclusions = next(line for line in stdout.splitlines() if line.startswith("Exclusions:"))
+        self.assertIn("comments", exclusions)
+
     def test_env_prod_is_dev_to_prod_and_json_emits_one_complete_report(self):
         code, output, _ = self.run_cli(["--env", "prod", "--pattern", "CUST*", "--format", "json"])
         report = json.loads(output)

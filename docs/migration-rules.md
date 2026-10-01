@@ -214,7 +214,8 @@ wildcard. `_` is literal, so `HR_*` does not select `HRX_EMPLOYEES`. Selection
 is the union of objects found in either catalog. Comparison captures catalog
 inventory, table columns, views, sequences, and normalized metadata DDL for
 selected objects. It reports missing target objects/columns, changed
-definitions, target-only objects, and incomplete catalog visibility.
+definitions, target-only objects, and incomplete catalog visibility. It does not
+compare table or column comments, grants, storage settings, or data.
 
 This is a live schema drift check, not reliable migration-file attribution.
 Local `status.<env>.json` receipts can help an operator identify migrations to

@@ -378,6 +378,7 @@ def normalization_coverage() -> dict:
             "storage, segment, tablespace, logging, compression, and physical allocation settings",
             "object IDs, data object IDs, DDL timestamps, and optimizer statistics",
             "sequence runtime LAST_NUMBER/restart position, including DDL START WITH values",
+            "table and column comments",
             "security grants and application data",
         ],
         "ddl_transforms": sorted(PHYSICAL_OPTIONS_WITH_VALUE | PHYSICAL_SINGLE_OPTIONS | {"STORAGE", "TABLESPACE", "SEGMENT CREATION"}),

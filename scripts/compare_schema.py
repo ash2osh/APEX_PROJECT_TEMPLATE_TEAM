@@ -449,7 +449,7 @@ def render_report(report: ComparisonReport, output_format: str) -> str:
         side_line("Source", report.source),
         side_line("Target", report.target),
         f"Normalization: {report.coverage.get('normalization', {}).get('version', 'unknown')}",
-        "Exclusions: storage/segment/tablespace settings, object IDs, DDL timestamps, optimizer statistics, sequence runtime position, grants, and application data.",
+        "Exclusions: storage/segment/tablespace settings, object IDs, DDL timestamps, optimizer statistics, sequence runtime position, table and column comments, grants, and application data.",
         f"Coverage complete: {'yes' if report.coverage.get('complete') else 'no'}",
         f"Result: exit {report.exit_code}; {len(report.differences)} difference(s)",
     ]
