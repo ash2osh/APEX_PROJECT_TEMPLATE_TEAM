@@ -87,6 +87,17 @@ class SqlDriverContractTests(unittest.TestCase):
                         self.assertLessEqual(size, 32767)
         self.assertGreaterEqual(checked, 3, "the chunking loops were not found; update this test")
 
+    def test_the_catalog_driver_lifts_the_dbms_output_cap_before_it_prints_the_payload(self) -> None:
+        # SQLcl's SERVEROUTPUT SIZE UNLIMITED still leaves a 1,000,000-byte buffer
+        # (ORU-10027), so a selected definition over 1 MB (a large package body)
+        # could not be captured. DBMS_OUTPUT.ENABLE(NULL) inside the block lifts it.
+        contents = (ROOT / "scripts" / "schema_catalog.sql").read_text(encoding="utf-8")
+        enable = re.search(r"(?i)DBMS_OUTPUT\.ENABLE\(\s*NULL\s*\)\s*;", contents)
+        first_put = re.search(r"(?i)DBMS_OUTPUT\.PUT_LINE\(", contents)
+        self.assertIsNotNone(enable, "schema_catalog.sql must call DBMS_OUTPUT.ENABLE(NULL)")
+        self.assertIsNotNone(first_put)
+        self.assertLess(enable.start(), first_put.start())
+
     def test_identity_and_drift_drivers_emit_verification_sentinels(self) -> None:
         self.assertIn("APEX_DOCTOR_VERIFIED:&&expected_user", (ROOT / "scripts/doctor.sql").read_text(encoding="utf-8"))
         self.assertIn("APEX_DRIFT_QUERY_VERIFIED", (ROOT / "scripts/check_builder_drift.sql").read_text(encoding="utf-8"))

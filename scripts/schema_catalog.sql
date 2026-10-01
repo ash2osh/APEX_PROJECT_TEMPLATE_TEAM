@@ -328,6 +328,9 @@ DECLARE
   END;
 
 BEGIN
+  -- SQLcl's SERVEROUTPUT SIZE UNLIMITED still leaves a 1,000,000-byte buffer
+  -- (ORU-10027), and a selected definition can be larger than that.
+  DBMS_OUTPUT.ENABLE(NULL);
   IF SYS_CONTEXT('USERENV', 'SESSION_USER') != c_expected_user THEN
     RAISE_APPLICATION_ERROR(-20980, 'SQLcl session user did not match selected target');
   END IF;
