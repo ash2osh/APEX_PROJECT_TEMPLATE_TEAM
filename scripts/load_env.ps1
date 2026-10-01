@@ -182,7 +182,10 @@ foreach ($projectEnvKey in @("TABLES_PREFIXES", "CODE_PREFIXES")) {
 if ($env:DEVELOPER_NAME -cnotmatch '^[A-Z][A-Z0-9_]{0,29}$') {
   throw "DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF"
 }
-if ($env:DB_ENVIRONMENT -notin @("development", "test", "staging", "production")) { throw "DB_ENVIRONMENT is invalid" }
+# -cnotin: -notin ignores case, but load_env.sh and the Bash helpers do not.
+if ($env:DB_ENVIRONMENT -cnotin @("development", "test", "staging", "production")) {
+  throw "DB_ENVIRONMENT must be development, test, staging, or production"
+}
 if ($env:INSTALL_UC_APX -cnotin @("true", "false")) { throw "INSTALL_UC_APX must be true or false" }
 if ($env:UC_APX_SKILLS_AGENT -cnotin @("universal", "claude-code")) {
   throw "UC_APX_SKILLS_AGENT must be universal or claude-code"

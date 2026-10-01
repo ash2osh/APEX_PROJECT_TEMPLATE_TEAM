@@ -568,6 +568,9 @@ def apply_folder(
 
     driver_lines = [
         "SET ECHO OFF",
+        # SQLcl ends a plain SQL statement at a blank line unless told otherwise,
+        # so an UPDATE with a blank line before its WHERE would run on every row.
+        "SET SQLBLANKLINES ON",
         "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
         "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
         "SET DEFINE ON",

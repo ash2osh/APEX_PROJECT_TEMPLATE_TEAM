@@ -141,6 +141,89 @@ class ValidateMigrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("buffer terminator", result.stderr)
 
+    def test_lone_slash_or_period_line_inside_a_sql_statement_is_rejected(self) -> None:
+        # SQLcl ends a plain SQL statement at a line holding only '/' or '.', so
+        # the next line would run as a client command although the validator
+        # sees one SELECT. Verified with SQLcl against a database.
+        for terminator in ("/", ".", "  /  ", " . ", "/ -- run", ". -- end"):
+            for source in (
+                f"SELECT 1 FROM dual\n{terminator}\nHOST echo CLIENT_DIRECTIVE_EXECUTED\n;\n",
+                f"INSERT INTO T VALUES (1)\n{terminator}\n;\n",
+                f"UPDATE T SET A = 1\n{terminator}\nWHERE B = 2;\n",
+            ):
+                with self.subTest(source=source):
+                    result = self.run_validator(source)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("SQL-only migration", result.stderr)
+                    self.assertIn("ends the statement", result.stderr)
+
+    def test_at_sign_line_inside_a_statement_is_rejected(self) -> None:
+        # SQLcl splices the text of the named file into the statement, so the
+        # payload would run bytes that were never reviewed or hashed.
+        for source in (
+            "SELECT 1\n@other.sql\nFROM dual;\n",
+            "SELECT 1\n  @@other.sql\nFROM dual;\n",
+            "BEGIN\n  NULL;\n@other.sql\nEND;\n/\n",
+            "CREATE OR REPLACE PROCEDURE P AS\nBEGIN\n  NULL;\n@other.sql\nEND;\n/\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SQL-only migration", result.stderr)
+                self.assertIn("'@'", result.stderr)
+
+    def test_lone_slash_line_inside_a_block_comment_is_rejected(self) -> None:
+        # SQLcl ends the statement or PL/SQL block at the '/' even inside a
+        # comment, then runs what follows the comment's first lines.
+        for source in (
+            "SELECT 1 /*\n/\n*/ FROM dual;\n",
+            "BEGIN\n  NULL; /*\n/\nHOST echo CLIENT_DIRECTIVE_EXECUTED\n*/\nEND;\n/\n",
+            "/*\n  /  \n*/\nSELECT 1 FROM dual;\n",
+            # a '.' line before the '/' line must not hide it
+            "SELECT 1 /* a\n.\n/\nHOST echo CLIENT_DIRECTIVE_EXECUTED\n b */ FROM dual;\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SQL-only migration", result.stderr)
+                self.assertIn("comment", result.stderr)
+
+    def test_quoted_identifier_spanning_lines_is_rejected(self) -> None:
+        # SQLcl ends the statement at a '/' line inside the identifier, then
+        # runs what follows as client commands.
+        for source in (
+            'SELECT 1 AS "a\n/\nHOST echo CLIENT_DIRECTIVE_EXECUTED\nb" FROM dual;\n',
+            'SELECT 1 AS "a\nb" FROM dual;\n',
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("quoted identifier", result.stderr)
+
+    def test_statement_text_that_only_resembles_a_terminator_is_accepted(self) -> None:
+        # SQLcl keeps these as part of the statement: a blank line (the apply
+        # driver sets SQLBLANKLINES ON), a '/' or '.' line inside a string, a
+        # q-quoted literal or a comment, and an '@' that does not start a line.
+        for source in (
+            "UPDATE T\nSET A = 1\n\nWHERE B = 2;\n",
+            "SELECT 'a\n/\nb' FROM dual;\n",
+            "SELECT 'a\n.\nb' FROM dual;\n",
+            "SELECT q'[a\n/\nb]' FROM dual;\n",
+            "SELECT 1 /* a\n.\n b */ FROM dual;\n",
+            "SELECT 1 FROM dual@remote_link;\n",
+            "SELECT 'two\nlines' AS \"ONE_LINE\" FROM dual;\n",
+            "BEGIN\n  NULL;\n\n  NULL;\nEND;\n/\n",
+            "SELECT 1\n  / 2 FROM dual;\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_migration_cannot_take_transaction_completion_away_from_driver(self) -> None:
         for source in ("COMMIT;\n", "ROLLBACK;\n"):
             with self.subTest(source=source):

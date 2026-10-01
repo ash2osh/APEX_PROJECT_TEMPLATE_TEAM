@@ -426,7 +426,8 @@ restore those backups before retrying the upgrade.
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 
 `scripts/team.ps1` exposes the same commands for PowerShell. Migration and
-deployment helpers use Bash, such as Git Bash on Windows.
+deployment helpers use Bash, such as Git Bash on Windows; `team.ps1` finds Git
+Bash itself, and `TEAM_BASH` names a different `bash.exe` when it cannot.
 
 ## Optional knowledge graph
 

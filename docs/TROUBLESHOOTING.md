@@ -23,7 +23,7 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `<profile> connection '<name>' resembles production but DB_ENVIRONMENT=development` | The saved connection's name looks like production: `prod`, `prd`, `production` or `live` as a word, or names like `PRODDB` and `ERPPROD`. Pre-production names such as `PREPROD` and `NONPROD` do not count. The database, unique and service names are checked the same way once connected. | Rename the saved connection, or, if it really is production, set `DB_ENVIRONMENT=production` (which makes the scripts read-only). |
 | `sql: command not found` | SQLcl is not installed or not on your `PATH`. | Install SQLcl 26.1 or newer and open a new terminal. |
 | `local: -n: invalid option` (or other odd Bash errors) on macOS | macOS's built-in Bash (3.2) is too old. | `brew install bash`, then run the scripts with it. |
-| `bash` is not found on Windows | Bash is not installed. | Install Git for Windows, which includes Git Bash. |
+| `Bash is required for '<script>.sh'` from `scripts/team.ps1` on Windows | The migration, comparison and deployment helpers run in Bash. `team.ps1` looks for Git Bash next to `git.exe` and in Git for Windows' usual install folders, and skips the WSL `bash.exe`, which cannot run a Windows path. None was found. | Install Git for Windows, or set `TEAM_BASH` to the full path of its `bash.exe` (for example `$env:TEAM_BASH = 'C:\Program Files\Git\bin\bash.exe'`), or run `scripts/team.sh` from Git Bash. |
 
 ## Export and backup
 

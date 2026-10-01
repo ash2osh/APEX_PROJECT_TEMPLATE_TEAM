@@ -36,4 +36,7 @@ the full contract, target configuration, comparison, and recovery limits.
 
 Migration SQL runs with SQLcl substitution disabled. SQLcl client commands
 such as `SET`, `PROMPT`, `HOST`, `WHENEVER`, `SPOOL`, and `CONNECT` are rejected
-before SQLcl connects.
+before SQLcl connects. A SQL statement ends at its `;`. SQLcl would also end it
+at a line holding only `/` or `.`, or splice a file into it at a line starting
+with `@`, so those lines are rejected inside a statement, and a line holding
+only `/` is rejected inside a comment. Blank lines inside a statement are fine.

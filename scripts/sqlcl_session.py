@@ -12,7 +12,10 @@ from collections.abc import Mapping
 
 
 ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
-SQLCL_ERROR_RE = re.compile(r"(?m)^(?:ORA-\d{5}|SP2-\d{4}|SQLcl Error):")
+# `Error starting at line` and `Error report -` head every error SQLcl prints. A
+# client error such as "Unknown Command" is not a SQL error, so WHENEVER SQLERROR
+# does not stop the script and SQLcl still exits 0; only the report shows it.
+SQLCL_ERROR_RE = re.compile(r"(?m)^(?:(?:ORA-\d{5}|SP2-\d{4}|SQLcl Error):|Error starting at line\b|Error report -)")
 
 
 @dataclass(frozen=True)

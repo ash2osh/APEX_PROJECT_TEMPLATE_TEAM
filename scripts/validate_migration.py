@@ -33,6 +33,33 @@ SQL_STARTERS = {
 }
 
 
+# SQLcl ends a SQL statement or PL/SQL block at a line holding only '/' or '.'
+# and splices the file named by a line starting with '@' into the statement.
+# Neither is SQL, so the validator, which splits statements at ';', would see
+# one statement while SQLcl runs the following lines as client commands.
+LONE_TERMINATOR = re.compile(r"(?m)^[ \t]*([/.])[ \t\r]*$")
+AT_LINE = re.compile(r"(?m)^[ \t]*@")
+
+
+def reject_sqlcl_line_hazards(masked: str, start: int, end: int, *, plsql: bool) -> None:
+    """Refuse lines inside one statement that SQLcl does not read as part of it."""
+    for terminator in LONE_TERMINATOR.finditer(masked, start, end):
+        line = masked.count("\n", 0, terminator.start()) + 1
+        if plsql and terminator.group(1) == ".":
+            raise ValueError(f"SQL-only migration rejects SQLcl buffer terminator in PL/SQL block at line {line}")
+        raise ValueError(
+            f"SQL-only migration rejects a line holding only '{terminator.group(1)}' inside a "
+            f"{'PL/SQL block' if plsql else 'SQL statement'} at line {line}; SQLcl ends the statement there"
+        )
+    at_line = AT_LINE.search(masked, start, end)
+    if at_line is not None:
+        line = masked.count("\n", 0, at_line.start()) + 1
+        raise ValueError(
+            f"SQL-only migration rejects a line starting with '@' at line {line}; "
+            "SQLcl would splice the named file into the statement"
+        )
+
+
 def mask_comments_and_literals(source: str) -> str:
     """Blank comments and quoted values while preserving offsets and newlines."""
     characters = list(source)
@@ -59,6 +86,14 @@ def mask_comments_and_literals(source: str) -> str:
             if comment_end < 0:
                 raise ValueError(f"unterminated block comment at line {source.count(chr(10), 0, start) + 1}")
             index = comment_end + 2
+            # SQLcl ends the statement or PL/SQL block at a line holding only
+            # '/', even inside a comment, and runs the rest as commands.
+            for lone in LONE_TERMINATOR.finditer(source, start, index):
+                if lone.group(1) == "/":
+                    raise ValueError(
+                        "SQL-only migration rejects a line holding only '/' inside a comment at line "
+                        f"{source.count(chr(10), 0, lone.start()) + 1}; SQLcl ends the statement there"
+                    )
             blank(start, index)
             continue
 
@@ -126,6 +161,14 @@ def mask_comments_and_literals(source: str) -> str:
                 index += 1
             else:
                 raise ValueError(f"unterminated quoted value at line {source.count(chr(10), 0, start) + 1}")
+            # SQLcl does not keep a quoted identifier together across lines: a
+            # line holding only '/' inside one ends the statement. A string
+            # literal is kept whole, so only identifiers are refused.
+            if quote == '"' and "\n" in source[start:index]:
+                raise ValueError(
+                    f"SQL-only migration rejects a quoted identifier that spans lines at line {source.count(chr(10), 0, start) + 1}; "
+                    "keep it on one line"
+                )
             blank(start, index)
             continue
 
@@ -246,13 +289,7 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
             slash = re.search(r"(?m)^[ \t]*/[ \t]*(?:\r?\n|$)", masked[index:])
             if slash is None:
                 raise ValueError(f"SQL-only migration PL/SQL block must end with a standalone slash at line {line_number}")
-            block = masked[index:index + slash.start()]
-            buffer_terminator = re.search(r"(?m)^[ \t]*\.[ \t]*(?:\r?\n|$)", block)
-            if buffer_terminator is not None:
-                terminator_line = line_number + block.count("\n", 0, buffer_terminator.start())
-                raise ValueError(
-                    f"SQL-only migration rejects SQLcl buffer terminator in PL/SQL block at line {terminator_line}"
-                )
+            reject_sqlcl_line_hazards(masked, index, index + slash.start(), plsql=True)
             spans.append((statement_start, index + slash.start()))
             index += slash.end()
             continue
@@ -272,6 +309,7 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
                 f"SQL-only migration rejects SQLcl/client command or unsupported statement "
                 f"'{first}' at line {line_number}"
             )
+        reject_sqlcl_line_hazards(masked, statement_start, statement_end, plsql=False)
         spans.append((statement_start, statement_end))
         index = statement_end + 1
     return spans

@@ -31,11 +31,50 @@ Options:
 "@ | Write-Output
 }
 
+# The Bash that runs the migration, comparison and deployment helpers. TEAM_BASH
+# names one explicitly. On Windows, bash.exe in System32 or WindowsApps is the
+# WSL launcher, which cannot run a Windows script path, and Git for Windows
+# keeps only its cmd directory on PATH by default, so Git Bash is looked up
+# next to git.exe and in the usual install directories.
+function Resolve-TeamBash {
+  if (-not [string]::IsNullOrWhiteSpace($env:TEAM_BASH)) {
+    if (-not (Test-Path -LiteralPath $env:TEAM_BASH -PathType Leaf)) {
+      throw "TEAM_BASH is set but is not a file: $($env:TEAM_BASH)"
+    }
+    return $env:TEAM_BASH
+  }
+  $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)
+  $found = @(Get-Command bash -All -ErrorAction SilentlyContinue)
+  if (-not $onWindows) {
+    if ($found.Count -gt 0) { return $found[0].Source }
+    return $null
+  }
+  foreach ($command in $found) {
+    if ($command.Source -notmatch '(?i)[\\/](System32|SysWOW64|Sysnative|WindowsApps)[\\/]') { return $command.Source }
+  }
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if ($null -ne $git) {
+    $gitDirectory = Split-Path -Parent $git.Source
+    foreach ($relative in @("..\bin\bash.exe", "..\..\bin\bash.exe", "..\usr\bin\bash.exe", "..\..\usr\bin\bash.exe")) {
+      $candidate = [System.IO.Path]::GetFullPath((Join-Path $gitDirectory $relative))
+      if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+  }
+  foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Programs" }))) {
+    if ([string]::IsNullOrWhiteSpace($root)) { continue }
+    $candidate = Join-Path $root "Git\bin\bash.exe"
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+  }
+  return $null
+}
+
 function Invoke-TeamBash {
   param([string] $ScriptName, [string[]] $ScriptArguments)
-  $bash = Get-Command bash -ErrorAction SilentlyContinue
-  if ($null -eq $bash) { throw "Bash is required for '$ScriptName'; install Git for Windows or run scripts/team.sh" }
-  & $bash.Source (Join-Path $PSScriptRoot $ScriptName) @ScriptArguments
+  $bashPath = Resolve-TeamBash
+  if ($null -eq $bashPath) {
+    throw "Bash is required for '$ScriptName'; install Git for Windows, set TEAM_BASH to its bash.exe, or run scripts/team.sh"
+  }
+  & $bashPath (Join-Path $PSScriptRoot $ScriptName) @ScriptArguments
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

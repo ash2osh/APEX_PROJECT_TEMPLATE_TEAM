@@ -273,6 +273,7 @@ class SqlclTransportTests(unittest.TestCase):
             "pathlib.Path(os.environ['FAKE_RECORD']).write_text(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'sqlpath':os.getenv('SQLPATH'),'oracle_path':os.getenv('ORACLE_PATH'),'login_loaded':(sqlpath / 'login.sql').exists(),'stdin':sys.stdin.read()}))\n"
             + ("time.sleep(3)\n" if behavior == "sleep" else "")
             + ("print('ORA-20000: fake failure')\n" if behavior == "ora" else "print('CATALOG_VERIFIED:inventory')\n")
+            + ("print('Error starting at line : 4 File @ x.sql')\nprint('In command -')\nprint('WHERE id = 1')\nprint('Error report -')\nprint('Unknown Command')\n" if behavior == "client" else "")
             + ("sys.exit(3)\n" if behavior == "nonzero" else "")
             ,
             encoding="utf-8",
@@ -307,7 +308,7 @@ class SqlclTransportTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
 
     def test_transport_rejects_nonzero_or_oracle_error_with_saved_diagnostics(self) -> None:
-        for behavior, expected_error in (("ora", "database or client error"), ("nonzero", "exited with status 3")):
+        for behavior, expected_error in (("ora", "database or client error"), ("client", "database or client error"), ("nonzero", "exited with status 3")):
             with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 fake_bin = root / "bin"

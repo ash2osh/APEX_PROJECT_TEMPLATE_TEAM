@@ -223,6 +223,74 @@ class TeamCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "APP_STAGE$|")
 
+    def test_both_loaders_reject_a_db_environment_that_is_not_exactly_lowercase(self) -> None:
+        # PowerShell's -in is case-insensitive; the loaders must still agree.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        expected = "DB_ENVIRONMENT must be development, test, staging, or production"
+        for value in ("Development", "PRODUCTION", "Test"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
+                environment = Path(temporary) / ".env"
+                lines = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+                environment.write_text(
+                    "\n".join(f"DB_ENVIRONMENT={value}" if line.startswith("DB_ENVIRONMENT=") else line for line in lines) + "\n",
+                    encoding="utf-8",
+                )
+                bash_result = self.run_bash_env_loader(environment)
+                powershell_result = subprocess.run(
+                    [pwsh, "-NoProfile", "-Command", f". '{ROOT / 'scripts' / 'load_env.ps1'}' -EnvFile '{environment}'"],
+                    text=True, capture_output=True, check=False,
+                )
+                self.assertNotEqual(bash_result.returncode, 0)
+                self.assertIn(expected, bash_result.stderr)
+                self.assertNotEqual(powershell_result.returncode, 0, powershell_result.stdout)
+                self.assertIn(expected, powershell_result.stderr)
+
+    def test_powershell_runs_bash_helpers_with_the_bash_named_by_team_bash(self) -> None:
+        # On Windows the first bash on PATH may be the WSL launcher, or absent
+        # when Git for Windows keeps only its cmd directory on PATH.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = root / "record.txt"
+            fake_bash = root / "git-bash"
+            fake_bash.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$@\" > '{record}'\n",
+                encoding="utf-8",
+            )
+            fake_bash.chmod(0o755)
+            environment = os.environ.copy()
+            environment["TEAM_BASH"] = str(fake_bash)
+            environment["PATH"] = str(root / "no-bash-here")
+            result = subprocess.run(
+                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "compare-schema", "--env", "dev", "--object", "CUSTOMERS"],
+                cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            seen = record.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(seen[0], str(ROOT / "scripts" / "compare_schema.sh"))
+            self.assertEqual(seen[1:], ["--env", "dev", "--object", "CUSTOMERS"])
+
+    def test_powershell_names_the_fix_when_no_usable_bash_is_found(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        environment = os.environ.copy()
+        environment.pop("TEAM_BASH", None)
+        environment["PATH"] = str(Path(pwsh).parent)  # pwsh itself, but no bash
+        if shutil.which("bash", path=environment["PATH"]):
+            self.skipTest("bash lives next to pwsh on this machine")
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
+            cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TEAM_BASH", result.stderr + result.stdout)
+
     def test_doctor_uses_read_only_identity_sqlcl_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

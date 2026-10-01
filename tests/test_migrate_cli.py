@@ -368,6 +368,10 @@ class MigrateCliTests(unittest.TestCase):
             self.assertIn("@@../payload/2026-09-28_create-driver-r001/001-create-t.sql", content)
             self.assertIn("EXIT SUCCESS COMMIT", content)
             payload_at = content.index("@@../payload/")
+            # SQLcl ends a plain SQL statement at a blank line unless told
+            # otherwise: an UPDATE split before its WHERE would run on every row.
+            self.assertIn("SET SQLBLANKLINES ON", content)
+            self.assertLess(content.index("SET SQLBLANKLINES ON"), payload_at)
             # The identity guard runs before any payload and pins every field.
             guard_at = content.index("-20987")
             self.assertLess(guard_at, payload_at)

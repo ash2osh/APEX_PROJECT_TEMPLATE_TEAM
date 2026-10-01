@@ -65,6 +65,17 @@ earlier one creates. A
 cross-schema change such as a grant or a synonym is two coordinated migrations,
 one per schema.
 
+SQL files hold only SQL: statements ended by `;` and PL/SQL blocks, types,
+libraries, Java sources and MLE modules ended by a standalone `/`. SQLcl would
+read some lines as something other than part of the statement, so the
+validator rejects them before SQLcl connects: a line holding only `/` or `.`
+inside a SQL statement (SQLcl ends the statement there and runs the next line
+as a command), a line holding only `/` inside a comment, and a line starting
+with `@` inside a statement or block (SQLcl splices the named file into it,
+bytes that were never reviewed or hashed). Blank lines inside a statement are
+accepted: the apply session sets `SQLBLANKLINES ON`, so an `UPDATE` with a blank
+line before its `WHERE` runs as written.
+
 Every folder requires a `checks.json` with read-only preconditions and
 postconditions. These checks validate the expected starting state and verify
 the committed result. The runner also performs structural catalog checks for
