@@ -240,7 +240,13 @@ def validate_check_query(sql: str) -> None:
         raise MigrationManifestError("check SQL is empty")
     if tokens[-1] == ";":
         tokens.pop()
-    if ";" in tokens or any(token in {"/", "\\"} for token in tokens):
+    # A check reaches Oracle as hex through DBMS_SQL, not as a line SQLcl reads, so
+    # '/' is the division operator unless it stands where no operand can: first,
+    # last (the habitual terminator) or beside another '/'.
+    if ";" in tokens or "\\" in tokens or any(
+        token == "/" and (index in (0, len(tokens) - 1) or "/" in (tokens[index - 1], tokens[index + 1]))
+        for index, token in enumerate(tokens)
+    ):
         raise MigrationManifestError("checks must contain exactly one SQL query and no SQLcl terminator")
 
     for index, token in enumerate(tokens):

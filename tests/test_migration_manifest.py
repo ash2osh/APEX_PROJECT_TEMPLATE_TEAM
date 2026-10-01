@@ -310,6 +310,33 @@ class MigrationManifestTests(unittest.TestCase):
             with self.subTest(query=query):
                 api.validate_check_query(query)
 
+    def test_division_is_allowed_in_a_check_but_a_sqlcl_slash_terminator_is_not(self) -> None:
+        # A check reaches Oracle as hex through DBMS_SQL, never as a SQLcl line, so
+        # '/' as the division operator is harmless; only the habitual trailing
+        # '/' terminator is a mistake worth refusing.
+        api = self.require_manifest()
+        for query in (
+            "SELECT 1/1 FROM dual",
+            "SELECT 1 / 2 FROM dual",
+            "SELECT CASE WHEN COUNT(*) / 2 = 1 THEN 1 ELSE 0 END FROM user_tables",
+            "SELECT 4\n  / 2 FROM dual",
+            "SELECT AVG(num_rows) / COALESCE(MAX(num_rows), 1) FROM user_tables",
+            "SELECT (10 / 5) * (6 / 3) FROM dual",
+        ):
+            with self.subTest(query=query):
+                api.validate_check_query(query)
+        for query in (
+            "SELECT 1 FROM dual\n/",
+            "SELECT 1 FROM dual /",
+            "SELECT 1 FROM dual;\n/",
+            "/ SELECT 1 FROM dual",
+            "SELECT 1 // 2 FROM dual",
+            "SELECT 1 FROM dual\\",
+        ):
+            with self.subTest(query=query):
+                with self.assertRaises(api.MigrationManifestError):
+                    api.validate_check_query(query)
+
     def test_file_rename_and_checks_content_change_the_payload_digest(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")
