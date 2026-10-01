@@ -123,6 +123,37 @@ class VerifyPublishStateTests(unittest.TestCase):
             self.assertIn("do not match", result.stderr)
             self.assertEqual(marker_path.read_bytes(), original_marker)
 
+    def test_a_different_live_publish_tag_says_a_teammates_import_replaced_this_one(self) -> None:
+        # Two developers who publish within one import's duration both pass the
+        # drift check; the later import wins and the earlier one fails here.
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            (source / "application.apx").write_text('app X (\n    version: "Release 1.0 [ALICE-2026-10-01r007]"\n)\n', encoding="utf-8")
+            (exported / "application.apx").write_text('app X (\n    version: "Release 1.0 [BOB-2026-10-01r007]"\n)\n', encoding="utf-8")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("do not match", result.stderr)
+            self.assertIn("[BOB-2026-10-01r007]", result.stderr)
+            self.assertIn("[ALICE-2026-10-01r007]", result.stderr)
+            self.assertIn("a teammate's import replaced yours", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
+
+    def test_a_mismatch_with_the_same_publish_tag_does_not_blame_a_teammate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, _ = self.make_fixture(Path(temporary))
+            same = 'app X (\n    version: "Release 1.0 [ALICE-2026-10-01r007]"\n)\n'
+            (source / "application.apx").write_text(same, encoding="utf-8")
+            (exported / "application.apx").write_text(same.replace("app X", "app Y"), encoding="utf-8")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("do not match", result.stderr)
+            self.assertNotIn("teammate", result.stderr)
+
     def test_intervening_builder_revision_does_not_advance_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source, exported, before, after, marker_path = self.make_fixture(Path(temporary))

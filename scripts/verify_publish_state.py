@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from record_export_state import AppState, marker_payload, read_state
+from stamp_publish_version import PUBLISH_TAG, VERSION_LINE, parse_version
 from validate_app_source import validate_app_source
 
 
@@ -31,6 +32,32 @@ def source_files(root: Path) -> dict[Path, Path]:
         if path.is_file():
             files[relative] = path
     return files
+
+
+def publish_tag(application: Path) -> str | None:
+    """The DEV publish tag in an application.apx version line, if it has one."""
+    try:
+        match = VERSION_LINE.search(application.read_text(encoding="utf-8"))
+        tag = PUBLISH_TAG.search(parse_version(match.group(1))) if match else None
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return tag.group(0).strip() if tag else None
+
+
+def replaced_import_hint(source_dir: Path, exported_dir: Path) -> str:
+    """Name the likely cause when the live app carries another publish's tag.
+
+    Two developers who publish within one import's duration both pass the drift
+    check; the later import wins and the earlier one fails this verification.
+    """
+    ours = publish_tag(source_dir / "application.apx")
+    live = publish_tag(exported_dir / "application.apx")
+    if ours is None or live is None or ours == live:
+        return ""
+    return (
+        f"; the live publish tag is {live}, not the {ours} this publish stamped, "
+        "so a teammate's import replaced yours: export, merge, publish"
+    )
 
 
 def verify_source_bytes(source_dir: Path, exported_dir: Path) -> None:
@@ -124,7 +151,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source_dir = validate_app_source(args.repo_root, args.source_dir)
         exported_dir = args.exported_dir.resolve(strict=True)
-        verify_source_bytes(source_dir, exported_dir)
+        try:
+            verify_source_bytes(source_dir, exported_dir)
+        except ValueError as mismatch:
+            raise ValueError(f"{mismatch}{replaced_import_hint(source_dir, exported_dir)}") from mismatch
         revision = read_verified_revision(args.app_id, args.before_file, args.after_file)
         if args.record_baseline:
             advance_baseline(args.app_id, source_dir, revision)

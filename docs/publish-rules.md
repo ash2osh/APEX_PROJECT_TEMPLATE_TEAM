@@ -27,6 +27,15 @@ check approved them. That shrinks the window for a save to slip in to the
 import itself; it still cannot see Builder edits that were never saved, so tell
 the team before you publish.
 
+Two people who publish the same app within one import's duration (about twenty
+seconds) can both pass both checks. Their imports then run one after the other
+and the later one wins. The earlier publish fails its post-import verification
+with `the live publish tag is [...], not the [...] this publish stamped, so a
+teammate's import replaced yours`: nothing is lost, because your edits are still
+in your files, but DEV runs the other developer's source. Commit your stamped
+`application.apx`, export, merge, and publish again, after agreeing with them
+who goes next.
+
 ## The usual fix
 
 Almost every drift refusal is fixed the same way:
@@ -138,7 +147,7 @@ commit. Publish prints these steps when it stops here.
 | --- | --- |
 | `post-import APEX export failed` | The verification export failed. |
 | `APEXlang source file set does not match the post-import re-export` | APEX wrote a different set of files than you committed. |
-| `APEXlang source bytes do not match the post-import re-export` | APEX normalized something you wrote by hand. After exporting, commit APEX's form. |
+| `APEXlang source bytes do not match the post-import re-export` | APEX normalized something you wrote by hand, or (when the message goes on to name another live publish tag) a teammate's import replaced yours. After exporting, commit APEX's form, or merge their change. |
 | `is not visible in the post-import state` | The app is missing after import. |
 | `changed while its post-import source was being verified` | Someone edited or imported during the verification. |
 | `same database second` / `later than the database-time observation` | The revision is ambiguous; export and retry. |
