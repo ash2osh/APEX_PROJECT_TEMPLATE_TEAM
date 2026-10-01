@@ -49,7 +49,7 @@ DECLARE
   c_expected_user CONSTANT VARCHAR2(128) := UPPER('&&expected_user');
   l_identity JSON_OBJECT_T := JSON_OBJECT_T();
   l_json CLOB;
-  l_chunk VARCHAR2(30000);
+  l_chunk VARCHAR2(32767);
   l_offset PLS_INTEGER := 1;
 BEGIN
   IF SYS_CONTEXT('USERENV', 'SESSION_USER') != c_expected_user THEN
@@ -70,7 +70,7 @@ BEGIN
   l_json := l_identity.to_clob();
   DBMS_OUTPUT.PUT_LINE('MIGRATION_IDENTITY_BEGIN');
   WHILE l_offset <= DBMS_LOB.GETLENGTH(l_json) LOOP
-    l_chunk := DBMS_LOB.SUBSTR(l_json, 30000, l_offset);
+    l_chunk := DBMS_LOB.SUBSTR(l_json, 8000, l_offset);
     DBMS_OUTPUT.PUT_LINE(l_chunk);
     l_offset := l_offset + LENGTH(l_chunk);
   END LOOP;

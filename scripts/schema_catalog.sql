@@ -37,7 +37,8 @@ DECLARE
   l_completed_at VARCHAR2(40);
   l_raw CLOB;
   l_pos PLS_INTEGER;
-  l_chunk VARCHAR2(4000);
+  -- DBMS_LOB.SUBSTR below takes 4000 characters; four bytes each in UTF-8.
+  l_chunk VARCHAR2(32767);
   l_owner VARCHAR2(128);
   l_name VARCHAR2(128);
   l_type VARCHAR2(128);

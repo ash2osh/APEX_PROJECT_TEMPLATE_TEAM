@@ -69,6 +69,23 @@ class SqlDriverContractTests(unittest.TestCase):
         first_include = next(index for index, line in enumerate(lines) if line.startswith("@@schema_catalog.sql"))
         self.assertIn("SET DDL INSERT OFF", lines[:first_include])
 
+    def test_a_clob_chunk_buffer_holds_the_bytes_of_the_characters_it_is_filled_with(self) -> None:
+        # DBMS_LOB.SUBSTR counts characters; a VARCHAR2 variable counts bytes
+        # here. A 4000-character chunk of UTF-8 text with accented letters is more
+        # than 4000 bytes, so ORA-06502 ended a catalog read after the migration
+        # had already committed an object whose name or DDL held one.
+        checked = 0
+        for path in sorted((ROOT / "scripts").glob("*.sql")):
+            contents = path.read_text(encoding="utf-8")
+            for buffer in re.finditer(r"(?im)^\s*(\w+)\s+VARCHAR2\((\d+)\)\s*;", contents):
+                name, size = buffer.group(1), int(buffer.group(2))
+                for fill in re.finditer(rf"(?i)\b{name}\s*:=\s*DBMS_LOB\.SUBSTR\(\s*\w+\s*,\s*(\d+)\s*,", contents):
+                    checked += 1
+                    with self.subTest(driver=path.name, buffer=name):
+                        self.assertGreaterEqual(size, 4 * int(fill.group(1)), f"{name} VARCHAR2({size}) cannot hold {fill.group(1)} four-byte characters")
+                        self.assertLessEqual(size, 32767)
+        self.assertGreaterEqual(checked, 2, "the chunking loops were not found; update this test")
+
     def test_identity_and_drift_drivers_emit_verification_sentinels(self) -> None:
         self.assertIn("APEX_DOCTOR_VERIFIED:&&expected_user", (ROOT / "scripts/doctor.sql").read_text(encoding="utf-8"))
         self.assertIn("APEX_DRIFT_QUERY_VERIFIED", (ROOT / "scripts/check_builder_drift.sql").read_text(encoding="utf-8"))
