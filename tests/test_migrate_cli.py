@@ -406,6 +406,50 @@ class MigrateCliTests(unittest.TestCase):
             with self.assertRaisesRegex(MigrationApplyError, "cannot be enforced"):
                 apply_folder(staged, self.target(), staged_dir / "apply-quote", expected_identity={**expected_identity, "service_name": "x'y"})
 
+    def schema_folder(self, schema, name, sql):
+        folder = self.root / "migrations" / schema / name
+        folder.mkdir(parents=True)
+        (folder / "001-create.sql").write_text(sql, encoding="utf-8", newline="\n")
+        checks = {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "after-change", "sql": "SELECT 1 FROM dual", "expected": 1}]}
+        (folder / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8")
+        return folder
+
+    def test_an_attempt_in_one_schema_does_not_block_the_same_folder_name_in_another(self):
+        # migrations/<SCHEMA>/ may reuse a family and revision per schema; the
+        # retained attempt evidence was matched by folder name alone, so a write
+        # in DEMO refused the never-written DEMO2 folder as "different bytes".
+        name = "2026-10-01_multi-r001"
+        first = self.schema_folder("DEMO", name, "CREATE TABLE T_ONE (ID NUMBER);\n")
+        second = self.schema_folder("DEMO2", name, "CREATE TABLE T_TWO (ID NUMBER);\n")
+        demo = Target("dev", "dev-profile", "LOGIN_DEV", "DEMO", "development")
+        demo2 = Target("dev", "dev-profile", "LOGIN_DEV", "DEMO2", "development")
+
+        applied_first, _ = self.apply(load_batch(self.root, [f"migrations/DEMO/{name}"]), target=demo)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            applied_second, _ = self.apply(load_batch(self.root, [f"migrations/DEMO2/{name}"]), target=demo2)
+
+        self.assertEqual(applied_first, 0)
+        self.assertEqual(applied_second, 0, stderr.getvalue())
+        self.assertTrue((first / "status.dev.json").exists())
+        self.assertTrue((second / "status.dev.json").exists())
+
+    def test_an_attempt_in_the_same_schema_still_blocks_a_changed_folder_of_that_name(self):
+        name = "2026-10-01_multi-r001"
+        demo = Target("dev", "dev-profile", "LOGIN_DEV", "DEMO", "development")
+        folder = self.schema_folder("DEMO", name, "CREATE TABLE T_ONE (ID NUMBER);\n")
+        fake = FakeDatabase(demo)
+        fake.fail_file = "001-create.sql"
+        with contextlib.redirect_stderr(io.StringIO()):
+            failed, _ = self.apply(load_batch(self.root, [f"migrations/DEMO/{name}"]), target=demo, fake=fake)
+        self.assertEqual(failed, 2)
+        (folder / "001-create.sql").write_text("CREATE TABLE T_CHANGED (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            again, _ = self.apply(load_batch(self.root, [f"migrations/DEMO/{name}"]), target=demo)
+        self.assertEqual(again, 2)
+        self.assertIn("prior write attempt", stderr.getvalue())
+
     def test_interrupt_during_apply_says_the_folder_may_be_partially_applied(self):
         # Ctrl-C used to end in a Python traceback. The write attempt is already
         # recorded, so the next run refuses; the message must say why.

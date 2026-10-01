@@ -334,6 +334,11 @@ def _verify_receipts_and_attempts(
         target_record = manifest.get("target")
         if not isinstance(target_record, dict):
             raise MigrationApplyError(f"retained migration target evidence is malformed; reconcile before applying: {manifest_path}")
+        # migrations/<SCHEMA>/ may reuse a folder name per schema. An attempt
+        # against another schema is not an attempt at this folder.
+        recorded_schema = target_record.get("current_schema")
+        if recorded_schema is not None and recorded_schema != target_identity.get("current_schema"):
+            continue
         for record in manifest["migrations"]:
             if not isinstance(record, dict) or record.get("folder") not in selected:
                 continue
