@@ -125,32 +125,6 @@ if ($Command -ne "upgrade-template") {
   }
 }
 
-# On Unix, SIGTERM (kill, an IDE's stop button) ends pwsh at once and no finally
-# block runs, so an interrupted publish would leave its stamped application.apx
-# and its scratch directory with no word about either. Turn SIGTERM into the
-# Ctrl-C that the blocks below already handle. Best effort: it needs .NET 6, and
-# a missing compiler only means SIGTERM keeps its old effect. Only the commands
-# that run in this process need it; the others hand over to Bash or Python.
-if ($Command -in @("doctor", "export", "publish", "backup-db") -and $PSVersionTable.PSEdition -eq "Core" -and -not $IsWindows) {
-  try {
-    Add-Type -ErrorAction Stop -WarningAction SilentlyContinue -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public static class TeamSignals {
-  [DllImport("libc", SetLastError = true)] private static extern int kill(int pid, int signal);
-  private static PosixSignalRegistration registration;
-  public static void TermBecomesInterrupt() {
-    int self = Environment.ProcessId;
-    registration = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context => { context.Cancel = true; kill(self, 2); });
-  }
-}
-"@
-    [TeamSignals]::TermBecomesInterrupt()
-  } catch {
-    # Not available here; SIGTERM keeps ending the process at once.
-  }
-}
-
 try {
   switch ($Command) {
     "doctor" {

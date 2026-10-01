@@ -450,11 +450,9 @@ class PublishAppCliTests(unittest.TestCase):
         # before publish has read its output; the old source is put back, so
         # the developer must be told that DEV may have changed.
         pwsh = shutil.which("pwsh")
-        # PowerShell gets SIGTERM too: pwsh itself ends at once on it, skipping every
-        # finally block, unless team.ps1 turns it into Ctrl-C (Unix only).
-        shells = [("bash", signal.SIGTERM, "team.sh")] + (
-            [("pwsh", signal.SIGINT, "team.ps1"), ("pwsh", signal.SIGTERM, "team.ps1")] if pwsh else []
-        )
+        # pwsh ends at once on SIGTERM and runs no finally block, so only Ctrl-C is
+        # handled in PowerShell (docs/publish-rules.md says so).
+        shells = [("bash", signal.SIGTERM, "team.sh")] + ([("pwsh", signal.SIGINT, "team.ps1")] if pwsh else [])
         for shell, sig, wrapper in shells:
             with self.subTest(shell=shell, signal=sig.name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)

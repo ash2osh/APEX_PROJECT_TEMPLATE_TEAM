@@ -130,13 +130,11 @@ moment the file is missing from the app folder, and its previous bytes are in
 that scratch folder as `application.apx.before-stamp` or
 `application.apx.displaced`.
 
-Ctrl-C is handled by both wrappers, and so is `kill` (SIGTERM): by Bash, and by
-PowerShell 7.2 or later on Linux and macOS (`team.ps1` turns it into Ctrl-C when
-it can compile a small helper, which it needs .NET 6 for; PowerShell exits 130).
-A publish stopped any other way (`kill -9`, closing the window, PowerShell on
-Windows) cannot clean up: `application.apx` keeps the stamped version, its
-scratch folder stays behind (delete it), no recovery guidance is printed, and
-DEV may or may not run your source. Treat it like an unverified import (see "After import"
+Ctrl-C is handled by both wrappers, and `kill` (SIGTERM) by Bash. A publish
+stopped any other way (`kill -9`, closing the window, SIGTERM sent to PowerShell)
+cannot clean up: `application.apx` keeps the stamped version, its scratch folder
+stays behind (delete it), no recovery guidance is printed, and DEV may or may
+not run your source. Treat it like an unverified import (see "After import"
 below): commit the file as it is, run `scripts/team.sh export <id>`, read the
 live version, then reconcile and commit.
 
