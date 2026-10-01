@@ -134,6 +134,12 @@ belongs in the next revision folder. A failed or ambiguous attempt may have
 left Oracle DDL committed, so inspect the live schema before deciding how to
 recover or retry.
 
+Every `migrate` that reaches the database leaves its record in
+`scratch/migration-attempt-*` (SQL, SQLcl log and outcome). It is what lets
+`migrate` refuse a folder you edited or that is half applied, so do not delete
+it until you have reconciled that folder with the database. `scratch/` is
+ignored by Git and is not shared with teammates.
+
 The runner creates `status.dev.json`, `status.staging.json`, or
 `status.prod.json` only after SQLcl confirms the apply session completed and a
 fresh connection verifies the target identity and postconditions. It records
