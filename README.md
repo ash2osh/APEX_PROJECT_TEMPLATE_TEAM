@@ -382,6 +382,8 @@ it as `<file>.template-new`, and exits with status 1: merge the two, delete the
 in `.template-lock.json`; commit it with the upgraded files. Use `--ref <tag>`
 to install a specific template version and `--source <url>` for a fork. If the
 upgrade reports that `.env` needs attention, compare it with `.env.example`.
+If the upgrade is interrupted (Ctrl-C or `kill`), it puts back every file it had
+replaced and says `the project was left as it was`; run it again.
 
 A project upgraded to a template version with multi-schema support needs no
 `.env` change: one value per key is still the single-schema setup. Its next

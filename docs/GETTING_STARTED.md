@@ -166,7 +166,7 @@ do not add spaces or trailing comments.
 | Setting | Meaning | Example |
 | --- | --- | --- |
 | `DEVELOPER_NAME` | Your name in capitals. It is stamped into the app version every time you publish, so teammates can tell whose import it was. | `ALICE` |
-| `DB_ENVIRONMENT` | `development` for a shared dev database. | `development` |
+| `DB_ENVIRONMENT` | What kind of database this is: `development` for a shared dev database (the others are `test`, `staging` and `production`, in lowercase; anything else is refused with `DB_ENVIRONMENT must be development, test, staging, or production`). | `development` |
 | `APEX_APP_ID` | The numeric IDs of your APEX apps, separated by commas. | `100,200` |
 | `*_SCHEMA` | The schema that owns your tables, your code, and your APEX apps. | `DEMO` |
 | `*_SQLCL_CONNECTION` | The saved connection from step 5. | `my-dev` |
