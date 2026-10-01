@@ -1017,6 +1017,7 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
     live_common = _initial_objects(snapshot)
     live_exact = {(key.name, key.object_type) for key in snapshot.inventory}
     staged_common: set[str] = set()
+    staged_kinds: dict[str, str] = {}
     staged_indexes: set[str] = set()
     staged_tables: dict[str, set[str]] = {}
     # Names that reviewed opaque CREATEs (synonyms, stored units, materialized
@@ -1048,17 +1049,24 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
         migration_name = operation.get("migration")
         location = {"migration": migration_name, "file": operation.get("file"), "statement_index": operation.get("statement_index")}
         if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE"}:
+            reviewed_replace = kind == "CREATE_VIEW" and operation.get("replace") and migration is not None and migration.preconditions
             if name in staged_common:
-                conflicts.append({"code": "BATCH_NAMESPACE_COLLISION", "name": name, "namespace": "COMMON", **location})
-                continue
-            existing = live_common.get(name, set())
-            if existing:
-                if kind == "CREATE_VIEW" and operation.get("replace") and existing == {"VIEW"} and migration is not None and migration.preconditions:
-                    coverage.setdefault("manual_review_required", []).append({"migration": migration_name, "file": operation.get("file"), "reason": "CREATE OR REPLACE VIEW needs its declared precondition reviewed against the expected prior view"})
-                else:
-                    conflicts.append({"code": "LIVE_NAMESPACE_OCCUPIED", "name": name, "namespace": "COMMON", "existing_types": sorted(existing), **location})
+                # The folders run in the order given, so a reviewed CREATE OR REPLACE
+                # VIEW may replace the view an earlier selected folder created.
+                if not (reviewed_replace and staged_kinds.get(name) == "CREATE_VIEW"):
+                    conflicts.append({"code": "BATCH_NAMESPACE_COLLISION", "name": name, "namespace": "COMMON", **location})
                     continue
+                coverage.setdefault("manual_review_required", []).append({"migration": migration_name, "file": operation.get("file"), "reason": "CREATE OR REPLACE VIEW replaces the view an earlier selected folder creates; its declared precondition needs reviewing against that view"})
+            else:
+                existing = live_common.get(name, set())
+                if existing:
+                    if reviewed_replace and existing == {"VIEW"}:
+                        coverage.setdefault("manual_review_required", []).append({"migration": migration_name, "file": operation.get("file"), "reason": "CREATE OR REPLACE VIEW needs its declared precondition reviewed against the expected prior view"})
+                    else:
+                        conflicts.append({"code": "LIVE_NAMESPACE_OCCUPIED", "name": name, "namespace": "COMMON", "existing_types": sorted(existing), **location})
+                        continue
             staged_common.add(name)
+            staged_kinds[name] = kind
             if kind == "CREATE_TABLE":
                 staged_tables[name] = set(operation.get("columns", ()))
         elif kind == "CREATE_INDEX":

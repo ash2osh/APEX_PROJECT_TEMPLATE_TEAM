@@ -166,6 +166,12 @@ preconditions before applying. The checker handles common object namespace
 collisions, table columns, and supported dependencies; it reports when an SQL
 form needs explicit checks or cannot be analyzed safely.
 
+A table, view or sequence name that is already taken is a conflict, whether the
+database holds it or an earlier selected folder creates it. The one exception is
+a `CREATE OR REPLACE VIEW` that replaces a view, in the database or created by
+an earlier folder of the same batch, and whose folder declares a precondition
+for the expected prior view; the report lists it as needing review.
+
 This is selected-batch analysis plus live-state preflight, not discovery of
 other developers' pending files. Because independent repositories do not share
 migration files, two developers can both pass while the shared catalog is

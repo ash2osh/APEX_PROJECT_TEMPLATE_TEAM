@@ -182,6 +182,38 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 1)
         self.assertTrue(any(item["code"] == "BATCH_NAMESPACE_COLLISION" for item in report.conflicts))
 
+    def test_create_or_replace_view_may_replace_a_view_an_earlier_selected_folder_creates(self):
+        # The folders run in the order given, so r002 replaces the view r001 made.
+        # It needs the same reviewed precondition a replace of a live view needs.
+        precondition = {"id": "view-is-r001", "sql": "SELECT 1 FROM dual", "expected": 1}
+        self.add_folder("2026-10-01_replace-view-r001", "CREATE VIEW ZZ_V AS SELECT 1 AS A FROM dual;\n")
+        self.add_folder("2026-10-01_replace-view-r002", "CREATE OR REPLACE VIEW ZZ_V AS SELECT 2 AS A FROM dual;\n", preconditions=(precondition,))
+
+        report = preflight(self.migration_batch("2026-10-01_replace-view-r001", "2026-10-01_replace-view-r002"), self.snapshot(), self.passing_checks())
+
+        self.assertEqual(report.exit_code, 0, report.to_dict())
+        reviewed = report.coverage["manual_review_required"]
+        self.assertTrue(any(item["migration"] == "2026-10-01_replace-view-r002" for item in reviewed), reviewed)
+
+    def test_a_second_create_of_a_staged_name_is_still_a_collision_unless_it_replaces_a_staged_view(self):
+        precondition = {"id": "view-is-r001", "sql": "SELECT 1 FROM dual", "expected": 1}
+        for label, first, second, reviewed in (
+            ("plain CREATE VIEW twice", "CREATE VIEW ZZ_V AS SELECT 1 AS A FROM dual;\n", "CREATE VIEW ZZ_V AS SELECT 2 AS A FROM dual;\n", True),
+            ("replace without a reviewed precondition", "CREATE VIEW ZZ_V AS SELECT 1 AS A FROM dual;\n", "CREATE OR REPLACE VIEW ZZ_V AS SELECT 2 AS A FROM dual;\n", False),
+            ("replace a staged table with a view", "CREATE TABLE ZZ_V (A NUMBER);\n", "CREATE OR REPLACE VIEW ZZ_V AS SELECT 2 AS A FROM dual;\n", True),
+            ("replace a staged sequence with a view", "CREATE SEQUENCE ZZ_V;\n", "CREATE OR REPLACE VIEW ZZ_V AS SELECT 2 AS A FROM dual;\n", True),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as temporary:
+                self.root = Path(temporary)
+                (self.root / "migrations").mkdir()
+                self.add_folder("2026-10-01_replace-view-r001", first)
+                self.add_folder("2026-10-01_replace-view-r002", second, preconditions=(precondition,) if reviewed else ())
+
+                report = preflight(self.migration_batch("2026-10-01_replace-view-r001", "2026-10-01_replace-view-r002"), self.snapshot(), self.passing_checks())
+
+                self.assertEqual(report.exit_code, 1, report.to_dict())
+                self.assertTrue(any(item["code"] == "BATCH_NAMESPACE_COLLISION" for item in report.conflicts))
+
     def test_quoted_identifiers_preserve_case_and_owner_is_resolved_from_target(self):
         folder = self.add_folder("2026-09-27_create-quoted-r001", 'CREATE TABLE "lowerName" (ID NUMBER);\n')
         migration = load_batch(self.root, [f"migrations/{folder.name}"])[0]
