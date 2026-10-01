@@ -238,6 +238,9 @@ class BuilderDriftTests(unittest.TestCase):
                 ["python3", str(GUARD), "100", "docker-demo", str(app)],
                 cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
+                # A suite started in the background (nohup ... &) inherits an
+                # ignored SIGINT, which Python would then keep ignoring.
+                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
             )
             deadline = time.monotonic() + 60
             while not started.exists() and time.monotonic() < deadline:
