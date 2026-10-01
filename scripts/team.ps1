@@ -198,7 +198,7 @@ switch ($Command) {
   }
   "export" {
     if ($Arguments.Count -ne 1) { Fail "usage: scripts/team.ps1 export <numeric_app_id>" }
-    if ($Arguments[0] -cnotmatch '^[1-9][0-9]*$') { Fail "expected a positive numeric application id" }
+    if ($Arguments[0] -cnotmatch '^[1-9][0-9]{0,17}$') { Fail "expected a positive numeric application id of at most 18 digits" }
     & (Join-Path $PSScriptRoot "export_apps.ps1") -AppId $Arguments[0]
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   }

@@ -170,8 +170,8 @@ foreach ($projectEnvPrefix in @("PROD", "STAGING")) {
     }
   }
 }
-if ($env:APEX_APP_ID -notmatch '^[1-9][0-9]*(,[1-9][0-9]*)*$') {
-  throw "APEX_APP_ID must be a comma-separated list of positive integers without spaces"
+if ($env:APEX_APP_ID -notmatch '^[1-9][0-9]{0,17}(,[1-9][0-9]{0,17})*$') {
+  throw "APEX_APP_ID must be a comma-separated list of positive integers of at most 18 digits, without spaces"
 }
 Assert-ProjectEnvUniqueCsv -Name "APEX_APP_ID" -Value $env:APEX_APP_ID
 foreach ($projectEnvKey in @("TABLES_PREFIXES", "CODE_PREFIXES")) {

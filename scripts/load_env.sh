@@ -255,8 +255,8 @@ for project_env_prefix in PROD STAGING; do
     fi
   fi
 done
-project_env_match "$APEX_APP_ID" '^[1-9][0-9]*(,[1-9][0-9]*)*$' || {
-  project_env_fail "APEX_APP_ID must be a comma-separated list of positive integers without spaces"
+project_env_match "$APEX_APP_ID" '^[1-9][0-9]{0,17}(,[1-9][0-9]{0,17})*$' || {
+  project_env_fail "APEX_APP_ID must be a comma-separated list of positive integers of at most 18 digits, without spaces"
   return 1 2>/dev/null || exit 1
 }
 

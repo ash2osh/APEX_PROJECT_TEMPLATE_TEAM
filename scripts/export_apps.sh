@@ -28,7 +28,7 @@ if [ "$#" -gt 1 ]; then
   exit 2
 fi
 if [ "$#" -eq 1 ]; then
-  [[ "$1" =~ ^[1-9][0-9]*$ ]] || { echo "export error: expected a positive numeric application id" >&2; exit 2; }
+  [[ "$1" =~ ^[1-9][0-9]{0,17}$ ]] || { echo "export error: expected a positive numeric application id of at most 18 digits" >&2; exit 2; }
   APP_IDS=("$1")
 else
   IFS=',' read -r -a APP_IDS <<< "$APEX_APP_ID"

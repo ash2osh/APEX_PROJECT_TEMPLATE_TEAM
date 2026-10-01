@@ -36,7 +36,7 @@ if ($apexSchemas.Count -eq 0) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($AppId)) {
-  if ($AppId -cnotmatch '^[1-9][0-9]*$') { throw "export error: expected a positive numeric application id" }
+  if ($AppId -cnotmatch '^[1-9][0-9]{0,17}$') { throw "export error: expected a positive numeric application id of at most 18 digits" }
   $appIds = @($AppId)
 } else {
   $appIds = @($env:APEX_APP_ID.Split(','))

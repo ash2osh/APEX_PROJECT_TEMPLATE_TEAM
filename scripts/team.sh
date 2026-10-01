@@ -142,7 +142,7 @@ case "$command_name" in
     ;;
   export)
     [ "$#" -eq 1 ] || fail "usage: scripts/team.sh export <numeric_app_id>"
-    [[ "$1" =~ ^[1-9][0-9]*$ ]] || fail "expected a positive numeric application id"
+    [[ "$1" =~ ^[1-9][0-9]{0,17}$ ]] || fail "expected a positive numeric application id of at most 18 digits"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       "$REPO_ROOT/scripts/export_apps.sh" "$1"
     ;;

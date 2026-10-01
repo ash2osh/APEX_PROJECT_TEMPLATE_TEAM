@@ -21,8 +21,8 @@ if ($AppId -in @("--help", "-h") -or $RemainingArguments -contains "--help" -or
   Show-Usage
   exit 0
 }
-if ([string]::IsNullOrWhiteSpace($AppId) -or $AppId -cnotmatch '^[1-9][0-9]*$') {
-  throw "publish error: expected a positive numeric application id"
+if ([string]::IsNullOrWhiteSpace($AppId) -or $AppId -cnotmatch '^[1-9][0-9]{0,17}$') {
+  throw "publish error: expected a positive numeric application id of at most 18 digits"
 }
 
 $appEnvironment = "dev"

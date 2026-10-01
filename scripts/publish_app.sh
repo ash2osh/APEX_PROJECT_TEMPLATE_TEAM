@@ -20,7 +20,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 
 app_id="${1:-}"
-[[ "$app_id" =~ ^[1-9][0-9]*$ ]] || fail "expected a positive numeric application id"
+[[ "$app_id" =~ ^[1-9][0-9]{0,17}$ ]] || fail "expected a positive numeric application id of at most 18 digits"
 shift
 
 app_environment=dev
