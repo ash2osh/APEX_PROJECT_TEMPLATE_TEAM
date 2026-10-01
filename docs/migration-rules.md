@@ -76,7 +76,9 @@ bytes that were never reviewed or hashed), a quoted identifier that spans
 lines, a string or quoted name standing between two statements (SQLcl reads
 it as a command and the statement after it may not run), and the comment
 opener `/*/` (SQLcl's parser fails on it and runs the comment's lines as
-commands; write `/* /` or `/**/`). Blank lines inside a statement are
+commands; write `/* /` or `/**/`), and a statement's first word glued to what follows
+(`DECLARE,`, `SELECT(`: SQLcl reads the first word up to the next space and runs the
+lines after it one by one; put a space after it). Blank lines inside a statement are
 accepted: the apply session sets `SQLBLANKLINES ON`, so an `UPDATE` with a blank
 line before its `WHERE` runs as written.
 

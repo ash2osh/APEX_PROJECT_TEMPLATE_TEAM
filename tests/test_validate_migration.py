@@ -252,6 +252,45 @@ class ValidateMigrationTests(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_a_statements_first_word_must_be_followed_by_whitespace(self) -> None:
+        # SQLcl decides what a statement is from its first whitespace-delimited
+        # word. 'DECLARE,~' is an unknown command, so SQLcl ran the lines after
+        # it one by one (HOST ran in a live test) while the validator read the
+        # keyword and treated everything up to the final '/' as one block.
+        for source in (
+            "DECLARE,~\nHOST echo CLIENT_DIRECTIVE_EXECUTED\nBEGIN\n  NULL;\nEND;\n/\n",
+            "BEGIN,~\nHOST echo CLIENT_DIRECTIVE_EXECUTED\n  NULL;\nEND;\n/\n",
+            "DECLARE(\nHOST echo CLIENT_DIRECTIVE_EXECUTED\nBEGIN\n  NULL;\nEND;\n/\n",
+            "DECLARE/**/\nHOST echo CLIENT_DIRECTIVE_EXECUTED\nBEGIN\n  NULL;\nEND;\n/\n",
+            "SELECT,~\nHOST echo CLIENT_DIRECTIVE_EXECUTED\nFROM dual;\n",
+            "SELECT(1) AS x FROM dual;\n",
+            "SELECT 1 FROM dual;\nCREATE,~\nTABLE x (a NUMBER);\n",
+            "SELECT 1 FROM dual;SELECT,~ 2 FROM dual;\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SQL-only migration", result.stderr)
+                self.assertIn("first word", result.stderr)
+
+    def test_a_first_word_followed_by_whitespace_is_accepted(self) -> None:
+        for source in (
+            "DECLARE\n  x NUMBER;\nBEGIN\n  x := 1;\nEND;\n/\n",
+            "BEGIN\n  NULL;\nEND;\n/\n",
+            "BEGIN NULL; END;\n/\n",
+            "SELECT 1 FROM dual;\nSELECT 2 FROM dual;\n",
+            "SELECT 1 FROM dual;SELECT 2 FROM dual;\n",
+            "INSERT INTO t (a) VALUES (1);\n",
+            "WITH q AS (SELECT 1 AS v FROM dual) SELECT v FROM q;\n",
+            "SELECT\t1 FROM dual;\n",
+            "CREATE OR REPLACE VIEW v AS SELECT 1 AS a FROM dual;\n",
+        ):
+            with self.subTest(source=source):
+                result = self.run_validator(source)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_quoted_identifier_spanning_lines_is_rejected(self) -> None:
         # SQLcl ends the statement at a '/' line inside the identifier, then
         # runs what follows as client commands.

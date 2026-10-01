@@ -295,6 +295,17 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
             raise ValueError(
                 f"SQL-only migration rejects a client command or non-SQL token at line {line_number}"
             )
+        # SQLcl decides what a statement is from its first whitespace-delimited
+        # word. 'DECLARE,~' is an unknown command to it, so it runs the lines
+        # after it one by one while this validator would read the keyword and
+        # skip the rest as one block. Judge the source, not the masked text, so
+        # a comment glued to the word ('DECLARE/**/') does not count as a gap.
+        word_end = statement_start + first_match.end()
+        if word_end < len(source) and source[word_end] not in " \t\r\n":
+            raise ValueError(
+                f"SQL-only migration rejects '{source[statement_start:word_end + 1].strip()}' at line {line_number}: "
+                f"SQLcl reads a statement's first word up to the next space, so put a space after '{first_match.group(1)}'"
+            )
         tokens = re.findall(r"[A-Za-z][A-Za-z0-9_$#]*", head[:240], flags=re.ASCII)
         first = first_match.group(1).upper()
 
