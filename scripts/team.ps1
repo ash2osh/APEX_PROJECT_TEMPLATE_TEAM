@@ -7,6 +7,9 @@ $Command = if ($args.Count -gt 0) { [string] $args[0] } else { "" }
 $Arguments = @($args | Select-Object -Skip 1 | ForEach-Object { [string] $_ })
 
 $ErrorActionPreference = "Stop"
+# Start from a known status: the finally block at the bottom reads it, and the
+# caller's session may still hold the status of an earlier command.
+$global:LASTEXITCODE = 0
 
 # Set once the command has ended by its own means: it returned, failed, or chose
 # an exit status. The finally block at the bottom treats any other end as Ctrl-C.
@@ -292,7 +295,12 @@ try {
   # Ctrl-C stops this script as well as the helper it was running, so nothing
   # after the helper runs and pwsh would exit 0, which a caller reads as success.
   # It does not run the catch block, so a script that ended without finishing was
-  # interrupted: report 130, as Bash does. (Only a script without [Parameter()]
-  # attributes keeps an exit status chosen in finally; see the top of the file.)
-  if (-not $finished) { exit 130 }
+  # interrupted. Report what Bash would: the status the helper chose if it had
+  # already ended (migrate says 2 for "may be partially applied"), else 130.
+  # (Only a script without [Parameter()] attributes keeps an exit status chosen
+  # in finally; see the top of the file.)
+  if (-not $finished) {
+    if ($LASTEXITCODE -gt 0) { exit $LASTEXITCODE }
+    exit 130
+  }
 }
