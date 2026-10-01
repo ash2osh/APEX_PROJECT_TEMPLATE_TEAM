@@ -2,8 +2,10 @@ import json
 import re
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -112,6 +114,7 @@ class PublishAppCliTests(unittest.TestCase):
             "      skipped) printf '%s\\n' 'Workspace: NO_SUCH_WORKSPACE from deployment file: deployments/dev.json is invalid' 'APEX_IMPORT_VERIFIED:100' ;;\n"
             "      *) printf '%s\\n' 'Import successful.' 'APEX_IMPORT_VERIFIED:100' ;;\n"
             "    esac\n"
+            "    if [[ -n \"${FAKE_IMPORT_PAUSE:-}\" ]]; then : > \"$FAKE_IMPORT_PAUSE\"; sleep 120; fi\n"
             "    ;;\n"
             "  export)\n"
             "    exported=\"$PWD/apps/$export_schema/100\"\n"
@@ -441,6 +444,42 @@ class PublishAppCliTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 output = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stdout + result.stderr).split())
                 self.assertIn("byte-order mark", output)
+
+    def test_interrupt_while_the_import_runs_says_its_result_is_unknown(self) -> None:
+        # SQLcl may already have finished the import when the interrupt arrives,
+        # before publish has read its output; the old source is put back, so
+        # the developer must be told that DEV may have changed.
+        pwsh = shutil.which("pwsh")
+        shells = [("bash", signal.SIGTERM, "team.sh")] + ([("pwsh", signal.SIGINT, "team.ps1")] if pwsh else [])
+        for shell, sig, wrapper in shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                pause = root / "import-paused"
+                environment["FAKE_IMPORT_PAUSE"] = str(pause)
+                original = (app / "application.apx").read_bytes()
+                if shell == "bash":
+                    command = ["bash", str(runner), "100"]
+                else:
+                    command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+                process = subprocess.Popen(
+                    command, cwd=root, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    start_new_session=True, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+                )
+                deadline = time.monotonic() + 90
+                while not pause.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(pause.exists(), "the fake import never ran")
+                os.killpg(process.pid, sig)
+                output, _ = process.communicate(timeout=60)
+
+                plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", output).split())
+                self.assertIn("interrupted while the import was running", plain)
+                self.assertIn("its result is unknown", plain)
+                self.assertIn(f"scripts/{wrapper} export 100", plain)
+                self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
+                self.assertEqual((app / "application.apx").read_bytes(), original)
 
     def test_drift_refusal_names_the_export_command_of_the_shell_in_use(self) -> None:
         # A PowerShell user must not be told to run the Bash wrapper.

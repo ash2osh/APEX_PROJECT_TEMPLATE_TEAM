@@ -131,6 +131,7 @@ or `application.apx.displaced`.
 
 | Message | Meaning and action |
 | --- | --- |
+| `interrupted while the import was running, so its result is unknown` | You (or a signal) stopped publish while SQLcl was importing, before publish read its output. SQLcl may already have finished: DEV may or may not run your source. Your old `application.apx` is put back. Commit your changes, run `scripts/team.sh export <id>`, and read the live version: the tag publish printed as stamped means the import completed. Then reconcile and commit. |
 | `SQLcl application import failed` | SQLcl exited with an error. Fix the reported problem and retry. |
 | `SQLcl reported a client or database error during the application import` | An `ORA-`, `SP2-`, `PLS-`, or `TNS-` error was printed. Fix it and retry. |
 | `SQLcl did not report a successful APEX import` | SQLcl skipped the import, for example because `dev.json` names a workspace that does not exist. Fix the descriptor. |

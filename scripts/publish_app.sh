@@ -247,6 +247,10 @@ restore_unstamped=false
 # Set once the import changed the target and cleared after its verification,
 # so a failure in between can say what to do next.
 import_unverified=false
+# Set while the import session runs and cleared once its output has been read: an
+# interrupt in between leaves the import's result unknown (SQLcl may have
+# finished it already).
+import_running=false
 # Replace <target> with <replacement> only while <target> still holds the bytes
 # of <expected>. The target is renamed aside before the comparison and the
 # replacement is installed without overwriting, so an editor save at any
@@ -272,6 +276,15 @@ swap_if_unchanged() {
 
 cleanup() {
   local aside
+  if [ "$import_running" = true ]; then
+    if [ "$app_environment" = dev ]; then
+      printf 'publish: interrupted while the import was running, so its result is unknown: DEV may or may not run your source. Commit your changes, run scripts/team.sh export %s, and read the live version; %s means the import completed.\n' \
+        "$app_id" "${published_version:-the version you published}" >&2
+    else
+      printf 'publish: interrupted while the import into %s was running, so its result is unknown; inspect %s before importing again.\n' \
+        "$target_label" "$target_label" >&2
+    fi
+  fi
   if [ "$import_unverified" = true ]; then
     if [ "$app_environment" = dev ]; then
       if [ -n "$published_version" ]; then
@@ -360,6 +373,7 @@ fi
 
 application_source="$app_dir"
 deployment_file="$app_dir/deployments/$app_environment.json"
+import_running=true
 if ! (
   invoke_sqlcl_safe "$staging_dir" \
     -S -noupdates -name "$sqlcl_connection" \
@@ -368,9 +382,11 @@ if ! (
     "$application_source" "$deployment_file" "$app_id" "$expected_live_state" \
     < "$sqlcl_stdin"
 ) > "$sqlcl_output" 2>&1; then
+  import_running=false
   cat "$sqlcl_output" >&2
   fail "SQLcl application import failed; see the client output above"
 fi
+import_running=false
 cat "$sqlcl_output"
 if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:' "$sqlcl_output"; then
   fail "SQLcl reported a client or database error during the application import"

@@ -293,6 +293,10 @@ $restoreUnstamped = $false
 # Set once the import changed the target and cleared after its verification,
 # so a failure in between can say what to do next.
 $importUnverified = $false
+# Set while the import session runs and cleared once its output has been read: an
+# interrupt in between leaves the import's result unknown (SQLcl may have
+# finished it already).
+$importRunning = $false
 
 # Replace Target with Replacement only while Target still holds the bytes of
 # Expected. Target is renamed aside before the comparison and the replacement
@@ -369,12 +373,14 @@ try {
 
   $applicationInput = $appDir
   $deploymentFile = Join-Path $appDir "deployments/$appEnvironment.json"
+  $importRunning = $true
   $sqlclExit = Invoke-Sqlcl -WorkingDirectory $publishWorkDir -StdInFile $stdinFile -Arguments @(
     "-S", "-noupdates", "-name", $sqlclConnection,
     "@$(Join-Path $PSScriptRoot 'publish_app.sql')",
     $parsingSchema, $targetEnvironment, $expectedUser,
     $applicationInput, $deploymentFile, $AppId, $expectedLiveState
   ) -TranscriptFile $transcriptFile
+  $importRunning = $false
   $sqlclOutput = [System.IO.File]::ReadAllText($transcriptFile)
   if (-not [string]::IsNullOrEmpty($sqlclOutput)) { Write-Output $sqlclOutput }
   if ($sqlclExit -ne 0) { throw "SQLcl application import failed with exit code $sqlclExit" }
@@ -451,6 +457,14 @@ try {
     Write-Output "Commit the stamped version in ${relativeSource}: $publishedVersion"
   }
 } finally {
+  if ($importRunning) {
+    if ($appEnvironment -eq "dev") {
+      $stampedText = if ($publishedVersion) { $publishedVersion } else { "the version you published" }
+      Write-Warning "publish: interrupted while the import was running, so its result is unknown: DEV may or may not run your source. Commit your changes, run scripts/team.ps1 export $AppId, and read the live version; $stampedText means the import completed."
+    } else {
+      Write-Warning "publish: interrupted while the import into $targetLabel was running, so its result is unknown; inspect $targetLabel before importing again."
+    }
+  }
   if ($importUnverified) {
     if ($appEnvironment -eq "dev") {
       $nextStep = "Run scripts/team.ps1 export $AppId to see what is live, reconcile, and commit."
