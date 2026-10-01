@@ -252,6 +252,29 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
         self.assertFalse((folder / "status.dev.json").exists())
 
+    def test_a_retained_attempt_with_a_duplicate_key_still_blocks_replay(self):
+        # json.loads keeps the last of two equal keys, so "writeAttempted": true
+        # followed by "writeAttempted": false read as false and let the DDL run
+        # again. Receipts reject duplicate keys; the attempt record must too.
+        folder = self.add_folder("2026-09-28_create-dup-r001", {"001-create-a.sql": "CREATE TABLE A (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        fake.fail_file = "001-create-a.sql"
+        failed, _ = self.apply(migrations, fake=fake)
+        self.assertEqual(failed, 2)
+        manifest = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        original = manifest.read_text(encoding="utf-8")
+        self.assertIn('"writeAttempted": true', original)
+        manifest.write_text(original.replace('"writeAttempted": true', '"writeAttempted": true, "writeAttempted": false'), encoding="utf-8")
+        fake.fail_file = None
+        apply_count = len([call for call in fake.calls if call[0] == "apply"])
+
+        retry, fake = self.apply(migrations, fake=fake)
+
+        self.assertEqual(retry, 2)
+        self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
+        self.assertFalse((folder / "status.dev.json").exists())
+
     def test_matching_receipt_blocks_replay(self):
         folder = self.add_folder("2026-09-28_create-once-r001", {"001-create-once.sql": "CREATE TABLE ONCE_T (ID NUMBER);\n"})
         migrations = self.load(folder.name)

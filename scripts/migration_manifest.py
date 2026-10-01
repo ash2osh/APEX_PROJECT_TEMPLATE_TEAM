@@ -139,7 +139,7 @@ class Migration:
     schema: str | None = None
 
 
-def _decode_json(source: bytes, label: str) -> object:
+def decode_json(source: bytes, label: str) -> object:
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -403,7 +403,7 @@ def _load_check_file(path: Path) -> tuple[tuple[QueryCheck, ...], tuple[QueryChe
         source = path.read_bytes()
     except OSError as exc:
         raise MigrationManifestError(f"required checks.json could not be read: {exc}") from exc
-    raw = _decode_json(source, str(path))
+    raw = decode_json(source, str(path))
     if not isinstance(raw, dict) or set(raw) != {"schemaVersion", "preconditions", "postconditions"}:
         raise MigrationManifestError("checks.json must contain exactly schemaVersion, preconditions, and postconditions")
     if type(raw["schemaVersion"]) is not int or raw["schemaVersion"] != 1:
@@ -590,7 +590,7 @@ def validate_receipt(path: Path, migration: Migration, target_identity: Mapping[
     if path.is_symlink() or path.name not in {f"status.{environment}.json" for environment in STATUS_ENVIRONMENTS}:
         raise MigrationManifestError("receipt path is unsafe or has an unsupported environment name")
     try:
-        raw = _decode_json(path.read_bytes(), str(path))
+        raw = decode_json(path.read_bytes(), str(path))
     except OSError as exc:
         raise MigrationManifestError(f"receipt could not be read: {exc}") from exc
     if not isinstance(raw, dict) or set(raw) != RECEIPT_FIELDS:

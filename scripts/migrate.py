@@ -39,6 +39,7 @@ from .migration_manifest import (
     MigrationFile,
     MigrationManifestError,
     assert_single_layout,
+    decode_json,
     install_receipt,
     load_batch,
     load_migration,
@@ -326,9 +327,11 @@ def _verify_receipts_and_attempts(
         if manifest_path.is_symlink():
             raise MigrationApplyError(f"retained migration evidence is unsafe and needs reconciliation: {manifest_path}")
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise MigrationApplyError(f"retained migration evidence cannot be read; reconcile before applying: {manifest_path}") from error
+            # Strict, like a receipt: a duplicate key would let the last one win and
+            # turn "writeAttempted": true into false.
+            manifest = decode_json(manifest_path.read_bytes(), str(manifest_path))
+        except (OSError, MigrationManifestError) as error:
+            raise MigrationApplyError(f"retained migration evidence cannot be read; reconcile before applying: {manifest_path} ({error})") from error
         if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or not isinstance(manifest.get("migrations"), list):
             raise MigrationApplyError(f"retained migration evidence is malformed; reconcile before applying: {manifest_path}")
         target_record = manifest.get("target")
