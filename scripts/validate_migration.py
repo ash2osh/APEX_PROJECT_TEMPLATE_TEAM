@@ -343,22 +343,23 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
             previous_end = index
             continue
 
-        statement_end = masked.find(";", index)
-        if statement_end < 0:
-            raise ValueError(
-                f"SQL-only migration statement must end with a semicolon at line {line_at(masked, statement_start)}"
-            )
-        words = [word.upper() for word in re.findall(r"[A-Za-z][A-Za-z0-9_$#]*", masked[index:statement_end])]
-        if not words:
-            raise ValueError(f"SQL-only migration has an empty statement at line {line_at(masked, statement_start)}")
-        first = words[0]
+        # Name a client command before asking for a semicolon: HOST, DEFINE, START
+        # and the like end at the newline, so "add a semicolon" would be wrong.
         allowed = first in SQL_STARTERS
         if first == "SET":
-            allowed = len(words) > 1 and words[1] in {"CONSTRAINTS", "TRANSACTION"}
+            # Only SET CONSTRAINTS and SET TRANSACTION are SQL; read the second word
+            # from this statement, not from the one after a ';'.
+            statement_words = FIRST_WORD.findall(masked[index:index + 240].split(";", 1)[0])
+            allowed = len(statement_words) > 1 and statement_words[1].upper() in {"CONSTRAINTS", "TRANSACTION"}
         if not allowed:
             raise ValueError(
                 f"SQL-only migration rejects SQLcl/client command or unsupported statement "
                 f"'{first}' at line {line_at(masked, statement_start)}"
+            )
+        statement_end = masked.find(";", index)
+        if statement_end < 0:
+            raise ValueError(
+                f"SQL-only migration statement must end with a semicolon at line {line_at(masked, statement_start)}"
             )
         reject_sqlcl_line_hazards(masked, statement_start, statement_end, plsql=False)
         spans.append((statement_start, statement_end))

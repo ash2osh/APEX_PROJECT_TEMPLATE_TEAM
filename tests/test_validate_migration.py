@@ -350,6 +350,26 @@ class ValidateMigrationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertLess(elapsed, 20, f"{label} took {elapsed:.1f}s to validate")
 
+    def test_a_client_command_without_a_semicolon_is_named_not_reported_as_a_missing_semicolon(self) -> None:
+        # HOST, DEFINE, START, SPOOL and the like end at the newline in SQLcl, so
+        # they never have a semicolon; telling the author to add one points the
+        # wrong way. The message must name the command.
+        for command in ("HOST touch marker", "DEFINE X = 1", "START file.sql", "SPOOL out.txt", "PROMPT hello",
+                        "WHENEVER SQLERROR CONTINUE", "SET DEFINE ON", "EXIT", "CONNECT scott/tiger"):
+            with self.subTest(command):
+                result = self.run_validator(f"{command}\n")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SQLcl/client command or unsupported statement", result.stderr)
+                self.assertIn(f"'{command.split()[0]}'", result.stderr)
+                self.assertNotIn("semicolon", result.stderr)
+
+    def test_a_real_statement_without_a_semicolon_still_asks_for_one(self) -> None:
+        for source in ("SELECT 1 FROM dual\n", "UPDATE T SET A = 1\n", "SET CONSTRAINTS ALL DEFERRED\n"):
+            with self.subTest(source):
+                result = self.run_validator(source)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must end with a semicolon", result.stderr)
+
     def test_migration_cannot_take_transaction_completion_away_from_driver(self) -> None:
         for source in ("COMMIT;\n", "ROLLBACK;\n"):
             with self.subTest(source=source):
