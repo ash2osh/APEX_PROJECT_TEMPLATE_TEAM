@@ -251,5 +251,14 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _run() -> int:
+    try:
+        return main()
+    except KeyboardInterrupt:
+        # Nothing is stamped or imported yet, so there is nothing else to report.
+        print("[DRIFT UNKNOWN] interrupted before the live app was checked; nothing was imported", file=sys.stderr)
+        return 130
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_run())

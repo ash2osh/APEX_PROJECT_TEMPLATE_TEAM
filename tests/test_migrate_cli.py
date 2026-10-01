@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -403,6 +405,54 @@ class MigrateCliTests(unittest.TestCase):
         with patch("scripts.migrate.run_sqlcl", side_effect=AssertionError("SQLcl must not run")):
             with self.assertRaisesRegex(MigrationApplyError, "cannot be enforced"):
                 apply_folder(staged, self.target(), staged_dir / "apply-quote", expected_identity={**expected_identity, "service_name": "x'y"})
+
+    def test_interrupt_during_apply_says_the_folder_may_be_partially_applied(self):
+        # Ctrl-C used to end in a Python traceback. The write attempt is already
+        # recorded, so the next run refuses; the message must say why.
+        folder = self.add_folder("2026-09-28_interrupt-r001", {"001-create.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        fake = FakeDatabase(self.target())
+
+        def interrupted(*_arguments, **_keywords):
+            raise KeyboardInterrupt
+
+        fake.apply_folder = interrupted
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result, _ = self.apply(self.load(folder.name), fake=fake)
+
+        self.assertEqual(result, 2)
+        message = stderr.getvalue()
+        self.assertIn("interrupted", message)
+        self.assertIn("may be partially applied", message)
+        self.assertIn("Retained attempt evidence", message)
+        self.assertFalse((folder / "status.dev.json").exists())
+        retained = list((self.root / "scratch").glob("migration-attempt-*"))
+        self.assertEqual(len(retained), 1)
+        manifest = json.loads((retained[0] / "run-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["state"], "apply-failed-or-unknown")
+
+        # The documented consequence: another attempt is refused until reconciled.
+        with contextlib.redirect_stderr(io.StringIO()) as again:
+            repeated, _ = self.apply(self.load(folder.name))
+        self.assertEqual(repeated, 2)
+        self.assertIn("write attempt", again.getvalue())
+
+    def test_interrupt_before_any_write_leaves_nothing_behind(self):
+        folder = self.add_folder("2026-09-28_interrupt-early-r001", {"001-create.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        fake = FakeDatabase(self.target())
+
+        def interrupted(*_arguments, **_keywords):
+            raise KeyboardInterrupt
+
+        fake.capture_inventory = interrupted
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result, _ = self.apply(self.load(folder.name), fake=fake)
+
+        self.assertEqual(result, 130)
+        self.assertIn("interrupted", stderr.getvalue())
+        self.assertIn("no writes were attempted", stderr.getvalue())
+        self.assertEqual(list((self.root / "scratch").glob("migration-attempt-*")), [])
 
     def test_a_later_folder_precondition_may_depend_on_an_earlier_folder(self):
         # r002's precondition queries the table r001 creates; it runs at r002's

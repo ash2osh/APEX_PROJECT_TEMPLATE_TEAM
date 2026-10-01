@@ -1,7 +1,9 @@
 import json
 import os
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -211,6 +213,37 @@ class BuilderDriftTests(unittest.TestCase):
                     extra_arguments=("--wrapper", wrapper),
                 )
                 self.assertIn(f"scripts/{wrapper} export 100", unknown.stderr)
+
+    def test_interrupting_the_drift_check_does_not_print_a_traceback(self) -> None:
+        # The check runs before anything is stamped or imported, so Ctrl-C has
+        # no consequence to report beyond that it was interrupted.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / "app"
+            app.mkdir()
+            (app / "apex-team-export.json").write_text(
+                json.dumps({"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": None, "version": "Release 1.0"}),
+                encoding="utf-8",
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            # A SQLcl that is still running when the interrupt arrives.
+            (fake_bin / "sql").write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+            (fake_bin / "sql").chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+            process = subprocess.Popen(
+                ["python3", str(GUARD), "100", "docker-demo", str(app)],
+                cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            time.sleep(1.5)
+            os.killpg(process.pid, signal.SIGINT)
+            _, stderr = process.communicate(timeout=30)
+
+            self.assertEqual(process.returncode, 130, stderr)
+            self.assertNotIn("Traceback", stderr)
+            self.assertIn("interrupted", stderr)
 
     def test_ambiguous_same_second_timestamp_fails_closed(self) -> None:
         timestamp = "2026-09-26T09:00:00"

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -834,6 +835,13 @@ def apply_batch(
             folder_run_dir = run_dir / f"apply-{folder_index:03d}"
             try:
                 apply_evidence = apply_folder_fn(staged, target, folder_run_dir, expected_identity=initial_target_identity)
+            except KeyboardInterrupt:
+                # SQLcl may have finished or stopped part-way: the outcome is unknown.
+                record["state"] = "apply-failed-or-unknown"
+                record["error"] = "interrupted"
+                run_manifest["state"] = "apply-failed-or-unknown"
+                _atomic_write_json(manifest_path, run_manifest)
+                raise MigrationApplyError(f"{original.folder.name} was interrupted and may be partially applied; stop and reconcile. Evidence: {run_dir}") from None
             except (MigrationApplyError, OSError, RuntimeError) as error:
                 record["state"] = "apply-failed-or-unknown"
                 record["error"] = str(error)
@@ -898,6 +906,16 @@ def apply_batch(
             print(f"Applied and verified {original.folder.name} on {target.environment}; receipt {receipt_path.name}.")
 
         return 0
+    except KeyboardInterrupt:
+        if attempted and run_dir is not None:
+            print(
+                "migration interrupted after a write was attempted; stop and reconcile. "
+                f"Retained attempt evidence: {run_dir}",
+                file=sys.stderr,
+            )
+        else:
+            print("migration interrupted; no writes were attempted", file=sys.stderr)
+        return 130
     except (MigrationApplyError, MigrationManifestError, CatalogError, TargetResolutionError, OSError, RuntimeError, ValueError) as error:
         print(f"migration error: {error}", file=sys.stderr)
         if attempted and run_dir is not None:
@@ -953,5 +971,20 @@ def main(
     return apply_batch(Path(repo_root), migrations, target, confirm)
 
 
+def _interrupt_on_sigterm() -> None:
+    """Handle SIGTERM like Ctrl-C, so the run says what state it left."""
+    if not hasattr(signal, "SIGTERM"):
+        return
+
+    def handler(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except (ValueError, OSError):  # not the main thread
+        pass
+
+
 if __name__ == "__main__":
+    _interrupt_on_sigterm()
     raise SystemExit(main())
