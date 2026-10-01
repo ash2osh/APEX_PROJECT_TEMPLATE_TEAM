@@ -124,17 +124,19 @@ SQLcl output printed above the message. If the file changed while publish ran
 file could not be swapped back (for example an editor holds it open), publish
 warns `could not remove the publish tag`; remove the tag from its `version:`
 line by hand. Publish
-swaps `application.apx` by moving it into `scratch/apex-publish.*` first; if a
+swaps `application.apx` by moving it into `scratch/apex-publish.*` (PowerShell:
+`scratch/apex-publish-*`) first; if a
 publish is killed at that moment the file is missing from the app folder, and
 its previous bytes are in that scratch folder as `application.apx.before-stamp`
 or `application.apx.displaced`.
 
 Ctrl-C is handled by both wrappers, and `kill` (SIGTERM) by Bash. A publish
 stopped any other way (`kill -9`, closing the window, SIGTERM sent to
-PowerShell) cannot clean up: `application.apx` keeps the stamped version,
-nothing is printed, and DEV may or may not run your source. Treat it like an
-unverified import (see "After import" below): commit the file as it is, run
-`scripts/team.sh export <id>`, read the live version, then reconcile and commit.
+PowerShell) cannot clean up: `application.apx` keeps the stamped version, its
+scratch folder stays behind (delete it), nothing is printed, and DEV may or may
+not run your source. Treat it like an unverified import (see "After import"
+below): commit the file as it is, run `scripts/team.sh export <id>`, read the
+live version, then reconcile and commit.
 
 | Message | Meaning and action |
 | --- | --- |
