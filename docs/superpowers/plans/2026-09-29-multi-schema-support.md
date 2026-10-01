@@ -32,7 +32,7 @@ Copied from the spec. Every task's requirements include these.
 - Preserve all existing safety properties: per-target identity checks, production markers, read-only production, all-or-nothing mirror installs, the drift guard, byte-equality publish verification.
 - PowerShell scripts run through `&` share the caller's process environment: a child that writes `$env:` (a schema selection, or a dot-sourced loader) changes the caller's values. Any `.ps1` that writes `$env:` and is *called* by another script must restore the environment it found; `check_db_target.ps1` does. A script that is meant to select a schema for itself (`publish_app.ps1`, `team.ps1 --schema`) sets `$env:PROJECT_SCHEMA` deliberately.
 - Keep APEXlang and SQL files in LF line endings. Bash scripts are Bash 4.3+ (they already use `mapfile` and `${var,,}`).
-- Out of scope: per-schema prefix filters, sequences, different schema names across environments, cross-schema migrations, and the one-time `epromhq_all` adoption script.
+- Out of scope: per-schema prefix filters, sequences, different schema names across environments, cross-schema migrations, and the one-time `multi_app_all` adoption script.
 
 ## Review Focus
 
@@ -1103,9 +1103,9 @@ Add a comment block above the `TABLES_SCHEMA` block in `.env.example` (comments 
 # expected-user keys below a comma-separated list. The three keys of a profile
 # must list the same number of entries, in the same order, and each schema must
 # appear once. Example:
-#   CODE_SCHEMA=EPROMHQ,TMS
-#   CODE_SQLCL_CONNECTION=42_epromhq,42_tms
-#   CODE_EXPECTED_USER=EPROMHQ,TMS
+#   CODE_SCHEMA=APP_ONE,APP_TWO
+#   CODE_SQLCL_CONNECTION=dev_app_one,dev_app_two
+#   CODE_EXPECTED_USER=APP_ONE,APP_TWO
 # Prefix filters apply to every schema in the profile. STAGING_* and PROD_*
 # take the same lists, and a schema keeps the same name in every environment.
 # Pass --schema <NAME> to scripts/team.sh to run one schema.
@@ -3099,9 +3099,9 @@ class SchemaFolderManifestTests(unittest.TestCase):
         (self.root / "migrations").mkdir()
 
     def test_schema_folder_migration_loads_with_its_schema(self) -> None:
-        add_folder(self.root, "migrations/TMS/2026-09-29_create-t1-r001")
-        migration = manifest.load_migration(self.root, "migrations/TMS/2026-09-29_create-t1-r001")
-        self.assertEqual("TMS", migration.schema)
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_create-t1-r001")
+        migration = manifest.load_migration(self.root, "migrations/APP_TWO/2026-09-29_create-t1-r001")
+        self.assertEqual("APP_TWO", migration.schema)
         self.assertEqual("create-t1", migration.family)
 
     def test_flat_folder_has_no_schema(self) -> None:
@@ -3109,20 +3109,20 @@ class SchemaFolderManifestTests(unittest.TestCase):
         self.assertIsNone(manifest.load_migration(self.root, "migrations/2026-09-29_create-t1-r001").schema)
 
     def test_listing_includes_both_layouts_newest_first(self) -> None:
-        add_folder(self.root, "migrations/TMS/2026-09-29_create-t1-r001")
-        add_folder(self.root, "migrations/APR/2026-09-30_create-t2-r001")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_create-t1-r001")
+        add_folder(self.root, "migrations/APP_THREE/2026-09-30_create-t2-r001")
         names = [path.name for path in manifest.list_migration_folders(self.root)]
         self.assertEqual(["2026-09-30_create-t2-r001", "2026-09-29_create-t1-r001"], names)
 
     def test_same_family_and_revision_in_two_schemas_is_not_a_duplicate(self) -> None:
-        add_folder(self.root, "migrations/TMS/2026-09-29_add-flag-r001")
-        add_folder(self.root, "migrations/APR/2026-09-29_add-flag-r001")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_add-flag-r001")
+        add_folder(self.root, "migrations/APP_THREE/2026-09-29_add-flag-r001")
         self.assertEqual(2, len(manifest.list_migration_folders(self.root)))
 
     def test_revision_gap_is_checked_per_schema(self) -> None:
-        add_folder(self.root, "migrations/TMS/2026-09-29_add-flag-r001")
-        add_folder(self.root, "migrations/APR/2026-09-29_add-flag-r001")
-        add_folder(self.root, "migrations/APR/2026-09-30_add-flag-r003")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_add-flag-r001")
+        add_folder(self.root, "migrations/APP_THREE/2026-09-29_add-flag-r001")
+        add_folder(self.root, "migrations/APP_THREE/2026-09-30_add-flag-r003")
         with self.assertRaises(manifest.MigrationManifestError):
             manifest.list_migration_folders(self.root)
 
@@ -3134,26 +3134,26 @@ class SchemaFolderManifestTests(unittest.TestCase):
 
     def test_three_part_path_needs_a_schema_shaped_directory(self) -> None:
         with self.assertRaises(manifest.MigrationManifestError):
-            manifest.load_migration(self.root, "migrations/tms/2026-09-29_create-t1-r001")
+            manifest.load_migration(self.root, "migrations/app_two/2026-09-29_create-t1-r001")
         with self.assertRaises(manifest.MigrationManifestError):
             manifest.load_migration(self.root, "migrations/A/B/2026-09-29_create-t1-r001")
 
     def test_batch_family_order_is_per_schema(self) -> None:
-        add_folder(self.root, "migrations/TMS/2026-09-29_add-flag-r001")
-        add_folder(self.root, "migrations/TMS/2026-09-30_add-flag-r002")
-        batch = manifest.load_batch(self.root, ["migrations/TMS/2026-09-29_add-flag-r001", "migrations/TMS/2026-09-30_add-flag-r002"])
-        self.assertEqual(["TMS", "TMS"], [item.schema for item in batch])
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_add-flag-r001")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-30_add-flag-r002")
+        batch = manifest.load_batch(self.root, ["migrations/APP_TWO/2026-09-29_add-flag-r001", "migrations/APP_TWO/2026-09-30_add-flag-r002"])
+        self.assertEqual(["APP_TWO", "APP_TWO"], [item.schema for item in batch])
         with self.assertRaises(manifest.MigrationManifestError):
-            manifest.load_batch(self.root, ["migrations/TMS/2026-09-30_add-flag-r002", "migrations/TMS/2026-09-29_add-flag-r001"])
+            manifest.load_batch(self.root, ["migrations/APP_TWO/2026-09-30_add-flag-r002", "migrations/APP_TWO/2026-09-29_add-flag-r001"])
 
 
 class SchemaFolderCliTests(unittest.TestCase):
     MULTI_ENV = {
         "PROJECT_ENV_FILE": "",
         "DB_ENVIRONMENT": "development",
-        "CODE_SQLCL_CONNECTION": "conn-tms,conn-apr",
-        "CODE_EXPECTED_USER": "TMS,APR",
-        "CODE_SCHEMA": "TMS,APR",
+        "CODE_SQLCL_CONNECTION": "conn-two,conn-three",
+        "CODE_EXPECTED_USER": "APP_TWO,APP_THREE",
+        "CODE_SCHEMA": "APP_TWO,APP_THREE",
         "PROJECT_MULTI_SCHEMA": "true",
     }
 
@@ -3171,8 +3171,8 @@ class SchemaFolderCliTests(unittest.TestCase):
         )
 
     def test_local_check_accepts_a_schema_folder(self) -> None:
-        add_folder(self.root, "migrations/TMS/2026-09-29_create-t1-r001")
-        result = self.run_checker("migrations/TMS/2026-09-29_create-t1-r001", "--local")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_create-t1-r001")
+        result = self.run_checker("migrations/APP_TWO/2026-09-29_create-t1-r001", "--local")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("Local selected-batch analysis only", result.stdout)
 
@@ -3187,26 +3187,26 @@ class SchemaFolderCliTests(unittest.TestCase):
 
     def test_migrate_refuses_a_batch_that_mixes_schemas(self) -> None:
         from scripts import migrate
-        add_folder(self.root, "migrations/TMS/2026-09-29_create-t1-r001")
-        add_folder(self.root, "migrations/APR/2026-09-29_create-t2-r001")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_create-t1-r001")
+        add_folder(self.root, "migrations/APP_THREE/2026-09-29_create-t2-r001")
         code = migrate.main(
-            ["migrations/TMS/2026-09-29_create-t1-r001", "migrations/APR/2026-09-29_create-t2-r001", "--env", "dev"],
+            ["migrations/APP_TWO/2026-09-29_create-t1-r001", "migrations/APP_THREE/2026-09-29_create-t2-r001", "--env", "dev"],
             environ=self.MULTI_ENV, repo_root=self.root, confirm=lambda prompt: False,
         )
         self.assertEqual(2, code)
 
     def test_migrate_refuses_a_schema_option_that_disagrees_with_the_folder(self) -> None:
         from scripts import migrate
-        add_folder(self.root, "migrations/TMS/2026-09-29_create-t1-r001")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_create-t1-r001")
         code = migrate.main(
-            ["migrations/TMS/2026-09-29_create-t1-r001", "--env", "dev", "--schema", "APR"],
+            ["migrations/APP_TWO/2026-09-29_create-t1-r001", "--env", "dev", "--schema", "APP_THREE"],
             environ=self.MULTI_ENV, repo_root=self.root, confirm=lambda prompt: False,
         )
         self.assertEqual(2, code)
 
     def test_resolver_picks_the_folders_schema_for_dev(self) -> None:
-        target = resolve_target(self.MULTI_ENV, "dev", "migration", schema="APR")
-        self.assertEqual(("conn-apr", "APR", "APR"), (target.connection, target.expected_user, target.schema))
+        target = resolve_target(self.MULTI_ENV, "dev", "migration", schema="APP_THREE")
+        self.assertEqual(("conn-three", "APP_THREE", "APP_THREE"), (target.connection, target.expected_user, target.schema))
         with self.assertRaises(TargetResolutionError):
             resolve_target(self.MULTI_ENV, "dev", "migration")
 

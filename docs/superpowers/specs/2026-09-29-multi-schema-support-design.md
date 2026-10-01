@@ -14,11 +14,10 @@ exactly as it does today.
 
 ## Background
 
-The motivating project is `/home/ash/projects/epromhq_all`. It has eight
-schemas (`APR`, `CAREERS`, `CENTRAL`, `EPROMHQ`, `HQ_ELEVATED`, `HQ_TRAINING`,
-`MED`, `TMS`) in one workspace. It reaches each schema through its own saved
-connection (`42_epromhq`, `42_tms`, and so on) and keeps its own export
-scripts.
+The motivating project is `multi_app_all`. It has eight schemas (`APP_ONE`
+through `APP_EIGHT`) in one workspace. It reaches each schema through its own
+saved connection (`dev_app_one`, `dev_app_two`, and so on) and keeps its own
+export scripts.
 
 The template already separates source by schema: `apps/<SCHEMA>/<app-id>/` and
 `database/<SCHEMA>/`. What it lacks is a way to hold more than one schema in
@@ -30,7 +29,7 @@ resolve DEV to the single `CODE_SCHEMA`. `doctor` checks one identity.
 
 The Graphify extractor resolves a database reference only inside the
 referencing app's own schema, so a cross-schema reference stays a stub.
-Sixteen synonym files in `epromhq_all` point across schemas.
+Sixteen synonym files in `multi_app_all` point across schemas.
 
 ## Goals
 
@@ -58,7 +57,7 @@ Sixteen synonym files in `epromhq_all` point across schemas.
   one configured DEV schema. An unlisted schema is never mapped to a target.
 - A registry file, per-schema env files, or new key families.
 - Cross-schema migrations. One migration changes one schema.
-- The one-time adoption script for `epromhq_all`. It is a separate follow-up in
+- The one-time adoption script for `multi_app_all`. It is a separate follow-up in
   that project.
 
 ## Design
@@ -69,17 +68,17 @@ The existing keys accept comma lists. Each profile's three keys are
 position-aligned:
 
 ```
-TABLES_SCHEMA=EPROMHQ,TMS,APR
-TABLES_SQLCL_CONNECTION=42_epromhq,42_tms,42_apr
-TABLES_EXPECTED_USER=EPROMHQ,TMS,APR
+TABLES_SCHEMA=APP_ONE,APP_TWO,APP_THREE
+TABLES_SQLCL_CONNECTION=dev_app_one,dev_app_two,dev_app_three
+TABLES_EXPECTED_USER=APP_ONE,APP_TWO,APP_THREE
 
-CODE_SCHEMA=EPROMHQ,TMS,APR
-CODE_SQLCL_CONNECTION=42_epromhq,42_tms,42_apr
-CODE_EXPECTED_USER=EPROMHQ,TMS,APR
+CODE_SCHEMA=APP_ONE,APP_TWO,APP_THREE
+CODE_SQLCL_CONNECTION=dev_app_one,dev_app_two,dev_app_three
+CODE_EXPECTED_USER=APP_ONE,APP_TWO,APP_THREE
 
-APEX_PARSING_SCHEMA=EPROMHQ,TMS,APR
-APEX_SQLCL_CONNECTION=42_epromhq,42_tms,42_apr
-APEX_EXPECTED_USER=EPROMHQ,TMS,APR
+APEX_PARSING_SCHEMA=APP_ONE,APP_TWO,APP_THREE
+APEX_SQLCL_CONNECTION=dev_app_one,dev_app_two,dev_app_three
+APEX_EXPECTED_USER=APP_ONE,APP_TWO,APP_THREE
 APEX_APP_ID=117,301,205
 ```
 
@@ -225,7 +224,7 @@ Each step is independently mergeable and tested:
 ## Assumptions to verify during planning
 
 - The first `APEX_SQLCL_CONNECTION` entry can see every configured app in
-  `APEX_APPLICATIONS`. `epromhq_all`'s export scripts query the workspace with
+  `APEX_APPLICATIONS`. `multi_app_all`'s export scripts query the workspace with
   one connection, which suggests it can. If it cannot, `export` would need a
   fallback across the listed connections.
 - `DBMS_METADATA.GET_DDL('SYNONYM', …)` output is stable enough for the
