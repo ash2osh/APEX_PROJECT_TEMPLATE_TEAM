@@ -129,6 +129,13 @@ publish is killed at that moment the file is missing from the app folder, and
 its previous bytes are in that scratch folder as `application.apx.before-stamp`
 or `application.apx.displaced`.
 
+Ctrl-C is handled by both wrappers, and `kill` (SIGTERM) by Bash. A publish
+stopped any other way (`kill -9`, closing the window, SIGTERM sent to
+PowerShell) cannot clean up: `application.apx` keeps the stamped version,
+nothing is printed, and DEV may or may not run your source. Treat it like an
+unverified import (see "After import" below): commit the file as it is, run
+`scripts/team.sh export <id>`, read the live version, then reconcile and commit.
+
 | Message | Meaning and action |
 | --- | --- |
 | `interrupted while the import was running, so its result is unknown` | You (or a signal) stopped publish while SQLcl was importing, before publish read its output. SQLcl may already have finished: DEV may or may not run your source. Your old `application.apx` is put back. Commit your changes, run `scripts/team.sh export <id>`, and read the live version: the tag publish printed as stamped means the import completed. Then reconcile and commit. |
