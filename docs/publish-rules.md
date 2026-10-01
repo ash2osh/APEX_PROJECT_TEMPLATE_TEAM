@@ -117,8 +117,9 @@ app and agreed with the team that your files should replace it.
 | `is parsed by` | The live application uses a different parsing schema than the descriptor. Review the live app and correct the descriptor and folder, or arrange the intended schema change with the team before importing. |
 | `Live application changed after the Builder drift check` (ORA-20016) | Someone saved or imported the app between the drift check and the import. Nothing was imported. Export, merge, publish. |
 
-**During import.** Publish restores your unstamped `application.apx`; read the
-SQLcl output printed above the message. If the file changed while publish ran
+**During import.** Publish restores your unstamped `application.apx`; when SQLcl
+failed, read its output printed above the message (an interrupt prints none: see
+the first row below). If the file changed while publish ran
 (you saved it in an editor), publish leaves your edit in place and warns
 `changed while publishing; left as is`; check its `version:` line. If the file
 could not be swapped back (for example an editor holds it open), publish warns
@@ -134,8 +135,8 @@ PowerShell 7.2 or later on Linux and macOS (`team.ps1` turns it into Ctrl-C when
 it can compile a small helper, which it needs .NET 6 for; PowerShell exits 130).
 A publish stopped any other way (`kill -9`, closing the window, PowerShell on
 Windows) cannot clean up: `application.apx` keeps the stamped version, its
-scratch folder stays behind (delete it), nothing is printed, and DEV may or may
-not run your source. Treat it like an unverified import (see "After import"
+scratch folder stays behind (delete it), no recovery guidance is printed, and
+DEV may or may not run your source. Treat it like an unverified import (see "After import"
 below): commit the file as it is, run `scripts/team.sh export <id>`, read the
 live version, then reconcile and commit.
 
