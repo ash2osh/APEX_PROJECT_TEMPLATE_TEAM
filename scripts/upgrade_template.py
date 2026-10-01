@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -540,7 +541,9 @@ def apply_actions(
                 mutation.installed_hash = hashlib.sha256(writes[relative][0]).hexdigest()
                 _install_no_replace(staged[relative], target)
                 mutation.replacement_installed = True
-    except (OSError, UpgradeError) as exc:
+    except BaseException as exc:
+        # Ctrl-C and SIGTERM (see _interrupt_on_sigterm) are not OSError, but
+        # they stop an upgrade half-way just the same; restore for them too.
         rollback_errors: list[str] = []
         for mutation in reversed(mutations):
             try:
@@ -570,12 +573,14 @@ def apply_actions(
         if rollback_errors:
             preserve_scratch = True
             detail = (
-                f"filesystem update failed: {exc}; rollback incomplete: "
+                f"filesystem update failed: {exc or type(exc).__name__}; rollback incomplete: "
                 + "; ".join(rollback_errors)
                 + f"; recovery backups retained at {scratch_root}"
             )
-        else:
+        elif isinstance(exc, (OSError, UpgradeError)):
             detail = f"filesystem update failed and was rolled back: {exc}"
+        else:
+            raise  # an interrupt: everything is back as it was
         raise UpgradeError(detail) from exc
     finally:
         if not preserve_scratch:
@@ -629,6 +634,9 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"template upgrade error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("template upgrade interrupted; the project was left as it was", file=sys.stderr)
+        return 130
 
     counts: dict[str, int] = {}
     for action in actions:
@@ -646,5 +654,21 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _interrupt_on_sigterm() -> None:
+    """Handle SIGTERM like Ctrl-C: the default action ends the process at once,
+    leaving a half-applied upgrade and its backups in a scratch directory."""
+    if not hasattr(signal, "SIGTERM"):
+        return
+
+    def handler(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except (ValueError, OSError):  # not the main thread
+        pass
+
+
 if __name__ == "__main__":
+    _interrupt_on_sigterm()
     raise SystemExit(main())

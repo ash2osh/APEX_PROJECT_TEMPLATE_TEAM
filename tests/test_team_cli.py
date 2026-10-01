@@ -247,6 +247,44 @@ class TeamCliTests(unittest.TestCase):
                 self.assertNotEqual(powershell_result.returncode, 0, powershell_result.stdout)
                 self.assertIn(expected, powershell_result.stderr)
 
+    def test_bash_loader_matches_ascii_only_whatever_the_users_locale(self) -> None:
+        # In en_US.UTF-8, Bash's [A-Z] and [A-Za-z] match accented letters, so
+        # the loader accepted values that the PowerShell loader and the Python
+        # resolver reject (an accented DEVELOPER_NAME then failed at publish).
+        listed = subprocess.run(["locale", "-a"], text=True, capture_output=True, check=False).stdout.lower()
+        if "en_us.utf8" not in listed and "en_us.utf-8" not in listed:
+            self.skipTest("the en_US.UTF-8 locale is not installed")
+        pwsh = shutil.which("pwsh")
+        for key, value in (
+            ("DEVELOPER_NAME", "\u00c9RIC"),
+            ("CODE_SQLCL_CONNECTION", "pr\u00fcfung"),
+            ("CODE_SCHEMA", "D\u00c9MO"),
+            ("TABLES_PREFIXES", "\u00dc_"),
+        ):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as temporary:
+                environment = Path(temporary) / ".env"
+                lines = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+                environment.write_text(
+                    "\n".join(f"{key}={value}" if line.startswith(f"{key}=") else line for line in lines) + "\n",
+                    encoding="utf-8",
+                )
+                scripts = Path(temporary) / "scripts"
+                scripts.mkdir()
+                shutil.copy2(ROOT / "scripts" / "load_env.sh", scripts / "load_env.sh")
+                bash_result = subprocess.run(
+                    ["bash", "-c", 'set -e; source "$1" "$2"; echo accepted', "bash", str(scripts / "load_env.sh"), str(environment)],
+                    text=True, capture_output=True, check=False,
+                    env={**os.environ, "LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"},
+                )
+                self.assertNotEqual(bash_result.returncode, 0, f"{key}={value!r} was accepted: {bash_result.stdout}")
+                self.assertIn(key, bash_result.stderr)
+                if pwsh is not None:
+                    powershell_result = subprocess.run(
+                        [pwsh, "-NoProfile", "-Command", f". '{ROOT / 'scripts' / 'load_env.ps1'}' -EnvFile '{environment}'"],
+                        text=True, capture_output=True, check=False,
+                    )
+                    self.assertNotEqual(powershell_result.returncode, 0, powershell_result.stdout)
+
     def test_powershell_runs_bash_helpers_with_the_bash_named_by_team_bash(self) -> None:
         # On Windows the first bash on PATH may be the WSL launcher, or absent
         # when Git for Windows keeps only its cmd directory on PATH.

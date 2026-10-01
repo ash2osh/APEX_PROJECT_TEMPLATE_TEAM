@@ -26,6 +26,14 @@ project_env_fail() {
   return 1
 }
 
+# Bash matches [A-Z], [A-Za-z] and [[:alnum:]] by the user's locale: under
+# en_US.UTF-8 they accept accented letters, which load_env.ps1 and the Python
+# resolver reject. Match in the C locale so all three agree.
+project_env_match() {
+  local LC_ALL=C
+  [[ "$1" =~ $2 ]]
+}
+
 if [ ! -f "$PROJECT_ENV_FILE" ]; then
   project_env_fail "configuration file not found: $PROJECT_ENV_FILE (copy .env.example to .env)"
   return 1 2>/dev/null || exit 1
@@ -50,7 +58,7 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   if [ -z "${project_env_line//[[:space:]]/}" ]; then
     continue
   fi
-  if [[ ! "$project_env_line" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+  if ! project_env_match "$project_env_line" '^([A-Z][A-Z0-9_]*)=(.*)$'; then
     project_env_fail "invalid line in $PROJECT_ENV_FILE: $project_env_line"
     return 1 2>/dev/null || exit 1
   fi
@@ -88,7 +96,7 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   # Values are parsed literally, so an unquoted inline comment would be stored
   # verbatim. For the settings with a format rule that surfaces as a confusing
   # error; for PROJECT_NAME, which has none, it is stored silently.
-  if [ "$project_env_quoted" != true ] && [[ "$project_env_value" =~ [[:space:]]# ]]; then
+  if [ "$project_env_quoted" != true ] && project_env_match "$project_env_value" '[[:space:]]#'; then
     project_env_fail "$project_env_key has an inline comment; .env values are parsed literally, so put the comment on its own line, or quote the value to keep a literal '#'"
     return 1 2>/dev/null || exit 1
   fi
@@ -167,11 +175,11 @@ project_env_check_list() {
   project_env_csv_shape_ok "$value" || { project_env_fail "$key must not contain empty entries"; return 1; }
   project_env_split_csv items "$value"
   for item in "${items[@]}"; do
-    if [ "$kind" = identifier ] && [[ ! "$item" =~ $project_env_oracle_identifier_regex ]]; then
+    if [ "$kind" = identifier ] && ! project_env_match "$item" "$project_env_oracle_identifier_regex"; then
       project_env_fail "$key must be an uppercase Oracle identifier"
       return 1
     fi
-    if [ "$kind" = alias ] && [[ ! "$item" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    if [ "$kind" = alias ] && ! project_env_match "$item" '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
       project_env_fail "$key contains unsupported characters"
       return 1
     fi
@@ -236,7 +244,7 @@ for project_env_prefix in PROD STAGING; do
     fi
   fi
 done
-[[ "$APEX_APP_ID" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
+project_env_match "$APEX_APP_ID" '^[1-9][0-9]*(,[1-9][0-9]*)*$' || {
   project_env_fail "APEX_APP_ID must be a comma-separated list of positive integers without spaces"
   return 1 2>/dev/null || exit 1
 }
@@ -250,7 +258,7 @@ for project_env_key in TABLES_PREFIXES CODE_PREFIXES; do
   if [ "$project_env_value" = "*" ]; then
     continue
   fi
-  if [[ ! "$project_env_value" =~ $project_env_oracle_prefix_regex ]]; then
+  if ! project_env_match "$project_env_value" "$project_env_oracle_prefix_regex"; then
     project_env_fail "$project_env_key must be * or a comma-separated list of uppercase Oracle identifier prefixes without spaces"
     return 1 2>/dev/null || exit 1
   fi
@@ -267,7 +275,7 @@ for project_env_key in TABLES_PREFIXES CODE_PREFIXES; do
 done
 # DEV publish stamps this name into the app version tag, where '-' separates it
 # from the date.
-if [[ ! "$DEVELOPER_NAME" =~ ^[A-Z][A-Z0-9_]{0,29}$ ]]; then
+if ! project_env_match "$DEVELOPER_NAME" '^[A-Z][A-Z0-9_]{0,29}$'; then
   project_env_fail "DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF"
   return 1 2>/dev/null || exit 1
 fi
@@ -355,7 +363,7 @@ project_env_narrow() {
 }
 
 if [ -n "${PROJECT_SCHEMA:-}" ]; then
-  if [[ ! "$PROJECT_SCHEMA" =~ $project_env_oracle_identifier_regex ]]; then
+  if ! project_env_match "$PROJECT_SCHEMA" "$project_env_oracle_identifier_regex"; then
     project_env_fail "PROJECT_SCHEMA must be an uppercase Oracle identifier"
     return 1 2>/dev/null || exit 1
   fi
@@ -402,4 +410,5 @@ unset project_env_repo_root
 # project_env_fail and project_env_require_single stay defined for callers that
 # refuse an ambiguous schema; the parsing helpers do not.
 unset -f project_env_validate_unique_csv project_env_csv_shape_ok project_env_split_csv \
-  project_env_count project_env_check_list project_env_check_aligned project_env_narrow
+  project_env_count project_env_check_list project_env_check_aligned project_env_narrow \
+  project_env_match

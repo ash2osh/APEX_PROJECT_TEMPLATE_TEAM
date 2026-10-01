@@ -1,8 +1,10 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -248,6 +250,62 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read("scripts/tool.sh"), "echo v1\n")
         self.assertEqual(self.read(".template-lock.json"), original_lock)
         self.assertEqual(git(self.project, "status", "--porcelain"), "")
+
+    def test_interrupt_rolls_back_prior_updates_and_lock_like_a_failure(self) -> None:
+        # Ctrl-C is a KeyboardInterrupt, not an OSError. It used to skip the
+        # rollback and the cleanup then deleted the backups, leaving a half
+        # applied upgrade whose lock already listed the new hashes.
+        self.adopt()
+        original_lock = self.read(".template-lock.json")
+        self.release_v2({"AGENTS.md": "rules v2\n", "scripts/tool.sh": "echo v2\n"})
+        actions = [
+            upgrade_engine.Action("UPDATE", "AGENTS.md"),
+            upgrade_engine.Action("UPDATE", "scripts/tool.sh"),
+        ]
+        real_install = upgrade_engine._install_no_replace
+
+        def interrupt_installing_tool(source: Path, target: Path) -> None:
+            if target.name == "tool.sh":
+                raise KeyboardInterrupt
+            real_install(source, target)
+
+        with patch("scripts.upgrade_template._install_no_replace", side_effect=interrupt_installing_tool):
+            with self.assertRaises(KeyboardInterrupt):
+                upgrade_engine.apply_actions(
+                    self.project,
+                    self.template,
+                    actions,
+                    str(self.template),
+                    git(self.template, "rev-parse", "HEAD"),
+                    {"AGENTS.md": "a" * 64, "scripts/tool.sh": "b" * 64},
+                )
+
+        self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+        self.assertEqual(self.read("scripts/tool.sh"), "echo v1\n")
+        self.assertEqual(self.read(".template-lock.json"), original_lock)
+        self.assertEqual(git(self.project, "status", "--porcelain"), "")
+        self.assertEqual(list(self.project.glob(".apex-template-upgrade-*")), [])
+
+    def test_interrupt_message_says_the_project_was_restored(self) -> None:
+        self.adopt()
+        self.release_v2({"AGENTS.md": "rules v2\n"})
+        with patch("scripts.upgrade_template.fetch_template", side_effect=KeyboardInterrupt):
+            with patch("sys.stderr") as stderr:
+                status = upgrade_engine.main(["--project-root", str(self.project), "--source", str(self.template)])
+        self.assertEqual(status, 130)
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("interrupted", written)
+
+    @unittest.skipUnless(hasattr(signal, "SIGTERM") and os.name == "posix", "needs POSIX signals")
+    def test_sigterm_is_handled_like_ctrl_c(self) -> None:
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            upgrade_engine._interrupt_on_sigterm()
+            with self.assertRaises(KeyboardInterrupt):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(1)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
     def test_failed_rollback_retains_backup_and_does_not_claim_success(self) -> None:
         self.adopt()

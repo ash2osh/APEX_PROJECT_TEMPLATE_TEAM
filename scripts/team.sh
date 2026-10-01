@@ -61,7 +61,8 @@ if [ "$command_name" != upgrade-template ]; then
   set -- ${schema_filtered[@]+"${schema_filtered[@]}"}
   if [ -n "${PROJECT_SCHEMA:-}" ]; then
     schema_pattern='^[A-Z][A-Z0-9_$#]{0,127}$'
-    [[ "$PROJECT_SCHEMA" =~ $schema_pattern ]] || fail "--schema must be an uppercase Oracle identifier"
+    # C locale: in en_US.UTF-8 [A-Z] also matches accented capitals.
+    ( LC_ALL=C; [[ "$PROJECT_SCHEMA" =~ $schema_pattern ]] ) || fail "--schema must be an uppercase Oracle identifier"
   fi
 fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
