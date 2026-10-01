@@ -229,6 +229,10 @@ class ValidateMigrationTests(unittest.TestCase):
             'INSERT INTO T VALUES (1);\n"x"\nUPDATE T SET A = 2;\n',
             "q'[stray]'\nSELECT 1 FROM dual;\n",
             "SELECT 1 FROM dual; 'trailing'\nSELECT 2 FROM dual;\n",
+            # after the last statement, and a file that is one quoted region
+            "SELECT 1 FROM dual;\n'-- stray\n--'\n",
+            "BEGIN\n  NULL;\nEND;\n/\n' \n'--\n",
+            "'/*END; \nFROM dual;\nBEGIN NULL; END;\n/\nq'\n",
         ):
             with self.subTest(source=source):
                 result = self.run_validator(source)

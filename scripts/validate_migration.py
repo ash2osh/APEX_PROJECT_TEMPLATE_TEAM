@@ -275,19 +275,20 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
     while index < len(masked):
         while index < len(masked) and masked[index].isspace():
             index += 1
+        # Blanked quoted text between statements (or after the last one) would
+        # be skipped here, but SQLcl reads it as a command ("Unknown Command")
+        # and carries on.
+        for quoted_start, quoted_end in quoted:
+            if quoted_start >= previous_end and quoted_end <= index:
+                raise ValueError(
+                    f"SQL-only migration rejects a quoted value outside any statement at line "
+                    f"{source.count(chr(10), 0, quoted_start) + 1}; SQLcl would read it as a command"
+                )
         if index >= len(masked):
             break
 
         statement_start = index
         line_number = masked.count("\n", 0, statement_start) + 1
-        # Blanked quoted text between statements would be skipped here, but
-        # SQLcl reads it as a command ("Unknown Command") and carries on.
-        for quoted_start, quoted_end in quoted:
-            if quoted_start >= previous_end and quoted_end <= statement_start:
-                raise ValueError(
-                    f"SQL-only migration rejects a quoted value outside any statement at line "
-                    f"{source.count(chr(10), 0, quoted_start) + 1}; SQLcl would not run the statement that follows it"
-                )
         head = masked[index:]
         first_match = re.match(r"([A-Za-z][A-Za-z0-9_$#]*)", head, flags=re.ASCII)
         if first_match is None:
