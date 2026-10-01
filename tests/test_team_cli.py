@@ -312,6 +312,36 @@ class TeamCliTests(unittest.TestCase):
                     plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stderr).split())
                     self.assertIn("is UTF-16; save it as UTF-8", plain, f"{name}: {result.stderr}")
 
+    def test_a_leading_option_is_an_unknown_command_in_both_wrappers(self) -> None:
+        # PowerShell's parameter binder keeps option-like tokens out of $Command,
+        # so `team.ps1 --schema=DEMO doctor` printed usage and exited 0, silently
+        # dropping the command. Bash says unknown command; so must PowerShell.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        environment = {**os.environ, "PROJECT_ENV_FILE": "/no/such/env"}
+        for arguments in (["--schema=DEMO", "doctor"], ["--schema", "-1", "doctor"], ["-x", "doctor"]):
+            with self.subTest(arguments=arguments):
+                bash_result = subprocess.run(["bash", str(ROOT / "scripts" / "team.sh"), *arguments], env=environment,
+                                             text=True, capture_output=True, check=False, cwd=ROOT)
+                powershell_result = subprocess.run([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), *arguments],
+                                                   env=environment, text=True, capture_output=True, check=False, cwd=ROOT)
+                self.assertNotEqual(bash_result.returncode, 0)
+                self.assertIn("unknown command", bash_result.stderr)
+                self.assertNotEqual(powershell_result.returncode, 0, powershell_result.stdout)
+                self.assertIn("unknown command", re.sub(r"\x1b\[[0-9;]*m", "", powershell_result.stderr))
+
+    def test_both_wrappers_still_print_usage_for_no_command_and_for_help(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        for arguments in ([], ["--help"], ["-h"]):
+            with self.subTest(arguments=arguments):
+                for command in (["bash", str(ROOT / "scripts" / "team.sh")], [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")]):
+                    result = subprocess.run([*command, *arguments], text=True, capture_output=True, check=False, cwd=ROOT)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("Usage: scripts/team.", result.stdout)
+
     def test_powershell_runs_bash_helpers_with_the_bash_named_by_team_bash(self) -> None:
         # On Windows the first bash on PATH may be the WSL launcher, or absent
         # when Git for Windows keeps only its cmd directory on PATH.
@@ -425,6 +455,7 @@ class TeamCliTests(unittest.TestCase):
             "normalize_apx.sh",
             "record_export_state.py",
             "verify_publish_state.py",
+            "stamp_publish_version.py",
             "validate_app_source.py",
         ):
             source = ROOT / "scripts" / name

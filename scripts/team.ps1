@@ -78,6 +78,14 @@ function Invoke-TeamBash {
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+# PowerShell's parameter binder keeps option-like tokens (--schema=X, -x) out of
+# $Command and leaves it empty, which printed usage and exited 0 for
+# `team.ps1 --schema=DEMO doctor`. Bash takes the first token as the command.
+if ([string]::IsNullOrWhiteSpace($Command) -and $Arguments.Count -gt 0) {
+  $Command = $Arguments[0]
+  $Arguments = @($Arguments | Select-Object -Skip 1)
+}
+
 if ([string]::IsNullOrWhiteSpace($Command) -or $Command -in @("--help", "-h")) {
   Show-Usage
   exit 0
