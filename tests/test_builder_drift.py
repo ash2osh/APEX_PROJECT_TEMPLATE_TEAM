@@ -227,8 +227,10 @@ class BuilderDriftTests(unittest.TestCase):
             )
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            # A SQLcl that is still running when the interrupt arrives.
-            (fake_bin / "sql").write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+            # A SQLcl that is still running when the interrupt arrives; it says
+            # so, so the test does not guess how long Python takes to start.
+            started = root / "sql-started"
+            (fake_bin / "sql").write_text(f"#!/bin/sh\ntouch '{started}'\nsleep 30\n", encoding="utf-8")
             (fake_bin / "sql").chmod(0o755)
             environment = os.environ.copy()
             environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
@@ -237,7 +239,10 @@ class BuilderDriftTests(unittest.TestCase):
                 cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
             )
-            time.sleep(1.5)
+            deadline = time.monotonic() + 60
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(started.exists(), "the guard never started SQLcl")
             os.killpg(process.pid, signal.SIGINT)
             _, stderr = process.communicate(timeout=30)
 
