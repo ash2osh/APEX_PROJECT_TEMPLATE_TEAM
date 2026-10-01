@@ -462,7 +462,9 @@ class PublishAppCliTests(unittest.TestCase):
                 if shell == "bash":
                     command = ["bash", str(runner), "100"]
                 else:
-                    command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+                    # Through the wrapper: it is what turns Ctrl-C into status 130.
+                    shutil.copy2(ROOT / "scripts" / "team.ps1", root / "scripts" / "team.ps1")
+                    command = [pwsh, "-NoProfile", "-File", str(root / "scripts/team.ps1"), "publish", "100"]
                 process = subprocess.Popen(
                     command, cwd=root, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     start_new_session=True, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
@@ -474,6 +476,9 @@ class PublishAppCliTests(unittest.TestCase):
                 os.killpg(process.pid, sig)
                 output, _ = process.communicate(timeout=60)
 
+                if shell == "pwsh":
+                    # pwsh used to exit 0 here, which a caller reads as success.
+                    self.assertEqual(process.returncode, 130, output)
                 plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", output).split())
                 self.assertIn("interrupted while the import was running", plain)
                 self.assertIn("its result is unknown", plain)

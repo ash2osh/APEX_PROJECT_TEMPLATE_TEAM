@@ -2,8 +2,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -368,6 +370,39 @@ class TeamCliTests(unittest.TestCase):
                     re.sub(r"\x1b\[[0-9;]*m", "", powershell_result.stderr).strip(),
                     bash_result.stderr.replace("team.sh", "team.ps1").strip(),
                 )
+
+    def test_powershell_exits_130_when_interrupted_while_a_helper_runs(self) -> None:
+        # Ctrl-C stops PowerShell's own pipeline as well as the helper, so the
+        # line that passes the helper's status on never ran and pwsh exited 0,
+        # which a caller reads as success. Bash exits 130.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            started = root / "started"
+            fake_bash = root / "git-bash"
+            fake_bash.write_text(f"#!/bin/sh\n: > '{started}'\nsleep 30\n", encoding="utf-8")
+            fake_bash.chmod(0o755)
+            process = subprocess.Popen(
+                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "compare-schema", "--env", "dev", "--object", "T"],
+                cwd=ROOT, env={**os.environ, "TEAM_BASH": str(fake_bash)},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                # A background job in a non-interactive shell inherits SIGINT as ignored.
+                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while not started.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(started.exists(), "the helper never started")
+                os.killpg(process.pid, signal.SIGINT)
+                process.communicate(timeout=60)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+            self.assertEqual(process.returncode, 130)
 
     def test_the_two_usage_screens_match_apart_from_the_script_name(self) -> None:
         # The PowerShell screen once left out `--help`, an option it accepts.
