@@ -6,6 +6,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Fail([string] $Message) {
+  [Console]::Error.WriteLine("team error: $Message")
+  exit 2
+}
+
 function Show-Usage {
   @"
 Usage: scripts/team.ps1 <command> [arguments]
@@ -40,7 +45,7 @@ Options:
 function Resolve-TeamBash {
   if (-not [string]::IsNullOrWhiteSpace($env:TEAM_BASH)) {
     if (-not (Test-Path -LiteralPath $env:TEAM_BASH -PathType Leaf)) {
-      throw "TEAM_BASH is set but is not a file: $($env:TEAM_BASH)"
+      Fail "TEAM_BASH is set but is not a file: $($env:TEAM_BASH)"
     }
     return $env:TEAM_BASH
   }
@@ -73,7 +78,7 @@ function Invoke-TeamBash {
   param([string] $ScriptName, [string[]] $ScriptArguments)
   $bashPath = Resolve-TeamBash
   if ($null -eq $bashPath) {
-    throw "Bash is required for '$ScriptName'; install Git for Windows, set TEAM_BASH to its bash.exe, or run scripts/team.sh"
+    Fail "Bash is required for '$ScriptName'; install Git for Windows, set TEAM_BASH to its bash.exe, or run scripts/team.sh"
   }
   & $bashPath (Join-Path $PSScriptRoot $ScriptName) @ScriptArguments
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -98,7 +103,7 @@ if ($Command -ne "upgrade-template") {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
-      if ($index + 1 -ge $Arguments.Count) { throw "--schema requires a schema name" }
+      if ($index + 1 -ge $Arguments.Count) { Fail "--schema requires a schema name" }
       $env:PROJECT_SCHEMA = $Arguments[$index + 1]
       $index++
     } elseif ($Arguments[$index] -like "--schema=*") {
@@ -109,13 +114,13 @@ if ($Command -ne "upgrade-template") {
   }
   $Arguments = $schemaFiltered
   if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA) -and $env:PROJECT_SCHEMA -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
-    throw "--schema must be an uppercase Oracle identifier"
+    Fail "--schema must be an uppercase Oracle identifier"
   }
 }
 
 switch ($Command) {
   "doctor" {
-    if ($Arguments.Count -ne 0) { throw "doctor does not accept arguments" }
+    if ($Arguments.Count -ne 0) { Fail "doctor does not accept arguments" }
     . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
     . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
     $scratchPath = Join-Path ((Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path) "scratch"
@@ -183,8 +188,8 @@ switch ($Command) {
         if (-not (Invoke-DoctorOne $connectionList[$doctorIndex] $userList[$doctorIndex] $schemaList[$doctorIndex])) { $doctorFailed++ }
       }
     }
-    if ($doctorTotal -eq 0) { throw "no configured profile lists schema $($env:PROJECT_SCHEMA)" }
-    if ($doctorFailed -gt 0) { throw "$doctorFailed of $doctorTotal doctor check(s) failed" }
+    if ($doctorTotal -eq 0) { Fail "no configured profile lists schema $($env:PROJECT_SCHEMA)" }
+    if ($doctorFailed -gt 0) { Fail "$doctorFailed of $doctorTotal doctor check(s) failed" }
     if ($doctorTotal -eq 1) {
       Write-Output "Doctor checks passed for the configured DEV connection."
     } else {
@@ -192,49 +197,47 @@ switch ($Command) {
     }
   }
   "export" {
-    if ($Arguments.Count -ne 1 -or $Arguments[0] -cnotmatch '^[1-9][0-9]*$') {
-      throw "usage: scripts/team.ps1 export <numeric_app_id>"
-    }
+    if ($Arguments.Count -ne 1) { Fail "usage: scripts/team.ps1 export <numeric_app_id>" }
+    if ($Arguments[0] -cnotmatch '^[1-9][0-9]*$') { Fail "expected a positive numeric application id" }
     & (Join-Path $PSScriptRoot "export_apps.ps1") -AppId $Arguments[0]
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   }
   "publish" {
-    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 publish <numeric_app_id> [--env dev] [--force]" }
+    if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 publish <numeric_app_id> [--env dev] [--force]" }
     for ($index = 0; $index -lt $Arguments.Count; $index++) {
       if ($Arguments[$index] -eq "--env") {
-        if ($index + 1 -ge $Arguments.Count -or $Arguments[$index + 1] -cne "dev") {
-          throw "publish targets DEV only; use deploy for staging or production"
-        }
+        if ($index + 1 -ge $Arguments.Count) { Fail "--env requires dev; use deploy for staging or production" }
+        if ($Arguments[$index + 1] -cne "dev") { Fail "publish targets DEV only; use deploy for staging or production" }
       }
     }
     & (Join-Path $PSScriptRoot "publish_app.ps1") @Arguments
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   }
   "check-conflicts" {
-    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)" }
+    if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)" }
     Invoke-TeamBash -ScriptName "check_conflicts.sh" -ScriptArguments $Arguments
   }
   "migrate" {
-    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod" }
+    if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod" }
     Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments $Arguments
   }
   "compare-schema" {
-    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }
+    if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }
     Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments $Arguments
   }
   "backup-db" {
-    if ($Arguments.Count -ne 0) { throw "backup-db does not accept arguments" }
+    if ($Arguments.Count -ne 0) { Fail "backup-db does not accept arguments" }
     & (Join-Path $PSScriptRoot "backup_db.ps1")
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   }
   "deploy" {
-    if ($Arguments.Count -lt 1) { throw "usage: scripts/team.ps1 deploy <numeric_app_id> --env <staging|prod> [--manual]" }
+    if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 deploy <numeric_app_id> --env <staging|prod> [--manual]" }
     Invoke-TeamBash -ScriptName "deploy.sh" -ScriptArguments $Arguments
   }
   "upgrade-template" {
     $python = Get-Command python3 -ErrorAction SilentlyContinue
     if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-    if ($null -eq $python) { throw "Python 3 is required to upgrade the template" }
+    if ($null -eq $python) { Fail "Python 3 is required to upgrade the template" }
     $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
     & $python.Source (Join-Path $PSScriptRoot "upgrade_template.py") --project-root $repoRoot @Arguments
     $upgradeStatus = $LASTEXITCODE
@@ -248,5 +251,5 @@ switch ($Command) {
     }
     exit $upgradeStatus
   }
-  default { throw "unknown command '$Command'; use --help to list commands" }
+  default { Fail "unknown command '$Command'; use --help to list commands" }
 }

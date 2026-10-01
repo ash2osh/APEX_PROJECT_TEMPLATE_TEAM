@@ -342,6 +342,33 @@ class TeamCliTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Usage: scripts/team.", result.stdout)
 
+    def test_argument_errors_read_and_exit_the_same_in_both_wrappers(self) -> None:
+        # An uncaught throw makes PowerShell print an exception block with the
+        # script path and line and exit 1; Bash prints one `team error:` line and
+        # exits 2, which scripts that call the wrappers can rely on.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        environment = {**os.environ, "PROJECT_ENV_FILE": "/no/such/env"}
+        for arguments in (
+            ["export"], ["export", "bad"], ["export", "1", "2"],
+            ["doctor", "extra"], ["doctor", "--schema"], ["doctor", "--schema", "lowercase"],
+            ["publish"], ["publish", "1", "--env"], ["publish", "1", "--env", "prod"],
+            ["check-conflicts"], ["migrate"], ["compare-schema"], ["deploy"],
+            ["backup-db", "extra"], ["no-such-command"],
+        ):
+            with self.subTest(arguments=arguments):
+                bash_result = subprocess.run(["bash", str(ROOT / "scripts" / "team.sh"), *arguments], env=environment,
+                                             text=True, capture_output=True, check=False, cwd=ROOT)
+                powershell_result = subprocess.run([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), *arguments],
+                                                   env=environment, text=True, capture_output=True, check=False, cwd=ROOT)
+                self.assertEqual(bash_result.returncode, 2, bash_result.stderr)
+                self.assertEqual(powershell_result.returncode, 2, powershell_result.stderr)
+                self.assertEqual(
+                    re.sub(r"\x1b\[[0-9;]*m", "", powershell_result.stderr).strip(),
+                    bash_result.stderr.replace("team.sh", "team.ps1").strip(),
+                )
+
     def test_the_two_usage_screens_match_apart_from_the_script_name(self) -> None:
         # The PowerShell screen once left out `--help`, an option it accepts.
         pwsh = shutil.which("pwsh")
