@@ -364,6 +364,28 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertNotIn(check.sql, observed["driver"])
         self.assertIn("DBMS_SQL.BIND_VARIABLE(l_cursor, ':target_schema', 'APP')", observed["driver"])
 
+    def test_check_session_cannot_commit_inside_a_stored_function(self):
+        # SET TRANSACTION READ ONLY does not stop a stored function that runs as an
+        # autonomous transaction: called from a check it inserted a row, or created a
+        # table, and committed. The text validator cannot see a function named
+        # without parentheses, so the session itself must refuse the commit.
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("one", "SELECT 1 FROM dual", 1)
+        observed = {}
+
+        def runner(_target, driver, run_dir):
+            observed["driver"] = driver.read_text(encoding="utf-8")
+            payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "one", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
+            output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        run_checks(target, (check,), Path(self.temporary.name), _runner=runner)
+
+        driver = observed["driver"]
+        self.assertIn("ALTER SESSION DISABLE COMMIT IN PROCEDURE;", driver)
+        self.assertLess(driver.index("ALTER SESSION DISABLE COMMIT IN PROCEDURE;"), driver.index("SET TRANSACTION READ ONLY;"))
+        self.assertLess(driver.index("ALTER SESSION DISABLE COMMIT IN PROCEDURE;"), driver.index("DBMS_SQL.PARSE"))
+
     def test_check_session_reports_its_database_identity(self):
         target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
         check = QueryCheck("one", "SELECT 1 FROM dual", 1)

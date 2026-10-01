@@ -100,14 +100,18 @@ subqueries, and these functions: `AVG`, `CAST`, `COALESCE`, `COUNT`, `LENGTH`,
 `LOWER`, `MAX`, `MIN`, `NVL`, `REGEXP_LIKE`, `SUBSTR`, `SUM`, `TO_CHAR`,
 `TO_NUMBER`, `UPPER`, and `SYS_CONTEXT` for `USERENV` `SESSION_USER` or
 `CURRENT_SCHEMA`. Its only bind is `:target_schema`. Non-ASCII text belongs
-inside a string literal, a quoted name or a comment. A call to any other function (yours
-or a built-in not listed) is refused when it is written with parentheses, so is
-a sequence `NEXTVAL`/`CURRVAL`, `FOR UPDATE`, a database link, or any statement
-that writes; express other tests with `CASE` and the listed functions. The
-validator reads the text, not the database: a stored function named without
-parentheses (`my_func`, `my_pkg.is_ready`) looks like a column to it and is not
-refused. Do not call one in a check; one that writes through an autonomous
-transaction would break the read-only promise of `check-conflicts`.
+inside a string literal, a quoted name or a comment. A call to any other
+function (yours or a built-in not listed) is refused when it is written with
+parentheses, so is a sequence `NEXTVAL`/`CURRVAL`, `FOR UPDATE`, a database
+link, or any statement that writes; express other tests with `CASE` and the
+listed functions. The validator reads the text, not the database, so a stored
+function named without parentheses (`my_func`, `my_pkg.is_ready`) looks like a
+column to it and is not refused. The check session is read-only and cannot
+commit inside PL/SQL (`ALTER SESSION DISABLE COMMIT IN PROCEDURE`), so a
+function that writes, whether directly, through an autonomous transaction or
+through DDL, fails the check with `ORA-00034` instead of writing. Do not call
+stored functions in a check anyway: one that does something that is not
+transactional, such as writing a file or sending a request, is not stopped.
 
 SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
 so the apply session ends with its own check. Every package, package body,

@@ -750,6 +750,11 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
         "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
+        # A read-only transaction does not stop a stored function that runs as an
+        # autonomous transaction: called from a check it can insert, or run DDL, and
+        # commit. The text validator cannot see such a function when it is named
+        # without parentheses, so the session refuses the commit (ORA-00034).
+        "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
         "SET TRANSACTION READ ONLY;",
         "DECLARE",
         "  l_payload JSON_OBJECT_T := JSON_OBJECT_T();",
