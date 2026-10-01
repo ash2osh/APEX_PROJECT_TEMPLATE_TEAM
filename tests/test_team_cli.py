@@ -342,6 +342,22 @@ class TeamCliTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Usage: scripts/team.", result.stdout)
 
+    def test_the_two_usage_screens_match_apart_from_the_script_name(self) -> None:
+        # The PowerShell screen once left out `--help`, an option it accepts.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        bash_usage = subprocess.run(["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
+                                    text=True, capture_output=True, check=False, cwd=ROOT)
+        powershell_usage = subprocess.run([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "--help"],
+                                          text=True, capture_output=True, check=False, cwd=ROOT)
+        self.assertEqual(bash_usage.returncode, 0, bash_usage.stderr)
+        self.assertEqual(powershell_usage.returncode, 0, powershell_usage.stderr)
+        self.assertEqual(
+            [line.rstrip() for line in bash_usage.stdout.replace("team.sh", "team.ps1").splitlines()],
+            [line.rstrip() for line in powershell_usage.stdout.splitlines()],
+        )
+
     def test_powershell_runs_bash_helpers_with_the_bash_named_by_team_bash(self) -> None:
         # On Windows the first bash on PATH may be the WSL launcher, or absent
         # when Git for Windows keeps only its cmd directory on PATH.

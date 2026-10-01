@@ -28,6 +28,7 @@ Commands:
                                               Update template-owned files from the template
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template)
+  --help                                      Show this help
 "@ | Write-Output
 }
 
