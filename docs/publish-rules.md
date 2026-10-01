@@ -88,6 +88,7 @@ app and agreed with the team that your files should replace it.
 | `publish targets DEV only` | Use `scripts/team.sh deploy <id> --env staging\|prod`. |
 | `resembles production but DB_ENVIRONMENT` | The connection name looks like production. Check `.env`, and ask before continuing. |
 | `deployment descriptor not found` | Add `apps/<schema>/<id>/deployments/dev.json`; copy it from `apps/templates/deployments/`. |
+| `invalid deployment descriptor: it starts with a UTF-8 byte-order mark` | SQLcl cannot parse a descriptor that starts with a byte-order mark (Windows PowerShell's `-Encoding UTF8` writes one), and imports nothing. Save the file as UTF-8 without a BOM. |
 | `is stored under apps/` | The app folder and descriptor name different parsing schemas. Move the folder under `apps/<PARSING_SCHEMA>/` or correct the descriptor. |
 | `does not match the application's parsing schema` | The selected `--schema` differs from the descriptor. Drop or correct `--schema`. |
 | `is not listed in APEX_PARSING_SCHEMA` | The app's parsing schema has no DEV APEX profile entry. Add the schema, connection, and expected user to the aligned APEX profile lists in `.env`. |

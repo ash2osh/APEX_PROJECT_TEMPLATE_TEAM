@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -415,6 +416,31 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("[DRIFT DETECTED]", second.stdout)
             self.assertIn("[BOB-2026-09-26r001]", second.stdout)
             self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
+
+    def test_descriptor_with_a_byte_order_mark_is_refused_early_in_both_shells(self) -> None:
+        # SQLcl cannot parse a deployment file that starts with a UTF-8 BOM (it
+        # prints "Deployment file cannot be parsed", exits 0 and imports nothing),
+        # and Windows PowerShell's -Encoding UTF8 writes one. Both shells say so
+        # before connecting.
+        pwsh = shutil.which("pwsh")
+        shells = ["bash"] + (["pwsh"] if pwsh else [])
+        for shell in shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                descriptor = app / "deployments" / "dev.json"
+                descriptor.write_bytes(b"\xef\xbb\xbf" + descriptor.read_bytes())
+                if shell == "bash":
+                    command = ["bash", str(runner), "100", "--describe"]
+                else:
+                    command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100", "--describe"]
+
+                result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                output = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stdout + result.stderr).split())
+                self.assertIn("byte-order mark", output)
 
     def test_drift_refusal_names_the_export_command_of_the_shell_in_use(self) -> None:
         # A PowerShell user must not be told to run the Bash wrapper.

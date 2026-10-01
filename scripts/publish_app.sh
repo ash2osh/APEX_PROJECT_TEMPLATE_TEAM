@@ -92,6 +92,15 @@ import sys
 
 path, expected_id = sys.argv[1:]
 try:
+    with open(path, "rb") as raw:
+        if raw.read(3) == b"\xef\xbb\xbf":
+            # SQLcl prints "Deployment file cannot be parsed" and imports nothing.
+            print(
+                "invalid deployment descriptor: it starts with a UTF-8 byte-order mark, "
+                "which SQLcl cannot parse; save it without one",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
     with open(path, encoding="utf-8") as source:
         descriptor = json.load(source)
     workspace = descriptor["workspace"]["name"]

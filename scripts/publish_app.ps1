@@ -107,6 +107,11 @@ $deploymentFile = Join-Path $appDir "deployments/$appEnvironment.json"
 if (-not (Test-Path -LiteralPath $deploymentFile -PathType Leaf)) {
   throw "publish error: deployment descriptor not found: $deploymentFile"
 }
+$deploymentHead = [System.IO.File]::ReadAllBytes($deploymentFile) | Select-Object -First 3
+if (@($deploymentHead).Count -eq 3 -and $deploymentHead[0] -eq 0xEF -and $deploymentHead[1] -eq 0xBB -and $deploymentHead[2] -eq 0xBF) {
+  # SQLcl prints "Deployment file cannot be parsed" and imports nothing.
+  throw "publish error: invalid deployment descriptor: it starts with a UTF-8 byte-order mark, which SQLcl cannot parse; save it without one"
+}
 try {
   $deployment = Get-Content -LiteralPath $deploymentFile -Raw | ConvertFrom-Json
 } catch {
