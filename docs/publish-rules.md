@@ -158,7 +158,7 @@ commit. Publish prints these steps when it stops here.
 | Message | Meaning |
 | --- | --- |
 | `post-import APEX export failed` | The verification export failed. |
-| `APEXlang source file set does not match the post-import re-export` | APEX wrote a different set of files than you committed. |
+| `APEXlang source file set does not match the post-import re-export` | APEX wrote a different set of files than you committed. The one exception is an empty `supporting-objects/deinstall-script.sql`, which SQLcl's starter application (`apex generate`) ships and APEX leaves out of an export: it is accepted as missing, and any content in it is not. |
 | `APEXlang source bytes do not match the post-import re-export` | APEX normalized something you wrote by hand, or (when the message goes on to name another live publish tag) a teammate's import replaced yours. After exporting, commit APEX's form, or merge their change. |
 | `is not visible in the post-import state` | The app is missing after import. |
 | `changed while its post-import source was being verified` | Someone edited or imported during the verification. |

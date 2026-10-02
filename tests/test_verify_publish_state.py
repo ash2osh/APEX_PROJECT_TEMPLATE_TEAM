@@ -193,6 +193,60 @@ class VerifyPublishStateTests(unittest.TestCase):
             self.assertIn("later than the database-time observation", result.stderr)
             self.assertEqual(marker_path.read_bytes(), original_marker)
 
+    # SQLcl's starter application (apex generate) ships supporting-objects/deinstall-script.sql
+    # with no content, and APEX leaves an empty script out of an export.
+    DEINSTALL = Path("supporting-objects") / "deinstall-script.sql"
+
+    def test_an_empty_deinstall_script_that_the_export_leaves_out_does_not_stop_the_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            (source / self.DEINSTALL).parent.mkdir()
+            (source / self.DEINSTALL).write_bytes(b"")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(marker_path.read_text(encoding="utf-8"))["builderLastUpdatedOn"], "2026-09-26T09:30:00")
+
+    def test_a_deinstall_script_with_content_must_come_back_in_the_re_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            (source / self.DEINSTALL).parent.mkdir()
+            (source / self.DEINSTALL).write_bytes(b"DROP TABLE T;\n")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing from re-export: supporting-objects/deinstall-script.sql", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
+
+    def test_any_other_file_missing_from_the_re_export_still_stops_the_baseline_even_when_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            (source / "pages").mkdir()
+            (source / "pages" / "p00002-empty.apx").write_bytes(b"")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing from re-export: pages/p00002-empty.apx", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
+
+    def test_a_deinstall_script_only_in_the_re_export_still_stops_the_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            (exported / self.DEINSTALL).parent.mkdir()
+            (exported / self.DEINSTALL).write_bytes(b"")
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unexpected in re-export: supporting-objects/deinstall-script.sql", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
+
 
 if __name__ == "__main__":
     unittest.main()

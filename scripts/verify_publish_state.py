@@ -17,6 +17,10 @@ from validate_app_source import validate_app_source
 
 
 IGNORED_SOURCE_PATHS = {"apex-team-export.json"}
+# SQLcl's starter application (`apex generate`) ships this script with no content, and APEX
+# leaves an empty script out of an export, so the re-export of a correct import lacks it. Only
+# the empty file may be missing: one with content must still come back byte for byte.
+EMPTY_MAY_BE_MISSING = {Path("supporting-objects/deinstall-script.sql")}
 
 
 def source_files(root: Path) -> dict[Path, Path]:
@@ -63,7 +67,11 @@ def replaced_import_hint(source_dir: Path, exported_dir: Path) -> str:
 def verify_source_bytes(source_dir: Path, exported_dir: Path) -> None:
     source_files_by_path = source_files(source_dir)
     exported_files_by_path = source_files(exported_dir)
-    missing = sorted(source_files_by_path.keys() - exported_files_by_path.keys())
+    missing = sorted(
+        path
+        for path in source_files_by_path.keys() - exported_files_by_path.keys()
+        if not (path in EMPTY_MAY_BE_MISSING and source_files_by_path[path].stat().st_size == 0)
+    )
     unexpected = sorted(exported_files_by_path.keys() - source_files_by_path.keys())
     if missing or unexpected:
         details = []
@@ -74,6 +82,8 @@ def verify_source_bytes(source_dir: Path, exported_dir: Path) -> None:
         raise ValueError("APEXlang source file set does not match the post-import re-export (" + "; ".join(details) + ")")
 
     for relative, source_path in source_files_by_path.items():
+        if relative not in exported_files_by_path:
+            continue  # an empty script the export leaves out, accepted above
         if source_path.read_bytes() != exported_files_by_path[relative].read_bytes():
             raise ValueError(f"APEXlang source bytes do not match the post-import re-export: {relative.as_posix()}")
 
