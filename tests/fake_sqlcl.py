@@ -3,8 +3,12 @@
 A test writes the fake as a Bash script. On POSIX that script runs as `sql`
 through its shebang, and so does it under Git Bash on Windows. Windows itself
 cannot start an extensionless file (CreateProcess, Start-Process, Python's
-subprocess), so a `sql.cmd` shim beside it runs the same script with Git Bash.
-A Python caller finds that shim with shutil.which, which applies PATHEXT.
+subprocess), so a `sql.exe` beside it runs the same script with Git Bash. It is a
+real executable (pip's bundled distlib script launcher around a three-line
+Python forwarder), which matters: Start-Process, Python subprocess and Bash all
+start it, and the command line, stdin and exit code reach the script unchanged.
+A `sql.cmd` shim is not equivalent, because cmd.exe would interpret `&`, `^` and
+`%` in the arguments; it is written only when the launcher cannot be built.
 
 Import this module instead of `_no_real_sqlcl`: it installs that guard too.
 """
@@ -12,6 +16,7 @@ Import this module instead of `_no_real_sqlcl`: it installs that guard too.
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -29,10 +34,31 @@ def install(directory: Path, script: str) -> Path:
     fake = directory / "sql"
     fake.write_text(script if script.startswith("#!") else "#!/usr/bin/env bash\n" + script, encoding="utf-8", newline="\n")
     fake.chmod(0o755)
-    if os.name == "nt":
+    if os.name == "nt" and not _build_windows_launcher(directory, fake):
         shim = f'@echo off\r\n"{sqlcl_session.bash_command()}" "%~dp0sql" %*\r\nexit /b %ERRORLEVEL%\r\n'
         (directory / "sql.cmd").write_text(shim, encoding="ascii", newline="")
     return directory
+
+
+def _build_windows_launcher(directory: Path, fake: Path) -> bool:
+    """Write directory\\sql.exe, which runs `fake` with Git Bash; False when it cannot be built."""
+    try:
+        from pip._vendor.distlib.scripts import ScriptMaker
+    except ImportError:
+        return False
+    # distlib wraps only a script that starts with a shebang line.
+    forwarder = (
+        "#!python\nimport subprocess, sys\n"
+        f"sys.exit(subprocess.call([{sqlcl_session.bash_command()!r}, {str(fake)!r}, *sys.argv[1:]]))\n"
+    )
+    with tempfile.TemporaryDirectory() as source:
+        (Path(source) / "sql.py").write_text(forwarder, encoding="utf-8", newline="\n")
+        maker = ScriptMaker(source, str(directory), add_launchers=True)
+        maker.clobber = True
+        maker.variants = {""}
+        maker.set_mode = False
+        maker.make("sql.py")
+    return (directory / "sql.exe").is_file()
 
 
 def environment(directory: Path, base: Mapping[str, str] | None = None, **values: str) -> dict[str, str]:

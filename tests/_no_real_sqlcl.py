@@ -9,7 +9,11 @@ connection. Importing this module makes that fall-through fail loudly instead:
 * POSIX: a `sql` that prints an explanation and exits 99 is placed at the very
   end of the search order that tests see, behind every fake but ahead of a real
   SQLcl.
-* Windows: directories holding sql.exe, sql.cmd or sql.bat are removed from PATH.
+* Windows: the same, plus a `sql.exe` (a copy of the system whoami.exe, which
+  rejects SQLcl's arguments and exits 1), because CreateProcess, Start-Process
+  and Python's subprocess start `sql.exe` while Git Bash starts the Bash `sql`.
+  The directory that holds the real SQLcl stays on PATH: it may hold other tools
+  the tests need (scoop or Chocolatey shims), and shadowing is enough.
 
 Test modules that run scripts import it (`import _no_real_sqlcl`); `unittest
 discover -s tests` puts this directory on sys.path.
@@ -37,16 +41,19 @@ def install() -> None:
         return
     _DONE = True
     entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
-    if os.name == "nt":
-        kept = [entry for entry in entries if not _holds_sqlcl(entry.strip('"'))]
-        os.environ["PATH"] = os.pathsep.join(kept)
-        return
     guard_directory = tempfile.mkdtemp(prefix="no-real-sqlcl-")
     atexit.register(shutil.rmtree, guard_directory, True)
     guard = os.path.join(guard_directory, "sql")
     with open(guard, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(f"#!/bin/sh\necho {shlex.quote(_MESSAGE)} >&2\nexit 99\n")
     os.chmod(guard, 0o755)
+    if os.name == "nt":
+        whoami = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "whoami.exe")
+        if os.path.isfile(whoami):
+            shutil.copy2(whoami, os.path.join(guard_directory, "sql.exe"))
+        else:
+            # No stand-in executable: fall back to hiding the directories that hold SQLcl.
+            entries = [entry for entry in entries if not _holds_sqlcl(entry.strip('"'))]
     os.environ["PATH"] = os.pathsep.join([guard_directory, *entries])
 
 
