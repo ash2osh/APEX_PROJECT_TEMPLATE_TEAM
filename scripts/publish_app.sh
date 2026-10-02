@@ -111,8 +111,11 @@ except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
     print(f"invalid deployment descriptor: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id != int(expected_id):
-    print(f"deployment app.id must be numeric {expected_id}", file=sys.stderr)
+if isinstance(app_id, bool) or not isinstance(app_id, int):
+    print(f"deployment app.id must be a number: set \"id\": {expected_id} in the descriptor", file=sys.stderr)
+    raise SystemExit(1)
+if app_id != int(expected_id):
+    print(f"deployment app.id is {app_id} but this is application {expected_id}: set \"id\": {expected_id} in the descriptor", file=sys.stderr)
     raise SystemExit(1)
 if not isinstance(workspace, str) or not workspace.strip() or any(c in workspace for c in "\t\r\n"):
     print("deployment workspace.name must be a non-empty single-line string", file=sys.stderr)

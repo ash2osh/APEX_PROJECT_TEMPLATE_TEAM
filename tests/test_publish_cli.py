@@ -449,6 +449,39 @@ class PublishAppCliTests(unittest.TestCase):
                 output = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stdout + result.stderr).split())
                 self.assertIn("byte-order mark", output)
 
+    def test_a_descriptor_for_another_application_names_both_ids_in_both_shells(self) -> None:
+        # The template's own descriptor example has "id": 100; copied unchanged for another
+        # application it is a number, just the wrong one. Say so, not "must be numeric".
+        pwsh = shutil.which("pwsh")
+        shells = ["bash"] + (["pwsh"] if pwsh else [])
+        cases = (
+            ('"id": 7', "is 7 but this is application 100"),
+            ('"id": "seven"', "must be a number"),
+        )
+        for shell in shells:
+            for replacement, expected in cases:
+                with self.subTest(shell=shell, descriptor=replacement), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+                    environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                    descriptor = app / "deployments" / "dev.json"
+                    text = descriptor.read_text(encoding="utf-8")
+                    changed = re.sub(r'"id":\s*100', replacement, text)
+                    self.assertNotEqual(changed, text)
+                    descriptor.write_text(changed, encoding="utf-8")
+                    if shell == "bash":
+                        command = [BASH, str(runner), "100", "--describe"]
+                    else:
+                        command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100", "--describe"]
+
+                    result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    output = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stdout + result.stderr).split())
+                    self.assertIn(expected, output)
+                    self.assertIn('set "id": 100 in the descriptor', output)
+                    self.assertNotIn("must be numeric", output)
+
     @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
     def test_interrupt_while_the_import_runs_says_its_result_is_unknown(self) -> None:
         # SQLcl may already have finished the import when the interrupt arrives,

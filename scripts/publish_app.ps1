@@ -117,9 +117,11 @@ if ($deployment.workspace.name -isnot [string] -or [string]::IsNullOrWhiteSpace(
 }
 $deploymentAppId = 0L
 if ($deployment.app.id -is [bool] -or
-    -not [Int64]::TryParse([string]$deployment.app.id, [ref]$deploymentAppId) -or
-    $deploymentAppId -ne [Int64]$AppId) {
-  throw "publish error: deployment app.id must be numeric $AppId"
+    -not [Int64]::TryParse([string]$deployment.app.id, [ref]$deploymentAppId)) {
+  throw "publish error: deployment app.id must be a number: set `"id`": $AppId in the descriptor"
+}
+if ($deploymentAppId -ne [Int64]$AppId) {
+  throw "publish error: deployment app.id is $deploymentAppId but this is application ${AppId}: set `"id`": $AppId in the descriptor"
 }
 $parsingSchema = [string]$deployment.app.databaseSession.parsingSchema
 if ($parsingSchema -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
