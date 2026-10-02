@@ -34,6 +34,9 @@ LIMITATION = (
     "This checks selected local migrations against observed live state. Other repositories' pending migrations "
     "are not visible; concurrent changes can occur after preflight."
 )
+LOCAL_LIMITATION = (
+    "Other repositories' pending migrations are not visible, and the database may differ from what these migrations assume."
+)
 COMMON_NAMESPACE_TYPES = {
     "TABLE", "VIEW", "SEQUENCE", "SYNONYM", "MATERIALIZED VIEW", "PROCEDURE", "FUNCTION",
     "PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY", "CLUSTER", "JAVA SOURCE", "JAVA CLASS",
@@ -1179,8 +1182,11 @@ def _local_report(migrations: Sequence[Migration], repo_root: Path) -> Preflight
     errors = list(result.errors)
     if unknown_live:
         errors.append({"code": "LIVE_PREREQUISITE_UNKNOWN", "message": "local-only analysis cannot establish whether referenced tables or columns exist", "items": unknown_live})
-    coverage = {**result.coverage, "mode": "local-only", "live_state_checked": False, "repo_root": str(repo_root)}
-    return PreflightReport(2 if errors else (1 if conflicts else 0), conflicts, tuple(errors), coverage)
+    coverage = {
+        **result.coverage, "mode": "local-only", "live_state_checked": False, "repo_root": str(repo_root),
+        "limitations": [LOCAL_LIMITATION],
+    }
+    return PreflightReport(2 if errors else (1 if conflicts else 0), conflicts, tuple(errors), coverage, LOCAL_LIMITATION)
 
 
 def _live_report(migrations: Sequence[Migration], environment: str, repo_root: Path, schema: str | None = None) -> PreflightReport:

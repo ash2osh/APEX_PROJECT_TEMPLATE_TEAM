@@ -62,6 +62,21 @@ class MigrationPreflightCliTests(unittest.TestCase):
         self.assertIn("Local selected-batch analysis only", result.stdout)
         self.assertIn("Other repositories' pending migrations are not visible", result.stdout)
 
+    def test_local_mode_does_not_claim_to_have_checked_live_state(self):
+        # Under "no live database state was checked" it used to add that the run "checks
+        # selected local migrations against observed live state".
+        self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")
+
+        text = self.run_checker("migrations/2026-09-27_create-orders-r001", "--local")
+        document = self.run_checker("migrations/2026-09-27_create-orders-r001", "--local", "--format", "json")
+
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertNotIn("observed live state", text.stdout)
+        report = json.loads(document.stdout)
+        self.assertNotIn("observed live state", report["limitation"])
+        self.assertNotIn("observed live state", " ".join(report["coverage"]["limitations"]))
+        self.assertIn("Other repositories' pending migrations are not visible", report["limitation"])
+
     def test_no_folder_or_missing_mode_is_usage_error_and_never_claims_cross_developer_scan(self):
         for arguments in ((), ("--local",)):
             with self.subTest(arguments=arguments):
