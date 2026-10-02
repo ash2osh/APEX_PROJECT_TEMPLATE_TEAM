@@ -681,6 +681,8 @@ class PublishAppCliTests(unittest.TestCase):
                         app.chmod(0o755)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("could not move application.apx", result.stdout + result.stderr)
+                # Both shells give the advice for the usual Windows cause (an editor holds the file open).
+                self.assertIn("close any program holding it open", result.stdout + result.stderr)
                 self.assertNotIn("changed while the publish tag was stamped", result.stdout + result.stderr)
                 self.assertEqual((app / "application.apx").read_bytes(), original)
                 self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "0")

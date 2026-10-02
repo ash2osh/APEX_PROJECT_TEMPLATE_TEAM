@@ -344,7 +344,7 @@ try {
     $stampResult = Invoke-SwapIfUnchanged -Target $applicationSource -Expected $unstampedSource `
       -Replacement $stampingSource -Aside (Join-Path $publishWorkDir "application.apx.before-stamp")
     if ($stampResult -eq "locked") {
-      throw "publish error: could not move application.apx to stamp the publish tag; close any program holding it open and publish again"
+      throw "publish error: could not move application.apx to stamp the publish tag; close any program holding it open (or check the folder's permissions) and publish again"
     }
     if ($stampResult -eq "not-installed") {
       throw "publish error: could not install the stamped application.apx; nothing was imported, publish again"

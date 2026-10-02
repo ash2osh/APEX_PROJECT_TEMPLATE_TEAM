@@ -371,7 +371,7 @@ if [ "$app_environment" = dev ]; then
     "$staging_dir/application.apx.stamping" "$staging_dir/application.apx.before-stamp" || stamp_status=$?
   case "$stamp_status" in
     0) ;;
-    2) fail "could not move application.apx to stamp the publish tag; check its permissions and publish again" ;;
+    2) fail "could not move application.apx to stamp the publish tag; close any program holding it open (or check the folder's permissions) and publish again" ;;
     3) fail "could not install the stamped application.apx; nothing was imported, publish again" ;;
     *) fail "application.apx changed while the publish tag was stamped; publish again" ;;
   esac
