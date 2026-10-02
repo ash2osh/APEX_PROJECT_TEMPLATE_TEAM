@@ -624,6 +624,48 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
             self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-1], "-")
 
+    def make_unexported_app(self, root: Path, *, app_exists: bool):
+        """A stateful fixture whose app was never exported, in a target that has it or not."""
+        runner, sql_log, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
+        (app / "apex-team-export.json").unlink()
+        if not app_exists:
+            (state_dir / "live.txt").write_text("NOT_FOUND\n", encoding="utf-8")
+            (state_dir / "version.txt").write_text("\n", encoding="utf-8")
+        environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
+        return runner, sql_log, environment, app, state_dir
+
+    def test_first_publish_of_an_app_absent_from_the_target_hands_the_import_the_absent_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, environment, app, _ = self.make_unexported_app(root, app_exists=False)
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("does not exist in the target yet", result.stdout)
+            # The import session re-reads the live app before importing, so an app
+            # created after the drift check is refused instead of overwritten.
+            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-1], "ABSENT")
+            self.assertTrue((app / "apex-team-export.json").is_file(), "the publish should record the baseline")
+
+    def test_publish_of_an_unexported_app_that_exists_in_the_target_is_refused_before_any_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, environment, _, state_dir = self.make_unexported_app(root, app_exists=True)
+
+            result = subprocess.run(
+                ["bash", str(runner), "100"], cwd=root, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Database export baseline is unavailable", result.stderr)
+            self.assertNotIn("import", (root / "sql-calls.txt").read_text(encoding="utf-8").split())
+            self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "0")
+
     # SQLcl prints "...is invalid" and exits 0 when the descriptor workspace
     # does not exist, without importing (verified on docker-demo).
     def test_import_skipped_by_sqlcl_is_a_failure_and_restores_the_source(self) -> None:
@@ -696,6 +738,23 @@ class PublishAppCliTests(unittest.TestCase):
                 sql_log.read_text(encoding="utf-8").splitlines()[-1],
                 "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper(),
             )
+
+    def test_powershell_first_publish_of_an_app_absent_from_the_target_hands_the_import_the_absent_state(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, sql_log, environment, app, _ = self.make_unexported_app(root, app_exists=False)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+
+            result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("does not exist in the target yet", result.stdout)
+            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-1], "ABSENT")
+            self.assertTrue((app / "apex-team-export.json").is_file(), "the publish should record the baseline")
 
     def test_powershell_import_that_clears_builder_timestamp_publishes(self) -> None:
         pwsh = shutil.which("pwsh")

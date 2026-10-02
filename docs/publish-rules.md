@@ -59,7 +59,8 @@ The guard runs before import and changes nothing when it refuses.
 | Your baseline | Live app now | Result | Message |
 | --- | --- | --- | --- |
 | No `apex-team-export.json` at all (never exported) | App absent | OK: a first publish only creates the app | `does not exist in the target yet` |
-| Missing, or from an export made before the version was recorded | App exists, or cannot be read | Refused | `Database export baseline is unavailable` |
+| No `apex-team-export.json` at all | App exists, or cannot be read | Refused | `Database export baseline is unavailable` |
+| A marker from an export made before the version was recorded, or a damaged one | – | Refused | `Database export baseline is unavailable` |
 | – | SQLcl cannot read it | Refused | `Could not read live APEX App` |
 | App absent | App absent | OK | `remains absent since the local export` |
 | App absent | App exists | Refused | `was created after the local export` |
