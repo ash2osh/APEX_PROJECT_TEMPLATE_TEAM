@@ -34,8 +34,24 @@ class MigrationPreflightCliTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=False,
-            env={"PATH": __import__("os").environ["PATH"], "HOME": __import__("os").environ.get("HOME", "")},
+            env=self.minimal_environment(),
         )
+
+    @staticmethod
+    def minimal_environment() -> dict[str, str]:
+        """PATH and HOME only (no project settings), plus the system variables Windows programs need.
+
+        Without LOCALAPPDATA the Python install manager's python3 alias downloads a whole
+        runtime into the current directory, which here is the repository root.
+        """
+        import os
+
+        environment = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")}
+        if os.name == "nt":
+            for name in ("SystemRoot", "LOCALAPPDATA", "APPDATA", "USERPROFILE", "TEMP", "TMP", "COMSPEC", "PATHEXT"):
+                if name in os.environ:
+                    environment[name] = os.environ[name]
+        return environment
 
     def test_local_mode_explicitly_reports_only_selected_scope_and_needs_no_env(self):
         self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")

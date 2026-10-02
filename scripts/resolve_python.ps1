@@ -15,6 +15,9 @@ $script:TeamPythonResolved = $null
 
 function Test-TeamPythonCandidate {
   param([string] $Path, [string[]] $Prefix)
+  # The Python install manager's aliases in WindowsApps download a whole runtime into the
+  # current folder when they start without LOCALAPPDATA (a stripped environment). Do not run one.
+  if ($Path -match '(?i)[\\/]WindowsApps[\\/]' -and [string]::IsNullOrEmpty($env:LOCALAPPDATA)) { return $false }
   # Windows PowerShell 5.1 turns native stderr into a terminating error under
   # "Stop"; a failing stub must only answer false.
   $previous = $ErrorActionPreference

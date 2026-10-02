@@ -546,10 +546,15 @@ class TeamCliTests(unittest.TestCase):
         environment["PATH"] = str(Path(pwsh).parent)  # pwsh itself, but no bash
         if shutil.which("bash", path=environment["PATH"]):
             self.skipTest("bash lives next to pwsh on this machine")
-        result = subprocess.run(
-            [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
-            cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
-        )
+        with tempfile.TemporaryDirectory() as empty:
+            if os.name == "nt":
+                # team.ps1 also looks for Git for Windows under Program Files and LOCALAPPDATA\Programs.
+                for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"):
+                    environment[name] = empty
+            result = subprocess.run(
+                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
+                cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
+            )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TEAM_BASH", result.stderr + result.stdout)
 

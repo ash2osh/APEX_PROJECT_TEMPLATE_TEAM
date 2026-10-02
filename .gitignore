@@ -17,6 +17,11 @@ __pycache__/
 apps/**/deployments/default.json
 apps/**/apex-team-export.json
 
+# The Windows Python install manager unpacks a runtime and writes its log into the
+# current folder when its python3/py alias runs without LOCALAPPDATA.
+/Python/
+python_install_*.log
+
 # Local graph/build output
 graphify-out/
 
