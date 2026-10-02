@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shlex
@@ -622,6 +623,52 @@ class TeamCliTests(unittest.TestCase):
                     process.communicate()
             self.assertEqual(process.returncode, 130)
             self.assertEqual(sorted(path.name for path in (root / "scratch").glob("sqlcl-doctor.*")), [])
+
+    def test_interrupting_a_live_preflight_reports_that_nothing_changed_and_exits_130(self) -> None:
+        # check-conflicts --env only reads, so Ctrl-C while SQLcl runs ends it with
+        # one line, status 130, no traceback and no scratch directory.
+        pwsh = shutil.which("pwsh")
+        wrappers = [["bash", "team.sh"]] + ([[pwsh, "-NoProfile", "-File", "team.ps1"]] if pwsh else [])
+        for wrapper in wrappers:
+            with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+                (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+                folder = root / "migrations" / "2026-10-02_interrupt-r001"
+                folder.mkdir(parents=True)
+                (folder / "001-create.sql").write_text("CREATE TABLE ZZ_INTERRUPT (ID NUMBER);\n", encoding="utf-8")
+                (folder / "checks.json").write_text(
+                    json.dumps({"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]}) + "\n",
+                    encoding="utf-8",
+                )
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                started = root / "sql-started"
+                fake_sql = fake_bin / "sql"
+                fake_sql.write_text(f"#!/bin/sh\n: > '{started}'\nsleep 30\n", encoding="utf-8")
+                fake_sql.chmod(0o755)
+                environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", "PROJECT_ENV_FILE": str(root / ".env")}
+                command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "check-conflicts", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
+                process = subprocess.Popen(
+                    command, cwd=root, env=environment,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                    # A background job in a non-interactive shell inherits SIGINT as ignored.
+                    preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+                )
+                try:
+                    deadline = time.monotonic() + 60
+                    while not started.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    self.assertTrue(started.exists(), "SQLcl never started")
+                    os.killpg(process.pid, signal.SIGINT)
+                    _, stderr = process.communicate(timeout=60)
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate()
+                self.assertEqual(process.returncode, 130, stderr)
+                self.assertEqual(stderr.strip(), "preflight interrupted; it only reads, so nothing was changed")
+                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
 
     def make_deploy_checkout(self, root: Path, configure_profile: bool = True) -> tuple[Path, Path]:
         scripts = root / "scripts"
