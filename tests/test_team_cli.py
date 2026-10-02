@@ -409,7 +409,7 @@ class TeamCliTests(unittest.TestCase):
                 self.assertNotIn("Exception:", results["powershell"])
                 self.assertNotIn("Line |", results["powershell"])
 
-    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_ends_a_live_preflight_and_everything_it_started")
     def test_powershell_exits_130_when_interrupted_while_a_helper_runs(self) -> None:
         # Ctrl-C stops PowerShell's own pipeline as well as the helper, so the
         # line that passes the helper's status on never ran and pwsh exited 0,
@@ -443,7 +443,7 @@ class TeamCliTests(unittest.TestCase):
                     process.communicate()
             self.assertEqual(process.returncode, 130)
 
-    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_waits_for_python_and_passes_its_status_on")
     def test_powershell_passes_on_the_status_a_helper_chose_when_it_was_interrupted(self) -> None:
         # migrate reports "interrupted and may be partially applied" with status 2,
         # not 130; the wrapper must not flatten that into a plain interrupt.
@@ -635,7 +635,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", doctor_sql)
             self.assertIn("@@verify_db_access.sql", doctor_sql)
 
-    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_ends_doctor_and_removes_its_working_directory")
     def test_interrupting_doctor_removes_its_working_directory(self) -> None:
         # Doctor makes scratch/sqlcl-doctor.* for SQLcl; Ctrl-C used to end the
         # script before the line that removes it.
@@ -675,7 +675,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertEqual(process.returncode, 130)
             self.assertEqual(sorted(path.name for path in (root / "scratch").glob("sqlcl-doctor.*")), [])
 
-    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_ends_a_live_preflight_and_everything_it_started")
     def test_interrupting_a_live_preflight_reports_that_nothing_changed_and_exits_130(self) -> None:
         # check-conflicts --env only reads, so Ctrl-C while SQLcl runs ends it with
         # one line, status 130, no traceback and no scratch directory.

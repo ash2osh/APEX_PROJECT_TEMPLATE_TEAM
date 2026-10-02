@@ -239,7 +239,7 @@ class BuilderDriftTests(unittest.TestCase):
                 )
                 self.assertIn(f"scripts/{wrapper} export 100", unknown.stderr)
 
-    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); no Windows twin: Ctrl-C is only simulated for preflight, doctor and publish")
     def test_interrupting_the_drift_check_does_not_print_a_traceback(self) -> None:
         # The check runs before anything is stamped or imported, so Ctrl-C has
         # no consequence to report beyond that it was interrupted.

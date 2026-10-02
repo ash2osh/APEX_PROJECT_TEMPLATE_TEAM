@@ -484,7 +484,7 @@ class PublishAppCliTests(unittest.TestCase):
                     self.assertIn('set "id": 100 in the descriptor', output)
                     self.assertNotIn("must be numeric", output)
 
-    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_while_the_import_runs_says_its_result_is_unknown")
     def test_interrupt_while_the_import_runs_says_its_result_is_unknown(self) -> None:
         # SQLcl may already have finished the import when the interrupt arrives,
         # before publish has read its output; the old source is put back, so
