@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,9 @@ def _query_live_timestamp(
     if not sql_script.is_file():
         return None, None, f"SQLcl query script is missing: {sql_script}"
     expected_arg = expected_user or "-"
+    # shutil.which applies PATHEXT, so a sql.cmd or sql.bat launcher is found on
+    # Windows as PowerShell finds it; CreateProcess alone starts only sql.exe.
+    sql_executable = shutil.which("sql") or "sql"
     with tempfile.TemporaryDirectory(prefix="apex-builder-drift-") as temp_dir:
         stdin_path = Path(temp_dir) / "sqlcl-stdin"
         stdin_path.write_text("", encoding="utf-8")
@@ -111,7 +115,7 @@ def _query_live_timestamp(
             with stdin_path.open("r", encoding="utf-8") as stdin:
                 result = subprocess.run(
                     [
-                        "sql",
+                        sql_executable,
                         "-S",
                         "-noupdates",
                         "-name",

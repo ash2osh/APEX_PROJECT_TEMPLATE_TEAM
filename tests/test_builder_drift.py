@@ -1,12 +1,15 @@
+import importlib.util
 import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
-import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+from unittest.mock import patch
+import fake_sqlcl
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,21 +50,14 @@ class BuilderDriftTests(unittest.TestCase):
                     marker["version"] = version if application_present else None
                 (app / "apex-team-export.json").write_text(json.dumps(marker), encoding="utf-8")
 
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            fake_sql = fake_bin / "sql"
-            fake_sql.write_text(
-                "#!/usr/bin/env bash\n"
+            fake_bin = fake_sqlcl.install(
+                root / "bin",
                 "printf '%s\\n' \"$FAKE_SQL_OUTPUT\"\n"
                 "exit \"$FAKE_SQL_EXIT\"\n",
-                encoding="utf-8",
             )
-            fake_sql.chmod(0o755)
-            environment = os.environ.copy()
-            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
-            environment["FAKE_SQL_OUTPUT"] = sql_output
-            environment["FAKE_SQL_EXIT"] = sql_exit
-            environment["TZ"] = "Pacific/Kiritimati"
+            environment = fake_sqlcl.environment(
+                fake_bin, FAKE_SQL_OUTPUT=sql_output, FAKE_SQL_EXIT=sql_exit, TZ="Pacific/Kiritimati"
+            )
             return subprocess.run(
                 [
                     "python3",
@@ -254,15 +250,11 @@ class BuilderDriftTests(unittest.TestCase):
                 json.dumps({"applicationId": 100, "applicationPresent": True, "builderLastUpdatedOn": None, "version": "Release 1.0"}),
                 encoding="utf-8",
             )
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
             # A SQLcl that is still running when the interrupt arrives; it says
             # so, so the test does not guess how long Python takes to start.
             started = root / "sql-started"
-            (fake_bin / "sql").write_text(f"#!/bin/sh\ntouch '{started}'\nsleep 30\n", encoding="utf-8")
-            (fake_bin / "sql").chmod(0o755)
-            environment = os.environ.copy()
-            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+            fake_bin = fake_sqlcl.install(root / "bin", f"touch '{started}'\nsleep 30\n")
+            environment = fake_sqlcl.environment(fake_bin)
             process = subprocess.Popen(
                 ["python3", str(GUARD), "100", "docker-demo", str(app)],
                 cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -281,6 +273,23 @@ class BuilderDriftTests(unittest.TestCase):
             self.assertEqual(process.returncode, 130, stderr)
             self.assertNotIn("Traceback", stderr)
             self.assertIn("interrupted", stderr)
+
+    def test_the_sql_launcher_is_resolved_through_path_before_it_is_started(self) -> None:
+        # shutil.which applies PATHEXT, so a sql.cmd or sql.bat launcher is found on
+        # Windows as PowerShell finds it; CreateProcess alone starts only sql.exe.
+        spec = importlib.util.spec_from_file_location("check_builder_drift_under_test", GUARD)
+        module = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, str(GUARD.parent))
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.remove(str(GUARD.parent))
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(module.shutil, "which", return_value="/resolved/launcher/sql.cmd") as which, \
+                patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")) as run:
+            module._query_live_timestamp(100, "docker-demo", "DEMO", Path(temporary))
+        which.assert_called_once_with("sql")
+        self.assertEqual(run.call_args.args[0][0], "/resolved/launcher/sql.cmd")
 
     def test_ambiguous_same_second_timestamp_fails_closed(self) -> None:
         timestamp = "2026-09-26T09:00:00"
