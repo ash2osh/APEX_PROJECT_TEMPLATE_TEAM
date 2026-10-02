@@ -65,7 +65,11 @@ Notes:
 - **macOS** ships Bash 3.2, which is too old. Install a current one with
   `brew install bash` and run the scripts with it.
 - **Windows** needs Git for Windows (it provides Bash). PowerShell 7 or
-  Windows PowerShell 5.1 can run the `team.ps1` wrapper.
+  Windows PowerShell 5.1 can run the `team.ps1` wrapper. Windows PowerShell 5.1
+  refuses to run scripts until `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`,
+  and migration files must be saved as UTF-8 without a BOM and with LF line
+  endings; see the Windows notes in the [README](../README.md#quickstart) and
+  [Troubleshooting](TROUBLESHOOTING.md).
 - Optional: `uv` and Graphify for the [knowledge graph](../README.md#optional-knowledge-graph),
   and an AI coding assistant such as Claude Code or Codex.
 

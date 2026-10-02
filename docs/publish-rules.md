@@ -58,7 +58,8 @@ The guard runs before import and changes nothing when it refuses.
 
 | Your baseline | Live app now | Result | Message |
 | --- | --- | --- | --- |
-| Missing, or from an export made before the version was recorded | – | Refused | `Database export baseline is unavailable` |
+| No `apex-team-export.json` at all (never exported) | App absent | OK: a first publish only creates the app | `does not exist in the target yet` |
+| Missing, or from an export made before the version was recorded | App exists, or cannot be read | Refused | `Database export baseline is unavailable` |
 | – | SQLcl cannot read it | Refused | `Could not read live APEX App` |
 | App absent | App absent | OK | `remains absent since the local export` |
 | App absent | App exists | Refused | `was created after the local export` |
@@ -76,7 +77,7 @@ What to do:
 
 | Message | Action |
 | --- | --- |
-| `Database export baseline is unavailable` | Run `scripts/team.sh export <id>` once, then publish. |
+| `Database export baseline is unavailable` | The app exists in the target but you have no export of it (or the marker is damaged). Run `scripts/team.sh export <id>` once, then publish. A brand-new app ID that is not in the target yet needs no export: the guard prints `does not exist in the target yet` and publishes. |
 | `Could not read live APEX App` | Fix the SQLcl connection (`scripts/team.sh doctor`) and retry. |
 | `was created after the local export` | Someone created the app after your export. Export, merge, publish. |
 | `no longer exists in the target after the local export` | Someone deleted the app. Ask the team before recreating it. |

@@ -110,6 +110,30 @@ Copy-Item .env.example .env
 pwsh -File scripts/team.ps1 doctor
 ```
 
+`powershell.exe` (Windows PowerShell 5.1) works the same way. Windows also
+needs Git for Windows (the migration, comparison and deployment helpers run in
+its Bash), Python 3.10 or newer, and SQLcl on `PATH`. Three things trip people
+up there:
+
+- **Script policy.** Windows PowerShell 5.1 on a client Windows starts with the
+  `Restricted` policy and refuses to run any `.ps1`. Allow your own account to
+  run local scripts with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+  A copy downloaded as a ZIP carries a "from the internet" mark that
+  `RemoteSigned` still blocks; clone with Git, or run
+  `Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File` once.
+- **File encoding.** Migration SQL, `checks.json` and deployment descriptors
+  must be UTF-8 without a byte-order mark and with LF line endings.
+  `Set-Content -Encoding UTF8` and `Out-File` in Windows PowerShell 5.1 write a
+  BOM, UTF-16 or CRLF. Create them in an editor set to UTF-8 and LF, or with
+  `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`.
+- **Checkout path.** Prefer a folder name without `[` and `]`. PowerShell reads
+  them as wildcards in many cmdlets and Git Bash does not convert such a path
+  for native programs; the scripts work around both, but your own commands in
+  that folder may not (`Set-Location "C:\work [1]"` fails; use `-LiteralPath`).
+
+`team.ps1` accepts a migration folder as `migrations\2026-10-02_name-r001`,
+`.\migrations\2026-10-02_name-r001\` or an absolute path inside the checkout.
+
 ## Application files and deployment descriptors
 
 Use the numeric APEX application ID as the stable source directory key. The
