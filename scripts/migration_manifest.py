@@ -386,7 +386,8 @@ def list_migration_folders(repo_root: Path) -> tuple[Path, ...]:
 def _validate_relative_folder(relative_folder: str) -> tuple[str, ...]:
     if not isinstance(relative_folder, str) or "\\" in relative_folder:
         raise MigrationManifestError("use a repository-relative migrations/<dated-folder> path")
-    parts = tuple(relative_folder.split("/"))
+    # Tab completion in a shell ends the folder with "/": the same folder, so accept it.
+    parts = tuple(relative_folder.removesuffix("/").split("/"))
     legacy = "use a repository-relative migrations/<dated-folder> path; legacy file paths are not supported"
     if len(parts) not in (2, 3) or parts[0] != "migrations" or any(part in {"", ".", ".."} for part in parts):
         raise MigrationManifestError(legacy)

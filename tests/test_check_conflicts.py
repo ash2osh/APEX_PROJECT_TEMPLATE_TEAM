@@ -75,6 +75,22 @@ class MigrationPreflightCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("legacy file paths are not supported", result.stderr)
 
+    def test_a_folder_argument_may_end_with_the_slash_that_shell_completion_adds(self):
+        self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")
+
+        result = self.run_checker("migrations/2026-09-27_create-orders-r001/", "--local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Local selected-batch analysis only", result.stdout)
+
+    def test_the_same_folder_with_and_without_the_slash_is_still_selected_once(self):
+        self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")
+
+        result = self.run_checker("migrations/2026-09-27_create-orders-r001", "migrations/2026-09-27_create-orders-r001/", "--local")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("may be selected only once", result.stderr)
+
     def test_json_mode_reports_scope_and_coverage(self):
         self.add_folder("2026-09-27_create-orders-r001", "CREATE TABLE ORDERS (ID NUMBER);\n")
         result = self.run_checker("migrations/2026-09-27_create-orders-r001", "--local", "--format", "json")

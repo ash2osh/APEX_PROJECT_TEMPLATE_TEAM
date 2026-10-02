@@ -133,6 +133,20 @@ class MigrationManifestTests(unittest.TestCase):
         with self.assertRaises(api.MigrationManifestError):
             api.load_migration(self.root, "migrations/../outside.sql")
 
+    def test_one_trailing_slash_names_the_same_folder_and_no_other_spelling_is_accepted(self) -> None:
+        api = self.require_manifest()
+        folder = self.add_folder("2026-09-27_create-customers-r001")
+        relative = "migrations/2026-09-27_create-customers-r001"
+
+        self.assertEqual(api.load_migration(self.root, relative + "/"), api.load_migration(self.root, relative))
+        with self.assertRaisesRegex(api.MigrationManifestError, "a migration folder may be selected only once"):
+            api.load_batch(self.root, [relative, relative + "/"])
+        for spelling in (relative + "//", "migrations/", "migrations//", "/" + relative, "./" + relative, relative + "/001-create-table.sql/"):
+            with self.subTest(spelling=spelling):
+                with self.assertRaises(api.MigrationManifestError):
+                    api.load_migration(self.root, spelling)
+        self.assertTrue(folder.is_dir())
+
     def test_checks_require_valid_read_only_assertions(self) -> None:
         api = self.require_manifest()
         allowed = (
