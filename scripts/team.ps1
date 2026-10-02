@@ -98,12 +98,17 @@ function ConvertTo-MigrationFolderArgument([string] $Value) {
   $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)
   if (-not $onWindows -or $Value.StartsWith("-")) { return $Value }
   $converted = $Value
-  if ([System.IO.Path]::IsPathRooted($converted)) {
-    $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path.TrimEnd("\", "/")
-    $full = [System.IO.Path]::GetFullPath($converted)
-    if ($full.StartsWith($repoRoot + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
-      $converted = $full.Substring($repoRoot.Length + 1)
+  try {
+    if ([System.IO.Path]::IsPathRooted($converted)) {
+      $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path.TrimEnd("\", "/")
+      $full = [System.IO.Path]::GetFullPath($converted)
+      if ($full.StartsWith($repoRoot + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $converted = $full.Substring($repoRoot.Length + 1)
+      }
     }
+  } catch {
+    # Windows PowerShell 5.1's .NET throws on a character no Windows path may hold (such as a
+    # double quote). It is no folder: leave the text for the validator, which refuses it.
   }
   $converted = $converted.Replace("\", "/")
   while ($converted.StartsWith("./")) { $converted = $converted.Substring(2) }
@@ -123,6 +128,15 @@ function Invoke-TeamBash {
   $bashPath = Resolve-TeamBash
   if ($null -eq $bashPath) {
     Fail "Bash is required for '$ScriptName'; install Git for Windows, set TEAM_BASH to its bash.exe, or run scripts/team.sh"
+  }
+  if (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)) {
+    # Git Bash's launcher reads ' in the command line as a quote: the argument arrives without
+    # it and joined with the next one, which fails far from the cause.
+    foreach ($forwarded in @(Join-Path $PSScriptRoot $ScriptName) + @($ScriptArguments)) {
+      if ($forwarded.Contains("'")) {
+        Fail "Git Bash cannot receive an argument with a single quote (') from PowerShell, since it reads it as a quote: remove it from the arguments and the checkout path, or run scripts/team.sh in Git Bash"
+      }
+    }
   }
   # The helpers call `python3`. On Windows a python.org or winget install has no
   # python3.exe and the Store alias is often a stub, so when Git Bash cannot run

@@ -338,6 +338,38 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
                         self.assertIn(refusal, result.stderr)
                         self.assertNotIn("Exception", result.stderr)
 
+    def test_a_double_quote_in_a_folder_argument_is_refused_in_one_line(self) -> None:
+        # Windows PowerShell 5.1 let .NET's Path.IsPathRooted throw on it and printed an exception block.
+        engines = [shutil.which(name) for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
+        if not engines:
+            self.skipTest("no PowerShell found")
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = self.make_checkout(temporary)
+            for engine in engines:
+                with self.subTest(engine=Path(engine).name):
+                    result = self.run_team(engine, checkout, 'migrations/double"quote')
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("preflight error:", result.stderr)
+                    self.assertNotIn("Exception", result.stderr)
+                    self.assertNotIn("Illegal characters", result.stderr)
+
+    def test_a_single_quote_in_an_argument_for_bash_is_refused_not_mangled(self) -> None:
+        # Git Bash's launcher reads ' in the command line as a quote: the argument lost it and
+        # was joined with the next one ("migrations/singlequote --local"), which then failed
+        # with a message about a missing --local.
+        engines = [shutil.which(name) for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
+        if not engines:
+            self.skipTest("no PowerShell found")
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = self.make_checkout(temporary)
+            for engine in engines:
+                with self.subTest(engine=Path(engine).name):
+                    result = self.run_team(engine, checkout, "migrations/single'quote")
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("team error:", result.stderr)
+                    self.assertIn("single quote", result.stderr)
+                    self.assertNotIn("select exactly one of", result.stderr)
+
     def test_no_shim_is_written_when_git_bash_already_runs_python3(self) -> None:
         # The probe passes `python3 -c '...'` to bash -c. Windows PowerShell 5.1 passes embedded
         # double quotes unescaped, which used to make the probe fail and write a needless shim.
