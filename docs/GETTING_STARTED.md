@@ -57,14 +57,16 @@ Check each row. The command in the last column prints the version.
 | An Oracle database with **APEX 26.1 or newer** and a workspace | 26.1+ | see the check at the end of step 5 |
 | **SQLcl** | 26.1 or newer | `sql -V` |
 | **Git** | any recent | `git --version` |
-| **Python** | 3.10 or newer | `python3 --version` |
+| **Python** | 3.10 or newer | `python3 --version` (Windows: `py -3 --version`) |
 | **Bash** | 4.3 or newer | `bash --version` |
 
 Notes:
 
 - **macOS** ships Bash 3.2, which is too old. Install a current one with
   `brew install bash` and run the scripts with it.
-- **Windows** needs Git for Windows (it provides Bash). PowerShell 7 or
+- **Windows** needs Git for Windows (it provides Bash). A Python from python.org
+  or winget provides `python.exe` and `py`, not `python3`, so check it with
+  `py -3 --version`; `team.ps1` finds either one. PowerShell 7 or
   Windows PowerShell 5.1 can run the `team.ps1` wrapper. Windows PowerShell 5.1
   refuses to run scripts until `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`,
   and migration files must be saved as UTF-8 without a BOM and with LF line

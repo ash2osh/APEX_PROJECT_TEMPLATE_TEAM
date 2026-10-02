@@ -133,6 +133,11 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(pointer=path.name):
                 self.assertIn("docs/publish-rules.md", path.read_text(encoding="utf-8"))
 
+    def test_getting_started_gives_the_python_check_that_works_on_windows(self) -> None:
+        # A python.org or winget install provides python.exe and py, but no python3.
+        guide = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+        self.assertIn("py -3 --version", guide)
+
     def test_troubleshooting_explains_the_team_ps1_refusals_about_bash(self) -> None:
         # The table quotes these messages verbatim, so rewording one must update it.
         troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
