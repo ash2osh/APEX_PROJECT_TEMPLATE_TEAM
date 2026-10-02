@@ -11,6 +11,7 @@ it runs in, never see the event.
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,9 @@ _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 def start_in_new_console(command: list[str], **popen_arguments: Any) -> subprocess.Popen:
     """Popen for command with a hidden console of its own, its standard handles on that console."""
+    # A runner that Git Bash started from a script has "ignore Ctrl-C" set, and every process it
+    # starts inherits that, a new console included: switch it off before starting the command.
+    ctypes.WinDLL("kernel32", use_last_error=True).SetConsoleCtrlHandler(None, False)
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = subprocess.SW_HIDE
@@ -125,9 +129,11 @@ def interrupt(
     sql_survived = False
     try:
         deadline = time.monotonic() + 60
-        while not started.exists() and time.monotonic() < deadline:
+        while not started.exists() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
         if not started.exists():
+            if process.poll() is not None:
+                raise AssertionError(f"the command ended with status {process.returncode} before it reached the step that waits")
             raise AssertionError("the command never reached the step that waits")
         screen = press_ctrl_c(process, wait_seconds)
         if process.poll() is None:
