@@ -1,3 +1,7 @@
+# Every text file is LF, whatever core.autocrlf says: a clone on Windows must
+# have the same bytes as one on Linux and macOS. Files without a known
+# extension, such as the shebang scripts of the agent skills, are covered too.
+* text=auto eol=lf
 # APEXlang, SQL, metadata and launcher files are always LF.
 *.apx text eol=lf
 *.sql text eol=lf

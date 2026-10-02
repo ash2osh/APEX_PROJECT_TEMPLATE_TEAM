@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,7 +34,10 @@ class BashCommandTests(unittest.TestCase):
         environment = {"PATH": path}
         if team_bash is not None:
             environment["TEAM_BASH"] = team_bash
-        with patch.object(sqlcl_session.os, "name", "nt"), patch.dict(os.environ, environment, clear=True):
+        # Replace the module's `os`, not os.name itself: that is global, and on
+        # Python 3.10 pathlib refuses to build a Path while os.name says "nt".
+        windows_os = types.SimpleNamespace(name="nt", environ=os.environ, path=os.path, pathsep=os.pathsep)
+        with patch.object(sqlcl_session, "os", windows_os), patch.dict(os.environ, environment, clear=True):
             return sqlcl_session.bash_command()
 
     def test_windows_skips_the_wsl_launcher_directories_and_takes_git_bash(self) -> None:
@@ -127,6 +131,117 @@ class BackupPrefixTokenTests(unittest.TestCase):
     def test_the_windows_wrappers_send_percent_for_star(self) -> None:
         self.assertIn('"%"', (ROOT / "scripts" / "backup_db.ps1").read_text(encoding="utf-8"))
         self.assertIn('prefixes="%"', (ROOT / "scripts" / "backup_db.sh").read_text(encoding="utf-8"))
+
+
+def write_script(path: Path, body: str) -> None:
+    path.write_text("#!/bin/sh\n" + body, encoding="utf-8", newline="\n")
+    path.chmod(0o755)
+
+
+@unittest.skipIf(os.name == "nt", "simulates a Windows shell on a POSIX one")
+class WindowsShellGateTests(unittest.TestCase):
+    """The Bash helpers convert paths only when `uname -s` names a Windows shell.
+
+    A fake `uname` and `cygpath` (which maps /x to C:/x) stand in for Git Bash.
+    """
+
+    def environment(self, directory: Path, uname: str) -> dict[str, str]:
+        tools = directory / "tools"
+        tools.mkdir()
+        write_script(tools / "uname", 'echo "$FAKE_UNAME"\n')
+        write_script(tools / "cygpath", 'while [ "$#" -gt 1 ]; do shift; done\nprintf "C:%s\\n" "$1"\n')
+        write_script(tools / "python3", 'for a in "$@"; do printf "%s\\n" "$a"; done\n')
+        write_script(
+            tools / "sql",
+            'for a in "$@"; do printf "%s\\n" "$a"; done > "$FAKE_RECORD"\nprintf "%s\\n%s\\n" "$SQLPATH" "$ORACLE_PATH" >> "$FAKE_RECORD"\n',
+        )
+        return dict(
+            os.environ,
+            PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+            FAKE_UNAME=uname,
+            FAKE_RECORD=str(directory / "record.txt"),
+        )
+
+    def run_python3(self, environment: dict[str, str], *arguments: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", "-c", 'source "$1" "$2" && shift 2 && python3 "$@"', "bash",
+             str(ROOT / "scripts" / "load_env.sh"), str(ROOT / ".env.example"), *arguments],
+            capture_output=True, text=True, env=environment, check=False,
+        )
+
+    def run_sqlcl(self, environment: dict[str, str], work: Path, *arguments: str) -> list[str]:
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1/scripts/sqlcl_safe.sh"; shift; invoke_sqlcl_safe "$@"', "bash", str(ROOT), str(work), *arguments],
+            capture_output=True, text=True, env=environment, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return Path(environment["FAKE_RECORD"]).read_text(encoding="utf-8").splitlines()
+
+    def test_load_env_does_not_shadow_python3_off_windows(self) -> None:
+        for uname in ("Linux", "Darwin", "FreeBSD"):
+            with self.subTest(uname=uname), tempfile.TemporaryDirectory() as temporary:
+                environment = self.environment(Path(temporary), uname)
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1" "$2" && type -t python3', "bash",
+                     str(ROOT / "scripts" / "load_env.sh"), str(ROOT / ".env.example")],
+                    capture_output=True, text=True, env=environment, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "file")
+
+    def test_load_env_python3_converts_existing_paths_on_a_windows_shell(self) -> None:
+        for uname in ("MINGW64_NT-10.0-26100", "MSYS_NT-10.0-26100", "CYGWIN_NT-10.0"):
+            with self.subTest(uname=uname), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                environment = self.environment(directory, uname)
+                existing = directory / "app.sql"
+                existing.write_text("", encoding="utf-8")
+                result = self.run_python3(
+                    environment, str(existing), "-m", "scripts.tool", str(directory / "new-output.txt"), "/no/such/dir/out", "relative"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [f"C:{existing}", "-m", "scripts.tool", f"C:{directory}/new-output.txt", "/no/such/dir/out", "relative"],
+                )
+
+    def test_sqlcl_launcher_passes_arguments_unchanged_whatever_the_platform_off_windows(self) -> None:
+        for uname in ("Linux", "Darwin", "FreeBSD"):
+            with self.subTest(uname=uname), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                environment = self.environment(directory, uname)
+                work = directory / "work"
+                work.mkdir()
+                lines = self.run_sqlcl(environment, work, "-S", "@/tmp/x/doctor.sql", str(directory / "out.txt"), "plain")
+                self.assertEqual(lines[:4], ["-S", "@/tmp/x/doctor.sql", str(directory / "out.txt"), "plain"])
+                self.assertEqual(lines[4:], [f"{work}/.sqlcl-path"] * 2)
+
+    def test_sqlcl_launcher_passes_native_paths_on_a_windows_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            environment = self.environment(directory, "MINGW64_NT-10.0-26100")
+            work = directory / "work"
+            work.mkdir()
+            lines = self.run_sqlcl(environment, work, "-S", "@/tmp/x/doctor.sql", str(directory / "out.txt"), "plain")
+            self.assertEqual(lines[:4], ["-S", "@C:/tmp/x/doctor.sql", f"C:{directory}/out.txt", "plain"])
+            self.assertEqual(lines[4:], [f"C:{work}/.sqlcl-path"] * 2)
+
+
+class GitAttributesTests(unittest.TestCase):
+    """A clone made with core.autocrlf=true must hold the same bytes as one made elsewhere."""
+
+    def test_every_tracked_text_file_is_forced_to_lf(self) -> None:
+        if shutil.which("git") is None or not (ROOT / ".git").exists():
+            self.skipTest("needs a Git checkout")
+        listing = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--eol", "-z"], capture_output=True, check=True
+        ).stdout.decode("utf-8")
+        loose = []
+        for entry in filter(None, listing.split("\0")):
+            info, _, name = entry.partition("\t")
+            if info.split()[0] in ("i/lf", "i/crlf", "i/mixed") and "eol=lf" not in info:
+                loose.append(name)
+        self.assertEqual(loose, [], "text files that .gitattributes does not force to LF")
 
 
 @unittest.skipUnless(os.name == "nt", "needs Windows PowerShell and Git Bash")
