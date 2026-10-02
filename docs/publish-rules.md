@@ -168,6 +168,19 @@ commit. Publish prints these steps when it stops here.
 | `changed while its post-import source was being verified` | Someone edited or imported during the verification. |
 | `same database second` / `later than the database-time observation` | The revision is ambiguous; export and retry. |
 
+**A new app from `apex generate`.** SQLcl's starter application is not in the form
+APEX exports back: every file ends with one extra blank line, and
+`supporting-objects/supporting-objects.apx` names an empty `deinstall-script.sql`
+that APEX leaves out. The first publish therefore imports the app (the guard prints
+`does not exist in the target yet`), then stops with `APEXlang source bytes do not
+match the post-import re-export` and records no baseline. That is the "After
+import" case above: commit the stamped `application.apx`, run
+`scripts/team.sh export <id>`, check with `git diff` that only those normalizations
+changed, and commit the canonical source. Publishing after that works as usual.
+Generate the app while connected to the target database (`sql -name <connection>`,
+then `apex generate`): offline, SQLcl writes its own, newer APEXlang version, which an
+older APEX cannot import.
+
 ## Example
 
 Two developers, ASHARIF and BOB, both export app 9000. ASHARIF publishes

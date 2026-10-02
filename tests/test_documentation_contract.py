@@ -133,6 +133,14 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(pointer=path.name):
                 self.assertIn("docs/publish-rules.md", path.read_text(encoding="utf-8"))
 
+    def test_publish_guide_explains_the_first_publish_of_a_generated_starter_app(self) -> None:
+        # `apex generate` writes files APEX does not export back byte for byte, so the first
+        # publish imports the app and then refuses to record a baseline; the guide says what to do.
+        guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
+        for phrase in ("apex generate", "extra blank line", "deinstall", "scripts/team.sh export <id>"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, guide)
+
     def test_getting_started_gives_the_python_check_that_works_on_windows(self) -> None:
         # A python.org or winget install provides python.exe and py, but no python3.
         guide = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
