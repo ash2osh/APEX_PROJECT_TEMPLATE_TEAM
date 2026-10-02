@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

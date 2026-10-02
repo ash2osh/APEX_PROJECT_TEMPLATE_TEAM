@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 try:
     from scripts import migration_manifest as manifest

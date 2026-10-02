@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts import migration_manifest as manifest
 from scripts.db_targets import TargetResolutionError, resolve_target
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 ROOT = Path(__file__).resolve().parents[1]

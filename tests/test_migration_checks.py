@@ -8,6 +8,7 @@ from scripts.db_targets import Target
 from scripts.migration_manifest import QueryCheck, load_batch
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
 from scripts.migration_checks import CheckReport, analyze_batch, compiled_units, preflight, run_checks
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 class MigrationChecksTests(unittest.TestCase):

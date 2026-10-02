@@ -69,7 +69,7 @@ BEGIN
       -- stays here as BIN$<base64>==$0. Those are not project objects.
       AND object_name NOT LIKE 'BIN$%'
       AND (
-        '&&object_prefixes' = '*'
+        '&&object_prefixes' IN ('*', '%')
         OR EXISTS (
           SELECT 1
           FROM (
@@ -116,7 +116,7 @@ WHERE LOWER('&&object_scope') = 'tables'
   AND tables_to_export.dropped = 'NO'
   AND tables_to_export.table_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -138,7 +138,7 @@ WHERE LOWER('&&object_scope') = 'code'
   AND views_to_export.owner = UPPER('&&target_schema')
   AND views_to_export.view_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -161,7 +161,7 @@ WHERE LOWER('&&object_scope') = 'code'
   AND objects_to_export.object_type = 'PACKAGE'
   AND objects_to_export.object_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -184,7 +184,7 @@ WHERE LOWER('&&object_scope') = 'code'
   AND objects_to_export.object_type = 'PACKAGE BODY'
   AND objects_to_export.object_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -207,7 +207,7 @@ WHERE LOWER('&&object_scope') = 'code'
   AND objects_to_export.object_type = 'PROCEDURE'
   AND objects_to_export.object_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -230,7 +230,7 @@ WHERE LOWER('&&object_scope') = 'code'
   AND objects_to_export.object_type = 'FUNCTION'
   AND objects_to_export.object_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -253,7 +253,7 @@ WHERE LOWER('&&object_scope') = 'code'
   AND objects_to_export.object_type = 'TRIGGER'
   AND objects_to_export.object_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -278,7 +278,7 @@ WHERE LOWER('&&object_scope') = 'code'
   AND objects_to_export.object_type = 'SYNONYM'
   AND objects_to_export.object_name NOT LIKE 'BIN$%'
   AND (
-    '&&object_prefixes' = '*'
+    '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
       SELECT 1
       FROM (
@@ -320,7 +320,7 @@ LEFT JOIN all_objects
  AND all_objects.object_type = expected_types.object_type
  AND all_objects.object_name NOT LIKE 'BIN$%'
  AND (
-   '&&object_prefixes' = '*'
+   '&&object_prefixes' IN ('*', '%')
    OR EXISTS (
      SELECT 1
      FROM (

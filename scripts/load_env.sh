@@ -20,6 +20,34 @@ case "$PROJECT_ENV_FILE" in
     ;;
 esac
 
+# Git Bash (MSYS) hands a native Windows program such as python.exe an unconverted
+# /c/... path when the path holds glob characters like [1], and python then looks
+# for C:\c\.... Shadow python3 on Windows shells only: absolute POSIX paths that
+# exist (or whose parent exists, for an output location) go through cygpath -m.
+# Every other argument, and every other platform, is passed through untouched.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      python3() {
+        local python_arg python_args=()
+        for python_arg in "$@"; do
+          case "$python_arg" in
+            /*)
+              if [ -e "$python_arg" ] || [ -d "${python_arg%/*}" ]; then
+                python_args+=("$(cygpath -m -- "$python_arg")")
+              else
+                python_args+=("$python_arg")
+              fi
+              ;;
+            *) python_args+=("$python_arg") ;;
+          esac
+        done
+        command python3 "${python_args[@]}"
+      }
+    fi
+    ;;
+esac
+
 project_env_fail() {
   unset project_env_repo_root
   echo "project environment error: $*" >&2

@@ -11,6 +11,7 @@ from scripts.migrate import MigrationApplyError, apply_batch, apply_folder, main
 from scripts.migration_checks import CheckReport, analyze_batch
 from scripts.migration_manifest import load_batch, validate_receipt
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 ROOT = Path(__file__).resolve().parents[1]

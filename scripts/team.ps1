@@ -89,6 +89,27 @@ function Resolve-TeamBash {
   return $null
 }
 
+# The migration scripts accept only migrations/<folder> with forward slashes. On
+# Windows a folder argument is naturally typed or tab-completed as
+# .\migrations\<folder>\ (or pasted as an absolute path), so turn that into the
+# repository-relative form. Option tokens and anything outside the checkout are
+# left alone; the Python validator still refuses what it cannot accept.
+function ConvertTo-MigrationFolderArgument([string] $Value) {
+  $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)
+  if (-not $onWindows -or $Value.StartsWith("-")) { return $Value }
+  $converted = $Value
+  if ([System.IO.Path]::IsPathRooted($converted)) {
+    $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path.TrimEnd("\", "/")
+    $full = [System.IO.Path]::GetFullPath($converted)
+    if ($full.StartsWith($repoRoot + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+      $converted = $full.Substring($repoRoot.Length + 1)
+    }
+  }
+  $converted = $converted.Replace("\", "/")
+  while ($converted.StartsWith("./")) { $converted = $converted.Substring(2) }
+  return $converted.TrimEnd("/")
+}
+
 function Invoke-TeamBash {
   param([string] $ScriptName, [string[]] $ScriptArguments)
   $bashPath = Resolve-TeamBash
@@ -223,11 +244,11 @@ try {
     }
     "check-conflicts" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)" }
-      Invoke-TeamBash -ScriptName "check_conflicts.sh" -ScriptArguments $Arguments
+      Invoke-TeamBash -ScriptName "check_conflicts.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
     }
     "migrate" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod" }
-      Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments $Arguments
+      Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
     }
     "compare-schema" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }

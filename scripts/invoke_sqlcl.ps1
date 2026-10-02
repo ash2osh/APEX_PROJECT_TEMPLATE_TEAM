@@ -33,10 +33,14 @@ function Invoke-Sqlcl {
     if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
   })
 
-  # Start-Process' -WorkingDirectory resolves wildcard characters in this path.
-  # Set the provider location by literal path and let the child inherit it.
-  # Its redirected-input path is also wildcard-resolved, so hand it a system
-  # temp copy even when the caller's checkout path contains brackets.
+  # Start-Process resolves the working directory as a wildcard pattern: when none
+  # is given it uses the current location, and Windows PowerShell 5.1 then fails
+  # with "Unable to find the specified file" if that path contains brackets (a
+  # checkout under "C:\work [1]"). Pass the directory explicitly with the
+  # wildcard characters escaped; PowerShell 5.1 and 7 both read that as the
+  # literal path. The redirected-input path is also wildcard-resolved, so hand it
+  # a system temp copy even when the caller's checkout path contains brackets.
+  $escapedWorkingDirectory = [System.Management.Automation.WildcardPattern]::Escape($WorkingDirectory)
   $stdinRedirectFile = [System.IO.Path]::GetTempFileName()
   $safeSqlPath = Join-Path $WorkingDirectory ".sqlcl-path"
   [System.IO.Directory]::CreateDirectory($safeSqlPath) | Out-Null
@@ -52,7 +56,7 @@ function Invoke-Sqlcl {
     $env:SQLPATH = $safeSqlPath
     $env:ORACLE_PATH = $safeSqlPath
     if ([string]::IsNullOrWhiteSpace($TranscriptFile)) {
-      $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
+      $process = Start-Process -FilePath "sql" -ArgumentList $quoted -WorkingDirectory $escapedWorkingDirectory `
         -NoNewWindow -Wait -PassThru -RedirectStandardInput $stdinRedirectFile
       return $process.ExitCode
     }
@@ -60,7 +64,7 @@ function Invoke-Sqlcl {
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
     try {
-      $process = Start-Process -FilePath "sql" -ArgumentList $quoted `
+      $process = Start-Process -FilePath "sql" -ArgumentList $quoted -WorkingDirectory $escapedWorkingDirectory `
         -NoNewWindow -Wait -PassThru -RedirectStandardInput $stdinRedirectFile `
         -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
       $stdout = [System.IO.File]::ReadAllText($stdoutFile)

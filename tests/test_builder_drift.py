@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +143,34 @@ class BuilderDriftTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("[DRIFT UNKNOWN]", result.stderr)
         self.assertIn("scripts/team.sh export 100", result.stderr)
+
+    def test_first_publish_of_an_app_absent_from_the_target_needs_no_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_out = Path(temporary) / "state.txt"
+            result = self.run_guard(
+                baseline=None,
+                sql_output=observed_state("NOT_FOUND"),
+                marker_present=False,
+                state_out=state_out,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("does not exist in the target yet", result.stdout)
+            self.assertEqual(state_out.read_text(encoding="utf-8").strip(), "ABSENT")
+
+    def test_missing_baseline_stays_refused_when_the_query_fails_for_an_unexported_app(self) -> None:
+        result = self.run_guard(
+            baseline=None, sql_output="connection failed", sql_exit="1", marker_present=False
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Database export baseline is unavailable", result.stderr)
+
+    def test_a_corrupt_marker_is_not_treated_as_a_new_app(self) -> None:
+        # The marker file exists but cannot be used: do not guess the app is new.
+        result = self.run_guard(
+            baseline="not-a-date", sql_output=observed_state("NOT_FOUND"), application_present=False
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Database export baseline is unavailable", result.stderr)
 
     def test_unavailable_sqlcl_query_fails_closed(self) -> None:
         result = self.run_guard(

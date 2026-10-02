@@ -89,7 +89,21 @@ if [ "$manual" = true ]; then
       expected_user="${expected_user:-YOUR_PROD_EXPECTED_USER}"
       ;;
   esac
+  # On Windows the steps below are for Git Bash, and SQLcl is a native program:
+  # print C:/... paths, which Git Bash and SQLcl both accept, not /c/... ones.
+  runbook_root="$REPO_ROOT"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v cygpath >/dev/null 2>&1; then
+        runbook_root="$(cygpath -m "$REPO_ROOT")"
+        app_dir="$(cygpath -m "$app_dir")"
+      fi
+      ;;
+  esac
   printf '\nDBA runbook (this command did not connect to a database):\n'
+  if [ "$runbook_root" != "$REPO_ROOT" ]; then
+    printf '%s\n' 'These steps use Bash syntax: run them in Git Bash. Paths are written as C:/...'
+  fi
   printf '1. Review the committed descriptor: %s\n' "$app_dir/deployments/$app_environment.json"
   printf '%s\n' \
     '2. From a shell with SQLcl and the approved connection configured, run:' \
@@ -98,7 +112,7 @@ if [ "$manual" = true ]; then
     '   cd "$sqlcl_dir"' \
     '   export SQLPATH="$sqlcl_dir" ORACLE_PATH="$sqlcl_dir"'
   printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q %q\n' \
-    "$sqlcl_connection" "@$REPO_ROOT/scripts/publish_app.sql" "$parsing_schema" \
+    "$sqlcl_connection" "@$runbook_root/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "$app_dir" \
     "$app_dir/deployments/$app_environment.json" "$app_id" -
   verify_parent="apps/$parsing_schema"
@@ -107,15 +121,15 @@ if [ "$manual" = true ]; then
   printf '   verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-manual-verify.XXXXXX")\n'
   printf '   cd "$verify_dir"\n'
   printf '   sql -S -noupdates -name %q %q %q %q %q %q\n' \
-    "$sqlcl_connection" "@$REPO_ROOT/scripts/export_apps.sql" \
+    "$sqlcl_connection" "@$runbook_root/scripts/export_apps.sql" \
     "$parsing_schema" "$app_id" "$target_environment" "$expected_user"
   printf '   shopt -s nullglob\n'
   printf '   export_dirs=(%q/*/)\n' "$verify_parent"
   printf '%s\n' '   test "${#export_dirs[@]}" -eq 1 || { echo "expected exactly one APEX export" >&2; exit 1; }'
   printf '%s\n' '   exported_dir="${export_dirs[0]%/}"'
-  printf '   %q "$exported_dir"\n' "$REPO_ROOT/scripts/normalize_apx.sh"
+  printf '   %q "$exported_dir"\n' "$runbook_root/scripts/normalize_apx.sh"
   printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q\n' \
-    "$REPO_ROOT/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$REPO_ROOT"
+    "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root"
   printf '5. Treat the deployment as verified only if that check prints APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
   exit 0
 fi

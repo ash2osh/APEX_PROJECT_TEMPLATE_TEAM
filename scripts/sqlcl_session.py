@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,37 @@ ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
 # client error such as "Unknown Command" is not a SQL error, so WHENEVER SQLERROR
 # does not stop the script and SQLcl still exits 0; only the report shows it.
 SQLCL_ERROR_RE = re.compile(r"(?m)^(?:(?:ORA-\d{5}|SP2-\d{4}|SQLcl Error):|Error starting at line\b|Error report -)")
+
+
+_WSL_LAUNCHER_RE = re.compile(r"(?i)[\\/](System32|SysWOW64|Sysnative|WindowsApps)[\\/]")
+
+
+def bash_command() -> str:
+    """Return the Bash that runs the SQLcl bridge.
+
+    A bare "bash" is fine on Linux and macOS. On Windows, CreateProcess searches
+    the system directory before PATH, so it would start the WSL launcher in
+    System32, which cannot run a Windows script path. Use TEAM_BASH when it names
+    a file, else the first bash.exe on PATH that is not the launcher, else the Git
+    for Windows copy next to git.exe, the same order team.ps1 uses.
+    """
+    if os.name != "nt":
+        return "bash"
+    override = os.environ.get("TEAM_BASH")
+    if override and os.path.isfile(override):
+        return override
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(directory.strip('"'), "bash.exe")
+        if directory and os.path.isfile(candidate) and _WSL_LAUNCHER_RE.search(candidate) is None:
+            return candidate
+    git = shutil.which("git")
+    if git:
+        base = os.path.dirname(git)
+        for relative in (("..", "bin"), ("..", "..", "bin"), ("..", "usr", "bin"), ("..", "..", "usr", "bin")):
+            candidate = os.path.normpath(os.path.join(base, *relative, "bash.exe"))
+            if os.path.isfile(candidate):
+                return candidate
+    return "bash"
 
 
 @dataclass(frozen=True)
@@ -71,7 +103,10 @@ def run_sqlcl(
     child_environment = dict(os.environ if environment is None else environment)
     try:
         completed = subprocess.run(
-            ["bash", str(bridge), str(resolved_run), target.connection, str(resolved_driver)],
+            # as_posix: the bridge compares the driver path with the run directory
+            # as strings, which only works when both use "/" (Git Bash accepts
+            # C:/dir/file); on Linux and macOS it is the same as str().
+            [bash_command(), bridge.as_posix(), resolved_run.as_posix(), target.connection, resolved_driver.as_posix()],
             cwd=resolved_run,
             env=child_environment,
             input="",

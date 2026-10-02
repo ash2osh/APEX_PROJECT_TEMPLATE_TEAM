@@ -14,6 +14,7 @@ from scripts.schema_catalog import (
     parse_snapshot,
 )
 from scripts.sqlcl_session import SqlclError, SqlclResult, run_sqlcl
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 ROOT = Path(__file__).resolve().parents[1]

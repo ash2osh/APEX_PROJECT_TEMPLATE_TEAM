@@ -63,6 +63,23 @@ class RecordExportStateTests(unittest.TestCase):
             },
         )
 
+    def test_marker_is_written_with_lf_line_endings_on_every_platform(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "before.txt").write_bytes(b"2026-09-26T08:00:00|2026-09-26T09:00:00|Release 1.0\n")
+            (root / "after.txt").write_bytes(b"2026-09-26T08:00:00|2026-09-26T09:00:02|Release 1.0\n")
+            marker_path = root / "apex-team-export.json"
+            result = subprocess.run(
+                ["python3", str(RECORDER), "100", str(root / "before.txt"), str(root / "after.txt"), str(marker_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = marker_path.read_bytes()
+        self.assertNotIn(b"\r", data)
+        self.assertTrue(data.endswith(b"}\n"))
+
     def test_export_fails_if_builder_changes_during_export(self) -> None:
         result, marker = self.run_recorder("2026-09-26T08:00:00", "2026-09-26T08:00:01")
         self.assertNotEqual(result.returncode, 0)

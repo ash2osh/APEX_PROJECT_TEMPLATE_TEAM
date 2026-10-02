@@ -10,6 +10,7 @@ from unittest import mock
 from scripts import compare_schema, migration_checks
 from scripts.migration_checks import CheckReport
 from scripts.schema_catalog import CatalogError, ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 def inventory(owner):

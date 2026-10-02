@@ -60,7 +60,7 @@ PY
 # Refuse local mirror edits before making either database connection.
 for schema in "${BACKUP_SCHEMAS[@]}"; do
   destination="database/$schema"
-  dirty_status="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- "$destination")" || {
+  dirty_status="$(cd "$REPO_ROOT" && git status --porcelain --untracked-files=all -- "$destination")" || {
     echo "unable to inspect Git status for mirror: $destination" >&2
     exit 1
   }
@@ -170,6 +170,14 @@ run_backup_scope() {
   local connection="$3"
   local expected_user="$4"
   local prefixes="$5"
+  # The SQLcl launcher on Windows expands an unquoted * against the working
+  # directory, which shifts every later argument. backup_db.sql treats % as the
+  # same "every object" value, and % cannot occur in an identifier prefix.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if [ "$prefixes" = "*" ]; then prefixes="%"; fi
+      ;;
+  esac
   local spool_schema
   spool_schema="$(schema_stage_directory "$schema")"
   local scope_dir

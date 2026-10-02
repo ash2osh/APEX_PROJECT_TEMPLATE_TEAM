@@ -83,7 +83,7 @@ DEST_PARENT="$(dirname -- "$DEST_DIR")"
 mkdir -p "$DEST_PARENT"
 
 check_clean_mirror() {
-  if ! DIRTY_STATUS="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- "$DEST_REL")"; then
+  if ! DIRTY_STATUS="$(cd "$REPO_ROOT" && git status --porcelain --untracked-files=all -- "$DEST_REL")"; then
     echo "unable to inspect Git status for mirror: $DEST_REL" >&2
     return 1
   fi
@@ -96,7 +96,7 @@ check_clean_mirror() {
   # without Git noticing. Only the two ignored files an export regenerates
   # are expected in a mirror.
   local ignored_status ignored_path ignored_files=()
-  if ! ignored_status="$(git -C "$REPO_ROOT" status --porcelain --ignored --untracked-files=all -- "$DEST_REL")"; then
+  if ! ignored_status="$(cd "$REPO_ROOT" && git status --porcelain --ignored --untracked-files=all -- "$DEST_REL")"; then
     echo "unable to inspect ignored files for mirror: $DEST_REL" >&2
     return 1
   fi

@@ -88,7 +88,7 @@ def live_state_token(state: AppState) -> str:
 
 def _write_state(path: Path | None, state: AppState) -> None:
     if path is not None:
-        path.write_text(live_state_token(state) + "\n", encoding="utf-8")
+        path.write_text(live_state_token(state) + "\n", encoding="utf-8", newline="\n")
 
 
 def _query_live_timestamp(
@@ -175,6 +175,20 @@ def main(argv: list[str] | None = None) -> int:
 
     baseline = get_export_baseline(app_dir, args.app_id)
     export_command = f"scripts/{args.wrapper} export {args.app_id}"
+    if baseline is None and not (app_dir / "apex-team-export.json").exists():
+        # A brand-new app has never been exported, and an export of an app that
+        # does not exist fails, so no baseline can ever be recorded. When the
+        # target has no such app there is nothing to overwrite: publishing only
+        # creates it. Any other answer, including a failed query, keeps the
+        # refusal below.
+        live, _, error = _query_live_timestamp(args.app_id, args.connection, args.expected_user, app_dir)
+        if not error and live is not None and not live.present:
+            print(
+                f"[DRIFT OK] APEX App {args.app_id} does not exist in the target yet; "
+                "publishing creates it, so there is no earlier export to compare."
+            )
+            _write_state(args.state_out, live)
+            return 0
     if baseline is None:
         print(
             f"[DRIFT UNKNOWN] Database export baseline is unavailable for APEX App {args.app_id}.\n"

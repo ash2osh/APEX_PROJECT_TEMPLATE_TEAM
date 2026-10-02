@@ -114,7 +114,15 @@ $backupSchemas = @($backupTargets | ForEach-Object { $_.Schema } | Select-Object
 # Refuse local mirror edits before making either database connection.
 foreach ($schema in $backupSchemas) {
   $destination = "database/$schema"
-  $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination)
+  # Windows PowerShell 5.1 ends the script on any native stderr text (such as
+  # git's "could not open directory" warning) under $ErrorActionPreference = "Stop".
+  $previousErrorPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination 2>$null)
+  } finally {
+    $ErrorActionPreference = $previousErrorPreference
+  }
   if ($LASTEXITCODE -ne 0) { throw "unable to inspect Git status for mirror: $destination" }
   if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
     throw "refusing to back up over dirty mirror: $destination; commit, stash, or remove local changes first"
@@ -141,6 +149,13 @@ try {
         -Path (Join-Path $stagingPath "database/$spoolSchema/$scopeDir") | Out-Null
     }
     $transcriptPath = Join-Path $stagingPath ".sqlcl-transcript.txt"
+    # The SQLcl launcher on Windows expands an unquoted * against the working
+    # directory, which shifts every later argument. backup_db.sql treats % as the
+    # same "every object" value, and % cannot occur in an identifier prefix.
+    $prefixArgument = $target.Prefixes
+    if ($prefixArgument -ceq "*" -and (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows))) {
+      $prefixArgument = "%"
+    }
     $sqlclExit = Invoke-Sqlcl -WorkingDirectory $stagingPath `
       -StdInFile (Join-Path $stagingPath ".sqlcl-stdin") `
       -TranscriptFile $transcriptPath `
@@ -148,7 +163,7 @@ try {
         "-S", "-noupdates", "-name", $target.Connection,
         "@$(Join-Path $repoRoot 'scripts/backup_db.sql')",
         $target.Schema, $target.Scope, $env:DB_ENVIRONMENT,
-        $target.ExpectedUser, $target.Prefixes, $spoolSchema
+        $target.ExpectedUser, $prefixArgument, $spoolSchema
       )
     # backup_db.sql sets LONG far above SQLcl's ~2 MB warning threshold so the
     # largest package body is never truncated; drop that advisory, keep the rest.

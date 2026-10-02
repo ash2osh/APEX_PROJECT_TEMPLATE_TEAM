@@ -85,7 +85,17 @@ try {
   # that diagnostic while preserving the command's failure status.
   foreach ($appId in $appIds) {
     $destination = "apps/$($appSchemaOf[[string]$appId])/$appId"
-    $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination 2>$null)
+    # Windows PowerShell 5.1 turns any stderr text from a native command into a
+    # terminating error under $ErrorActionPreference = "Stop", even with 2>$null,
+    # so the warning would still end the export. Relax the preference for this
+    # one call and judge git by its exit status.
+    $previousErrorPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- $destination 2>$null)
+    } finally {
+      $ErrorActionPreference = $previousErrorPreference
+    }
     if ($LASTEXITCODE -ne 0) { throw "unable to inspect Git status for mirror: $destination" }
     if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
       throw "refusing to export over dirty mirror: $destination; commit, stash, or remove local changes first"

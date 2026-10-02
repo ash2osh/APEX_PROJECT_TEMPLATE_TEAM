@@ -7,6 +7,7 @@ from scripts.migrate import MigrationApplyError, build_receipt
 from scripts.migration_checks import CheckReport
 from scripts.migration_manifest import MigrationManifestError, install_receipt, load_migration, validate_receipt
 from scripts.schema_catalog import SchemaSnapshot
+import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
 class MigrationReceiptTests(unittest.TestCase):

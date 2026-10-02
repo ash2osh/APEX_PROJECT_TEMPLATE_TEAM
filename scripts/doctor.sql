@@ -2,6 +2,10 @@
 SET DEFINE ON
 SET VERIFY OFF
 SET ECHO OFF
+-- Only the identity line is wanted: no column heading (SQLcl prints it in ANSI
+-- bold when output is redirected) and no "PL/SQL procedure successfully completed".
+SET HEADING OFF
+SET FEEDBACK OFF
 WHENEVER SQLERROR EXIT FAILURE ROLLBACK
 WHENEVER OSERROR EXIT FAILURE ROLLBACK
 DEFINE target_schema = '&1'

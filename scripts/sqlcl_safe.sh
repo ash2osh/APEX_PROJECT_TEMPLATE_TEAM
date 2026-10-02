@@ -2,6 +2,24 @@
 # Run SQLcl only from a generated working directory with trusted script paths.
 # Callers must pass a newly-created staging directory, never application source.
 
+# Print the form of a path that SQLcl itself can open. SQLcl is a native program:
+# under Git Bash (MSYS) a path such as /c/Users/me/work [1]/scripts/doctor.sql is
+# unknown to it ("SP2-0310: unable to open file"). MSYS rewrites plain /c/...
+# arguments for native programs, but not the @script form, and not a path that
+# holds glob characters such as [1]. cygpath -m gives C:/Users/... Everywhere
+# else the path is printed unchanged.
+sqlcl_native_path() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m -- "$1"
+        return
+      fi
+      ;;
+  esac
+  printf '%s\n' "$1"
+}
+
 invoke_sqlcl_safe() {
   [ "$#" -ge 2 ] || {
     printf 'SQLcl launcher requires a working directory and arguments\n' >&2
@@ -10,6 +28,29 @@ invoke_sqlcl_safe() {
 
   local working_directory="$1"
   shift
+
+  # Convert absolute POSIX paths that exist (or whose parent directory exists, as
+  # an output location does) so a native SQLcl can open them. Only Windows shells
+  # change anything.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local sqlcl_arg sqlcl_args=()
+      for sqlcl_arg in "$@"; do
+        case "$sqlcl_arg" in
+          @/*) sqlcl_args+=("@$(sqlcl_native_path "${sqlcl_arg#@}")") ;;
+          /*)
+            if [ -e "$sqlcl_arg" ] || [ -d "${sqlcl_arg%/*}" ]; then
+              sqlcl_args+=("$(sqlcl_native_path "$sqlcl_arg")")
+            else
+              sqlcl_args+=("$sqlcl_arg")
+            fi
+            ;;
+          *) sqlcl_args+=("$sqlcl_arg") ;;
+        esac
+      done
+      set -- "${sqlcl_args[@]}"
+      ;;
+  esac
   [ -d "$working_directory" ] || {
     printf 'SQLcl working directory does not exist: %s\n' "$working_directory" >&2
     return 2
@@ -21,9 +62,11 @@ invoke_sqlcl_safe() {
   # injecting startup commands.
   local safe_sql_path="$working_directory/.sqlcl-path"
   mkdir -p -- "$safe_sql_path"
+  local native_sql_path
+  native_sql_path="$(sqlcl_native_path "$safe_sql_path")"
   (
     cd -- "$working_directory"
-    SQLPATH="$safe_sql_path" ORACLE_PATH="$safe_sql_path" command sql "$@"
+    SQLPATH="$native_sql_path" ORACLE_PATH="$native_sql_path" command sql "$@"
   )
 }
 

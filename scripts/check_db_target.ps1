@@ -37,7 +37,7 @@ try {
   # Remove pre-production words (PREPROD, non-prod) before looking for a marker.
   $connectionWords = $targetConnection -replace $nonProductionPattern, ' '
   if ($connectionWords -match $productionPattern -and $env:DB_ENVIRONMENT -ne "production") {
-    throw "$Target connection '$targetConnection' resembles production but DB_ENVIRONMENT=$($env:DB_ENVIRONMENT); ask the user whether this is production"
+    throw "$Target connection '$targetConnection' resembles production but DB_ENVIRONMENT=$($env:DB_ENVIRONMENT); ask the user whether this is production before continuing"
   }
   if ($env:DB_ENVIRONMENT -eq "production") {
     if ($Operation -ne "read") { throw "production database operations are always read-only; '$Operation' is blocked" }

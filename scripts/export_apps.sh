@@ -88,7 +88,7 @@ done
 # diagnostic while preserving the command's failure status.
 for app_id in "${APP_IDS[@]}"; do
   destination="apps/${APP_SCHEMA_OF[$app_id]}/$app_id"
-  dirty_status="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- "$destination" 2>/dev/null)" || {
+  dirty_status="$(cd "$REPO_ROOT" && git status --porcelain --untracked-files=all -- "$destination" 2>/dev/null)" || {
     echo "unable to inspect Git status for mirror: $destination" >&2
     exit 1
   }

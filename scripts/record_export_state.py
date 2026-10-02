@@ -106,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     marker = marker_payload(args.app_id, before)
-    args.marker_file.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+    # newline="\n": the default would write CRLF on Windows.
+    args.marker_file.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8", newline="\n")
     return 0
 
 
