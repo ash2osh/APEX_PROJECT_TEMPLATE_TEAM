@@ -99,6 +99,7 @@ class PublishAppCliTests(unittest.TestCase):
             "  import)\n"
             "    printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
             "    pwd > \"$FAKE_SQL_CWD\"\n"
+            "    if [[ -n \"${FAKE_LOCK_SCRATCH:-}\" ]]; then mkdir -p locked && : > locked/held && chmod 500 locked; fi\n"
             "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then\n"
             "      count=$(cat \"$FAKE_STATE_DIR/import-count.txt\")\n"
             "      count=$((count + 1))\n"
@@ -527,6 +528,37 @@ class PublishAppCliTests(unittest.TestCase):
                 self.assertIn(f"scripts/{wrapper} export 100", plain)
                 self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
                 self.assertEqual((app / "application.apx").read_bytes(), original)
+
+    @unittest.skipIf(os.name == "nt", "a read-only directory stands in for a file an editor holds open; Windows locks are not simulated")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores directory permissions")
+    def test_publish_names_the_scratch_directory_it_could_not_remove(self) -> None:
+        # Where a program holds a file of the publish directory open (on Windows), or the
+        # directory cannot be emptied, the cleanup failed silently in PowerShell and with a
+        # bare rm error in Bash, and the developer was never told to remove it.
+        pwsh = shutil.which("pwsh")
+        shells = ["bash"] + (["pwsh"] if pwsh else [])
+        for shell in shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, _, _, environment, _, _ = self.make_stateful_dev_fixture(root)
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                environment["FAKE_LOCK_SCRATCH"] = "1"
+                if shell == "bash":
+                    command = [BASH, str(runner), "100"]
+                else:
+                    command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
+                try:
+                    result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+                    leftovers = sorted((root / "scratch").glob("apex-publish*"))
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(len(leftovers), 1, result.stdout + result.stderr)
+                    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stdout + result.stderr).split())
+                    self.assertIn("could not remove the temporary directory", plain)
+                    self.assertIn(leftovers[0].name, plain)
+                    self.assertNotIn("Permission denied", plain)
+                finally:
+                    for locked in (root / "scratch").glob("apex-publish*/locked"):
+                        locked.chmod(0o700)
 
     @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is above")
     def test_ctrl_c_in_a_windows_console_while_the_import_runs_says_its_result_is_unknown(self) -> None:

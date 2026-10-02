@@ -130,7 +130,11 @@ hand. Publish swaps `application.apx` by moving it into `scratch/apex-publish.*`
 (PowerShell: `scratch/apex-publish-*`) first; if a publish is killed at that
 moment the file is missing from the app folder, and its previous bytes are in
 that scratch folder as `application.apx.before-stamp` or
-`application.apx.displaced`.
+`application.apx.displaced`. Publish deletes the folder when it ends. If a
+program still holds a file in it open (on Windows an editor, a virus scanner or
+an Explorer window), publish warns `could not remove the temporary directory
+scratch/apex-publish...`: close whatever holds it and delete that folder; nothing
+else is needed.
 
 Ctrl-C is handled by both wrappers, and `kill` (SIGTERM) by Bash. A publish
 stopped any other way (`kill -9`, closing the window, SIGTERM sent to PowerShell)

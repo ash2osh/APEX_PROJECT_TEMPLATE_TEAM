@@ -327,7 +327,10 @@ cleanup() {
       fi
     fi
   done
-  rm -rf -- "$staging_dir"
+  if ! rm -rf -- "$staging_dir" 2>/dev/null; then
+    printf 'publish warning: could not remove the temporary directory %s; delete it after closing whatever holds a file in it\n' \
+      "${staging_dir#"$REPO_ROOT/"}" >&2
+  fi
 }
 trap cleanup EXIT
 

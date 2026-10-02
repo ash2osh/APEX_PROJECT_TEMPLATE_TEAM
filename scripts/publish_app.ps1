@@ -480,6 +480,10 @@ try {
   Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue
   if (-not $keepPublishWorkDir -and (Test-Path -LiteralPath $publishWorkDir)) {
     Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $publishWorkDir) {
+      $relativeWorkDir = $publishWorkDir.Substring($repoRoot.Length).TrimStart('\', '/')
+      Write-Warning "publish warning: could not remove the temporary directory $relativeWorkDir; delete it after closing whatever holds a file in it"
+    }
   }
 }
 } finally {
