@@ -1092,6 +1092,24 @@ class TeamCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn(".env needs attention after the upgrade", result.stderr)
 
+    def test_upgrade_template_runs_in_a_checkout_whose_path_has_spaces_and_brackets(self) -> None:
+        # Git Bash does not rewrite a /c/... argument that holds glob characters such as
+        # [1] for a native program, so the Windows Python was asked for C:\c\...
+        with tempfile.TemporaryDirectory(prefix="work ", suffix=" [1]") as temporary:
+            template, project = self.make_upgrade_fixture(Path(temporary))
+
+            result = subprocess.run(
+                [BASH, str(project / "scripts" / "team.sh"), "upgrade-template", "--source", str(template), "--dry-run"],
+                cwd=project,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CREATE scripts/hello.sh", result.stdout)
+            self.assertFalse((project / ".template-lock.json").exists())
+
     def test_powershell_upgrade_template_command_runs_the_engine(self) -> None:
         pwsh = shutil.which("pwsh")
         if pwsh is None:

@@ -193,7 +193,19 @@ case "$command_name" in
       "$REPO_ROOT/scripts/deploy.sh" "$@"
     ;;
   upgrade-template)
-    if python3 "$REPO_ROOT/scripts/upgrade_template.py" --project-root "$REPO_ROOT" "$@"; then
+    # A native Python cannot open /c/... paths. Git Bash rewrites them for it only when
+    # they hold no glob characters such as [1], so convert them here.
+    upgrade_script="$REPO_ROOT/scripts/upgrade_template.py"
+    upgrade_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          upgrade_script="$(cygpath -m "$upgrade_script")"
+          upgrade_root="$(cygpath -m "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+    if python3 "$upgrade_script" --project-root "$upgrade_root" "$@"; then
       upgrade_status=0
     else
       upgrade_status=$?
