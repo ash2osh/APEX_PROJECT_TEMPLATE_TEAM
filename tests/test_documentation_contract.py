@@ -133,6 +133,19 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(pointer=path.name):
                 self.assertIn("docs/publish-rules.md", path.read_text(encoding="utf-8"))
 
+    def test_troubleshooting_explains_the_team_ps1_refusals_about_bash(self) -> None:
+        # The table quotes these messages verbatim, so rewording one must update it.
+        troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        script = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        for message in (
+            "TEAM_BASH is set but is not a file",
+            "Bash is required for",
+            "Git Bash cannot receive an argument with a single quote",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, script)
+                self.assertIn(message, troubleshooting)
+
     def test_application_context_describes_only_current_numeric_paths_and_guards(self) -> None:
         context = (ROOT / "app_context" / "README.md").read_text(encoding="utf-8")
         self.assertIn("app_context/<numeric-app-id>/", context)
