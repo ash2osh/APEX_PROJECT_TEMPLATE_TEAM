@@ -289,6 +289,17 @@ $importUnverified = $false
 # finished it already).
 $importRunning = $false
 
+# .NET rather than Get-FileHash: a Windows PowerShell that inherited PowerShell 7's
+# PSModulePath (anything started under pwsh passes it on) loses that cmdlet, and
+# the swap below has already moved the working file aside when it needs the hash.
+function Get-FileSha256([string]$Path) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try { return [System.BitConverter]::ToString($sha.ComputeHash($stream)) } finally { $stream.Dispose() }
+  } finally { $sha.Dispose() }
+}
+
 # Replace Target with Replacement only while Target still holds the bytes of
 # Expected. Target is renamed aside before the comparison and the replacement
 # is installed with File.Move, which never overwrites, so an editor save at any
@@ -302,7 +313,7 @@ function Invoke-SwapIfUnchanged([string]$Target, [string]$Expected, [string]$Rep
     try { $acl = Get-Acl -LiteralPath $Target } catch { $acl = $null }
   }
   try { [System.IO.File]::Move($Target, $Aside) } catch { return "locked" }
-  if ((Get-FileHash -LiteralPath $Aside -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $Expected -Algorithm SHA256).Hash) {
+  if ((Get-FileSha256 $Aside) -ne (Get-FileSha256 $Expected)) {
     if (-not (Test-Path -LiteralPath $Target)) {
       try { [System.IO.File]::Move($Aside, $Target) } catch { }
     }

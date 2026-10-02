@@ -595,6 +595,45 @@ class PublishAppCliTests(unittest.TestCase):
                 self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
                 self.assertEqual((app / "application.apx").read_bytes(), original)
 
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell only meets PowerShell 7's module path on Windows")
+    def test_windows_powershell_publishes_with_powershell_7s_module_path_inherited(self) -> None:
+        # Whatever runs under PowerShell 7 (an agent's shell, an IDE task, a test runner) hands its
+        # environment to the programs it starts. A Windows PowerShell started that way loads
+        # PowerShell 7's Utility and Management modules and loses Get-FileHash, Get-Acl and
+        # Set-Acl, which the publish swap of application.apx used to need.
+        powershell, pwsh = shutil.which("powershell"), shutil.which("pwsh")
+        if not (powershell and pwsh):
+            self.skipTest("needs Windows PowerShell and PowerShell 7")
+        module_path = subprocess.run(
+            [pwsh, "-NoProfile", "-Command", "$env:PSModulePath"], text=True, capture_output=True, check=True
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
+            for name in [name for name in environment if name.upper() == "PSMODULEPATH"]:
+                del environment[name]
+            environment["PSModulePath"] = module_path
+            lookup = subprocess.run(
+                [powershell, "-NoProfile", "-Command", "if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) { 'present' }"],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            if "present" in lookup.stdout:
+                self.skipTest("PowerShell 7's module path does not hide Get-FileHash from Windows PowerShell here")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(root / "scripts" / "publish_app.ps1"), "100"],
+                cwd=root, env=environment, text=True, capture_output=True, check=False,
+            )
+
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, output)
+            self.assertIn("Published APEX App 100", output)
+            version = (state_dir / "version.txt").read_text(encoding="utf-8").strip()
+            self.assertRegex(version, STAMPED_VERSION.format(counter="001"))
+            self.assertIn(f'    version: "{version}"\n', (app / "application.apx").read_text(encoding="utf-8"))
+
     def test_drift_refusal_names_the_export_command_of_the_shell_in_use(self) -> None:
         # A PowerShell user must not be told to run the Bash wrapper.
         pwsh = shutil.which("pwsh")
