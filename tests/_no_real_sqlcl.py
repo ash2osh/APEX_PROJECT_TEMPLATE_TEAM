@@ -27,6 +27,8 @@ import shlex
 import shutil
 import tempfile
 
+import _windows_lf  # noqa: F401  (Path.write_text writes LF on Windows too)
+
 _MESSAGE = "a unit test reached a real SQLcl; the test's fake sql did not run first"
 _DONE = False
 

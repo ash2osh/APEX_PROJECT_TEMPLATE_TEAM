@@ -3,6 +3,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from fake_sqlcl import BASH
 from pathlib import Path
 
 
@@ -195,7 +196,7 @@ def heading_slugs(markdown: str) -> set[str]:
 def team_commands() -> list[str]:
     """The command names `scripts/team.sh --help` lists."""
     help_text = subprocess.run(
-        ["bash", str(ROOT / "scripts" / "team.sh"), "--help"], capture_output=True, text=True, check=True
+        [BASH, str(ROOT / "scripts" / "team.sh"), "--help"], capture_output=True, text=True, check=True
     ).stdout
     commands = re.findall(r"^  ([a-z][a-z-]+)(?: |$)", help_text.split("Options:")[0], re.MULTILINE)
     return [name for name in commands if name != "help"]

@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from fake_sqlcl import BASH
 from pathlib import Path
 
 
@@ -50,7 +51,7 @@ def load(env_path: Path, probe: str = PROBE, project_schema: str | None = None) 
     if project_schema is not None:
         environment["PROJECT_SCHEMA"] = project_schema
     return subprocess.run(
-        ["bash", "-c", f'set -e; source "$1" "$2"; {probe}', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
+        [BASH, "-c", f'set -e; source "$1" "$2"; {probe}', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
         env=environment,
         text=True,
         capture_output=True,

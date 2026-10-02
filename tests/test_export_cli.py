@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import fake_sqlcl
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,10 +65,8 @@ class ExportCliTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(root), "add", "apps/DEMO/100/deployments"], check=True)
         subprocess.run(["git", "-C", str(root), "commit", "-qm", "seed descriptors"], check=True)
 
-        fake_bin = root / "bin"
-        fake_bin.mkdir()
-        fake_sql = fake_bin / "sql"
-        fake_sql.write_text(
+        fake_sqlcl.install(
+            root / "bin",
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "cat > /dev/null\n"
@@ -76,9 +76,7 @@ class ExportCliTests(unittest.TestCase):
             "printf '{\\\"default\\\":true}\\n' > apps/DEMO/exported/deployments/default.json\n"
             "printf '%s\\n' \"$FAKE_DB_BEFORE\" > .apex-export-before.txt\n"
             "printf '%s\\n' \"$FAKE_DB_AFTER\" > .apex-export-after.txt\n",
-            encoding="utf-8",
         )
-        fake_sql.chmod(0o755)
         script = scripts / ("export_apps.ps1" if powershell else "export_apps.sh")
         return script, expected
 
@@ -97,7 +95,7 @@ class ExportCliTests(unittest.TestCase):
         command = (
             [PWSH, "-NoProfile", "-File", str(script), "-AppId", "100"]
             if powershell
-            else ["bash", str(script), "100"]
+            else [BASH, str(script), "100"]
         )
         return subprocess.run(
             command,

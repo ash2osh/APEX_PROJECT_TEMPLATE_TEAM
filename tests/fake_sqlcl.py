@@ -24,6 +24,9 @@ import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 from scripts import sqlcl_session
 
+# Git Bash on Windows, plain `bash` elsewhere: a bare "bash" is the WSL launcher on Windows.
+BASH = sqlcl_session.bash_command()
+
 
 def install(directory: Path, script: str) -> Path:
     """Write the fake `sql` into directory, creating it, and return the directory.
@@ -34,10 +37,20 @@ def install(directory: Path, script: str) -> Path:
     fake = directory / "sql"
     fake.write_text(script if script.startswith("#!") else "#!/usr/bin/env bash\n" + script, encoding="utf-8", newline="\n")
     fake.chmod(0o755)
-    if os.name == "nt" and not _build_windows_launcher(directory, fake):
+    add_launcher(directory)
+    return directory
+
+
+def add_launcher(directory: Path) -> None:
+    """Make the Bash script directory/sql startable by Windows; nothing happens elsewhere.
+
+    For a test that writes its own script (install() calls this itself).
+    """
+    if os.name != "nt":
+        return
+    if not _build_windows_launcher(directory, directory / "sql"):
         shim = f'@echo off\r\n"{sqlcl_session.bash_command()}" "%~dp0sql" %*\r\nexit /b %ERRORLEVEL%\r\n'
         (directory / "sql.cmd").write_text(shim, encoding="ascii", newline="")
-    return directory
 
 
 def _build_windows_launcher(directory: Path, fake: Path) -> bool:

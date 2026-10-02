@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import sys
+from fake_sqlcl import BASH
 from pathlib import Path
 
 
@@ -127,7 +129,7 @@ class MirrorSafetyTests(unittest.TestCase):
 
     def commands(self, root: Path, staged: Path, destination: str, environment=None):
         yield "bash", subprocess.run(
-            ["bash", str(root / "scripts" / "replace_mirror.sh"), str(staged), destination],
+            [BASH, str(root / "scripts" / "replace_mirror.sh"), str(staged), destination],
             cwd=root, env=environment, text=True, capture_output=True, check=False,
         )
         if PWSH:
@@ -157,7 +159,7 @@ class MirrorSafetyTests(unittest.TestCase):
             staged.mkdir(parents=True)
             (staged / "application.apx").write_text("new\n", encoding="utf-8")
             result = subprocess.run(
-                ["bash", str(root / "scripts" / "replace_mirror.sh"), str(staged), "apps/DEMO/100"],
+                [BASH, str(root / "scripts" / "replace_mirror.sh"), str(staged), "apps/DEMO/100"],
                 cwd=root, text=True, capture_output=True, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -176,6 +178,8 @@ class MirrorSafetyTests(unittest.TestCase):
 
 
     def test_failure_on_the_second_mirror_rolls_back_the_first(self) -> None:
+        if os.name == "nt":
+            self.skipTest("a read-only directory does not stop writes on Windows, and there is no geteuid")
         if os.geteuid() == 0:
             self.skipTest("root ignores directory permissions")
         for shell in ("bash", "pwsh"):
@@ -195,7 +199,7 @@ class MirrorSafetyTests(unittest.TestCase):
                 try:
                     pairs = [str(staged_app), "apps/DEMO/100", str(staged_database), "database/DEMO"]
                     if shell == "bash":
-                        command = ["bash", str(root / "scripts" / "replace_mirror.sh"), *pairs]
+                        command = [BASH, str(root / "scripts" / "replace_mirror.sh"), *pairs]
                     else:
                         command = [PWSH, "-NoProfile", "-File", str(root / "scripts" / "replace_mirror.ps1"), *pairs]
                     result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
@@ -225,7 +229,7 @@ class PreserveDeploymentsTests(unittest.TestCase):
             staged = root / "staged"
             staged.mkdir()
             result = subprocess.run(
-                ["python3", str(ROOT / "scripts" / "preserve_deployments.py"), str(existing), str(staged)],
+                [sys.executable, str(ROOT / "scripts" / "preserve_deployments.py"), str(existing), str(staged)],
                 text=True, capture_output=True, check=False,
             )
             self.assertNotEqual(result.returncode, 0)

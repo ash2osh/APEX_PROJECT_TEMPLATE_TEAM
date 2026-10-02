@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 
@@ -33,7 +34,7 @@ class RecordExportStateTests(unittest.TestCase):
             environment["TZ"] = timezone
             result = subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     str(RECORDER),
                     "100",
                     str(before_path),
@@ -70,7 +71,7 @@ class RecordExportStateTests(unittest.TestCase):
             (root / "after.txt").write_bytes(b"2026-09-26T08:00:00|2026-09-26T09:00:02|Release 1.0\n")
             marker_path = root / "apex-team-export.json"
             result = subprocess.run(
-                ["python3", str(RECORDER), "100", str(root / "before.txt"), str(root / "after.txt"), str(marker_path)],
+                [sys.executable, str(RECORDER), "100", str(root / "before.txt"), str(root / "after.txt"), str(marker_path)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -113,7 +114,7 @@ class RecordExportStateTests(unittest.TestCase):
             (root / "before.txt").write_text("NO_TIMESTAMP|2026-09-26T09:00:00\n", encoding="utf-8")
             (root / "after.txt").write_text("NO_TIMESTAMP|2026-09-26T09:00:02\n", encoding="utf-8")
             result = subprocess.run(
-                ["python3", str(RECORDER), "100", str(root / "before.txt"), str(root / "after.txt"), str(root / "m.json")],
+                [sys.executable, str(RECORDER), "100", str(root / "before.txt"), str(root / "after.txt"), str(root / "m.json")],
                 text=True,
                 capture_output=True,
                 check=False,

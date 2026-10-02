@@ -9,6 +9,8 @@ import time
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import fake_sqlcl
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +22,7 @@ STAMPED_VERSION = r"^Release 1\.0 \[ALICE-\d{{4}}-\d{{2}}-\d{{2}}r{counter}\]$"
 class PublishAppCliTests(unittest.TestCase):
     def run_publish(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(PUBLISH), *args],
+            [BASH, str(PUBLISH), *args],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -133,6 +135,7 @@ class PublishAppCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
+        fake_sqlcl.add_launcher(fake_bin)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["FAKE_SQL_LOG"] = str(sql_log)
@@ -225,7 +228,7 @@ class PublishAppCliTests(unittest.TestCase):
             root = Path(temporary)
             runner, sql_log, sql_cwd, environment = self.make_publish_fixture(root)
             result = subprocess.run(
-                ["bash", str(runner), "100", "--force"],
+                [BASH, str(runner), "100", "--force"],
                 cwd=root,
                 env=environment,
                 text=True,
@@ -249,7 +252,7 @@ class PublishAppCliTests(unittest.TestCase):
             (root / "apps/DEMO/100/login.sql").write_text("HOST touch should-not-run\n", encoding="utf-8")
 
             result = subprocess.run(
-                ["bash", str(runner), "100", "--force"],
+                [BASH, str(runner), "100", "--force"],
                 cwd=root,
                 env=environment,
                 text=True,
@@ -274,7 +277,7 @@ class PublishAppCliTests(unittest.TestCase):
                 self.skipTest(f"symlink creation is unavailable: {exc}")
 
             result = subprocess.run(
-                ["bash", str(runner), "100", "--force"],
+                [BASH, str(runner), "100", "--force"],
                 cwd=root,
                 env=environment,
                 text=True,
@@ -320,7 +323,7 @@ class PublishAppCliTests(unittest.TestCase):
                 runner, _, _, environment = self.make_publish_fixture(root)
                 environment["FAKE_SQL_MODE"] = mode
                 result = subprocess.run(
-                    ["bash", str(runner), "100", "--force"],
+                    [BASH, str(runner), "100", "--force"],
                     cwd=root,
                     env=environment,
                     text=True,
@@ -337,7 +340,7 @@ class PublishAppCliTests(unittest.TestCase):
             runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
 
             first = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
@@ -346,7 +349,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual(marker["builderLastUpdatedOn"], "2026-09-26T09:30:00")
 
             second = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
@@ -363,7 +366,7 @@ class PublishAppCliTests(unittest.TestCase):
             environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
 
             first = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
@@ -374,7 +377,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertRegex(marker["version"], STAMPED_VERSION.format(counter="001"))
 
             second = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
@@ -387,7 +390,7 @@ class PublishAppCliTests(unittest.TestCase):
             environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -404,7 +407,7 @@ class PublishAppCliTests(unittest.TestCase):
             runner, _, _, environment, _, state_dir = self.make_stateful_dev_fixture(root)
             environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
             first = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
@@ -412,7 +415,7 @@ class PublishAppCliTests(unittest.TestCase):
             (state_dir / "version.txt").write_text("Release 1.0 [BOB-2026-09-26r001]\n", encoding="utf-8")
 
             second = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -436,7 +439,7 @@ class PublishAppCliTests(unittest.TestCase):
                 descriptor = app / "deployments" / "dev.json"
                 descriptor.write_bytes(b"\xef\xbb\xbf" + descriptor.read_bytes())
                 if shell == "bash":
-                    command = ["bash", str(runner), "100", "--describe"]
+                    command = [BASH, str(runner), "100", "--describe"]
                 else:
                     command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100", "--describe"]
 
@@ -446,6 +449,7 @@ class PublishAppCliTests(unittest.TestCase):
                 output = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", result.stdout + result.stderr).split())
                 self.assertIn("byte-order mark", output)
 
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
     def test_interrupt_while_the_import_runs_says_its_result_is_unknown(self) -> None:
         # SQLcl may already have finished the import when the interrupt arrives,
         # before publish has read its output; the old source is put back, so
@@ -463,7 +467,7 @@ class PublishAppCliTests(unittest.TestCase):
                 environment["FAKE_IMPORT_PAUSE"] = str(pause)
                 original = (app / "application.apx").read_bytes()
                 if shell == "bash":
-                    command = ["bash", str(runner), "100"]
+                    command = [BASH, str(runner), "100"]
                 else:
                     # Through the wrapper: it is what turns Ctrl-C into status 130.
                     shutil.copy2(ROOT / "scripts" / "team.ps1", root / "scripts" / "team.ps1")
@@ -501,7 +505,7 @@ class PublishAppCliTests(unittest.TestCase):
                 environment["PROJECT_ENV_FILE"] = str(root / ".env")
                 environment["FAKE_IMPORT_CLEARS_TIMESTAMP"] = "1"
                 if shell == "bash":
-                    command = ["bash", str(runner), "100"]
+                    command = [BASH, str(runner), "100"]
                 else:
                     command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
                 first = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
@@ -525,7 +529,7 @@ class PublishAppCliTests(unittest.TestCase):
             original = (app / "application.apx").read_bytes()
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -540,7 +544,7 @@ class PublishAppCliTests(unittest.TestCase):
             environment["FAKE_SQL_MODE"] = "edit-then-fail"
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -560,7 +564,7 @@ class PublishAppCliTests(unittest.TestCase):
                 environment["PROJECT_ENV_FILE"] = str(root / ".env")
                 original = (app / "application.apx").read_bytes()
                 if shell == "bash":
-                    command = ["bash", str(runner), "100"]
+                    command = [BASH, str(runner), "100"]
                 else:
                     command = [executable, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
                 app.chmod(0o555)
@@ -585,7 +589,7 @@ class PublishAppCliTests(unittest.TestCase):
                 runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
                 environment["PROJECT_ENV_FILE"] = str(root / ".env")
                 if shell == "bash":
-                    command = ["bash", str(runner), "100"]
+                    command = [BASH, str(runner), "100"]
                 else:
                     command = [pwsh, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
                 ok = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
@@ -609,7 +613,7 @@ class PublishAppCliTests(unittest.TestCase):
             runner, sql_log, _, environment, _, _ = self.make_stateful_dev_fixture(root)
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -618,7 +622,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual(arguments[-1], "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper())
 
             forced = subprocess.run(
-                ["bash", str(runner), "100", "--force"], cwd=root, env=environment,
+                [BASH, str(runner), "100", "--force"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
@@ -640,7 +644,7 @@ class PublishAppCliTests(unittest.TestCase):
             runner, sql_log, environment, app, _ = self.make_unexported_app(root, app_exists=False)
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -657,7 +661,7 @@ class PublishAppCliTests(unittest.TestCase):
             runner, _, environment, _, state_dir = self.make_unexported_app(root, app_exists=True)
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -676,7 +680,7 @@ class PublishAppCliTests(unittest.TestCase):
             original = (app / "application.apx").read_bytes()
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -816,7 +820,7 @@ class PublishAppCliTests(unittest.TestCase):
             environment["FAKE_SQL_CALLS"] = str(calls)
 
             result = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
 
@@ -858,7 +862,7 @@ class PublishAppCliTests(unittest.TestCase):
             original_marker = marker_path.read_bytes()
 
             first = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertNotEqual(first.returncode, 0, first.stdout + first.stderr)
@@ -867,7 +871,7 @@ class PublishAppCliTests(unittest.TestCase):
 
             environment.pop("FAKE_EXPORT_MISMATCH")
             retry = subprocess.run(
-                ["bash", str(runner), "100"], cwd=root, env=environment,
+                [BASH, str(runner), "100"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertNotEqual(retry.returncode, 0, retry.stdout + retry.stderr)
@@ -984,6 +988,7 @@ class PublishAppCliTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 fake_sql.chmod(0o755)
+                fake_sqlcl.add_launcher(fake_bin)
                 environment = os.environ.copy()
                 environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
                 environment["PROJECT_ENV_FILE"] = str(root / ".env")
@@ -1038,7 +1043,7 @@ class PublishAppCliTests(unittest.TestCase):
             original_source = (app / "application.apx").read_bytes()
 
             result = subprocess.run(
-                ["bash", str(runner), "100", "--env", "staging"],
+                [BASH, str(runner), "100", "--env", "staging"],
                 cwd=root,
                 env=environment,
                 input="y\n",

@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 
@@ -16,7 +17,7 @@ class StampPublishVersionTests(unittest.TestCase):
             path = Path(temporary) / "application.apx"
             path.write_text(source, encoding="utf-8")
             result = subprocess.run(
-                ["python3", str(STAMPER), str(path), developer, "--date", publish_date],
+                [sys.executable, str(STAMPER), str(path), developer, "--date", publish_date],
                 text=True,
                 capture_output=True,
                 check=False,

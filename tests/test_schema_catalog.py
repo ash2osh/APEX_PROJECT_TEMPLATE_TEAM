@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from scripts.schema_catalog import (
 )
 from scripts.sqlcl_session import SqlclError, SqlclResult, run_sqlcl
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import fake_sqlcl
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -266,9 +268,11 @@ def inventory_from_fixture():
 
 class SqlclTransportTests(unittest.TestCase):
     def fake_sql(self, directory: Path, behavior: str = "success") -> Path:
-        executable = directory / "sql"
-        executable.write_text(
-            "#!/usr/bin/env python3\n"
+        # The fake is Python so it can record the environment, but SQLcl is started the way
+        # production starts it: a Bash `sql` (startable on Windows through fake_sqlcl) that
+        # runs the test interpreter on a sibling file.
+        program = directory / "sql_fake.py"
+        program.write_text(
             "import json, os, pathlib, sys, time\n"
             "sqlpath = pathlib.Path(os.getenv('SQLPATH', ''))\n"
             "pathlib.Path(os.environ['FAKE_RECORD']).write_text(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'sqlpath':os.getenv('SQLPATH'),'oracle_path':os.getenv('ORACLE_PATH'),'login_loaded':(sqlpath / 'login.sql').exists(),'stdin':sys.stdin.read()}))\n"
@@ -279,8 +283,8 @@ class SqlclTransportTests(unittest.TestCase):
             ,
             encoding="utf-8",
         )
-        executable.chmod(0o755)
-        return executable
+        fake_sqlcl.install(directory, f'#!/usr/bin/env bash\nexec "{Path(sys.executable).as_posix()}" "{program.as_posix()}" "$@"\n')
+        return directory / "sql"
 
     def test_safe_transport_isolates_working_directory_paths_and_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -302,8 +306,9 @@ class SqlclTransportTests(unittest.TestCase):
             observation = json.loads(record.read_text(encoding="utf-8"))
 
             self.assertEqual(Path(observation["cwd"]), driver.parent)
-            self.assertEqual(observation["sqlpath"], str(driver.parent / ".sqlcl-path"))
-            self.assertEqual(observation["oracle_path"], str(driver.parent / ".sqlcl-path"))
+            # Windows: the launcher passes C:/... (cygpath -m); Path compares separators-insensitively.
+            self.assertEqual(Path(observation["sqlpath"]), driver.parent / ".sqlcl-path")
+            self.assertEqual(Path(observation["oracle_path"]), driver.parent / ".sqlcl-path")
             self.assertFalse(observation["login_loaded"])
             self.assertEqual(observation["stdin"], "")
             self.assertEqual(result.returncode, 0)
@@ -374,7 +379,7 @@ class SqlclTransportTests(unittest.TestCase):
             result = run_sqlcl(target(), driver, run_dir, environment=environment)
 
             observation = json.loads(record.read_text(encoding="utf-8"))
-            self.assertIn("@" + str(driver), observation["args"])
+            self.assertIn(driver, [Path(argument[1:]) for argument in observation["args"] if argument.startswith("@")])
             self.assertFalse((root / "INJECTED").exists())
             self.assertEqual(result.returncode, 0)
 

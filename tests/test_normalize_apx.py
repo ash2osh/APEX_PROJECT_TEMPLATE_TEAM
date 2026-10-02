@@ -2,6 +2,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from fake_sqlcl import BASH
 from pathlib import Path
 
 
@@ -38,7 +39,7 @@ class NormalizeApxTests(unittest.TestCase):
                 (root / shell).mkdir()
                 for name, data in CASES.items():
                     (root / shell / f"{name}.apx").write_bytes(data)
-            subprocess.run(["bash", str(ROOT / "scripts" / "normalize_apx.sh"), str(root / "sh")], check=True)
+            subprocess.run([BASH, str(ROOT / "scripts" / "normalize_apx.sh"), str(root / "sh")], check=True)
             subprocess.run(
                 [PWSH, "-NoProfile", "-File", str(ROOT / "scripts" / "normalize_apx.ps1"), "-TargetDir", str(root / "ps")],
                 check=True, capture_output=True,
@@ -55,7 +56,7 @@ class NormalizeApxTests(unittest.TestCase):
             root = Path(temporary)
             for name, data in CASES.items():
                 (root / f"{name}.apx").write_bytes(data)
-            subprocess.run(["bash", str(ROOT / "scripts" / "normalize_apx.sh"), str(root)], check=True)
+            subprocess.run([BASH, str(ROOT / "scripts" / "normalize_apx.sh"), str(root)], check=True)
             for name, data in CASES.items():
                 with self.subTest(case=name):
                     result = (root / f"{name}.apx").read_bytes()

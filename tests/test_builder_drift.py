@@ -60,7 +60,7 @@ class BuilderDriftTests(unittest.TestCase):
             )
             return subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     str(GUARD),
                     "100",
                     "docker-demo",
@@ -239,6 +239,7 @@ class BuilderDriftTests(unittest.TestCase):
                 )
                 self.assertIn(f"scripts/{wrapper} export 100", unknown.stderr)
 
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
     def test_interrupting_the_drift_check_does_not_print_a_traceback(self) -> None:
         # The check runs before anything is stamped or imported, so Ctrl-C has
         # no consequence to report beyond that it was interrupted.
@@ -256,7 +257,7 @@ class BuilderDriftTests(unittest.TestCase):
             fake_bin = fake_sqlcl.install(root / "bin", f"touch '{started}'\nsleep 30\n")
             environment = fake_sqlcl.environment(fake_bin)
             process = subprocess.Popen(
-                ["python3", str(GUARD), "100", "docker-demo", str(app)],
+                [sys.executable, str(GUARD), "100", "docker-demo", str(app)],
                 cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
                 # A suite started in the background (nohup ... &) inherits an

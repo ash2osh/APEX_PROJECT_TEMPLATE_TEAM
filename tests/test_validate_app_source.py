@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 
@@ -11,7 +12,7 @@ VALIDATOR = ROOT / "scripts" / "validate_app_source.py"
 class ValidateAppSourceTests(unittest.TestCase):
     def run_validator(self, repo_root: Path, source: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(VALIDATOR), str(repo_root), str(source)],
+            [sys.executable, str(VALIDATOR), str(repo_root), str(source)],
             text=True,
             capture_output=True,
             check=False,

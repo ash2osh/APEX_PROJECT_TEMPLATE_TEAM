@@ -9,9 +9,12 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tools import chrome_mcp_daemon
-from tools.chrome_mcp_daemon import ChromeMcpDaemon, prepare_socket_path
-from tools.chrome_devtools_client import ChromeDevToolsClient, ensure_daemon_running
+if os.name == "nt":
+    raise unittest.SkipTest("tools/chrome_mcp_daemon.py is POSIX-only: it imports fcntl and relies on Unix sockets and process groups")
+
+from tools import chrome_mcp_daemon  # noqa: E402
+from tools.chrome_mcp_daemon import ChromeMcpDaemon, prepare_socket_path  # noqa: E402
+from tools.chrome_devtools_client import ChromeDevToolsClient, ensure_daemon_running  # noqa: E402
 
 
 class ChromeMcpConfigurationTests(unittest.TestCase):

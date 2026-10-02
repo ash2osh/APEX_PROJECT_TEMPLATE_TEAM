@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,12 +43,12 @@ class AppIdLimitTests(unittest.TestCase):
     def test_every_entry_point_refuses_an_id_of_more_than_18_digits(self) -> None:
         scripts = ROOT / "scripts"
         for label, build, environment in (
-            ("team.sh export", lambda value: ["bash", str(scripts / "team.sh"), "export", value], self.missing_environment),
-            ("team.sh publish", lambda value: ["bash", str(scripts / "team.sh"), "publish", value], self.missing_environment),
-            ("team.sh deploy", lambda value: ["bash", str(scripts / "team.sh"), "deploy", value, "--env", "staging"], self.missing_environment),
-            ("publish_app.sh", lambda value: ["bash", str(scripts / "publish_app.sh"), value], self.missing_environment),
-            ("deploy.sh", lambda value: ["bash", str(scripts / "deploy.sh"), value, "--env", "staging"], self.missing_environment),
-            ("export_apps.sh", lambda value: ["bash", str(scripts / "export_apps.sh"), value], self.example_environment),
+            ("team.sh export", lambda value: [BASH, str(scripts / "team.sh"), "export", value], self.missing_environment),
+            ("team.sh publish", lambda value: [BASH, str(scripts / "team.sh"), "publish", value], self.missing_environment),
+            ("team.sh deploy", lambda value: [BASH, str(scripts / "team.sh"), "deploy", value, "--env", "staging"], self.missing_environment),
+            ("publish_app.sh", lambda value: [BASH, str(scripts / "publish_app.sh"), value], self.missing_environment),
+            ("deploy.sh", lambda value: [BASH, str(scripts / "deploy.sh"), value, "--env", "staging"], self.missing_environment),
+            ("export_apps.sh", lambda value: [BASH, str(scripts / "export_apps.sh"), value], self.example_environment),
             ("team.ps1 export", lambda value: self.powershell(str(scripts / "team.ps1"), "export", value), self.missing_environment),
             ("team.ps1 publish", lambda value: self.powershell(str(scripts / "team.ps1"), "publish", value), self.missing_environment),
             ("publish_app.ps1", lambda value: self.powershell(str(scripts / "publish_app.ps1"), value), self.missing_environment),
@@ -63,11 +64,11 @@ class AppIdLimitTests(unittest.TestCase):
     def test_an_id_of_18_digits_passes_the_id_check(self) -> None:
         scripts = ROOT / "scripts"
         for label, command in (
-            ("team.sh export", ["bash", str(scripts / "team.sh"), "export", LONGEST]),
-            ("team.sh publish", ["bash", str(scripts / "team.sh"), "publish", LONGEST]),
-            ("team.sh deploy", ["bash", str(scripts / "team.sh"), "deploy", LONGEST, "--env", "staging"]),
-            ("publish_app.sh", ["bash", str(scripts / "publish_app.sh"), LONGEST]),
-            ("deploy.sh", ["bash", str(scripts / "deploy.sh"), LONGEST, "--env", "staging"]),
+            ("team.sh export", [BASH, str(scripts / "team.sh"), "export", LONGEST]),
+            ("team.sh publish", [BASH, str(scripts / "team.sh"), "publish", LONGEST]),
+            ("team.sh deploy", [BASH, str(scripts / "team.sh"), "deploy", LONGEST, "--env", "staging"]),
+            ("publish_app.sh", [BASH, str(scripts / "publish_app.sh"), LONGEST]),
+            ("deploy.sh", [BASH, str(scripts / "deploy.sh"), LONGEST, "--env", "staging"]),
         ):
             with self.subTest(label):
                 result = self.run_command(command, self.missing_environment)
@@ -93,7 +94,7 @@ class AppIdLimitTests(unittest.TestCase):
                 environment = Path(temporary) / ".env"
                 environment.write_text(template.replace("APEX_APP_ID=100,200", f"APEX_APP_ID={value}"), encoding="utf-8")
                 bash_result = subprocess.run(
-                    ["bash", "-c", 'source "$1" "$2"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment)],
+                    [BASH, "-c", 'source "$1" "$2"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment)],
                     text=True, capture_output=True, check=False,
                 )
                 results = [("bash", bash_result)]

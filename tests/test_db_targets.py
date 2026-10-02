@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from fake_sqlcl import BASH
 from pathlib import Path
 
 try:
@@ -275,7 +276,7 @@ class ProductionMarkerTests(unittest.TestCase):
                     self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_bash_guard_matches_python(self) -> None:
-        self.assert_guard_matches_python(["bash", "check_db_target.sh"])
+        self.assert_guard_matches_python([BASH, "check_db_target.sh"])
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is not installed")
     def test_powershell_guard_matches_python(self) -> None:

@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 
@@ -42,7 +43,7 @@ class VerifyPublishStateTests(unittest.TestCase):
     def run_verifier(self, source: Path, exported: Path, before: Path, after: Path):
         return subprocess.run(
             [
-                "python3", str(VERIFIER), "100", str(source), str(exported), str(before), str(after),
+                sys.executable, str(VERIFIER), "100", str(source), str(exported), str(before), str(after),
                 "--repo-root", str(source.parent), "--record-baseline",
             ],
             text=True,

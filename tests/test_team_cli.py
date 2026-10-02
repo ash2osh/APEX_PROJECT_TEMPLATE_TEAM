@@ -10,6 +10,8 @@ import time
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import fake_sqlcl
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +26,7 @@ class TeamCliTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / "load_env.sh", loader)
             return subprocess.run(
                 [
-                    "bash",
+                    BASH,
                     "-c",
                     'set -e; source "$1" "$2"; printf "%s|%s|%s|%s\\n" "$CODE_SCHEMA" "$CODE_EXPECTED_USER" "$CODE_PREFIXES" "$APEX_PARSING_SCHEMA"',
                     "bash",
@@ -38,7 +40,7 @@ class TeamCliTests(unittest.TestCase):
 
     def test_team_help_lists_primary_commands(self) -> None:
         result = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
+            [BASH, str(ROOT / "scripts" / "team.sh"), "--help"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -70,7 +72,7 @@ class TeamCliTests(unittest.TestCase):
                 environment = os.environ.copy()
                 environment["PROJECT_ENV_FILE"] = "/no/such/migration-env-file"
                 result = subprocess.run(
-                    ["bash", str(ROOT / "scripts" / "team.sh"), "migrate", *arguments],
+                    [BASH, str(ROOT / "scripts" / "team.sh"), "migrate", *arguments],
                     cwd=ROOT,
                     env=environment,
                     text=True,
@@ -110,7 +112,7 @@ class TeamCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts" / "team.sh"), "check-conflicts", f"migrations/{folder.name}", "--local", "--repo-root", str(root)],
+                [BASH, str(ROOT / "scripts" / "team.sh"), "check-conflicts", f"migrations/{folder.name}", "--local", "--repo-root", str(root)],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
@@ -121,7 +123,7 @@ class TeamCliTests(unittest.TestCase):
 
     def test_publish_command_routes_non_dev_targets_to_deploy(self) -> None:
         result = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "team.sh"), "publish", "100", "--env", "prod"],
+            [BASH, str(ROOT / "scripts" / "team.sh"), "publish", "100", "--env", "prod"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -168,7 +170,7 @@ class TeamCliTests(unittest.TestCase):
             environment.write_text(content, encoding="utf-8")
             result = subprocess.run(
                 [
-                    "bash", "-c",
+                    BASH, "-c",
                     'set -e; source "$1" "$2"; printf "%s|%s|%s\\n" "$STAGING_SQLCL_CONNECTION" "$STAGING_EXPECTED_USER" "$STAGING_SCHEMA"',
                     "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment),
                 ],
@@ -183,7 +185,7 @@ class TeamCliTests(unittest.TestCase):
             content = (ROOT / ".env.example").read_text(encoding="utf-8")
             environment.write_text(content + "\nSTAGING_SCHEMA=APP_STAGE\n", encoding="utf-8")
             result = subprocess.run(
-                ["bash", "-c", 'source "$1" "$2"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment)],
+                [BASH, "-c", 'source "$1" "$2"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment)],
                 text=True, capture_output=True, check=False,
             )
             self.assertNotEqual(result.returncode, 0)
@@ -195,7 +197,7 @@ class TeamCliTests(unittest.TestCase):
             environment.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
             result = subprocess.run(
                 [
-                    "bash", "-c",
+                    BASH, "-c",
                     'export STAGING_SCHEMA=INHERITED PROD_SCHEMA=INHERITED; source "$1" "$2"; printf "%s|%s\\n" "${STAGING_SCHEMA-}" "${PROD_SCHEMA-}"',
                     "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment),
                 ],
@@ -277,7 +279,7 @@ class TeamCliTests(unittest.TestCase):
                 scripts.mkdir()
                 shutil.copy2(ROOT / "scripts" / "load_env.sh", scripts / "load_env.sh")
                 bash_result = subprocess.run(
-                    ["bash", "-c", 'set -e; source "$1" "$2"; echo accepted', "bash", str(scripts / "load_env.sh"), str(environment)],
+                    [BASH, "-c", 'set -e; source "$1" "$2"; echo accepted', "bash", str(scripts / "load_env.sh"), str(environment)],
                     text=True, capture_output=True, check=False,
                     env={**os.environ, "LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"},
                 )
@@ -326,7 +328,7 @@ class TeamCliTests(unittest.TestCase):
         environment = {**os.environ, "PROJECT_ENV_FILE": "/no/such/env"}
         for arguments in (["--schema=DEMO", "doctor"], ["--schema", "-1", "doctor"], ["-x", "doctor"]):
             with self.subTest(arguments=arguments):
-                bash_result = subprocess.run(["bash", str(ROOT / "scripts" / "team.sh"), *arguments], env=environment,
+                bash_result = subprocess.run([BASH, str(ROOT / "scripts" / "team.sh"), *arguments], env=environment,
                                              text=True, capture_output=True, check=False, cwd=ROOT)
                 powershell_result = subprocess.run([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), *arguments],
                                                    env=environment, text=True, capture_output=True, check=False, cwd=ROOT)
@@ -341,7 +343,7 @@ class TeamCliTests(unittest.TestCase):
             self.skipTest("PowerShell Core is not installed")
         for arguments in ([], ["--help"], ["-h"]):
             with self.subTest(arguments=arguments):
-                for command in (["bash", str(ROOT / "scripts" / "team.sh")], [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")]):
+                for command in ([BASH, str(ROOT / "scripts" / "team.sh")], [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")]):
                     result = subprocess.run([*command, *arguments], text=True, capture_output=True, check=False, cwd=ROOT)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Usage: scripts/team.", result.stdout)
@@ -362,7 +364,7 @@ class TeamCliTests(unittest.TestCase):
             ["backup-db", "extra"], ["no-such-command"],
         ):
             with self.subTest(arguments=arguments):
-                bash_result = subprocess.run(["bash", str(ROOT / "scripts" / "team.sh"), *arguments], env=environment,
+                bash_result = subprocess.run([BASH, str(ROOT / "scripts" / "team.sh"), *arguments], env=environment,
                                              text=True, capture_output=True, check=False, cwd=ROOT)
                 powershell_result = subprocess.run([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), *arguments],
                                                    env=environment, text=True, capture_output=True, check=False, cwd=ROOT)
@@ -396,7 +398,7 @@ class TeamCliTests(unittest.TestCase):
                 environment_file.write_text(content, encoding="utf-8")
                 environment = {**os.environ, "PROJECT_ENV_FILE": str(environment_file)}
                 results = {}
-                for name, command in (("bash", ["bash", str(ROOT / "scripts" / "team.sh"), "doctor"]),
+                for name, command in (("bash", [BASH, str(ROOT / "scripts" / "team.sh"), "doctor"]),
                                       ("powershell", [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "doctor"])):
                     result = subprocess.run(command, env=environment, text=True, capture_output=True, check=False, cwd=ROOT)
                     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
@@ -406,6 +408,7 @@ class TeamCliTests(unittest.TestCase):
                 self.assertNotIn("Exception:", results["powershell"])
                 self.assertNotIn("Line |", results["powershell"])
 
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
     def test_powershell_exits_130_when_interrupted_while_a_helper_runs(self) -> None:
         # Ctrl-C stops PowerShell's own pipeline as well as the helper, so the
         # line that passes the helper's status on never ran and pwsh exited 0,
@@ -439,6 +442,7 @@ class TeamCliTests(unittest.TestCase):
                     process.communicate()
             self.assertEqual(process.returncode, 130)
 
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
     def test_powershell_passes_on_the_status_a_helper_chose_when_it_was_interrupted(self) -> None:
         # migrate reports "interrupted and may be partially applied" with status 2,
         # not 130; the wrapper must not flatten that into a plain interrupt.
@@ -476,7 +480,7 @@ class TeamCliTests(unittest.TestCase):
         pwsh = shutil.which("pwsh")
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
-        bash_usage = subprocess.run(["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
+        bash_usage = subprocess.run([BASH, str(ROOT / "scripts" / "team.sh"), "--help"],
                                     text=True, capture_output=True, check=False, cwd=ROOT)
         powershell_usage = subprocess.run([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "--help"],
                                           text=True, capture_output=True, check=False, cwd=ROOT)
@@ -556,6 +560,7 @@ class TeamCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_sql.chmod(0o755)
+            fake_sqlcl.add_launcher(fake_bin)
             environment = os.environ.copy()
             environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
             environment["FAKE_SQL_LOG"] = str(sql_log)
@@ -569,7 +574,7 @@ class TeamCliTests(unittest.TestCase):
             environment["SQLPATH"] = str(malicious_sqlpath)
 
             result = subprocess.run(
-                ["bash", str(scripts / "team.sh"), "doctor"],
+                [BASH, str(scripts / "team.sh"), "doctor"],
                 cwd=root,
                 env=environment,
                 text=True,
@@ -586,6 +591,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", doctor_sql)
             self.assertIn("@@verify_db_access.sql", doctor_sql)
 
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
     def test_interrupting_doctor_removes_its_working_directory(self) -> None:
         # Doctor makes scratch/sqlcl-doctor.* for SQLcl; Ctrl-C used to end the
         # script before the line that removes it.
@@ -603,9 +609,10 @@ class TeamCliTests(unittest.TestCase):
             fake_sql = fake_bin / "sql"
             fake_sql.write_text(f"#!/bin/sh\n: > '{started}'\nsleep 30\n", encoding="utf-8")
             fake_sql.chmod(0o755)
+            fake_sqlcl.add_launcher(fake_bin)
             environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", "PROJECT_ENV_FILE": str(root / ".env")}
             process = subprocess.Popen(
-                ["bash", str(scripts / "team.sh"), "doctor"], cwd=root, env=environment,
+                [BASH, str(scripts / "team.sh"), "doctor"], cwd=root, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
                 # A background job in a non-interactive shell inherits SIGINT as ignored.
                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
@@ -624,11 +631,12 @@ class TeamCliTests(unittest.TestCase):
             self.assertEqual(process.returncode, 130)
             self.assertEqual(sorted(path.name for path in (root / "scratch").glob("sqlcl-doctor.*")), [])
 
+    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Ctrl-C on Windows is checked by hand")
     def test_interrupting_a_live_preflight_reports_that_nothing_changed_and_exits_130(self) -> None:
         # check-conflicts --env only reads, so Ctrl-C while SQLcl runs ends it with
         # one line, status 130, no traceback and no scratch directory.
         pwsh = shutil.which("pwsh")
-        wrappers = [["bash", "team.sh"]] + ([[pwsh, "-NoProfile", "-File", "team.ps1"]] if pwsh else [])
+        wrappers = [[BASH, "team.sh"]] + ([[pwsh, "-NoProfile", "-File", "team.ps1"]] if pwsh else [])
         for wrapper in wrappers:
             with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -647,6 +655,7 @@ class TeamCliTests(unittest.TestCase):
                 fake_sql = fake_bin / "sql"
                 fake_sql.write_text(f"#!/bin/sh\n: > '{started}'\nsleep 30\n", encoding="utf-8")
                 fake_sql.chmod(0o755)
+                fake_sqlcl.add_launcher(fake_bin)
                 environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", "PROJECT_ENV_FILE": str(root / ".env")}
                 command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "check-conflicts", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
                 process = subprocess.Popen(
@@ -720,6 +729,7 @@ class TeamCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
+        fake_sqlcl.add_launcher(fake_bin)
         return scripts / "deploy.sh", sql_log
 
     def run_deploy(self, script: Path, sql_log: Path, *args: str, input_text: str = ""):
@@ -729,7 +739,7 @@ class TeamCliTests(unittest.TestCase):
         environment["FAKE_SOURCE_DIR"] = (script.parents[1] / "apps/DEMO/100").as_posix()
         environment["PROJECT_ENV_FILE"] = str(script.parents[1] / ".env")
         return subprocess.run(
-            ["bash", str(script), "100", "--env", "prod", *args],
+            [BASH, str(script), "100", "--env", "prod", *args],
             cwd=script.parents[1],
             env=environment,
             input=input_text,
@@ -852,7 +862,7 @@ class TeamCliTests(unittest.TestCase):
             template, project = self.make_upgrade_fixture(Path(temporary))
 
             result = subprocess.run(
-                ["bash", str(project / "scripts" / "team.sh"), "upgrade-template", "--source", str(template)],
+                [BASH, str(project / "scripts" / "team.sh"), "upgrade-template", "--source", str(template)],
                 cwd=project,
                 text=True,
                 capture_output=True,
@@ -869,7 +879,7 @@ class TeamCliTests(unittest.TestCase):
             (project / ".env").write_text("PROJECT_NAME=x\n", encoding="utf-8")
 
             result = subprocess.run(
-                ["bash", str(project / "scripts" / "team.sh"), "upgrade-template", "--source", str(template)],
+                [BASH, str(project / "scripts" / "team.sh"), "upgrade-template", "--source", str(template)],
                 cwd=project,
                 text=True,
                 capture_output=True,

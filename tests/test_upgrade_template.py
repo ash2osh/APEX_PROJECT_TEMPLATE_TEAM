@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import sys
 from unittest.mock import patch
 from pathlib import Path
 
@@ -94,7 +95,7 @@ class UpgradeTemplateTests(unittest.TestCase):
 
     def upgrade(self, *extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(ENGINE), "--project-root", str(self.project), "--source", str(self.template), *extra],
+            [sys.executable, str(ENGINE), "--project-root", str(self.project), "--source", str(self.template), *extra],
             text=True,
             capture_output=True,
             check=False,
@@ -102,7 +103,7 @@ class UpgradeTemplateTests(unittest.TestCase):
 
     def upgrade_without_source(self, *extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(ENGINE), "--project-root", str(self.project), *extra],
+            [sys.executable, str(ENGINE), "--project-root", str(self.project), *extra],
             text=True,
             capture_output=True,
             check=False,
@@ -330,6 +331,7 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertIn("interrupted", written)
 
     @unittest.skipUnless(hasattr(signal, "SIGTERM") and os.name == "posix", "needs POSIX signals")
+    @unittest.skipIf(os.name == "nt", "os.kill(os.getpid(), SIGTERM) terminates the process on Windows instead of raising the handler")
     def test_sigterm_is_handled_like_ctrl_c(self) -> None:
         previous = signal.getsignal(signal.SIGTERM)
         try:

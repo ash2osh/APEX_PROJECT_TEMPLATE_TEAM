@@ -64,7 +64,7 @@ class MigrationManifestTests(unittest.TestCase):
             },
         )
 
-        migration = api.load_migration(self.root, str(folder.relative_to(self.root)))
+        migration = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
 
         self.assertEqual(tuple(file.sequence for file in migration.files), (1, 2, 3))
         self.assertEqual(tuple(file.name for file in migration.files), ("001-create-table.sql", "002-create-indexes.sql", "003-create-view.sql"))
@@ -116,9 +116,13 @@ class MigrationManifestTests(unittest.TestCase):
         folder = self.add_folder("2026-09-27_create-customers-r001")
         outside = self.root / "outside.sql"
         outside.write_text("SELECT 1 FROM dual;\n", encoding="utf-8")
-        (folder / "002-escape.sql").symlink_to(outside)
-        with self.assertRaises(api.MigrationManifestError):
-            api.load_migration(self.root, "migrations/2026-09-27_create-customers-r001")
+        try:
+            (folder / "002-escape.sql").symlink_to(outside)
+        except OSError:
+            pass  # no symlink privilege on this Windows machine; the payload cases below still run
+        else:
+            with self.assertRaises(api.MigrationManifestError):
+                api.load_migration(self.root, "migrations/2026-09-27_create-customers-r001")
 
         for payload in (b"SELECT 1 FROM dual;\r\n", b"\xff\xfe"):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
@@ -200,8 +204,8 @@ class MigrationManifestTests(unittest.TestCase):
             (second / "001-create-table.sql").write_text("CREATE TABLE T (ID NUMBER, NAME VARCHAR2(20));\n")
             (second / "checks.json").write_text((first / "checks.json").read_text())
 
-            first_migration = api.load_migration(self.root, str(first.relative_to(self.root)))
-            second_migration = api.load_migration(second_root, str(second.relative_to(second_root)))
+            first_migration = api.load_migration(self.root, first.relative_to(self.root).as_posix())
+            second_migration = api.load_migration(second_root, second.relative_to(second_root).as_posix())
 
             self.assertEqual(first.name, second.name)
             self.assertNotEqual(first_migration.payload_digest, second_migration.payload_digest)
@@ -355,18 +359,18 @@ class MigrationManifestTests(unittest.TestCase):
     def test_file_rename_and_checks_content_change_the_payload_digest(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")
-        initial = api.load_migration(self.root, str(folder.relative_to(self.root)))
+        initial = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
         (folder / "001-create-table.sql").rename(folder / "001-create-customer-table.sql")
-        renamed = api.load_migration(self.root, str(folder.relative_to(self.root)))
+        renamed = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
         self.assertNotEqual(initial.payload_digest, renamed.payload_digest)
         (folder / "checks.json").write_text((folder / "checks.json").read_text().replace("'T'", "'CUSTOMERS'"))
-        checks_changed = api.load_migration(self.root, str(folder.relative_to(self.root)))
+        checks_changed = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
         self.assertNotEqual(renamed.payload_digest, checks_changed.payload_digest)
 
     def test_receipts_bind_target_and_payload_and_install_without_overwrite(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")
-        migration = api.load_migration(self.root, str(folder.relative_to(self.root)))
+        migration = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
         target = {"environment": "dev", "schema": "APP", "session_user": "MIGRATOR", "db_unique_name": "DEVDB"}
         receipt = {
             "schemaVersion": 1,
@@ -401,7 +405,7 @@ class MigrationManifestTests(unittest.TestCase):
         api = self.require_manifest()
         folder = self.add_folder("2026-09-27_create-customers-r001")
         self.assertFalse((folder / "status.dev.json").exists())
-        migration = api.load_migration(self.root, str(folder.relative_to(self.root)))
+        migration = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
         self.assertEqual(migration.family, "create-customers")
         self.assertEqual(migration.revision, 1)
 

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +29,7 @@ class MigrationPreflightCliTests(unittest.TestCase):
 
     def run_checker(self, *arguments):
         return subprocess.run(
-            ["bash", str(CHECKER), "--repo-root", str(self.root), *arguments],
+            [BASH, str(CHECKER), "--repo-root", str(self.root), *arguments],
             cwd=ROOT,
             text=True,
             capture_output=True,

@@ -8,6 +8,7 @@ from pathlib import Path
 from scripts import migration_manifest as manifest
 from scripts.db_targets import TargetResolutionError, resolve_target
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,7 +130,7 @@ class SchemaFolderCliTests(unittest.TestCase):
     def run_checker(self, *arguments: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         base = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")}
         return subprocess.run(
-            ["bash", str(ROOT / "scripts" / "check_conflicts.sh"), "--repo-root", str(self.root), *arguments],
+            [BASH, str(ROOT / "scripts" / "check_conflicts.sh"), "--repo-root", str(self.root), *arguments],
             cwd=ROOT, text=True, capture_output=True, check=False, env={**base, **(environment or {})},
         )
 

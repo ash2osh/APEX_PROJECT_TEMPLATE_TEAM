@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import fake_sqlcl
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +22,7 @@ def plain(text: str) -> str:
 def script_command(script: Path, *arguments: str) -> list[str]:
     if script.suffix.casefold() == ".ps1":
         return ["pwsh", "-NoProfile", "-File", str(script), *arguments]
-    return ["bash", str(script), *arguments]
+    return [BASH, str(script), *arguments]
 
 
 TWO_SCHEMAS = {
@@ -78,6 +80,7 @@ class DoctorCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
+        fake_sqlcl.add_launcher(fake_bin)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["PROJECT_ENV_FILE"] = str(root / ".env")
@@ -177,7 +180,7 @@ class CheckDbTargetTests(unittest.TestCase):
             if project_schema:
                 environment["PROJECT_SCHEMA"] = project_schema
             return subprocess.run(
-                ["bash", str(scripts / "check_db_target.sh"), *arguments],
+                [BASH, str(scripts / "check_db_target.sh"), *arguments],
                 env=environment, text=True, capture_output=True, check=False,
             )
 
@@ -258,6 +261,7 @@ class BackupCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
+        fake_sqlcl.add_launcher(fake_bin)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["PROJECT_ENV_FILE"] = str(root / ".env")
@@ -436,6 +440,7 @@ class ExportCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
+        fake_sqlcl.add_launcher(fake_bin)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["PROJECT_ENV_FILE"] = str(root / ".env")
@@ -601,6 +606,7 @@ class PublishCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
+        fake_sqlcl.add_launcher(fake_bin)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["PROJECT_ENV_FILE"] = str(root / ".env")

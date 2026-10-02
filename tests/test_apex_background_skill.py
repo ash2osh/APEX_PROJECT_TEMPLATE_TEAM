@@ -2,6 +2,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 
@@ -19,7 +20,7 @@ class RenderFindingsTests(unittest.TestCase):
             faults_path.write_text(faults, encoding="utf-8")
             return subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     str(RENDERER),
                     str(log_path),
                     str(faults_path),

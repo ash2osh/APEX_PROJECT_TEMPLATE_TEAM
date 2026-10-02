@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import fake_sqlcl
+from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +82,7 @@ class BackupDbCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
+        fake_sqlcl.add_launcher(fake_bin)
         return scripts / ("backup_db.ps1" if powershell else "backup_db.sh")
 
     def run_backup(self, script: Path, powershell: bool) -> subprocess.CompletedProcess[str]:
@@ -89,7 +92,7 @@ class BackupDbCliTests(unittest.TestCase):
         command = (
             [PWSH, "-NoProfile", "-File", str(script)]
             if powershell
-            else ["bash", str(script)]
+            else [BASH, str(script)]
         )
         return subprocess.run(
             command,

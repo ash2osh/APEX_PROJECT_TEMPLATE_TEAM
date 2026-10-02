@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import sys
 from pathlib import Path
 
 
@@ -15,7 +16,7 @@ class ValidateMigrationTests(unittest.TestCase):
             path = Path(temporary) / "migration.sql"
             path.write_text(source, encoding="utf-8")
             return subprocess.run(
-                ["python3", str(VALIDATOR), str(path)],
+                [sys.executable, str(VALIDATOR), str(path)],
                 text=True,
                 capture_output=True,
                 check=False,
