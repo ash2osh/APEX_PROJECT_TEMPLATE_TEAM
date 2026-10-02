@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import shlex
 import shutil
 import tempfile
 
@@ -44,7 +45,7 @@ def install() -> None:
     atexit.register(shutil.rmtree, guard_directory, True)
     guard = os.path.join(guard_directory, "sql")
     with open(guard, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(f"#!/bin/sh\necho '{_MESSAGE}' >&2\nexit 99\n")
+        handle.write(f"#!/bin/sh\necho {shlex.quote(_MESSAGE)} >&2\nexit 99\n")
     os.chmod(guard, 0o755)
     os.environ["PATH"] = os.pathsep.join([guard_directory, *entries])
 
