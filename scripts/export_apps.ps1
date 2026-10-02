@@ -6,18 +6,13 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
+. (Join-Path $PSScriptRoot "resolve_python.ps1")
 
 function Invoke-PythonScript {
   param([string] $ScriptPath, [string[]] $ScriptArguments)
-  $python = Get-Command python3 -ErrorAction SilentlyContinue
-  if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-  if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
-  if ($null -eq $python) { throw "Python 3 is required for APEX export metadata" }
-  if ($python.Name -in @("py.exe", "py")) {
-    & $python.Source -3 $ScriptPath @ScriptArguments
-  } else {
-    & $python.Source $ScriptPath @ScriptArguments
-  }
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw "Python 3.10 or newer is required for APEX export metadata (python3, python or py -3)" }
+  & $python.Path @($python.Prefix) $ScriptPath @ScriptArguments
   if ($LASTEXITCODE -ne 0) { throw "Python export helper failed with exit code $LASTEXITCODE" }
 }
 

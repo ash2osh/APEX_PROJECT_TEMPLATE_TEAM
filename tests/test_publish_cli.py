@@ -156,7 +156,7 @@ class PublishAppCliTests(unittest.TestCase):
             "verify_publish_state.py",
             "publish_app.ps1",
             "load_env.ps1",
-            "invoke_sqlcl.ps1",
+            "invoke_sqlcl.ps1", "resolve_python.ps1",
             "check_db_target.ps1",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
@@ -934,7 +934,7 @@ class PublishAppCliTests(unittest.TestCase):
                     "publish_app.ps1",
                     "publish_app.sql",
                     "load_env.ps1",
-                    "invoke_sqlcl.ps1",
+                    "invoke_sqlcl.ps1", "resolve_python.ps1",
                     "check_db_target.ps1",
                     "export_apps.sql",
                     "verify_db_access.sql",

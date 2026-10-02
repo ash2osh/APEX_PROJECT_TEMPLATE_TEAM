@@ -22,7 +22,7 @@ class ExportCliTests(unittest.TestCase):
                 "lookup_app_schema.sql",
                 "load_env.ps1",
                 "check_db_target.ps1",
-                "invoke_sqlcl.ps1",
+                "invoke_sqlcl.ps1", "resolve_python.ps1",
                 "normalize_apx.ps1",
                 "replace_mirror.ps1",
             )

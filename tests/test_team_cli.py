@@ -839,7 +839,7 @@ class TeamCliTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(template), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(template), "commit", "-q", "-m", "v1"], check=True)
         (project / "scripts").mkdir()
-        for name in ("team.sh", "team.ps1", "upgrade_template.py", "load_env.sh", "load_env.ps1"):
+        for name in ("team.sh", "team.ps1", "upgrade_template.py", "load_env.sh", "load_env.ps1", "resolve_python.ps1"):
             shutil.copy2(ROOT / "scripts" / name, project / "scripts" / name)
         # .env is local configuration; ignoring it keeps the tree clean for the engine.
         (project / ".gitignore").write_text(".env\n", encoding="utf-8")

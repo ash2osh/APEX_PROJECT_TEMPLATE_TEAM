@@ -60,6 +60,7 @@ $publishEnvSnapshot = [Environment]::GetEnvironmentVariables("Process")
 try {
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
+. (Join-Path $PSScriptRoot "resolve_python.ps1")
 
 $selectedSchema = if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA)) { $env:PROJECT_SCHEMA } else { $env:APEX_PARSING_SCHEMA }
 $preferredAppDir = Join-Path $repoRoot "apps/$selectedSchema/$AppId"
@@ -87,19 +88,13 @@ if (Test-Path -LiteralPath $preferredAppDir -PathType Container) {
   $appDir = $candidates[0]
 }
 
-$python = Get-Command python3 -ErrorAction SilentlyContinue
-if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
-if ($null -eq $python) { throw "Python 3 is required to validate the application source tree" }
+$python = Resolve-TeamPython
+if ($null -eq $python) { throw "Python 3.10 or newer is required to validate the application source tree (python3, python or py -3)" }
 $sourceValidator = Join-Path $PSScriptRoot "validate_app_source.py"
 if (-not (Test-Path -LiteralPath $sourceValidator -PathType Leaf)) {
   throw "publish error: application source validator is missing; refusing import"
 }
-if ($python.Name -in @("py.exe", "py")) {
-  & $python.Source -3 $sourceValidator $repoRoot $appDir
-} else {
-  & $python.Source $sourceValidator $repoRoot $appDir
-}
+& $python.Path @($python.Prefix) $sourceValidator $repoRoot $appDir
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $appDir = [System.IO.Path]::GetFullPath($appDir)
 
@@ -257,17 +252,11 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
     throw "publish error: Builder drift guard is missing; refusing import"
   }
-  $python = Get-Command python3 -ErrorAction SilentlyContinue
-  if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-  if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
-  if ($null -eq $python) { throw "Python 3 is required to check Builder drift" }
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw "Python 3.10 or newer is required to check Builder drift (python3, python or py -3)" }
   $approvedStateFile = [System.IO.Path]::GetTempFileName()
   try {
-    if ($python.Name -in @("py.exe", "py")) {
-      & $python.Source -3 $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile --wrapper team.ps1
-    } else {
-      & $python.Source $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile --wrapper team.ps1
-    }
+    & $python.Path @($python.Prefix) $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile --wrapper team.ps1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $expectedLiveState = ([System.IO.File]::ReadAllText($approvedStateFile)).Trim()
   } finally {
@@ -343,16 +332,10 @@ try {
     # meanwhile; a failed stamp leaves the working file untouched.
     Copy-Item -LiteralPath $applicationSource -Destination $unstampedSource
     Copy-Item -LiteralPath $applicationSource -Destination $stampingSource
-    $stampPython = Get-Command python3 -ErrorAction SilentlyContinue
-    if ($null -eq $stampPython) { $stampPython = Get-Command python -ErrorAction SilentlyContinue }
-    if ($null -eq $stampPython) { $stampPython = Get-Command py -ErrorAction SilentlyContinue }
-    if ($null -eq $stampPython) { throw "Python 3 is required to stamp the publish tag" }
+    $stampPython = Resolve-TeamPython
+    if ($null -eq $stampPython) { throw "Python 3.10 or newer is required to stamp the publish tag (python3, python or py -3)" }
     $stampArgs = @((Join-Path $PSScriptRoot "stamp_publish_version.py"), $stampingSource, $env:DEVELOPER_NAME)
-    if ($stampPython.Name -in @("py.exe", "py")) {
-      $publishedVersion = & $stampPython.Source -3 @stampArgs
-    } else {
-      $publishedVersion = & $stampPython.Source @stampArgs
-    }
+    $publishedVersion = & $stampPython.Path @($stampPython.Prefix) @stampArgs
     if ($LASTEXITCODE -ne 0) { throw "publish error: could not stamp the application version" }
     Copy-Item -LiteralPath $stampingSource -Destination $stampedSource
     Copy-Item -LiteralPath $unstampedSource -Destination $restoreSource
@@ -430,10 +413,8 @@ try {
   }
   & (Join-Path $PSScriptRoot "normalize_apx.ps1") $exportedDir
 
-  $python = Get-Command python3 -ErrorAction SilentlyContinue
-  if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-  if ($null -eq $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
-  if ($null -eq $python) { throw "Python 3 is required to verify the post-import APEX source" }
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw "Python 3.10 or newer is required to verify the post-import APEX source (python3, python or py -3)" }
   $verifyScript = Join-Path $PSScriptRoot "verify_publish_state.py"
   $verifyArgs = @(
     $verifyScript, $AppId, $appDir, $exportedDir,
@@ -442,11 +423,7 @@ try {
     "--repo-root", $repoRoot
   )
   if ($appEnvironment -eq "dev") { $verifyArgs += "--record-baseline" }
-  if ($python.Name -in @("py.exe", "py")) {
-    & $python.Source -3 @verifyArgs
-  } else {
-    & $python.Source @verifyArgs
-  }
+  & $python.Path @($python.Prefix) @verifyArgs
   if ($LASTEXITCODE -ne 0) {
     throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
   }

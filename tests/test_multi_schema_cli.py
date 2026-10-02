@@ -733,7 +733,7 @@ class PublishCliTests(unittest.TestCase):
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellDoctorCliTests(DoctorCliTests):
-    NAMES = ("team.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "doctor.sql", "verify_db_access.sql")
+    NAMES = ("team.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "doctor.sql", "verify_db_access.sql")
 
     def test_schema_option_requires_a_value(self) -> None:
         # PowerShell reports this usage error with exit code 1; Bash uses 2.
@@ -747,7 +747,7 @@ class PowerShellDoctorCliTests(DoctorCliTests):
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellBackupCliTests(BackupCliTests):
-    NAMES = ("backup_db.ps1", "backup_db.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "replace_mirror.ps1")
+    NAMES = ("backup_db.ps1", "backup_db.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "replace_mirror.ps1")
 
     def test_backup_profile_loop_does_not_shadow_automatic_profile_variable(self) -> None:
         source = (ROOT / "scripts" / "backup_db.ps1").read_text(encoding="utf-8")
@@ -759,7 +759,7 @@ class PowerShellBackupCliTests(BackupCliTests):
 class PowerShellExportCliTests(ExportCliTests):
     NAMES = (
         "export_apps.ps1", "export_apps.sql", "lookup_app_schema.sql", "load_env.ps1", "check_db_target.ps1",
-        "invoke_sqlcl.ps1", "normalize_apx.ps1", "replace_mirror.ps1", "verify_db_access.sql",
+        "invoke_sqlcl.ps1", "resolve_python.ps1", "normalize_apx.ps1", "replace_mirror.ps1", "verify_db_access.sql",
         "record_export_state.py", "preserve_deployments.py",
     )
 
@@ -767,7 +767,7 @@ class PowerShellExportCliTests(ExportCliTests):
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellPublishCliTests(PublishCliTests):
     NAMES = (
-        "publish_app.ps1", "publish_app.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1",
+        "publish_app.ps1", "publish_app.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1",
         "export_apps.sql", "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.ps1",
         "record_export_state.py", "verify_publish_state.py", "validate_app_source.py",
         "stamp_publish_version.py", "check_builder_drift.py", "check_builder_drift.sql",

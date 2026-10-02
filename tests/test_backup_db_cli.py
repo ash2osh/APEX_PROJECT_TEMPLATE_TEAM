@@ -21,7 +21,7 @@ class BackupDbCliTests(unittest.TestCase):
                 "backup_db.sql",
                 "load_env.ps1",
                 "check_db_target.ps1",
-                "invoke_sqlcl.ps1",
+                "invoke_sqlcl.ps1", "resolve_python.ps1",
                 "replace_mirror.ps1",
             )
         else:

@@ -116,8 +116,27 @@ function Invoke-TeamBash {
   if ($null -eq $bashPath) {
     Fail "Bash is required for '$ScriptName'; install Git for Windows, set TEAM_BASH to its bash.exe, or run scripts/team.sh"
   }
-  & $bashPath (Join-Path $PSScriptRoot $ScriptName) @ScriptArguments
-  if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
+  # The helpers call `python3`. On Windows a python.org or winget install has no
+  # python3.exe and the Store alias is often a stub, so when Git Bash cannot run
+  # python3 a one-file shim for the interpreter found here goes first on PATH for
+  # this one run (see resolve_python.ps1).
+  $shimDirectory = $null
+  $originalPath = $env:PATH
+  try {
+    if (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)) {
+      . (Join-Path $PSScriptRoot "resolve_python.ps1")
+      $scratchPath = Join-Path ((Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path) "scratch"
+      [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
+      $shimDirectory = Get-TeamPythonShim -BashPath $bashPath -ScratchRoot $scratchPath
+      if ($null -ne $shimDirectory) { $env:PATH = "$shimDirectory;$originalPath" }
+    }
+    & $bashPath (Join-Path $PSScriptRoot $ScriptName) @ScriptArguments
+    $bashStatus = $LASTEXITCODE
+  } finally {
+    $env:PATH = $originalPath
+    if ($null -ne $shimDirectory) { Remove-TeamPythonShim -Directory $shimDirectory }
+  }
+  if ($bashStatus -ne 0) { Exit-Team $bashStatus }
 }
 
 if ([string]::IsNullOrWhiteSpace($Command) -or $Command -in @("--help", "-h")) {
@@ -264,11 +283,11 @@ try {
       Invoke-TeamBash -ScriptName "deploy.sh" -ScriptArguments $Arguments
     }
     "upgrade-template" {
-      $python = Get-Command python3 -ErrorAction SilentlyContinue
-      if ($null -eq $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-      if ($null -eq $python) { Fail "Python 3 is required to upgrade the template" }
+      . (Join-Path $PSScriptRoot "resolve_python.ps1")
+      $python = Resolve-TeamPython
+      if ($null -eq $python) { Fail "Python 3.10 or newer is required to upgrade the template (python3, python or py -3)" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-      & $python.Source (Join-Path $PSScriptRoot "upgrade_template.py") --project-root $repoRoot @Arguments
+      & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "upgrade_template.py") --project-root $repoRoot @Arguments
       $upgradeStatus = $LASTEXITCODE
       $envFile = Join-Path $repoRoot ".env"
       if ($upgradeStatus -ne 2 -and $Arguments -notcontains "--dry-run" -and (Test-Path -LiteralPath $envFile)) {

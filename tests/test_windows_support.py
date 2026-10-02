@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -259,15 +260,66 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
         )
         return checkout
 
-    def run_team(self, engine: str, checkout: Path, folder: str) -> subprocess.CompletedProcess:
+    def run_team(self, engine: str, checkout: Path, folder: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
             [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(checkout / "scripts" / "team.ps1"),
              "check-conflicts", folder, "--local"],
             capture_output=True,
             text=True,
             cwd=checkout,
+            env=environment,
             check=False,
         )
+
+    def python_exe_only_path(self) -> str:
+        """A PATH whose only Python is python.exe, as after a python.org or winget install.
+
+        There is no python3.exe and no py launcher, so the Bash helpers' literal
+        `python3` cannot be found unless team.ps1 provides one.
+        """
+        home = Path(sys.executable).resolve().parent
+        if not (home / "python.exe").is_file() or (home / "python3.exe").exists():
+            self.skipTest("the running Python is not a python.exe-only install")
+        system = os.environ["SystemRoot"]
+        git = shutil.which("git")
+        entries = [str(Path(system) / "System32"), system, str(Path(system) / "System32" / "WindowsPowerShell" / "v1.0"), str(home)]
+        if git:
+            entries.append(str(Path(git).parent))
+        return os.pathsep.join(entries)
+
+    def test_a_python_exe_without_python3_exe_is_enough_for_the_bash_helpers(self) -> None:
+        engines = [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
+        if not engines:
+            self.skipTest("no PowerShell found")
+        environment = {**os.environ, "PATH": self.python_exe_only_path()}
+        engines = [shutil.which(name) for name in engines]
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = self.make_checkout(temporary)
+            for engine in engines:
+                with self.subTest(engine=Path(engine).name):
+                    result = self.run_team(engine, checkout, "migrations/2026-10-02_win-r001", environment)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("Result: exit 0", result.stdout)
+                    # The one-run shim folder is gone afterwards.
+                    self.assertEqual(sorted(path.name for path in (checkout / "scratch").glob("team-python-*")), [])
+
+    def test_a_failing_python3_stub_is_skipped_for_a_working_python(self) -> None:
+        # The Microsoft Store alias python3.exe fails when Python came from elsewhere.
+        home = Path(sys.executable).resolve().parent
+        whoami = Path(os.environ["SystemRoot"]) / "System32" / "whoami.exe"
+        if not (home / "python.exe").is_file() or not whoami.is_file():
+            self.skipTest("needs python.exe and whoami.exe")
+        with tempfile.TemporaryDirectory() as temporary:
+            stub_directory = Path(temporary)
+            shutil.copy2(whoami, stub_directory / "python3.exe")  # exits 1 for -c ...
+            environment = {**os.environ, "PATH": os.pathsep.join([str(stub_directory), str(home)])}
+            script = f". '{ROOT / 'scripts' / 'resolve_python.ps1'}'; $python = Resolve-TeamPython; $python.Path"
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                capture_output=True, text=True, env=environment, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(result.stdout.strip()).resolve(), (home / "python.exe").resolve())
 
     def test_windows_spellings_of_the_folder_are_accepted(self) -> None:
         engines = [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
@@ -287,6 +339,20 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
                         result = self.run_team(engine, checkout, form)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                         self.assertIn("Result: exit 0", result.stdout)
+
+
+@unittest.skipUnless(shutil.which("pwsh"), "needs PowerShell 7")
+class ResolvePythonTests(unittest.TestCase):
+    """scripts/resolve_python.ps1 on every platform: a working Python 3.10+ is found and run."""
+
+    def test_the_resolver_returns_a_python_that_runs(self) -> None:
+        script = (
+            f". '{ROOT / 'scripts' / 'resolve_python.ps1'}'; $python = Resolve-TeamPython; "
+            "& $python.Path @($python.Prefix) -c 'import sys; print(sys.version_info >= (3, 10))'"
+        )
+        result = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", script], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "True")
 
 
 if __name__ == "__main__":
