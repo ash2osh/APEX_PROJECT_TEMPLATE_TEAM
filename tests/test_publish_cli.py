@@ -9,6 +9,7 @@ import time
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import _console_ctrl_c
 import fake_sqlcl
 from fake_sqlcl import BASH
 
@@ -524,6 +525,41 @@ class PublishAppCliTests(unittest.TestCase):
                 self.assertIn("interrupted while the import was running", plain)
                 self.assertIn("its result is unknown", plain)
                 self.assertIn(f"scripts/{wrapper} export 100", plain)
+                self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
+                self.assertEqual((app / "application.apx").read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is above")
+    def test_ctrl_c_in_a_windows_console_while_the_import_runs_says_its_result_is_unknown(self) -> None:
+        # Through team.ps1 in each PowerShell, as in the test above. The fake SQLcl is a Bash
+        # script that Ctrl-C cannot end, so publish waits for it for ten seconds and then ends
+        # it; real SQLcl is one native program that the keypress ends at once.
+        engines = [
+            [path, *flags]
+            for path, flags in (
+                (shutil.which("powershell"), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]),
+                (shutil.which("pwsh"), ["-NoProfile", "-File"]),
+            )
+            if path
+        ]
+        for engine in engines:
+            with self.subTest(shell=Path(engine[0]).name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
+                environment["PROJECT_ENV_FILE"] = str(root / ".env")
+                pause = root / "import-paused"
+                environment["FAKE_IMPORT_PAUSE"] = str(pause)
+                original = (app / "application.apx").read_bytes()
+                shutil.copy2(ROOT / "scripts" / "team.ps1", root / "scripts" / "team.ps1")
+                command = [*engine, str(root / "scripts" / "team.ps1"), "publish", "100"]
+
+                process, screen, _ = _console_ctrl_c.interrupt(command, root, environment, pause, wait_seconds=60)
+
+                self.assertEqual(process.returncode, 130, screen)
+                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("apex-publish*")), [])
+                plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", screen).split())
+                self.assertIn("interrupted while the import was running", plain)
+                self.assertIn("its result is unknown", plain)
+                self.assertIn("scripts/team.ps1 export 100", plain)
                 self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
                 self.assertEqual((app / "application.apx").read_bytes(), original)
 
