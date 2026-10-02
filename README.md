@@ -112,7 +112,7 @@ pwsh -File scripts/team.ps1 doctor
 
 `powershell.exe` (Windows PowerShell 5.1) works the same way. Windows also
 needs Git for Windows (the migration, comparison and deployment helpers run in
-its Bash), Python 3.10 or newer, and SQLcl on `PATH`. Three things trip people
+its Bash), Python 3.10 or newer, and SQLcl on `PATH`. Four things trip people
 up there:
 
 - **Script policy.** Windows PowerShell 5.1 on a client Windows starts with the
@@ -121,10 +121,20 @@ up there:
   A copy downloaded as a ZIP carries a "from the internet" mark that
   `RemoteSigned` still blocks; clone with Git, or run
   `Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File` once.
-- **File encoding.** Migration SQL, `checks.json` and deployment descriptors
-  must be UTF-8 without a byte-order mark and with LF line endings.
-  `Set-Content -Encoding UTF8` and `Out-File` in Windows PowerShell 5.1 write a
-  BOM, UTF-16 or CRLF. Create them in an editor set to UTF-8 and LF, or with
+- **Python.** The Bash helpers behind `check-conflicts`, `migrate`,
+  `compare-schema` and `deploy` call `python3`, which a python.org or winget
+  install does not provide (the Microsoft Store `python3.exe` is a stub when
+  Python came from elsewhere). `team.ps1` finds a working Python (`python3`,
+  `python`, then `py -3`) and gives Git Bash a `python3` for that run, so there
+  is nothing to set up. If you run `scripts/team.sh` straight from Git Bash and
+  see `python3: command not found`, create one once and open a new Git Bash
+  window: `mkdir -p ~/bin && printf '#!/usr/bin/env bash\nexec py -3 "$@"\n' > ~/bin/python3 && chmod +x ~/bin/python3`.
+- **File encoding.** Migration SQL and `checks.json` must be UTF-8 without a
+  byte-order mark and with LF line endings, and are refused otherwise. A
+  deployment descriptor must be UTF-8 without a byte-order mark (a BOM is
+  refused; CRLF is accepted). `Set-Content -Encoding UTF8` and `Out-File` in
+  Windows PowerShell 5.1 write a BOM, UTF-16 or CRLF. Create the files in an
+  editor set to UTF-8 and LF, or with
   `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`.
 - **Checkout path.** Prefer a folder name without `[` and `]`. PowerShell reads
   them as wildcards in many cmdlets and Git Bash does not convert such a path

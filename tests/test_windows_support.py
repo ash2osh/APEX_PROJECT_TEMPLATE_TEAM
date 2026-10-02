@@ -303,6 +303,41 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
                     # The one-run shim folder is gone afterwards.
                     self.assertEqual(sorted(path.name for path in (checkout / "scratch").glob("team-python-*")), [])
 
+    def test_more_spellings_of_the_folder_and_what_is_refused(self) -> None:
+        engines = [shutil.which(name) for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
+        if not engines:
+            self.skipTest("no PowerShell found")
+        refusal = "use a repository-relative migrations/<dated-folder> path"
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = self.make_checkout(temporary)
+            inside = checkout / "migrations" / "2026-10-02_win-r001"
+            drive, rest = os.path.splitdrive(str(inside))
+            accepted = {
+                "absolute with forward slashes": inside.as_posix(),
+                "absolute with a lower-case drive letter": drive.lower() + rest,
+                "absolute with an upper-case drive letter": drive.upper() + rest,
+                "relative with .\\ and a trailing slash": ".\\migrations\\2026-10-02_win-r001\\",
+                "relative with forward slashes and a trailing slash": "migrations/2026-10-02_win-r001/",
+            }
+            refused = {
+                "outside the checkout": str(Path(temporary) / "elsewhere" / "migrations" / "2026-10-02_win-r001"),
+                "a UNC path to the same checkout": "\\\\localhost\\" + drive[0] + "$" + rest,
+                "parent directory": "..\\migrations\\2026-10-02_win-r001",
+                "the migrations folder itself with another folder": "migrations\\..\\migrations\\2026-10-02_win-r001",
+            }
+            for engine in engines:
+                for label, form in accepted.items():
+                    with self.subTest(engine=Path(engine).name, accepted=label):
+                        result = self.run_team(engine, checkout, form)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn("Result: exit 0", result.stdout)
+                for label, form in refused.items():
+                    with self.subTest(engine=Path(engine).name, refused=label):
+                        result = self.run_team(engine, checkout, form)
+                        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                        self.assertIn(refusal, result.stderr)
+                        self.assertNotIn("Exception", result.stderr)
+
     def test_no_shim_is_written_when_git_bash_already_runs_python3(self) -> None:
         # The probe passes `python3 -c '...'` to bash -c. Windows PowerShell 5.1 passes embedded
         # double quotes unescaped, which used to make the probe fail and write a needless shim.

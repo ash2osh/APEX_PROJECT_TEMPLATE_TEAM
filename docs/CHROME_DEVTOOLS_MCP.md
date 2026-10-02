@@ -7,6 +7,7 @@ This project can use the `chrome-devtools-mcp` server through a persistent local
 - `chrome-devtools-mcp` must already be installed and available on `PATH`, or be selected with `CHROME_MCP_EXECUTABLE`.
 - Chrome must be running with remote debugging available and user consent granted when Chrome asks. The first request can take longer while consent is handled.
 - Python 3 is required for the daemon and client.
+- The daemon is POSIX-only: it imports `fcntl` and serves a Unix socket in its own process group, so it does not start on native Windows. Run it and the client from WSL (or Linux or macOS); the unit tests for it are skipped on Windows for the same reason.
 
 This guide does not install or update Chrome, Node.js, or `chrome-devtools-mcp`. If the MCP executable is missing, report the missing prerequisite and use the machine's approved setup process.
 
