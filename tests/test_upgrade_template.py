@@ -686,6 +686,41 @@ class LineEndingPlanTests(unittest.TestCase):
 
         self.assertEqual(kinds["AGENTS.md"], "CONFLICT")
 
+    def project_and_template(self, base: Path, template_bytes: bytes, project_bytes: bytes) -> tuple[Path, Path]:
+        template, project = base / "template", base / "project"
+        template.mkdir()
+        project.mkdir()
+        (template / "AGENTS.md").write_bytes(template_bytes)
+        (project / "AGENTS.md").write_bytes(project_bytes)
+        return project, template
+
+    def test_an_older_lock_upgrades_an_untouched_crlf_file_and_is_rewritten_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, template = self.project_and_template(Path(temporary), b"rules v2\n", b"rules v1\r\n")
+            raw_lock = {"AGENTS.md": hashlib.sha256(b"rules v1\r\n").hexdigest()}
+            actions, new_lock = upgrade_engine.plan_upgrade(project, template, ["AGENTS.md"], [], {"files": raw_lock})
+
+            upgrade_engine.apply_actions(project, template, actions, "unused", "0" * 40, new_lock)
+
+            self.assertEqual((project / "AGENTS.md").read_bytes(), b"rules v2\n")
+            written = json.loads((project / upgrade_engine.LOCK_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(written["files"], {"AGENTS.md": hashlib.sha256(b"rules v2\n").hexdigest()})
+
+    def test_a_line_ending_only_save_after_planning_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, template = self.project_and_template(Path(temporary), b"rules v2\n", b"rules v1\r\n")
+            raw_lock = {"AGENTS.md": hashlib.sha256(b"rules v1\r\n").hexdigest()}
+            actions, new_lock = upgrade_engine.plan_upgrade(project, template, ["AGENTS.md"], [], {"files": raw_lock})
+            self.assertEqual({action.path: action.kind for action in actions}, {"AGENTS.md": "UPDATE"})
+            # The planning decision ignores line endings, the race guard must not.
+            (project / "AGENTS.md").write_bytes(b"rules v1\n")
+
+            with self.assertRaisesRegex(upgrade_engine.UpgradeError, "changed after the upgrade was planned"):
+                upgrade_engine.apply_actions(project, template, actions, "unused", "0" * 40, new_lock)
+
+            self.assertEqual((project / "AGENTS.md").read_bytes(), b"rules v1\n")
+            self.assertFalse((project / upgrade_engine.LOCK_NAME).exists())
+
 
 if __name__ == "__main__":
     unittest.main()
