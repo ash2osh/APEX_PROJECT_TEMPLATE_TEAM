@@ -52,8 +52,14 @@ function Get-TeamPythonShim {
   $previous = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    & $BashPath -c 'python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"' 2>$null | Out-Null
+    # Single quotes inside: Windows PowerShell 5.1 passes embedded double quotes to a native command
+    # unescaped, which splits this argument in Bash and lets cmd.exe read the ">" as a redirect.
+    & $BashPath -c "python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'" 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { return $null }
+  } catch {
+    # This Bash cannot even be started: no shim can help, and the real run that follows
+    # reports the problem in its own words.
+    return $null
   } finally {
     $ErrorActionPreference = $previous
   }

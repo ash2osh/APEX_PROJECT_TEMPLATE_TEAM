@@ -211,6 +211,8 @@ if [ "$app_environment" != dev ]; then
   printf 'Deploying to %s. Proceed? [y/N]: ' "$target_label"
   answer=""
   IFS= read -r answer || true
+  # An answer piped from Windows PowerShell arrives as "y" followed by CR LF; drop the CR.
+  answer="${answer%$'\r'}"
   case "${answer,,}" in
     y|yes) ;;
     *) printf 'Publish cancelled.\n' >&2; exit 1 ;;

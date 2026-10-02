@@ -303,6 +303,27 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
                     # The one-run shim folder is gone afterwards.
                     self.assertEqual(sorted(path.name for path in (checkout / "scratch").glob("team-python-*")), [])
 
+    def test_no_shim_is_written_when_git_bash_already_runs_python3(self) -> None:
+        # The probe passes `python3 -c '...'` to bash -c. Windows PowerShell 5.1 passes embedded
+        # double quotes unescaped, which used to make the probe fail and write a needless shim.
+        bash = sqlcl_session.bash_command()
+        probe = subprocess.run([bash, "-c", "python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'"], capture_output=True, check=False)
+        if probe.returncode != 0:
+            self.skipTest("this Git Bash has no working python3")
+        engines = [shutil.which(name) for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
+        with tempfile.TemporaryDirectory() as temporary:
+            script = (
+                f". '{ROOT / 'scripts' / 'resolve_python.ps1'}'; "
+                f"$shim = Get-TeamPythonShim -BashPath '{bash}' -ScratchRoot '{temporary}'; "
+                "if ($null -eq $shim) { 'none' } else { 'shim' }"
+            )
+            for engine in engines:
+                with self.subTest(engine=Path(engine).name):
+                    result = subprocess.run([engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), "none")
+                    self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def test_a_failing_python3_stub_is_skipped_for_a_working_python(self) -> None:
         # The Microsoft Store alias python3.exe fails when Python came from elsewhere.
         home = Path(sys.executable).resolve().parent

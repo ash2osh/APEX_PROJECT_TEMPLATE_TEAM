@@ -27,6 +27,18 @@ from scripts import sqlcl_session
 # Git Bash on Windows, plain `bash` elsewhere: a bare "bash" is the WSL launcher on Windows.
 BASH = sqlcl_session.bash_command()
 
+# Bash that undoes the forwarder's "__AT__" marking and runs the fake with the original arguments.
+_AT_PROLOGUE = (
+    'script=$1; shift; restored=(); '
+    'for a in "$@"; do case "$a" in __AT__*) a="@${a#__AT__}";; esac; restored+=("$a"); done; '
+    'exec "$script" "${restored[@]}"'
+)
+
+
+def native(path: Path | str) -> str:
+    """The form in which SQLcl receives a path argument: C:/dir/file on Windows, str(path) elsewhere."""
+    return Path(path).as_posix() if os.name == "nt" else str(path)
+
 
 def install(directory: Path, script: str) -> Path:
     """Write the fake `sql` into directory, creating it, and return the directory.
@@ -60,9 +72,20 @@ def _build_windows_launcher(directory: Path, fake: Path) -> bool:
     except ImportError:
         return False
     # distlib wraps only a script that starts with a shebang line.
+    #
+    # Git Bash's runtime (msys-2.0.dll) expands an argument that starts with "@" and names an
+    # existing file as a RESPONSE FILE when bash.exe is started by a Windows process, so
+    # `sql ... @C:/work/scripts/doctor.sql` would reach the fake as the words of doctor.sql.
+    # Real SQLcl is a native program and gets the argument as is. The forwarder therefore hides
+    # the leading "@" and a Bash prologue restores it before it execs the script (MSYS to MSYS
+    # starts do not expand).
     forwarder = (
         "#!python\nimport subprocess, sys\n"
-        f"sys.exit(subprocess.call([{sqlcl_session.bash_command()!r}, {str(fake)!r}, *sys.argv[1:]]))\n"
+        f"BASH = {sqlcl_session.bash_command()!r}\n"
+        f"SCRIPT = {fake.as_posix()!r}\n"
+        f"PROLOGUE = {_AT_PROLOGUE!r}\n"
+        "arguments = ['__AT__' + a[1:] if a.startswith('@') else a for a in sys.argv[1:]]\n"
+        "sys.exit(subprocess.call([BASH, '-c', PROLOGUE, 'sql', SCRIPT, *arguments]))\n"
     )
     with tempfile.TemporaryDirectory() as source:
         (Path(source) / "sql.py").write_text(forwarder, encoding="utf-8", newline="\n")

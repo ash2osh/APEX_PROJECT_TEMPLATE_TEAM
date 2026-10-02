@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -34,7 +35,12 @@ class ValidateAppSourceTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary) / name
                 app = root / "apps" / "DEMO" / "100"
-                (app / ".apex").mkdir(parents=True)
+                try:
+                    (app / ".apex").mkdir(parents=True)
+                except OSError as error:
+                    # Windows cannot name a folder with a double quote: nothing to test there.
+                    self.assertEqual(os.name, "nt", error)
+                    continue
                 (app / ".apex" / "apexlang.json").write_text("{}\n", encoding="utf-8")
 
                 result = self.run_validator(root, app)

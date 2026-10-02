@@ -134,7 +134,7 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
 
 def run_git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(cwd), *args], capture_output=True, text=True, check=False
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
     )
     if result.returncode != 0:
         raise UpgradeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")

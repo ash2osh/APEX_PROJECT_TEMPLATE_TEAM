@@ -500,13 +500,31 @@ class TeamCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record = root / "record.txt"
-            fake_bash = root / "git-bash"
-            fake_bash.write_text(
-                "#!/bin/sh\n"
-                f"printf '%s\\n' \"$@\" > '{record}'\n",
-                encoding="utf-8",
-            )
-            fake_bash.chmod(0o755)
+            if os.name == "nt":
+                # PowerShell cannot run an extensionless script; a batch file records the same lines.
+                fake_bash = root / "git-bash.cmd"
+                fake_bash.write_text(
+                    "@echo off\r\n"
+                    # team.ps1 asks Bash whether python3 works (bash -c "python3 ..."): answer yes, record nothing.
+                    'if "%~1"=="-c" exit /b 0\r\n'
+                    f'break > "{record}"\r\n'
+                    ":loop\r\n"
+                    'if "%~1"=="" goto done\r\n'
+                    f'>>"{record}" echo %~1\r\n'
+                    "shift\r\n"
+                    "goto loop\r\n"
+                    ":done\r\n",
+                    encoding="ascii",
+                    newline="",
+                )
+            else:
+                fake_bash = root / "git-bash"
+                fake_bash.write_text(
+                    "#!/bin/sh\n"
+                    f"printf '%s\\n' \"$@\" > '{record}'\n",
+                    encoding="utf-8",
+                )
+                fake_bash.chmod(0o755)
             environment = os.environ.copy()
             environment["TEAM_BASH"] = str(fake_bash)
             environment["PATH"] = str(root / "no-bash-here")
@@ -586,7 +604,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertFalse(login_marker.exists(), "SQLcl must not start in the caller's directory")
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("docker-demo", args)
-            self.assertIn(f"@{scripts / 'doctor.sql'}", args)
+            self.assertIn("@" + fake_sqlcl.native(scripts / "doctor.sql"), args)
             doctor_sql = (scripts / "doctor.sql").read_text(encoding="utf-8")
             self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", doctor_sql)
             self.assertIn("@@verify_db_access.sql", doctor_sql)
@@ -769,12 +787,12 @@ class TeamCliTests(unittest.TestCase):
                     "-noupdates",
                     "-name",
                     "prod-db",
-                    f"@{script.parents[1] / 'scripts' / 'publish_app.sql'}",
+                    "@" + fake_sqlcl.native(script.parents[1] / "scripts" / "publish_app.sql"),
                     "PROD_APP",
                     "production",
                     "PROD_DEPLOYER",
-                    str(script.parents[1] / "apps/DEMO/100"),
-                    str(script.parents[1] / "apps/DEMO/100/deployments/prod.json"),
+                    fake_sqlcl.native(script.parents[1] / "apps/DEMO/100"),
+                    fake_sqlcl.native(script.parents[1] / "apps/DEMO/100/deployments/prod.json"),
                     "100",
                     "-",
                 ],
@@ -787,7 +805,7 @@ class TeamCliTests(unittest.TestCase):
                     "-noupdates",
                     "-name",
                     "prod-db",
-                    f"@{script.parents[1] / 'scripts' / 'export_apps.sql'}",
+                    "@" + fake_sqlcl.native(script.parents[1] / "scripts" / "export_apps.sql"),
                     "PROD_APP",
                     "100",
                     "production",
@@ -829,7 +847,7 @@ class TeamCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("prod-db", args)
-            self.assertIn(str(script.parents[1] / "apps/DEMO/100/deployments/prod.json"), args)
+            self.assertIn(fake_sqlcl.native(script.parents[1] / "apps/DEMO/100/deployments/prod.json"), args)
 
     def make_upgrade_fixture(self, root: Path) -> tuple[Path, Path]:
         template = root / "template"

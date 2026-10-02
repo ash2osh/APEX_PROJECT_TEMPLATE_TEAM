@@ -128,7 +128,11 @@ def _query_live_timestamp(
                     env=environment,
                     stdin=stdin,
                     capture_output=True,
-                    text=True,
+                    # The script sets ENCODING UTF-8 and SQLcl writes UTF-8 to a pipe; the default
+                    # (the ANSI code page on Windows) turns an accented version into mojibake and
+                    # a false "re-imported" refusal.
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=45,
                     check=False,
                 )

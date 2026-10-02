@@ -51,6 +51,19 @@ class FakeSqlclTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertEqual(self.recorded(), [*TRICKY, "stdin=hello"])
 
+    def test_an_argument_naming_an_existing_file_stays_an_argument(self) -> None:
+        # Git Bash would expand `@existing-file` as a response file; real SQLcl gets `@script` as is.
+        script = Path(self.temporary.name) / "dir with space" / "doctor.sql"
+        script.parent.mkdir()
+        script.write_text("-- words that must not become arguments\nSELECT 1 FROM dual;\n", encoding="utf-8")
+        arguments = ["-S", "-name", "conn", f"@{script}", "100", "@" + script.as_posix()]
+        program = shutil.which("sql", path=self.environment["PATH"])
+
+        result = subprocess.run([program, *arguments], input=b"", capture_output=True, env=self.environment, check=False)
+
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(self.recorded(), [*arguments, "stdin="])
+
     def test_git_bash_starts_the_script_itself(self) -> None:
         bash = sqlcl_session.bash_command()
         result = subprocess.run(

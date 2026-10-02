@@ -240,9 +240,9 @@ class PublishAppCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("docker-demo", args)
-            self.assertIn(f"@{runner.parent / 'publish_app.sql'}", args)
-            self.assertIn(str(root / "apps/DEMO/100"), args)
-            self.assertIn(str(root / "apps/DEMO/100" / "deployments/dev.json"), args)
+            self.assertIn("@" + fake_sqlcl.native(runner.parent / "publish_app.sql"), args)
+            self.assertIn(fake_sqlcl.native(root / "apps/DEMO/100"), args)
+            self.assertIn(fake_sqlcl.native(root / "apps/DEMO/100" / "deployments/dev.json"), args)
             self.assertNotEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(root / "apps/DEMO/100"))
 
     def test_publish_does_not_start_sqlcl_in_application_source(self) -> None:
@@ -567,11 +567,17 @@ class PublishAppCliTests(unittest.TestCase):
                     command = [BASH, str(runner), "100"]
                 else:
                     command = [executable, "-NoProfile", "-File", str(root / "scripts/publish_app.ps1"), "100"]
-                app.chmod(0o555)
-                try:
-                    result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
-                finally:
-                    app.chmod(0o755)
+                if os.name == "nt":
+                    # The real Windows cause: a program holds the file open. Python's open() does not
+                    # share DELETE, so renaming the file fails while the handle is held.
+                    with open(app / "application.apx", "rb"):
+                        result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+                else:
+                    app.chmod(0o555)
+                    try:
+                        result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
+                    finally:
+                        app.chmod(0o755)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("could not move application.apx", result.stdout + result.stderr)
                 self.assertNotIn("changed while the publish tag was stamped", result.stdout + result.stderr)
@@ -1011,7 +1017,7 @@ class PublishAppCliTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertNotIn("Published APEX App 100", result.stdout + result.stderr)
 
-    def test_staging_publish_skips_dev_builder_drift_guard(self) -> None:
+    def staging_promotion_confirmed_with(self, answer: bytes) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runner, sql_log, _, environment = self.make_publish_fixture(root)
@@ -1046,18 +1052,26 @@ class PublishAppCliTests(unittest.TestCase):
                 [BASH, str(runner), "100", "--env", "staging"],
                 cwd=root,
                 env=environment,
-                input="y\n",
-                text=True,
+                # Bytes, not text: text-mode input turns "\n" into "\r\n" on Windows.
+                input=answer,
                 capture_output=True,
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
             self.assertFalse(guard_marker.exists(), "staging promotions must not compare Builder edit timestamps")
             self.assertIn("deployments/staging.json", sql_log.read_text(encoding="utf-8"))
             # Promotion ships the committed DEV publish tag unchanged.
             self.assertEqual((app / "application.apx").read_bytes(), original_source)
-            self.assertNotIn("Stamped application version", result.stdout)
+            self.assertNotIn("Stamped application version", result.stdout.decode("utf-8", "replace"))
+
+    def test_staging_publish_skips_dev_builder_drift_guard(self) -> None:
+        self.staging_promotion_confirmed_with(b"y\n")
+
+    def test_a_crlf_yes_is_accepted_for_a_promotion(self) -> None:
+        # Windows PowerShell appends CR LF to what it pipes into a native program, so
+        # `"y" | scripts\team.ps1 deploy 100 --env staging` reaches Bash as "y\r\n".
+        self.staging_promotion_confirmed_with(b"y\r\n")
 
 
 if __name__ == "__main__":
