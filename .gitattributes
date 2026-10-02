@@ -4,3 +4,18 @@
 *.json text eol=lf
 *.sh text eol=lf
 *.ps1 text eol=lf
+# Documentation, tooling and configuration are LF too, so a checkout on Windows
+# (core.autocrlf=true) has the same bytes as one on Linux and macOS.
+*.md text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.js text eol=lf
+*.cjs text eol=lf
+*.ts text eol=lf
+*.html text eol=lf
+*.toml text eol=lf
+.env.example text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.graphifyignore text eol=lf

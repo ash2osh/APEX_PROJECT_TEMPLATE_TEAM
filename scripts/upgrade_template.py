@@ -183,6 +183,30 @@ def sha256(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def normalized_sha256(data: bytes) -> str:
+    """Hash text with CRLF folded to LF; binary data (any NUL byte) is hashed as is.
+
+    Git for Windows checks text files out as CRLF by default (core.autocrlf), so
+    the same template file has different bytes on different machines. Comparing
+    the normalized hash keeps a project made on Linux, or from a ZIP, from showing
+    every text file as a conflict when it is upgraded from a Windows clone.
+    """
+    if b"\0" not in data:
+        data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_pair(path: Path) -> tuple[str, str] | None:
+    """Return (raw hash, line-ending-normalized hash) of a file, None when absent."""
+    info = _lstat(path)
+    if info is None:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise UpgradeError(f"managed path is not a regular file: {path}")
+    data = path.read_bytes()
+    return hashlib.sha256(data).hexdigest(), normalized_sha256(data)
+
+
 def fetch_template(source: str, ref: str | None, destination: Path) -> str:
     run_git(destination.parent, "clone", "--quiet", source, str(destination))
     if ref:
@@ -345,11 +369,11 @@ def check_project(project_root: Path) -> None:
         raise UpgradeError(f"resolve and delete {CONFLICT_SUFFIX} files first: {', '.join(pending)}")
 
 
-def _new_file_hash(template_root: Path, relative: str) -> str:
-    digest = sha256(template_root / relative)
-    if digest is None:
+def _new_file_hash(template_root: Path, relative: str) -> tuple[str, str]:
+    digests = sha256_pair(template_root / relative)
+    if digests is None:
         raise UpgradeError(f"managed template file is missing: {relative}")
-    return digest
+    return digests
 
 
 def plan_upgrade(
@@ -365,18 +389,22 @@ def plan_upgrade(
     current_files = set(template_owned)
 
     for path in template_owned:
-        new = _new_file_hash(template_root, path)
+        new_raw, new_normalized = _new_file_hash(template_root, path)
         target = safe_project_path(project_root, path)
-        local = sha256(target)
+        local_pair = sha256_pair(target)
+        # `local` stays the raw hash: it is what the race guard in apply_actions
+        # compares with the bytes it later moves aside. Decisions below ignore a
+        # CRLF/LF difference; an older lock holds raw hashes, which are accepted too.
+        local = local_pair[0] if local_pair is not None else None
         last = installed.get(path)
-        new_lock[path] = new
-        if local is None:
+        new_lock[path] = new_normalized
+        if local_pair is None:
             kind = "CREATE" if last is None else "KEEP-DELETED"
-        elif local == new:
+        elif local_pair[1] == new_normalized:
             kind = "UNCHANGED"
-        elif local == last:
+        elif last in local_pair:
             kind = "UPDATE"
-        elif new == last:
+        elif last in (new_raw, new_normalized):
             kind = "KEEP-LOCAL"
         else:
             kind = "CONFLICT"
@@ -390,10 +418,10 @@ def plan_upgrade(
         if path in current_files:
             continue
         target = safe_project_path(project_root, path)
-        local = sha256(target)
-        if local is None:
+        local_pair = sha256_pair(target)
+        if local_pair is None:
             continue
-        actions.append(Action("DELETE" if local == last else "KEEP-REMOVED", path, local))
+        actions.append(Action("DELETE" if last in local_pair else "KEEP-REMOVED", path, local_pair[0]))
 
     for path in placeholders:
         target = safe_project_path(project_root, path)

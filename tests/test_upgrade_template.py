@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -626,6 +627,64 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("symbolic link", result.stderr)
         self.assertFalse((self.project / "scripts/link.sh").exists())
+
+
+class LineEndingPlanTests(unittest.TestCase):
+    """plan_upgrade must not treat a CRLF/LF difference as a customization.
+
+    Git for Windows checks text out as CRLF by default, so one template file has
+    different bytes on different machines.
+    """
+
+    def plan(self, template_bytes: bytes, project_bytes: bytes | None, lock_files: dict[str, str]):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            template, project = base / "template", base / "project"
+            template.mkdir()
+            project.mkdir()
+            (template / "AGENTS.md").write_bytes(template_bytes)
+            if project_bytes is not None:
+                (project / "AGENTS.md").write_bytes(project_bytes)
+            actions, new_lock = upgrade_engine.plan_upgrade(
+                project, template, ["AGENTS.md"], [], {"files": lock_files}
+            )
+        return {action.path: action.kind for action in actions}, new_lock
+
+    def test_crlf_template_and_lf_project_are_unchanged_not_a_conflict(self) -> None:
+        kinds, _ = self.plan(b"rules v1\r\nmore\r\n", b"rules v1\nmore\n", {})
+
+        self.assertEqual(kinds["AGENTS.md"], "UNCHANGED")
+
+    def test_lf_template_and_crlf_project_are_unchanged_not_a_conflict(self) -> None:
+        kinds, _ = self.plan(b"rules v1\nmore\n", b"rules v1\r\nmore\r\n", {})
+
+        self.assertEqual(kinds["AGENTS.md"], "UNCHANGED")
+
+    def test_a_real_edit_is_still_a_conflict(self) -> None:
+        kinds, _ = self.plan(b"rules v2\r\n", b"our edit\n", {"AGENTS.md": "0" * 64})
+
+        self.assertEqual(kinds["AGENTS.md"], "CONFLICT")
+
+    def test_lock_written_before_normalization_still_recognizes_an_untouched_file(self) -> None:
+        # Older locks hold the hash of the exact bytes, here a CRLF checkout.
+        raw_lock_hash = hashlib.sha256(b"rules v1\r\n").hexdigest()
+
+        kinds, new_lock = self.plan(b"rules v2\n", b"rules v1\r\n", {"AGENTS.md": raw_lock_hash})
+
+        self.assertEqual(kinds["AGENTS.md"], "UPDATE")
+        self.assertEqual(new_lock["AGENTS.md"], hashlib.sha256(b"rules v2\n").hexdigest())
+
+    def test_lock_hash_is_the_same_for_lf_and_crlf_template_bytes(self) -> None:
+        _, lf_lock = self.plan(b"a\nb\n", None, {})
+        _, crlf_lock = self.plan(b"a\r\nb\r\n", None, {})
+
+        self.assertEqual(lf_lock, crlf_lock)
+        self.assertEqual(lf_lock["AGENTS.md"], hashlib.sha256(b"a\nb\n").hexdigest())
+
+    def test_binary_content_is_compared_byte_for_byte(self) -> None:
+        kinds, _ = self.plan(b"\x00a\r\nb", b"\x00a\nb", {})
+
+        self.assertEqual(kinds["AGENTS.md"], "CONFLICT")
 
 
 if __name__ == "__main__":
