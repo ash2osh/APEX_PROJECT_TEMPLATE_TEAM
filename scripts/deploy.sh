@@ -119,6 +119,7 @@ if [ "$manual" = true ]; then
   printf '3. Check that import completed without SQLcl errors and printed "Import successful." and APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
   printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'
   printf '   verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-manual-verify.XXXXXX")\n'
+  printf '%s\n' '   trap '\''rm -rf -- "$sqlcl_dir" "$verify_dir"'\'' EXIT'
   printf '   cd "$verify_dir"\n'
   printf '   sql -S -noupdates -name %q %q %q %q %q %q\n' \
     "$sqlcl_connection" "@$runbook_root/scripts/export_apps.sql" \
