@@ -11,6 +11,7 @@ import sys
 from unittest.mock import patch
 from pathlib import Path
 
+import _windows_lf  # noqa: F401  (Path.write_text writes LF on Windows too)
 from scripts import upgrade_template as upgrade_engine
 
 
@@ -536,6 +537,42 @@ class UpgradeTemplateTests(unittest.TestCase):
         result = self.upgrade()
         self.assertEqual(result.returncode, 2)
         self.assertIn(".template-new", result.stderr)
+
+    def test_a_working_copy_that_only_differs_by_line_endings_is_not_a_dirty_tree(self) -> None:
+        # With core.autocrlf=true and eol=lf, `git status` calls a file modified after an editor
+        # saved it with CRLF although `git diff` has nothing to show. The guard is about content,
+        # so it asks `git diff`.
+        git(self.project, "config", "core.autocrlf", "true")
+        # Bytes, not text: write_text would turn these LF files into CRLF ones on Windows.
+        (self.project / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+        (self.project / "docs").mkdir(exist_ok=True)
+        (self.project / "docs" / "note.md").write_bytes(b"line one\nline two\n")
+        commit_all(self.project, "attributes and a note")
+        (self.project / "docs" / "note.md").write_bytes(b"line one\r\nline two\r\n")
+        if not git(self.project, "status", "--porcelain"):
+            self.skipTest("this Git does not report a line-ending-only change as modified")
+
+        result = self.upgrade("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("uncommitted changes", result.stderr)
+
+    def test_a_real_edit_of_a_tracked_file_is_still_a_dirty_tree(self) -> None:
+        write(self.project, {"scripts/tool.sh": "echo edited\n"})
+
+        result = self.upgrade("--dry-run")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("uncommitted changes", result.stderr)
+
+    def test_a_staged_change_is_still_a_dirty_tree(self) -> None:
+        write(self.project, {"scripts/tool.sh": "echo edited\n"})
+        git(self.project, "add", "scripts/tool.sh")
+
+        result = self.upgrade("--dry-run")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("uncommitted changes", result.stderr)
 
     def test_dry_run_changes_nothing(self) -> None:
         self.adopt()

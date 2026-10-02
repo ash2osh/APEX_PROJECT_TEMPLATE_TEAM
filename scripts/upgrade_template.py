@@ -357,8 +357,22 @@ def validate_lock_ownership(lock: dict, manifest: dict) -> None:
             raise UpgradeError(f"{LOCK_NAME} path is not template-owned by the current manifest: {path}")
 
 
+def has_uncommitted_changes(project_root: Path) -> bool:
+    """Whether the working tree differs from HEAD in content, file mode or file set.
+
+    `git status` also lists a file whose line endings differ in a way Git's own conversions
+    undo (core.autocrlf=true with eol=lf, after an editor saved it with CRLF), although
+    nothing in it changed. `git diff` compares the converted content, so a file counts here
+    only when its content really differs.
+    """
+    untracked = run_git(project_root, "ls-files", "--others", "--exclude-standard")
+    unstaged = run_git(project_root, "diff", "--name-only")
+    staged = run_git(project_root, "diff", "--cached", "--name-only")
+    return bool((untracked + unstaged + staged).strip())
+
+
 def check_project(project_root: Path) -> None:
-    if run_git(project_root, "status", "--porcelain", "--untracked-files=all").strip():
+    if has_uncommitted_changes(project_root):
         raise UpgradeError("the project has uncommitted changes; commit or stash them before upgrading")
     pending = [
         path
