@@ -10,6 +10,7 @@ import time
 import unittest
 from pathlib import Path
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import _console_ctrl_c
 import fake_sqlcl
 from fake_sqlcl import BASH
 
@@ -537,6 +538,26 @@ class TeamCliTests(unittest.TestCase):
             self.assertEqual(seen[0], str(ROOT / "scripts" / "compare_schema.sh"))
             self.assertEqual(seen[1:], ["--env", "dev", "--object", "CUSTOMERS"])
 
+    @unittest.skipUnless(os.name == "nt", "the signal status is Git Bash's convention on Windows")
+    def test_powershell_reports_git_bash_signal_statuses_as_bash_does(self) -> None:
+        # A Git Bash process that a signal ended exits with the signal number times 256
+        # (512 for Ctrl-C); Bash itself says 128 plus the signal (130). Plain statuses stay.
+        engines = [path for path in (shutil.which("pwsh"), shutil.which("powershell")) if path]
+        for engine in engines:
+            for status, expected in ((512, 130), (3840, 143), (2, 2), (1, 1)):
+                with self.subTest(engine=Path(engine).name, status=status), tempfile.TemporaryDirectory() as temporary:
+                    fake_bash = Path(temporary) / "git-bash.cmd"
+                    # team.ps1 asks Bash whether python3 works (bash -c "python3 ..."): answer yes.
+                    fake_bash.write_text(
+                        f'@echo off\r\nif "%~1"=="-c" exit /b 0\r\nexit /b {status}\r\n', encoding="ascii", newline=""
+                    )
+                    result = subprocess.run(
+                        [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "team.ps1"),
+                         "compare-schema", "--env", "dev", "--object", "T"],
+                        cwd=ROOT, env={**os.environ, "TEAM_BASH": str(fake_bash)}, text=True, capture_output=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
     def test_powershell_names_the_fix_when_no_usable_bash_is_found(self) -> None:
         pwsh = shutil.which("pwsh")
         if pwsh is None:
@@ -701,6 +722,152 @@ class TeamCliTests(unittest.TestCase):
                 self.assertEqual(process.returncode, 130, stderr)
                 self.assertEqual(stderr.strip(), "preflight interrupted; it only reads, so nothing was changed")
                 self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
+
+    @staticmethod
+    def windows_wrappers() -> list[list[str]]:
+        """Every way to start team on Windows: Git Bash, and each PowerShell that is installed."""
+        wrappers = [[BASH, "team.sh"]]
+        windows_powershell = shutil.which("powershell")
+        if windows_powershell:
+            wrappers.append([windows_powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "team.ps1"])
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            wrappers.append([pwsh, "-NoProfile", "-File", "team.ps1"])
+        return wrappers
+
+    def interrupt_in_a_windows_console(
+        self, command: list[str], root: Path, environment: dict[str, str], started: Path, sql_pid: Path | None = None
+    ) -> tuple[subprocess.Popen, str, bool]:
+        """Run command in a console of its own and press Ctrl-C there once the file started exists.
+
+        Returns the ended process, what the console shows, and whether the process whose
+        Windows id the fake wrote to sql_pid still ran after the command had ended. No
+        standard handle is redirected: the keypress reaches the whole chain only while
+        every process shares the console.
+        """
+        process = _console_ctrl_c.start_in_new_console(command, cwd=root, env=environment)
+        sql_survived = False
+        try:
+            deadline = time.monotonic() + 60
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(started.exists(), "the command never reached the step that waits")
+            screen = _console_ctrl_c.press_ctrl_c(process, wait_seconds=20)
+            if process.poll() is None:
+                self.fail(f"the command was still running 20 seconds after Ctrl-C; the console shows {screen!r}")
+            if sql_pid is not None:
+                # Ending a process is asynchronous, so give the last one a moment.
+                deadline = time.monotonic() + 10
+                while _console_ctrl_c.process_is_running(int(sql_pid.read_text())) and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                sql_survived = _console_ctrl_c.process_is_running(int(sql_pid.read_text()))
+        finally:
+            if process.poll() is None:
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, check=False)
+                process.wait()
+            if sql_pid is not None and sql_pid.exists():
+                subprocess.run(["taskkill", "/PID", sql_pid.read_text().strip(), "/T", "/F"], capture_output=True, check=False)
+        return process, screen, sql_survived
+
+    @staticmethod
+    def write_windows_python_command(directory: Path, name: str, source: str) -> None:
+        """Write directory\\<name>.exe, a Windows launcher that runs the Python script source as a command.
+
+        Unlike the Bash fakes of fake_sqlcl it is one native program that Ctrl-C ends, as it ends SQLcl.
+        """
+        from pip._vendor.distlib.scripts import ScriptMaker
+
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as sources:
+            (Path(sources) / f"{name}.py").write_text("#!python\n" + source, encoding="utf-8", newline="\n")
+            maker = ScriptMaker(sources, str(directory), add_launchers=True)
+            maker.clobber = True
+            maker.variants = {""}
+            maker.set_mode = False
+            maker.make(f"{name}.py")
+    def make_windows_interrupt_checkout(self, root: Path) -> None:
+        shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+
+    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is above")
+    def test_ctrl_c_in_a_windows_console_ends_a_live_preflight_and_everything_it_started(self) -> None:
+        # The keypress reaches every process on the console, but Python waits for its
+        # child where the keypress cannot interrupt it, and the Git Bash processes
+        # below it do not take it. The preflight used to run on, with SQLcl under it,
+        # until SQLcl ended by itself.
+        for wrapper in self.windows_wrappers():
+            with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.make_windows_interrupt_checkout(root)
+                folder = root / "migrations" / "2026-10-02_interrupt-r001"
+                folder.mkdir(parents=True)
+                (folder / "001-create.sql").write_text("CREATE TABLE ZZ_INTERRUPT (ID NUMBER);\n", encoding="utf-8")
+                (folder / "checks.json").write_text(
+                    json.dumps({"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]}) + "\n",
+                    encoding="utf-8",
+                )
+                started = root / "sql-started"
+                sql_pid = root / "sql-pid"
+                # /proc/$$/winpid is the Windows process id of the script that stands for SQLcl.
+                fake_bin = fake_sqlcl.install(
+                    root / "bin", f"cat /proc/$$/winpid > '{sql_pid.as_posix()}'\n: > '{started.as_posix()}'\nsleep 60\n"
+                )
+                environment = fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(root / ".env"))
+                command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "check-conflicts", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
+                process, screen, sql_survived = self.interrupt_in_a_windows_console(command, root, environment, started, sql_pid)
+                self.assertEqual(process.returncode, 130, screen)
+                self.assertEqual(screen.strip(), "preflight interrupted; it only reads, so nothing was changed")
+                self.assertFalse(sql_survived, "SQLcl was still running after the preflight ended")
+                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
+
+    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console")
+    def test_ctrl_c_in_a_windows_console_waits_for_python_and_passes_its_status_on(self) -> None:
+        # Python needs a moment after Ctrl-C to say what it left and to clean up, and
+        # migrate chooses status 2 ("interrupted and may be partially applied") over 130.
+        # A Bash that had exec'd Python is a bare stand-in that the keypress ends at once
+        # with a status of its own (512): the prompt came back first, Python's last words
+        # appeared after it, and the status it chose was lost.
+        for wrapper in self.windows_wrappers():
+            with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.make_windows_interrupt_checkout(root)
+                started = root / "python-started"
+                # A python3 that waits for Ctrl-C, takes a moment to finish and exits 2, as
+                # scripts.migrate does when it is interrupted inside an apply.
+                self.write_windows_python_command(
+                    root / "bin", "python3",
+                    "import sys\nimport time\nfrom pathlib import Path\n"
+                    'if sys.argv[1:2] == ["-c"]:\n'
+                    "    exec(sys.argv[2])  # team.ps1 asks whether this is Python 3.10 or newer\n"
+                    "    raise SystemExit(0)\n"
+                    f"Path({str(started)!r}).write_text('started')\n"
+                    "try:\n    time.sleep(60)\nexcept KeyboardInterrupt:\n"
+                    "    print('python is cleaning up', flush=True)\n    time.sleep(1.5)\n"
+                    "    print('python is done', flush=True)\n    raise SystemExit(2)\n",
+                )
+                environment = fake_sqlcl.environment(root / "bin", PROJECT_ENV_FILE=str(root / ".env"))
+                command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "migrate", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
+                process, screen, _ = self.interrupt_in_a_windows_console(command, root, environment, started)
+                self.assertEqual(process.returncode, 2, screen)
+                self.assertEqual(screen.strip().splitlines(), ["python is cleaning up", "python is done"])
+
+    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is test_interrupting_doctor_removes_its_working_directory")
+    def test_ctrl_c_in_a_windows_console_ends_doctor_and_removes_its_working_directory(self) -> None:
+        for wrapper in self.windows_wrappers():
+            with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.make_windows_interrupt_checkout(root)
+                started = root / "sql-started"
+                # Real SQLcl is one native program that Ctrl-C ends; so is this stand-in.
+                self.write_windows_python_command(
+                    root / "bin", "sql",
+                    f"import time\nfrom pathlib import Path\nPath({str(started)!r}).write_text('started')\ntime.sleep(60)\n",
+                )
+                environment = fake_sqlcl.environment(root / "bin", PROJECT_ENV_FILE=str(root / ".env"))
+                command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "doctor"]
+                process, screen, _ = self.interrupt_in_a_windows_console(command, root, environment, started)
+                self.assertEqual(process.returncode, 130, screen)
+                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("sqlcl-doctor*")), [])
 
     def make_deploy_checkout(self, root: Path, configure_profile: bool = True) -> tuple[Path, Path]:
         scripts = root / "scripts"

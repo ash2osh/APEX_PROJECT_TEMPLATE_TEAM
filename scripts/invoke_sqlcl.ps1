@@ -11,6 +11,31 @@
 # Start-Process is what allows standard input to be redirected at all:
 # Windows PowerShell 5.1 has no '<' redirection operator for native commands.
 
+# Wait for a process that Start-Process started without -Wait. Start-Process -Wait stops
+# waiting the moment Ctrl-C arrives, and the caller's finally block then removes the
+# directory SQLcl is still shutting down in (and cannot, on Windows, while SQLcl is in
+# it). Wait in short steps instead; when interrupted, hold on until SQLcl has ended, and
+# end it if it takes too long.
+function Wait-SqlclProcess {
+  param([Parameter(Mandatory = $true)] $Process)
+  $finished = $false
+  try {
+    while (-not $Process.WaitForExit(200)) { }
+    $finished = $true
+  } finally {
+    if (-not $finished -and -not $Process.WaitForExit(10000)) {
+      # The caller reads $LASTEXITCODE to tell an interrupt from a failure.
+      $savedExitCode = $global:LASTEXITCODE
+      if (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)) {
+        & cmd.exe /c "taskkill /PID $($Process.Id) /T /F >nul 2>&1"
+      } else {
+        try { $Process.Kill() } catch { }
+      }
+      $global:LASTEXITCODE = $savedExitCode
+    }
+  }
+}
+
 function Invoke-Sqlcl {
   param(
     [Parameter(Mandatory = $true)][string[]] $Arguments,
@@ -57,7 +82,9 @@ function Invoke-Sqlcl {
     $env:ORACLE_PATH = $safeSqlPath
     if ([string]::IsNullOrWhiteSpace($TranscriptFile)) {
       $process = Start-Process -FilePath "sql" -ArgumentList $quoted -WorkingDirectory $escapedWorkingDirectory `
-        -NoNewWindow -Wait -PassThru -RedirectStandardInput $stdinRedirectFile
+        -NoNewWindow -PassThru -RedirectStandardInput $stdinRedirectFile
+      $null = $process.Handle  # Windows PowerShell 5.1 loses the exit code of a -PassThru process otherwise
+      Wait-SqlclProcess $process
       return $process.ExitCode
     }
 
@@ -65,8 +92,10 @@ function Invoke-Sqlcl {
     $stderrFile = [System.IO.Path]::GetTempFileName()
     try {
       $process = Start-Process -FilePath "sql" -ArgumentList $quoted -WorkingDirectory $escapedWorkingDirectory `
-        -NoNewWindow -Wait -PassThru -RedirectStandardInput $stdinRedirectFile `
+        -NoNewWindow -PassThru -RedirectStandardInput $stdinRedirectFile `
         -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+      $null = $process.Handle
+      Wait-SqlclProcess $process
       $stdout = [System.IO.File]::ReadAllText($stdoutFile)
       $stderr = [System.IO.File]::ReadAllText($stderrFile)
       $transcript = $stdout

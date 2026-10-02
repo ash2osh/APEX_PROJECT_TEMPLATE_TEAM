@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
 
+from . import windows_job
+
 
 ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
 # `Error starting at line` and `Error report -` head every error SQLcl prints. A
@@ -66,6 +68,23 @@ class SqlclError(RuntimeError):
         super().__init__(f"{message}; diagnostics: {run_dir / 'sqlcl-output.log'}")
 
 
+def _run_bridge(command: list[str], *, cwd: Path, env: Mapping[str, str], timeout_seconds: float) -> subprocess.CompletedProcess:
+    """Run the SQLcl bridge with its output (stderr included) as text and nothing on stdin."""
+    options = {
+        "cwd": cwd,
+        "env": env,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+    }
+    if os.name == "nt":
+        # Ctrl-C must end the wait and the SQLcl under the bridge; see windows_job.
+        return windows_job.run(command, input_text="", timeout=timeout_seconds, **options)
+    return subprocess.run(command, input="", timeout=timeout_seconds, check=False, **options)
+
+
 def run_sqlcl(
     target,
     driver_path: Path,
@@ -102,21 +121,14 @@ def run_sqlcl(
     bridge = Path(__file__).with_name("sqlcl_session.sh").resolve(strict=True)
     child_environment = dict(os.environ if environment is None else environment)
     try:
-        completed = subprocess.run(
+        completed = _run_bridge(
             # as_posix: the bridge compares the driver path with the run directory
             # as strings, which only works when both use "/" (Git Bash accepts
             # C:/dir/file); on Linux and macOS it is the same as str().
             [bash_command(), bridge.as_posix(), resolved_run.as_posix(), target.connection, resolved_driver.as_posix()],
             cwd=resolved_run,
             env=child_environment,
-            input="",
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=timeout_seconds,
-            check=False,
+            timeout_seconds=timeout_seconds,
         )
         output = completed.stdout or ""
         reason = None

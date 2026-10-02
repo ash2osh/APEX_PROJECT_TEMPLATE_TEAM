@@ -64,10 +64,23 @@ invoke_sqlcl_safe() {
   mkdir -p -- "$safe_sql_path"
   local native_sql_path
   native_sql_path="$(sqlcl_native_path "$safe_sql_path")"
+  local sqlcl_status=0
   (
     cd -- "$working_directory"
     SQLPATH="$native_sql_path" ORACLE_PATH="$native_sql_path" command sql "$@"
-  )
+  ) || sqlcl_status=$?
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Ctrl-C ends SQLcl, but Git Bash does not run this shell's INT trap when SQLcl's
+      # standard streams are redirected, as every caller redirects them: the script
+      # would go on as if SQLcl had merely failed and miss that it was interrupted
+      # (publish would call an import of unknown result "failed"). Raise the signal.
+      if [ "$sqlcl_status" -eq 130 ]; then
+        kill -s INT $$
+      fi
+      ;;
+  esac
+  return "$sqlcl_status"
 }
 
 # Print the parsing schema that owns an APEX application, or fail. The caller

@@ -110,6 +110,14 @@ function ConvertTo-MigrationFolderArgument([string] $Value) {
   return $converted.TrimEnd("/")
 }
 
+# Git Bash reports a process that a signal ended as the signal number times 256 (Ctrl-C,
+# SIGINT, is 512), which a Windows caller reads as a plain exit status. Bash itself
+# says 128 plus the signal number (130), so do the same.
+function ConvertFrom-GitBashStatus([int] $Status) {
+  if ($Status -ge 256 -and $Status -le 32512 -and $Status % 256 -eq 0) { return 128 + [int] ($Status / 256) }
+  return $Status
+}
+
 function Invoke-TeamBash {
   param([string] $ScriptName, [string[]] $ScriptArguments)
   $bashPath = Resolve-TeamBash
@@ -131,7 +139,7 @@ function Invoke-TeamBash {
       if ($null -ne $shimDirectory) { $env:PATH = "$shimDirectory;$originalPath" }
     }
     & $bashPath (Join-Path $PSScriptRoot $ScriptName) @ScriptArguments
-    $bashStatus = $LASTEXITCODE
+    $bashStatus = ConvertFrom-GitBashStatus $LASTEXITCODE
   } finally {
     $env:PATH = $originalPath
     if ($null -ne $shimDirectory) { Remove-TeamPythonShim -Directory $shimDirectory }
@@ -329,7 +337,7 @@ try {
   # (Only a script without [Parameter()] attributes keeps an exit status chosen
   # in finally; see the top of the file.)
   if (-not $finished) {
-    if ($LASTEXITCODE -gt 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE -gt 0) { exit (ConvertFrom-GitBashStatus $LASTEXITCODE) }
     exit 130
   }
 }
