@@ -478,15 +478,21 @@ class TeamCliTests(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertTrue(started.exists(), "SQLcl never started")
                 child = int(child_pid.read_text())
+                # SQLcl can start before Start-Process has handed it to PowerShell; a Ctrl-C
+                # inside Start-Process cannot be handled, so let it return first.
+                time.sleep(1)
+                interrupted_at = time.monotonic()
                 os.killpg(process.pid, signal.SIGINT)
-                process.communicate(timeout=60)
+                output, errors = process.communicate(timeout=60)
+                elapsed = time.monotonic() - interrupted_at
                 time.sleep(0.5)
                 try:
                     os.kill(child, 0)
                     alive = True
                 except ProcessLookupError:
                     alive = False
-                self.assertFalse(alive, "the process SQLcl started outlived the interrupt")
+                state = Path(f"/proc/{child}/stat").read_text().split(")")[-1].split()[0] if alive and Path(f"/proc/{child}/stat").exists() else "-"
+                self.assertFalse(alive, f"the process SQLcl started outlived the interrupt (state {state}, pwsh exit {process.returncode} after {elapsed:.1f} s: {output}{errors})")
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)

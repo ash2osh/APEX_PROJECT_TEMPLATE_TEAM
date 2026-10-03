@@ -11,11 +11,6 @@
 # Start-Process is what allows standard input to be redirected at all:
 # Windows PowerShell 5.1 has no '<' redirection operator for native commands.
 
-# Wait for a process that Start-Process started without -Wait. Start-Process -Wait stops
-# waiting the moment Ctrl-C arrives, and the caller's finally block then removes the
-# directory SQLcl is still shutting down in (and cannot, on Windows, while SQLcl is in
-# it). Wait in short steps instead; when interrupted, hold on until SQLcl has ended, and
-# end it if it takes too long.
 # The direct children of a Windows process (the launcher sql.exe starts java.exe).
 function Get-SqlclChildIds([int] $ParentId) {
   try {
@@ -39,38 +34,40 @@ function Stop-SqlclChildren([int[]] $ChildIds, [datetime] $Deadline) {
   }
 }
 
+# Wait for a process that Start-Process started without -Wait. Start-Process -Wait stops
+# waiting the moment Ctrl-C arrives, and the caller's finally block then removes the
+# directory SQLcl is still shutting down in (and cannot, on Windows, while SQLcl is in
+# it). Wait in short steps instead; Stop-SqlclProcess handles an interrupt.
 function Wait-SqlclProcess {
   param([Parameter(Mandatory = $true)] $Process)
-  $finished = $false
-  $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)
-  try {
-    while (-not $Process.WaitForExit(200)) { }
-    if ($onWindows) {
-      # The launcher can end before the java.exe it started; give its children ten
-      # seconds in all, as after an interrupt, instead of waiting for ever.
-      $savedExitCode = $global:LASTEXITCODE
-      Stop-SqlclChildren -ChildIds (Get-SqlclChildIds $Process.Id) -Deadline ([datetime]::UtcNow.AddSeconds(10))
-      $global:LASTEXITCODE = $savedExitCode
-    }
-    $finished = $true
-  } finally {
-    if (-not $finished) {
-      # The caller reads $LASTEXITCODE to tell an interrupt from a failure.
-      $savedExitCode = $global:LASTEXITCODE
-      $deadline = [datetime]::UtcNow.AddSeconds(10)
-      if ($onWindows) {
-        $childIds = Get-SqlclChildIds $Process.Id
-        if (-not $Process.WaitForExit(10000)) {
-          & cmd.exe /c "taskkill /PID $($Process.Id) /T /F >nul 2>&1"
-        }
-        Stop-SqlclChildren -ChildIds $childIds -Deadline $deadline
-      } elseif (-not $Process.WaitForExit(10000)) {
-        # Kill(true) ends the launcher's descendants too (the JVM a shell launcher started).
-        try { $Process.Kill($true) } catch { }
-      }
-      $global:LASTEXITCODE = $savedExitCode
-    }
+  while (-not $Process.WaitForExit(200)) { }
+  if (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)) {
+    # The launcher can end before the java.exe it started; give its children ten
+    # seconds in all, as after an interrupt, instead of waiting for ever.
+    $savedExitCode = $global:LASTEXITCODE
+    Stop-SqlclChildren -ChildIds (Get-SqlclChildIds $Process.Id) -Deadline ([datetime]::UtcNow.AddSeconds(10))
+    $global:LASTEXITCODE = $savedExitCode
   }
+}
+
+# After an interrupt: hold on until SQLcl has ended, and end it with everything it
+# started if it takes longer than ten seconds.
+function Stop-SqlclProcess {
+  param([Parameter(Mandatory = $true)] $Process)
+  # The caller reads $LASTEXITCODE to tell an interrupt from a failure.
+  $savedExitCode = $global:LASTEXITCODE
+  $deadline = [datetime]::UtcNow.AddSeconds(10)
+  if (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)) {
+    $childIds = Get-SqlclChildIds $Process.Id
+    if (-not $Process.WaitForExit(10000)) {
+      & cmd.exe /c "taskkill /PID $($Process.Id) /T /F >nul 2>&1"
+    }
+    Stop-SqlclChildren -ChildIds $childIds -Deadline $deadline
+  } elseif (-not $Process.WaitForExit(10000)) {
+    # Kill(true) ends the launcher's descendants too (the JVM a shell launcher started).
+    try { $Process.Kill($true) } catch { }
+  }
+  $global:LASTEXITCODE = $savedExitCode
 }
 
 function Invoke-Sqlcl {
@@ -111,6 +108,10 @@ function Invoke-Sqlcl {
   $hadOraclePath = Test-Path Env:ORACLE_PATH
   $oldOraclePath = $env:ORACLE_PATH
   $locationPushed = $false
+  # Set once SQLcl is started and once it was waited for to the end: a finally block
+  # that sees a process not waited for was interrupted, wherever the Ctrl-C landed.
+  $process = $null
+  $waited = $false
   try {
     Copy-Item -LiteralPath $StdInFile -Destination $stdinRedirectFile -Force
     Push-Location -LiteralPath $WorkingDirectory
@@ -122,6 +123,7 @@ function Invoke-Sqlcl {
         -NoNewWindow -PassThru -RedirectStandardInput $stdinRedirectFile
       $null = $process.Handle  # Windows PowerShell 5.1 loses the exit code of a -PassThru process otherwise
       Wait-SqlclProcess $process
+      $waited = $true
       return $process.ExitCode
     }
 
@@ -133,6 +135,7 @@ function Invoke-Sqlcl {
         -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
       $null = $process.Handle
       Wait-SqlclProcess $process
+      $waited = $true
       $stdout = [System.IO.File]::ReadAllText($stdoutFile)
       $stderr = [System.IO.File]::ReadAllText($stderrFile)
       $transcript = $stdout
@@ -143,9 +146,14 @@ function Invoke-Sqlcl {
       [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
       return $process.ExitCode
     } finally {
+      if ($null -ne $process -and -not $waited) {
+        Stop-SqlclProcess $process  # before its output files are removed
+        $waited = $true
+      }
       Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     }
   } finally {
+    if ($null -ne $process -and -not $waited) { Stop-SqlclProcess $process }
     if ($hadSqlPath) { $env:SQLPATH = $oldSqlPath } else { Remove-Item Env:SQLPATH -ErrorAction SilentlyContinue }
     if ($hadOraclePath) { $env:ORACLE_PATH = $oldOraclePath } else { Remove-Item Env:ORACLE_PATH -ErrorAction SilentlyContinue }
     if ($locationPushed) { Pop-Location }
