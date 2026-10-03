@@ -138,7 +138,11 @@ Once a migration has been applied or a write attempt may have begun, keep its
 SQL bytes, names, order, and `checks.json` unchanged. A correction or recovery
 belongs in the next revision folder. A failed or ambiguous attempt may have
 left Oracle DDL committed, so inspect the live schema before deciding how to
-recover or retry.
+recover or retry. An interrupted `migrate` says which case it is: interrupted
+while a SQL step runs, it prints "was interrupted and may be partially applied"
+and exits 2, because the result is unknown; interrupted anywhere else it exits
+130 and says whether a write was attempted ("no writes were attempted", or
+"interrupted after a write was attempted; stop and reconcile").
 
 Every `migrate` that reaches the database leaves its record in
 `scratch/migration-attempt-*` (SQL, SQLcl log and outcome). It is what lets

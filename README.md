@@ -469,8 +469,15 @@ Exit status, the same in Bash and PowerShell:
 | --- | --- |
 | 0 | Done; for `check-conflicts` and `compare-schema`, nothing found. |
 | 1 | `check-conflicts` found conflicts or `compare-schema` found differences; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
-| 2 | Refused or failed; the message says why and what changed. |
-| 130 / 143 | Stopped by Ctrl-C / by SIGTERM (`kill`; Bash only: PowerShell cannot clean up after SIGTERM). |
+| 2 | Refused or failed; the message says why and what changed. Also `migrate` interrupted while a SQL step runs ("may be partially applied"). |
+| 130 / 143 | Stopped by Ctrl-C / by SIGTERM (`kill`). |
+
+SIGTERM is for Bash: `team.sh` hands its process to the command it runs, so a
+`kill` reaches it. PowerShell 7 on Linux and macOS cannot run any cleanup on
+SIGTERM, so `kill` ends `team.ps1` while the Bash helper or SQLcl it started
+carries on (a migration may finish and write its receipt); its scratch folder
+stays behind. Stop a PowerShell run with Ctrl-C, or signal its whole process
+group (`kill -TERM -- -<pgid>`). Windows has no SIGTERM.
 
 `scripts/team.ps1` exposes the same commands for PowerShell. Migration and
 deployment helpers use Bash, such as Git Bash on Windows; `team.ps1` finds Git
