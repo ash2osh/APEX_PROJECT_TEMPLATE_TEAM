@@ -92,7 +92,9 @@ Every folder requires a `checks.json` with read-only preconditions and
 postconditions. These checks validate the expected starting state and verify
 the committed result. The runner also performs structural catalog checks for
 SQL forms it can analyze. Unsupported or data-changing operations need explicit
-reviewed checks; incomplete verification blocks automated apply.
+reviewed checks; incomplete verification blocks automated apply. When such an
+operation has its checks, preflight passes but lists it as `REVIEW:`: the
+analyzer cannot see what that SQL does, so only the checks stand for it.
 
 Each check is one `SELECT` (or `WITH ... SELECT`) that returns the number `1`.
 It may use ordinary query syntax, including parenthesized conditions and

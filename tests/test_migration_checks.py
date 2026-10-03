@@ -126,6 +126,19 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual(report.coverage["deferred_preconditions"]["folders"], ["2026-09-30_dep-r002"])
         self.assertIn("preconditions of 2026-09-30_dep-r002 are not checked here", _render_preflight(report, False))
 
+    def test_text_report_names_the_sql_that_needs_manual_review(self):
+        # Opaque SQL with declared checks passes, but only after a person reviewed those
+        # checks; the JSON report said so and the text report used to say nothing.
+        from scripts.migration_checks import _render_preflight
+        reviewed = [{"id": "reviewed", "sql": "SELECT 1 FROM dual", "expected": 1}]
+        self.add_folder("2026-09-30_opaque-r001", "ALTER SYSTEM SET zz_param = 1 SCOPE=MEMORY;\n", preconditions=reviewed)
+        report = preflight(self.migration_batch("2026-09-30_opaque-r001"), self.snapshot(), CheckReport(True, True, (), (), {"complete": True}))
+        self.assertEqual(report.exit_code, 0)
+        self.assertTrue(report.coverage.get("manual_review_required"))
+        rendered = _render_preflight(report, False)
+        self.assertIn("REVIEW: 2026-09-30_opaque-r001/001-change.sql", rendered)
+        self.assertIn("1 manual review item(s)", rendered)
+
     def test_view_may_use_a_synonym_created_earlier_in_the_batch(self):
         reviewed = [{"id": "synonym-absent", "sql": "SELECT 1 FROM dual", "expected": 1}]
         self.add_folder("2026-09-30_link-r001", {

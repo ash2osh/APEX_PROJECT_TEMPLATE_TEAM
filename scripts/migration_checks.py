@@ -1243,11 +1243,22 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
 
 def _render_preflight(report: PreflightReport, local: bool) -> str:
     mode = "Local selected-batch analysis only; no live database state was checked." if local else "Live selected-batch preflight against observed schema state."
-    lines = [mode, report.limitation, f"Result: exit {report.exit_code}; {len(report.conflicts)} conflict(s), {len(report.errors)} incomplete/error condition(s)"]
+    reviews = report.coverage.get("manual_review_required") or []
+    result = f"Result: exit {report.exit_code}; {len(report.conflicts)} conflict(s), {len(report.errors)} incomplete/error condition(s)"
+    if reviews:
+        result += f", {len(reviews)} manual review item(s)"
+    lines = [mode, report.limitation, result]
     for conflict in report.conflicts:
         lines.append(f"CONFLICT [{conflict.get('code', 'UNKNOWN')}]: {conflict.get('name') or conflict.get('message') or conflict}")
     for error in report.errors:
         lines.append(f"INCOMPLETE [{error.get('code', 'UNKNOWN')}]: {error.get('message') or error.get('reason') or error}")
+    # The analyzer cannot see what this SQL does; only its declared checks stand for it.
+    for review in reviews:
+        where = "/".join(part for part in (review.get("migration"), review.get("file")) if part)
+        lines.append(
+            f"REVIEW: {where}: {review.get('reason') or 'opaque SQL'}; make sure its checks.json "
+            "preconditions and postconditions prove the intended effect before you migrate."
+        )
     deferred = report.coverage.get("deferred_preconditions")
     if isinstance(deferred, Mapping) and deferred.get("folders"):
         lines.append(
