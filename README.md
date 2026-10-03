@@ -18,6 +18,7 @@ separate file changes only and do not isolate a shared APEX application.
 | understand an error message | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | look up a command | [Command reference](#command-reference) |
 | know exactly when publish or migrate refuses | [publish-rules](docs/publish-rules.md), [migration-rules](docs/migration-rules.md) |
+| know which limits are deliberate | [Known limitations](docs/known-limitations.md) |
 | see what an AI assistant can do here | [Skills and agent support](#skills-and-agent-support) |
 
 ## What you get

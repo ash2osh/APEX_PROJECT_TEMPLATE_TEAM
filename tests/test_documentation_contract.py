@@ -21,6 +21,7 @@ DOCS = (
     ROOT / "docs" / "GETTING_STARTED.md",
     ROOT / "docs" / "EXAMPLES.md",
     ROOT / "docs" / "TROUBLESHOOTING.md",
+    ROOT / "docs" / "known-limitations.md",
 )
 # Each refusal the publish guide explains, and the script that prints it. The
 # guide quotes these verbatim, so rewording a message must update the guide.

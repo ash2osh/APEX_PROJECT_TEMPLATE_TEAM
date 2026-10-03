@@ -113,6 +113,10 @@ files, not shared Builder state.
 
 ## Rules for coding agents
 
+- Before reporting a defect or changing behaviour in a review or test run,
+  check [docs/known-limitations.md](docs/known-limitations.md). The behaviour
+  listed there is deliberate: do not report or "fix" it again unless it no
+  longer matches that page.
 - Before writing PL/SQL for APEX automations, workflow activities, task
   actions, or background execution chains, read
   `.agents/skills/apex-background/SKILL.md`.

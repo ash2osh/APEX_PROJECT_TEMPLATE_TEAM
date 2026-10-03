@@ -21,6 +21,7 @@
     "docs/EXAMPLES.md",
     "docs/GETTING_STARTED.md",
     "docs/TROUBLESHOOTING.md",
+    "docs/known-limitations.md",
     "docs/migration-rules.md",
     "docs/publish-rules.md",
     "migrations/README.md",
