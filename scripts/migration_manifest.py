@@ -484,6 +484,11 @@ def _validate_folder_entries(folder: Path) -> tuple[MigrationFile, ...]:
     return tuple(files)
 
 
+def _printable(value: str) -> str:
+    """Value with control characters escaped, so a refusal naming it stays on one line."""
+    return "".join(character if character.isprintable() else repr(character)[1:-1] for character in value)
+
+
 def load_migration(repo_root: Path, relative_folder: str) -> Migration:
     """Validate one folder and return its ordered, exact-byte payload."""
     parts = _validate_relative_folder(relative_folder)
@@ -494,14 +499,14 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
     try:
         folder.resolve(strict=True).relative_to(root)
     except (OSError, ValueError) as exc:
-        raise MigrationManifestError(f"migration folder is missing or outside the repository: {relative_folder}") from exc
+        raise MigrationManifestError(f"migration folder is missing or outside the repository: {_printable(relative_folder)}") from exc
     if not folder.is_dir():
-        raise MigrationManifestError(f"migration path is not a folder: {relative_folder}")
+        raise MigrationManifestError(f"migration path is not a folder: {_printable(relative_folder)}")
     _, family, revision = _folder_parts(folder.name)
     directories = _migration_directories(root)
     schemas = [schema for candidate, schema, _, _ in directories if candidate == folder]
     if not schemas:
-        raise MigrationManifestError(f"migration folder is not directly under migrations/ or migrations/<SCHEMA>/: {relative_folder}")
+        raise MigrationManifestError(f"migration folder is not directly under migrations/ or migrations/<SCHEMA>/: {_printable(relative_folder)}")
     files = _validate_folder_entries(folder)
     preconditions, postconditions, checks_source = _load_check_file(folder / "checks.json")
     checks_sha256 = hashlib.sha256(checks_source).hexdigest()

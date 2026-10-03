@@ -20,6 +20,15 @@ class MigrationManifestTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_a_refused_folder_is_named_on_one_line(self) -> None:
+        # A CR or LF in the argument used to split the message into lines a log reader takes for two.
+        api = self.require_manifest()
+        with self.assertRaises(api.MigrationManifestError) as caught:
+            api.load_migration(self.root, "migrations/2026-09-27_x\r\nnext-r001")
+        self.assertIn("migrations/2026-09-27_x\\r\\nnext-r001", str(caught.exception))
+        self.assertNotIn("\n", str(caught.exception))
+        self.assertNotIn("\r", str(caught.exception))
+
     def require_manifest(self):
         self.assertIsNotNone(manifest, "dated migration manifest handling is not implemented")
         return manifest

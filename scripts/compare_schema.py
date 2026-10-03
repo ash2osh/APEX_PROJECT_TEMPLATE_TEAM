@@ -89,6 +89,11 @@ def _parse_quoted_identifier(value: str) -> str:
     return name
 
 
+def _printable(value: str) -> str:
+    """Value with control characters escaped, so a refusal naming it stays on one line."""
+    return "".join(character if character.isprintable() else repr(character)[1:-1] for character in value)
+
+
 def parse_exact_selector(selector: str) -> tuple[str, str | None]:
     """Parse NAME, \"Quoted Name\", or TYPE:NAME; unquoted names fold uppercase."""
     if not isinstance(selector, str) or not selector:
@@ -98,7 +103,7 @@ def parse_exact_selector(selector: str) -> tuple[str, str | None]:
     if not selector.startswith('"') and ":" in selector:
         type_part, name_part = selector.split(":", 1)
         if not TYPE_RE.fullmatch(type_part.strip()):
-            raise ValueError(f"invalid object type qualifier: {type_part}")
+            raise ValueError(f"invalid object type qualifier: {_printable(type_part)}")
         type_name = " ".join(type_part.strip().replace("_", " ").upper().split())
         if not type_name:
             raise ValueError("object type qualifier cannot be empty")
@@ -107,7 +112,7 @@ def parse_exact_selector(selector: str) -> tuple[str, str | None]:
     elif EXACT_IDENTIFIER_RE.fullmatch(name_part):
         name = name_part.upper()
     else:
-        raise ValueError(f"invalid exact object name: {name_part}")
+        raise ValueError(f"invalid exact object name: {_printable(name_part)}")
     return name, type_name
 
 

@@ -110,6 +110,12 @@ class SelectionTests(unittest.TestCase):
             with self.subTest(selector=selector), self.assertRaises(ValueError):
                 parse_exact_selector(selector)
 
+    def test_a_refused_selector_is_named_on_one_line(self) -> None:
+        # A CR or LF in the value used to split the message into lines a log reader takes for two.
+        with self.assertRaises(ValueError) as caught:
+            parse_exact_selector("name\r\nvalue")
+        self.assertEqual(str(caught.exception), "invalid exact object name: name\\r\\nvalue")
+
     def test_unsupported_matched_types_are_reported_without_silent_skip(self) -> None:
         source = inventory("APP_DEV", "DEVDB", [("REPORT_MV", "MATERIALIZED VIEW", {})])
         target = inventory("APP_STAGE", "STAGEDB", [])
