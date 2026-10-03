@@ -1159,6 +1159,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except MigrationManifestError as error:
         print(f"preflight error: {error}", file=sys.stderr)
         return 2
+    if args.local:
+        from .db_targets import TargetResolutionError, batch_schema
+
+        # No .env is loaded here, so the layout rule cannot be enforced (README), but a
+        # --schema that names another schema than the folders, or a batch that mixes
+        # schemas, needs no configuration to refuse.
+        try:
+            batch_schema([migration.schema for migration in migrations], args.schema or os.environ.get("PROJECT_SCHEMA") or None, {})
+        except TargetResolutionError as error:
+            print(f"preflight error: {error}", file=sys.stderr)
+            return 2
     try:
         if args.local:
             report = _local_report(migrations, args.repo_root)

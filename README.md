@@ -222,7 +222,8 @@ Limits:
 - Schemas sharing one SQLcl connection share its privileges. Identity checks
   confirm the session user, not that it can reach only one schema.
 - `--local` conflict checks load no `.env`, so they cannot enforce the
-  schema-folder layout rule.
+  schema-folder layout rule. They still refuse a `--schema` that differs from
+  the folder's schema and a batch that mixes schemas.
 - `publish --force` skips the drift check, but still requires schema agreement
   between the app folder, descriptor, and live app.
 

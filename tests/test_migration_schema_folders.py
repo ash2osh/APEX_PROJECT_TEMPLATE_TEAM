@@ -140,6 +140,25 @@ class SchemaFolderCliTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("Local selected-batch analysis only", result.stdout)
 
+    def test_local_check_refuses_what_it_can_tell_without_a_configuration(self) -> None:
+        # --local loads no .env, so it cannot enforce the layout rule (README), but a --schema
+        # that names another schema than the folder, or a batch of two schemas, needs none.
+        add_folder(self.root, "migrations/APP_ONE/2026-09-29_create-t1-r001")
+        add_folder(self.root, "migrations/APP_TWO/2026-09-29_create-t2-r001", "CREATE TABLE T2 (ID NUMBER);\n")
+        cases = (
+            (("migrations/APP_TWO/2026-09-29_create-t2-r001", "--local"), {"PROJECT_SCHEMA": "APP_ONE"},
+             "--schema APP_ONE does not match the migration folder's schema APP_TWO"),
+            (("migrations/APP_TWO/2026-09-29_create-t2-r001", "--local", "--schema", "APP_ONE"), {},
+             "--schema APP_ONE does not match the migration folder's schema APP_TWO"),
+            (("migrations/APP_ONE/2026-09-29_create-t1-r001", "migrations/APP_TWO/2026-09-29_create-t2-r001", "--local"), {},
+             "selected migrations belong to different schemas"),
+        )
+        for arguments, environment, expected in cases:
+            with self.subTest(arguments=arguments, environment=environment):
+                result = self.run_checker(*arguments, environment=environment)
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn(expected, result.stderr)
+
     def test_migrate_refuses_a_flat_folder_when_several_schemas_are_configured(self) -> None:
         from scripts import migrate
         add_folder(self.root, "migrations/2026-09-29_create-t1-r001")
