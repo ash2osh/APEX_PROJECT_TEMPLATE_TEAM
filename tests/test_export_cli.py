@@ -196,6 +196,25 @@ class ExportCliTests(unittest.TestCase):
             for name, contents in expected.items():
                 self.assertEqual((app / "deployments" / name).read_bytes(), contents)
 
+    def test_bash_export_that_sqlcl_ends_with_status_130_stops_as_interrupted(self) -> None:
+        # SQLcl ended by Ctrl-C exits 130; export stops with that status instead of calling it a failure.
+        with tempfile.TemporaryDirectory() as temporary:
+            script, expected = self.make_checkout(Path(temporary), powershell=False)
+            app = script.parents[1] / "apps" / "DEMO" / "100"
+            (app / "application.apx").write_text("old app source\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(script.parents[1]), "add", "apps/DEMO/100/application.apx"], check=True)
+            subprocess.run(["git", "-C", str(script.parents[1]), "commit", "-qm", "seed app source"], check=True)
+            fake_sql = script.parents[1] / "bin" / "sql"
+            fake_sql.write_text(fake_sql.read_text(encoding="utf-8") + "exit 130\n", encoding="utf-8")
+
+            result = self.run_export(script, powershell=False)
+
+            self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+            self.assertNotIn("failed in SQLcl", result.stderr)
+            self.assertEqual((app / "application.apx").read_text(encoding="utf-8"), "old app source\n")
+            for name, contents in expected.items():
+                self.assertEqual((app / "deployments" / name).read_bytes(), contents)
+
     @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
     def test_powershell_export_refuses_sqlcl_error_after_partial_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

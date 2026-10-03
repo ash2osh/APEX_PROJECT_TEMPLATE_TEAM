@@ -117,11 +117,13 @@ class PublishAppCliTests(unittest.TestCase):
             "      edit-then-fail) printf '%s\\n' '// saved during publish' >> \"$FAKE_SOURCE_DIR/application.apx\"; printf '%s\\n' 'SP2-0640: Not connected' ;;\n"
             "      no-sentinel) printf '%s\\n' 'Import successful.' ;;\n"
             "      skipped) printf '%s\\n' 'Workspace: NO_SUCH_WORKSPACE from deployment file: deployments/dev.json is invalid' 'APEX_IMPORT_VERIFIED:100' ;;\n"
+            "      interrupted) exit 130 ;;\n"
             "      *) printf '%s\\n' 'Import successful.' 'APEX_IMPORT_VERIFIED:100' ;;\n"
             "    esac\n"
             "    if [[ -n \"${FAKE_IMPORT_PAUSE:-}\" ]]; then : > \"$FAKE_IMPORT_PAUSE\"; sleep 120; fi\n"
             "    ;;\n"
             "  export)\n"
+            "    if [[ -n \"${FAKE_EXPORT_STATUS:-}\" ]]; then exit \"$FAKE_EXPORT_STATUS\"; fi\n"
             "    exported=\"$PWD/apps/$export_schema/100\"\n"
             "    mkdir -p \"$exported/.apex\"\n"
             "    cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"\n"
@@ -836,6 +838,43 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("did not report a successful APEX import", result.stderr)
             self.assertNotIn("Published APEX App", result.stdout)
             self.assertEqual((app / "application.apx").read_bytes(), original)
+
+    # SQLcl ended by Ctrl-C exits 130 (on Windows Git Bash does not run the script's own
+    # trap then, so the status is all publish sees). The import's result is unknown.
+    def test_an_import_that_sqlcl_ends_with_status_130_is_reported_as_interrupted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
+            environment["FAKE_SQL_MODE"] = "interrupted"
+            original = (app / "application.apx").read_bytes()
+
+            result = subprocess.run([BASH, str(runner), "100"], cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+            plain = " ".join(result.stderr.split())
+            self.assertIn("interrupted while the import was running, so its result is unknown", plain)
+            self.assertNotIn("SQLcl application import failed", plain)
+            self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
+            self.assertEqual((app / "application.apx").read_bytes(), original)
+
+    def test_a_post_import_export_that_sqlcl_ends_with_status_130_says_the_import_was_not_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment, app, _ = self.make_stateful_dev_fixture(root)
+            environment["FAKE_EXPORT_STATUS"] = "130"
+            original = (app / "application.apx").read_bytes()
+            marker = app / "apex-team-export.json"
+            marker_before = marker.read_bytes() if marker.exists() else None
+
+            result = subprocess.run([BASH, str(runner), "100"], cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+            self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+            plain = " ".join(result.stderr.split())
+            self.assertIn("DEV now runs the imported source, but it was not verified", plain)
+            self.assertNotIn("post-import APEX export failed", plain)
+            # The stamped source is what DEV runs, so it stays for the developer to commit.
+            self.assertNotEqual((app / "application.apx").read_bytes(), original)
+            self.assertEqual(marker.read_bytes() if marker.exists() else None, marker_before)
 
     def test_powershell_import_skipped_by_sqlcl_is_a_failure_and_restores_the_source(self) -> None:
         pwsh = shutil.which("pwsh")
