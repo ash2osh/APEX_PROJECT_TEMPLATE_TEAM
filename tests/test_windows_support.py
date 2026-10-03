@@ -443,5 +443,137 @@ class ResolvePythonTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "True")
 
 
+class SqlclLauncherLayoutTests(unittest.TestCase):
+    """The four SQLcl launcher layouts on PATH and their resolution across callers."""
+
+    def test_holds_sqlcl_detects_all_four_layouts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            d1 = base / "d1"
+            d1.mkdir()
+            (d1 / "sql.exe").touch()
+            (d1 / "sql.cmd").touch()
+            self.assertTrue(_no_real_sqlcl._holds_sqlcl(str(d1)))
+
+            d2 = base / "d2"
+            d2.mkdir()
+            (d2 / "sql.exe").touch()
+            (d2 / "sql.bat").touch()
+            self.assertTrue(_no_real_sqlcl._holds_sqlcl(str(d2)))
+
+            d3_earlier = base / "d3_earlier"
+            d3_earlier.mkdir()
+            (d3_earlier / "sql.cmd").touch()
+            d3_later = base / "d3_later"
+            d3_later.mkdir()
+            (d3_later / "sql.exe").touch()
+            self.assertTrue(_no_real_sqlcl._holds_sqlcl(str(d3_earlier)))
+            self.assertTrue(_no_real_sqlcl._holds_sqlcl(str(d3_later)))
+
+            d4 = base / "d4"
+            d4.mkdir()
+            (d4 / "sql").touch()
+            (d4 / "sql.exe").touch()
+            self.assertTrue(_no_real_sqlcl._holds_sqlcl(str(d4)))
+
+    @unittest.skipUnless(os.name == "nt", "Windows only: tests launcher resolution across Windows callers")
+    def test_all_callers_resolve_working_launcher_across_layouts(self) -> None:
+        try:
+            from pip._vendor.distlib.scripts import ScriptMaker
+        except ImportError:
+            self.skipTest("needs distlib ScriptMaker to create native launchers")
+
+        bash = sqlcl_session.bash_command()
+        engines = [shutil.which(name) for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+
+            def make_exe(d: Path, tag: str) -> None:
+                d.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory() as tmp:
+                    src = Path(tmp) / "sql.py"
+                    src.write_text(f'#!python\nprint("OUT:{tag}")\n', encoding="utf-8")
+                    maker = ScriptMaker(tmp, str(d), add_launchers=True)
+                    maker.clobber = True
+                    maker.variants = {""}
+                    maker.set_mode = False
+                    maker.make("sql.py")
+
+            def make_cmd(d: Path, tag: str) -> None:
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "sql.cmd").write_text(f"@echo off\r\necho OUT:{tag}\r\n", encoding="ascii")
+
+            def make_bat(d: Path, tag: str) -> None:
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "sql.bat").write_text(f"@echo off\r\necho OUT:{tag}\r\n", encoding="ascii")
+
+            def make_sh(d: Path, tag: str) -> None:
+                d.mkdir(parents=True, exist_ok=True)
+                f = d / "sql"
+                f.write_text(f'#!/usr/bin/env bash\necho "OUT:{tag}"\n', encoding="utf-8", newline="\n")
+                f.chmod(0o755)
+
+            layouts = [
+                ("(i) sql.exe + sql.cmd", [("d1", [lambda p: make_exe(p, "exe"), lambda p: make_cmd(p, "cmd")])]),
+                ("(ii) sql.exe + sql.bat", [("d1", [lambda p: make_exe(p, "exe"), lambda p: make_bat(p, "bat")])]),
+                ("(iii) sql.cmd earlier, sql.exe later", [
+                    ("d1", [lambda p: make_cmd(p, "cmd")]),
+                    ("d2", [lambda p: make_exe(p, "exe")]),
+                ]),
+                ("(iv) sql + sql.exe (real)", [("d1", [lambda p: make_sh(p, "sh"), lambda p: make_exe(p, "exe")])]),
+            ]
+
+            system_path = os.environ.get("PATH", "")
+
+            for label, specs in layouts:
+                with self.subTest(layout=label):
+                    created = []
+                    safe_label = "".join(c if c.isalnum() else "_" for c in label)
+                    sub = base / safe_label
+                    for dname, makers in specs:
+                        dp = sub / dname
+                        dp.mkdir(parents=True, exist_ok=True)
+                        for m in makers:
+                            m(dp)
+                        created.append(dp)
+
+                    test_path = os.pathsep.join(str(d) for d in created) + os.pathsep + system_path
+                    env = {**os.environ, "PATH": test_path}
+
+                    # Python shutil.which
+                    prog = shutil.which("sql", path=test_path)
+                    self.assertIsNotNone(prog, f"Python found no launcher for {label}")
+                    py_run = subprocess.run([prog], env=env, capture_output=True, text=True, check=False)
+                    self.assertEqual(py_run.returncode, 0, f"Python failed to run {prog}: {py_run.stderr}")
+                    self.assertIn("OUT:", py_run.stdout)
+
+                    # PowerShell Start-Process
+                    for engine in engines:
+                        ps_script = (
+                            "$p = Start-Process -FilePath 'sql' -NoNewWindow -PassThru -Wait "
+                            "-RedirectStandardOutput out.txt -RedirectStandardError err.txt; exit $p.ExitCode"
+                        )
+                        with tempfile.TemporaryDirectory() as td:
+                            ps_run = subprocess.run(
+                                [engine, "-NoProfile", "-Command", ps_script],
+                                cwd=td,
+                                env=env,
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                            )
+                            self.assertEqual(ps_run.returncode, 0, f"{Path(engine).name} failed: {ps_run.stderr}")
+                            out = (Path(td) / "out.txt").read_text(encoding="utf-8")
+                            self.assertIn("OUT:", out)
+
+                    # Git Bash command sql
+                    bash_run = subprocess.run(
+                        [bash, "-c", "command sql"], env=env, capture_output=True, text=True, check=False
+                    )
+                    self.assertEqual(bash_run.returncode, 0, f"Git Bash failed: {bash_run.stderr}")
+                    self.assertIn("OUT:", bash_run.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
