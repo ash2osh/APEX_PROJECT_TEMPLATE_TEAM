@@ -445,6 +445,58 @@ class TeamCliTests(unittest.TestCase):
                     process.communicate()
             self.assertEqual(process.returncode, 130)
 
+    @unittest.skipIf(os.name == "nt", "pwsh on Linux and macOS: Windows ends the tree with taskkill /T")
+    def test_powershell_ends_the_whole_sqlcl_tree_when_sqlcl_ignores_ctrl_c(self) -> None:
+        # After Ctrl-C, Invoke-Sqlcl gives SQLcl ten seconds and then kills it. Off Windows
+        # that killed only the launcher it started, and whatever the launcher had started
+        # (the JVM) carried on, orphaned.
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            started, child_pid = root / "started", root / "child-pid"
+            fake_bin = root / "bin"
+            fake_sqlcl.install(
+                fake_bin,
+                "#!/bin/sh\ntrap '' INT\n"
+                f"sh -c 'echo $$ > \"{child_pid}\"; exec sleep 60' &\n"
+                f": > '{started}'\nwait\n",
+            )
+            env_file = root / ".env"
+            env_file.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+            process = subprocess.Popen(
+                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "doctor"],
+                cwd=root, env=fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(env_file)),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+            )
+            child = None
+            try:
+                deadline = time.monotonic() + 60
+                while not (started.exists() and child_pid.exists() and child_pid.read_text().strip()) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(started.exists(), "SQLcl never started")
+                child = int(child_pid.read_text())
+                os.killpg(process.pid, signal.SIGINT)
+                process.communicate(timeout=60)
+                time.sleep(0.5)
+                try:
+                    os.kill(child, 0)
+                    alive = True
+                except ProcessLookupError:
+                    alive = False
+                self.assertFalse(alive, "the process SQLcl started outlived the interrupt")
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+                if child is not None:
+                    try:
+                        os.kill(child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_waits_for_python_and_passes_its_status_on")
     def test_powershell_passes_on_the_status_a_helper_chose_when_it_was_interrupted(self) -> None:
         # migrate reports "interrupted and may be partially applied" with status 2,

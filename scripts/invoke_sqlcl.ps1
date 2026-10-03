@@ -16,6 +16,29 @@
 # directory SQLcl is still shutting down in (and cannot, on Windows, while SQLcl is in
 # it). Wait in short steps instead; when interrupted, hold on until SQLcl has ended, and
 # end it if it takes too long.
+# The direct children of a Windows process (the launcher sql.exe starts java.exe).
+function Get-SqlclChildIds([int] $ParentId) {
+  try {
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ParentId" -ErrorAction SilentlyContinue |
+      ForEach-Object { [int]$_.ProcessId })
+  } catch {
+    return @()
+  }
+}
+
+# Wait for each process until one shared deadline, then end what is left with its tree.
+function Stop-SqlclChildren([int[]] $ChildIds, [datetime] $Deadline) {
+  foreach ($childId in $ChildIds) {
+    try {
+      $child = [System.Diagnostics.Process]::GetProcessById($childId)
+      $remaining = [int][Math]::Max(0, ($Deadline - [datetime]::UtcNow).TotalMilliseconds)
+      if (-not $child.WaitForExit($remaining)) {
+        & cmd.exe /c "taskkill /PID $childId /T /F >nul 2>&1"
+      }
+    } catch { }
+  }
+}
+
 function Wait-SqlclProcess {
   param([Parameter(Mandatory = $true)] $Process)
   $finished = $false
@@ -23,22 +46,10 @@ function Wait-SqlclProcess {
   try {
     while (-not $Process.WaitForExit(200)) { }
     if ($onWindows) {
-      $childPids = @()
-      try {
-        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Process.Id)" -ErrorAction SilentlyContinue)
-        $childPids = @($children | ForEach-Object { [int]$_.ProcessId })
-      } catch { }
-      # The launcher can end before the java.exe it started; give that child the same
-      # ten seconds as after an interrupt instead of waiting for ever.
+      # The launcher can end before the java.exe it started; give its children ten
+      # seconds in all, as after an interrupt, instead of waiting for ever.
       $savedExitCode = $global:LASTEXITCODE
-      foreach ($cpid in $childPids) {
-        try {
-          $childProcess = [System.Diagnostics.Process]::GetProcessById($cpid)
-          if (-not $childProcess.WaitForExit(10000)) {
-            & cmd.exe /c "taskkill /PID $cpid /T /F >nul 2>&1"
-          }
-        } catch { }
-      }
+      Stop-SqlclChildren -ChildIds (Get-SqlclChildIds $Process.Id) -Deadline ([datetime]::UtcNow.AddSeconds(10))
       $global:LASTEXITCODE = $savedExitCode
     }
     $finished = $true
@@ -46,27 +57,16 @@ function Wait-SqlclProcess {
     if (-not $finished) {
       # The caller reads $LASTEXITCODE to tell an interrupt from a failure.
       $savedExitCode = $global:LASTEXITCODE
+      $deadline = [datetime]::UtcNow.AddSeconds(10)
       if ($onWindows) {
-        $childPids = @()
-        try {
-          $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Process.Id)" -ErrorAction SilentlyContinue)
-          $childPids = @($children | ForEach-Object { [int]$_.ProcessId })
-        } catch { }
+        $childIds = Get-SqlclChildIds $Process.Id
         if (-not $Process.WaitForExit(10000)) {
           & cmd.exe /c "taskkill /PID $($Process.Id) /T /F >nul 2>&1"
         }
-        foreach ($cpid in $childPids) {
-          try {
-            $childProcess = [System.Diagnostics.Process]::GetProcessById($cpid)
-            if (-not $childProcess.WaitForExit(10000)) {
-              & cmd.exe /c "taskkill /PID $cpid /F >nul 2>&1"
-            }
-          } catch { }
-        }
-      } else {
-        if (-not $Process.WaitForExit(10000)) {
-          try { $Process.Kill() } catch { }
-        }
+        Stop-SqlclChildren -ChildIds $childIds -Deadline $deadline
+      } elseif (-not $Process.WaitForExit(10000)) {
+        # Kill(true) ends the launcher's descendants too (the JVM a shell launcher started).
+        try { $Process.Kill($true) } catch { }
       }
       $global:LASTEXITCODE = $savedExitCode
     }
