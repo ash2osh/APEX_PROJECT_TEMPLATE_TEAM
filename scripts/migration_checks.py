@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sys
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -25,7 +24,7 @@ from .migration_manifest import (
     validate_check_query,
 )
 from .schema_catalog import ObjectKey, SchemaSnapshot
-from .sqlcl_session import run_sqlcl
+from .sqlcl_session import run_sqlcl, safe_rmtree
 from .validate_migration import statement_spans
 
 
@@ -1228,7 +1227,7 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
         return PreflightReport(2, (), ({"code": "LIVE_PREFLIGHT_UNAVAILABLE", "message": str(error)},), {"complete": False, "mode": "live", "environment": environment, "limitations": [LIMITATION]})
     finally:
         if work_dir is not None and not keep_logs:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            safe_rmtree(work_dir)
 
 
 def _render_preflight(report: PreflightReport, local: bool) -> str:

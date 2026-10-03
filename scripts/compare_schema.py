@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -34,6 +33,7 @@ from .schema_normalization import (
     normalize_definition,
     normalization_coverage,
 )
+from .sqlcl_session import safe_rmtree
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -613,7 +613,7 @@ def main(
         return 130
     finally:
         if own_run_dir and not keep_logs:
-            shutil.rmtree(run_dir, ignore_errors=True)
+            safe_rmtree(run_dir)
 
 
 if __name__ == "__main__":

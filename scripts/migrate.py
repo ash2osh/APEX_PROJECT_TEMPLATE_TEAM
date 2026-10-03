@@ -55,7 +55,7 @@ from .schema_catalog import (
     capture_snapshot,
 )
 from .schema_normalization import normalization_coverage
-from .sqlcl_session import SqlclError, run_sqlcl
+from .sqlcl_session import SqlclError, run_sqlcl, safe_rmtree
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +101,7 @@ def _new_run_dir(repo_root: Path) -> Path:
     try:
         run_dir.chmod(0o700)
     except OSError as error:
-        shutil.rmtree(run_dir, ignore_errors=True)
+        safe_rmtree(run_dir)
         raise MigrationApplyError(f"could not secure migration run directory: {error}") from error
     return run_dir
 
@@ -937,7 +937,7 @@ def apply_batch(
         return 2
     finally:
         if run_dir is not None and not attempted:
-            shutil.rmtree(run_dir, ignore_errors=True)
+            safe_rmtree(run_dir)
 
 
 def _confirm_from_terminal(prompt: str) -> bool:

@@ -575,5 +575,38 @@ class SqlclLauncherLayoutTests(unittest.TestCase):
                     self.assertIn("OUT:", bash_run.stdout)
 
 
+class SafeRmtreeTests(unittest.TestCase):
+    """safe_rmtree must reliably remove directories and tolerate transient errors."""
+
+    def test_removes_directory_and_contents(self) -> None:
+        temp_dir = tempfile.mkdtemp()
+        sub = Path(temp_dir) / "subdir"
+        sub.mkdir()
+        (sub / "file.txt").write_text("content", encoding="utf-8")
+        sqlcl_session.safe_rmtree(temp_dir)
+        self.assertFalse(os.path.exists(temp_dir))
+
+    def test_ignores_nonexistent_path(self) -> None:
+        nonexistent = Path(tempfile.gettempdir()) / "nonexistent_dir_for_test_12345"
+        sqlcl_session.safe_rmtree(nonexistent)
+
+    def test_retries_on_transient_oserror(self) -> None:
+        calls = 0
+
+        def flaky_rmtree(target: Path | str, *args, **kwargs) -> None:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise PermissionError("Access is denied")
+            os.rmdir(target)
+
+        temp_dir = tempfile.mkdtemp()
+        with patch.object(sqlcl_session.shutil, "rmtree", side_effect=flaky_rmtree):
+            sqlcl_session.safe_rmtree(temp_dir, delay=0.01, is_windows=True)
+        self.assertGreaterEqual(calls, 3)
+        if os.path.exists(temp_dir):
+            os.rmdir(temp_dir)
+
+
 if __name__ == "__main__":
     unittest.main()

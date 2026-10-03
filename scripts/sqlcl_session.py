@@ -7,11 +7,35 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
 
 from . import windows_job
+
+
+def safe_rmtree(
+    path: Path | str,
+    *,
+    retries: int = 25,
+    delay: float = 0.1,
+    is_windows: bool | None = None,
+) -> None:
+    """Remove a directory tree reliably, retrying on Windows while file locks release."""
+    target = Path(path)
+    if not target.exists():
+        return
+    if not (is_windows if is_windows is not None else (os.name == "nt")):
+        shutil.rmtree(target, ignore_errors=True)
+        return
+    for _ in range(retries):
+        try:
+            shutil.rmtree(target)
+            return
+        except OSError:
+            time.sleep(delay)
+    shutil.rmtree(target, ignore_errors=True)
 
 
 ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
