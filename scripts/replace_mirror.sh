@@ -5,7 +5,7 @@ set -euo pipefail
 REPO_ROOT="${MIRROR_SYNC_REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd -P)}"
 if [ "$#" -lt 2 ] || [ $(( $# % 2 )) -ne 0 ]; then
   echo "usage: replace_mirror.sh <staged-dir> <destination> [<staged-dir> <destination> ...]" >&2
-  exit 1
+  exit 2
 fi
 
 STAGED_DIRS=()
@@ -19,7 +19,7 @@ DEST_DIR_ARG="$2"
 
 if [ ! -d "$STAGED_DIR_ARG" ]; then
   echo "staging directory does not exist: $STAGED_DIR_ARG" >&2
-  exit 1
+  exit 2
 fi
 
 STAGED_DIR="$(cd "$STAGED_DIR_ARG" && pwd -P)"
@@ -29,13 +29,13 @@ case "$STAGED_DIR" in
   "$SCRATCH_ROOT"/*) ;;
   *)
     echo "staging directory must be inside scratch/: $STAGED_DIR" >&2
-    exit 1
+    exit 2
     ;;
 esac
 
 if [[ "$DEST_DIR_ARG" = /* ]]; then
   echo "destination must be a repository-relative mirror path: $DEST_DIR_ARG" >&2
-  exit 1
+  exit 2
 fi
 DEST_DIR="$REPO_ROOT/$DEST_DIR_ARG"
 
@@ -43,7 +43,7 @@ case "$DEST_DIR" in
   "$REPO_ROOT"/*) ;;
   *)
     echo "destination must be inside the repository: $DEST_DIR" >&2
-    exit 1
+    exit 2
     ;;
 esac
 
@@ -54,25 +54,25 @@ if [[ "${DEST_PARTS[0]}" = apps && "${#DEST_PARTS[@]}" -eq 3 ]] || \
   :
 else
   echo "destination is not an approved generated mirror: $DEST_REL" >&2
-  exit 1
+  exit 2
 fi
 for DEST_PART in "${DEST_PARTS[@]}"; do
   if [ -z "$DEST_PART" ] || [ "$DEST_PART" = . ] || [ "$DEST_PART" = .. ] || \
      [[ ! "$DEST_PART" =~ ^[A-Za-z0-9][A-Za-z0-9._\$#-]*$ ]]; then
     echo "destination contains an unsafe path segment: $DEST_REL" >&2
-    exit 1
+    exit 2
   fi
 done
 
 FIRST_STAGED_FILE="$(find "$STAGED_DIR" -type f -print -quit)"
 if [ -z "$FIRST_STAGED_FILE" ]; then
   echo "staging directory is empty: $STAGED_DIR" >&2
-  exit 1
+  exit 2
 fi
 FIRST_STAGED_LINK="$(find "$STAGED_DIR" -type l -print -quit)"
 if [ -n "$FIRST_STAGED_LINK" ]; then
   echo "staging directory contains a symbolic link: $FIRST_STAGED_LINK" >&2
-  exit 1
+  exit 2
 fi
 
 # Create the destination parent before the first Git query. With apps/ present
@@ -82,15 +82,16 @@ fi
 DEST_PARENT="$(dirname -- "$DEST_DIR")"
 mkdir -p "$DEST_PARENT"
 
+# Returns 2, the status of every refusal (README), which set -e passes on as the exit status.
 check_clean_mirror() {
   if ! DIRTY_STATUS="$(cd "$REPO_ROOT" && git status --porcelain --untracked-files=all -- "$DEST_REL")"; then
     echo "unable to inspect Git status for mirror: $DEST_REL" >&2
-    return 1
+    return 2
   fi
   if [ -n "$DIRTY_STATUS" ]; then
     echo "refusing to replace dirty mirror: $DEST_REL" >&2
     echo "commit, stash, or remove local changes first" >&2
-    return 1
+    return 2
   fi
   # The swap deletes the old directory, so ignored files there would be lost
   # without Git noticing. Only the two ignored files an export regenerates
@@ -98,7 +99,7 @@ check_clean_mirror() {
   local ignored_status ignored_path ignored_files=()
   if ! ignored_status="$(cd "$REPO_ROOT" && git status --porcelain --ignored --untracked-files=all -- "$DEST_REL")"; then
     echo "unable to inspect ignored files for mirror: $DEST_REL" >&2
-    return 1
+    return 2
   fi
   while IFS= read -r ignored_path; do
     case "$ignored_path" in
@@ -113,7 +114,7 @@ check_clean_mirror() {
     echo "refusing to replace mirror with ignored local files that would be deleted: $DEST_REL" >&2
     printf '  %s\n' "${ignored_files[@]}" >&2
     echo "move them out of the mirror first" >&2
-    return 1
+    return 2
   fi
 }
 check_clean_mirror
@@ -124,7 +125,7 @@ case "$DEST_DIR" in
   "$REPO_ROOT"/*) ;;
   *)
     echo "resolved destination escaped the repository: $DEST_DIR" >&2
-    exit 1
+    exit 2
     ;;
 esac
 CANONICAL_REL="${DEST_DIR#"$REPO_ROOT/"}"
@@ -132,7 +133,7 @@ IFS=/ read -r -a CANONICAL_PARTS <<< "$CANONICAL_REL"
 if ! [[ "${CANONICAL_PARTS[0]}" = apps && "${#CANONICAL_PARTS[@]}" -eq 3 ]] && \
    ! [[ "${CANONICAL_PARTS[0]}" = database && "${#CANONICAL_PARTS[@]}" -eq 2 ]]; then
   echo "resolved destination is not an approved generated mirror: $CANONICAL_REL" >&2
-  exit 1
+  exit 2
 fi
 
 device_id() {
@@ -144,7 +145,7 @@ device_id() {
 }
 if [ "$(device_id "$STAGED_DIR")" != "$(device_id "$DEST_PARENT")" ]; then
   echo "staging and destination must be on the same filesystem" >&2
-  exit 1
+  exit 2
 fi
 
 MIRROR_NAME="$(basename -- "$DEST_DIR")"
@@ -152,7 +153,7 @@ PAIR_INDEX="${#STAGED_DIRS[@]}"
 BACKUP_DIR="$REPO_ROOT/scratch/.mirror-backup.${MIRROR_NAME}.$$.$PAIR_INDEX"
 if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then
   echo "temporary replacement path already exists: $BACKUP_DIR" >&2
-  exit 1
+  exit 2
 fi
 
 STAGED_DIRS+=("$STAGED_DIR")
@@ -311,7 +312,7 @@ trap 'exit 143' TERM HUP
 
 for (( PAIR_INDEX=0; PAIR_INDEX < ${#STAGED_DIRS[@]}; PAIR_INDEX++ )); do
   LOCK_FILE="$LOCK_ROOT/$(lock_digest "${CANONICAL_RELS[$PAIR_INDEX]}").lock"
-  acquire_mirror_lock "$LOCK_FILE" "${CANONICAL_RELS[$PAIR_INDEX]}" || exit 1
+  acquire_mirror_lock "$LOCK_FILE" "${CANONICAL_RELS[$PAIR_INDEX]}" || exit 2
   ACQUIRED_LOCKS+=("$LOCK_FILE")
 done
 
@@ -344,7 +345,7 @@ for (( PAIR_INDEX=0; PAIR_INDEX < ${#BACKUP_DIRS[@]}; PAIR_INDEX++ )); do
   if [ -e "${BACKUP_DIRS[$PAIR_INDEX]}" ] || [ -L "${BACKUP_DIRS[$PAIR_INDEX]}" ]; then
     rm -rf -- "${BACKUP_DIRS[$PAIR_INDEX]}" || {
       echo "mirrors installed, but cleanup failed; the previous mirror is at ${BACKUP_DIRS[$PAIR_INDEX]}" >&2
-      exit 1
+      exit 2
     }
   fi
 done

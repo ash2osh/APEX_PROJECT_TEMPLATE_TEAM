@@ -147,6 +147,9 @@ class MirrorSafetyTests(unittest.TestCase):
             for shell, result in self.commands(root, staged, "database/DEMO"):
                 with self.subTest(shell=shell):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    if shell == "bash":
+                        # A refusal is 2, as team.ps1 reports the PowerShell helper's throw (README).
+                        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                     self.assertIn("ignored local files", result.stdout + result.stderr)
                     self.assertEqual(sidecar.read_text(encoding="utf-8"), "keep me\n")
                     self.assertEqual((mirror / "tables" / "t.sql").read_text(encoding="utf-8"), "old\n")
