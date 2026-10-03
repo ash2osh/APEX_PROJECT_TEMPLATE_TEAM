@@ -28,12 +28,18 @@ function Wait-SqlclProcess {
         $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Process.Id)" -ErrorAction SilentlyContinue)
         $childPids = @($children | ForEach-Object { [int]$_.ProcessId })
       } catch { }
+      # The launcher can end before the java.exe it started; give that child the same
+      # ten seconds as after an interrupt instead of waiting for ever.
+      $savedExitCode = $global:LASTEXITCODE
       foreach ($cpid in $childPids) {
         try {
           $childProcess = [System.Diagnostics.Process]::GetProcessById($cpid)
-          while (-not $childProcess.WaitForExit(200)) { }
+          if (-not $childProcess.WaitForExit(10000)) {
+            & cmd.exe /c "taskkill /PID $cpid /T /F >nul 2>&1"
+          }
         } catch { }
       }
+      $global:LASTEXITCODE = $savedExitCode
     }
     $finished = $true
   } finally {
