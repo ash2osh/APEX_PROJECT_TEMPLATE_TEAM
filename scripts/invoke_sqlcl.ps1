@@ -19,17 +19,48 @@
 function Wait-SqlclProcess {
   param([Parameter(Mandatory = $true)] $Process)
   $finished = $false
+  $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)
   try {
     while (-not $Process.WaitForExit(200)) { }
+    if ($onWindows) {
+      $childPids = @()
+      try {
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Process.Id)" -ErrorAction SilentlyContinue)
+        $childPids = @($children | ForEach-Object { [int]$_.ProcessId })
+      } catch { }
+      foreach ($cpid in $childPids) {
+        try {
+          $childProcess = [System.Diagnostics.Process]::GetProcessById($cpid)
+          while (-not $childProcess.WaitForExit(200)) { }
+        } catch { }
+      }
+    }
     $finished = $true
   } finally {
-    if (-not $finished -and -not $Process.WaitForExit(10000)) {
+    if (-not $finished) {
       # The caller reads $LASTEXITCODE to tell an interrupt from a failure.
       $savedExitCode = $global:LASTEXITCODE
-      if (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)) {
-        & cmd.exe /c "taskkill /PID $($Process.Id) /T /F >nul 2>&1"
+      if ($onWindows) {
+        $childPids = @()
+        try {
+          $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Process.Id)" -ErrorAction SilentlyContinue)
+          $childPids = @($children | ForEach-Object { [int]$_.ProcessId })
+        } catch { }
+        if (-not $Process.WaitForExit(10000)) {
+          & cmd.exe /c "taskkill /PID $($Process.Id) /T /F >nul 2>&1"
+        }
+        foreach ($cpid in $childPids) {
+          try {
+            $childProcess = [System.Diagnostics.Process]::GetProcessById($cpid)
+            if (-not $childProcess.WaitForExit(10000)) {
+              & cmd.exe /c "taskkill /PID $cpid /F >nul 2>&1"
+            }
+          } catch { }
+        }
       } else {
-        try { $Process.Kill() } catch { }
+        if (-not $Process.WaitForExit(10000)) {
+          try { $Process.Kill() } catch { }
+        }
       }
       $global:LASTEXITCODE = $savedExitCode
     }

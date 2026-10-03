@@ -227,8 +227,11 @@ try {
           [Console]::Error.WriteLine("team error: SQLcl doctor check failed for schema $SchemaName (connection $Connection): $($_.Exception.Message)")
           return $false
         } finally {
-          if (Test-Path -LiteralPath $sqlclWorkDir) {
+          for ($cleanupAttempt = 0; $cleanupAttempt -lt 10; $cleanupAttempt++) {
+            if (-not (Test-Path -LiteralPath $sqlclWorkDir)) { break }
             Remove-Item -LiteralPath $sqlclWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $sqlclWorkDir)) { break }
+            Start-Sleep -Milliseconds 200
           }
         }
       }
