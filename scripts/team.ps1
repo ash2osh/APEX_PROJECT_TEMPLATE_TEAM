@@ -172,10 +172,12 @@ if ($Command -ne "upgrade-template") {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
-      if ($index + 1 -ge $Arguments.Count) { Fail "--schema requires a schema name" }
+      # An empty name would select nothing, which means every schema.
+      if ($index + 1 -ge $Arguments.Count -or [string]::IsNullOrEmpty($Arguments[$index + 1])) { Fail "--schema requires a schema name" }
       $env:PROJECT_SCHEMA = $Arguments[$index + 1]
       $index++
     } elseif ($Arguments[$index] -like "--schema=*") {
+      if ($Arguments[$index] -eq "--schema=") { Fail "--schema requires a schema name" }
       $env:PROJECT_SCHEMA = $Arguments[$index].Substring("--schema=".Length)
     } else {
       $schemaFiltered += $Arguments[$index]

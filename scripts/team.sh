@@ -44,11 +44,13 @@ if [ "$command_name" != upgrade-template ]; then
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --schema)
-        [ "$#" -ge 2 ] || fail "--schema requires a schema name"
+        # An empty name would select nothing, which means every schema.
+        [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--schema requires a schema name"
         export PROJECT_SCHEMA="$2"
         shift 2
         ;;
       --schema=*)
+        [ -n "${1#--schema=}" ] || fail "--schema requires a schema name"
         export PROJECT_SCHEMA="${1#--schema=}"
         shift
         ;;

@@ -150,6 +150,17 @@ class DoctorCliTests(unittest.TestCase):
             self.assertEqual(2, result.returncode)
             self.assertIn("--schema requires a schema name", plain(result.stderr))
 
+    def test_an_empty_schema_value_is_refused_before_any_sqlcl_call(self) -> None:
+        # An empty name used to select nothing, which widened the command to every schema.
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), TWO_SCHEMAS)
+            for arguments in (("--schema", ""), ("--schema=",)):
+                with self.subTest(arguments=arguments):
+                    result = self.run_team(script, environment, "doctor", *arguments)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("--schema requires a schema name", plain(result.stderr))
+            self.assertFalse(Path(environment["FAKE_SQL_CALLS"]).exists())
+
     def test_split_profile_project_still_checks_each_distinct_identity(self) -> None:
         # Tables in one schema, code and APEX in another: no --schema needed.
         replacements = {
