@@ -723,6 +723,44 @@ class TeamCliTests(unittest.TestCase):
                 self.assertEqual(stderr.strip(), "preflight interrupted; it only reads, so nothing was changed")
                 self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
 
+    @unittest.skipIf(os.name == "nt", "on Windows Python runs as a child on purpose: Git Bash ends itself on Ctrl-C (see check_conflicts.sh)")
+    def test_helper_scripts_hand_their_process_to_python_off_windows(self) -> None:
+        # With exec Python keeps the script's PID, so a signal sent to the script alone (timeout, kill,
+        # a supervisor that signals its child only) reaches it. As a child it would be orphaned and carry
+        # on: a migration that was "stopped" would go on applying.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+            (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+            record = root / "python-pid"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_python = fake_bin / "python3"
+            fake_python.write_text('#!/bin/sh\ncase "$*" in "-m scripts."*) echo $$ > "$PYTHON_PID_FILE" ;; esac\n', encoding="utf-8")
+            fake_python.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "PROJECT_ENV_FILE": str(root / ".env"),
+                "PYTHON_PID_FILE": str(record),
+            }
+            folder = "migrations/2026-10-02_exec-r001"
+            for script, arguments in (
+                ("check_conflicts.sh", [folder, "--local"]),
+                ("check_conflicts.sh", [folder, "--env", "dev"]),
+                ("migrate.sh", [folder, "--env", "dev"]),
+                ("compare_schema.sh", []),
+            ):
+                with self.subTest(script=script, arguments=arguments):
+                    record.unlink(missing_ok=True)
+                    process = subprocess.Popen(
+                        [BASH, str(root / "scripts" / script), *arguments], cwd=root, env=environment,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    )
+                    _, stderr = process.communicate(timeout=60)
+                    self.assertTrue(record.exists(), f"python3 was never started: {stderr}")
+                    self.assertEqual(int(record.read_text()), process.pid)
+
     @staticmethod
     def windows_wrappers() -> list[list[str]]:
         """Every way to start team on Windows: Git Bash, and each PowerShell that is installed."""

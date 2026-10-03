@@ -4,13 +4,21 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
-# Python runs as a child, with Ctrl-C caught here, not through exec: on Windows Git Bash
-# ends itself at once on Ctrl-C (status 512) while Python is still cleaning up, so the
-# prompt would return before Python has finished; a Bash that catches it waits.
+# Python takes over this process (exec), so a signal sent to the script reaches it. On
+# Windows it runs as a child with Ctrl-C caught here instead: Git Bash ends itself at
+# once on Ctrl-C (status 512) while Python is still cleaning up, so the prompt would
+# return before Python has finished; a Bash that catches it waits.
 run_preflight() {
   cd "$REPO_ROOT"
-  trap : INT
-  python3 -m scripts.migration_checks "$@"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      trap : INT
+      python3 -m scripts.migration_checks "$@"
+      ;;
+    *)
+      exec python3 -m scripts.migration_checks "$@"
+      ;;
+  esac
 }
 
 has_environment=false
