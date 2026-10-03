@@ -402,8 +402,11 @@ sqlcl_status=0
     < "$sqlcl_stdin"
 ) > "$sqlcl_output" 2>&1 || sqlcl_status=$?
 if [ "$sqlcl_status" -ne 0 ]; then
-  if [ "$sqlcl_status" -eq 130 ]; then
-    exit 130
+  # Above 128: a signal ended SQLcl or the subshell running it (Ctrl-C is 130; a
+  # SIGTERM sent to that subshell is 143 and leaves SQLcl running). The import may
+  # have completed, so leave import_running set: cleanup says the result is unknown.
+  if [ "$sqlcl_status" -gt 128 ]; then
+    exit "$sqlcl_status"
   fi
   import_running=false
   cat "$sqlcl_output" >&2
@@ -442,8 +445,9 @@ verify_status=0
     < "$sqlcl_stdin"
 ) > "$verify_sqlcl_output" 2>&1 || verify_status=$?
 if [ "$verify_status" -ne 0 ]; then
-  if [ "$verify_status" -eq 130 ]; then
-    exit 130
+  # Ended by a signal, as above: cleanup says DEV runs an unverified import.
+  if [ "$verify_status" -gt 128 ]; then
+    exit "$verify_status"
   fi
   cat "$verify_sqlcl_output" >&2
   fail "post-import APEX export failed; the imported source was not verified"

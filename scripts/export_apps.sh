@@ -122,8 +122,10 @@ for app_id in "${APP_IDS[@]}"; do
       "$app_user" < "$SQLCL_STDIN"
   ) > "$SQLCL_OUTPUT" 2>&1 || sqlcl_status=$?
   if [ "$sqlcl_status" -ne 0 ]; then
-    if [ "$sqlcl_status" -eq 130 ]; then
-      exit 130
+    # Above 128: a signal ended SQLcl or its subshell (Ctrl-C is 130). Stop with that
+    # status; nothing was copied into apps/ yet.
+    if [ "$sqlcl_status" -gt 128 ]; then
+      exit "$sqlcl_status"
     fi
     cat "$SQLCL_OUTPUT" >&2
     echo "APEX export for application $app_id failed in SQLcl" >&2

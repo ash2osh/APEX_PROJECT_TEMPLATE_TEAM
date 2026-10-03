@@ -136,7 +136,9 @@ an Explorer window), publish warns `could not remove the temporary directory
 scratch/apex-publish...`: close whatever holds it and delete that folder; nothing
 else is needed.
 
-Ctrl-C is handled by both wrappers, and `kill` (SIGTERM) by Bash. A publish
+Ctrl-C is handled by both wrappers, and `kill` (SIGTERM) by Bash. Bash also
+reports a signal that ends only SQLcl, or the subshell running it, as an
+interrupt (status 130, 143, ...), since SQLcl may have finished the import. A publish
 stopped any other way (`kill -9`, closing the window, SIGTERM sent to PowerShell)
 cannot clean up: `application.apx` keeps the stamped version, its scratch folder
 stays behind (delete it), no recovery guidance is printed, and DEV may or may
