@@ -100,7 +100,7 @@ function Assert-ProjectEnvUniqueCsv([string]$Name, [string]$Value) {
   $projectEnvCsvSeen = @{}
   foreach ($projectEnvCsvItem in $Value.Split(',')) {
     if ($projectEnvCsvSeen.ContainsKey($projectEnvCsvItem)) {
-      throw "$Name must not contain duplicate values: $projectEnvCsvItem"
+      throw "project environment error: $Name must not contain duplicate values: $projectEnvCsvItem"
     }
     $projectEnvCsvSeen[$projectEnvCsvItem] = $true
   }
@@ -116,13 +116,13 @@ function Split-ProjectEnvList([string]$Value) {
 function Assert-ProjectEnvList([string]$Name, [string]$Kind) {
   $projectEnvListValue = [Environment]::GetEnvironmentVariable($Name, "Process")
   if ([string]::IsNullOrEmpty($projectEnvListValue)) { return }
-  if ($projectEnvListValue -cmatch '(^,|,$|,,)') { throw "$Name must not contain empty entries" }
+  if ($projectEnvListValue -cmatch '(^,|,$|,,)') { throw "project environment error: $Name must not contain empty entries" }
   foreach ($projectEnvListItem in @(Split-ProjectEnvList $projectEnvListValue)) {
     if ($Kind -eq "identifier" -and $projectEnvListItem -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
-      throw "$Name must be an uppercase Oracle identifier"
+      throw "project environment error: $Name must be an uppercase Oracle identifier"
     }
     if ($Kind -eq "alias" -and $projectEnvListItem -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
-      throw "$Name contains unsupported characters"
+      throw "project environment error: $Name contains unsupported characters"
     }
   }
 }
@@ -131,7 +131,7 @@ function Assert-ProjectEnvTriple([string]$SchemaKey, [string]$ConnectionKey, [st
   $projectEnvConnections = @(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($ConnectionKey, "Process")))
   $projectEnvUsers = @(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($UserKey, "Process")))
   if ($projectEnvSchemas.Count -ne $projectEnvConnections.Count -or $projectEnvSchemas.Count -ne $projectEnvUsers.Count) {
-    throw "$ConnectionKey, $UserKey and $SchemaKey must list the same number of entries"
+    throw "project environment error: $ConnectionKey, $UserKey and $SchemaKey must list the same number of entries"
   }
   Assert-ProjectEnvUniqueCsv -Name $SchemaKey -Value ([Environment]::GetEnvironmentVariable($SchemaKey, "Process"))
 }
@@ -143,17 +143,17 @@ foreach ($projectEnvPrefix in @("PROD", "STAGING")) {
   $projectEnvUserSeen = $projectEnvSeen.ContainsKey($projectEnvUserKey)
   $projectEnvSchemaSeen = $projectEnvSeen.ContainsKey($projectEnvSchemaKey)
   if ($projectEnvConnectionSeen -ne $projectEnvUserSeen) {
-    throw "$projectEnvConnectionKey and $projectEnvUserKey must be configured together"
+    throw "project environment error: $projectEnvConnectionKey and $projectEnvUserKey must be configured together"
   }
   if ($projectEnvSchemaSeen -and -not $projectEnvConnectionSeen) {
-    throw "$projectEnvSchemaKey requires $projectEnvConnectionKey and $projectEnvUserKey"
+    throw "project environment error: $projectEnvSchemaKey requires $projectEnvConnectionKey and $projectEnvUserKey"
   }
   if ($projectEnvConnectionSeen) {
     $projectEnvConnectionValue = [Environment]::GetEnvironmentVariable($projectEnvConnectionKey, "Process")
     $projectEnvUserValue = [Environment]::GetEnvironmentVariable($projectEnvUserKey, "Process")
     if ([string]::IsNullOrWhiteSpace($projectEnvConnectionValue) -or
         [string]::IsNullOrWhiteSpace($projectEnvUserValue)) {
-      throw "$projectEnvConnectionKey and $projectEnvUserKey must not be empty"
+      throw "project environment error: $projectEnvConnectionKey and $projectEnvUserKey must not be empty"
     }
     Assert-ProjectEnvList -Name $projectEnvConnectionKey -Kind alias
     Assert-ProjectEnvList -Name $projectEnvUserKey -Kind identifier
@@ -162,43 +162,43 @@ foreach ($projectEnvPrefix in @("PROD", "STAGING")) {
     } else {
       $projectEnvConnectionCount = @(Split-ProjectEnvList $projectEnvConnectionValue).Count
       if ($projectEnvConnectionCount -ne @(Split-ProjectEnvList $projectEnvUserValue).Count) {
-        throw "$projectEnvConnectionKey and $projectEnvUserKey must list the same number of entries"
+        throw "project environment error: $projectEnvConnectionKey and $projectEnvUserKey must list the same number of entries"
       }
       if ($projectEnvConnectionCount -gt 1) {
-        throw "$projectEnvSchemaKey is required when $projectEnvConnectionKey lists several connections"
+        throw "project environment error: $projectEnvSchemaKey is required when $projectEnvConnectionKey lists several connections"
       }
     }
   }
 }
 if ($env:APEX_APP_ID -notmatch '^[1-9][0-9]{0,17}(,[1-9][0-9]{0,17})*$') {
-  throw "APEX_APP_ID must be a comma-separated list of positive integers of at most 18 digits, without spaces"
+  throw "project environment error: APEX_APP_ID must be a comma-separated list of positive integers of at most 18 digits, without spaces"
 }
 Assert-ProjectEnvUniqueCsv -Name "APEX_APP_ID" -Value $env:APEX_APP_ID
 foreach ($projectEnvKey in @("TABLES_PREFIXES", "CODE_PREFIXES")) {
   $projectEnvPrefixValue = [Environment]::GetEnvironmentVariable($projectEnvKey, "Process")
   if ($projectEnvPrefixValue -eq "*") { continue }
   if ($projectEnvPrefixValue -cnotmatch '^[A-Z][A-Z0-9_$#]*(,[A-Z][A-Z0-9_$#]*)*$') {
-    throw "$projectEnvKey must be * or a comma-separated list of uppercase Oracle identifier prefixes without spaces"
+    throw "project environment error: $projectEnvKey must be * or a comma-separated list of uppercase Oracle identifier prefixes without spaces"
   }
   Assert-ProjectEnvUniqueCsv -Name $projectEnvKey -Value $projectEnvPrefixValue
   foreach ($projectEnvPrefixItem in $projectEnvPrefixValue.Split(',')) {
     if ($projectEnvPrefixItem.Length -gt 128) {
-      throw "$projectEnvKey prefixes must be at most 128 characters"
+      throw "project environment error: $projectEnvKey prefixes must be at most 128 characters"
     }
   }
 }
 # DEV publish stamps this name into the app version tag, where '-' separates it
 # from the date.
 if ($env:DEVELOPER_NAME -cnotmatch '^[A-Z][A-Z0-9_]{0,29}$') {
-  throw "DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF"
+  throw "project environment error: DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF"
 }
 # -cnotin: -notin ignores case, but load_env.sh and the Bash helpers do not.
 if ($env:DB_ENVIRONMENT -cnotin @("development", "test", "staging", "production")) {
-  throw "DB_ENVIRONMENT must be development, test, staging, or production"
+  throw "project environment error: DB_ENVIRONMENT must be development, test, staging, or production"
 }
-if ($env:INSTALL_UC_APX -cnotin @("true", "false")) { throw "INSTALL_UC_APX must be true or false" }
+if ($env:INSTALL_UC_APX -cnotin @("true", "false")) { throw "project environment error: INSTALL_UC_APX must be true or false" }
 if ($env:UC_APX_SKILLS_AGENT -cnotin @("universal", "claude-code")) {
-  throw "UC_APX_SKILLS_AGENT must be universal or claude-code"
+  throw "project environment error: UC_APX_SKILLS_AGENT must be universal or claude-code"
 }
 foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_EXPECTED_USER",
     "APEX_PARSING_SCHEMA", "APEX_EXPECTED_USER", "STAGING_SCHEMA", "PROD_SCHEMA")) {
@@ -262,10 +262,10 @@ function Set-ProjectEnvNarrow([string]$SchemaKey, [string]$ConnectionKey, [strin
 
 if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA)) {
   if ($env:PROJECT_SCHEMA -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
-    throw "PROJECT_SCHEMA must be an uppercase Oracle identifier"
+    throw "project environment error: PROJECT_SCHEMA must be an uppercase Oracle identifier"
   }
   if (@($projectEnvUnion) -cnotcontains $env:PROJECT_SCHEMA) {
-    throw "schema $($env:PROJECT_SCHEMA) is not configured; configured schemas: $($env:PROJECT_SCHEMAS)"
+    throw "project environment error: schema $($env:PROJECT_SCHEMA) is not configured; configured schemas: $($env:PROJECT_SCHEMAS)"
   }
   Set-ProjectEnvNarrow TABLES_SCHEMA TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER strict
   Set-ProjectEnvNarrow CODE_SCHEMA CODE_SQLCL_CONNECTION CODE_EXPECTED_USER strict
@@ -280,7 +280,7 @@ if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA)) {
 # Kept after the load so a script can refuse to guess between schemas.
 function Assert-ProjectEnvSingleSchema([string]$Label) {
   if ($env:PROJECT_MULTI_SCHEMA -eq "true" -and [string]::IsNullOrEmpty($env:PROJECT_SCHEMA)) {
-    throw "$Label needs one schema because several are configured ($($env:PROJECT_SCHEMAS)); pass --schema <NAME>"
+    throw "project environment error: $Label needs one schema because several are configured ($($env:PROJECT_SCHEMAS)); pass --schema <NAME>"
   }
 }
 

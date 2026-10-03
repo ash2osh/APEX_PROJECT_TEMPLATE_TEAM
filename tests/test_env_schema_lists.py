@@ -263,6 +263,29 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("must not contain empty entries", plain(result.stderr))
 
+    def test_refusals_match_the_bash_loader_word_for_word(self) -> None:
+        # Both loaders are also run directly (and by the helper scripts); the PowerShell one
+        # used to drop the "project environment error:" prefix on most of its refusals.
+        cases = {
+            "boolean": {"INSTALL_UC_APX=false": "INSTALL_UC_APX="},
+            "developer": {"DEVELOPER_NAME=ALICE": "DEVELOPER_NAME=lower"},
+            "environment": {"DB_ENVIRONMENT=development": "DB_ENVIRONMENT=dev"},
+            "duplicate": {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,ONE"},
+            "lengths": {**MULTI, "CODE_EXPECTED_USER=ONE,TWO": "CODE_EXPECTED_USER=ONE"},
+            "empty entry": {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,,TWO"},
+            "lowercase": {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,two"},
+        }
+        for label, replacements in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                env_path = write_env(Path(temporary), replacements)
+                bash = load(env_path, "true")
+                powershell = self.run_probe(env_path, "'loaded'")
+                self.assertNotEqual(0, bash.returncode)
+                self.assertNotEqual(0, powershell.returncode)
+                message = bash.stderr.strip()
+                self.assertTrue(message.startswith("project environment error: "), message)
+                self.assertIn(message, plain(powershell.stderr))
+
 
 if __name__ == "__main__":
     unittest.main()

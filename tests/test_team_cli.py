@@ -253,7 +253,9 @@ class TeamCliTests(unittest.TestCase):
                 self.assertNotEqual(bash_result.returncode, 0)
                 self.assertIn(expected, bash_result.stderr)
                 self.assertNotEqual(powershell_result.returncode, 0, powershell_result.stdout)
-                self.assertIn(expected, powershell_result.stderr)
+                # PowerShell's error view colours the message and wraps it at the console width.
+                unwrapped = re.sub(r"\s*\n\s*\|?\s*", " ", re.sub(r"\x1b\[[0-9;]*m", "", powershell_result.stderr))
+                self.assertIn(expected, unwrapped)
 
     def test_bash_loader_matches_ascii_only_whatever_the_users_locale(self) -> None:
         # In en_US.UTF-8, Bash's [A-Z] and [A-Za-z] match accented letters, so
