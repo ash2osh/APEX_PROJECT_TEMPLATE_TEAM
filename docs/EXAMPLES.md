@@ -45,9 +45,7 @@ diff of the `.apx` files that changed.
 1. Edit a file, for example `apps/DEMO/100/pages/p00001-dashboard.apx`.
 2. Tell your team you are publishing app 100 and check nobody is editing it in
    Builder. Git cannot see Builder.
-3. Commit your edit, so the imported source is the source in Git:
-   `git add apps/DEMO/100/ && git commit -m "Change the dashboard title"`.
-4. Run:
+3. Run (committing first is optional; publish imports the files on disk):
 
 ```bash
 scripts/team.sh publish 100 --env dev
@@ -60,8 +58,8 @@ Published APEX App 100 to DEV (DEMO / DEMO).
 Commit the stamped version in apps/DEMO/100/application.apx: Release 1.0 [ALICE-2026-09-30r001]
 ```
 
-Commit `application.apx`: it carries the stamp that lets teammates tell whose
-import is live.
+Commit your edit and `application.apx` (it carries the stamp that lets
+teammates tell whose import is live) before you next export this app.
 
 **If it goes wrong:**
 - `[DRIFT DETECTED] Live APEX App 100 was modified in Builder on ...`: someone

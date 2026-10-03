@@ -278,14 +278,8 @@ git add apps/ && git commit -m "Change the dashboard title"
    change `title: Employee Self Service` to `title: Employee Self Service Portal`.
 2. **Tell your team which app you are publishing**, and check that nobody has
    unsaved work in Builder on it. Git cannot see Builder.
-3. Commit your edit. The source you import should be the source in Git:
-
-```bash
-git add apps/DEMO/100/
-git commit -m "Change the dashboard title"
-```
-
-4. Publish:
+3. Publish. You do not need to commit first: publish imports the files as
+   they are on disk, and the shared DEV database is the source of truth.
 
 ```bash
 scripts/team.sh publish 100 --env dev
@@ -301,11 +295,13 @@ Published APEX App 100 to DEV (DEMO / DEMO).
 Commit the stamped version in apps/DEMO/100/application.apx: Release 1.0 [ALICE-2026-09-30r001]
 ```
 
-Commit that stamp as its own commit:
+4. Commit what you published, your edit and the stamp, so your repository
+   records what DEV runs. Do it before your next `export` of this app, which
+   refuses to write over uncommitted files:
 
 ```bash
-git add apps/DEMO/100/application.apx
-git commit -m "Record app 100 publish version"
+git add apps/DEMO/100/
+git commit -m "Change the dashboard title (published r001)"
 ```
 
 ## 10. Make your first database change

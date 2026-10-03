@@ -245,8 +245,9 @@ local source mirror while preserving its authored deployment descriptors.
 
 ## File-first APEXlang workflow
 
-Edit the APEXlang files, review them, and commit the source. Before importing
-into shared DEV, tell teammates which app ID is being published and check for
+Edit the APEXlang files and review them. Committing first is optional:
+publish imports the files on disk, and the shared database is the source of
+truth. Before importing into shared DEV, tell teammates which app ID is being published and check for
 unsaved or in-progress Builder edits. Then run:
 
 ```bash

@@ -1,7 +1,8 @@
 # Publish rules: why publish refuses and what to do
 
-`scripts/team.sh publish <id> --env dev` imports your committed APEXlang
-files into the shared DEV app. Because the whole team edits that one app,
+`scripts/team.sh publish <id> --env dev` imports the APEXlang files in your
+app folder, committed or not, into the shared DEV app. The shared database is
+the source of truth, so you may commit before or after publishing. Because the whole team edits that one app,
 publish first proves that nobody changed the app since you last took a copy
 of it. If it cannot prove that, it refuses rather than silently overwriting a
 teammate's work.

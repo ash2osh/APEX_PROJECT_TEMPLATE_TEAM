@@ -36,7 +36,8 @@ state.
   Builder. Run `scripts/team.sh export <app-id>`, review the APEXlang diff, and
   commit it. Export records the observed Builder state; do not import as part
   of this route.
-- **File-first:** Edit and commit the exact APEXlang source. Before importing
+- **File-first:** Edit the exact APEXlang source; committing before publish
+  is optional, since publish imports the files on disk. Before importing
   to shared DEV, tell the team which numeric app ID is being published and
   check for in-progress Builder edits. Run
   `scripts/team.sh publish <app-id> --env dev`. The drift guard compares the

@@ -7,7 +7,8 @@ commits. Git branches do not isolate shared Builder or database state.
 1. **Builder-first:** Coordinate the shared app edit, save in Builder, run
    `scripts/team.sh export <numeric-app-id>`, review the APEXlang diff, then
    commit. Export captures Builder state; it does not import.
-2. **File-first:** Edit and commit the app's APEXlang source. Tell teammates
+2. **File-first:** Edit the app's APEXlang source (commit before or after
+   publishing; publish imports the files on disk). Tell teammates
    which numeric app ID will be published and check for in-progress Builder
    work. Run `scripts/team.sh publish <numeric-app-id> --env dev`; the drift
    guard refuses to overwrite Builder edits newer than the local export. After
