@@ -96,6 +96,23 @@ BEGIN
 END;
 /
 
+-- The live application must be parsed by the descriptor's schema, also with one
+-- schema configured (only the multi-schema wrappers look it up beforehand); an
+-- application that is not there yet (first import) is allowed.
+DECLARE
+  v_owner VARCHAR2(128);
+BEGIN
+  SELECT MAX(owner) INTO v_owner
+  FROM apex_applications
+  WHERE application_id = TO_NUMBER('&&expected_app_id');
+  IF v_owner IS NOT NULL AND v_owner != UPPER('&&target_schema') THEN
+    RAISE_APPLICATION_ERROR(-20017,
+      'Application &&expected_app_id is parsed by ' || v_owner || ', not the descriptor''s '
+      || UPPER('&&target_schema') || '; refusing to import');
+  END IF;
+END;
+/
+
 apex import -input "&&application_source" -deployment "&&deployment_file"
 
 DECLARE

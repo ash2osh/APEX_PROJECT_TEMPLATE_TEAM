@@ -45,6 +45,7 @@ PUBLISH_REFUSALS = (
     ("scripts/validate_app_source.py", "application source is outside the repository"),
     ("scripts/validate_app_source.py", "symbolic links or reparse points are not supported"),
     ("scripts/validate_app_source.py", "the application path contains characters SQLcl cannot pass"),
+    ("scripts/publish_app.sql", "is parsed by"),
     ("scripts/publish_app.sql", "Live application changed after the Builder drift check"),
     ("scripts/publish_app.sh", "changed while publishing; left as is"),
     ("scripts/publish_app.sh", "DEV publish needs application.apx to stamp the publish tag"),

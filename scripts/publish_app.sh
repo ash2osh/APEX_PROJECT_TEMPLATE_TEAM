@@ -141,6 +141,16 @@ if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
   export PROJECT_SCHEMA="$parsing_schema"
   # shellcheck source=load_env.sh
   source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+elif [ "$app_environment" = dev ]; then
+  # One schema: the DEV descriptor must name it, and the folder is named after it.
+  # Staging and production descriptors may name other schemas (apps/templates).
+  app_folder_schema="$(basename "$(dirname "$app_dir")")"
+  if [ "$app_folder_schema" != "$parsing_schema" ]; then
+    fail "application $app_id is stored under apps/$app_folder_schema but its descriptor parses as $parsing_schema; move the folder or fix the descriptor"
+  fi
+  if [ "${APEX_PARSING_SCHEMA:-}" != "$parsing_schema" ]; then
+    fail "schema $parsing_schema is not listed in APEX_PARSING_SCHEMA; add its connection and expected user to .env"
+  fi
 fi
 
 if [ ! -f "$app_dir/application.apx" ] && [ ! -f "$app_dir/.apex/apexlang.json" ] && \

@@ -581,12 +581,14 @@ class PublishCliTests(unittest.TestCase):
         "check_builder_drift.py", "check_builder_drift.sql", "sqlcl_safe.sh",
     )
 
-    def make_fixture(self, root: Path, folder_schema: str, descriptor_schema: str, extra_env: str = "") -> tuple[Path, dict[str, str]]:
+    def make_fixture(
+        self, root: Path, folder_schema: str, descriptor_schema: str, extra_env: str = "", schemas: dict[str, str] = TWO_SCHEMAS,
+    ) -> tuple[Path, dict[str, str]]:
         scripts = root / "scripts"
         scripts.mkdir()
         for name in self.NAMES:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
-        (root / ".env").write_text(env_text({**TWO_SCHEMAS, "APEX_APP_ID=100,200": "APEX_APP_ID=117"}) + extra_env, encoding="utf-8")
+        (root / ".env").write_text(env_text({**schemas, "APEX_APP_ID=100,200": "APEX_APP_ID=117"}) + extra_env, encoding="utf-8")
         app = root / "apps" / folder_schema / "117"
         (app / "deployments").mkdir(parents=True)
         (app / ".apex").mkdir()
@@ -661,6 +663,29 @@ class PublishCliTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("is stored under apps/ONE", plain(result.stderr))
             self.assertEqual([], self.calls(environment))
+
+    def test_one_schema_project_also_requires_folder_descriptor_and_profile_to_agree(self) -> None:
+        # Only the multi-schema branch used to compare them: a one-schema project (DEMO)
+        # imported a descriptor naming DEMO2 and changed the live app's parsing schema.
+        cases = (
+            ("DEMO", "DEMO2", "is stored under apps/DEMO but its descriptor parses as DEMO2"),
+            ("DEMO2", "DEMO2", "schema DEMO2 is not listed in APEX_PARSING_SCHEMA"),
+        )
+        for folder_schema, descriptor_schema, expected in cases:
+            with self.subTest(folder=folder_schema, descriptor=descriptor_schema), tempfile.TemporaryDirectory() as temporary:
+                script, environment = self.make_fixture(Path(temporary), folder_schema, descriptor_schema, schemas={})
+                result = self.run_publish(script, environment, "--force")
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn(expected, plain(result.stderr))
+                self.assertEqual([], self.calls(environment))
+
+    def test_one_schema_project_publishes_its_own_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_fixture(Path(temporary), "DEMO", "DEMO", schemas={})
+            result = self.run_publish(script, environment, "--describe")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            # Bash prints one field per line, PowerShell one tab-separated line.
+            self.assertEqual("DEMO", result.stdout.replace("\t", "\n").splitlines()[2])
 
     def test_schema_option_must_match_the_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

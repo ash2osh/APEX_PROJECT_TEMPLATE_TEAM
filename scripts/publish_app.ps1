@@ -139,6 +139,16 @@ if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
   }
   $env:PROJECT_SCHEMA = $parsingSchema
   . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
+} elseif ($appEnvironment -eq "dev") {
+  # One schema: the DEV descriptor must name it, and the folder is named after it.
+  # Staging and production descriptors may name other schemas (apps/templates).
+  $appFolderSchema = Split-Path -Leaf (Split-Path -Parent $appDir)
+  if ($appFolderSchema -cne $parsingSchema) {
+    throw "publish error: application $AppId is stored under apps/$appFolderSchema but its descriptor parses as $parsingSchema; move the folder or fix the descriptor"
+  }
+  if ($env:APEX_PARSING_SCHEMA -cne $parsingSchema) {
+    throw "publish error: schema $parsingSchema is not listed in APEX_PARSING_SCHEMA; add its connection and expected user to .env"
+  }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $appDir "application.apx") -PathType Leaf) -and
     -not (Test-Path -LiteralPath (Join-Path $appDir ".apex/apexlang.json") -PathType Leaf) -and

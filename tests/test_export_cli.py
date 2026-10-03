@@ -257,7 +257,10 @@ class ExportCliTests(unittest.TestCase):
         after = script.index("SPOOL .apex-export-after.txt")
         self.assertLess(before, export)
         self.assertLess(export, after)
-        self.assertEqual(script.count("FROM apex_applications"), 2)
+        # One state query in each spooled section (the parsing-schema check before them
+        # also reads apex_applications).
+        self.assertEqual(script[before:export].count("FROM apex_applications"), 1)
+        self.assertEqual(script[after:].count("FROM apex_applications"), 1)
         self.assertEqual(script.count("TO_CHAR(SYSDATE"), 2)
 
 

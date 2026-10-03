@@ -116,7 +116,7 @@ app and agreed with the team that your files should replace it.
 
 | Message | Meaning and action |
 | --- | --- |
-| `is parsed by` | The live application uses a different parsing schema than the descriptor. Review the live app and correct the descriptor and folder, or arrange the intended schema change with the team before importing. |
+| `is parsed by` (also ORA-20017) | The live application uses a different parsing schema than the descriptor. Nothing was imported. Review the live app and correct the descriptor and folder, or arrange the intended schema change with the team before importing. |
 | `Live application changed after the Builder drift check` (ORA-20016) | Someone saved or imported the app between the drift check and the import. Nothing was imported. Export, merge, publish. |
 
 **During import.** Publish restores your unstamped `application.apx`; when SQLcl

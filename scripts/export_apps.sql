@@ -19,6 +19,22 @@ WHENEVER OSERROR EXIT FAILURE ROLLBACK
 
 @@verify_db_access.sql
 
+-- The app must be parsed by the schema whose folder receives it. With one schema
+-- configured the wrappers do not look this up, so check it here.
+DECLARE
+  v_owner VARCHAR2(128);
+BEGIN
+  SELECT MAX(owner) INTO v_owner
+  FROM apex_applications
+  WHERE application_id = &&app_id;
+  IF v_owner IS NOT NULL AND v_owner != UPPER('&&target_schema') THEN
+    RAISE_APPLICATION_ERROR(-20017,
+      'Application &&app_id is parsed by ' || v_owner || ', which is not the configured '
+      || UPPER('&&target_schema') || '; list ' || v_owner || ' in APEX_PARSING_SCHEMA');
+  END IF;
+END;
+/
+
 -- Save the live Builder revision in database time before reading APEX source.
 SPOOL .apex-export-before.txt
 SELECT CASE
