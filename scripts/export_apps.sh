@@ -36,7 +36,14 @@ fi
 
 mkdir -p "$REPO_ROOT/scratch"
 STAGING_DIR="$(mktemp -d "$REPO_ROOT/scratch/apex-export.XXXXXX")"
-cleanup() { rm -rf -- "$STAGING_DIR"; }
+cleanup() {
+  # A file Windows still holds (SQLcl just ended) can block the removal; say so and keep
+  # the export's own status instead of turning a finished export into an rm error.
+  if ! rm -rf -- "$STAGING_DIR" 2>/dev/null; then
+    printf 'export warning: could not remove the temporary directory %s; delete it after closing whatever holds a file in it\n' \
+      "${STAGING_DIR#"$REPO_ROOT/"}" >&2
+  fi
+}
 trap cleanup EXIT
 
 # SQLcl builds a JLine console over its standard input at startup. Handed a

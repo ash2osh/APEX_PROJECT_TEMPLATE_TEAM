@@ -217,6 +217,34 @@ class ExportCliTests(unittest.TestCase):
                 for name, contents in expected.items():
                     self.assertEqual((app / "deployments" / name).read_bytes(), contents)
 
+    @unittest.skipIf(os.name == "nt", "a read-only directory stands in for a file Windows holds open; Windows locks are not simulated")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores directory permissions")
+    def test_export_names_the_scratch_directory_it_could_not_remove_and_still_succeeds(self) -> None:
+        # On Windows a file can stay locked for a moment after SQLcl ends. Removing the
+        # scratch directory then failed: PowerShell turned a finished export into an error,
+        # Bash printed a bare rm error. Both now warn and keep the export's status.
+        for powershell in ([False, True] if PWSH else [False]):
+            with self.subTest(powershell=powershell), tempfile.TemporaryDirectory() as temporary:
+                script, expected = self.make_checkout(Path(temporary), powershell=powershell)
+                fake_sql = script.parents[1] / "bin" / "sql"
+                fake_sql.write_text(
+                    fake_sql.read_text(encoding="utf-8") + "mkdir -p locked && : > locked/held && chmod 500 locked\n",
+                    encoding="utf-8",
+                )
+                try:
+                    result = self.run_export(script, powershell=powershell)
+                    leftovers = sorted((script.parents[1] / "scratch").glob("apex-export*"))
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assert_descriptors_preserved(script, expected)
+                    self.assertEqual(len(leftovers), 1, result.stdout + result.stderr)
+                    plain = " ".join((result.stdout + result.stderr).split())
+                    self.assertIn("could not remove the temporary directory", plain)
+                    self.assertIn(leftovers[0].name, plain)
+                    self.assertNotIn("Permission denied", plain)
+                finally:
+                    for locked in (script.parents[1] / "scratch").glob("apex-export*/**/locked"):
+                        locked.chmod(0o700)
+
     def test_both_wrappers_exit_2_when_sqlcl_refuses_the_export(self) -> None:
         # Bash's export exited 1 here, team.ps1 2 (it gives every helper refusal 2, as
         # Bash's publish and deploy do); an application that does not exist is the usual case.

@@ -164,7 +164,14 @@ try {
   }
   & (Join-Path $PSScriptRoot "replace_mirror.ps1") @replaceArgs
 } finally {
+  # On Windows a file can stay locked for a moment after SQLcl ends: retry, then warn
+  # rather than turn a finished export into an error.
+  for ($cleanupAttempt = 0; $cleanupAttempt -lt 10 -and (Test-Path -LiteralPath $stagingPath); $cleanupAttempt++) {
+    if ($cleanupAttempt -gt 0) { Start-Sleep -Milliseconds 200 }
+    Remove-Item -LiteralPath $stagingPath -Recurse -Force -ErrorAction SilentlyContinue
+  }
   if (Test-Path -LiteralPath $stagingPath) {
-    Remove-Item -LiteralPath $stagingPath -Recurse -Force -ErrorAction Stop
+    $relativeStaging = $stagingPath.Substring($repoRoot.Length).TrimStart('\', '/')
+    Write-Warning "export warning: could not remove the temporary directory $relativeStaging; delete it after closing whatever holds a file in it"
   }
 }
