@@ -69,6 +69,8 @@ if [ "$command_name" != upgrade-template ]; then
 fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
+# Each helper takes over this process (exec), so a signal sent to team.sh alone
+# (timeout, kill, a supervisor) reaches the helper instead of orphaning it.
 case "$command_name" in
   doctor)
     [ "$#" -eq 0 ] || fail "doctor does not accept arguments"
@@ -154,7 +156,7 @@ case "$command_name" in
     [ "$#" -eq 1 ] || fail "usage: scripts/team.sh export <numeric_app_id>"
     [[ "$1" =~ ^[1-9][0-9]{0,17}$ ]] || fail "expected a positive numeric application id of at most 18 digits"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      "$REPO_ROOT/scripts/export_apps.sh" "$1"
+      exec "$REPO_ROOT/scripts/export_apps.sh" "$1"
     ;;
   publish)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh publish <numeric_app_id> [--env dev] [--force]"
@@ -167,32 +169,32 @@ case "$command_name" in
       fi
     done
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      "$REPO_ROOT/scripts/publish_app.sh" "$@"
+      exec "$REPO_ROOT/scripts/publish_app.sh" "$@"
     ;;
   check-conflicts)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      "$REPO_ROOT/scripts/check_conflicts.sh" "$@"
+      exec "$REPO_ROOT/scripts/check_conflicts.sh" "$@"
     ;;
   migrate)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      "$REPO_ROOT/scripts/migrate.sh" "$@"
+      exec "$REPO_ROOT/scripts/migrate.sh" "$@"
     ;;
   compare-schema)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      "$REPO_ROOT/scripts/compare_schema.sh" "$@"
+      exec "$REPO_ROOT/scripts/compare_schema.sh" "$@"
     ;;
   backup-db)
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      "$REPO_ROOT/scripts/backup_db.sh"
+      exec "$REPO_ROOT/scripts/backup_db.sh"
     ;;
   deploy)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh deploy <numeric_app_id> --env <staging|prod> [--manual]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      "$REPO_ROOT/scripts/deploy.sh" "$@"
+      exec "$REPO_ROOT/scripts/deploy.sh" "$@"
     ;;
   upgrade-template)
     # A native Python cannot open /c/... paths. Git Bash rewrites them for it only when

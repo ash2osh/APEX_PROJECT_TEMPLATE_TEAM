@@ -750,6 +750,11 @@ class TeamCliTests(unittest.TestCase):
                 ("check_conflicts.sh", [folder, "--env", "dev"]),
                 ("migrate.sh", [folder, "--env", "dev"]),
                 ("compare_schema.sh", []),
+                # team.sh hands its process on too, or a signal sent to team.sh alone
+                # would leave the helper (and its migration) running.
+                ("team.sh", ["check-conflicts", folder, "--local"]),
+                ("team.sh", ["migrate", folder, "--env", "dev"]),
+                ("team.sh", ["compare-schema", "--env", "dev", "--object", "X"]),
             ):
                 with self.subTest(script=script, arguments=arguments):
                     record.unlink(missing_ok=True)
