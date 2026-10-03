@@ -321,6 +321,54 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read(".template-lock.json"), original_lock)
         self.assertEqual(git(self.project, "status", "--porcelain"), "")
 
+    def interrupt_right_after_installing(self, name: str, actions: list) -> None:
+        # The signal can land after a file is installed but before the bookkeeping
+        # flag says so; rollback must still remove it (new file) or restore the old one.
+        real_install = upgrade_engine._install_no_replace
+        interrupted = []
+
+        def install_then_interrupt(source: Path, target: Path) -> None:
+            real_install(source, target)
+            if target.name == name and not interrupted:
+                interrupted.append(target)
+                raise KeyboardInterrupt
+
+        with patch("scripts.upgrade_template._install_no_replace", side_effect=install_then_interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                upgrade_engine.apply_actions(
+                    self.project, self.template, actions, str(self.template),
+                    git(self.template, "rev-parse", "HEAD"), {action.path: "a" * 64 for action in actions},
+                )
+        self.assertTrue(interrupted, "the injected interrupt never fired")
+
+    def test_interrupt_right_after_a_new_file_is_installed_removes_it(self) -> None:
+        self.adopt()
+        original_lock = self.read(".template-lock.json")
+        self.release_v2({"AGENTS.md": "rules v2\n", "scripts/new_tool.sh": "echo new\n"})
+
+        self.interrupt_right_after_installing(
+            "new_tool.sh",
+            [upgrade_engine.Action("UPDATE", "AGENTS.md"), upgrade_engine.Action("CREATE", "scripts/new_tool.sh")],
+        )
+
+        self.assertFalse((self.project / "scripts" / "new_tool.sh").exists())
+        self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+        self.assertEqual(self.read(".template-lock.json"), original_lock)
+        self.assertEqual(git(self.project, "status", "--porcelain"), "")
+        self.assertEqual(list(self.project.glob(".apex-template-upgrade-*")), [])
+
+    def test_interrupt_right_after_a_file_is_replaced_restores_the_old_one(self) -> None:
+        self.adopt()
+        original_lock = self.read(".template-lock.json")
+        self.release_v2({"AGENTS.md": "rules v2\n"})
+
+        self.interrupt_right_after_installing("AGENTS.md", [upgrade_engine.Action("UPDATE", "AGENTS.md")])
+
+        self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+        self.assertEqual(self.read(".template-lock.json"), original_lock)
+        self.assertEqual(git(self.project, "status", "--porcelain"), "")
+        self.assertEqual(list(self.project.glob(".apex-template-upgrade-*")), [])
+
     def test_interrupt_message_says_the_project_was_restored(self) -> None:
         self.adopt()
         self.release_v2({"AGENTS.md": "rules v2\n"})

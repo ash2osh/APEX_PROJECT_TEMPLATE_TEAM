@@ -589,6 +589,16 @@ def apply_actions(
         rollback_errors: list[str] = []
         for mutation in reversed(mutations):
             try:
+                # A signal can also land after the install but before
+                # replacement_installed is set: a regular file holding exactly the
+                # staged bytes is that install (installed_hash is set just before).
+                if not mutation.replacement_installed and mutation.installed_hash is not None:
+                    target_info = _lstat(mutation.target)
+                    mutation.replacement_installed = (
+                        target_info is not None
+                        and stat.S_ISREG(target_info.st_mode)
+                        and sha256(mutation.target) == mutation.installed_hash
+                    )
                 if mutation.replacement_installed:
                     target_info = _lstat(mutation.target)
                     if target_info is not None:
