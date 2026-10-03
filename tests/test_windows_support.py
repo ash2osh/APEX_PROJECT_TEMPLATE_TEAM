@@ -608,5 +608,97 @@ class SafeRmtreeTests(unittest.TestCase):
             os.rmdir(temp_dir)
 
 
+_ORPHAN_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+. '{invoke}'
+# A process whose parent has ended keeps that parent's id as its ParentProcessId, as the
+# children of every ended launcher do. Windows hands the id to a new process later on.
+$launcher = Start-Process cmd.exe -ArgumentList '/c', 'start "" /b ping -n 120 127.0.0.1 >nul' -WindowStyle Hidden -PassThru
+$null = $launcher.Handle
+$launcher.WaitForExit()
+$orphan = $null
+for ($i = 0; $i -lt 100 -and $null -eq $orphan; $i++) {{
+  $orphan = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($launcher.Id) AND Name = 'PING.EXE'" | Select-Object -First 1
+  if ($null -eq $orphan) {{ Start-Sleep -Milliseconds 100 }}
+}}
+if ($null -eq $orphan) {{ throw 'the orphan never started' }}
+$orphanProcess = [System.Diagnostics.Process]::GetProcessById([int] $orphan.ProcessId)
+# Stands for a SQLcl launcher that was given the same id afterwards and has just ended.
+$reused = [pscustomobject] @{{ Id = $launcher.Id; StartTime = [datetime]::Now }}
+$reused | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{ param($Milliseconds) $true }}
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+try {{
+  {command} $reused
+}} finally {{
+  "ELAPSED_MS=$([int] $watch.Elapsed.TotalMilliseconds)"
+  "ORPHAN_ALIVE=$(-not $orphanProcess.HasExited)"
+  if (-not $orphanProcess.HasExited) {{ $orphanProcess.Kill() }}
+}}
+"""
+
+_GRANDCHILD_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+. '{invoke}'
+# A launcher whose child (cmd) has a child of its own (ping); the launcher has ended.
+$launcher = Start-Process cmd.exe -ArgumentList '/c', 'cmd /c ping -n 120 127.0.0.1 >nul' -WindowStyle Hidden -PassThru
+$null = $launcher.Handle
+$ping = $null
+for ($i = 0; $i -lt 100 -and $null -eq $ping; $i++) {{
+  $inner = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($launcher.Id) AND Name = 'cmd.exe'" | Select-Object -First 1
+  if ($null -ne $inner) {{ $ping = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($inner.ProcessId) AND Name = 'PING.EXE'" | Select-Object -First 1 }}
+  if ($null -eq $ping) {{ Start-Sleep -Milliseconds 100 }}
+}}
+if ($null -eq $ping) {{ throw 'the grandchild never started' }}
+$pingProcess = [System.Diagnostics.Process]::GetProcessById([int] $ping.ProcessId)
+$innerProcess = [System.Diagnostics.Process]::GetProcessById([int] $inner.ProcessId)
+$view = [pscustomobject] @{{ Id = $launcher.Id; StartTime = $launcher.StartTime }}
+$view | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{ param($Milliseconds) $true }}
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+try {{
+  {command} $view
+}} finally {{
+  "ELAPSED_MS=$([int] $watch.Elapsed.TotalMilliseconds)"
+  Start-Sleep -Milliseconds 300
+  "CHILD_ALIVE=$(-not $innerProcess.HasExited)"
+  "GRANDCHILD_ALIVE=$(-not $pingProcess.HasExited)"
+  foreach ($left in @($pingProcess, $innerProcess, $launcher)) {{ if (-not $left.HasExited) {{ $left.Kill() }} }}
+}}
+"""
+
+
+@unittest.skipUnless(os.name == "nt", "Windows process ids and ParentProcessId; off Windows Invoke-Sqlcl ends the tree with Kill($true)")
+class SqlclProcessTreeTests(unittest.TestCase):
+    """invoke_sqlcl.ps1 ends what SQLcl started, and nothing else, after SQLcl ends or is interrupted."""
+
+    def engines(self) -> list[str]:
+        return [shutil.which(name) for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)]
+
+    def run_script(self, engine: str, template: str, command: str) -> dict[str, str]:
+        script = template.format(invoke=str(ROOT / "scripts" / "invoke_sqlcl.ps1").replace("'", "''"), command=command)
+        result = subprocess.run([engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                                capture_output=True, text=True, check=False, timeout=120)
+        self.assertEqual(result.returncode, 0, f"{Path(engine).name}: {result.stdout}{result.stderr}")
+        return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    def test_a_process_left_by_an_earlier_owner_of_the_launcher_id_is_not_waited_for_or_killed(self) -> None:
+        # Windows reuses process ids and keeps a dead parent's id on its children: selecting
+        # children by ParentProcessId alone adopted unrelated processes (explorer.exe among
+        # them on a real machine), waited ten seconds for them and then killed their tree.
+        for engine in self.engines():
+            for command in ("Wait-SqlclProcess", "Stop-SqlclProcess"):
+                with self.subTest(engine=Path(engine).name, command=command):
+                    values = self.run_script(engine, _ORPHAN_SCRIPT, command)
+                    self.assertEqual(values["ORPHAN_ALIVE"], "True", "a process SQLcl never started must not be killed")
+                    self.assertLess(int(values["ELAPSED_MS"]), 5000, "nor waited for")
+
+    def test_what_the_launcher_started_is_ended_at_the_deadline_with_its_own_children(self) -> None:
+        engine = self.engines()[0]
+        values = self.run_script(engine, _GRANDCHILD_SCRIPT, "Wait-SqlclProcess")
+        self.assertEqual(values["CHILD_ALIVE"], "False")
+        self.assertEqual(values["GRANDCHILD_ALIVE"], "False", "the child's own children end with it")
+        self.assertGreaterEqual(int(values["ELAPSED_MS"]), 9000, "the children get their ten seconds first")
+        self.assertLess(int(values["ELAPSED_MS"]), 20000)
+
+
 if __name__ == "__main__":
     unittest.main()

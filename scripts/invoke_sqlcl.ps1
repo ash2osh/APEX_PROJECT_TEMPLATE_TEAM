@@ -11,24 +11,56 @@
 # Start-Process is what allows standard input to be redirected at all:
 # Windows PowerShell 5.1 has no '<' redirection operator for native commands.
 
-# The direct children of a Windows process (the launcher sql.exe starts java.exe).
-function Get-SqlclChildIds([int] $ParentId) {
-  try {
-    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ParentId" -ErrorAction SilentlyContinue |
-      ForEach-Object { [int]$_.ProcessId })
-  } catch {
-    return @()
+# The live processes a Windows process started, and theirs (the launcher sql.exe starts
+# java.exe), each as a Process object. Windows reuses process ids and leaves a dead
+# parent's id on its children, so a process whose ParentProcessId matches is only a
+# descendant if it started after that parent; anything older belongs to an earlier owner
+# of the id (explorer.exe, for one). Each one is opened before its own children are
+# looked up, which keeps its id from being reused meanwhile. The caller keeps the root's
+# id the same way, by holding its handle.
+function Get-SqlclDescendants([int] $RootId, [datetime] $RootStartTime) {
+  $found = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+  $parents = [System.Collections.Generic.Queue[object]]::new()
+  $parents.Enqueue(@($RootId, $RootStartTime))
+  while ($parents.Count -gt 0) {
+    $parent = $parents.Dequeue()
+    try {
+      $candidates = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($parent[0])" -ErrorAction SilentlyContinue)
+    } catch {
+      $candidates = @()
+    }
+    foreach ($candidate in $candidates) {
+      if ($null -eq $candidate.CreationDate -or $candidate.CreationDate -lt $parent[1]) { continue }
+      try {
+        $child = [System.Diagnostics.Process]::GetProcessById([int] $candidate.ProcessId)
+        $null = $child.Handle
+        # The id was reused between the query and the open: not the process found.
+        if ([Math]::Abs(($child.StartTime - $candidate.CreationDate).TotalMilliseconds) -ge 1) { continue }
+      } catch {
+        continue  # it has ended
+      }
+      $found.Add($child)
+      $parents.Enqueue(@($child.Id, $child.StartTime))
+    }
+  }
+  return $found.ToArray()
+}
+
+# End a process and everything it started, through the handles found (taskkill /T would
+# pick its children by ParentProcessId alone).
+function Stop-SqlclTree([System.Diagnostics.Process] $Process, [datetime] $StartTime) {
+  foreach ($member in @($Process) + @(Get-SqlclDescendants $Process.Id $StartTime)) {
+    try { if (-not $member.HasExited) { $member.Kill() } } catch { }
   }
 }
 
 # Wait for each process until one shared deadline, then end what is left with its tree.
-function Stop-SqlclChildren([int[]] $ChildIds, [datetime] $Deadline) {
-  foreach ($childId in $ChildIds) {
+function Stop-SqlclChildren([System.Diagnostics.Process[]] $Children, [datetime] $Deadline) {
+  foreach ($child in $Children) {
     try {
-      $child = [System.Diagnostics.Process]::GetProcessById($childId)
       $remaining = [int][Math]::Max(0, ($Deadline - [datetime]::UtcNow).TotalMilliseconds)
       if (-not $child.WaitForExit($remaining)) {
-        & cmd.exe /c "taskkill /PID $childId /T /F >nul 2>&1"
+        Stop-SqlclTree $child $child.StartTime
       }
     } catch { }
   }
@@ -45,7 +77,7 @@ function Wait-SqlclProcess {
     # The launcher can end before the java.exe it started; give its children ten
     # seconds in all, as after an interrupt, instead of waiting for ever.
     $savedExitCode = $global:LASTEXITCODE
-    Stop-SqlclChildren -ChildIds (Get-SqlclChildIds $Process.Id) -Deadline ([datetime]::UtcNow.AddSeconds(10))
+    Stop-SqlclChildren -Children (Get-SqlclDescendants $Process.Id $Process.StartTime) -Deadline ([datetime]::UtcNow.AddSeconds(10))
     $global:LASTEXITCODE = $savedExitCode
   }
 }
@@ -58,11 +90,11 @@ function Stop-SqlclProcess {
   $savedExitCode = $global:LASTEXITCODE
   $deadline = [datetime]::UtcNow.AddSeconds(10)
   if (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows)) {
-    $childIds = Get-SqlclChildIds $Process.Id
+    $children = Get-SqlclDescendants $Process.Id $Process.StartTime
     if (-not $Process.WaitForExit(10000)) {
-      & cmd.exe /c "taskkill /PID $($Process.Id) /T /F >nul 2>&1"
+      Stop-SqlclTree $Process $Process.StartTime
     }
-    Stop-SqlclChildren -ChildIds $childIds -Deadline $deadline
+    Stop-SqlclChildren -Children $children -Deadline $deadline
   } elseif (-not $Process.WaitForExit(10000)) {
     # Kill(true) ends the launcher's descendants too (the JVM a shell launcher started).
     try { $Process.Kill($true) } catch { }

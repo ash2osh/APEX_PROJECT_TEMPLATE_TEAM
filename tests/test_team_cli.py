@@ -445,7 +445,7 @@ class TeamCliTests(unittest.TestCase):
                     process.communicate()
             self.assertEqual(process.returncode, 130)
 
-    @unittest.skipIf(os.name == "nt", "pwsh on Linux and macOS: Windows ends the tree with taskkill /T")
+    @unittest.skipIf(os.name == "nt", "pwsh on Linux and macOS ends the tree with Kill(true); Windows twin: SqlclProcessTreeTests in test_windows_support.py")
     def test_powershell_ends_the_whole_sqlcl_tree_when_sqlcl_ignores_ctrl_c(self) -> None:
         # After Ctrl-C, Invoke-Sqlcl gives SQLcl ten seconds and then kills it. Off Windows
         # that killed only the launcher it started, and whatever the launcher had started
