@@ -382,14 +382,19 @@ fi
 application_source="$app_dir"
 deployment_file="$app_dir/deployments/$app_environment.json"
 import_running=true
-if ! (
+sqlcl_status=0
+(
   invoke_sqlcl_safe "$staging_dir" \
     -S -noupdates -name "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/publish_app.sql" \
     "$parsing_schema" "$target_environment" "$expected_user" \
     "$application_source" "$deployment_file" "$app_id" "$expected_live_state" \
     < "$sqlcl_stdin"
-) > "$sqlcl_output" 2>&1; then
+) > "$sqlcl_output" 2>&1 || sqlcl_status=$?
+if [ "$sqlcl_status" -ne 0 ]; then
+  if [ "$sqlcl_status" -eq 130 ]; then
+    exit 130
+  fi
   import_running=false
   cat "$sqlcl_output" >&2
   fail "SQLcl application import failed; see the client output above"
@@ -418,13 +423,18 @@ verify_run_dir="$staging_dir/post-import/runs/$app_id"
 verify_parent="$verify_run_dir/apps/$parsing_schema"
 mkdir -p "$verify_parent"
 verify_sqlcl_output="$staging_dir/post-import/sqlcl-output.log"
-if ! (
+verify_status=0
+(
   invoke_sqlcl_safe "$verify_run_dir" \
     -S -noupdates -name "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/export_apps.sql" \
     "$parsing_schema" "$app_id" "$target_environment" "$expected_user" \
     < "$sqlcl_stdin"
-) > "$verify_sqlcl_output" 2>&1; then
+) > "$verify_sqlcl_output" 2>&1 || verify_status=$?
+if [ "$verify_status" -ne 0 ]; then
+  if [ "$verify_status" -eq 130 ]; then
+    exit 130
+  fi
   cat "$verify_sqlcl_output" >&2
   fail "post-import APEX export failed; the imported source was not verified"
 fi

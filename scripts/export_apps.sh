@@ -113,14 +113,18 @@ for app_id in "${APP_IDS[@]}"; do
   RUN_STAGE_PARENT="$RUN_DIR/apps/$app_schema"
   mkdir -p "$RUN_STAGE_PARENT"
   SQLCL_OUTPUT="$RUN_DIR/sqlcl-output.log"
-
-  if ! (
+  sqlcl_status=0
+  (
     invoke_sqlcl_safe "$RUN_DIR" \
       -S -noupdates -name "$app_connection" \
       "@$REPO_ROOT/scripts/export_apps.sql" \
       "$app_schema" "$app_id" "$DB_ENVIRONMENT" \
       "$app_user" < "$SQLCL_STDIN"
-  ) > "$SQLCL_OUTPUT" 2>&1; then
+  ) > "$SQLCL_OUTPUT" 2>&1 || sqlcl_status=$?
+  if [ "$sqlcl_status" -ne 0 ]; then
+    if [ "$sqlcl_status" -eq 130 ]; then
+      exit 130
+    fi
     cat "$SQLCL_OUTPUT" >&2
     echo "APEX export for application $app_id failed in SQLcl" >&2
     exit 1
