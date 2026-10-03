@@ -9,10 +9,11 @@ Use the project daemon for browser runtime evidence. See the [daemon guide](../.
 
 ## Connect
 
-1. Check whether the daemon is already serving the shared user socket. Do not start a second daemon.
+1. Check whether the daemon is already serving the shared user socket (a TCP loopback port with a token on Windows). Do not start a second daemon.
 2. If none is running, use `python3 tools/chrome_mcp_daemon.py` only when this task authorizes startup and Chrome consent is available. Otherwise, report that the daemon is unavailable and ask the user to start it.
 3. Send every browser call through `python3 tools/chrome_devtools_client.py <tool> [json_args]`. The client does not start the daemon; do not call a separate browser MCP connection or connect directly to Chrome's debugging endpoint.
 4. Call `list_pages` first and use the returned `pageId` for page-scoped tools.
+5. On Windows use `python` where `python3` is missing; in Windows PowerShell 5.1 write JSON arguments as `'{\"pageId\":1}'`.
 
 ```bash
 python3 tools/chrome_devtools_client.py list_pages

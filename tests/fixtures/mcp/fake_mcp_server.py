@@ -5,6 +5,7 @@
   echo        - answers initialize and every tools/call
   init-hang   - never answers initialize
   stop-reading - answers initialize, then stops consuming stdin
+  exit        - answers initialize, then exits (the MCP child died)
 """
 import json
 import os
@@ -30,6 +31,8 @@ for line in sys.stdin:
         if mode == "stop-reading":
             while True:
                 time.sleep(1)
+        if mode == "exit":
+            sys.exit(0)
     elif message.get("method") == "tools/call":
         if mode == "echo":
             print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"echo": message["params"]}}), flush=True)
