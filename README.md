@@ -463,6 +463,15 @@ restore those backups before retrying the upgrade.
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 
+Exit status, the same in Bash and PowerShell:
+
+| Status | Meaning |
+| --- | --- |
+| 0 | Done; for `check-conflicts` and `compare-schema`, nothing found. |
+| 1 | `check-conflicts` found conflicts or `compare-schema` found differences; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
+| 2 | Refused or failed; the message says why and what changed. |
+| 130 / 143 | Stopped by Ctrl-C / by SIGTERM (`kill`; Bash only: PowerShell cannot clean up after SIGTERM). |
+
 `scripts/team.ps1` exposes the same commands for PowerShell. Migration and
 deployment helpers use Bash, such as Git Bash on Windows; `team.ps1` finds Git
 Bash itself, and `TEAM_BASH` names a different `bash.exe` when it cannot.

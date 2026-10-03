@@ -62,12 +62,12 @@ for schema in "${BACKUP_SCHEMAS[@]}"; do
   destination="database/$schema"
   dirty_status="$(cd "$REPO_ROOT" && git status --porcelain --untracked-files=all -- "$destination")" || {
     echo "unable to inspect Git status for mirror: $destination" >&2
-    exit 1
+    exit 2
   }
   if [ -n "$dirty_status" ]; then
     echo "refusing to back up over dirty mirror: $destination" >&2
     echo "commit, stash, or remove local changes first" >&2
-    exit 1
+    exit 2
   fi
 done
 
@@ -132,20 +132,20 @@ verify_scope_complete() {
   if [ "$counted" -eq 0 ]; then
     echo "database backup manifest for $schema ($scope) has no readable object" >&2
     echo "counts; the mirror was not replaced" >&2
-    exit 1
+    exit 2
   fi
 
   local -a required_types
   case "$scope" in
     tables) required_types=(TABLE) ;;
     code) required_types=(VIEW PACKAGE 'PACKAGE BODY' PROCEDURE FUNCTION SYNONYM TRIGGER) ;;
-    *) echo "unsupported backup scope: $scope" >&2; exit 1 ;;
+    *) echo "unsupported backup scope: $scope" >&2; exit 2 ;;
   esac
   local required_type
   for required_type in "${required_types[@]}"; do
     if [[ "$manifest_types" != *"|$required_type|"* ]]; then
       echo "database backup manifest for $schema ($scope) is missing the $required_type row; the mirror was not replaced" >&2
-      exit 1
+      exit 2
     fi
   done
 
@@ -160,7 +160,7 @@ verify_scope_complete() {
   if [ "$expected" -ne "$actual" ]; then
     echo "database backup is incomplete for $schema ($scope): manifest expects" >&2
     echo "$expected object file(s) but $actual were written; the mirror was not replaced" >&2
-    exit 1
+    exit 2
   fi
 }
 
@@ -196,10 +196,16 @@ run_backup_scope() {
         $0 == "It is recommended to reduce the setting and/or increase the memory available to Java." { next }
         { print }
       '
-  )
+  ) || {
+    # SQLcl failed (2, as every refusal of the wrappers), or a signal ended it (its status).
+    local backup_status=$?
+    [ "$backup_status" -gt 128 ] && exit "$backup_status"
+    echo "database backup for $schema ($scope) failed in SQLcl; the mirror was not replaced" >&2
+    exit 2
+  }
   test -f "$STAGING_DIR/database/$spool_schema/manifest-$scope.txt" || {
     echo "database backup did not create manifest-$scope.txt for $schema" >&2
-    exit 1
+    exit 2
   }
   verify_scope_complete "$scope" "$schema"
 }

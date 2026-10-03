@@ -217,6 +217,29 @@ class ExportCliTests(unittest.TestCase):
                 for name, contents in expected.items():
                     self.assertEqual((app / "deployments" / name).read_bytes(), contents)
 
+    def test_both_wrappers_exit_2_when_sqlcl_refuses_the_export(self) -> None:
+        # Bash's export exited 1 here, team.ps1 2 (it gives every helper refusal 2, as
+        # Bash's publish and deploy do); an application that does not exist is the usual case.
+        wrappers = [[BASH, "scripts/team.sh"]] + ([[PWSH, "-NoProfile", "-File", "scripts/team.ps1"]] if PWSH else [])
+        for wrapper in wrappers:
+            with self.subTest(shell=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
+                script, _ = self.make_checkout(Path(temporary), powershell="pwsh" in Path(wrapper[0]).name)
+                shutil.copytree(ROOT / "scripts", script.parent, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+                fake_sql = script.parents[1] / "bin" / "sql"
+                fake_sql.write_text(
+                    "#!/usr/bin/env bash\ncat > /dev/null\n"
+                    "printf 'ORA-20987: APEX - Application 100 not found\\n'\nexit 1\n",
+                    encoding="utf-8",
+                )
+                environment = os.environ.copy()
+                environment["PATH"] = f"{script.parents[1] / 'bin'}{os.pathsep}{environment['PATH']}"
+                environment["PROJECT_ENV_FILE"] = str(script.parents[1] / ".env")
+
+                result = subprocess.run([*wrapper, "export", "100"], cwd=script.parents[1], env=environment, text=True, capture_output=True, check=False)
+
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("ORA-20987", result.stdout + result.stderr)
+
     @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
     def test_powershell_export_refuses_sqlcl_error_after_partial_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -62,7 +62,7 @@ for app_id in "${APP_IDS[@]}"; do
     app_schema="$(sqlcl_app_parsing_schema "${APEX_CONNECTIONS[0]}" "${APEX_USERS[0]}" \
       "${APEX_SCHEMAS[0]}" "$app_id" "$STAGING_DIR/lookup/$app_id")" || {
       echo "export error: could not determine the parsing schema of application $app_id" >&2
-      exit 1
+      exit 2
     }
     if [ -n "${PROJECT_SCHEMA:-}" ] && [ "$app_schema" != "$PROJECT_SCHEMA" ]; then
       echo "export error: application $app_id is parsed by $app_schema, not $PROJECT_SCHEMA" >&2
@@ -90,12 +90,12 @@ for app_id in "${APP_IDS[@]}"; do
   destination="apps/${APP_SCHEMA_OF[$app_id]}/$app_id"
   dirty_status="$(cd "$REPO_ROOT" && git status --porcelain --untracked-files=all -- "$destination" 2>/dev/null)" || {
     echo "unable to inspect Git status for mirror: $destination" >&2
-    exit 1
+    exit 2
   }
   if [ -n "$dirty_status" ]; then
     echo "refusing to export over dirty mirror: $destination" >&2
     echo "commit, stash, or remove local changes first" >&2
-    exit 1
+    exit 2
   fi
 done
 
@@ -129,12 +129,12 @@ for app_id in "${APP_IDS[@]}"; do
     fi
     cat "$SQLCL_OUTPUT" >&2
     echo "APEX export for application $app_id failed in SQLcl" >&2
-    exit 1
+    exit 2
   fi
   if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:|SQLcl Error:' "$SQLCL_OUTPUT"; then
     cat "$SQLCL_OUTPUT" >&2
     echo "APEX export for application $app_id reported a client or database error" >&2
-    exit 1
+    exit 2
   fi
   cat "$SQLCL_OUTPUT"
 
@@ -149,15 +149,15 @@ for app_id in "${APP_IDS[@]}"; do
 
   if [ "$EXPORTED_COUNT" -ne 1 ]; then
     echo "expected exactly one exported directory for application $app_id, found $EXPORTED_COUNT" >&2
-    exit 1
+    exit 2
   fi
   test -f "$EXPORTED_DIR/application.apx" || {
     echo "APEX export for application $app_id did not create application.apx" >&2
-    exit 1
+    exit 2
   }
   test -f "$EXPORTED_DIR/.apex/apexlang.json" || {
     echo "APEX export for application $app_id did not create .apex/apexlang.json" >&2
-    exit 1
+    exit 2
   }
 
   APP_STAGE="$STAGE_PARENT/$app_id"
