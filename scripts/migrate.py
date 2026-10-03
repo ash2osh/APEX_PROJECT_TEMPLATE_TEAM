@@ -993,6 +993,22 @@ def _interrupt_on_sigterm() -> None:
         pass
 
 
+def _record_status(status: int, environ: Mapping[str, str] = os.environ) -> int:
+    """Also write the exit status to MIGRATE_STATUS_FILE, and return it.
+
+    On Windows migrate.sh runs Python as a child, and Git Bash reports 130 for a child that
+    ends within a moment of a Ctrl-C whatever status it chose; an interrupted apply chooses
+    2 ("may be partially applied"), so migrate.sh reads the status from this file.
+    """
+    path = environ.get("MIGRATE_STATUS_FILE")
+    if path:
+        try:
+            Path(path).write_text(f"{status}\n", encoding="ascii")
+        except OSError:
+            pass
+    return status
+
+
 if __name__ == "__main__":
     _interrupt_on_sigterm()
-    raise SystemExit(main())
+    raise SystemExit(_record_status(main()))

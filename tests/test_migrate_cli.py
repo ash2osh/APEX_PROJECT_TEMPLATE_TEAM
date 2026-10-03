@@ -1,6 +1,9 @@
 import contextlib
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -146,6 +149,16 @@ class MigrateCliTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_the_exit_status_is_also_written_where_migrate_sh_reads_it(self):
+        # On Windows Git Bash can report 130 for Python's status; migrate.sh reads this file.
+        status_file = self.root / "status"
+        result = subprocess.run(
+            [sys.executable, "-m", "scripts.migrate"], cwd=ROOT, capture_output=True, text=True, check=False,
+            env={**os.environ, "MIGRATE_STATUS_FILE": str(status_file)},
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(status_file.read_text(encoding="ascii"), "2\n")
 
     def add_folder(self, name, files, *, preconditions=(), postconditions=None):
         folder = self.root / "migrations" / name

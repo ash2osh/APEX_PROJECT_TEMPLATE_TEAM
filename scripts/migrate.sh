@@ -52,7 +52,23 @@ cd "$REPO_ROOT"
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*)
     trap : INT
-    python3 -m scripts.migrate "$@"
+    # Git Bash reports 130 for a native child that ends within a moment of a Ctrl-C,
+    # whatever status it chose, and an interrupted apply chooses 2 ("may be partially
+    # applied") at once. Python also writes its status to this file.
+    mkdir -p "$REPO_ROOT/scratch"
+    status_file="$(mktemp "$REPO_ROOT/scratch/migrate-status.XXXXXX")"
+    status=0
+    MIGRATE_STATUS_FILE="$(cygpath -w "$status_file" 2>/dev/null || printf '%s' "$status_file")" \
+      python3 -m scripts.migrate "$@" || status=$?
+    if [ "$status" -gt 128 ] && [ -s "$status_file" ]; then
+      recorded="$(tr -d '\r\n' < "$status_file")"
+      case "$recorded" in
+        ''|*[!0-9]*) ;;
+        *) status="$recorded" ;;
+      esac
+    fi
+    rm -f -- "$status_file"
+    exit "$status"
     ;;
   *)
     exec python3 -m scripts.migrate "$@"

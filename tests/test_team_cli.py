@@ -904,6 +904,37 @@ class TeamCliTests(unittest.TestCase):
                 self.assertEqual(process.returncode, 2, screen)
                 self.assertEqual(screen.strip().splitlines(), ["python is cleaning up", "python is done"])
 
+    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; off Windows Python takes over the process (exec)")
+    def test_ctrl_c_in_a_windows_console_passes_on_the_status_of_a_python_that_exits_at_once(self) -> None:
+        # Git Bash reports 130 for a native child that ends within a moment of the Ctrl-C,
+        # whatever status it chose: an interrupted apply (scripts.migrate exits 2 at once,
+        # "may be partially applied") came out as a clean 130 most of the time. Python
+        # also writes its status to MIGRATE_STATUS_FILE; repeat, since it is a race.
+        for wrapper in self.windows_wrappers():
+            for attempt in range(3):
+                with self.subTest(wrapper=Path(wrapper[0]).name, attempt=attempt), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    self.make_windows_interrupt_checkout(root)
+                    started = root / "python-started"
+                    # A python3 that waits for Ctrl-C and exits 2 at once, recording the status
+                    # where scripts.migrate does.
+                    _console_ctrl_c.write_python_command(
+                        root / "bin", "python3",
+                        "import os\nimport sys\nimport time\nfrom pathlib import Path\n"
+                        'if sys.argv[1:2] == ["-c"]:\n'
+                        "    exec(sys.argv[2])  # team.ps1 asks whether this is Python 3.10 or newer\n"
+                        "    raise SystemExit(0)\n"
+                        f"Path({str(started)!r}).write_text('started')\n"
+                        "try:\n    time.sleep(60)\nexcept KeyboardInterrupt:\n"
+                        "    Path(os.environ['MIGRATE_STATUS_FILE']).write_text('2\\n')\n"
+                        "    raise SystemExit(2)\n",
+                    )
+                    environment = fake_sqlcl.environment(root / "bin", PROJECT_ENV_FILE=str(root / ".env"))
+                    command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "migrate", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
+                    process, screen, _ = _console_ctrl_c.interrupt(command, root, environment, started)
+                    self.assertEqual(process.returncode, 2, screen)
+                    self.assertEqual(list((root / "scratch").glob("migrate-status.*")), [], "the status file is removed")
+
     @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is test_interrupting_doctor_removes_its_working_directory")
     def test_ctrl_c_in_a_windows_console_ends_doctor_and_removes_its_working_directory(self) -> None:
         for wrapper in self.windows_wrappers():
