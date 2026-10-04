@@ -112,6 +112,14 @@ files, not shared Builder state.
 
 ## Project instructions
 
+- After cloning into a new downstream project, follow the
+  [post-clone cleanup](docs/GETTING_STARTED.md#post-clone-cleanup) instructions:
+  establish `.template-lock.json`, then remove inherited template-maintenance
+  tests, GitHub workflows/Dependabot and historical planning documents. This
+  cleanup applies to downstream projects, not the original template repository,
+  which retains its tests and CI. Preserve project-specific regression tests
+  when cleaning an existing project. Keep `.env`, operational scripts, agent
+  guidance, the manifest and upgrade lock.
 - `AGENTS.md`, `CLAUDE.md`, `README.md`, and `.agents/rules/agent-safety.md`
   belong to the template; `scripts/team.sh upgrade-template` replaces them.
   Put project-specific agent instructions in `AGENTS.project.md`, project

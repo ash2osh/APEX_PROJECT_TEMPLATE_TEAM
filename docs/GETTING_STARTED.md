@@ -46,7 +46,8 @@ What each folder is for:
 | `migrations/` | Dated SQL changes you write, one folder each | you |
 | `app_context/` | Notes about each app, for AI assistants | you |
 | `.env` | Literal configuration and SQLcl saved connection names (no credentials) | you; review and keep it in your own Git repository |
-| `scripts/`, `tests/`, `docs/`, `.agents/` | The template itself | template upgrades |
+| `scripts/`, operational `docs/`, `.agents/` | Command implementations and guidance | template upgrades |
+| Inherited `tests/` and `.github/` | Original-template maintenance and CI | remove from a new downstream clone after recording the upgrade baseline |
 
 ## 2. What you need
 
@@ -119,13 +120,51 @@ git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git my-apex-proj
 cd my-apex-project
 git remote rename origin template     # keep the template as a separate remote
 git remote add origin <your-new-repository-url>
-git push -u origin main
 ```
 
 Either way, the files `AGENTS.project.md`, `PROJECT.md` and
 `.agents/rules/project.md` are yours. Put your project's own notes there,
 because template upgrades replace `README.md` and `AGENTS.md` but never touch
 those three.
+
+### Post-clone cleanup
+
+Do this in your new downstream project before its first push. The original
+`APEX_PROJECT_TEMPLATE_TEAM` repository retains its tests, workflows and
+Dependabot for template development. The cleanup below is for a fresh clone;
+in an established project, preserve any project-specific tests or CI first.
+
+Record the installed template baseline while the checkout is clean:
+
+```bash
+scripts/team.sh upgrade-template --dry-run
+scripts/team.sh upgrade-template
+```
+
+These upgrade commands do not connect to Oracle. Review any `.template-new`
+files and resolve them before continuing. Keep the generated
+`.template-lock.json`: it lets future upgrades preserve intentional deletion
+of installed template files. Review and commit the upgrade result in your own
+repository before cleaning it.
+
+Then remove the inherited maintenance files:
+
+```bash
+git rm -r --ignore-unmatch tests .github docs/superpowers
+git status --short
+```
+
+This removes template tests, GitHub Actions workflows, Dependabot configuration
+and tracked historical planning/design documents if present. The daily team
+commands do not require those files. Keep `scripts/`, operational documentation,
+`.agents/`, `.claude/`, `template-manifest.json` and `.template-lock.json`.
+Configure the credential-free root `.env` in step 6 and keep it in your own Git
+repository after validation. Review the cleanup, commit it, and then push to
+your downstream remote.
+
+An upgrade keeps previously installed files deleted (`KEEP-DELETED`), but may
+introduce new template test/workflow files. Review those after every upgrade.
+Do not delete your project's own regression tests as part of repeated cleanup.
 
 ## 5. Save your SQLcl connection
 

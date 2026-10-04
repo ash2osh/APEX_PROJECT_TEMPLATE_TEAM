@@ -21,6 +21,12 @@ separate file changes only and do not isolate a shared APEX application.
 | know which limits are deliberate | [Known limitations](docs/known-limitations.md) |
 | see what an AI assistant can do here | [Skills and agent support](#skills-and-agent-support) |
 
+After cloning this template into your own project, complete the
+[post-clone cleanup](docs/GETTING_STARTED.md#post-clone-cleanup). Downstream
+projects remove inherited template-maintenance tests, GitHub workflows and
+Dependabot; the original template keeps them for its own validation. Retain
+project-specific tests and the operational scripts, `.env`, manifest and lock.
+
 ## What you get
 
 | Feature | What it does |
@@ -467,6 +473,9 @@ upgrade reports that `.env` needs attention, compare it with `.env.example`.
 A differing `.env.example` on the first upgrade also leaves an
 `.env.example.template-new` review copy; merge it into the example before
 reviewing any corresponding changes to your own `.env`.
+Files removed after they were recorded in `.template-lock.json` remain deleted
+(`KEEP-DELETED`). Keep that lock when cleaning a clone. New upstream files can
+still be created; review tests and GitHub automation after future upgrades.
 If the upgrade is interrupted (Ctrl-C or `kill`), it puts back every file it had
 replaced and says `the project was left as it was`; run it again.
 
