@@ -10,8 +10,10 @@ state.
 
 ## Configuration and application source
 
-- Copy `.env.example` to ignored `.env`, set `DEVELOPER_NAME` to the
-  developer's uppercase name, and use SQLcl saved connection names. The
+- Copy `.env.example` to root `.env`, set `DEVELOPER_NAME` to the
+  developer's uppercase name, and use SQLcl saved connection names. After
+  local validation, review and keep this credential-free configuration in
+  each developer's own downstream Git repository. The
   default points the table, code, and APEX profiles at the same DEV
   connection. Keep these profile values aligned unless the project needs
   separate connections. Staging and production connection/user pairs are

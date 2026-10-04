@@ -128,6 +128,132 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commit_all(self.project, "adopt template lock")
 
+    def add_environment_files(self) -> None:
+        manifest = {**MANIFEST, "upstream": str(self.template)}
+        manifest["templateOwned"] = [*MANIFEST["templateOwned"], ".env.example"]
+        common = {
+            "template-manifest.json": json.dumps(manifest),
+            ".env.example": "DEVELOPER_NAME=EXAMPLE\nTABLES_SQLCL_CONNECTION=demo-dev\n",
+        }
+        write(self.template, common)
+        commit_all(self.template, "add environment example")
+        write(self.project, {
+            **common,
+            ".env": "DEVELOPER_NAME=ALICE\nTABLES_SQLCL_CONNECTION=alice-dev\n",
+            ".env.local": "PROJECT_NAME=local settings\n",
+            ".env.example.backup": "PROJECT_NAME=example backup\n",
+        })
+        commit_all(self.project, "configure credential-free environment")
+
+    def test_first_upgrade_env_example_conflict_preserves_tracked_environment(self) -> None:
+        self.add_environment_files()
+        self.assertIn(".env", git(self.project, "ls-files").splitlines())
+        self.assertFalse((self.project / ".template-lock.json").exists())
+        self.release_v2({".env.example": "DEVELOPER_NAME=EXAMPLE\nTABLES_SQLCL_CONNECTION=new-demo-dev\n"})
+
+        result = self.upgrade()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT .env.example", result.stdout)
+        self.assertEqual(self.read(".env.example.template-new"),
+                         "DEVELOPER_NAME=EXAMPLE\nTABLES_SQLCL_CONNECTION=new-demo-dev\n")
+        self.assertEqual(self.read(".env.example"), "DEVELOPER_NAME=EXAMPLE\nTABLES_SQLCL_CONNECTION=demo-dev\n")
+        self.assertEqual(self.read(".env"), "DEVELOPER_NAME=ALICE\nTABLES_SQLCL_CONNECTION=alice-dev\n")
+        self.assertEqual(self.read(".env.local"), "PROJECT_NAME=local settings\n")
+        self.assertEqual(self.read(".env.example.backup"), "PROJECT_NAME=example backup\n")
+        self.assertNotIn(".env", self.lock()["files"])
+        self.assertNotIn(".env.example.template-new", self.lock()["files"])
+
+    def test_existing_lock_env_example_conflict_preserves_customized_example(self) -> None:
+        self.add_environment_files()
+        self.adopt()
+        write(self.project, {".env.example": "DEVELOPER_NAME=OUR_EXAMPLE\n"})
+        commit_all(self.project, "customize environment example")
+        self.release_v2({".env.example": "DEVELOPER_NAME=NEW_EXAMPLE\n"})
+
+        result = self.upgrade()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.read(".env.example"), "DEVELOPER_NAME=OUR_EXAMPLE\n")
+        self.assertEqual(self.read(".env.example.template-new"), "DEVELOPER_NAME=NEW_EXAMPLE\n")
+        self.assertEqual(self.read(".env"), "DEVELOPER_NAME=ALICE\nTABLES_SQLCL_CONNECTION=alice-dev\n")
+
+    def test_manifest_cannot_manage_environment_or_generated_candidate(self) -> None:
+        self.add_environment_files()
+        for path in (".env", ".env.local", ".env.example.template-new", ".template-lock.json"):
+            with self.subTest(path=path):
+                manifest = {**MANIFEST, "upstream": str(self.template)}
+                manifest["templateOwned"] = [*MANIFEST["templateOwned"], path]
+                write(self.template, {
+                    "template-manifest.json": json.dumps(manifest),
+                    path: "PROJECT_NAME=untrusted template settings\n",
+                })
+                commit_all(self.template, "unsafe environment ownership")
+
+                result = self.upgrade()
+
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(git(self.project, "status", "--porcelain"), "")
+                self.assertEqual(self.read(".env"), "DEVELOPER_NAME=ALICE\nTABLES_SQLCL_CONNECTION=alice-dev\n")
+                self.assertFalse((self.project / ".env.example.template-new").exists())
+                self.assertFalse((self.project / ".template-lock.json").exists())
+
+    def test_lock_cannot_manage_environment_or_generated_candidate(self) -> None:
+        self.add_environment_files()
+        self.adopt()
+        original_lock = self.lock()
+        for path in (".env", ".env.local", ".env.example.template-new", ".template-lock.json"):
+            with self.subTest(path=path):
+                lock = {**original_lock, "files": {**original_lock["files"], path: "a" * 64}}
+                write(self.project, {".template-lock.json": json.dumps(lock)})
+                commit_all(self.project, "unsafe environment lock entry")
+
+                result = self.upgrade()
+
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("protected project data", result.stderr)
+                self.assertEqual(git(self.project, "status", "--porcelain"), "")
+                self.assertEqual(self.read(".env"), "DEVELOPER_NAME=ALICE\nTABLES_SQLCL_CONNECTION=alice-dev\n")
+                self.assertFalse((self.project / ".env.example.template-new").exists())
+
+    def test_ignored_environment_conflict_candidate_blocks_next_upgrade(self) -> None:
+        self.add_environment_files()
+        write(self.project, {".gitignore": ".env.*\n!/.env.example\n"})
+        commit_all(self.project, "ignore local environment variants")
+        self.release_v2({".env.example": "DEVELOPER_NAME=NEW_EXAMPLE\n"})
+        first = self.upgrade()
+        self.assertEqual(first.returncode, 1, first.stdout + first.stderr)
+        commit_all(self.project, "record upgrade without resolving ignored candidate")
+        self.assertNotIn(".env.example.template-new", git(self.project, "ls-files").splitlines())
+        before = self.read(".template-lock.json")
+
+        result = self.upgrade()
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("resolve and delete", result.stderr)
+        self.assertEqual(self.read(".env.example.template-new"), "DEVELOPER_NAME=NEW_EXAMPLE\n")
+        self.assertEqual(self.read(".env.example"), "DEVELOPER_NAME=EXAMPLE\nTABLES_SQLCL_CONNECTION=demo-dev\n")
+        self.assertEqual(self.read(".template-lock.json"), before)
+        self.assertEqual(git(self.project, "status", "--porcelain"), "")
+
+    def test_environment_candidate_is_not_a_general_write_destination(self) -> None:
+        self.add_environment_files()
+        write(self.template, {".env.example.template-new": "PROJECT_NAME=not a conflict\n"})
+
+        for kind in ("CREATE", "DELETE", "CONFLICT"):
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(upgrade_engine.UpgradeError, "protected project data"):
+                    upgrade_engine.apply_actions(
+                        self.project, self.template,
+                        [upgrade_engine.Action("CONFLICT", ".env.example"),
+                         upgrade_engine.Action(kind, ".env.example.template-new", None)],
+                        "unused", "0" * 40, {},
+                    )
+
+                self.assertEqual(git(self.project, "status", "--porcelain"), "")
+                self.assertFalse((self.project / ".env.example.template-new").exists())
+                self.assertFalse((self.project / ".template-lock.json").exists())
+
     def test_first_upgrade_of_identical_copy_writes_lock_without_changes(self) -> None:
         result = self.upgrade()
 
@@ -714,6 +840,36 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("symbolic link", result.stderr)
         self.assertFalse((self.project / "scripts/link.sh").exists())
+
+
+class EnvironmentGitPolicyTests(unittest.TestCase):
+    def test_root_configuration_is_trackable_but_nested_and_variant_env_files_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            init_repo(project)
+            (project / ".gitignore").write_bytes((ROOT / ".gitignore").read_bytes())
+            paths = {
+                ".env": False,
+                ".env.example": False,
+                ".env.local": True,
+                ".env.example.template-new": True,
+                "nested/.env": True,
+                "nested/.env.local": True,
+                "nested/.env.example": True,
+            }
+            for path, ignored in paths.items():
+                with self.subTest(path=path):
+                    write(project, {path: "PROJECT_NAME=credential-free fixture\n"})
+                    result = subprocess.run(
+                        ["git", "-C", str(project), "check-ignore", "-q", path], check=False,
+                    )
+                    self.assertEqual(result.returncode, 0 if ignored else 1)
+            add = subprocess.run(
+                ["git", "-C", str(project), "add", ".env", ".env.example"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(add.returncode, 0, add.stderr)
+            self.assertEqual(git(project, "ls-files").splitlines(), [".env", ".env.example"])
 
 
 class LineEndingPlanTests(unittest.TestCase):

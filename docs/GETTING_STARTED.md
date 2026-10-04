@@ -45,7 +45,7 @@ What each folder is for:
 | `database/<SCHEMA>/` | A read-only copy of your tables, views, code and synonyms (and, when configured, `ords/schema.sql`, the ORDS REST definition) | `backup-db` (and `backup-ords`) writes it; never edit by hand |
 | `migrations/` | Dated SQL changes you write, one folder each | you |
 | `app_context/` | Notes about each app, for AI assistants | you |
-| `.env` | Which connections and schemas to use (no passwords) | you; it is not committed |
+| `.env` | Literal configuration and SQLcl saved connection names (no credentials) | you; review and keep it in your own Git repository |
 | `scripts/`, `tests/`, `docs/`, `.agents/` | The template itself | template upgrades |
 
 ## 2. What you need
@@ -200,6 +200,12 @@ Doctor checks passed for the configured DEV connection.
 
 `doctor` only reads. If it fails, [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists
 each message and what to do.
+
+After validation, review your root `.env` and version it in your own downstream
+Git repository. Keep only literal configuration and saved SQLcl connection
+names in it; credentials stay in SQLcl's secure store. The root `.env` is
+available to Git, while nested `.env` files and `.env.*` variants are ignored.
+Template upgrades preserve your `.env`, including when it is tracked.
 
 ## 8. Export your first app
 

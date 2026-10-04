@@ -379,6 +379,11 @@ def check_project(project_root: Path) -> None:
         for path in run_git(project_root, "ls-files", "-z").split("\0")
         if path.endswith(CONFLICT_SUFFIX)
     ]
+    # This generated review copy is ignored by the .env.* rule, so Git's
+    # tracked-file listing cannot see it after the lock alone is committed.
+    environment_candidate = ".env.example" + CONFLICT_SUFFIX
+    if _lstat(project_root / environment_candidate) is not None and environment_candidate not in pending:
+        pending.append(environment_candidate)
     if pending:
         raise UpgradeError(f"resolve and delete {CONFLICT_SUFFIX} files first: {', '.join(pending)}")
 
@@ -500,16 +505,23 @@ def apply_actions(
     """
     writes: dict[str, tuple[bytes, int]] = {}
     deletes: set[str] = set()
+    conflict_candidates: set[str] = set()
     # What each target held when the plan was made. A file saved after the
     # plan must not be overwritten or deleted with the plan's decision.
     planned_local: dict[str, str | None] = {}
     for action in actions:
+        if action.kind in {"CREATE", "UPDATE", "PLACEHOLDER", "CONFLICT", "DELETE"} and protected_project_path(action.path):
+            raise UpgradeError(f"upgrade plan targets protected project data: {action.path}")
         if action.kind in {"CREATE", "UPDATE", "PLACEHOLDER"}:
             writes[action.path] = _read_template_bytes(template_root, action.path)
             if action.local != "":
                 planned_local[action.path] = action.local
         elif action.kind == "CONFLICT":
             conflict_path = action.path + CONFLICT_SUFFIX
+            # The example is template-owned; only its generated review copy may
+            # bypass the .env.* destination guard. Manifest and lock paths stay protected.
+            if action.path == ".env.example":
+                conflict_candidates.add(conflict_path)
             writes[conflict_path] = _read_template_bytes(template_root, action.path)
             planned_local[conflict_path] = None
         elif action.kind == "DELETE":
@@ -525,7 +537,7 @@ def apply_actions(
         raise UpgradeError("upgrade plan both deletes and writes: " + ", ".join(sorted(overlap)))
 
     for relative in deletes | set(writes):
-        if relative != LOCK_NAME and protected_project_path(relative):
+        if relative != LOCK_NAME and relative not in conflict_candidates and protected_project_path(relative):
             raise UpgradeError(f"upgrade plan targets protected project data: {relative}")
         safe_project_path(project_root, relative)
 

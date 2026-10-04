@@ -212,6 +212,13 @@ the local checks pass. That skill owns installation approval and skill sync.
 The shell loaders default omitted settings to `false` and `universal` for
 existing projects, and reject any other explicit values.
 
+After local validation succeeds, tell the user to review and keep the
+credential-free root `.env` in their own downstream Git repository. It holds
+literal configuration and SQLcl saved connection names; credentials stay in
+SQLcl's secure store. The template makes root `.env` available to Git and
+preserves it during upgrades, including when tracked. Do not stage, commit,
+or push it without an explicit instruction.
+
 ## Common mistakes
 
 | Mistake | Required response |
@@ -221,5 +228,5 @@ existing projects, and reject any other explicit values.
 | `.env` already exists | Summarize and obtain overwrite confirmation before writing. |
 | ORDS is enabled but the expected user differs from the REST schema | Reject it: the ORDS export needs the session user to equal the REST schema. Ask for a connection that logs in as the REST schema owner; never enable REST for another account. |
 | Guard reports a production-like alias | Ask the production-classification question; do not test the connection. |
-| Initialization succeeds | Report validation results and any prerequisite the user declined; do not commit or push unless separately authorized. |
+| Initialization succeeds | Report validation results and any prerequisite the user declined, and recommend reviewing and versioning root `.env` in the developer's downstream repository; do not stage, commit or push unless separately authorized. |
 | A prerequisite is missing | Report it and ask before installing; never install without approval, and never block `.env` on it. |

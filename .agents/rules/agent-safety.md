@@ -3,7 +3,9 @@
 - Read APEXlang and SQL source before changing it or applying it. Keep numeric
   app IDs and explicit deployment workspace/schema mappings consistent.
 - Do not place database credentials in `.env`, tracked files, command output,
-  or logs. Use saved SQLcl connection names.
+  or logs. Use saved SQLcl connection names. After local validation, recommend
+  reviewing and versioning the credential-free root `.env` in the developer's
+  own downstream Git repository; commit only when explicitly authorized.
 - Treat export as a read from shared Builder that refreshes tracked local
   source. Do not export unless requested, and review the result before
   committing it.

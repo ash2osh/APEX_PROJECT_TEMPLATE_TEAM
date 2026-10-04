@@ -102,7 +102,11 @@ The example uses `docker-demo` / `DEMO`. Table, code, and APEX settings can
 share that connection. Staging and production app-deployment profiles are
 optional connection/user pairs; migrations and schema comparison also require
 an explicit target schema. Store credentials in SQLcl's secure connection
-store, never in `.env` or Git.
+store, never in `.env` or Git. After validating your configuration, review
+and keep the credential-free root `.env` in your own downstream Git repository.
+It contains literal settings and saved connection names only; nested `.env`
+files and `.env.*` variants remain ignored. The template ships `.env.example`
+and does not create or commit a configured `.env` for you.
 
 On Windows, use the PowerShell wrapper:
 
@@ -438,7 +442,8 @@ files the upgrade may touch: template scripts, tests, CI, and agent guidance
 are upgraded; project files such as `AGENTS.project.md`,
 `.agents/rules/project.md`, and `PROJECT.md` are created once and never
 overwritten; application source, database mirrors, migrations,
-`app_context/<id>/`, and `.env` are never touched. Put project-specific
+`app_context/<id>/`, and `.env` are never touched, even when `.env` is tracked
+in Git. Put project-specific
 instructions in those placeholder files, not in `AGENTS.md` or `README.md`.
 The engine also writes its fixed `.template-lock.json` metadata file, which
 records the installed template commit and hashes.
@@ -459,6 +464,9 @@ it as `<file>.template-new`, and exits with status 1: merge the two, delete the
 in `.template-lock.json`; commit it with the upgraded files. Use `--ref <tag>`
 to install a specific template version and `--source <url>` for a fork. If the
 upgrade reports that `.env` needs attention, compare it with `.env.example`.
+A differing `.env.example` on the first upgrade also leaves an
+`.env.example.template-new` review copy; merge it into the example before
+reviewing any corresponding changes to your own `.env`.
 If the upgrade is interrupted (Ctrl-C or `kill`), it puts back every file it had
 replaced and says `the project was left as it was`; run it again.
 
