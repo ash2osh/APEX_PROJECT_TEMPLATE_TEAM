@@ -57,15 +57,19 @@ def environment(project_schema: str | None, **extra: str) -> dict[str, str]:
     return result
 
 
-def load_bash(env_path: Path, project_schema: str | None = None, **extra: str) -> subprocess.CompletedProcess[str]:
+STAGING_BASH_PROBE = 'printf "[%s][%s][%s]\\n" "$STAGING_SQLCL_CONNECTION" "$STAGING_EXPECTED_USER" "$STAGING_SCHEMA"'
+STAGING_POWERSHELL_PROBE = '"[$($env:STAGING_SQLCL_CONNECTION)][$($env:STAGING_EXPECTED_USER)][$($env:STAGING_SCHEMA)]"'
+
+
+def load_bash(env_path: Path, project_schema: str | None = None, probe: str = BASH_PROBE, **extra: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [BASH, "-c", f'set -e; source "$1" "$2"; {BASH_PROBE}', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
+        [BASH, "-c", f'set -e; source "$1" "$2"; {probe}', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
         env=environment(project_schema, **extra), text=True, capture_output=True, check=False,
     )
 
 
-def load_powershell(env_path: Path, project_schema: str | None = None, **extra: str) -> subprocess.CompletedProcess[str]:
-    script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; {POWERSHELL_PROBE}'
+def load_powershell(env_path: Path, project_schema: str | None = None, probe: str = POWERSHELL_PROBE, **extra: str) -> subprocess.CompletedProcess[str]:
+    script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; {probe}'
     return subprocess.run(
         [PWSH, "-NoProfile", "-Command", script],
         env=environment(project_schema, **extra), text=True, capture_output=True, check=False,
@@ -83,10 +87,11 @@ class OrdsProfileTests(unittest.TestCase):
         if PWSH:
             yield "powershell", load_powershell
 
-    def assert_loaded(self, env_path: Path, expected: str, project_schema: str | None = None, **extra: str) -> None:
+    def assert_loaded(self, env_path: Path, expected: str, project_schema: str | None = None, staging: bool = False, **extra: str) -> None:
         for shell, load in self.loaders():
             with self.subTest(shell=shell):
-                result = load(env_path, project_schema, **extra)
+                probe = {"bash": STAGING_BASH_PROBE, "powershell": STAGING_POWERSHELL_PROBE}[shell] if staging else {"bash": BASH_PROBE, "powershell": POWERSHELL_PROBE}[shell]
+                result = load(env_path, project_schema, probe=probe, **extra)
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                 self.assertEqual(expected, result.stdout.strip())
 
@@ -167,6 +172,32 @@ class OrdsProfileTests(unittest.TestCase):
     def test_a_schema_the_ords_profile_does_not_list_blanks_it_but_keeps_it_configured(self) -> None:
         env_path = write_env(self.directory, ORDS_ONE)
         self.assert_loaded(env_path, "true|false|DEMO,REST_API||||DEMO", project_schema="DEMO")
+
+    STAGING_ONE = "\nSTAGING_SQLCL_CONNECTION=stage-db\nSTAGING_EXPECTED_USER=STAGE_DEPLOYER\nSTAGING_SCHEMA=APP_STAGE\n"
+
+    def test_independent_ords_lists_keep_the_single_dev_schema_staging_mapping(self) -> None:
+        # One DEV (CODE) schema may map to a differently named staging schema. Several ORDS
+        # schemas are a separate, independent list and must not switch that mapping off.
+        for ords in (ORDS_ONE, ORDS_TWO):
+            with self.subTest(ords=ords.splitlines()[1]):
+                env_path = write_env(self.directory, ords + self.STAGING_ONE)
+                self.assert_loaded(env_path, "[stage-db][STAGE_DEPLOYER][APP_STAGE]", project_schema="DEMO", staging=True)
+
+    def test_an_ords_only_schema_gets_no_staging_mapping(self) -> None:
+        env_path = write_env(self.directory, ORDS_TWO + self.STAGING_ONE)
+        self.assert_loaded(env_path, "[][][]", project_schema="REST_ONE", staging=True)
+        self.assert_loaded(env_path, "[][][]", project_schema="REST_TWO", staging=True)
+
+    def test_several_code_schemas_still_switch_the_staging_mapping_off(self) -> None:
+        # The control: lists of the profiles that map DEV onto staging still count.
+        text = ("\nCODE_SCHEMA=DEMO,OTHER\nCODE_SQLCL_CONNECTION=docker-demo,other-conn\nCODE_EXPECTED_USER=DEMO,OTHER\n"
+                + ORDS_TWO + self.STAGING_ONE)
+        env_path = write_env(self.directory, text, drop=("CODE_SCHEMA", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER"))
+        self.assert_loaded(env_path, "[][][]", project_schema="DEMO", staging=True)
+
+    def test_ords_lists_still_make_the_project_multi_schema_for_commands_that_need_one_schema(self) -> None:
+        env_path = write_env(self.directory, ORDS_TWO + self.STAGING_ONE)
+        self.assert_loaded(env_path, "true|true|DEMO,REST_ONE,REST_TWO|REST_ONE,REST_TWO|dev-rest-one,dev-rest-two|REST_ONE,REST_TWO|DEMO")
 
     def test_unknown_schema_lists_the_ords_schemas_too(self) -> None:
         self.assert_refused(write_env(self.directory, ORDS_ONE), "DEMO,REST_API", project_schema="NOPE")

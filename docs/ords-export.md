@@ -121,7 +121,13 @@ as proof. Per schema, `scripts/ords_export.py` requires all of:
    `DEFINE_PARAMETER` and `ENABLE_OBJECT` calls equals the dictionary count of
    the same entity. `CREATE_ROLE` and `DEFINE_PRIVILEGE` may be fewer than the
    dictionary lists (the views also list the roles and privileges that ship
-   with ORDS, which ORDS does not export) but never more.
+   with ORDS, which ORDS does not export) but never more. Calls are counted in
+   the *code* of the script: comments and the contents of string literals (a
+   handler's stored source, `q'[...]'` quoting included) are ignored, so stored
+   text can neither inflate a count nor stand in for a missing definition. The
+   OAuth scan, the script-ending check and the scan of the SQLcl transcript read
+   the same way, and an export echoed to the screen is removed from the
+   transcript up to its real `COMMIT;` `END;`, not one inside handler source.
 6. A **second export**, taken after the first, is identical to it. Together with
    step 3 this catches metadata that changed while the export ran.
 

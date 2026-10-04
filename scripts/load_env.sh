@@ -400,10 +400,18 @@ project_env_check_aligned APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTE
 # The configured schemas, and whether any list names more than one.
 project_env_union=()
 project_env_multi=false
+# Whether the lists that map a DEV schema onto a staging or production schema
+# name several schemas. The independent ORDS list does not count: it makes the
+# project multi-schema for the commands that need a --schema, but it says
+# nothing about the one-DEV-schema mapping.
+project_env_multi_mapping=false
 for project_env_key in TABLES_SCHEMA CODE_SCHEMA APEX_PARSING_SCHEMA ORDS_SCHEMA; do
   project_env_items=()
   project_env_split_csv project_env_items "${!project_env_key}"
-  [ "${#project_env_items[@]}" -le 1 ] || project_env_multi=true
+  if [ "${#project_env_items[@]}" -gt 1 ]; then
+    project_env_multi=true
+    [ "$project_env_key" = ORDS_SCHEMA ] || project_env_multi_mapping=true
+  fi
   for project_env_item in "${project_env_items[@]}"; do
     project_env_known=false
     for project_env_union_item in ${project_env_union[@]+"${project_env_union[@]}"}; do
@@ -413,7 +421,7 @@ for project_env_key in TABLES_SCHEMA CODE_SCHEMA APEX_PARSING_SCHEMA ORDS_SCHEMA
   done
 done
 for project_env_key in STAGING_SCHEMA PROD_SCHEMA STAGING_SQLCL_CONNECTION PROD_SQLCL_CONNECTION; do
-  if [ "$(project_env_count "${!project_env_key:-}")" -gt 1 ]; then project_env_multi=true; fi
+  if [ "$(project_env_count "${!project_env_key:-}")" -gt 1 ]; then project_env_multi=true; project_env_multi_mapping=true; fi
 done
 # The project's one DEV schema (CODE_SCHEMA with exactly one entry), captured
 # before narrowing rewrites it. Only that schema may map to a differently named
@@ -438,7 +446,7 @@ project_env_narrow() {
   done
   if [ "$index" -ge 0 ]; then
     export "$schema_key=${schemas[$index]}" "$connection_key=${connections[$index]}" "$user_key=${users[$index]}"
-  elif [ "$mode" = lenient ] && [ "$project_env_multi" != true ] && [ "${#schemas[@]}" -eq 1 ] \
+  elif [ "$mode" = lenient ] && [ "$project_env_multi_mapping" != true ] && [ "${#schemas[@]}" -eq 1 ] \
       && [ -n "$project_env_dev_schema" ] && [ "$PROJECT_SCHEMA" = "$project_env_dev_schema" ]; then
     # A project with one DEV schema may name staging or production differently,
     # for that schema only.
@@ -492,7 +500,7 @@ unset project_env_user_value project_env_schema_key project_env_schema_seen
 unset project_env_first_line project_env_oracle_identifier_regex project_env_oracle_prefix_regex
 unset project_env_union project_env_multi project_env_items project_env_item
 unset project_env_known project_env_union_item project_env_selected_known project_env_count_items
-unset project_env_dev_schema project_env_ords_present project_env_ords_schemas project_env_ords_users project_env_ords_index
+unset project_env_dev_schema project_env_multi_mapping project_env_ords_present project_env_ords_schemas project_env_ords_users project_env_ords_index
 unset project_env_repo_root
 # project_env_fail and project_env_require_single stay defined for callers that
 # refuse an ambiguous schema; the parsing helpers do not.

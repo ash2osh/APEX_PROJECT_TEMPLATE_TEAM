@@ -246,9 +246,17 @@ Assert-ProjectEnvTriple -SchemaKey APEX_PARSING_SCHEMA -ConnectionKey APEX_SQLCL
 # The configured schemas, and whether any list names more than one.
 $projectEnvUnion = @()
 $projectEnvMulti = $false
+# Whether the lists that map a DEV schema onto a staging or production schema
+# name several schemas. The independent ORDS list does not count: it makes the
+# project multi-schema for the commands that need a --schema, but it says
+# nothing about the one-DEV-schema mapping.
+$projectEnvMultiMapping = $false
 foreach ($projectEnvKey in @("TABLES_SCHEMA", "CODE_SCHEMA", "APEX_PARSING_SCHEMA", "ORDS_SCHEMA")) {
   $projectEnvItems = @(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process")))
-  if ($projectEnvItems.Count -gt 1) { $projectEnvMulti = $true }
+  if ($projectEnvItems.Count -gt 1) {
+    $projectEnvMulti = $true
+    if ($projectEnvKey -ne "ORDS_SCHEMA") { $projectEnvMultiMapping = $true }
+  }
   foreach ($projectEnvItem in $projectEnvItems) {
     if ($projectEnvUnion -cnotcontains $projectEnvItem) { $projectEnvUnion += $projectEnvItem }
   }
@@ -256,6 +264,7 @@ foreach ($projectEnvKey in @("TABLES_SCHEMA", "CODE_SCHEMA", "APEX_PARSING_SCHEM
 foreach ($projectEnvKey in @("STAGING_SCHEMA", "PROD_SCHEMA", "STAGING_SQLCL_CONNECTION", "PROD_SQLCL_CONNECTION")) {
   if (@(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process"))).Count -gt 1) {
     $projectEnvMulti = $true
+    $projectEnvMultiMapping = $true
   }
 }
 # The project's one DEV schema (CODE_SCHEMA with exactly one entry), captured
@@ -279,7 +288,7 @@ function Set-ProjectEnvNarrow([string]$SchemaKey, [string]$ConnectionKey, [strin
     Set-Item -LiteralPath "Env:$SchemaKey" -Value $schemas[$index]
     Set-Item -LiteralPath "Env:$ConnectionKey" -Value $connections[$index]
     Set-Item -LiteralPath "Env:$UserKey" -Value $users[$index]
-  } elseif ($Mode -eq "lenient" -and -not $projectEnvMulti -and $schemas.Count -eq 1 -and
+  } elseif ($Mode -eq "lenient" -and -not $projectEnvMultiMapping -and $schemas.Count -eq 1 -and
       $projectEnvDevSchema -ne "" -and $env:PROJECT_SCHEMA -ceq $projectEnvDevSchema) {
     # A project with one DEV schema may name staging or production differently,
     # for that schema only.
@@ -327,7 +336,7 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvUserValue, projectEnvSchemaSeen, projectEnvSchemaValue,
   projectEnvRootRelative, projectEnvUnion, projectEnvMulti, projectEnvDevSchema, projectEnvItems,
   projectEnvItem, projectEnvConnectionCount, projectEnvHead, projectEnvStream,
-  projectEnvOrdsKeys, projectEnvOrdsPresent, projectEnvOrdsSchemas, projectEnvOrdsUsers, projectEnvOrdsIndex `
+  projectEnvMultiMapping, projectEnvOrdsKeys, projectEnvOrdsPresent, projectEnvOrdsSchemas, projectEnvOrdsUsers, projectEnvOrdsIndex `
   -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,
   Function:Assert-ProjectEnvList, Function:Assert-ProjectEnvTriple,

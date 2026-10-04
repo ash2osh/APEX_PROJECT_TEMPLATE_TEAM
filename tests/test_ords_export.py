@@ -289,6 +289,126 @@ class OrdsExportVerificationTests(unittest.TestCase):
         self.assertTrue(self.fixture.second.exists())
 
 
+# Application source a handler may legitimately store in its string literal.
+STORED_SOURCE = "\n".join([
+    "x",
+    "ORDS.DEFINE_MODULE(",
+    "  ORDS.DEFINE_HANDLER(",
+    "ORDS_METADATA.OAUTH.IMPORT_CLIENT(",
+    "p_client_id => ''x''",
+    "COMMIT;",
+    "END;",
+    "-- ORA-00942: a stored comment, not an error",
+    "it''s a quoted word",
+    "/* ORDS.DEFINE_TEMPLATE( */",
+])
+
+
+class OrdsExportLiteralAwareTests(unittest.TestCase):
+    """Counts, OAuth detection and the transcript scan read code, never stored handler source."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.fixture = Fixture(Path(self.temporary.name))
+
+    def assert_refused(self, fragment: str) -> None:
+        with self.assertRaises(OrdsExportError) as raised:
+            self.fixture.verify()
+        self.assertIn(fragment, str(raised.exception))
+
+    def test_stored_source_that_looks_like_calls_or_oauth_is_neither_counted_nor_refused(self) -> None:
+        text = export_text(handler_source=STORED_SOURCE)
+        self.fixture.write(transcript(), text, text)
+        self.fixture.verify()
+        self.assertIn("ORDS_METADATA.OAUTH.IMPORT_CLIENT(", self.fixture.export.read_text(encoding="utf-8"), "the source is kept as exported")
+
+    def test_a_missing_real_module_definition_is_not_made_up_by_stored_source(self) -> None:
+        # The dictionary lists one module; the only DEFINE_MODULE text left is inside a handler's source.
+        text = export_text(counts={"modules": 0}, handler_source="x\nORDS.DEFINE_MODULE(\n")
+        self.assertIn("\nORDS.DEFINE_MODULE(\n", text)
+        self.fixture.write(transcript(), text, text)
+        self.assert_refused("the dictionary lists 1 modules but the export has 0 DEFINE_MODULE")
+
+    def test_a_real_call_commented_out_is_not_counted(self) -> None:
+        text = export_text().replace("  ORDS.DEFINE_MODULE(", "  -- ORDS.DEFINE_MODULE(", 1)
+        self.fixture.write(transcript(), text, text)
+        self.assert_refused("DEFINE_MODULE")
+        text = export_text().replace("  ORDS.DEFINE_MODULE(", "  /*\n  ORDS.DEFINE_MODULE(\n  */", 1)
+        self.fixture.write(transcript(), text, text)
+        self.assert_refused("DEFINE_MODULE")
+
+    def test_comments_that_look_like_calls_do_not_inflate_the_counts(self) -> None:
+        text = export_text().replace(
+            "  ORDS.FINALIZE_IMPORT(", "  -- ORDS.DEFINE_MODULE(\n  /* ORDS.DEFINE_TEMPLATE(\n  ORDS.DEFINE_HANDLER( */\n  ORDS.FINALIZE_IMPORT(", 1
+        )
+        self.fixture.write(transcript(), text, text)
+        self.fixture.verify()
+
+    def test_a_real_oauth_call_is_still_refused_next_to_stored_source(self) -> None:
+        text = export_text(handler_source=STORED_SOURCE).replace("COMMIT;\nEXCEPTION", "  ORDS.CREATE_CLIENT(p_name => 'c');\nCOMMIT;\nEXCEPTION", 1)
+        self.fixture.write(transcript(), text, text)
+        self.assert_refused("OAuth client or secret material")
+
+    def test_a_truncation_inside_a_literal_cannot_look_complete(self) -> None:
+        text = export_text(handler_source="x'' COMMIT; END;")
+        cut = text.index("COMMIT; END;") + len("COMMIT; END;")
+        self.fixture.write(transcript(), text[:cut], text)
+        self.assert_refused("truncated")
+
+    def test_an_echoed_export_with_internal_commit_end_blocks_and_error_like_comments_is_ignored(self) -> None:
+        text = export_text(handler_source=STORED_SOURCE)
+        self.fixture.write(transcript(extra=text), text, text)
+        self.fixture.verify()
+
+    def test_a_real_sqlcl_error_after_an_echoed_export_is_still_refused(self) -> None:
+        text = export_text(handler_source=STORED_SOURCE)
+        self.fixture.write(transcript(extra=text + "\nORA-00942: table or view does not exist"), text, text)
+        self.assert_refused("SQLcl reported an error")
+
+    def test_an_echoed_export_without_a_real_end_is_not_stripped(self) -> None:
+        # No COMMIT; END; outside a literal: the scan stays strict instead of guessing.
+        text = export_text(handler_source=STORED_SOURCE)
+        truncated = text[: text.index("  ORDS.FINALIZE_IMPORT(")]
+        self.fixture.write(transcript(extra=truncated), text, text)
+        self.assert_refused("SQLcl reported an error")
+
+
+class MaskSqlTests(unittest.TestCase):
+    def test_comments_and_literal_contents_are_blanked_and_positions_kept(self) -> None:
+        text = "a -- note 'x'\nb 'it''s' /* c\nd */ e q'[it's ]' f \"q--r\" g\n"
+        masked = ords_export.mask_sql(text)
+        self.assertEqual(len(text), len(masked))
+        self.assertEqual(text.count("\n"), masked.count("\n"))
+        self.assertEqual(["a", "b", "e", "f", "g"], masked.split())
+
+    def test_q_quote_delimiters(self) -> None:
+        for quoted in ("q'[a ' b]'", "q'{a ' b}'", "q'(a ' b)'", "q'<a ' b>'", "q'#a ' b#'", "Q'!a ' b!'"):
+            with self.subTest(quoted=quoted):
+                self.assertEqual(["x", "y"], ords_export.mask_sql(f"x {quoted} y").split())
+
+    def test_an_identifier_ending_in_q_is_not_an_alternative_quote(self) -> None:
+        self.assertEqual("seq 'abc'".replace("'abc'", "     "), ords_export.mask_sql("seq 'abc'"))
+
+    def test_an_unterminated_literal_or_comment_is_blanked_to_the_end(self) -> None:
+        for text in ("a 'open COMMIT; END;", "a /* open COMMIT; END;", 'a "open COMMIT; END;'):
+            with self.subTest(text=text):
+                self.assertEqual(["a"], ords_export.mask_sql(text).split())
+
+    def test_strip_echoed_export_finds_the_end_that_is_code(self) -> None:
+        body = export_text(handler_source="x\nCOMMIT;\nEND;\nTAILMARK")
+        stripped = ords_export.strip_echoed_export(f"before\n{body}\nafter\n")
+        self.assertEqual(["before", "after"], stripped.split(), "everything of the export goes, including text after an internal COMMIT; END;")
+
+    def test_strip_echoed_export_removes_every_echoed_export_and_keeps_the_rest(self) -> None:
+        body = export_text(handler_source="x\nCOMMIT;\nEND;\nTAILMARK")
+        stripped = ords_export.strip_echoed_export(f"one\n{body}\ntwo\n{body}\nthree\n")
+        self.assertEqual(["one", "two", "three"], stripped.split())
+
+    def test_strip_echoed_export_leaves_text_without_a_code_level_end_alone(self) -> None:
+        text = "before\n-- Generated by ORDS\nBEGIN\n  ORDS.DEFINE_HANDLER(p_source => 'COMMIT; END;');\nafter\n"
+        self.assertEqual(text, ords_export.strip_echoed_export(text))
+
 class OrdsExportSupportTests(unittest.TestCase):
     def test_normalize_drops_only_the_header_date_and_blank_edges(self) -> None:
         text = f"\n\n-- Generated by X\n{DATE_LINE}\n--\n\nBEGIN\n  -- Schema: A  Date: keep\nCOMMIT;\n\nEND;\n\n\n"
