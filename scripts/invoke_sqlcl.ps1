@@ -245,3 +245,38 @@ function Get-AppParsingSchema {
   }
   throw $problem
 }
+
+# Run an ords_export.py subcommand with the Python that Resolve-TeamPython finds
+# and return its exit status and what it printed. Python 3.10 or newer is only
+# needed for the ORDS export, so projects without an ORDS profile never reach it.
+function Invoke-OrdsExportHelper {
+  param([Parameter(Mandatory = $true)][string[]] $HelperArguments)
+  . (Join-Path $PSScriptRoot "resolve_python.ps1")
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw "Python 3.10 or newer is required for the ORDS export (python3, python or py -3)" }
+  # Windows PowerShell 5.1 turns native stderr text into a terminating error under "Stop".
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $text = (& $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "ords_export.py") @HelperArguments 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $status = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+  return [pscustomobject]@{ Status = $status; Text = $text }
+}
+
+# Refuse an SQLcl release that cannot run the ORDS export (see ords_export.py).
+# `sql -V` connects to nothing. The caller supplies a newly-created work directory.
+function Assert-SqlclOrdsVersion {
+  param([Parameter(Mandatory = $true)][string] $WorkDirectory)
+  [System.IO.Directory]::CreateDirectory($WorkDirectory) | Out-Null
+  $transcript = Join-Path $WorkDirectory "sqlcl-version.txt"
+  $exit = Invoke-Sqlcl -WorkingDirectory $WorkDirectory -StdInFile (Join-Path $WorkDirectory ".sqlcl-stdin") `
+    -TranscriptFile $transcript -Arguments @("-V")
+  if ($exit -ne 0) {
+    throw "ORDS export unavailable: could not run ``sql -V`` to read the SQLcl release"
+  }
+  $result = Invoke-OrdsExportHelper -HelperArguments @("sqlcl-version", $transcript)
+  if ($result.Status -ne 0) { throw $result.Text }
+}

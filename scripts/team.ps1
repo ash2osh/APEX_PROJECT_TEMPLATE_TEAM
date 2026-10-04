@@ -31,7 +31,7 @@ function Show-Usage {
 Usage: scripts/team.ps1 <command> [arguments]
 
 Commands:
-  doctor                                      Validate .env and the DEV SQLcl identity
+  doctor                                      Validate .env and the DEV SQLcl identities (ORDS too, when configured)
   export <app_id>                             Export one numeric APEX app from DEV
   publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
   check-conflicts <folder> [...] (--env <env>|--local)
@@ -41,7 +41,8 @@ Commands:
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
-  backup-db                                   Refresh the table and code mirrors
+  backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
+  backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
   upgrade-template [--source <url|path>] [--ref <ref>] [--dry-run]
@@ -197,7 +198,7 @@ try {
       . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
       $scratchPath = Join-Path ((Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path) "scratch"
       [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
-      function Invoke-DoctorOne([string]$Connection, [string]$ExpectedUser, [string]$SchemaName) {
+      function Invoke-DoctorOne([string]$Connection, [string]$ExpectedUser, [string]$SchemaName, [string]$DoctorScript = "doctor.sql") {
         $sqlclWorkDir = Join-Path $scratchPath ("sqlcl-doctor-" + [Guid]::NewGuid().ToString("N"))
         [System.IO.Directory]::CreateDirectory($sqlclWorkDir) | Out-Null
         $stdinFile = Join-Path $sqlclWorkDir ".sqlcl-stdin"
@@ -207,7 +208,7 @@ try {
           $sqlclExit = Invoke-Sqlcl -WorkingDirectory $sqlclWorkDir -StdInFile $stdinFile `
             -TranscriptFile $transcriptFile -Arguments @(
             "-S", "-noupdates", "-name", $Connection,
-            "@$(Join-Path $PSScriptRoot 'doctor.sql')",
+            "@$(Join-Path $PSScriptRoot $DoctorScript)",
             $SchemaName, $env:DB_ENVIRONMENT, $ExpectedUser
           )
           $output = [System.IO.File]::ReadAllText($transcriptFile)
@@ -241,11 +242,27 @@ try {
       $doctorSeen = @{}
       $doctorTotal = 0
       $doctorFailed = 0
-      foreach ($doctorProfile in @("apex", "tables", "code")) {
+      # The ORDS export needs a newer SQLcl than nothing else does: say so once,
+      # before any check, instead of per schema. `sql -V` connects to nothing.
+      $doctorOrdsSqlclOk = $true
+      if (-not [string]::IsNullOrEmpty($env:ORDS_SCHEMA)) {
+        $versionDirectory = Join-Path $scratchPath ("sqlcl-doctor-" + [Guid]::NewGuid().ToString("N"))
+        try {
+          Assert-SqlclOrdsVersion -WorkDirectory $versionDirectory
+        } catch {
+          [Console]::Error.WriteLine($_.Exception.Message)
+          $doctorOrdsSqlclOk = $false
+        } finally {
+          Remove-Item -LiteralPath $versionDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+      }
+      foreach ($doctorProfile in @("apex", "tables", "code", "ords")) {
+        $doctorScript = "doctor.sql"
         switch ($doctorProfile) {
           "apex"   { $doctorSchemas = $env:APEX_PARSING_SCHEMA; $doctorConnections = $env:APEX_SQLCL_CONNECTION; $doctorUsers = $env:APEX_EXPECTED_USER }
           "tables" { $doctorSchemas = $env:TABLES_SCHEMA; $doctorConnections = $env:TABLES_SQLCL_CONNECTION; $doctorUsers = $env:TABLES_EXPECTED_USER }
           "code"   { $doctorSchemas = $env:CODE_SCHEMA; $doctorConnections = $env:CODE_SQLCL_CONNECTION; $doctorUsers = $env:CODE_EXPECTED_USER }
+          "ords"   { $doctorSchemas = $env:ORDS_SCHEMA; $doctorConnections = $env:ORDS_SQLCL_CONNECTION; $doctorUsers = $env:ORDS_EXPECTED_USER; $doctorScript = "doctor_ords.sql" }
         }
         if ([string]::IsNullOrEmpty($doctorSchemas)) { continue }
         $schemaList = @($doctorSchemas.Split(","))
@@ -253,6 +270,8 @@ try {
         $userList = @($doctorUsers.Split(","))
         for ($doctorIndex = 0; $doctorIndex -lt $schemaList.Count; $doctorIndex++) {
           $doctorKey = "$($connectionList[$doctorIndex])|$($userList[$doctorIndex])|$($schemaList[$doctorIndex])"
+          # The ORDS check is stricter, so another profile's check never stands in for it.
+          if ($doctorProfile -eq "ords") { $doctorKey = "ords|$doctorKey" }
           if ($doctorSeen.ContainsKey($doctorKey)) { continue }
           $doctorSeen[$doctorKey] = $true
           $doctorTotal++
@@ -260,7 +279,8 @@ try {
           if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
             Write-Output "Doctor: schema $($schemaList[$doctorIndex]) via connection $($connectionList[$doctorIndex]) as $($userList[$doctorIndex])"
           }
-          if (-not (Invoke-DoctorOne $connectionList[$doctorIndex] $userList[$doctorIndex] $schemaList[$doctorIndex])) { $doctorFailed++ }
+          if ($doctorProfile -eq "ords" -and -not $doctorOrdsSqlclOk) { $doctorFailed++; continue }
+          if (-not (Invoke-DoctorOne $connectionList[$doctorIndex] $userList[$doctorIndex] $schemaList[$doctorIndex] $doctorScript)) { $doctorFailed++ }
         }
       }
       if ($doctorTotal -eq 0) { Fail "no configured profile lists schema $($env:PROJECT_SCHEMA)" }
@@ -303,6 +323,11 @@ try {
     "backup-db" {
       if ($Arguments.Count -ne 0) { Fail "backup-db does not accept arguments" }
       & (Join-Path $PSScriptRoot "backup_db.ps1")
+      if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
+    }
+    "backup-ords" {
+      if ($Arguments.Count -ne 0) { Fail "backup-ords does not accept arguments" }
+      & (Join-Path $PSScriptRoot "backup_db.ps1") -OrdsOnly
       if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
     }
     "deploy" {

@@ -156,6 +156,22 @@ so on). A type with no objects has no folder. It holds structure only, never dat
 **If it goes wrong:** `refusing to back up over dirty mirror: database/DEMO`
 means you have uncommitted changes there. Commit or discard them first.
 
+### Optional: keep the ORDS (REST) definition too
+
+**When:** the schema serves REST services through ORDS and you want modules,
+handlers, roles and privileges reviewed in pull requests. Add all three keys to
+`.env` (the connection must log in as the REST schema owner), then:
+
+```bash
+scripts/team.sh backup-ords
+git diff database/REST_API/ords/schema.sql
+```
+
+**You should see** `ORDS export verified for REST_API: modules=..., handlers=...`
+and a changed `database/REST_API/ords/schema.sql` only when the REST definition
+changed. It never changes ORDS and never exports OAuth clients or secrets. If it
+refuses, nothing was installed: [ords-export.md](ords-export.md#messages) explains each message.
+
 ## 6. Work with more than one schema
 
 **When:** several schemas share one APEX workspace and each has its own tables

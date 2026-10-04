@@ -5,6 +5,7 @@ project_env_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ENV_FILE="${1:-${PROJECT_ENV_FILE:-$project_env_repo_root/.env}}"
 unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER PROD_SCHEMA
 unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
+unset ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER
 unset INSTALL_UC_APX UC_APX_SKILLS_AGENT
 
 # README.md documents a relative PROJECT_ENV_FILE. Resolve it against the
@@ -110,7 +111,8 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
     APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
     INSTALL_UC_APX|UC_APX_SKILLS_AGENT|\
     PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|PROD_SCHEMA|\
-    STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER|STAGING_SCHEMA) ;;
+    STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER|STAGING_SCHEMA|\
+    ORDS_SCHEMA|ORDS_SQLCL_CONNECTION|ORDS_EXPECTED_USER) ;;
     *)
       project_env_fail "unsupported setting in $PROJECT_ENV_FILE: $project_env_key"
       return 1 2>/dev/null || exit 1
@@ -283,6 +285,51 @@ for project_env_prefix in PROD STAGING; do
     fi
   fi
 done
+# The optional ORDS metadata profile. All three keys omitted means ORDS is
+# disabled and an existing project behaves exactly as before; any one of them
+# without the others is a configuration error, never a silent partial setup.
+project_env_ords_present=0
+for project_env_key in ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER; do
+  for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+    [ "$project_env_seen_key" = "$project_env_key" ] && project_env_ords_present=$((project_env_ords_present + 1))
+  done
+done
+if [ "$project_env_ords_present" -ne 0 ] && [ "$project_env_ords_present" -ne 3 ]; then
+  project_env_fail "ORDS_SCHEMA, ORDS_SQLCL_CONNECTION and ORDS_EXPECTED_USER must be configured together (all three, or none to leave ORDS disabled)"
+  return 1 2>/dev/null || exit 1
+fi
+PROJECT_ORDS_CONFIGURED=false
+if [ "$project_env_ords_present" -eq 3 ]; then
+  for project_env_key in ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER; do
+    project_env_value="${!project_env_key:-}"
+    if [ -z "${project_env_value//[[:space:]]/}" ]; then
+      project_env_fail "$project_env_key must not be empty; remove all three ORDS_* settings to leave ORDS disabled"
+      return 1 2>/dev/null || exit 1
+    fi
+  done
+  project_env_check_list ORDS_SCHEMA identifier || { return 1 2>/dev/null || exit 1; }
+  project_env_check_list ORDS_EXPECTED_USER identifier || { return 1 2>/dev/null || exit 1; }
+  project_env_check_list ORDS_SQLCL_CONNECTION alias || { return 1 2>/dev/null || exit 1; }
+  project_env_check_aligned ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER || { return 1 2>/dev/null || exit 1; }
+  # ORDS authorizes the actual login user, so the session user must be the REST
+  # schema owner itself: a profile whose expected user differs can never succeed.
+  project_env_ords_schemas=()
+  project_env_ords_users=()
+  project_env_split_csv project_env_ords_schemas "$ORDS_SCHEMA"
+  project_env_split_csv project_env_ords_users "$ORDS_EXPECTED_USER"
+  for ((project_env_ords_index = 0; project_env_ords_index < ${#project_env_ords_schemas[@]}; project_env_ords_index++)); do
+    if [ "${project_env_ords_schemas[$project_env_ords_index]}" != "${project_env_ords_users[$project_env_ords_index]}" ]; then
+      project_env_fail "ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry (found ${project_env_ords_users[$project_env_ords_index]} for ${project_env_ords_schemas[$project_env_ords_index]}): the ORDS export logs in as the REST schema owner"
+      return 1 2>/dev/null || exit 1
+    fi
+  done
+  PROJECT_ORDS_CONFIGURED=true
+else
+  ORDS_SCHEMA=""
+  ORDS_SQLCL_CONNECTION=""
+  ORDS_EXPECTED_USER=""
+fi
+export ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER PROJECT_ORDS_CONFIGURED
 project_env_match "$APEX_APP_ID" '^[1-9][0-9]{0,17}(,[1-9][0-9]{0,17})*$' || {
   project_env_fail "APEX_APP_ID must be a comma-separated list of positive integers of at most 18 digits, without spaces"
   return 1 2>/dev/null || exit 1
@@ -353,7 +400,7 @@ project_env_check_aligned APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTE
 # The configured schemas, and whether any list names more than one.
 project_env_union=()
 project_env_multi=false
-for project_env_key in TABLES_SCHEMA CODE_SCHEMA APEX_PARSING_SCHEMA; do
+for project_env_key in TABLES_SCHEMA CODE_SCHEMA APEX_PARSING_SCHEMA ORDS_SCHEMA; do
   project_env_items=()
   project_env_split_csv project_env_items "${!project_env_key}"
   [ "${#project_env_items[@]}" -le 1 ] || project_env_multi=true
@@ -419,6 +466,7 @@ if [ -n "${PROJECT_SCHEMA:-}" ]; then
   project_env_narrow TABLES_SCHEMA TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER strict
   project_env_narrow CODE_SCHEMA CODE_SQLCL_CONNECTION CODE_EXPECTED_USER strict
   project_env_narrow APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER strict
+  project_env_narrow ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER strict
   for project_env_prefix in STAGING PROD; do
     project_env_schema_key="${project_env_prefix}_SCHEMA"
     if [ -n "${!project_env_schema_key:-}" ]; then
@@ -444,7 +492,7 @@ unset project_env_user_value project_env_schema_key project_env_schema_seen
 unset project_env_first_line project_env_oracle_identifier_regex project_env_oracle_prefix_regex
 unset project_env_union project_env_multi project_env_items project_env_item
 unset project_env_known project_env_union_item project_env_selected_known project_env_count_items
-unset project_env_dev_schema
+unset project_env_dev_schema project_env_ords_present project_env_ords_schemas project_env_ords_users project_env_ords_index
 unset project_env_repo_root
 # project_env_fail and project_env_require_single stay defined for callers that
 # refuse an ambiguous schema; the parsing helpers do not.

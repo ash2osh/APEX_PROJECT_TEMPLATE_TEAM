@@ -76,7 +76,10 @@ if ([System.IO.Path]::IsPathRooted($Destination)) {
 }
 
 $destinationParts = $Destination -split '[\\/]'
+# database/<SCHEMA> is a whole schema mirror; database/<SCHEMA>/ords is the ORDS
+# export alone, so refreshing it leaves the table and code mirrors in place.
 $approvedDestination = ($destinationParts[0] -eq "database" -and $destinationParts.Count -eq 2) -or
+  ($destinationParts[0] -eq "database" -and $destinationParts.Count -eq 3 -and $destinationParts[2] -ceq "ords") -or
   ($destinationParts[0] -eq "apps" -and $destinationParts.Count -eq 3)
 if (-not $approvedDestination -or ($destinationParts | Where-Object { $_ -in @("", ".", "..") })) {
   throw "destination is not an approved generated mirror: $Destination"
@@ -137,6 +140,7 @@ if (-not $destinationPath.StartsWith($repoRoot + [System.IO.Path]::DirectorySepa
 $canonicalRelativeDestination = $destinationPath.Substring($repoRoot.Length).TrimStart([char[]]@('/', '\')) -replace '\\', '/'
 $canonicalDestinationParts = $canonicalRelativeDestination -split '[\\/]'
 $canonicalApproved = ($canonicalDestinationParts[0] -eq "database" -and $canonicalDestinationParts.Count -eq 2) -or
+  ($canonicalDestinationParts[0] -eq "database" -and $canonicalDestinationParts.Count -eq 3 -and $canonicalDestinationParts[2] -ceq "ords") -or
   ($canonicalDestinationParts[0] -eq "apps" -and $canonicalDestinationParts.Count -eq 3)
 if (-not $canonicalApproved) {
   throw "resolved destination is not an approved generated mirror: $canonicalRelativeDestination"
@@ -251,24 +255,47 @@ function Enter-MirrorLock([string]$LockPath, [string]$CanonicalRelative) {
   throw "could not acquire the mirror lock for $CanonicalRelative"
 }
 
+# One call must not name a mirror and a directory inside it (or one mirror
+# twice): the moves would undo each other.
+for ($overlapA = 0; $overlapA -lt $validated.Count; $overlapA++) {
+  for ($overlapB = 0; $overlapB -lt $validated.Count; $overlapB++) {
+    if ($overlapA -eq $overlapB) { continue }
+    if (($validated[$overlapB].CanonicalRelative + "/").StartsWith($validated[$overlapA].CanonicalRelative + "/", [System.StringComparison]::Ordinal)) {
+      throw "mirror destinations overlap: $($validated[$overlapB].CanonicalRelative) is inside $($validated[$overlapA].CanonicalRelative)"
+    }
+  }
+}
+
+# Each destination is locked, and so is the schema mirror around a
+# database/<SCHEMA>/ords destination: a whole-schema replacement of that mirror
+# must not run while only its ORDS folder is being replaced.
+$lockRelatives = @()
+foreach ($pair in $validated) {
+  $lockRelatives += $pair.CanonicalRelative
+  if ($pair.CanonicalRelative -cmatch '^database/[^/]+/ords$') {
+    $lockRelatives += $pair.CanonicalRelative.Substring(0, $pair.CanonicalRelative.Length - "/ords".Length)
+  }
+}
+
 $lockRoot = Join-Path $scratchRoot ".mirror-locks"
 [System.IO.Directory]::CreateDirectory($lockRoot) | Out-Null
 $lockHandles = @()
+$lockPaths = @()
 $installed = @()
 $movedDestination = @()
 try {
-  foreach ($pair in $validated) {
+  foreach ($lockRelative in $lockRelatives) {
     # SHA256::HashData and Convert::ToHexString are .NET 5+, so they are
     # missing on Windows PowerShell 5.1. Create()/ComputeHash and BitConverter
     # work on both.
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {
-      $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($pair.CanonicalRelative))
+      $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($lockRelative))
     } finally { $sha256.Dispose() }
     $lockName = ([System.BitConverter]::ToString($hashBytes) -replace '-', '').Substring(0, 16).ToLowerInvariant() + ".lock"
     $lockPath = Join-Path $lockRoot $lockName
-    $lockHandle = Enter-MirrorLock -LockPath $lockPath -CanonicalRelative $pair.CanonicalRelative
-    $pair | Add-Member -NotePropertyName LockPath -NotePropertyValue $lockPath
+    $lockHandle = Enter-MirrorLock -LockPath $lockPath -CanonicalRelative $lockRelative
+    $lockPaths += $lockPath
     $lockHandles += $lockHandle
   }
 
@@ -323,9 +350,9 @@ try {
   throw "mirror replacement failed and was rolled back. Original error: $originalErrorMessage"
 } finally {
   foreach ($handle in $lockHandles) { if ($null -ne $handle) { $handle.Dispose() } }
-  foreach ($pair in $validated) {
-    if ($pair.PSObject.Properties.Name -contains 'LockPath' -and (Test-Path -LiteralPath $pair.LockPath -PathType Leaf)) {
-      Remove-Item -LiteralPath $pair.LockPath -Force -ErrorAction SilentlyContinue
+  foreach ($lockPath in $lockPaths) {
+    if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+      Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
     }
   }
 }

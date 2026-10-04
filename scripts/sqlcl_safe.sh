@@ -123,3 +123,23 @@ sqlcl_app_parsing_schema() {
   fi
   printf '%s\n' "$owner"
 }
+
+# Refuse an SQLcl release that cannot run the ORDS export (see ords_export.py).
+# The caller supplies a newly-created work directory (never application source)
+# and has REPO_ROOT set. Runs `sql -V`, which connects to nothing. Returns 2,
+# the status of every refusal, after naming the problem on stderr.
+sqlcl_require_ords_version() {
+  [ "$#" -eq 1 ] || {
+    printf 'usage: sqlcl_require_ords_version <work-dir>\n' >&2
+    return 2
+  }
+  local work_dir="$1" stdin_file="$1/.sqlcl-stdin" output_file="$1/sqlcl-version.txt"
+  mkdir -p -- "$work_dir"
+  : > "$stdin_file"
+  if ! invoke_sqlcl_safe "$work_dir" -V < "$stdin_file" > "$output_file" 2>&1; then
+    cat "$output_file" >&2
+    printf 'ORDS export unavailable: could not run `sql -V` to read the SQLcl release\n' >&2
+    return 2
+  fi
+  python3 "$REPO_ROOT/scripts/ords_export.py" sqlcl-version "$output_file" > /dev/null || return 2
+}

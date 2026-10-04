@@ -42,7 +42,7 @@ What each folder is for:
 | Folder or file | What it holds | Who changes it |
 | --- | --- | --- |
 | `apps/<SCHEMA>/<app-id>/` | One APEX app as APEXlang (`.apx`) files | `export` writes it; you edit it and `publish` it |
-| `database/<SCHEMA>/` | A read-only copy of your tables, views, code and synonyms | `backup-db` writes it; never edit by hand |
+| `database/<SCHEMA>/` | A read-only copy of your tables, views, code and synonyms (and, when configured, `ords/schema.sql`, the ORDS REST definition) | `backup-db` (and `backup-ords`) writes it; never edit by hand |
 | `migrations/` | Dated SQL changes you write, one folder each | you |
 | `app_context/` | Notes about each app, for AI assistants | you |
 | `.env` | Which connections and schemas to use (no passwords) | you; it is not committed |
@@ -369,6 +369,7 @@ revision folder instead (`...-r002`). Commit the folder.
 | copy a live app into Git | `scripts/team.sh export <app-id>` |
 | push my edited files to the live app | `scripts/team.sh publish <app-id> --env dev` |
 | refresh the read-only database copy | `scripts/team.sh backup-db` |
+| export a schema's ORDS (REST) definition (optional, see [ords-export.md](ords-export.md)) | `scripts/team.sh backup-ords` |
 | test a SQL change without a database | `scripts/team.sh check-conflicts <folder> --local` |
 | test a SQL change against the database | `scripts/team.sh check-conflicts <folder> --env dev` |
 | apply a SQL change | `scripts/team.sh migrate <folder> --env dev` |

@@ -32,7 +32,7 @@ separate file changes only and do not isolate a shared APEX application.
 | Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production. |
 | Several schemas per workspace | Comma-separated lists in `.env` and `--schema`; apps, database copies and migrations are kept per schema. |
 | Staging and production | Per-app descriptors, an explicit `[y/N]` confirmation, and `--manual` to print a runbook for a DBA. |
-| Read-only database copy | `backup-db` mirrors tables, views, packages, procedures, functions, triggers and synonyms (structure only, never data). |
+| Read-only database copy | `backup-db` mirrors tables, views, packages, procedures, functions, triggers and synonyms (structure only, never data). `backup-ords` adds an optional, read-only export of a schema's ORDS (REST) definition. |
 | Safety built in | Every connection is identity-checked, production-looking names are caught, production is read-only, file installs are all-or-nothing, and your uncommitted work is never overwritten. |
 | Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
 | Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
@@ -145,6 +145,45 @@ up there:
 `team.ps1` accepts a migration folder as `migrations\2026-10-02_name-r001`,
 `.\migrations\2026-10-02_name-r001\` or an absolute path inside the checkout.
 
+## ORDS metadata (optional)
+
+`backup-ords` keeps a schema's REST modules, templates, handlers, parameters,
+roles and privileges in Git as `database/<SCHEMA>/ords/schema.sql`. It is off
+until all three `ORDS_*` keys are set, so existing projects change nothing:
+
+```dotenv
+ORDS_SCHEMA=REST_API
+ORDS_SQLCL_CONNECTION=dev-rest
+ORDS_EXPECTED_USER=REST_API
+```
+
+```bash
+scripts/team.sh backup-ords                      # every ORDS schema
+scripts/team.sh backup-ords --schema REST_API    # one
+scripts/team.sh backup-db                        # tables, code and ORDS together
+```
+
+The saved connection must log in **as the REST schema owner**: the session user
+must equal `ORDS_SCHEMA` and `ORDS_EXPECTED_USER` (and `.env` loading refuses
+two that differ). `ALTER SESSION SET
+CURRENT_SCHEMA` does not count, because ORDS authorizes the actual login user.
+It needs SQLcl 26.1 or newer and an ORDS release with the schema export API
+(Oracle documents it from ORDS 25.1).
+
+It only exports. It never enables REST, imports the generated SQL, changes ORDS
+configuration, creates metadata, grants privileges or commits. OAuth clients,
+client secrets, tokens and credentials are never exported: a schema that owns an
+OAuth client is refused, because SQLcl's schema export always includes them.
+Application data is not exported either.
+
+An export is installed only after it passes checks that do not rely on SQLcl's
+exit status: identity, completion, a before-and-after inventory from the ORDS
+dictionary views, the call counts in the script, and a second identical export.
+A verified empty schema is a valid result; an unavailable inventory is a failure.
+The previous mirror is kept on any failure or interruption, and `backup-ords`
+leaves the table and code mirrors alone. Details, every message and what has not
+been verified: [docs/ords-export.md](docs/ords-export.md).
+
 ## Application files and deployment descriptors
 
 Use the numeric APEX application ID as the stable source directory key. The
@@ -200,9 +239,10 @@ Pass `--schema <NAME>` to narrow a command to one schema. `doctor` and
 
 | Command | Multi-schema behavior |
 | --- | --- |
-| `doctor` | Checks every distinct `(connection, expected user, schema)` across the three profiles with one read-only SQLcl identity check each. It reports each schema and fails if any check fails. `--schema` narrows it. |
+| `doctor` | Checks every distinct `(connection, expected user, schema)` across the three profiles, and every ORDS target when that optional profile exists, with one read-only SQLcl identity check each. It reports each schema and fails if any check fails. `--schema` narrows it. |
 | `export <id>` | Reads the app's parsing schema from `APEX_APPLICATIONS` using the first `APEX_SQLCL_CONNECTION` entry, requires that schema in `APEX_PARSING_SCHEMA`, then reconnects with that schema's own connection and writes `apps/<SCHEMA>/<id>/`. `team.sh export` takes one ID. `scripts/export_apps.sh` with no argument resolves each configured app ID separately and installs all exports in one all-or-nothing mirror replacement. |
-| `backup-db` | Runs the tables scope for each tables schema and the code scope for each code schema. Each has a staging directory, manifest count check, and dirty-mirror check. Nothing is installed until every schema verifies; one mirror replacement installs them all. `--schema` narrows the run. |
+| `backup-db` | Runs the tables scope for each tables schema and the code scope for each code schema, plus the ORDS scope for each ORDS schema when the optional ORDS profile exists. Each has a staging directory, a completeness check, and a dirty-mirror check. Nothing is installed until every schema verifies; one mirror replacement installs them all. `--schema` narrows the run. |
+| `backup-ords` | Exports each ORDS schema (`ORDS_SCHEMA`, optional) to `database/<SCHEMA>/ords/schema.sql` and replaces only that folder. `--schema` narrows the run; an ORDS-only schema is selectable. |
 | `publish <id>` | Requires the app folder, descriptor, and live app parsing schema to agree and be listed, then uses that schema's connection. The drift guard, version stamp, and byte-equality verification remain unchanged. |
 | `deploy <id> --env staging\|prod` | The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection. |
 | `migrate`, `check-conflicts` | Uses `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/`; the folder selects the target entry. Scans, revision ordering, and receipts are scoped to one schema, and one invocation cannot mix schemas. |
@@ -430,6 +470,12 @@ never moves existing migration folders, and the flat
 `migrations/YYYY-MM-DD_<name>-rNNN/` layout stays valid while `CODE_SCHEMA` has
 one schema.
 
+A project upgraded to a template version with ORDS support needs no `.env`
+change either: ORDS stays disabled until all three `ORDS_*` keys are added. The
+upgrade delivers the ORDS scripts, tests and [docs/ords-export.md](docs/ords-export.md)
+as template files and never touches `database/`, so an existing
+`database/<SCHEMA>/ords/` export, your `.env`, apps and migrations are kept.
+
 Projects created before `template-manifest.json` existed do not have the
 upgrade script yet. Run it once from a fresh template clone. When the target
 repository has no `.template-lock.json`, the source resolves from its own
@@ -460,7 +506,8 @@ restore those backups before retrying the upgrade.
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
 | `scripts/team.sh migrate <folder> [...] --env <env>` | Verify and apply selected migration folders to DEV, staging, or production. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
-| `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors. |
+| `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
+| `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 

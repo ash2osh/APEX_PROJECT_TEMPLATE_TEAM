@@ -15,6 +15,7 @@ try {
 Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:PROD_SCHEMA, Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
   Env:STAGING_SCHEMA,
+  Env:ORDS_SCHEMA, Env:ORDS_SQLCL_CONNECTION, Env:ORDS_EXPECTED_USER,
   Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
@@ -49,7 +50,8 @@ $projectEnvAllowed = @(
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
   "INSTALL_UC_APX", "UC_APX_SKILLS_AGENT",
   "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER", "PROD_SCHEMA",
-  "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA"
+  "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA",
+  "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER"
 )
 foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   $projectEnvLine = $projectEnvLine.TrimEnd("`r")
@@ -170,6 +172,36 @@ foreach ($projectEnvPrefix in @("PROD", "STAGING")) {
     }
   }
 }
+# The optional ORDS metadata profile. All three keys omitted means ORDS is
+# disabled and an existing project behaves exactly as before; any one of them
+# without the others is a configuration error, never a silent partial setup.
+$projectEnvOrdsKeys = @("ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER")
+$projectEnvOrdsPresent = @($projectEnvOrdsKeys | Where-Object { $projectEnvSeen.ContainsKey($_) }).Count
+if ($projectEnvOrdsPresent -ne 0 -and $projectEnvOrdsPresent -ne 3) {
+  throw "project environment error: ORDS_SCHEMA, ORDS_SQLCL_CONNECTION and ORDS_EXPECTED_USER must be configured together (all three, or none to leave ORDS disabled)"
+}
+$env:PROJECT_ORDS_CONFIGURED = "false"
+if ($projectEnvOrdsPresent -eq 3) {
+  foreach ($projectEnvKey in $projectEnvOrdsKeys) {
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($projectEnvKey, "Process"))) {
+      throw "project environment error: $projectEnvKey must not be empty; remove all three ORDS_* settings to leave ORDS disabled"
+    }
+  }
+  Assert-ProjectEnvList -Name ORDS_SCHEMA -Kind identifier
+  Assert-ProjectEnvList -Name ORDS_EXPECTED_USER -Kind identifier
+  Assert-ProjectEnvList -Name ORDS_SQLCL_CONNECTION -Kind alias
+  Assert-ProjectEnvTriple -SchemaKey ORDS_SCHEMA -ConnectionKey ORDS_SQLCL_CONNECTION -UserKey ORDS_EXPECTED_USER
+  # ORDS authorizes the actual login user, so the session user must be the REST
+  # schema owner itself: a profile whose expected user differs can never succeed.
+  $projectEnvOrdsSchemas = @(Split-ProjectEnvList $env:ORDS_SCHEMA)
+  $projectEnvOrdsUsers = @(Split-ProjectEnvList $env:ORDS_EXPECTED_USER)
+  for ($projectEnvOrdsIndex = 0; $projectEnvOrdsIndex -lt $projectEnvOrdsSchemas.Count; $projectEnvOrdsIndex++) {
+    if ($projectEnvOrdsSchemas[$projectEnvOrdsIndex] -cne $projectEnvOrdsUsers[$projectEnvOrdsIndex]) {
+      throw "project environment error: ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry (found $($projectEnvOrdsUsers[$projectEnvOrdsIndex]) for $($projectEnvOrdsSchemas[$projectEnvOrdsIndex])): the ORDS export logs in as the REST schema owner"
+    }
+  }
+  $env:PROJECT_ORDS_CONFIGURED = "true"
+}
 if ($env:APEX_APP_ID -notmatch '^[1-9][0-9]{0,17}(,[1-9][0-9]{0,17})*$') {
   throw "project environment error: APEX_APP_ID must be a comma-separated list of positive integers of at most 18 digits, without spaces"
 }
@@ -214,7 +246,7 @@ Assert-ProjectEnvTriple -SchemaKey APEX_PARSING_SCHEMA -ConnectionKey APEX_SQLCL
 # The configured schemas, and whether any list names more than one.
 $projectEnvUnion = @()
 $projectEnvMulti = $false
-foreach ($projectEnvKey in @("TABLES_SCHEMA", "CODE_SCHEMA", "APEX_PARSING_SCHEMA")) {
+foreach ($projectEnvKey in @("TABLES_SCHEMA", "CODE_SCHEMA", "APEX_PARSING_SCHEMA", "ORDS_SCHEMA")) {
   $projectEnvItems = @(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process")))
   if ($projectEnvItems.Count -gt 1) { $projectEnvMulti = $true }
   foreach ($projectEnvItem in $projectEnvItems) {
@@ -270,6 +302,8 @@ if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA)) {
   Set-ProjectEnvNarrow TABLES_SCHEMA TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER strict
   Set-ProjectEnvNarrow CODE_SCHEMA CODE_SQLCL_CONNECTION CODE_EXPECTED_USER strict
   Set-ProjectEnvNarrow APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER strict
+  # With ORDS disabled the three variables stay unset: nothing for a child process to inherit.
+  if ($env:PROJECT_ORDS_CONFIGURED -eq "true") { Set-ProjectEnvNarrow ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER strict }
   foreach ($projectEnvPrefix in @("STAGING", "PROD")) {
     if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable("${projectEnvPrefix}_SCHEMA", "Process"))) {
       Set-ProjectEnvNarrow "${projectEnvPrefix}_SCHEMA" "${projectEnvPrefix}_SQLCL_CONNECTION" "${projectEnvPrefix}_EXPECTED_USER" lenient
@@ -292,7 +326,8 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvConnectionSeen, projectEnvUserSeen, projectEnvConnectionValue,
   projectEnvUserValue, projectEnvSchemaSeen, projectEnvSchemaValue,
   projectEnvRootRelative, projectEnvUnion, projectEnvMulti, projectEnvDevSchema, projectEnvItems,
-  projectEnvItem, projectEnvConnectionCount, projectEnvHead, projectEnvStream `
+  projectEnvItem, projectEnvConnectionCount, projectEnvHead, projectEnvStream,
+  projectEnvOrdsKeys, projectEnvOrdsPresent, projectEnvOrdsSchemas, projectEnvOrdsUsers, projectEnvOrdsIndex `
   -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,
   Function:Assert-ProjectEnvList, Function:Assert-ProjectEnvTriple,

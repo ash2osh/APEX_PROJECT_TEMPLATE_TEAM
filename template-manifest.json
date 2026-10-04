@@ -23,6 +23,7 @@
     "docs/TROUBLESHOOTING.md",
     "docs/known-limitations.md",
     "docs/migration-rules.md",
+    "docs/ords-export.md",
     "docs/publish-rules.md",
     "migrations/README.md",
     "pyproject.toml",

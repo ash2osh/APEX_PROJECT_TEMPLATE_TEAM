@@ -36,5 +36,11 @@ commits. Git branches do not isolate shared Builder or database state.
    `--schema <NAME>` when several schemas are configured); this reports drift
    and does not prove migration-file attribution.
 
+When the optional ORDS profile is configured, `scripts/team.sh backup-ords`
+exports a schema's ORDS (REST) definition read-only to
+`database/<SCHEMA>/ords/schema.sql`, and `backup-db` refreshes it with the table
+and code mirrors. It never changes ORDS; see `docs/ords-export.md`. Review and
+commit the generated file like any mirror.
+
 Use `scripts/team.sh doctor` for the read-only connection and database
 identity check. Never invent live database or team coordination evidence.

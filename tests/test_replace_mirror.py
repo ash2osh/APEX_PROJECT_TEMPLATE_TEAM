@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PWSH = shutil.which("pwsh")
+
+
+def plain(text: str) -> str:
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return re.sub(r"\s*\n\s*\|?\s*", " ", text)
 
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
@@ -214,6 +220,128 @@ class MirrorSafetyTests(unittest.TestCase):
                 self.assertEqual((staged_app / "application.apx").read_text(encoding="utf-8"), "new\n", output)
                 self.assertEqual((mirror / "tables" / "t.sql").read_text(encoding="utf-8"), "old\n", output)
                 self.assertNotIn("INCOMPLETE", output)
+
+
+class OrdsMirrorTests(unittest.TestCase):
+    """database/<SCHEMA>/ords is a mirror of its own: replaced alone, locked with its schema, never nested."""
+
+    def make_repo(self, root: Path) -> tuple[Path, Path]:
+        staged, mirror = MirrorSafetyTests.make_repo(self, root)
+        ords = mirror / "ords"
+        ords.mkdir()
+        (ords / "schema.sql").write_text("old ords\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@example.test", "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@example.test", "commit", "-qm", "ords"], check=True)
+        staged_ords = root / "scratch" / "ords-stage"
+        staged_ords.mkdir()
+        (staged_ords / "schema.sql").write_text("new ords\n", encoding="utf-8")
+        return staged_ords, mirror
+
+    def run_shells(self, root: Path, pairs: list[str], environment=None):
+        yield "bash", subprocess.run([BASH, str(root / "scripts" / "replace_mirror.sh"), *pairs], cwd=root, env=environment, text=True, capture_output=True, check=False)
+        if PWSH:
+            yield "pwsh", subprocess.run([PWSH, "-NoProfile", "-File", str(root / "scripts" / "replace_mirror.ps1"), *pairs], cwd=root, env=environment, text=True, capture_output=True, check=False)
+
+    def test_the_ords_folder_is_replaced_and_its_siblings_are_not_touched(self) -> None:
+        for shell in ("bash", "pwsh"):
+            if shell == "pwsh" and not PWSH:
+                continue
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                staged, mirror = self.make_repo(root)
+                pairs = [str(staged), "database/DEMO/ords"]
+                if shell == "bash":
+                    result = subprocess.run([BASH, str(root / "scripts" / "replace_mirror.sh"), *pairs], cwd=root, text=True, capture_output=True, check=False)
+                else:
+                    result = subprocess.run([PWSH, "-NoProfile", "-File", str(root / "scripts" / "replace_mirror.ps1"), *pairs], cwd=root, text=True, capture_output=True, check=False)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual("new ords\n", (mirror / "ords" / "schema.sql").read_text(encoding="utf-8"))
+                self.assertEqual("old\n", (mirror / "tables" / "t.sql").read_text(encoding="utf-8"))
+                self.assertEqual([], [path.name for path in (root / "scratch").glob(".mirror-backup*")])
+                self.assertEqual([], [path.name for path in (root / "scratch" / ".mirror-locks").glob("*.lock")], "every lock is released")
+
+    def test_a_first_ords_export_creates_the_folder_beside_the_existing_mirrors(self) -> None:
+        for shell in ("bash", "pwsh"):
+            if shell == "pwsh" and not PWSH:
+                continue
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                staged, mirror = MirrorSafetyTests.make_repo(self, root)
+                staged_ords = root / "scratch" / "ords-stage"
+                staged_ords.mkdir()
+                (staged_ords / "schema.sql").write_text("first ords\n", encoding="utf-8")
+                pairs = [str(staged_ords), "database/DEMO/ords"]
+                if shell == "bash":
+                    result = subprocess.run([BASH, str(root / "scripts" / "replace_mirror.sh"), *pairs], cwd=root, text=True, capture_output=True, check=False)
+                else:
+                    result = subprocess.run([PWSH, "-NoProfile", "-File", str(root / "scripts" / "replace_mirror.ps1"), *pairs], cwd=root, text=True, capture_output=True, check=False)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual("first ords\n", (mirror / "ords" / "schema.sql").read_text(encoding="utf-8"))
+                self.assertEqual("old\n", (mirror / "tables" / "t.sql").read_text(encoding="utf-8"))
+
+    def test_a_dirty_ords_folder_is_refused_and_a_dirty_sibling_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged, mirror = self.make_repo(root)
+            (mirror / "tables" / "t.sql").write_text("being edited\n", encoding="utf-8")
+            for shell, result in self.run_shells(root, [str(staged), "database/DEMO/ords"]):
+                with self.subTest(shell=shell, case="dirty sibling"):
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    (mirror / "ords" / "schema.sql").write_text("old ords\n", encoding="utf-8")
+                    staged.mkdir(exist_ok=True)
+                    (staged / "schema.sql").write_text("new ords\n", encoding="utf-8")
+            (mirror / "ords" / "schema.sql").write_text("hand edit\n", encoding="utf-8")
+            for shell, result in self.run_shells(root, [str(staged), "database/DEMO/ords"]):
+                with self.subTest(shell=shell, case="dirty ords"):
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("dirty mirror", plain(result.stdout + result.stderr))
+                    self.assertEqual("hand edit\n", (mirror / "ords" / "schema.sql").read_text(encoding="utf-8"))
+
+    def test_other_three_part_database_destinations_stay_unapproved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged, mirror = self.make_repo(root)
+            for destination in ("database/DEMO/tables", "database/DEMO/ORDS", "database/DEMO/ords/deeper", "database"):
+                for shell, result in self.run_shells(root, [str(staged), destination]):
+                    with self.subTest(shell=shell, destination=destination):
+                        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                        self.assertIn("not an approved generated mirror", plain(result.stdout + result.stderr))
+                        self.assertEqual("old\n", (mirror / "tables" / "t.sql").read_text(encoding="utf-8"))
+
+    def test_a_mirror_and_a_folder_inside_it_cannot_be_replaced_in_one_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged_ords, mirror = self.make_repo(root)
+            whole = root / "scratch" / "whole-stage"
+            (whole / "tables").mkdir(parents=True)
+            (whole / "tables" / "t.sql").write_text("whole\n", encoding="utf-8")
+            pairs = [str(whole), "database/DEMO", str(staged_ords), "database/DEMO/ords"]
+            for shell, result in self.run_shells(root, pairs):
+                with self.subTest(shell=shell):
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("mirror destinations overlap", plain(result.stdout + result.stderr))
+                    self.assertEqual("old\n", (mirror / "tables" / "t.sql").read_text(encoding="utf-8"))
+                    self.assertEqual("old ords\n", (mirror / "ords" / "schema.sql").read_text(encoding="utf-8"))
+
+    def test_a_held_schema_lock_blocks_an_ords_only_replacement(self) -> None:
+        import hashlib
+        import time
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged, mirror = self.make_repo(root)
+            locks = root / "scratch" / ".mirror-locks"
+            locks.mkdir(parents=True)
+            digest = hashlib.sha256(b"database/DEMO").hexdigest()[:16]
+            # A fresh lock of the whole schema mirror, held by a live process of the PowerShell kind
+            # (the Bash side cannot check its liveness and waits out the staleness window).
+            (locks / f"{digest}.lock").write_text(f"version=1\nimpl=ps1\npid={os.getpid()}\nepoch={int(time.time())}\n", encoding="utf-8")
+            for shell, result in self.run_shells(root, [str(staged), "database/DEMO/ords"]):
+                with self.subTest(shell=shell):
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("another mirror replacement is already running for database/DEMO", plain(result.stdout + result.stderr))
+                    self.assertEqual("old ords\n", (mirror / "ords" / "schema.sql").read_text(encoding="utf-8"))
+                    self.assertTrue((locks / f"{digest}.lock").exists(), "a lock this call did not take must stay")
 
 
 class PreserveDeploymentsTests(unittest.TestCase):

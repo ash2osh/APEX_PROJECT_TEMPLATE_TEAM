@@ -7,7 +7,7 @@ usage() {
 Usage: scripts/team.sh <command> [arguments]
 
 Commands:
-  doctor                                      Validate .env and the DEV SQLcl identity
+  doctor                                      Validate .env and the DEV SQLcl identities (ORDS too, when configured)
   export <app_id>                             Export one numeric APEX app from DEV
   publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
   check-conflicts <folder> [...] (--env <env>|--local)
@@ -17,7 +17,8 @@ Commands:
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
-  backup-db                                   Refresh the table and code mirrors
+  backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
+  backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
   upgrade-template [--source <url|path>] [--ref <ref>] [--dry-run]
@@ -89,8 +90,9 @@ case "$command_name" in
 
     doctor_one() {
       # Never let SQLcl start in the caller's directory: SQLcl executes a
-      # login.sql found there before doctor.sql.
-      local connection="$1" expected_user="$2" schema="$3" workdir stdin output status=0
+      # login.sql found there before the doctor script. The optional fourth
+      # argument names the script (doctor_ords.sql for the ORDS profile).
+      local connection="$1" expected_user="$2" schema="$3" doctor_script="${4:-doctor.sql}" workdir stdin output status=0
       workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
       doctor_workdir="$workdir"
       stdin="$workdir/.sqlcl-stdin"
@@ -98,7 +100,7 @@ case "$command_name" in
       output="$workdir/sqlcl-output.log"
       if ! invoke_sqlcl_safe "$workdir" \
         -S -noupdates -name "$connection" \
-        "@$REPO_ROOT/scripts/doctor.sql" \
+        "@$REPO_ROOT/scripts/$doctor_script" \
         "$schema" "$DB_ENVIRONMENT" "$expected_user" \
         < "$stdin" > "$output" 2>&1; then
         cat "$output" >&2
@@ -119,11 +121,22 @@ case "$command_name" in
     doctor_seen="|"
     doctor_total=0
     doctor_failed=0
-    for doctor_profile in apex tables code; do
+    # The ORDS export needs a newer SQLcl than nothing else does: say so once,
+    # before any check, instead of per schema. `sql -V` connects to nothing.
+    doctor_ords_sqlcl_ok=true
+    if [ -n "$ORDS_SCHEMA" ]; then
+      doctor_workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
+      sqlcl_require_ords_version "$doctor_workdir" || doctor_ords_sqlcl_ok=false
+      rm -rf -- "$doctor_workdir"
+      doctor_workdir=""
+    fi
+    for doctor_profile in apex tables code ords; do
+      doctor_script=doctor.sql
       case "$doctor_profile" in
         apex)   doctor_schemas="$APEX_PARSING_SCHEMA"; doctor_connections="$APEX_SQLCL_CONNECTION"; doctor_users="$APEX_EXPECTED_USER" ;;
         tables) doctor_schemas="$TABLES_SCHEMA"; doctor_connections="$TABLES_SQLCL_CONNECTION"; doctor_users="$TABLES_EXPECTED_USER" ;;
         code)   doctor_schemas="$CODE_SCHEMA"; doctor_connections="$CODE_SQLCL_CONNECTION"; doctor_users="$CODE_EXPECTED_USER" ;;
+        ords)   doctor_schemas="$ORDS_SCHEMA"; doctor_connections="$ORDS_SQLCL_CONNECTION"; doctor_users="$ORDS_EXPECTED_USER"; doctor_script=doctor_ords.sql ;;
       esac
       [ -n "$doctor_schemas" ] || continue
       IFS=',' read -r -a doctor_schema_list <<< "$doctor_schemas"
@@ -131,6 +144,8 @@ case "$command_name" in
       IFS=',' read -r -a doctor_user_list <<< "$doctor_users"
       for ((doctor_index = 0; doctor_index < ${#doctor_schema_list[@]}; doctor_index++)); do
         doctor_key="${doctor_connection_list[$doctor_index]}|${doctor_user_list[$doctor_index]}|${doctor_schema_list[$doctor_index]}"
+        # The ORDS check is stricter, so another profile's check never stands in for it.
+        [ "$doctor_profile" != ords ] || doctor_key="ords|$doctor_key"
         case "$doctor_seen" in *"|$doctor_key|"*) continue ;; esac
         doctor_seen="$doctor_seen$doctor_key|"
         doctor_total=$((doctor_total + 1))
@@ -140,8 +155,12 @@ case "$command_name" in
           printf 'Doctor: schema %s via connection %s as %s\n' \
             "${doctor_schema_list[$doctor_index]}" "${doctor_connection_list[$doctor_index]}" "${doctor_user_list[$doctor_index]}"
         fi
+        if [ "$doctor_profile" = ords ] && [ "$doctor_ords_sqlcl_ok" != true ]; then
+          doctor_failed=$((doctor_failed + 1))
+          continue
+        fi
         doctor_one "${doctor_connection_list[$doctor_index]}" "${doctor_user_list[$doctor_index]}" \
-          "${doctor_schema_list[$doctor_index]}" || doctor_failed=$((doctor_failed + 1))
+          "${doctor_schema_list[$doctor_index]}" "$doctor_script" || doctor_failed=$((doctor_failed + 1))
       done
     done
     [ "$doctor_total" -gt 0 ] || fail "no configured profile lists schema ${PROJECT_SCHEMA:-?}"
@@ -190,6 +209,11 @@ case "$command_name" in
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/backup_db.sh"
+    ;;
+  backup-ords)
+    [ "$#" -eq 0 ] || fail "backup-ords does not accept arguments"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      exec "$REPO_ROOT/scripts/backup_db.sh" --ords-only
     ;;
   deploy)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh deploy <numeric_app_id> --env <staging|prod> [--manual]"

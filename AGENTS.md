@@ -18,7 +18,10 @@ state.
   optional. Each profile's schema, connection, and expected-user keys accept
   position-aligned comma lists; one value keeps current behavior. Use
   `--schema <NAME>` to narrow any command. `doctor` and `backup-db` default to
-  all schemas. Never put credentials in `.env` or tracked files.
+  all schemas. Never put credentials in `.env` or tracked files. An optional,
+  independent `ORDS_SCHEMA`, `ORDS_SQLCL_CONNECTION` and `ORDS_EXPECTED_USER`
+  profile (all three or none) enables the read-only ORDS export; its session
+  user must equal the REST schema.
 - Use numeric APEX application IDs in commands and descriptors. Store each
   app's APEXlang source and `deployments/{dev,staging,prod}.json` under
   `apps/<parsing-schema>/<app-id>/`. `apps/templates/deployments/` contains
@@ -84,7 +87,11 @@ state.
   to the selected APEX workspace and parsing schema.
 - **Other commands:** `scripts/team.sh doctor` validates `.env` and performs a
   read-only SQLcl identity check. `scripts/team.sh backup-db` refreshes the
-  local table and code mirrors.
+  local table and code mirrors, and the ORDS mirror when the ORDS profile
+  exists. `scripts/team.sh backup-ords` exports ORDS metadata only: it never
+  enables REST, imports, changes ORDS configuration, creates metadata, grants
+  privileges or commits, and it never exports OAuth clients or secrets. Read
+  [docs/ords-export.md](docs/ords-export.md) before changing it.
 
 ## Optional Tooling
 

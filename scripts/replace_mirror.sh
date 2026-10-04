@@ -49,8 +49,11 @@ esac
 
 DEST_REL="${DEST_DIR#"$REPO_ROOT/"}"
 IFS=/ read -r -a DEST_PARTS <<< "$DEST_REL"
+# database/<SCHEMA> is a whole schema mirror; database/<SCHEMA>/ords is the ORDS
+# export alone, so refreshing it leaves the table and code mirrors in place.
 if [[ "${DEST_PARTS[0]}" = apps && "${#DEST_PARTS[@]}" -eq 3 ]] || \
-   [[ "${DEST_PARTS[0]}" = database && "${#DEST_PARTS[@]}" -eq 2 ]]; then
+   [[ "${DEST_PARTS[0]}" = database && "${#DEST_PARTS[@]}" -eq 2 ]] || \
+   [[ "${DEST_PARTS[0]}" = database && "${#DEST_PARTS[@]}" -eq 3 && "${DEST_PARTS[2]}" = ords ]]; then
   :
 else
   echo "destination is not an approved generated mirror: $DEST_REL" >&2
@@ -131,7 +134,8 @@ esac
 CANONICAL_REL="${DEST_DIR#"$REPO_ROOT/"}"
 IFS=/ read -r -a CANONICAL_PARTS <<< "$CANONICAL_REL"
 if ! [[ "${CANONICAL_PARTS[0]}" = apps && "${#CANONICAL_PARTS[@]}" -eq 3 ]] && \
-   ! [[ "${CANONICAL_PARTS[0]}" = database && "${#CANONICAL_PARTS[@]}" -eq 2 ]]; then
+   ! [[ "${CANONICAL_PARTS[0]}" = database && "${#CANONICAL_PARTS[@]}" -eq 2 ]] && \
+   ! [[ "${CANONICAL_PARTS[0]}" = database && "${#CANONICAL_PARTS[@]}" -eq 3 && "${CANONICAL_PARTS[2]}" = ords ]]; then
   echo "resolved destination is not an approved generated mirror: $CANONICAL_REL" >&2
   exit 2
 fi
@@ -253,6 +257,31 @@ while [ "$#" -gt 0 ]; do
   shift 2
 done
 
+# One call must not name a mirror and a directory inside it (or one mirror
+# twice): the moves would undo each other.
+for (( OVERLAP_A=0; OVERLAP_A < ${#CANONICAL_RELS[@]}; OVERLAP_A++ )); do
+  for (( OVERLAP_B=0; OVERLAP_B < ${#CANONICAL_RELS[@]}; OVERLAP_B++ )); do
+    [ "$OVERLAP_A" -ne "$OVERLAP_B" ] || continue
+    case "${CANONICAL_RELS[$OVERLAP_B]}/" in
+      "${CANONICAL_RELS[$OVERLAP_A]}/"*)
+        echo "mirror destinations overlap: ${CANONICAL_RELS[$OVERLAP_B]} is inside ${CANONICAL_RELS[$OVERLAP_A]}" >&2
+        exit 2
+        ;;
+    esac
+  done
+done
+
+# Each destination is locked, and so is the schema mirror around a
+# database/<SCHEMA>/ords destination: a whole-schema replacement of that mirror
+# must not run while only its ORDS folder is being replaced.
+LOCK_RELS=()
+for (( PAIR_INDEX=0; PAIR_INDEX < ${#CANONICAL_RELS[@]}; PAIR_INDEX++ )); do
+  LOCK_RELS+=("${CANONICAL_RELS[$PAIR_INDEX]}")
+  case "${CANONICAL_RELS[$PAIR_INDEX]}" in
+    database/*/ords) LOCK_RELS+=("${CANONICAL_RELS[$PAIR_INDEX]%/ords}") ;;
+  esac
+done
+
 LOCK_ROOT="$SCRATCH_ROOT/.mirror-locks"
 mkdir -p "$LOCK_ROOT"
 
@@ -310,9 +339,9 @@ trap cleanup_replacement EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
-for (( PAIR_INDEX=0; PAIR_INDEX < ${#STAGED_DIRS[@]}; PAIR_INDEX++ )); do
-  LOCK_FILE="$LOCK_ROOT/$(lock_digest "${CANONICAL_RELS[$PAIR_INDEX]}").lock"
-  acquire_mirror_lock "$LOCK_FILE" "${CANONICAL_RELS[$PAIR_INDEX]}" || exit 2
+for LOCK_REL in "${LOCK_RELS[@]}"; do
+  LOCK_FILE="$LOCK_ROOT/$(lock_digest "$LOCK_REL").lock"
+  acquire_mirror_lock "$LOCK_FILE" "$LOCK_REL" || exit 2
   ACQUIRED_LOCKS+=("$LOCK_FILE")
 done
 

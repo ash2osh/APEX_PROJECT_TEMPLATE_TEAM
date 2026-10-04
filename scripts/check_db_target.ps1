@@ -6,7 +6,7 @@
 # refused, and the operator is told to run SELECT statements only.
 param(
   [Parameter(Mandatory = $true)][ValidateSet("read", "write")][string]$Operation,
-  [Parameter(Mandatory = $true)][ValidateSet("tables", "code", "apex")][string]$Target,
+  [Parameter(Mandatory = $true)][ValidateSet("tables", "code", "apex", "ords")][string]$Target,
   [string]$Schema
 )
 
@@ -24,6 +24,7 @@ try {
     "tables" { $targetConnection = $env:TABLES_SQLCL_CONNECTION }
     "code"   { $targetConnection = $env:CODE_SQLCL_CONNECTION }
     "apex"   { $targetConnection = $env:APEX_SQLCL_CONNECTION }
+    "ords"   { $targetConnection = $env:ORDS_SQLCL_CONNECTION }
   }
 
   Assert-ProjectEnvSingleSchema -Label "check_db_target ($Target)"

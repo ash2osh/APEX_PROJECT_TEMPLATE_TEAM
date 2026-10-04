@@ -20,6 +20,7 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `project environment error: .env is UTF-16; save it as UTF-8` | `.env` was written by Windows PowerShell 5.1 (`>` or `Out-File`) or an old Notepad "Unicode" save. Bash cannot read it and PowerShell would decode it differently, so both loaders refuse it. | Re-save it as UTF-8 (a byte-order mark is fine), or create it with `Copy-Item .env.example .env`. |
 | `<KEY> has an inline comment` | A value in `.env` is followed by `# ...` on the same line. | Move the comment to its own line. |
 | `<KEY> must list the same number of entries` | The schema, connection and user settings of one profile have different numbers of comma-separated values. | Give all three the same number of entries, in the same order. |
+| `ORDS_SCHEMA, ORDS_SQLCL_CONNECTION and ORDS_EXPECTED_USER must be configured together` or `ORDS_<KEY> must not be empty` | The optional ORDS profile is half set. | Set all three, or remove all three to leave ORDS disabled. |
 | `ORA-12541: TNS:no listener` or `Connection refused` | The database is not running or not reachable. | Start it (with the local setup, from the `uc-local-apex-dev` folder you created in step 3 of the getting started guide: `./local-26ai.sh start`) and retry. |
 | `ORA-28000: the account is locked` / "Account Is Locked" | The schema's password expired or was locked. | With the local setup, from the `uc-local-apex-dev` folder: `./local-26ai.sh unexpire-accounts`. Otherwise ask your DBA. |
 | `Expected session user <X> but found <Y>` | The saved connection logs in as a different user than `*_EXPECTED_USER` says. | Fix the saved connection or the `*_EXPECTED_USER` value. This check prevents working in the wrong schema. |
@@ -47,6 +48,8 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `... is parsed by <X>, which is not listed in APEX_PARSING_SCHEMA`, or (with one schema) `ORA-20017: Application <id> is parsed by <X>, which is not the configured <Y>` | The app belongs to a schema you have not configured. Nothing was exported. | Add that schema (with its connection and user) to the `APEX_*` settings. |
 | export refuses because the app's last update matches "the current database second" | The app changed in the same second, so the revision is ambiguous. | Wait one second and run it again. |
 | `database backup is incomplete for <SCHEMA>` or `...manifest ... is missing the <TYPE> row` | SQLcl did not write every object it listed, so nothing was installed. | Run `backup-db` again. If it repeats, check disk space and SQLcl output. |
+| `refusing to back up over dirty mirror: database/<SCHEMA>/ords` | Uncommitted changes in the ORDS export. | Commit, stash or discard them, then run `backup-ords` again. |
+| `ORDS export verification failed for <SCHEMA>: ...`, `backup-ords error: ...`, `owns <N> ORDS OAuth client(s)` or `SQLcl <release> is not supported for the ORDS export` | The optional ORDS export refused its own result, or ORDS is not configured. Nothing was installed. | Every message, its meaning and its fix are in [ords-export.md](ords-export.md#messages). |
 
 ## Publish
 
@@ -103,6 +106,7 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `<command> needs one schema because several are configured (<list>); pass --schema <NAME>` | The command works on one schema at a time. | Add `--schema <NAME>`. |
 | `schema <X> is not configured; configured schemas: ...` | `--schema` names a schema that is not in `.env`. | Use one of the listed names. Schema names are uppercase. |
 | `schema <X> is not listed in STAGING_SCHEMA` (or `PROD_SCHEMA`) | The schema is not set up for that target. | Add it, with the same name, to the `STAGING_*` or `PROD_*` settings. |
+| `backup-ords error: the ORDS profile does not list schema <X>` | `--schema` names a schema that is not in `ORDS_SCHEMA`. | Use a schema from `ORDS_SCHEMA`, or add it (with its connection and user) to the `ORDS_*` settings. |
 
 ## Knowledge graph
 

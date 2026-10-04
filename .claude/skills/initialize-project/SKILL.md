@@ -10,7 +10,8 @@ description: Use when a user invokes /init, /init with a project name, $initiali
 Conduct a compact interactive setup, show a redacted summary, obtain explicit
 confirmation, and create a strict `.env` for this repository. Configuration
 may use the same saved SQLcl connection for every target or independent
-connections for table metadata, code metadata, and APEX.
+connections for table metadata, code metadata, and APEX. An optional, separate
+ORDS profile enables the read-only ORDS metadata export.
 
 Initialization does not connect to any database. SQLcl owns credentials.
 Never ask for or write passwords, tokens, wallets, private keys, or
@@ -98,7 +99,16 @@ Collect values in this order:
    the tables values. Ask for independent values when it should not.
 7. APEX parsing schema, then whether its connection/account should reuse the
    code or tables values. Ask for independent values when it should not.
-8. Whether to enable optional `uc-apx` tooling in `.env`; default to `false`.
+8. Whether to enable the optional ORDS metadata export (`backup-ords`); default
+   to no. If yes, collect the REST schema, a saved-connection name, and the
+   expected session user. The expected user must equal the REST schema: ORDS
+   authorizes the actual login user, so a deployment account that only switches
+   `CURRENT_SCHEMA` is not valid, and the profile is never reused from the
+   tables, code, or APEX profiles unless that connection already logs in as the
+   REST schema owner. Say that the export is read-only, never exports OAuth
+   clients or secrets, and needs SQLcl 26.1 or newer. All three values are set,
+   or none (no partial profile).
+9. Whether to enable optional `uc-apx` tooling in `.env`; default to `false`.
    If enabled, choose `universal` (default) or `claude-code` as its skill
    target. Enabling the toggle does not approve downloading a missing CLI; the
    `install-uc-apx` skill asks before installing it.
@@ -122,7 +132,7 @@ demand a dedicated account or a named role.
 
 Show all values in the following groups, redacting anything that unexpectedly
 resembles a secret: project name/developer name/APEX, tables target, code
-target, APEX target, and optional tooling. Explicitly identify reused
+target, APEX target, ORDS target (or "ORDS disabled"), and optional tooling. Explicitly identify reused
 profiles. Ask for confirmation
 immediately before creating or overwriting `.env`.
 
@@ -153,6 +163,16 @@ INSTALL_UC_APX=<true-or-false>
 UC_APX_SKILLS_AGENT=<universal-or-claude-code>
 ```
 
+Only when the ORDS metadata export is enabled, add these three lines after the
+APEX group, in this order. Never write them when it is disabled, and never write
+one or two of them:
+
+```dotenv
+ORDS_SCHEMA=<rest-schema>
+ORDS_SQLCL_CONNECTION=<saved-connection>
+ORDS_EXPECTED_USER=<same-as-ORDS_SCHEMA>
+```
+
 The schema, connection, and expected-user keys can use position-aligned comma
 lists for several schemas; see the README section "Several schemas in one
 workspace".
@@ -169,6 +189,7 @@ bash -c 'source scripts/load_env.sh .env'
 PROJECT_ENV_FILE=.env scripts/check_db_target.sh read tables
 PROJECT_ENV_FILE=.env scripts/check_db_target.sh read code
 PROJECT_ENV_FILE=.env scripts/check_db_target.sh read apex
+PROJECT_ENV_FILE=.env scripts/check_db_target.sh read ords   # only when ORDS is enabled
 ```
 
 On PowerShell systems run:
@@ -179,6 +200,7 @@ $env:PROJECT_ENV_FILE = '.env'
 ./scripts/check_db_target.ps1 -Operation read -Target tables
 ./scripts/check_db_target.ps1 -Operation read -Target code
 ./scripts/check_db_target.ps1 -Operation read -Target apex
+./scripts/check_db_target.ps1 -Operation read -Target ords   # only when ORDS is enabled
 ```
 
 If a saved-connection name resembles production while the environment is not
@@ -197,6 +219,7 @@ existing projects, and reject any other explicit values.
 | A connection string or password is supplied | Reject it and request only the SQLcl saved-connection name. |
 | Profiles share a schema but not an account | Record each profile explicitly; never infer the remaining values. |
 | `.env` already exists | Summarize and obtain overwrite confirmation before writing. |
+| ORDS is enabled but the expected user differs from the REST schema | Reject it: the ORDS export needs the session user to equal the REST schema. Ask for a connection that logs in as the REST schema owner; never enable REST for another account. |
 | Guard reports a production-like alias | Ask the production-classification question; do not test the connection. |
 | Initialization succeeds | Report validation results and any prerequisite the user declined; do not commit or push unless separately authorized. |
 | A prerequisite is missing | Report it and ask before installing; never install without approval, and never block `.env` on it. |
