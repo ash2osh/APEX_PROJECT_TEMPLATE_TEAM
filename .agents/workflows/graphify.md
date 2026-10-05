@@ -98,6 +98,31 @@ because package files carry no per-procedure nodes.
 
 ## Verification and queries
 
+Before every update or extraction, after the installation pre-flight, run:
+
+```bash
+python3 scripts/check_graphify_apx.py
+```
+
+After building the graph, require:
+
+```bash
+python3 scripts/check_graphify_apx.py --graph graphify-out/graph.json
+```
+
+Both checks must pass before reporting APEXlang file coverage. Graphify can
+return zero after skipping files with parser errors; its exit status alone is
+insufficient. The checker uses the active Graphify detector and its ignore rules,
+with saved exclusions and Git-ignore settings from the default `graphify-out/`
+directory. Custom output roots or new CLI corpus overrides require separate
+coverage verification. It writes its scan cache only in a temporary directory,
+and fails on unavailable or
+incomplete scans, parser failures, unreadable graphs, or omitted APEXlang sources.
+An empty eligible corpus is reported as zero files. These checks prove parsing
+and file presence, not semantic completeness, matching content hashes, or runtime
+validity. The parser accepts exported `$`, bind-alias and Unicode identifiers
+without treating SQL or comment payloads as component declarations.
+
 Verify that every nonempty graph `source_file` begins with `apps/`,
 `database/`, or `app_context/`; `.apx` sources emit nonzero edges; and context
 nodes exist. Then start with `graphify query`, using `graphify path` and
