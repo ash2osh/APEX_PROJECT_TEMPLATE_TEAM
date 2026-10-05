@@ -42,7 +42,10 @@ DISPLAY_TYPES = {
 SHARED_ANCHOR_TYPE = "module"
 DECLARATION_RE = re.compile(
     r'^\s*([A-Za-z][A-Za-z0-9-]*)'
-    r'(?:\s+("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[A-Za-z0-9_.-]+))?\s*\(\s*$'
+    # Exported identifiers include Oracle's $, bind aliases (:APP_SESSION),
+    # Arabic names and combining marks. Match an unquoted syntax token rather
+    # than an ASCII identifier; whitespace and structural delimiters end it.
+    r'(?:\s+("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s(){}\[\]\'",]+))?\s*\(\s*$'
 )
 NAME_RE = re.compile(r'^\s*name\s*:\s*(.*?)\s*$')
 CLOSE_COMPONENT_RE = re.compile(r'^\s*\)\s*$')

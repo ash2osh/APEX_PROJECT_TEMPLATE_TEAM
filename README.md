@@ -569,6 +569,12 @@ graphify extract . --force
 
 - `python3 scripts/setup_graphify_apx.py --verify` checks the installation
   without changing it; rerun setup after **every Graphify upgrade**.
+- `python3 scripts/check_graphify_apx.py` before every build, then
+  `python3 scripts/check_graphify_apx.py --graph graphify-out/graph.json`
+  afterward. Both must pass: Graphify can exit zero after skipping parser
+  failures. This checks APEXlang parsing and file presence, not live runtime
+  validity or semantic completeness; it uses the default output directory's
+  saved corpus exclusions and Git-ignore setting.
 - `graphify update .` after APEXlang or database changes (local, no API cost).
 - `graphify extract .` after changing `app_context`.
 - `python3 scripts/setup_graphify_apx.py` then `graphify update .` after the first
