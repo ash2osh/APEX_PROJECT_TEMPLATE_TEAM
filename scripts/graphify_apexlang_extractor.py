@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import re
 import sys
+import unicodedata
 
 
 ARCHITECTURAL_TYPES = {
@@ -43,9 +45,9 @@ SHARED_ANCHOR_TYPE = "module"
 DECLARATION_RE = re.compile(
     r'^\s*([A-Za-z][A-Za-z0-9-]*)'
     # Exported identifiers include Oracle's $, bind aliases (:APP_SESSION),
-    # Arabic names and combining marks. Match an unquoted syntax token rather
-    # than an ASCII identifier; whitespace and structural delimiters end it.
-    r'(?:\s+("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s(){}\[\]\'",]+))?\s*\(\s*$'
+    # Arabic names, expressions and combining marks. Whitespace and structural
+    # delimiters end unquoted tokens.
+    r'(?:\s+("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s(){}"\'][^\s(){}]*))?\s*\(\s*$'
 )
 NAME_RE = re.compile(r'^\s*name\s*:\s*(.*?)\s*$')
 CLOSE_COMPONENT_RE = re.compile(r'^\s*\)\s*$')
@@ -141,9 +143,18 @@ class Frame:
 
 def make_id(*parts: object) -> str:
     """Return a stable Graphify-compatible identifier."""
-    raw = "_".join(str(part) for part in parts if str(part))
+    raw = unicodedata.normalize("NFC", "_".join(str(part) for part in parts if str(part)))
+    raw = unicodedata.normalize("NFC", raw.casefold())
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", raw)
-    return re.sub(r"_+", "_", normalized).strip("_").lower()
+    normalized = re.sub(r"_+", "_", normalized).strip("_").lower()
+    if not raw.isascii():
+        # Keep existing ASCII ids (including mirrored SQL object ids) stable.
+        # Non-ASCII names used to collapse to the same empty/sanitized id, so
+        # references could not distinguish two Arabic components. Canonical
+        # Unicode spelling and case must resolve to the same anchor.
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        return f"{normalized}_u{digest}"
+    return normalized
 
 
 class DatabaseMirror:
@@ -539,6 +550,7 @@ def _strip_comments(line: str, in_block_comment: bool) -> tuple[str, bool]:
     output: list[str] = []
     index = 0
     quote: str | None = None
+    is_mime_value = bool(re.match(r"^\s*(?:fileTypes|comments)\s*:", line))
     while index < len(line):
         char = line[index]
         if in_block_comment:
@@ -560,6 +572,17 @@ def _strip_comments(line: str, in_block_comment: bool) -> tuple[str, bool]:
             index += 1
             continue
         if line.startswith("/*", index):
+            # A bare upload MIME pattern (image/*, */*) is property data.
+            # A separate /* after whitespace is still a real comment, and
+            # SQL property values retain their normal comment semantics.
+            if (
+                is_mime_value
+                and re.search(r"(?:^|[\s:,])[A-Za-z0-9*.+-]+$", line[:index])
+                and re.match(r"\s*(?:,|$|/\*|//)", line[index + 2:])
+            ):
+                output.append("/")
+                index += 1
+                continue
             in_block_comment = True
             index += 2
             continue
