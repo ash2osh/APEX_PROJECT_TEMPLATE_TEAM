@@ -7,6 +7,7 @@ unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER PROD_SCHEMA
 unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
 unset ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER
 unset INSTALL_UC_APX UC_APX_SKILLS_AGENT
+unset APEX_WORKSPACE_USERNAME
 
 # README.md documents a relative PROJECT_ENV_FILE. Resolve it against the
 # repository root when it is not found relative to the caller's directory, so a
@@ -105,11 +106,14 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   project_env_key="${BASH_REMATCH[1]}"
   project_env_value="${BASH_REMATCH[2]}"
   case "$project_env_key" in
-    PROJECT_NAME|DEVELOPER_NAME|DB_ENVIRONMENT|APEX_APP_ID|\
+    INSTALL_UC_APX|UC_APX_SKILLS_AGENT)
+      project_env_fail "uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env"
+      return 1 2>/dev/null || exit 1
+      ;;
+    PROJECT_NAME|DEVELOPER_NAME|DB_ENVIRONMENT|APEX_APP_ID|APEX_WORKSPACE_USERNAME|\
     TABLES_SCHEMA|TABLES_PREFIXES|TABLES_SQLCL_CONNECTION|TABLES_EXPECTED_USER|\
     CODE_SCHEMA|CODE_PREFIXES|CODE_SQLCL_CONNECTION|CODE_EXPECTED_USER|\
     APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
-    INSTALL_UC_APX|UC_APX_SKILLS_AGENT|\
     PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|PROD_SCHEMA|\
     STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER|STAGING_SCHEMA|\
     ORDS_SCHEMA|ORDS_SQLCL_CONNECTION|ORDS_EXPECTED_USER) ;;
@@ -144,12 +148,6 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   export "$project_env_key=$project_env_value"
   project_env_seen_keys+=("$project_env_key")
 done < "$PROJECT_ENV_FILE"
-
-# Optional uc-apx settings keep older .env files valid while making the
-# effective defaults explicit to project skills.
-if [ "${INSTALL_UC_APX+x}" != x ]; then INSTALL_UC_APX=false; fi
-if [ "${UC_APX_SKILLS_AGENT+x}" != x ]; then UC_APX_SKILLS_AGENT=universal; fi
-export INSTALL_UC_APX UC_APX_SKILLS_AGENT
 
 project_env_required=(
   PROJECT_NAME DEVELOPER_NAME DB_ENVIRONMENT APEX_APP_ID
@@ -369,20 +367,6 @@ case "$DB_ENVIRONMENT" in
   development|test|staging|production) ;;
   *)
     project_env_fail "DB_ENVIRONMENT must be development, test, staging, or production"
-    return 1 2>/dev/null || exit 1
-    ;;
-esac
-case "$INSTALL_UC_APX" in
-  true|false) ;;
-  *)
-    project_env_fail "INSTALL_UC_APX must be true or false"
-    return 1 2>/dev/null || exit 1
-    ;;
-esac
-case "$UC_APX_SKILLS_AGENT" in
-  universal|claude-code) ;;
-  *)
-    project_env_fail "UC_APX_SKILLS_AGENT must be universal or claude-code"
     return 1 2>/dev/null || exit 1
     ;;
 esac

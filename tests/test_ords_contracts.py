@@ -281,7 +281,7 @@ class OrdsTemplateDeliveryTests(unittest.TestCase):
 
             def upgrade() -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
-                    [sys.executable, str(engine), "--project-root", str(project), "--source", str(template)],
+                    [sys.executable, str(engine), "--project-root", str(project), "--source", str(template), "--apex-release", "26.2"],
                     text=True, capture_output=True, check=False,
                 )
 

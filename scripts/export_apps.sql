@@ -18,6 +18,7 @@ WHENEVER SQLERROR EXIT FAILURE ROLLBACK
 WHENEVER OSERROR EXIT FAILURE ROLLBACK
 
 @@verify_db_access.sql
+@@verify_apex_release.sql
 
 -- The app must be parsed by the schema whose folder receives it. With one schema
 -- configured the wrappers do not look this up, so check it here.
@@ -50,7 +51,11 @@ WHERE application_id = &&app_id;
 SPOOL OFF
 
 -- -dir is the parent directory. SQLcl creates the application-alias child.
-apex export -applicationid &&app_id -exptype APEXLANG -overwrite-files -dir apps/&&target_schema
+@@page_lock_state.sql .apex-page-locks-before.json
+apex export -applicationid &&app_id -exptype APEXLANG -exptranslations -overwrite-files -dir apps/&&target_schema
+
+@@verify_deployment_state.sql
+@@page_lock_state.sql .apex-page-locks-after.json
 
 -- Refuse to publish a local export marker if Builder changed during the export.
 SPOOL .apex-export-after.txt

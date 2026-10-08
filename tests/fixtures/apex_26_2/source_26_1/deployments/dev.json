@@ -1,0 +1,11 @@
+{
+  "workspace": {
+    "name": "DEMO"
+  },
+  "app": {
+    "id": 940261,
+    "databaseSession": {
+      "parsingSchema": "DEMO"
+    }
+  }
+}

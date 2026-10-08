@@ -98,7 +98,12 @@ Collect values in this order:
 6. Code schema and prefixes, then whether its connection/account should reuse
    the tables values. Ask for independent values when it should not.
 7. APEX parsing schema, then whether its connection/account should reuse the
-   code or tables values. Ask for independent values when it should not.
+   code or tables values. Ask for independent values when it should not. Also
+   collect `APEX_WORKSPACE_USERNAME`, the actual Builder developer/admin login.
+   It is independent of `DEVELOPER_NAME` and the database session user; email
+   and case-preserving usernames are allowed. Validate its privileges in each
+   selected DEV workspace before acquiring a native application lock. Never
+   infer this login from the version author or schema.
 8. Whether to enable the optional ORDS metadata export (`backup-ords`); default
    to no. If yes, collect the REST schema, a saved-connection name, and the
    expected session user. The expected user must equal the REST schema: ORDS
@@ -108,10 +113,6 @@ Collect values in this order:
    REST schema owner. Say that the export is read-only, never exports OAuth
    clients or secrets, and needs SQLcl 26.1 or newer. All three values are set,
    or none (no partial profile).
-9. Whether to enable optional `uc-apx` tooling in `.env`; default to `false`.
-   If enabled, choose `universal` (default) or `claude-code` as its skill
-   target. Enabling the toggle does not approve downloading a missing CLI; the
-   `install-uc-apx` skill asks before installing it.
 
 Schemas and users are uppercase Oracle identifiers matching
 `[A-Z][A-Z0-9_$#]{0,127}`. Saved-connection names match
@@ -142,6 +143,7 @@ this order:
 ```dotenv
 PROJECT_NAME=<project-name>
 DEVELOPER_NAME=<uppercase-developer-name>
+APEX_WORKSPACE_USERNAME=<actual-Builder-developer-login>
 DB_ENVIRONMENT=<environment>
 APEX_APP_ID=<positive-id-csv>
 
@@ -159,8 +161,6 @@ APEX_PARSING_SCHEMA=<schema>
 APEX_SQLCL_CONNECTION=<saved-connection>
 APEX_EXPECTED_USER=<session-user>
 
-INSTALL_UC_APX=<true-or-false>
-UC_APX_SKILLS_AGENT=<universal-or-claude-code>
 ```
 
 Only when the ORDS metadata export is enabled, add these three lines after the
@@ -206,11 +206,6 @@ $env:PROJECT_ENV_FILE = '.env'
 If a saved-connection name resembles production while the environment is not
 `production`, stop and ask the user whether that target is a production
 database. Correct the classification only after the user answers.
-
-If `INSTALL_UC_APX=true`, **REQUIRED SUB-SKILL:** use `install-uc-apx` after
-the local checks pass. That skill owns installation approval and skill sync.
-The shell loaders default omitted settings to `false` and `universal` for
-existing projects, and reject any other explicit values.
 
 After local validation succeeds, tell the user to review and keep the
 credential-free root `.env` in their own downstream Git repository. It holds

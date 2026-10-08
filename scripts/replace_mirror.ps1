@@ -1,18 +1,28 @@
 #Requires -Version 5.1
 # Replace generated mirrors with completed staging directories atomically.
 param(
-  [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
-  [string[]]$Pairs
+  [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true, Position = 0)]
+  [string[]]$Pairs,
+  [string]$VerifiedSource = ''
 )
 
 $ErrorActionPreference = "Stop"
 if ($Pairs.Count -lt 2 -or $Pairs.Count % 2 -ne 0) {
   throw "usage: replace_mirror.ps1 <staged-dir> <destination> [<staged-dir> <destination> ...]"
 }
+if ($VerifiedSource -and $Pairs.Count -ne 2) { throw 'verified source replacement requires one app pair' }
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $scratchPath = Join-Path $repoRoot "scratch"
 [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
 $scratchRoot = (Resolve-Path -LiteralPath $scratchPath).Path
+
+function Assert-VerifiedSource([string]$Relative) {
+  . (Join-Path $PSScriptRoot 'resolve_python.ps1')
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw 'Python is required to verify partial source replacement' }
+  & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot 'check_mirror_source.py') $repoRoot $Relative $VerifiedSource
+  if ($LASTEXITCODE -ne 0) { throw 'local source changed or verified replacement receipt is invalid' }
+}
 
 function Assert-NoIgnoredMirrorFiles([string]$RepoRoot, [string]$Relative) {
   # The swap deletes the old directory, so ignored files there would be lost
@@ -117,7 +127,9 @@ $gitExitCode = $LASTEXITCODE
 if ($gitExitCode -ne 0) {
   throw "unable to inspect Git status for mirror: $relativeDestination"
 }
-if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
+if ($VerifiedSource) {
+  Assert-VerifiedSource $relativeDestination
+} elseif (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
   throw "refusing to replace dirty mirror: $Destination"
 }
 Assert-NoIgnoredMirrorFiles -RepoRoot $repoRoot -Relative $relativeDestination
@@ -305,7 +317,9 @@ try {
     Assert-NoReparsePointsBelowRepository -Path $pair.StagedPath -Label "staging directory"
     $dirty = @(git -C $repoRoot status --porcelain --untracked-files=all -- ":(literal)$($pair.CanonicalRelative)")
     if ($LASTEXITCODE -ne 0) { throw "unable to recheck Git status for mirror: $($pair.CanonicalRelative)" }
-    if (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
+    if ($VerifiedSource) {
+      Assert-VerifiedSource $pair.CanonicalRelative
+    } elseif (-not [string]::IsNullOrWhiteSpace(($dirty -join "`n"))) {
       throw "refusing to replace dirty mirror: $($pair.CanonicalRelative)"
     }
     Assert-NoIgnoredMirrorFiles -RepoRoot $repoRoot -Relative $pair.CanonicalRelative

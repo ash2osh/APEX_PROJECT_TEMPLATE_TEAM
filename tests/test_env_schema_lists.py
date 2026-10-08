@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from fake_sqlcl import BASH
 from pathlib import Path
 
@@ -59,11 +60,58 @@ def load(env_path: Path, probe: str = PROBE, project_schema: str | None = None) 
     )
 
 
+RETIRED_UC_ERROR = "project environment error: uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env"
+
+
+def write_without_uc(directory: Path, extra: str = "") -> Path:
+    path = write_env(directory, {})
+    text = "\n".join(line for line in path.read_text().splitlines()
+                     if not line.startswith(("INSTALL_UC_APX=", "UC_APX_SKILLS_AGENT=")))
+    path.write_text(text + "\n" + extra, encoding="utf-8")
+    return path
+
+
+def write_without_workspace_username(directory: Path, extra: str = "") -> Path:
+    path = write_env(directory, {})
+    lines = [line for line in path.read_text().splitlines() if not line.startswith("APEX_WORKSPACE_USERNAME=")]
+    path.write_text("\n".join(lines) + "\n" + extra, encoding="utf-8")
+    return path
+
+
 class BashEnvironmentListTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+
+    def test_workspace_developer_is_independent_literal_optional_text(self) -> None:
+        for username in ("dev@example.com", "o'neil", "ΔΗΜΗΤΡΗΣ", "demo"):
+            with self.subTest(username=username):
+                path = write_without_workspace_username(self.directory, 'APEX_WORKSPACE_USERNAME="' + username + '"\n')
+                result = load(path, 'printf "%s|%s|%s" "$APEX_WORKSPACE_USERNAME" "$DEVELOPER_NAME" "$APEX_EXPECTED_USER"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, username + "|ALICE|DEMO")
+
+    def test_missing_workspace_developer_does_not_inherit_or_fall_back(self) -> None:
+        path = write_without_workspace_username(self.directory)
+        with patch.dict(os.environ, {"APEX_WORKSPACE_USERNAME": "INHERITED"}):
+            result = load(path, 'printf "%s" "${APEX_WORKSPACE_USERNAME:-}"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_fresh_config_does_not_export_retired_uc_settings(self) -> None:
+        result = load(write_without_uc(self.directory),
+                      'printf "%s|%s" "${INSTALL_UC_APX+set}" "${UC_APX_SKILLS_AGENT+set}"')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("|", result.stdout)
+
+    def test_retired_uc_keys_require_explicit_config_cleanup(self) -> None:
+        for setting in ("INSTALL_UC_APX=false", "INSTALL_UC_APX=true", "UC_APX_SKILLS_AGENT=universal"):
+            with self.subTest(setting=setting):
+                result = load(write_without_uc(self.directory, setting + "\n"), "echo LOADED")
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual(RETIRED_UC_ERROR, result.stderr.strip())
+                self.assertNotIn("LOADED", result.stdout)
 
     def test_single_values_load_exactly_as_before(self) -> None:
         result = load(write_env(self.directory, {}))
@@ -229,6 +277,32 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
         script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; {probe}'
         return subprocess.run([PWSH, "-NoProfile", "-Command", script], env=environment, text=True, capture_output=True, check=False)
 
+    def test_workspace_developer_matches_bash_literal_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            for username in ("dev@example.com", "o'neil", "ΔΗΜΗΤΡΗΣ", "demo"):
+                with self.subTest(username=username):
+                    path = write_without_workspace_username(Path(temporary), 'APEX_WORKSPACE_USERNAME="' + username + '"\n')
+                    result = self.run_probe(path, '"$($env:APEX_WORKSPACE_USERNAME)|$($env:DEVELOPER_NAME)|$($env:APEX_EXPECTED_USER)"')
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), username + "|ALICE|DEMO")
+
+    def test_retired_uc_keys_match_bash_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            for setting in ("INSTALL_UC_APX=false", "INSTALL_UC_APX=true", "UC_APX_SKILLS_AGENT=universal"):
+                with self.subTest(setting=setting):
+                    path = write_without_uc(Path(temporary), setting + "\n")
+                    result = self.run_probe(path, "'LOADED'")
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(RETIRED_UC_ERROR, plain(result.stderr))
+                    self.assertNotIn("LOADED", result.stdout)
+
+    def test_fresh_config_does_not_export_retired_uc_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_without_uc(Path(temporary))
+            result = self.run_probe(path, '"$($env:INSTALL_UC_APX)|$($env:UC_APX_SKILLS_AGENT)"')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("|", result.stdout.strip())
+
     def test_lists_narrowing_and_guard_match_the_bash_loader(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             env_path = write_env(Path(temporary), MULTI)
@@ -267,7 +341,6 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
         # Both loaders are also run directly (and by the helper scripts); the PowerShell one
         # used to drop the "project environment error:" prefix on most of its refusals.
         cases = {
-            "boolean": {"INSTALL_UC_APX=false": "INSTALL_UC_APX="},
             "developer": {"DEVELOPER_NAME=ALICE": "DEVELOPER_NAME=lower"},
             "environment": {"DB_ENVIRONMENT=development": "DB_ENVIRONMENT=dev"},
             "duplicate": {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,ONE"},

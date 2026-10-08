@@ -1,5 +1,13 @@
 # Agent safety rules
 
+- Follow the mandatory weekly Oracle skills refresh in `AGENTS.md`. Check
+  SQLcl's `~/.dbtools/skills/skills.json` repository and relevant installation
+  dates/files at every task startup; automatically run `skills sync -force`
+  when due. Verify the current run without conflicts, reread native evidence
+  and notify the developer in this chat. Do not create an extra date file or
+  infer a prior forced/successful run from native timestamps. An observed failed
+  refresh is not made successful by fresh dates. Preserve project-authored
+  skills and select Oracle APEXlang skills for the target release.
 - Read APEXlang and SQL source before changing it or applying it. Keep numeric
   app IDs and explicit deployment workspace/schema mappings consistent.
 - Do not place database credentials in `.env`, tracked files, command output,
@@ -11,7 +19,11 @@
   committing it.
 - Do not run migrations, APEX imports, or deployments unless the user asked
   for that database write. Coordinate with teammates before importing into a
-  shared DEV app; Git branches do not protect shared database state.
+  shared DEV app, except an eligible explicit `--no-team-notice` page-only
+  publish under `docs/partial-publish.md`. Builder locks must precede baseline
+  capture/edits; all ownership, salt, cutoff and verification gates apply.
+  Ambiguous writes require team recovery communication. Git branches do not
+  protect shared database state.
 - Store migration SQL in numbered files under
   `migrations/YYYY-MM-DD_<name>-rNNN/`; do not add a developer-name path.
   When several schemas are configured, use

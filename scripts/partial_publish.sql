@@ -1,0 +1,10 @@
+-- Called only by the verified page-import driver; values are numeric/UTF-8 hex.
+SET VERIFY OFF
+DECLARE
+  v_version VARCHAR2(255) := UTL_I18N.RAW_TO_CHAR(HEXTORAW('&2'), 'AL32UTF8');
+BEGIN
+  APEX_APPLICATION_ADMIN.SET_APPLICATION_VERSION(TO_NUMBER('&1'), v_version);
+  COMMIT;
+END;
+/
+PROMPT APEX_PARTIAL_VERSION_VERIFIED:&1

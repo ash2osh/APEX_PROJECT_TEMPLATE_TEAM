@@ -3,6 +3,12 @@
 set -euo pipefail
 
 REPO_ROOT="${MIRROR_SYNC_REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+VERIFIED_SOURCE=''
+if [ "${1:-}" = --verified-source ]; then
+  [ "$#" -eq 4 ] || { echo 'verified source replacement requires one app pair and a receipt' >&2; exit 2; }
+  VERIFIED_SOURCE="$2"
+  shift 2
+fi
 if [ "$#" -lt 2 ] || [ $(( $# % 2 )) -ne 0 ]; then
   echo "usage: replace_mirror.sh <staged-dir> <destination> [<staged-dir> <destination> ...]" >&2
   exit 2
@@ -87,6 +93,9 @@ mkdir -p "$DEST_PARENT"
 
 # Returns 2, the status of every refusal (README), which set -e passes on as the exit status.
 check_clean_mirror() {
+  if [ -n "$VERIFIED_SOURCE" ]; then
+    python3 "$REPO_ROOT/scripts/check_mirror_source.py" "$REPO_ROOT" "$DEST_REL" "$VERIFIED_SOURCE" || return 2
+  else
   if ! DIRTY_STATUS="$(cd "$REPO_ROOT" && git status --porcelain --untracked-files=all -- "$DEST_REL")"; then
     echo "unable to inspect Git status for mirror: $DEST_REL" >&2
     return 2
@@ -95,6 +104,7 @@ check_clean_mirror() {
     echo "refusing to replace dirty mirror: $DEST_REL" >&2
     echo "commit, stash, or remove local changes first" >&2
     return 2
+  fi
   fi
   # The swap deletes the old directory, so ignored files there would be lost
   # without Git noticing. Only the two ignored files an export regenerates

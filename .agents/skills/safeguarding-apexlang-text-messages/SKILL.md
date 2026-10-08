@@ -45,13 +45,8 @@ After editing, compare the property inventory with the baseline. Check for dupli
 
 1. Convert only verified static copy. Check the app's compatibility mode and loaded APEXlang workflow first. Oracle APEX 26.1 marks `&APP_TEXT$KEY.` as legacy and recommends `&{KEY}.` for compatibility mode 24.2 or later. For an older mode or a workflow that appears to require legacy syntax, verify the supported form against that app's documentation and tooling; do not choose legacy syntax from memory or switch silently.
 2. Review the complete diff. Check duplicate properties, changed identifiers, unresolved or orphan message keys, and identical placeholder names/counts in every locale. For automated edits, compare the property inventory before and after.
-3. Run validators that are installed and configured for the project. `uc-apx` may be run as:
-
-   ```bash
-   uc-apx validate --app-dir <app-source-dir> --json-pretty
-   ```
-
-   Require zero errors in the modified application source; report warnings separately.
+3. Run SQLcl APEXlang validation for the project's release. Require zero errors
+   in the modified application source and report warnings separately.
 
    SQLcl APEXlang validation can run without a database connection:
 

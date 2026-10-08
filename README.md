@@ -1,6 +1,8 @@
 # APEX project template for teams
 
-This template supports APEX 26.1+ applications authored as APEXlang. It uses
+This branch targets APEX 26.2 applications authored as APEXlang and requires
+SQLcl 26.3.0.0 or newer for APEX operations. APEX 26.1 projects use the pinned
+`codex/apex-26.1` maintenance branch. It uses
 plain Git source, explicit deployment JSON, and dated, ordered SQL migration
 folders. No custom team metadata schema or database lock tables are required.
 
@@ -42,18 +44,44 @@ project-specific tests and the operational scripts, `.env`, manifest and lock.
 | Safety built in | Every connection is identity-checked, production-looking names are caught, production is read-only, file installs are all-or-nothing, and your uncommitted work is never overwritten. |
 | Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
 | Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
-| AI-assistant support | Repository rules, workflows, 25 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
+| AI-assistant support | Repository rules, workflows, 24 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
 | Bash and PowerShell | `scripts/team.sh` and `scripts/team.ps1` expose the same commands. |
 
 ## Skills and agent support
 
 AI coding assistants read [AGENTS.md](AGENTS.md) (Claude Code loads it through
 `CLAUDE.md`) for the rules and load a skill on their own when a task matches
-its description. The same 25 skills are listed in `.agents/skills/` (for agents
+its description. The same 24 skills are listed in `.agents/skills/` (for agents
 that follow the `AGENTS.md` convention) and `.claude/skills/` (for Claude Code).
 Three Claude Code entries (`chrome-devtools-mcp`, `safeguarding-apexlang-text-messages`
 and `sqlcl-mcp-r0`) are short pointers to the full `.agents/skills/` copy.
 You do not have to call them by name.
+
+At the start of every task, agents read SQLcl's own
+`~/.dbtools/skills/skills.json`. They check the Oracle repository's `lastSync`
+and every required `installedAt` at this agent's actual Oracle skill paths,
+including the installed files. A fresh repository download alone is insufficient.
+Missing, invalid, future or seven-day-old evidence triggers an automatic refresh
+of all Oracle roots without connecting to a database:
+
+```text
+sql /nolog
+SQL> skills sync -force
+SQL> exit
+```
+
+SQLcl MCP `skills_sync` with `force=true` and all roots selected is equivalent.
+The agent verifies the current run completed without conflicts, rereads the
+native registry and reports the verified date/count in this chat. When current,
+it reports the oldest relevant installation date without claiming a new sync.
+Native timestamps do not record an earlier run's force option or overall success.
+Failed/conflicted refreshes block Oracle work even if SQLcl updated some dates;
+read-only investigation can continue with the failure reported.
+
+The full contract travels in `AGENTS.md`, also loaded by `CLAUDE.md`. There is
+no project timestamp file or scheduled automation. Projects sharing this user's
+installed skills reuse SQLcl's native dates; inactive projects check at next task
+startup. Agents preserve project-authored skills and use release-matched APEXlang.
 
 **APEX and database skills**
 
@@ -69,7 +97,6 @@ You do not have to call them by name.
 | `sqlcl-mcp-r0` | An assistant operates SQLcl through MCP at restriction level 0. |
 | `sqlcl-script-path-debugging` | Nested SQLcl scripts load the wrong file, or relative `SPOOL` and include paths misbehave. |
 | `chrome-devtools-mcp` | Inspecting or driving your running web app in Chrome through the project's persistent DevTools daemon. |
-| `install-uc-apx` | Installing or verifying the optional `uc-apx` command-line tool when `INSTALL_UC_APX=true`. |
 
 **Workflow skills** (from the Superpowers collection): `brainstorming`,
 `writing-plans`, `executing-plans`, `subagent-driven-development`,
@@ -82,16 +109,16 @@ debugs and reviews a change.
 
 Rules and workflows that apply to everyone, human or assistant, live in
 `.agents/rules/` (`agent-safety.md`, `graphify.md`) and `.agents/workflows/`
-(`team-flow.md`, `graphify.md`, `uc-apx.md`). Put your project's own
+(`team-flow.md`, `graphify.md`). Put your project's own
 instructions in `AGENTS.project.md`, `.agents/rules/project.md` and
 `PROJECT.md`; template upgrades never overwrite those.
 
 ## Quickstart
 
 New here? Follow [Getting started](docs/GETTING_STARTED.md): it walks through
-everything below with the output you should see. You need SQLcl 26.1 or newer,
+everything below with the output you should see. You need SQLcl 26.3.0.0 or newer,
 Git, Python 3.10 or newer, Bash 4.3 or newer, and an Oracle database with
-APEX 26.1 or newer. To practice locally, the
+APEX 26.2. To practice locally, the
 [United Codes `uc-local-apex-dev`](https://github.com/United-Codes/uc-local-apex-dev)
 containers give you one.
 
@@ -253,7 +280,7 @@ Pass `--schema <NAME>` to narrow a command to one schema. `doctor` and
 | `export <id>` | Reads the app's parsing schema from `APEX_APPLICATIONS` using the first `APEX_SQLCL_CONNECTION` entry, requires that schema in `APEX_PARSING_SCHEMA`, then reconnects with that schema's own connection and writes `apps/<SCHEMA>/<id>/`. `team.sh export` takes one ID. `scripts/export_apps.sh` with no argument resolves each configured app ID separately and installs all exports in one all-or-nothing mirror replacement. |
 | `backup-db` | Runs the tables scope for each tables schema and the code scope for each code schema, plus the ORDS scope for each ORDS schema when the optional ORDS profile exists. Each has a staging directory, a completeness check, and a dirty-mirror check. Nothing is installed until every schema verifies; one mirror replacement installs them all. `--schema` narrows the run. |
 | `backup-ords` | Exports each ORDS schema (`ORDS_SCHEMA`, optional) to `database/<SCHEMA>/ords/schema.sql` and replaces only that folder. `--schema` narrows the run; an ORDS-only schema is selectable. |
-| `publish <id>` | Requires the app folder, descriptor, and live app parsing schema to agree and be listed, then uses that schema's connection. The drift guard, version stamp, and byte-equality verification remain unchanged. |
+| `publish <id>` | Requires the app folder, descriptor, and live app parsing schema to agree and be listed, then uses that schema's connection. Full mode keeps the app-wide drift guard; selected-page mode verifies a fresh merged snapshot. |
 | `deploy <id> --env staging\|prod` | The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection. |
 | `migrate`, `check-conflicts` | Uses `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/`; the folder selects the target entry. Scans, revision ordering, and receipts are scoped to one schema, and one invocation cannot mix schemas. |
 | `compare-schema` | Requires `--schema` when more than one schema is configured and compares that schema across the selected environments. |
@@ -473,6 +500,17 @@ upgrade reports that `.env` needs attention, compare it with `.env.example`.
 A differing `.env.example` on the first upgrade also leaves an
 `.env.example.template-new` review copy; merge it into the example before
 reviewing any corresponding changes to your own `.env`.
+
+The lock also records the selected `templateRef` and `apexRelease`. Later runs
+reuse the recorded ref when `--ref` is omitted. Keep a 26.1 project pinned with
+`--ref codex/apex-26.1 --apex-release 26.1`. Moving to the 26.2 line requires
+an explicit `--ref main --apex-release 26.2` after that release is merged.
+Unknown or different release lines are refused before files change. This is
+an offline choice: `doctor` and APEX operations still check the live release.
+A legacy upgrader refuses schema-2 manifests; bootstrap the newer reviewed
+`scripts/upgrade_template.py` from the desired template ref before crossing
+the release boundary. Download it for review before executing it; do not pipe
+remote code into a shell. `--dry-run` leaves both files and lock untouched.
 Files removed after they were recorded in `.template-lock.json` remain deleted
 (`KEEP-DELETED`). Keep that lock when cleaning a clone. New upstream files can
 still be created; review tests and GitHub automation after future upgrades.
@@ -501,9 +539,11 @@ is used when no explicit source is supplied:
 
 ```bash
 git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git /tmp/apex-template
-python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git
+python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git --ref main --apex-release 26.2
 ```
 
+The example selects the 26.2 template explicitly. For a project remaining on
+26.1, use `--ref codex/apex-26.1 --apex-release 26.1` instead.
 That first run has no lock, so every file that differs from the template is
 reported as a conflict instead of being overwritten. Keep the project clean
 before running it; conflicts must be reviewed and merged manually.
@@ -512,13 +552,43 @@ The engine stages updates and restores them if a filesystem operation fails.
 If it reports an incomplete rollback, keep the named recovery directory and
 restore those backups before retrying the upgrade.
 
+`APEX_WORKSPACE_USERNAME` identifies the actual Builder developer/admin account
+used to own native application locks. It is independent of `DEVELOPER_NAME`
+(the version author) and `APEX_EXPECTED_USER` (the database login). Email and
+case-preserving usernames are supported. Set the account that exists in each
+selected DEV workspace; there is no fallback to the author or schema. The
+loader keeps this optional for schema/ORDS commands; the lock workflow validates
+it before a lock or DEV publish. `doctor` also checks the account in the live
+workspaces of the configured app IDs. If none is visible in a selected schema,
+that workspace check is unavailable and doctor refuses rather than claiming it
+passed. The 26.2 commands `app-lock <id> --env dev [--comment <text>]` and
+`app-unlock <id> --env dev` use public application APIs. DEV publish acquires
+and verifies a run-owned lock automatically; an existing lock refuses it even
+with `--force`. The app must already exist. Unknown imports retain the lock,
+old baseline and local recovery evidence for reconciliation. These application
+locks accompany page locks in Builder and the agreed team workflow.
+
+Use `publish <id> --file pages/<file>.apx` for an existing-page DEV update.
+Repeat `--file` for more pages. A schema-2 baseline and unchanged unselected
+local source are mandatory; a fresh snapshot preserves unrelated saved live
+work. Successful verification synchronizes the canonical whole-app source
+locally. Review that diff. Under the agreed separate-account guarded workflow,
+`--no-team-notice` additionally requires exact pre-edit Builder page locks and
+explicit live-matching salt/cutoff settings. See
+[partial publishing](docs/partial-publish.md) for eligibility, refusals and recovery.
+Full changes and promotion retain team coordination; working copies remain deferred.
+
 ## Command reference
 
 | Command | Purpose |
 | --- | --- |
+| `scripts/team.sh app-lock <id> --env dev` | Acquire a native application lock as the configured workspace developer. |
+| `scripts/team.sh app-unlock <id> --env dev` | Release only the configured developer's application lock after reconciliation. |
+| `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
 | `scripts/team.sh doctor` | Validate `.env` and check the DEV SQLcl identity. |
 | `scripts/team.sh export <id>` | Export one numeric app from shared DEV Builder. |
 | `scripts/team.sh publish <id> --env dev` | Drift-check and import one app to DEV. |
+| `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
 | `scripts/team.sh migrate <folder> [...] --env <env>` | Verify and apply selected migration folders to DEV, staging, or production. |

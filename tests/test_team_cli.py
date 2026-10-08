@@ -52,6 +52,8 @@ class TeamCliTests(unittest.TestCase):
             "doctor",
             "export",
             "publish",
+            "app-lock",
+            "app-unlock",
             "check-conflicts",
             "migrate",
             "compare-schema",
@@ -62,6 +64,19 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn(command, result.stdout)
         self.assertIn("--env dev|staging|prod", result.stdout)
         self.assertIn("--pattern", result.stdout)
+
+    def test_application_lock_rejects_non_dev_before_loading_environment(self):
+        for command in ('app-lock', 'app-unlock'):
+            for entry in ('team.sh', 'team.ps1'):
+                if entry.endswith('ps1') and not shutil.which('pwsh'):
+                    continue
+                launcher = [BASH] if entry.endswith('sh') else ['pwsh', '-NoProfile', '-File']
+                result = subprocess.run([*launcher, str(ROOT/'scripts'/entry), command, '100', '--env', 'prod'],
+                    env=dict(os.environ, PROJECT_ENV_FILE='/no/such/env'), capture_output=True, text=True)
+                with self.subTest(command=command, entry=entry):
+                    self.assertEqual(result.returncode, 2, result.stdout+result.stderr)
+                    self.assertIn('locks target DEV only', result.stderr)
+                    self.assertNotIn('configuration file', result.stderr)
 
     def test_team_migrate_rejects_missing_duplicate_and_invalid_environment_before_loading_env(self) -> None:
         for arguments, expected in (
@@ -644,7 +659,7 @@ class TeamCliTests(unittest.TestCase):
             root = Path(temporary)
             scripts = root / "scripts"
             scripts.mkdir()
-            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh"):
+            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh", "apex_compatibility.py"):
                 shutil.copy2(ROOT / "scripts" / name, scripts / name)
             (root / "scripts" / "verify_db_access.sql").write_text(
                 "PROMPT identity checked\n", encoding="utf-8"
@@ -657,10 +672,11 @@ class TeamCliTests(unittest.TestCase):
             fake_sql.write_text(
                 "#!/usr/bin/env bash\n"
                 "cat > /dev/null\n"
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
                 "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
                 "if [[ -f login.sql ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
                 "if [[ -n \"${SQLPATH:-}\" && -f \"$SQLPATH/login.sql\" ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
-                "printf 'APEX_DOCTOR_VERIFIED:DEMO\\n'\n",
+                "printf 'APEX_DOCTOR_VERIFIED:DEMO\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n'\n",
                 encoding="utf-8",
             )
             fake_sql.chmod(0o755)
@@ -703,7 +719,7 @@ class TeamCliTests(unittest.TestCase):
             root = Path(temporary)
             scripts = root / "scripts"
             scripts.mkdir()
-            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh"):
+            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh", "apex_compatibility.py"):
                 shutil.copy2(ROOT / "scripts" / name, scripts / name)
             (scripts / "verify_db_access.sql").write_text("PROMPT identity checked\n", encoding="utf-8")
             (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"))
@@ -959,13 +975,13 @@ class TeamCliTests(unittest.TestCase):
         for name in (
             "deploy.sh",
             "publish_app.sh",
-            "publish_app.sql",
+            "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "verify_apex_release.sql",
             "sqlcl_safe.sh",
             "load_env.sh",
-            "export_apps.sql",
+            "export_apps.sql", "verify_deployment_state.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
-            "record_export_state.py",
+            "record_export_state.py", "source_evidence.py",
             "verify_publish_state.py",
             "stamp_publish_version.py",
             "validate_app_source.py",
@@ -995,6 +1011,8 @@ class TeamCliTests(unittest.TestCase):
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
             "cat > /dev/null\n"
+            f'python3 "{(ROOT / "tests" / "fake_application_lock_sql.py").as_posix()}" "$@" >/dev/null\n'
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
             "mode=other; export_schema=DEMO\n"
             "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
             "if [[ $mode == export ]]; then found_script=0; for arg in \"$@\"; do if [[ $found_script == 1 ]]; then export_schema=$arg; break; fi; case \"$arg\" in *@*export_apps.sql) found_script=1 ;; esac; done; fi\n"
@@ -1051,6 +1069,7 @@ class TeamCliTests(unittest.TestCase):
                     fake_sqlcl.native(script.parents[1] / "apps/DEMO/100/deployments/prod.json"),
                     "100",
                     "-",
+                    fake_sqlcl.native(script.parents[1] / "scripts/no_application_lock.sql"),
                 ],
             )
             self.assertEqual(

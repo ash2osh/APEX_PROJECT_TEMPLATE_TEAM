@@ -147,7 +147,7 @@ def main(arguments: list[str]) -> int:
     config = json.loads(Path(os.environ["FAKE_ORDS_CONFIG"]).read_text(encoding="utf-8"))
     if arguments == ["-V"]:
         log(config, "version")
-        print(config.get("version", "SQLcl: Release 26.2.2.0 Production Build: 26.2.2.233.1901"))
+        print(config.get("version", "SQLcl: Release 26.3.0.0 Production Build: 26.3.0.260.1620"))
         return 0
     connection = arguments[arguments.index("-name") + 1]
     os.environ["FAKE_CONNECTION"] = connection
@@ -166,6 +166,9 @@ def main(arguments: list[str]) -> int:
             print(f"ORA-20061: ORDS export must authenticate as the REST schema owner {schema} but the session user is DEPLOYER")
             return 1
         print(f"APEX_DOCTOR_VERIFIED:{user}")
+        if script == "doctor.sql" and len(rest) >= 4 and rest[3] == "apex":
+            print("APEX_RELEASE_VERIFIED:26.2")
+            print("APEX_WORKSPACE_USERS_VERIFIED")
         return 0
     print(f"fake sql: unsupported script {script}", file=sys.stderr)
     return 4

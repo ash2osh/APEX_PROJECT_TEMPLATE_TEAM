@@ -56,7 +56,27 @@ def git_init(root: Path) -> None:
 
 
 class DoctorCliTests(unittest.TestCase):
-    NAMES = ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "verify_db_access.sql", "sqlcl_safe.sh")
+    NAMES = ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "verify_db_access.sql", "sqlcl_safe.sh", "apex_compatibility.py")
+
+    def test_apex_doctor_requires_explicit_workspace_username(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            script,environment=self.make_checkout(root,{'APEX_WORKSPACE_USERNAME=DEMO':'# username deliberately unset'})
+            environment['APEX_WORKSPACE_USERNAME']='INHERITED'
+            result=self.run_team(script,environment,'doctor')
+            self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertIn('APEX_WORKSPACE_USERNAME',plain(result.stderr))
+
+    def test_workspace_validation_is_not_required_for_table_only_schema(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            settings={**TWO_SCHEMAS,'APEX_PARSING_SCHEMA=DEMO':'APEX_PARSING_SCHEMA=ONE',
+                'APEX_SQLCL_CONNECTION=docker-demo':'APEX_SQLCL_CONNECTION=conn-one',
+                'APEX_EXPECTED_USER=DEMO':'APEX_EXPECTED_USER=ONE',
+                'APEX_WORKSPACE_USERNAME=DEMO':'# username deliberately unset'}
+            script,environment=self.make_checkout(root,settings)
+            result=self.run_team(script,environment,'doctor','--schema','TWO')
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
     def make_checkout(self, root: Path, replacements: dict[str, str]) -> tuple[Path, dict[str, str]]:
         scripts = root / "scripts"
@@ -74,9 +94,10 @@ class DoctorCliTests(unittest.TestCase):
             # Drain stdin first. PowerShell feeds it through a pipe; a fake that exits before the
             # pipe is closed races Start-Process ("Broken pipe", or a transcript read too early).
             "cat > /dev/null\n"
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release %s Production\\n' \"${FAKE_SQLCL_VERSION:-26.3}\"; exit 0; fi\n"
             "printf '%s|%s|%s\\n' \"$4\" \"$6\" \"$8\" >> \"$FAKE_SQL_CALLS\"\n"
             "if [[ \"${FAKE_FAIL_CONNECTION:-}\" == \"$4\" ]]; then printf 'ORA-01017: invalid credentials\\n'; exit 1; fi\n"
-            "printf 'APEX_DOCTOR_VERIFIED:%s\\n' \"$8\"\n",
+            "printf 'APEX_DOCTOR_VERIFIED:%s\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n' \"$8\"\n",
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
@@ -105,6 +126,26 @@ class DoctorCliTests(unittest.TestCase):
             result = self.run_team(script, environment, "doctor")
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("Doctor checks passed for the configured DEV connection.", plain(result.stdout))
+            self.assertEqual(["docker-demo|DEMO|DEMO"], Path(environment["FAKE_SQL_CALLS"]).read_text().splitlines())
+
+    def test_old_sqlcl_refuses_apex_doctor_before_connecting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), {})
+            environment["FAKE_SQLCL_VERSION"] = "26.2.2.0"
+            result = self.run_team(script, environment, "doctor")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("SQLcl 26.3.0.0", plain(result.stderr))
+            self.assertFalse(Path(environment["FAKE_SQL_CALLS"]).exists())
+
+    def test_table_only_selection_does_not_require_apex_sqlcl_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            replacements = {"APEX_PARSING_SCHEMA=DEMO": "APEX_PARSING_SCHEMA=OTHER",
+                            "APEX_EXPECTED_USER=DEMO": "APEX_EXPECTED_USER=OTHER",
+                            "APEX_SQLCL_CONNECTION=docker-demo": "APEX_SQLCL_CONNECTION=other-db"}
+            script, environment = self.make_checkout(Path(temporary), replacements)
+            environment["FAKE_SQLCL_VERSION"] = "26.2.2.0"
+            result = self.run_team(script, environment, "doctor", "--schema", "DEMO")
+            self.assertEqual(0, result.returncode, plain(result.stdout + result.stderr))
             self.assertEqual(["docker-demo|DEMO|DEMO"], Path(environment["FAKE_SQL_CALLS"]).read_text().splitlines())
 
     def test_multi_schema_doctor_checks_every_schema_once(self) -> None:
@@ -406,9 +447,9 @@ class BackupCliTests(unittest.TestCase):
 
 class ExportCliTests(unittest.TestCase):
     NAMES = (
-        "export_apps.sh", "export_apps.sql", "lookup_app_schema.sql", "load_env.sh", "check_db_target.sh",
+        "export_apps.sh", "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "verify_apex_release.sql", "lookup_app_schema.sql", "load_env.sh", "check_db_target.sh",
         "sqlcl_safe.sh", "normalize_apx.sh", "replace_mirror.sh", "verify_db_access.sql",
-        "record_export_state.py", "preserve_deployments.py",
+        "record_export_state.py", "source_evidence.py", "preserve_deployments.py",
     )
     APP_SCHEMAS = "117:ONE,301:TWO,205:THREE"
 
@@ -429,6 +470,7 @@ class ExportCliTests(unittest.TestCase):
             # Drain stdin first. PowerShell feeds it through a pipe; a fake that exits before the
             # pipe is closed races Start-Process ("Broken pipe", or a transcript read too early).
             "cat > /dev/null\n"
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
             "set -euo pipefail\n"
             "connection=\"$4\"; script=\"$5\"; schema=\"$6\"; app=\"$7\"\n"
             "printf '%s|%s|%s|%s\\n' \"$(basename \"${script#@}\")\" \"$connection\" \"$schema\" \"$app\" >> \"$FAKE_SQL_CALLS\"\n"
@@ -443,7 +485,7 @@ class ExportCliTests(unittest.TestCase):
             "    if [[ \"${FAKE_FAIL_APP:-}\" == \"$app\" ]]; then printf 'ORA-01017: invalid credentials\\n'; exit 1; fi\n"
             "    mkdir -p \"apps/$schema/exported/.apex\"\n"
             "    printf 'source of %s\\n' \"$app\" > \"apps/$schema/exported/application.apx\"\n"
-            "    printf '{\"v\":1}\\n' > \"apps/$schema/exported/.apex/apexlang.json\"\n"
+            "    printf '{\"mmdVersion\":\"26.2.0+3479\"}\\n' > \"apps/$schema/exported/.apex/apexlang.json\"\n"
             "    printf '2026-09-26T08:00:00|2026-09-26T09:00:00|Release 1.0\\n' > .apex-export-before.txt\n"
             "    printf '2026-09-26T08:00:00|2026-09-26T09:00:02|Release 1.0\\n' > .apex-export-after.txt\n"
             "    ;;\n"
@@ -575,8 +617,8 @@ class ExportCliTests(unittest.TestCase):
 
 class PublishCliTests(unittest.TestCase):
     NAMES = (
-        "publish_app.sh", "publish_app.sql", "load_env.sh", "check_db_target.sh", "export_apps.sql",
-        "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.sh", "record_export_state.py",
+        "publish_app.sh", "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "apex_compatibility.py", "verify_apex_release.sql", "load_env.sh", "check_db_target.sh", "export_apps.sql", "verify_deployment_state.sql",
+        "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.sh", "record_export_state.py", "source_evidence.py",
         "verify_publish_state.py", "validate_app_source.py", "stamp_publish_version.py",
         "check_builder_drift.py", "check_builder_drift.sql", "sqlcl_safe.sh",
     )
@@ -608,6 +650,8 @@ class PublishCliTests(unittest.TestCase):
             # Drain stdin first. PowerShell feeds it through a pipe; a fake that exits before the
             # pipe is closed races Start-Process ("Broken pipe", or a transcript read too early).
             "cat > /dev/null\n"
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
+            'if [[ -n "${FAKE_LOCK_HANDLER:-}" ]]; then python3 "$FAKE_LOCK_HANDLER" "$@"; lock_status=$?; [[ $lock_status == 3 ]] || exit "$lock_status"; fi\n'
             "connection=\"$4\"; script=\"$5\"\n"
             "printf '%s|%s\\n' \"$(basename \"${script#@}\")\" \"$connection\" >> \"$FAKE_SQL_CALLS\"\n"
             "case \"$script\" in\n"
@@ -623,6 +667,7 @@ class PublishCliTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["PROJECT_ENV_FILE"] = str(root / ".env")
+        environment["FAKE_LOCK_HANDLER"] = str(ROOT/"tests/fake_application_lock_sql.py")
         environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
         environment["FAKE_SQL_LOOKUP_ENVIRONMENTS"] = str(root / "lookup-environments.txt")
         environment.pop("PROJECT_SCHEMA", None)
@@ -775,7 +820,7 @@ class PublishCliTests(unittest.TestCase):
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellDoctorCliTests(DoctorCliTests):
-    NAMES = ("team.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "doctor.sql", "verify_db_access.sql")
+    NAMES = ("team.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "doctor.sql", "verify_db_access.sql", "apex_compatibility.py")
 
     def test_schema_option_requires_a_value(self) -> None:
         # PowerShell reports this usage error with exit code 1; Bash uses 2.
@@ -800,18 +845,18 @@ class PowerShellBackupCliTests(BackupCliTests):
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellExportCliTests(ExportCliTests):
     NAMES = (
-        "export_apps.ps1", "export_apps.sql", "lookup_app_schema.sql", "load_env.ps1", "check_db_target.ps1",
+        "export_apps.ps1", "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "verify_apex_release.sql", "lookup_app_schema.sql", "load_env.ps1", "check_db_target.ps1",
         "invoke_sqlcl.ps1", "resolve_python.ps1", "normalize_apx.ps1", "replace_mirror.ps1", "verify_db_access.sql",
-        "record_export_state.py", "preserve_deployments.py",
+        "record_export_state.py", "source_evidence.py", "preserve_deployments.py",
     )
 
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellPublishCliTests(PublishCliTests):
     NAMES = (
-        "publish_app.ps1", "publish_app.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1",
-        "export_apps.sql", "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.ps1",
-        "record_export_state.py", "verify_publish_state.py", "validate_app_source.py",
+        "publish_app.ps1", "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "verify_apex_release.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1",
+        "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "verify_apex_release.sql", "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.ps1",
+        "record_export_state.py", "source_evidence.py", "verify_publish_state.py", "validate_app_source.py",
         "stamp_publish_version.py", "check_builder_drift.py", "check_builder_drift.sql",
     )
 

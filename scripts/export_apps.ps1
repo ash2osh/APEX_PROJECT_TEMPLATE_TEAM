@@ -45,6 +45,7 @@ $stagingPath = Join-Path $scratchPath ("apex-export-" + [Guid]::NewGuid().ToStri
 [System.IO.Directory]::CreateDirectory($stagingPath) | Out-Null
 
 try {
+  Assert-SqlclApexVersion -WorkDirectory (Join-Path $stagingPath "version")
   # Which schema parses each application. With one schema configured that is
   # the schema itself; with several it is read from the live workspace, using
   # the first connection of the profile (the selected schema's, under --schema).
@@ -140,17 +141,17 @@ try {
     $appStage = Join-Path $stageParent $appId
     Move-Item -LiteralPath $exportedDir -Destination $appStage
     & (Join-Path $PSScriptRoot "normalize_apx.ps1") $appStage
+    Invoke-PythonScript -ScriptPath (Join-Path $PSScriptRoot "preserve_deployments.py") `
+      -ScriptArguments @((Join-Path $repoRoot "apps/$appSchema/$appId"), $appStage)
     Invoke-PythonScript -ScriptPath (Join-Path $PSScriptRoot "record_export_state.py") `
       -ScriptArguments @(
         $appId,
         (Join-Path $runPath ".apex-export-before.txt"),
         (Join-Path $runPath ".apex-export-after.txt"),
-        (Join-Path $appStage "apex-team-export.json")
-      )
-    Invoke-PythonScript -ScriptPath (Join-Path $PSScriptRoot "preserve_deployments.py") `
-      -ScriptArguments @(
-        (Join-Path $repoRoot "apps/$appSchema/$appId"),
-        $appStage
+        (Join-Path $appStage "apex-team-export.json"),
+        "--source-dir", $appStage,
+        '--page-locks-before', (Join-Path $runPath '.apex-page-locks-before.json'),
+        '--page-locks-after', (Join-Path $runPath '.apex-page-locks-after.json')
       )
   }
 

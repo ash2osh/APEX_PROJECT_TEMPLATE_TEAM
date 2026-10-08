@@ -16,7 +16,7 @@ Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:PROD_SCHEMA, Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
   Env:STAGING_SCHEMA,
   Env:ORDS_SCHEMA, Env:ORDS_SQLCL_CONNECTION, Env:ORDS_EXPECTED_USER,
-  Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT -ErrorAction SilentlyContinue
+  Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT, Env:APEX_WORKSPACE_USERNAME -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
 # Mirror load_env.sh: a relative PROJECT_ENV_FILE resolves against the
@@ -44,11 +44,10 @@ if (($projectEnvHead[0] -eq 0xFF -and $projectEnvHead[1] -eq 0xFE) -or ($project
 
 $projectEnvSeen = @{}
 $projectEnvAllowed = @(
-  "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
+  "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID", "APEX_WORKSPACE_USERNAME",
   "TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER",
   "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
-  "INSTALL_UC_APX", "UC_APX_SKILLS_AGENT",
   "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER", "PROD_SCHEMA",
   "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA",
   "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER"
@@ -61,6 +60,9 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   }
   $projectEnvKey = $Matches[1]
   $projectEnvValue = $Matches[2]
+  if ($projectEnvKey -in @("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT")) {
+    throw "project environment error: uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env"
+  }
   if ($projectEnvKey -notin $projectEnvAllowed) { throw "project environment error: unsupported setting in ${EnvFile}: $projectEnvKey" }
   if ($projectEnvSeen.ContainsKey($projectEnvKey)) { throw "project environment error: duplicate setting in ${EnvFile}: $projectEnvKey" }
   # The length guard matters: a one-character value of '"' satisfies both
@@ -80,11 +82,6 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   Set-Item -LiteralPath "Env:$projectEnvKey" -Value $projectEnvValue
   $projectEnvSeen[$projectEnvKey] = $true
 }
-
-# Preserve compatibility with existing .env files while exposing stable
-# defaults to project skills.
-if (-not $projectEnvSeen.ContainsKey("INSTALL_UC_APX")) { $env:INSTALL_UC_APX = "false" }
-if (-not $projectEnvSeen.ContainsKey("UC_APX_SKILLS_AGENT")) { $env:UC_APX_SKILLS_AGENT = "universal" }
 
 $projectEnvRequired = @(
   "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
@@ -227,10 +224,6 @@ if ($env:DEVELOPER_NAME -cnotmatch '^[A-Z][A-Z0-9_]{0,29}$') {
 # -cnotin: -notin ignores case, but load_env.sh and the Bash helpers do not.
 if ($env:DB_ENVIRONMENT -cnotin @("development", "test", "staging", "production")) {
   throw "project environment error: DB_ENVIRONMENT must be development, test, staging, or production"
-}
-if ($env:INSTALL_UC_APX -cnotin @("true", "false")) { throw "project environment error: INSTALL_UC_APX must be true or false" }
-if ($env:UC_APX_SKILLS_AGENT -cnotin @("universal", "claude-code")) {
-  throw "project environment error: UC_APX_SKILLS_AGENT must be universal or claude-code"
 }
 foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_EXPECTED_USER",
     "APEX_PARSING_SCHEMA", "APEX_EXPECTED_USER", "STAGING_SCHEMA", "PROD_SCHEMA")) {
