@@ -68,3 +68,35 @@ the evidence, the preferred behavior, and the check that keeps it true.
   (`Get-AppParsingSchema`); never retry a write.
 - Verification: the fixtures in `tests/test_multi_schema_cli.py` drain stdin,
   and `Get-AppParsingSchema` retries at most three times.
+
+### Native APEX locks require cooperating import wrappers
+
+- Trigger: adding APEX 26.2 native application locks to the team publish flow.
+- Evidence: Docker APEX 26.2.0 with SQLcl 26.3.0.0 refused different-owner
+  `LOCK_APPLICATION` and wrong-owner unlock, but full and page-only imports
+  still succeeded over another developer's lock and preserved its metadata.
+  Repeated acquisition by the same workspace developer also succeeded.
+- Preferred behavior: require successful native acquisition before importing;
+  refuse preexisting locks and verify owner/run comment before release. Retain
+  human coordination and drift checks. Do not claim that raw SQLcl imports or
+  concurrent processes sharing a developer account are excluded by the lock.
+- Verification: repeat the different-owner acquisition, raw full/partial import,
+  same-owner reentry and owner-filtered release probes through the production
+  wrappers when qualifying changes to lock integration. Live evidence is in
+  `docs/superpowers/plans/2026-10-08-apex-26.2-live-results.md`.
+
+### Verify generated deployment effects after a version stamp
+
+- Trigger: using the public version setter after a page-only APEXlang import.
+- Evidence: in two Docker probes, `SET_APPLICATION_VERSION` changed the exported
+  manifest and added/advanced generated deployment
+  `app.sessionStateProtection.allowUrlsCreatedAfter`; that value matched the
+  live app's `last_updated_on`. Exports without another write were stable.
+- Preferred behavior: verify this precise deployment key against server state,
+  keeping unrelated differences as failures. Qualify bookmark behavior and
+  explicitly configured cutoffs before enabling partial publishing; do not
+  infer runtime semantics from the version getter or manifest alone.
+- Verification: compare whole exports before/after stamping, verify the live
+  timestamp and repeat for stability, then exercise real bookmark URLs and
+  explicit cutoff settings. The 2026-10-08 native runtime tests passed; the guarded
+  no-notice route additionally requires an explicit live-matching salt and cutoff.

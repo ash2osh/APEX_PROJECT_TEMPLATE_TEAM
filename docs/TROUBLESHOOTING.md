@@ -120,3 +120,11 @@ for migration rules see [migration-rules.md](migration-rules.md).
 Run `scripts/team.sh doctor` and read every line: it prints which connection and
 schema it used. Keep the exact message, because the scripts are written so the
 text says what to do next. If an AI assistant is helping, paste the full output.
+
+## Retired uc-apx configuration
+
+If a command reports `uc-apx settings are retired`, remove both
+`INSTALL_UC_APX` and `UC_APX_SKILLS_AGENT` from your root `.env`, even when the
+installation toggle is false. The upgraded template uses SQLcl APEXlang
+validation and Oracle-maintained skills. Configuration cleanup is manual; an
+upgrade preserves `.env` and does not uninstall user-managed tooling.

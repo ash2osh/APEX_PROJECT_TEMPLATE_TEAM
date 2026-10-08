@@ -33,7 +33,14 @@ Usage: scripts/team.ps1 <command> [arguments]
 Commands:
   doctor                                      Validate .env and the DEV SQLcl identities (ORDS too, when configured)
   export <app_id>                             Export one numeric APEX app from DEV
+  upgrade-apexlang <app_id> --env dev --mode builder|files
+                                              Convert source explicitly to canonical APEX 26.2
   publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
+  publish <app_id> --file pages/<file>.apx [--file ...] [--no-team-notice]
+                                              Verify selected existing DEV pages and synchronize source
+  app-lock <app_id> [--env dev] [--comment <text>]
+                                              Acquire a native DEV application lock
+  app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
   migrate <folder> [...] --env dev|staging|prod
@@ -45,7 +52,7 @@ Commands:
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
-  upgrade-template [--source <url|path>] [--ref <ref>] [--dry-run]
+  upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.2] [--dry-run]
                                               Update template-owned files from the template
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template)
@@ -198,18 +205,26 @@ try {
       . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
       $scratchPath = Join-Path ((Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path) "scratch"
       [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
-      function Invoke-DoctorOne([string]$Connection, [string]$ExpectedUser, [string]$SchemaName, [string]$DoctorScript = "doctor.sql") {
+      function Invoke-DoctorOne([string]$Connection, [string]$ExpectedUser, [string]$SchemaName, [string]$DoctorScript = "doctor.sql", [string]$DoctorProfile = "identity") {
         $sqlclWorkDir = Join-Path $scratchPath ("sqlcl-doctor-" + [Guid]::NewGuid().ToString("N"))
         [System.IO.Directory]::CreateDirectory($sqlclWorkDir) | Out-Null
         $stdinFile = Join-Path $sqlclWorkDir ".sqlcl-stdin"
         $transcriptFile = Join-Path $sqlclWorkDir "sqlcl-output.log"
         New-Item -ItemType File -Path $stdinFile | Out-Null
         try {
+          $usernameHex = '-'
+          if ($DoctorProfile -eq 'apex') {
+            if ([string]::IsNullOrWhiteSpace($env:APEX_WORKSPACE_USERNAME)) { throw 'set APEX_WORKSPACE_USERNAME to the existing Builder developer/admin login' }
+            $usernameBytes = [System.Text.Encoding]::UTF8.GetBytes($env:APEX_WORKSPACE_USERNAME)
+            if ($env:APEX_WORKSPACE_USERNAME -match '[\x00-\x1F]' -or $usernameBytes.Length -gt 255) { throw 'APEX_WORKSPACE_USERNAME must be text without control characters (at most 255 UTF-8 bytes)' }
+            $usernameHex = [System.BitConverter]::ToString($usernameBytes).Replace('-', '')
+            Assert-SqlclApexVersion -WorkDirectory $sqlclWorkDir
+          }
           $sqlclExit = Invoke-Sqlcl -WorkingDirectory $sqlclWorkDir -StdInFile $stdinFile `
             -TranscriptFile $transcriptFile -Arguments @(
             "-S", "-noupdates", "-name", $Connection,
             "@$(Join-Path $PSScriptRoot $DoctorScript)",
-            $SchemaName, $env:DB_ENVIRONMENT, $ExpectedUser
+            $SchemaName, $env:DB_ENVIRONMENT, $ExpectedUser, $DoctorProfile, $usernameHex, $env:APEX_APP_ID
           )
           $output = [System.IO.File]::ReadAllText($transcriptFile)
           # Write-Host, not Write-Output: this function returns a status, and anything
@@ -221,6 +236,14 @@ try {
           }
           if ($output -notmatch "(?m)^\s*APEX_DOCTOR_VERIFIED:$([regex]::Escape($ExpectedUser))\s*$") {
             [Console]::Error.WriteLine("team error: SQLcl did not verify the doctor script for schema $SchemaName; the result is unknown")
+            return $false
+          }
+          if ($DoctorProfile -eq "apex" -and $output -notmatch '(?m)^\s*APEX_RELEASE_VERIFIED:26[.]2\s*$') {
+            [Console]::Error.WriteLine("team error: APEX release was not verified; the result is unknown")
+            return $false
+          }
+          if ($DoctorProfile -eq 'apex' -and $output -notmatch '(?m)^\s*APEX_WORKSPACE_USERS_VERIFIED\s*$') {
+            [Console]::Error.WriteLine('team error: workspace developer validation was not verified; the result is unknown')
             return $false
           }
           return $true
@@ -242,8 +265,7 @@ try {
       $doctorSeen = @{}
       $doctorTotal = 0
       $doctorFailed = 0
-      # The ORDS export needs a newer SQLcl than nothing else does: say so once,
-      # before any check, instead of per schema. `sql -V` connects to nothing.
+      # ORDS has its own floor; APEX checks its qualified floor separately.
       $doctorOrdsSqlclOk = $true
       if (-not [string]::IsNullOrEmpty($env:ORDS_SCHEMA)) {
         $versionDirectory = Join-Path $scratchPath ("sqlcl-doctor-" + [Guid]::NewGuid().ToString("N"))
@@ -280,7 +302,7 @@ try {
             Write-Output "Doctor: schema $($schemaList[$doctorIndex]) via connection $($connectionList[$doctorIndex]) as $($userList[$doctorIndex])"
           }
           if ($doctorProfile -eq "ords" -and -not $doctorOrdsSqlclOk) { $doctorFailed++; continue }
-          if (-not (Invoke-DoctorOne $connectionList[$doctorIndex] $userList[$doctorIndex] $schemaList[$doctorIndex] $doctorScript)) { $doctorFailed++ }
+          if (-not (Invoke-DoctorOne $connectionList[$doctorIndex] $userList[$doctorIndex] $schemaList[$doctorIndex] $doctorScript $doctorProfile)) { $doctorFailed++ }
         }
       }
       if ($doctorTotal -eq 0) { Fail "no configured profile lists schema $($env:PROJECT_SCHEMA)" }
@@ -297,6 +319,10 @@ try {
       & (Join-Path $PSScriptRoot "export_apps.ps1") -AppId $Arguments[0]
       if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
     }
+    "upgrade-apexlang" {
+      & (Join-Path $PSScriptRoot 'upgrade_apexlang.ps1') @Arguments
+      Exit-Team $LASTEXITCODE
+    }
     "publish" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 publish <numeric_app_id> [--env dev] [--force]" }
       for ($index = 0; $index -lt $Arguments.Count; $index++) {
@@ -306,6 +332,12 @@ try {
         }
       }
       & (Join-Path $PSScriptRoot "publish_app.ps1") @Arguments
+      if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
+    }
+    { $_ -cin @('app-lock', 'app-unlock') } {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 $Command <numeric_app_id> [--env dev]" }
+      $lockOperation = if ($Command -ceq 'app-lock') { 'acquire' } else { 'unlock' }
+      & (Join-Path $PSScriptRoot 'app_lock.ps1') $lockOperation @Arguments
       if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
     }
     "check-conflicts" {

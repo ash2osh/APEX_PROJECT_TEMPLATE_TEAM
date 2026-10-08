@@ -60,13 +60,22 @@ def read_state(path: Path) -> tuple[AppState, datetime]:
     return parsed
 
 
-def marker_payload(app_id: int, state: AppState) -> dict[str, object]:
-    return {
+def marker_payload(app_id: int, state: AppState, source_dir: Path | None = None, page_locks: list[dict] | None = None) -> dict[str, object]:
+    payload = {
         "applicationId": app_id,
         "applicationPresent": state.present,
         "builderLastUpdatedOn": state.last_updated_on,
         "version": state.version,
     }
+    if source_dir is not None:
+        if __package__:
+            from .source_evidence import content_evidence
+        else:
+            from source_evidence import content_evidence
+        payload.update(content_evidence(source_dir))
+        if page_locks is not None:
+            payload['pageLocks'] = page_locks
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("before_file", type=Path)
     parser.add_argument("after_file", type=Path)
     parser.add_argument("marker_file", type=Path)
+    parser.add_argument("--source-dir", type=Path)
+    parser.add_argument('--page-locks-before', type=Path)
+    parser.add_argument('--page-locks-after', type=Path)
     args = parser.parse_args(argv)
     if args.app_id < 1:
         parser.error("app_id must be a positive integer")
@@ -105,7 +117,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    marker = marker_payload(args.app_id, before)
+    try:
+        page_locks = None
+        if args.page_locks_before is not None or args.page_locks_after is not None:
+            if args.page_locks_before is None or args.page_locks_after is None:
+                raise ValueError('both page lock observations are required')
+            if __package__:
+                from .source_evidence import read_page_lock_evidence
+            else:
+                from source_evidence import read_page_lock_evidence
+            page_locks = read_page_lock_evidence(args.page_locks_before, args.page_locks_after, args.app_id)
+        marker = marker_payload(args.app_id, before, args.source_dir, page_locks)
+    except (OSError, ValueError) as exc:
+        print(f"export error: could not verify canonical source evidence: {exc}", file=sys.stderr)
+        return 1
     # newline="\n": the default would write CRLF on Windows.
     args.marker_file.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8", newline="\n")
     return 0

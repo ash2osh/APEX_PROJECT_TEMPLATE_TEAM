@@ -210,7 +210,14 @@ def sha256_pair(path: Path) -> tuple[str, str] | None:
 def fetch_template(source: str, ref: str | None, destination: Path) -> str:
     run_git(destination.parent, "clone", "--quiet", source, str(destination))
     if ref:
-        run_git(destination, "checkout", "--quiet", "--detach", ref)
+        # A clone only creates its default local branch. Other maintenance
+        # branches exist as remote refs and must be resolved explicitly.
+        try:
+            resolved = run_git(destination, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}").strip()
+        except UpgradeError:
+            resolved = run_git(destination, "rev-parse", "--verify", "--end-of-options",
+                               "refs/remotes/origin/" + ref + "^{commit}").strip()
+        run_git(destination, "checkout", "--quiet", "--detach", resolved)
     return run_git(destination, "rev-parse", "HEAD").strip()
 
 
@@ -235,8 +242,13 @@ def load_manifest(template_root: Path) -> dict:
         raise UpgradeError(f"template manifest is missing or invalid: {exc}") from exc
     if not isinstance(manifest, dict) or type(manifest.get("schemaVersion")) is not int:
         raise UpgradeError("template manifest must be an object with integer schemaVersion")
-    if manifest["schemaVersion"] != 1:
+    if manifest["schemaVersion"] not in (1, 2):
         raise UpgradeError("unsupported template manifest schemaVersion; upgrade this script first")
+    if manifest["schemaVersion"] == 2:
+        if manifest.get("apexRelease") != "26.2":
+            raise UpgradeError("schema-2 template manifest requires apexRelease 26.2")
+        if manifest.get("minimumSqlclVersion") != "26.3.0.0":
+            raise UpgradeError("schema-2 template manifest requires minimumSqlclVersion 26.3.0.0")
     if not isinstance(manifest.get("upstream"), str) or not manifest["upstream"]:
         raise UpgradeError("template manifest key upstream must be a non-empty string")
 
@@ -342,9 +354,14 @@ def _validated_lock(lock: object) -> dict:
         validate_relative_path(path_text)
         if not isinstance(digest, str) or not HASH_RE.fullmatch(digest):
             raise UpgradeError(f"{LOCK_NAME} has an invalid hash for {path_text}")
-    for key in ("upstream", "commit"):
+    for key in ("upstream", "commit", "templateRef"):
         if key in lock and not isinstance(lock[key], str):
             raise UpgradeError(f"{LOCK_NAME} has an invalid {key}")
+    if "templateRef" in lock and (not lock["templateRef"] or lock["templateRef"].startswith("-")
+                                  or any(char in lock["templateRef"] for char in "\0\r\n")):
+        raise UpgradeError(f"{LOCK_NAME} has an invalid templateRef")
+    if "apexRelease" in lock and lock["apexRelease"] not in ("26.1", "26.2"):
+        raise UpgradeError(f"{LOCK_NAME} has an invalid apexRelease")
     return lock
 
 
@@ -449,13 +466,16 @@ def plan_upgrade(
     return actions, new_lock
 
 
-def _lock_bytes(upstream: str, commit: str, files: dict[str, str]) -> bytes:
+def _lock_bytes(upstream: str, commit: str, files: dict[str, str], metadata: dict | None = None) -> bytes:
     payload = {
         "schemaVersion": 1,
         "upstream": upstream,
         "commit": commit,
         "files": dict(sorted(files.items())),
     }
+    if metadata:
+        payload.update(metadata)
+    _validated_lock(payload)
     return (json.dumps(payload, indent=2) + "\n").encode("utf-8")
 
 
@@ -497,6 +517,7 @@ def apply_actions(
     files: dict[str, str],
     *,
     lock_hash: str | None = "",
+    lock_metadata: dict | None = None,
 ) -> None:
     """Stage every write and roll back completed filesystem operations on failure.
 
@@ -528,7 +549,7 @@ def apply_actions(
             deletes.add(action.path)
             if action.local != "":
                 planned_local[action.path] = action.local
-    writes[LOCK_NAME] = (_lock_bytes(upstream, commit, files), 0o644)
+    writes[LOCK_NAME] = (_lock_bytes(upstream, commit, files, lock_metadata), 0o644)
     if lock_hash != "":
         planned_local[LOCK_NAME] = lock_hash
 
@@ -669,7 +690,8 @@ def main(argv: list[str] | None = None) -> int:
         "--source",
         help="template Git URL or local path (default: upstream recorded in the lock or manifest)",
     )
-    parser.add_argument("--ref", help="template branch, tag, or commit (default: the source's default branch)")
+    parser.add_argument("--ref", help="template branch, tag, or commit (default: recorded templateRef, then source default branch)")
+    parser.add_argument("--apex-release", choices=("26.1", "26.2"), help="explicitly choose the target template release; doctor still verifies the live instance")
     parser.add_argument("--dry-run", action="store_true", help="print the plan without changing files")
     args = parser.parse_args(argv)
 
@@ -685,15 +707,29 @@ def main(argv: list[str] | None = None) -> int:
         source = _normalize_source(source)
         with tempfile.TemporaryDirectory(prefix="apex-template-") as temporary:
             template_root = Path(temporary) / "template"
-            commit = fetch_template(source, args.ref, template_root)
+            chosen_ref = args.ref or lock.get("templateRef")
+            commit = fetch_template(source, chosen_ref, template_root)
             manifest = load_manifest(template_root)
+            release = manifest.get("apexRelease", "26.1")
+            if release and args.apex_release and args.apex_release != release:
+                raise UpgradeError(f"selected template targets APEX {release}, not {args.apex_release}")
+            if (manifest["schemaVersion"] == 2 or lock.get("apexRelease") == "26.2") and lock.get("apexRelease") != release and args.apex_release != release:
+                raise UpgradeError(f"template release is changing or unknown; review and pass --apex-release {release}")
+            metadata = {}
+            if chosen_ref:
+                metadata["templateRef"] = chosen_ref
+            if release or args.apex_release or lock.get("apexRelease"):
+                metadata["apexRelease"] = release or args.apex_release or lock["apexRelease"]
             template_owned, placeholders = classify(template_root, manifest)
             validate_lock_ownership(lock, manifest)
             actions, new_lock = plan_upgrade(project_root, template_root, template_owned, placeholders, lock)
             for action in actions:
                 print(f"{action.kind} {action.path}")
             if not args.dry_run:
-                apply_actions(project_root, template_root, actions, source, commit, new_lock, lock_hash=lock_hash)
+                apply_actions(project_root, template_root, actions, source, commit, new_lock,
+                              lock_hash=lock_hash, lock_metadata=metadata)
+            if release:
+                print(f"Template targets APEX {release}; run team doctor to verify the live instance before APEX operations.")
     except UpgradeError as exc:
         print(f"template upgrade error: {exc}", file=sys.stderr)
         return 2

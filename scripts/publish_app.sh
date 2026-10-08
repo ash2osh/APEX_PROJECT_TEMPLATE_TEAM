@@ -5,6 +5,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage: scripts/publish_app.sh <app_id> [--env <dev|staging|prod>] [--force]
+       scripts/publish_app.sh <app_id> --env dev --file <pages/file.apx> [--file ...] [--no-team-notice]
 
 Imports one APEXlang application with deployments/<env>.json. Staging and
 production imports require interactive confirmation. --force skips only the
@@ -26,6 +27,8 @@ shift
 app_environment=dev
 force=false
 describe=false
+selected_files=()
+no_team_notice=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env)
@@ -36,6 +39,13 @@ while [ "$#" -gt 0 ]; do
     --force)
       force=true
       shift
+      ;;
+    --file)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail '--file requires an app-relative page path'
+      selected_files+=("$2"); shift 2
+      ;;
+    --no-team-notice)
+      no_team_notice=true; shift
       ;;
     --describe)
       describe=true
@@ -52,6 +62,13 @@ case "$app_environment" in
   dev|staging|prod) ;;
   *) fail "unsupported environment '$app_environment'; use dev, staging, or prod" ;;
 esac
+if [ "${#selected_files[@]}" -gt 0 ]; then
+  [ "$app_environment" = dev ] || fail 'partial publishing targets DEV only'
+  [ "$force" = false ] || fail 'partial publishing does not accept --force'
+  [ "$describe" = false ] || fail '--describe cannot be combined with --file'
+elif [ "$no_team_notice" = true ]; then
+  fail '--no-team-notice requires --file'
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
@@ -85,47 +102,7 @@ python3 "$REPO_ROOT/scripts/validate_app_source.py" "$REPO_ROOT" "$app_dir" || e
 deployment_file="$app_dir/deployments/$app_environment.json"
 [ -f "$deployment_file" ] || fail "deployment descriptor not found: ${deployment_file#"$REPO_ROOT/"}"
 
-deployment_values="$(python3 - "$deployment_file" "$app_id" <<'PY'
-import json
-import re
-import sys
-
-path, expected_id = sys.argv[1:]
-try:
-    with open(path, "rb") as raw:
-        if raw.read(3) == b"\xef\xbb\xbf":
-            # SQLcl prints "Deployment file cannot be parsed" and imports nothing.
-            print(
-                "invalid deployment descriptor: it starts with a UTF-8 byte-order mark, "
-                "which SQLcl cannot parse; save it without one",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-    with open(path, encoding="utf-8") as source:
-        descriptor = json.load(source)
-    workspace = descriptor["workspace"]["name"]
-    app = descriptor["app"]
-    app_id = app["id"]
-    schema = app["databaseSession"]["parsingSchema"]
-except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-    print(f"invalid deployment descriptor: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-if isinstance(app_id, bool) or not isinstance(app_id, int):
-    print(f"deployment app.id must be a number: set \"id\": {expected_id} in the descriptor", file=sys.stderr)
-    raise SystemExit(1)
-if app_id != int(expected_id):
-    print(f"deployment app.id is {app_id} but this is application {expected_id}: set \"id\": {expected_id} in the descriptor", file=sys.stderr)
-    raise SystemExit(1)
-if not isinstance(workspace, str) or not workspace.strip() or any(c in workspace for c in "\t\r\n"):
-    print("deployment workspace.name must be a non-empty single-line string", file=sys.stderr)
-    raise SystemExit(1)
-if not isinstance(schema, str) or not re.fullmatch(r"[A-Z][A-Z0-9_$#]{0,127}", schema):
-    print("deployment parsingSchema must be an uppercase Oracle identifier", file=sys.stderr)
-    raise SystemExit(1)
-print(f"{workspace}\t{schema}")
-PY
-)" || exit 2
+deployment_values="$(python3 "$REPO_ROOT/scripts/deployment_descriptor.py" "$deployment_file" "$app_id")" || exit 2
 IFS=$'\t' read -r workspace_name parsing_schema <<< "$deployment_values"
 
 # With several schemas the descriptor's parsing schema selects the connection.
@@ -200,6 +177,11 @@ if [ "$describe" = true ]; then
   exit 0
 fi
 
+if [ "$app_environment" = dev ] && [ -z "${APEX_WORKSPACE_USERNAME:-}" ]; then
+  fail "set APEX_WORKSPACE_USERNAME to the existing Builder developer/admin login"
+fi
+python3 "$REPO_ROOT/scripts/validate_app_source.py" "$REPO_ROOT" "$app_dir" --for-import || exit 2
+
 if [ -z "$sqlcl_connection" ] || [ -z "$expected_user" ]; then
   case "$app_environment" in
     dev)
@@ -236,6 +218,15 @@ fi
 if [ "$app_environment" = dev ]; then
   PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/check_db_target.sh" write apex
 fi
+if [ "${#selected_files[@]}" -gt 0 ]; then
+  partial_args=()
+  for selected_file in "${selected_files[@]}"; do partial_args+=(--file "$selected_file"); done
+  [ "$no_team_notice" = false ] || partial_args+=(--no-team-notice)
+  exec python3 "$REPO_ROOT/scripts/partial_publish.py" "$app_id" "${partial_args[@]}" \
+    --source-dir "$app_dir" --repo-root "$REPO_ROOT" --workspace "$workspace_name" \
+    --schema "$parsing_schema" --connection "$sqlcl_connection" --expected-user "$expected_user" \
+    --classification "$target_environment" --developer "$APEX_WORKSPACE_USERNAME" --developer-name "$DEVELOPER_NAME"
+fi
 
 # The live application must be parsed by the schema the descriptor names. An
 # application that is not there yet (first import) is allowed.
@@ -266,6 +257,9 @@ import_unverified=false
 # interrupt in between leaves the import's result unknown (SQLcl may have
 # finished it already).
 import_running=false
+lock_recovery=""
+lock_held=false
+import_attempted=false
 # Replace <target> with <replacement> only while <target> still holds the bytes
 # of <expected>. The target is renamed aside before the comparison and the
 # replacement is installed without overwriting, so an editor save at any
@@ -291,6 +285,16 @@ swap_if_unchanged() {
 
 cleanup() {
   local aside
+  if [ -n "$lock_recovery" ]; then
+    if [ "$lock_held" = true ] && [ "$import_attempted" = false ]; then
+      if python3 "$REPO_ROOT/scripts/application_lock.py" release "${lock_args[@]}"; then
+        lock_held=false
+      fi
+    fi
+    if [ "$lock_held" = true ] || [ "$import_attempted" = true ] && [ -f "$lock_recovery/recovery.json" ]; then
+      printf 'publish: preserve lock recovery evidence at %s; inspect the live application and coordinate recovery before app-unlock.\n' "$lock_recovery/recovery.json" >&2
+    fi
+  fi
   if [ "$import_running" = true ]; then
     if [ "$app_environment" = dev ]; then
       printf 'publish: interrupted while the import was running, so its result is unknown: DEV may or may not run your source. Commit your changes, run scripts/team.sh export %s, and read the live version; %s means the import completed.\n' \
@@ -337,7 +341,9 @@ cleanup() {
       fi
     fi
   done
-  if ! rm -rf -- "$staging_dir" 2>/dev/null; then
+  if [ "$import_attempted" = true ]; then
+    printf 'publish: unverified import diagnostics retained at %s\n' "$staging_dir" >&2
+  elif ! rm -rf -- "$staging_dir" 2>/dev/null; then
     printf 'publish warning: could not remove the temporary directory %s; delete it after closing whatever holds a file in it\n' \
       "${staging_dir#"$REPO_ROOT/"}" >&2
   fi
@@ -347,6 +353,18 @@ trap cleanup EXIT
 # The import session re-checks the live state the drift guard approved; '-'
 # skips that re-check for --force and for staging or production.
 expected_live_state="-"
+sqlcl_require_apex_version "$staging_dir/version"
+lock_assert_script="$REPO_ROOT/scripts/no_application_lock.sql"
+if [ "$app_environment" = dev ]; then
+  mkdir -p "$REPO_ROOT/.sync-state/application-locks/$app_id"
+  lock_recovery="$(mktemp -d "$REPO_ROOT/.sync-state/application-locks/$app_id/publish.XXXXXX")"
+  lock_args=(--connection "$sqlcl_connection" --expected-user "$expected_user" --schema "$parsing_schema"
+    --workspace "$workspace_name" --developer "$APEX_WORKSPACE_USERNAME" --app-id "$app_id"
+    --classification "$target_environment" --run-dir "$lock_recovery")
+  python3 "$REPO_ROOT/scripts/application_lock.py" acquire "${lock_args[@]}"
+  lock_held=true
+  lock_assert_script="$lock_recovery/assert-lock.sql"
+fi
 if [ "$app_environment" = dev ] && [ "$force" != true ]; then
   drift_guard="$REPO_ROOT/scripts/check_builder_drift.py"
   [ -f "$drift_guard" ] || fail "Builder drift guard is missing; refusing import"
@@ -392,13 +410,14 @@ fi
 application_source="$app_dir"
 deployment_file="$app_dir/deployments/$app_environment.json"
 import_running=true
+import_attempted=true
 sqlcl_status=0
 (
   invoke_sqlcl_safe "$staging_dir" \
     -S -noupdates -name "$sqlcl_connection" \
     "@$REPO_ROOT/scripts/publish_app.sql" \
     "$parsing_schema" "$target_environment" "$expected_user" \
-    "$application_source" "$deployment_file" "$app_id" "$expected_live_state" \
+    "$application_source" "$deployment_file" "$app_id" "$expected_live_state" "$lock_assert_script" \
     < "$sqlcl_stdin"
 ) > "$sqlcl_output" 2>&1 || sqlcl_status=$?
 if [ "$sqlcl_status" -ne 0 ]; then
@@ -473,11 +492,16 @@ verify_args=(
   "$app_id" "$app_dir" "$exported_dir"
   "$verify_run_dir/.apex-export-before.txt" "$verify_run_dir/.apex-export-after.txt"
   --repo-root "$REPO_ROOT"
+  --deployment-file "$deployment_file" --deployment-state "$verify_run_dir/.apex-deployment-state.json"
 )
-if [ "$app_environment" = dev ]; then
-  verify_args+=(--record-baseline)
-fi
 python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}"
+if [ "$app_environment" = dev ]; then
+  python3 "$REPO_ROOT/scripts/application_lock.py" check "${lock_args[@]}"
+  python3 "$REPO_ROOT/scripts/application_lock.py" release "${lock_args[@]}"
+  lock_held=false
+  import_attempted=false
+  python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}" --record-baseline
+fi
 import_unverified=false
 printf 'Published APEX App %s to %s (%s / %s).\n' \
   "$app_id" "$target_label" "$workspace_name" "$parsing_schema"

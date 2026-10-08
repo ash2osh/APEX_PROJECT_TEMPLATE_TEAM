@@ -54,6 +54,7 @@ trap cleanup EXIT
 # probe, and it also stops SQLcl from consuming the caller's own input.
 SQLCL_STDIN="$STAGING_DIR/.sqlcl-stdin"
 : > "$SQLCL_STDIN"
+sqlcl_require_apex_version "$STAGING_DIR/version"
 
 # Which schema parses each application. With one schema configured that is the
 # schema itself; with several it is read from the live workspace, using the
@@ -170,11 +171,13 @@ for app_id in "${APP_IDS[@]}"; do
   APP_STAGE="$STAGE_PARENT/$app_id"
   mv -- "$EXPORTED_DIR" "$APP_STAGE"
   "$REPO_ROOT/scripts/normalize_apx.sh" "$APP_STAGE"
+  python3 "$REPO_ROOT/scripts/preserve_deployments.py"     "$REPO_ROOT/apps/$app_schema/$app_id" "$APP_STAGE"
   python3 "$REPO_ROOT/scripts/record_export_state.py" "$app_id" \
     "$RUN_DIR/.apex-export-before.txt" "$RUN_DIR/.apex-export-after.txt" \
-    "$APP_STAGE/apex-team-export.json"
-  python3 "$REPO_ROOT/scripts/preserve_deployments.py" \
-    "$REPO_ROOT/apps/$app_schema/$app_id" "$APP_STAGE"
+    "$APP_STAGE/apex-team-export.json" --source-dir "$APP_STAGE" \
+    --page-locks-before "$RUN_DIR/.apex-page-locks-before.json" \
+    --page-locks-after "$RUN_DIR/.apex-page-locks-after.json"
+
 done
 
 # Install only after every requested application has exported and verified, and

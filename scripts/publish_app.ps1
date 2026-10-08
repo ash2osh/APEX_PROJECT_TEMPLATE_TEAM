@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 function Show-Usage {
   @"
 Usage: scripts/publish_app.ps1 <app_id> [--env <dev|staging|prod>] [--force]
+       scripts/publish_app.ps1 <app_id> --env dev --file <pages/file.apx> [--file ...] [--no-team-notice]
 
 Imports one APEXlang application with deployments/<env>.json. Staging and
 production imports require interactive confirmation. --force skips only the
@@ -28,6 +29,8 @@ if ([string]::IsNullOrWhiteSpace($AppId) -or $AppId -cnotmatch '^[1-9][0-9]{0,17
 $appEnvironment = "dev"
 $force = $false
 $describe = $false
+$selectedFiles = @()
+$noTeamNotice = $false
 for ($index = 0; $index -lt $RemainingArguments.Count;) {
   switch ($RemainingArguments[$index]) {
     "--env" {
@@ -41,6 +44,12 @@ for ($index = 0; $index -lt $RemainingArguments.Count;) {
       $force = $true
       $index += 1
     }
+    '--file' {
+      if ($index + 1 -ge $RemainingArguments.Count -or [string]::IsNullOrEmpty($RemainingArguments[$index + 1])) { throw '--file requires an app-relative page path' }
+      $selectedFiles += $RemainingArguments[$index + 1]
+      $index += 2
+    }
+    '--no-team-notice' { $noTeamNotice = $true; $index += 1 }
     "--describe" {
       $describe = $true
       $index += 1
@@ -53,6 +62,11 @@ for ($index = 0; $index -lt $RemainingArguments.Count;) {
 if ($appEnvironment -notin @("dev", "staging", "prod")) {
   throw "publish error: unsupported environment '$appEnvironment'; use dev, staging, or prod"
 }
+if ($selectedFiles.Count -gt 0) {
+  if ($appEnvironment -cne 'dev') { throw 'partial publishing targets DEV only' }
+  if ($force) { throw 'partial publishing does not accept --force' }
+  if ($describe) { throw '--describe cannot be combined with --file' }
+} elseif ($noTeamNotice) { throw '--no-team-notice requires --file' }
 
 # An & script call has its own variables but shares the caller's process
 # environment. Restore the loader's narrowed values on every exit path.
@@ -102,31 +116,11 @@ $deploymentFile = Join-Path $appDir "deployments/$appEnvironment.json"
 if (-not (Test-Path -LiteralPath $deploymentFile -PathType Leaf)) {
   throw "publish error: deployment descriptor not found: $deploymentFile"
 }
-$deploymentHead = [System.IO.File]::ReadAllBytes($deploymentFile) | Select-Object -First 3
-if (@($deploymentHead).Count -eq 3 -and $deploymentHead[0] -eq 0xEF -and $deploymentHead[1] -eq 0xBB -and $deploymentHead[2] -eq 0xBF) {
-  # SQLcl prints "Deployment file cannot be parsed" and imports nothing.
-  throw "publish error: invalid deployment descriptor: it starts with a UTF-8 byte-order mark, which SQLcl cannot parse; save it without one"
-}
-try {
-  $deployment = Get-Content -LiteralPath $deploymentFile -Raw | ConvertFrom-Json
-} catch {
-  throw "publish error: invalid deployment descriptor: $($_.Exception.Message)"
-}
-if ($deployment.workspace.name -isnot [string] -or [string]::IsNullOrWhiteSpace($deployment.workspace.name)) {
-  throw "publish error: deployment workspace.name must be a non-empty string"
-}
-$deploymentAppId = 0L
-if ($deployment.app.id -is [bool] -or
-    -not [Int64]::TryParse([string]$deployment.app.id, [ref]$deploymentAppId)) {
-  throw "publish error: deployment app.id must be a number: set `"id`": $AppId in the descriptor"
-}
-if ($deploymentAppId -ne [Int64]$AppId) {
-  throw "publish error: deployment app.id is $deploymentAppId but this is application ${AppId}: set `"id`": $AppId in the descriptor"
-}
+$descriptorScript = Join-Path $PSScriptRoot 'deployment_descriptor.py'
+$descriptorJson = & $python.Path @($python.Prefix) $descriptorScript $deploymentFile $AppId --json
+if ($LASTEXITCODE -ne 0) { throw 'publish error: invalid deployment descriptor; see the property error above' }
+$deployment = $descriptorJson | ConvertFrom-Json
 $parsingSchema = [string]$deployment.app.databaseSession.parsingSchema
-if ($parsingSchema -cnotmatch '^[A-Z][A-Z0-9_$#]{0,127}$') {
-  throw "publish error: deployment parsingSchema must be an uppercase Oracle identifier"
-}
 # With several schemas the descriptor's parsing schema selects the connection.
 # Folder, descriptor, --schema and (below) the live app must all agree.
 if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
@@ -199,6 +193,11 @@ if ($describe) {
   exit 0
 }
 
+if ($appEnvironment -eq 'dev' -and [string]::IsNullOrWhiteSpace($env:APEX_WORKSPACE_USERNAME)) {
+  throw 'publish error: set APEX_WORKSPACE_USERNAME to the existing Builder developer/admin login'
+}
+& $python.Path @($python.Prefix) $sourceValidator $repoRoot $appDir --for-import
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ([string]::IsNullOrWhiteSpace($sqlclConnection) -or [string]::IsNullOrWhiteSpace($expectedUser)) {
   switch ($appEnvironment) {
     "dev" {
@@ -227,6 +226,16 @@ if ($appEnvironment -ne "dev") {
 # Classify the target before the live lookup opens its read-only session.
 if ($appEnvironment -eq "dev") {
   & (Join-Path $PSScriptRoot "check_db_target.ps1") -Operation write -Target apex
+}
+if ($selectedFiles.Count -gt 0) {
+  $partialArguments = @()
+  foreach ($selectedFile in $selectedFiles) { $partialArguments += @('--file', $selectedFile) }
+  if ($noTeamNotice) { $partialArguments += '--no-team-notice' }
+  & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot 'partial_publish.py') $AppId @partialArguments `
+    --source-dir $appDir --repo-root $repoRoot --workspace $deployment.workspace.name `
+    --schema $parsingSchema --connection $sqlclConnection --expected-user $expectedUser `
+    --classification $targetEnvironment --developer $env:APEX_WORKSPACE_USERNAME --developer-name $env:DEVELOPER_NAME
+  exit $LASTEXITCODE
 }
 
 # The live application must be parsed by the schema the descriptor names. An
@@ -259,25 +268,6 @@ if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
 # The import session re-checks the live state the drift guard approved; '-'
 # skips that re-check for -Force and for staging or production.
 $expectedLiveState = "-"
-if ($appEnvironment -eq "dev" -and -not $force) {
-  $driftGuard = Join-Path $repoRoot "scripts/check_builder_drift.py"
-  if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
-    throw "publish error: Builder drift guard is missing; refusing import"
-  }
-  $python = Resolve-TeamPython
-  if ($null -eq $python) { throw "Python 3.10 or newer is required to check Builder drift (python3, python or py -3)" }
-  $approvedStateFile = [System.IO.Path]::GetTempFileName()
-  try {
-    & $python.Path @($python.Prefix) $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile --wrapper team.ps1
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $expectedLiveState = ([System.IO.File]::ReadAllText($approvedStateFile)).Trim()
-  } finally {
-    Remove-Item -LiteralPath $approvedStateFile -Force -ErrorAction SilentlyContinue
-  }
-  if ($expectedLiveState -cnotmatch '^(ABSENT|P\.([0-9T:-]+|NONE)\.[0-9A-F]*)$') {
-    throw "publish error: Builder drift guard did not record the approved live state; refusing import"
-  }
-}
 
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
 $stdinFile = [System.IO.Path]::GetTempFileName()
@@ -298,6 +288,10 @@ $importUnverified = $false
 # interrupt in between leaves the import's result unknown (SQLcl may have
 # finished it already).
 $importRunning = $false
+$lockRecovery = $null
+$lockHeld = $false
+$importAttempted = $false
+$lockArguments = @()
 
 # .NET rather than Get-FileHash: a Windows PowerShell that inherited PowerShell 7's
 # PSModulePath (anything started under pwsh passes it on) loses that cmdlet, and
@@ -343,6 +337,41 @@ function Invoke-SwapIfUnchanged([string]$Target, [string]$Expected, [string]$Rep
 }
 $publishedVersion = ""
 try {
+  Assert-SqlclApexVersion -WorkDirectory (Join-Path $publishWorkDir "version")
+  $lockAssertScript = Join-Path $PSScriptRoot 'no_application_lock.sql'
+  if ($appEnvironment -eq 'dev') {
+    $lockPython = Resolve-TeamPython
+    if ($null -eq $lockPython) { throw 'Python 3.10 or newer is required for application locks' }
+    $lockRecovery = Join-Path $repoRoot ('.sync-state/application-locks/' + $AppId + '/publish.' + [Guid]::NewGuid().ToString('N'))
+    [System.IO.Directory]::CreateDirectory($lockRecovery) | Out-Null
+    $lockArguments = @('--connection', $sqlclConnection, '--expected-user', $expectedUser, '--schema', $parsingSchema,
+      '--workspace', [string]$deployment.workspace.name, '--developer', $env:APEX_WORKSPACE_USERNAME, '--app-id', $AppId,
+      '--classification', $targetEnvironment, '--run-dir', $lockRecovery)
+    & $lockPython.Path @($lockPython.Prefix) (Join-Path $PSScriptRoot 'application_lock.py') acquire @lockArguments
+    if ($LASTEXITCODE -ne 0) { throw 'publish error: native application lock acquisition failed; preserve its recovery evidence' }
+    $lockHeld = $true
+    $lockAssertScript = Join-Path $lockRecovery 'assert-lock.sql'
+  }
+if ($appEnvironment -eq "dev" -and -not $force) {
+  $driftGuard = Join-Path $repoRoot "scripts/check_builder_drift.py"
+  if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
+    throw "publish error: Builder drift guard is missing; refusing import"
+  }
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw "Python 3.10 or newer is required to check Builder drift (python3, python or py -3)" }
+  $approvedStateFile = [System.IO.Path]::GetTempFileName()
+  try {
+    & $python.Path @($python.Prefix) $driftGuard $AppId $sqlclConnection $appDir --expected-user $expectedUser --state-out $approvedStateFile --wrapper team.ps1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $expectedLiveState = ([System.IO.File]::ReadAllText($approvedStateFile)).Trim()
+  } finally {
+    Remove-Item -LiteralPath $approvedStateFile -Force -ErrorAction SilentlyContinue
+  }
+  if ($expectedLiveState -cnotmatch '^(ABSENT|P\.([0-9T:-]+|NONE)\.[0-9A-F]*)$') {
+    throw "publish error: Builder drift guard did not record the approved live state; refusing import"
+  }
+}
+
   # An import leaves no Builder timestamp, so a DEV publish stamps its own tag
   # into the application version before import. The drift guard compares that
   # version to spot a teammate's import. Staging and production import the
@@ -380,11 +409,12 @@ try {
   $applicationInput = $appDir
   $deploymentFile = Join-Path $appDir "deployments/$appEnvironment.json"
   $importRunning = $true
+  $importAttempted = $true
   $sqlclExit = Invoke-Sqlcl -WorkingDirectory $publishWorkDir -StdInFile $stdinFile -Arguments @(
     "-S", "-noupdates", "-name", $sqlclConnection,
     "@$(Join-Path $PSScriptRoot 'publish_app.sql')",
     $parsingSchema, $targetEnvironment, $expectedUser,
-    $applicationInput, $deploymentFile, $AppId, $expectedLiveState
+    $applicationInput, $deploymentFile, $AppId, $expectedLiveState, $lockAssertScript
   ) -TranscriptFile $transcriptFile
   $importRunning = $false
   $sqlclOutput = [System.IO.File]::ReadAllText($transcriptFile)
@@ -443,12 +473,22 @@ try {
     $verifyScript, $AppId, $appDir, $exportedDir,
     (Join-Path $verifyRunDir ".apex-export-before.txt"),
     (Join-Path $verifyRunDir ".apex-export-after.txt"),
-    "--repo-root", $repoRoot
+    "--repo-root", $repoRoot,
+    "--deployment-file", $deploymentFile, "--deployment-state", (Join-Path $verifyRunDir ".apex-deployment-state.json")
   )
-  if ($appEnvironment -eq "dev") { $verifyArgs += "--record-baseline" }
   & $python.Path @($python.Prefix) @verifyArgs
   if ($LASTEXITCODE -ne 0) {
     throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
+  }
+  if ($appEnvironment -eq 'dev') {
+    & $lockPython.Path @($lockPython.Prefix) (Join-Path $PSScriptRoot 'application_lock.py') check @lockArguments
+    if ($LASTEXITCODE -ne 0) { throw 'publish error: post-import application lock verification failed; baseline retained' }
+    & $lockPython.Path @($lockPython.Prefix) (Join-Path $PSScriptRoot 'application_lock.py') release @lockArguments
+    if ($LASTEXITCODE -ne 0) { throw 'publish error: application unlock result unknown; baseline retained' }
+    $lockHeld = $false
+    $importAttempted = $false
+    & $python.Path @($python.Prefix) @verifyArgs --record-baseline
+    if ($LASTEXITCODE -ne 0) { throw 'publish error: could not record the verified DEV baseline' }
   }
   $importUnverified = $false
   Write-Output "Published APEX App $AppId to $targetLabel ($($deployment.workspace.name) / $parsingSchema)."
@@ -457,6 +497,15 @@ try {
     Write-Output "Commit the stamped version in ${relativeSource}: $publishedVersion"
   }
 } finally {
+  if ($lockRecovery) {
+    if ($lockHeld -and -not $importAttempted) {
+      & $lockPython.Path @($lockPython.Prefix) (Join-Path $PSScriptRoot 'application_lock.py') release @lockArguments
+      if ($LASTEXITCODE -eq 0) { $lockHeld = $false }
+    }
+    if ($lockHeld -or $importAttempted) {
+      Write-Warning "publish: preserve lock recovery evidence at $lockRecovery/recovery.json; inspect the live application and coordinate recovery before app-unlock."
+    }
+  }
   if ($importRunning) {
     if ($appEnvironment -eq "dev") {
       $stampedText = if ($publishedVersion) { $publishedVersion } else { "the version you published" }
@@ -489,7 +538,8 @@ try {
   }
   # Interrupted or failed between moving application.apx aside and installing
   # its replacement: put the moved-aside file back before scratch is deleted.
-  $keepPublishWorkDir = $false
+  $keepPublishWorkDir = $importAttempted
+  if ($keepPublishWorkDir) { Write-Warning "publish: unverified import diagnostics retained at $publishWorkDir" }
   foreach ($aside in @((Join-Path $publishWorkDir "application.apx.before-stamp"), (Join-Path $publishWorkDir "application.apx.displaced"))) {
     if (-not (Test-Path -LiteralPath $applicationSource) -and (Test-Path -LiteralPath $aside -PathType Leaf)) {
       try { [System.IO.File]::Move($aside, $applicationSource) } catch {

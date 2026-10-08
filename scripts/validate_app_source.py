@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -73,13 +74,28 @@ def validate_app_source(repo_root: Path, source_dir: Path) -> Path:
     return candidate
 
 
+def validate_import_effects(source_dir: Path) -> None:
+    """Refuse Oracle's automatic supporting-object mode before an app import.
+
+    Database scripts must use the separately reviewed migration workflow. This
+    deliberately conservative check also refuses the setting inside comments
+    or script text: move that text out of the APEX source before publication.
+    """
+    for path in source_dir.rglob('*.apx'):
+        text = path.read_text(encoding='utf-8')
+        if re.search(r'(?m)^\s*includeInAppExport\s*:\s*["\']?autoInstall(?:["\']?\s|$)', text):
+            raise ValueError('automatic supporting-object execution is not authorized by app publication; apply reviewed schema migrations separately and remove autoInstall')
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
-    if len(arguments) != 2:
-        print("usage: validate_app_source.py <repository-root> <app-source-directory>", file=sys.stderr)
+    if len(arguments) not in (2, 3) or (len(arguments) == 3 and arguments[2] != '--for-import'):
+        print("usage: validate_app_source.py <repository-root> <app-source-directory> [--for-import]", file=sys.stderr)
         return 2
     try:
-        validate_app_source(Path(arguments[0]), Path(arguments[1]))
+        source = validate_app_source(Path(arguments[0]), Path(arguments[1]))
+        if len(arguments) == 3:
+            validate_import_effects(source)
     except (OSError, ValueError) as exc:
         print(f"application source validation error: {exc}", file=sys.stderr)
         return 1

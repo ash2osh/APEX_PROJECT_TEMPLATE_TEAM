@@ -116,6 +116,58 @@ class UpgradeTemplateTests(unittest.TestCase):
             (self.template / relative).unlink()
         commit_all(self.template, "v2")
 
+    def release_26_2(self) -> None:
+        manifest = {**MANIFEST, "upstream": str(self.template), "schemaVersion": 2,
+                    "apexRelease": "26.2", "minimumSqlclVersion": "26.3.0.0"}
+        self.release_v2({"template-manifest.json": json.dumps(manifest), "AGENTS.md": "26.2 rules\n"})
+
+    def test_unknown_line_requires_explicit_release(self) -> None:
+        self.adopt()
+        before = self.read(".template-lock.json")
+        self.release_26_2()
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--apex-release 26.2", result.stderr)
+        self.assertEqual(self.read(".template-lock.json"), before)
+        self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+
+    def test_legacy_engine_refuses_schema_2_before_mutation(self) -> None:
+        historical = subprocess.run(["git", "-C", str(ROOT), "show", "5178f57:scripts/upgrade_template.py"],
+                                    capture_output=True, check=False)
+        if historical.returncode:
+            self.skipTest("historical 26.1 engine is unavailable in this shallow clone")
+        self.adopt()
+        before = self.read(".template-lock.json")
+        self.release_26_2()
+        legacy = Path(self.temporary.name) / "legacy_upgrade.py"
+        legacy.write_bytes(historical.stdout)
+        result = subprocess.run([sys.executable, str(legacy), "--project-root", str(self.project),
+                                 "--source", str(self.template)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("unsupported template manifest schemaVersion", result.stderr)
+        self.assertEqual(self.read(".template-lock.json"), before)
+        self.assertEqual(git(self.project, "status", "--porcelain"), "")
+
+    def test_explicit_release_does_not_claim_live_verification(self) -> None:
+        self.adopt()
+        self.release_26_2()
+        result = self.upgrade("--apex-release", "26.2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lock()["apexRelease"], "26.2")
+        self.assertNotIn("liveVerified", self.lock())
+        self.assertIn("doctor", result.stdout)
+
+    def test_recorded_ref_is_reused(self) -> None:
+        git(self.template, "branch", "codex/apex-26.1")
+        result = self.upgrade("--ref", "codex/apex-26.1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lock()["templateRef"], "codex/apex-26.1")
+        commit_all(self.project, "pin maintenance")
+        self.release_26_2()
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+
     def read(self, relative: str) -> str:
         return (self.project / relative).read_text(encoding="utf-8")
 
@@ -651,6 +703,35 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertIn("KEEP-REMOVED scripts/tool.sh", result.stdout)
         self.assertFalse((self.project / "scripts/old.sh").exists())
         self.assertEqual(self.read("scripts/tool.sh"), "echo ours\n")
+
+    def test_uc_retirement_preserves_custom_skill_environment_and_local_payload(self) -> None:
+        retired = (".agents/skills/install-uc-apx/SKILL.md",
+                   ".claude/skills/install-uc-apx/SKILL.md", ".agents/workflows/uc-apx.md")
+        manifest = {**MANIFEST, "upstream": str(self.template),
+                    "templateOwned": [*MANIFEST["templateOwned"], ".agents/skills/**",
+                                      ".claude/skills/**", ".agents/workflows/**"]}
+        common = {"template-manifest.json": json.dumps(manifest),
+                  **{path: "template installer\n" for path in retired}}
+        write(self.template, common)
+        commit_all(self.template, "legacy integration")
+        write(self.project, {**common, ".env": "INSTALL_UC_APX=false\n",
+                            ".agents/skills/uc-apx-skills/local.md": "developer payload\n"})
+        commit_all(self.project, "legacy downstream")
+        self.adopt()
+        write(self.project, {retired[1]: "our customized installer\n"})
+        commit_all(self.project, "custom installer")
+        self.release_v2({}, removed=retired)
+
+        result = self.upgrade()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse((self.project / retired[0]).exists())
+        self.assertFalse((self.project / retired[2]).exists())
+        self.assertIn(f"KEEP-REMOVED {retired[1]}", result.stdout)
+        self.assertEqual(self.read(retired[1]), "our customized installer\n")
+        self.assertEqual(self.read(".env"), "INSTALL_UC_APX=false\n")
+        self.assertEqual(self.read(".agents/skills/uc-apx-skills/local.md"), "developer payload\n")
+        self.assertTrue(all(path not in self.lock()["files"] for path in retired))
 
     def test_project_data_and_template_only_files_are_untouched(self) -> None:
         self.release_v2({"docs/plan.md": "template only v2\n"})

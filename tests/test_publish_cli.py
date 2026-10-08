@@ -21,6 +21,92 @@ STAMPED_VERSION = r"^Release 1\.0 \[ALICE-\d{{4}}-\d{{2}}-\d{{2}}r{counter}\]$"
 
 
 class PublishAppCliTests(unittest.TestCase):
+    def test_automatic_supporting_objects_refuse_before_native_lock_or_import(self):
+        launchers = [('bash', [BASH])] + ([('pwsh', [shutil.which('pwsh'), '-NoProfile', '-File'])] if shutil.which('pwsh') else [])
+        for name, launcher in launchers:
+            with self.subTest(wrapper=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, sql_log, _, environment, app, state = self.make_stateful_dev_fixture(root)
+                environment['PROJECT_ENV_FILE'] = str(root / '.env')
+                support = app / 'supporting-objects/supporting-objects.apx'
+                support.parent.mkdir()
+                support.write_text('supportingObject (\n    advanced {\n        includeInAppExport: autoInstall\n    }\n)\n')
+                script = runner if name == 'bash' else runner.with_suffix('.ps1')
+                result = subprocess.run([*launcher, str(script), '100', '--force'], env=environment, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('automatic supporting-object execution', result.stdout + result.stderr)
+                self.assertFalse(sql_log.exists())
+                self.assertEqual((state / 'import-count.txt').read_text().strip(), '0')
+                self.assertFalse(Path(environment['FAKE_LOCK_CALLS']).exists())
+
+    def test_effective_deployment_mismatch_retains_native_lock_and_old_baseline(self):
+        launchers=[('bash',[BASH])] + ([('pwsh',[shutil.which('pwsh'),'-NoProfile','-File'])] if shutil.which('pwsh') else [])
+        for name,launcher in launchers:
+            with self.subTest(wrapper=name),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary)
+                runner,_,_,environment,app,_=self.make_stateful_dev_fixture(root)
+                environment['PROJECT_ENV_FILE']=str(root/'.env')
+                environment['FAKE_DEPLOYMENT_MISMATCH']='1'
+                baseline=(app/'apex-team-export.json').read_bytes()
+                script=runner if name=='bash' else runner.with_suffix('.ps1')
+                result=subprocess.run([*launcher,str(script),'100'],env=environment,capture_output=True,text=True)
+                self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+                self.assertIn('effective deployment mismatch: workspace.name',result.stdout+result.stderr)
+                self.assertEqual((app/'apex-team-export.json').read_bytes(),baseline)
+                records=list((root/'.sync-state/application-locks/100').glob('publish.*/recovery.json'))
+                self.assertEqual(json.loads(records[0].read_text())['status'],'held')
+
+    def test_preexisting_native_lock_or_invalid_user_refuses_even_with_force(self):
+        launchers=[('bash',[BASH])] + ([('pwsh',[shutil.which('pwsh'),'-NoProfile','-File'])] if shutil.which('pwsh') else [])
+        for name,launcher in launchers:
+            for mode in ('same-owner','other-owner','unknown-user','no-developer-role','working-copy'):
+                with self.subTest(wrapper=name,mode=mode), tempfile.TemporaryDirectory() as temporary:
+                    root=Path(temporary)
+                    runner,sql_log,_,environment,app,state=self.make_stateful_dev_fixture(root)
+                    environment['PROJECT_ENV_FILE']=str(root/'.env')
+                    environment['FAKE_APEX_LOCK_MODE']=mode
+                    original=(app/'application.apx').read_bytes()
+                    script=runner if name=='bash' else runner.with_suffix('.ps1')
+                    result=subprocess.run([*launcher,str(script),'100','--force'],env=environment,capture_output=True,text=True)
+                    self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+                    self.assertFalse(sql_log.exists(),'must not import before lock acquisition')
+                    self.assertEqual((app/'application.apx').read_bytes(),original)
+                    self.assertEqual((state/'import-count.txt').read_text().strip(),'0')
+
+    def test_lock_lost_after_import_keeps_old_baseline_and_recovery(self):
+        launchers=[('bash',[BASH])] + ([('pwsh',[shutil.which('pwsh'),'-NoProfile','-File'])] if shutil.which('pwsh') else [])
+        for name,launcher in launchers:
+            with self.subTest(wrapper=name), tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary)
+                runner,_,_,environment,app,state=self.make_stateful_dev_fixture(root)
+                environment['PROJECT_ENV_FILE']=str(root/'.env')
+                environment['FAKE_APEX_LOCK_MODE']='drop-after-import'
+                original=(app/'apex-team-export.json').read_bytes()
+                script=runner if name=='bash' else runner.with_suffix('.ps1')
+                result=subprocess.run([*launcher,str(script),'100'],env=environment,capture_output=True,text=True)
+                self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+                self.assertIn('application lock ownership changed',result.stdout+result.stderr)
+                self.assertEqual((app/'apex-team-export.json').read_bytes(),original)
+                records=list((root/'.sync-state/application-locks/100').glob('publish.*/recovery.json'))
+                self.assertEqual(len(records),1)
+                self.assertEqual(json.loads(records[0].read_text())['status'],'held')
+                self.assertNotIn('release',Path(environment['FAKE_LOCK_CALLS']).read_text().splitlines())
+                self.assertEqual((state/'import-count.txt').read_text().strip(),'1')
+
+    def test_dev_publish_requires_workspace_username_even_with_force(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, _, _, environment = self.make_publish_fixture(root)
+            env_path = root/'.env'
+            env_path.write_text(re.sub(r'(?m)^APEX_WORKSPACE_USERNAME=.*\n', '', env_path.read_text()))
+            environment['APEX_WORKSPACE_USERNAME'] = 'INHERITED'
+            result = subprocess.run([BASH, str(runner), '100', '--force'], env=environment,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stdout+result.stderr)
+            self.assertIn('set APEX_WORKSPACE_USERNAME', result.stderr)
+            self.assertNotIn('Published APEX', result.stdout)
+            self.assertFalse((root/'sql-args.txt').exists())
+
     def run_publish(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [BASH, str(PUBLISH), *args],
@@ -35,14 +121,15 @@ class PublishAppCliTests(unittest.TestCase):
         scripts.mkdir()
         for name in (
             "publish_app.sh",
-            "publish_app.sql",
+            "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
+            "apex_compatibility.py", "verify_apex_release.sql",
             "load_env.sh",
             "check_db_target.sh",
-            "export_apps.sql",
+            "export_apps.sql", "verify_deployment_state.sql",
             "lookup_app_schema.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
-            "record_export_state.py",
+            "record_export_state.py", "source_evidence.py",
             "verify_publish_state.py",
             "validate_app_source.py",
             "stamp_publish_version.py",
@@ -77,6 +164,8 @@ class PublishAppCliTests(unittest.TestCase):
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
             "cat > /dev/null\n"
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
+            'if [[ -n "${FAKE_LOCK_HANDLER:-}" ]]; then python3 "$FAKE_LOCK_HANDLER" "$@"; lock_status=$?; [[ $lock_status == 3 ]] || exit "$lock_status"; fi\n'
             "mode=other\n"
             "for arg in \"$@\"; do\n"
             "  case \"$arg\" in\n"
@@ -147,6 +236,8 @@ class PublishAppCliTests(unittest.TestCase):
         environment["FAKE_SQL_CWD"] = str(sql_cwd)
         environment["FAKE_LOGIN_MARKER"] = str(root / "login-marker")
         environment["FAKE_SOURCE_DIR"] = str(app)
+        environment["FAKE_LOCK_HANDLER"] = str(ROOT/"tests/fake_application_lock_sql.py")
+        environment["FAKE_LOCK_CALLS"] = str(root/"lock-calls.txt")
         return scripts / "publish_app.sh", sql_log, sql_cwd, environment
 
     def make_stateful_dev_fixture(self, root: Path):
@@ -155,11 +246,11 @@ class PublishAppCliTests(unittest.TestCase):
         for name in (
             "check_builder_drift.py",
             "check_builder_drift.sql",
-            "export_apps.sql",
+            "export_apps.sql", "verify_deployment_state.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
             "normalize_apx.ps1",
-            "record_export_state.py",
+            "record_export_state.py", "source_evidence.py",
             "preserve_deployments.py",
             "verify_publish_state.py",
             "publish_app.ps1",
@@ -524,7 +615,7 @@ class PublishAppCliTests(unittest.TestCase):
                 if shell == "pwsh":
                     # pwsh used to exit 0 here, which a caller reads as success.
                     self.assertEqual(process.returncode, 130, output)
-                    self.assertEqual(sorted(path.name for path in (root / "scratch").glob("apex-publish*")), [])
+                    self.assertTrue(list((root / "scratch").glob("apex-publish*")), "ambiguous import diagnostics must remain")
                 plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", output).split())
                 self.assertIn("interrupted while the import was running", plain)
                 self.assertIn("its result is unknown", plain)
@@ -770,14 +861,14 @@ class PublishAppCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             arguments = sql_log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(arguments[-1], "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper())
+            self.assertEqual(arguments[-2], "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper())
 
             forced = subprocess.run(
                 [BASH, str(runner), "100", "--force"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
-            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-1], "-")
+            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-2], "-")
 
     def make_unexported_app(self, root: Path, *, app_exists: bool):
         """A stateful fixture whose app was never exported, in a target that has it or not."""
@@ -789,7 +880,7 @@ class PublishAppCliTests(unittest.TestCase):
         environment["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
         return runner, sql_log, environment, app, state_dir
 
-    def test_first_publish_of_an_app_absent_from_the_target_hands_the_import_the_absent_state(self) -> None:
+    def test_first_publish_of_an_absent_app_refuses_before_import(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runner, sql_log, environment, app, _ = self.make_unexported_app(root, app_exists=False)
@@ -799,12 +890,10 @@ class PublishAppCliTests(unittest.TestCase):
                 text=True, capture_output=True, check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("does not exist in the target yet", result.stdout)
-            # The import session re-reads the live app before importing, so an app
-            # created after the drift check is refused instead of overwritten.
-            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-1], "ABSENT")
-            self.assertTrue((app / "apex-team-export.json").is_file(), "the publish should record the baseline")
+            self.assertNotEqual(result.returncode, 0, result.stdout+result.stderr)
+            self.assertIn('application target not found', result.stdout+result.stderr)
+            self.assertFalse(sql_log.exists())
+            self.assertFalse((app/'apex-team-export.json').exists())
 
     def test_publish_of_an_unexported_app_that_exists_in_the_target_is_refused_before_any_import(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -931,11 +1020,11 @@ class PublishAppCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(
-                sql_log.read_text(encoding="utf-8").splitlines()[-1],
+                sql_log.read_text(encoding="utf-8").splitlines()[-2],
                 "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper(),
             )
 
-    def test_powershell_first_publish_of_an_app_absent_from_the_target_hands_the_import_the_absent_state(self) -> None:
+    def test_powershell_first_publish_of_an_absent_app_refuses_before_import(self) -> None:
         pwsh = shutil.which("pwsh")
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
@@ -947,10 +1036,10 @@ class PublishAppCliTests(unittest.TestCase):
 
             result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
 
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("does not exist in the target yet", result.stdout)
-            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-1], "ABSENT")
-            self.assertTrue((app / "apex-team-export.json").is_file(), "the publish should record the baseline")
+            self.assertNotEqual(result.returncode, 0, result.stdout+result.stderr)
+            self.assertIn('application target not found', result.stdout+result.stderr)
+            self.assertFalse(sql_log.exists())
+            self.assertFalse((app/'apex-team-export.json').exists())
 
     def test_powershell_import_that_clears_builder_timestamp_publishes(self) -> None:
         pwsh = shutil.which("pwsh")
@@ -1045,7 +1134,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("resembles production", result.stdout + result.stderr)
             self.assertFalse(calls.exists(), calls.read_text(encoding="utf-8") if calls.exists() else "")
 
-    def test_unverified_publish_keeps_old_baseline_and_next_attempt_refuses_builder_drift(self) -> None:
+    def test_unverified_publish_keeps_old_baseline_and_next_attempt_refuses_retained_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runner, _, _, environment, app, state_dir = self.make_stateful_dev_fixture(root)
@@ -1067,7 +1156,7 @@ class PublishAppCliTests(unittest.TestCase):
                 text=True, capture_output=True, check=False,
             )
             self.assertNotEqual(retry.returncode, 0, retry.stdout + retry.stderr)
-            self.assertIn("[DRIFT DETECTED]", retry.stdout + retry.stderr)
+            self.assertIn("application already locked", retry.stdout + retry.stderr)
             self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
 
     def test_powershell_verified_dev_publish_advances_baseline_for_the_next_publish(self) -> None:
@@ -1113,7 +1202,7 @@ class PublishAppCliTests(unittest.TestCase):
             environment.pop("FAKE_EXPORT_MISMATCH")
             retry = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
             self.assertNotEqual(retry.returncode, 0, retry.stdout + retry.stderr)
-            self.assertIn("[DRIFT DETECTED]", retry.stdout + retry.stderr)
+            self.assertIn("application already locked", retry.stdout + retry.stderr)
             self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
 
     def test_powershell_publish_requires_clean_client_output_and_sentinel(self) -> None:
@@ -1128,14 +1217,15 @@ class PublishAppCliTests(unittest.TestCase):
                 scripts.mkdir()
                 for name in (
                     "publish_app.ps1",
-                    "publish_app.sql",
+                    "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "sqlcl_safe.sh",
+            "apex_compatibility.py", "verify_apex_release.sql",
                     "load_env.ps1",
                     "invoke_sqlcl.ps1", "resolve_python.ps1",
                     "check_db_target.ps1",
-                    "export_apps.sql",
+                    "export_apps.sql", "verify_deployment_state.sql",
                     "verify_db_access.sql",
                     "normalize_apx.ps1",
-                    "record_export_state.py",
+                    "record_export_state.py", "source_evidence.py",
                     "verify_publish_state.py",
                     "validate_app_source.py",
                     "stamp_publish_version.py",
@@ -1161,6 +1251,8 @@ class PublishAppCliTests(unittest.TestCase):
                 fake_sql.write_text(
                     "#!/usr/bin/env bash\n"
                     "cat > /dev/null\n"
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
+                    'if [[ -n "${FAKE_LOCK_HANDLER:-}" ]]; then python3 "$FAKE_LOCK_HANDLER" "$@"; lock_status=$?; [[ $lock_status == 3 ]] || exit "$lock_status"; fi\n'
                     "mode=other\n"
                     "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
                     "if [[ $mode == import ]]; then\n"
@@ -1186,6 +1278,7 @@ class PublishAppCliTests(unittest.TestCase):
                 environment["PROJECT_ENV_FILE"] = str(root / ".env")
                 environment["FAKE_SQL_MODE"] = mode
                 environment["FAKE_SOURCE_DIR"] = str(app)
+                environment["FAKE_LOCK_HANDLER"] = str(ROOT/"tests/fake_application_lock_sql.py")
 
                 result = subprocess.run(
                     [pwsh, "-NoProfile", "-File", str(scripts / "publish_app.ps1"), "100", "--force"],

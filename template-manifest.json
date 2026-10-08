@@ -1,5 +1,7 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "apexRelease": "26.2",
+  "minimumSqlclVersion": "26.3.0.0",
   "upstream": "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
   "templateOwned": [
     ".agents/rules/agent-safety.md",
@@ -21,9 +23,12 @@
     "docs/EXAMPLES.md",
     "docs/GETTING_STARTED.md",
     "docs/TROUBLESHOOTING.md",
+    "docs/apex-26.2-qualification.md",
+    "docs/apexlang-upgrade.md",
     "docs/known-limitations.md",
     "docs/migration-rules.md",
     "docs/ords-export.md",
+    "docs/partial-publish.md",
     "docs/publish-rules.md",
     "migrations/README.md",
     "pyproject.toml",
@@ -32,7 +37,8 @@
     "template-manifest.json",
     "tests/**",
     "tools/chrome_devtools_client.py",
-    "tools/chrome_mcp_daemon.py"
+    "tools/chrome_mcp_daemon.py",
+    "tools/probe_apex_26_2.py"
   ],
   "projectOwned": [
     ".agents/rules/project.md",

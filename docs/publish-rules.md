@@ -28,14 +28,35 @@ check approved them. That shrinks the window for a save to slip in to the
 import itself; it still cannot see Builder edits that were never saved, so tell
 the team before you publish.
 
-Two people who publish the same app within one import's duration (about twenty
-seconds) can both pass both checks. Their imports then run one after the other
-and the later one wins. The earlier publish fails its post-import verification
-with `the live publish tag is [...], not the [...] this publish stamped, so a
-teammate's import replaced yours`: nothing is lost, because your edits are still
-in your files, but DEV runs the other developer's source. Commit your stamped
-`application.apx`, export, merge, and publish again, after agreeing with them
-who goes next.
+DEV publish now acquires a native application lock before the final drift check.
+Set `APEX_WORKSPACE_USERNAME` to the existing Builder developer/admin login;
+it is independent of the version author and database account. Any existing
+application lock, including one you hold, refuses automatic publish. The app
+must already exist in the descriptor's workspace and parsing schema; working
+copies are deferred. `--force` skips drift checking but never breaks a lock.
+
+The wrapper commits acquisition, verifies the canonical owner, unique run
+comment and lock timestamp in fresh sessions, and asserts them immediately
+before and after import. It verifies the whole re-export before releasing its
+exact lock and advancing the baseline. Failures before import release only a
+proven run-owned lock. An attempted but unverified import retains the old
+baseline, lock and diagnostics. Review the live app, reconcile source, then
+use `scripts/team.sh app-unlock <id> --env dev` to release only your own lock;
+coordinate with the owner if another developer holds it. The PowerShell
+commands have the same behavior. Keep `.sync-state/application-locks/` recovery
+notes until the incident is reconciled.
+
+Raw SQLcl imports bypass these native locks. The API also permits same-account
+reentry, so the run-evidence checks do not provide a process mutex. Continue
+team communication and avoid simultaneous runs using the same workspace user.
+Page locks must be created in Builder. Existing-page DEV partial publishing is
+available with repeatable `--file pages/<file>.apx`; see
+[partial publish rules](partial-publish.md) for selected-page drift, whole-app
+verification, canonical synchronization and recovery. The explicit
+`--no-team-notice` route requires exact pre-edit owned page locks and explicit
+live-matching salt/cutoff settings under the team's separate-account guarded
+workflow. Other routes retain coordination. Partial mode never accepts `--force`
+or falls back to a full import.
 
 ## The usual fix
 
@@ -59,11 +80,11 @@ The guard runs before import and changes nothing when it refuses.
 
 | Your baseline | Live app now | Result | Message |
 | --- | --- | --- | --- |
-| No `apex-team-export.json` at all (never exported) | App absent | OK: a first publish only creates the app | `does not exist in the target yet` |
+| No `apex-team-export.json` at all (never exported) | App absent | Native-lock preflight refuses before this guard | `application target not found` |
 | No `apex-team-export.json` at all | App exists, or cannot be read | Refused | `Database export baseline is unavailable` |
 | A marker from an export made before the version was recorded, or a damaged one | – | Refused | `Database export baseline is unavailable` |
 | – | SQLcl cannot read it | Refused | `Could not read live APEX App` |
-| App absent | App absent | OK | `remains absent since the local export` |
+| App absent | App absent | Native-lock preflight refuses before this guard | `application target not found` |
 | App absent | App exists | Refused | `was created after the local export` |
 | App exists | App absent | Refused | `no longer exists in the target after the local export` |
 | No timestamp, version X | No timestamp, version X | OK | `has no Builder edits since its last import` |
@@ -79,7 +100,7 @@ What to do:
 
 | Message | Action |
 | --- | --- |
-| `Database export baseline is unavailable` | The app exists in the target but you have no export of it (or the marker is damaged). Run `scripts/team.sh export <id>` once, then publish. A brand-new app ID that is not in the target yet needs no export: the guard prints `does not exist in the target yet` and publishes. |
+| `Database export baseline is unavailable` | The app exists in the target but you have no export of it (or the marker is damaged). Run `scripts/team.sh export <id>` once, then publish. An absent app is refused by native-lock preflight: coordinate its initial creation separately, then export and reconcile. |
 | `Could not read live APEX App` | Fix the SQLcl connection (`scripts/team.sh doctor`) and retry. |
 | `was created after the local export` | Someone created the app after your export. Export, merge, publish. |
 | `no longer exists in the target after the local export` | Someone deleted the app. Ask the team before recreating it. |
@@ -97,6 +118,7 @@ app and agreed with the team that your files should replace it.
 
 | Message | Meaning and action |
 | --- | --- |
+| `set APEX_WORKSPACE_USERNAME` | Configure the actual existing Builder developer/admin login; no fallback to the version author or schema is allowed. |
 | `publish targets DEV only` | Use `scripts/team.sh deploy <id> --env staging\|prod`. |
 | `resembles production but DB_ENVIRONMENT` | The connection name looks like production. Check `.env`, and ask before continuing. |
 | `deployment descriptor not found` | Add `apps/<schema>/<id>/deployments/dev.json`; copy it from `apps/templates/deployments/`. |
@@ -113,10 +135,14 @@ app and agreed with the team that your files should replace it.
 | `could not move application.apx to stamp the publish tag` | The file or its folder cannot be renamed: on Windows an editor or another program usually holds it open; elsewhere check the folder's permissions. Close it or fix the permissions and publish again. |
 | `could not install the stamped application.apx` | The stamped copy could not be moved into place; your file was put back and nothing was imported. Publish again. |
 
-**After connecting, before import.** Nothing is changed when this check refuses.
+**After connecting, before import.** No application source is imported when these checks refuse. A successfully acquired native lock may already have been committed; recovery verifies ownership before releasing it.
 
 | Message | Meaning and action |
 | --- | --- |
+| `application already locked` | Inspect the existing lock and coordinate with its owner. Your own preexisting lock also refuses publish; reconcile before `app-unlock`. |
+| `application target not found or workspace/schema mismatch` | Confirm the descriptor and existing main app. Publish does not create an absent app. |
+| `working copies are deferred` | Use the existing main app; working-copy support is outside this release. |
+| `application lock ownership changed` | Keep recovery notes and the old baseline. Inspect/reconcile the live app; never erase another operation's lock. |
 | `is parsed by` (also ORA-20017) | The live application uses a different parsing schema than the descriptor. Nothing was imported. Review the live app and correct the descriptor and folder, or arrange the intended schema change with the team before importing. |
 | `Live application changed after the Builder drift check` (ORA-20016) | Someone saved or imported the app between the drift check and the import. Nothing was imported. Export, merge, publish. |
 
@@ -171,18 +197,14 @@ commit. Publish prints these steps when it stops here.
 | `changed while its post-import source was being verified` | Someone edited or imported during the verification. |
 | `same database second` / `later than the database-time observation` | The revision is ambiguous; export and retry. |
 
-**A new app from `apex generate`.** SQLcl's starter application is not in the form
-APEX exports back: every file ends with one extra blank line, and
-`supporting-objects/supporting-objects.apx` names an empty `deinstall-script.sql`
-that APEX leaves out. The first publish therefore imports the app (the guard prints
-`does not exist in the target yet`), then stops with `APEXlang source bytes do not
-match the post-import re-export` and records no baseline. That is the "After
-import" case above: commit the stamped `application.apx`, run
-`scripts/team.sh export <id>`, check with `git diff` that only those normalizations
-changed, and commit the canonical source. Publishing after that works as usual.
-Generate the app while connected to the target database (`sql -name <connection>`,
-then `apex generate`): offline, SQLcl writes its own, newer APEXlang version, which an
-older APEX cannot import.
+**A new app from `apex generate`.** DEV publish requires an existing app to
+acquire its native lock. Coordinate initial creation in Builder, or a separately
+requested bootstrap import, before the normal publish workflow. Export the live
+app through the template to obtain its canonical source and database baseline,
+then merge your authored changes. SQLcl starter files can contain an extra blank line
+at the end and an empty deinstall reference that a canonical export removes;
+exact byte verification intentionally refuses differences. Generate using the
+matching connected APEX 26.2 context rather than mixing release-specific syntax.
 
 ## Example
 

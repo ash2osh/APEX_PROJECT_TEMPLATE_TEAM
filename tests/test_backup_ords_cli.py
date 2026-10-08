@@ -31,7 +31,7 @@ FAKE = Path(__file__).resolve().parent / "fake_ords_sql.py"
 
 SQL_FILES = (
     "backup_db.sql", "doctor.sql", "doctor_ords.sql", "verify_db_access.sql", "verify_ords_access.sql",
-    "ords_export.sql", "ords_export_run.sql", "ords_export_skip.sql", "ords_inventory.sql", "ords_export.py",
+    "ords_export.sql", "ords_export_run.sql", "ords_export_skip.sql", "ords_inventory.sql", "ords_export.py", "apex_compatibility.py",
 )
 BASH_FILES = ("team.sh", "backup_db.sh", "load_env.sh", "check_db_target.sh", "sqlcl_safe.sh", "replace_mirror.sh")
 POWERSHELL_FILES = (
@@ -485,22 +485,22 @@ class DoctorOrdsTests(OrdsCliTestCase):
             self.assertIn("1 of 2 doctor check(s) failed", plain(result.stderr))
         self.each_shell(body, config={"ords": {"REST_API": {"scenario": "wrong-owner-exit1"}}})
 
-    def test_an_unsupported_sqlcl_release_fails_the_ords_doctor_checks_only(self) -> None:
+    def test_old_sqlcl_reports_independent_apex_and_ords_refusals(self) -> None:
         def body(project: Project) -> None:
             result = project.run("doctor")
             output = plain(result.stdout + result.stderr)
             self.assertEqual(2, result.returncode, output)
             self.assertIn("SQLcl 26.1 or newer is required", output)
-            self.assertIn("1 of 2 doctor check(s) failed", output)
+            self.assertIn("SQLcl 26.3.0.0", output)
+            self.assertIn("2 of 2 doctor check(s) failed", output)
             self.assertFalse([line for line in project.logged() if line.startswith("doctor|doctor_ords.sql")])
         self.each_shell(body, config={"version": "SQLcl: Release 25.1.0.0 Production"})
 
-    def test_without_an_ords_profile_doctor_does_not_probe_the_sqlcl_release(self) -> None:
+    def test_without_ords_profile_doctor_still_checks_apex_release(self) -> None:
         def body(project: Project) -> None:
             result = project.run("doctor")
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertNotIn("version", project.logged())
-            self.assertEqual(["doctor|doctor.sql|DEMO|DEMO|docker-demo"], project.logged())
+            self.assertEqual(["version", "doctor|doctor.sql|DEMO|DEMO|docker-demo"], project.logged())
         self.each_shell(body, ords="")
 
     def test_schema_narrows_doctor_to_the_ords_only_schema(self) -> None:
@@ -509,6 +509,13 @@ class DoctorOrdsTests(OrdsCliTestCase):
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertEqual(["version", "doctor|doctor_ords.sql|REST_TWO|REST_TWO|dev-two"], project.logged())
         self.each_shell(body, ords=ORDS_TWO)
+
+    def test_ords_only_selection_accepts_sqlcl_below_the_apex_floor(self) -> None:
+        def body(project: Project) -> None:
+            result = project.run("doctor", "--schema", "REST_TWO")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(["version", "doctor|doctor_ords.sql|REST_TWO|REST_TWO|dev-two"], project.logged())
+        self.each_shell(body, ords=ORDS_TWO, config={"version": "SQLcl: Release 26.2.2.0 Production"})
 
 
 class SchemaConstantTests(unittest.TestCase):

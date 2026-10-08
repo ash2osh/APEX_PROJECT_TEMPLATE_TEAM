@@ -12,6 +12,22 @@ RECORDER = ROOT / "scripts" / "record_export_state.py"
 
 
 class RecordExportStateTests(unittest.TestCase):
+    def test_canonical_export_records_schema_two_after_descriptor_preservation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            app=root/'app';(app/'.apex').mkdir(parents=True);(app/'deployments').mkdir()
+            (app/'.apex/apexlang.json').write_text('{"mmdVersion":"26.2.0+3479"}')
+            (app/'application.apx').write_text('app SAMPLE ()\n')
+            (app/'deployments/dev.json').write_text('{"workspace":{"name":"TEAM"}}')
+            before=root/'before.txt';after=root/'after.txt'
+            before.write_text('NO_TIMESTAMP|2026-10-08T10:00:00|Release 1.0\n');after.write_text('NO_TIMESTAMP|2026-10-08T10:00:02|Release 1.0\n')
+            result=subprocess.run([sys.executable,str(RECORDER),'100',str(before),str(after),str(app/'apex-team-export.json'),'--source-dir',str(app)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            marker=json.loads((app/'apex-team-export.json').read_text())
+            self.assertEqual(marker['schemaVersion'],2)
+            self.assertEqual(marker['sourceFormat']['apexRelease'],'26.2')
+            self.assertIn('deployments/dev.json',marker['sourceFiles'])
+
     def run_recorder(
         self,
         before: str,

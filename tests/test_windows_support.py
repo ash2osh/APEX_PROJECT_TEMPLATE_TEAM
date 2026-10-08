@@ -23,6 +23,27 @@ from scripts import sqlcl_session
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(shutil.which("pwsh") and os.name != "nt", "PowerShell async-output double uses the POSIX wait path")
+class SqlclOutputCompletionTests(unittest.TestCase):
+    def test_wait_finishes_pending_output_after_process_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = Path(temporary) / "wait.ps1"
+            driver.write_text('''param($Helper)
+class PendingOutput {
+  [bool] $OutputComplete = $false
+  [bool] WaitForExit([int] $Milliseconds) { return $true }
+  [void] WaitForExit() { $this.OutputComplete = $true }
+}
+. $Helper
+$process = [PendingOutput]::new()
+Wait-SqlclProcess $process
+if (-not $process.OutputComplete) { Write-Error 'output processing is still pending'; exit 1 }
+''', encoding="utf-8")
+            result = subprocess.run(["pwsh", "-NoProfile", "-File", str(driver),
+                                     str(ROOT / "scripts/invoke_sqlcl.ps1")], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class BashCommandTests(unittest.TestCase):
     """scripts/sqlcl_session.py must start Git Bash, not the WSL launcher, on Windows."""
 

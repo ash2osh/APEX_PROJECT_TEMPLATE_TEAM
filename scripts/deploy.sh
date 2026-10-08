@@ -105,16 +105,18 @@ if [ "$manual" = true ]; then
     printf '%s\n' 'These steps use Bash syntax: run them in Git Bash. Paths are written as C:/...'
   fi
   printf '1. Review the committed descriptor: %s\n' "$app_dir/deployments/$app_environment.json"
+  printf '   python3 %q %q %q --for-import || exit 1\n' \
+    "$runbook_root/scripts/validate_app_source.py" "$runbook_root" "$app_dir"
   printf '%s\n' \
     '2. From a shell with SQLcl and the approved connection configured, run:' \
     '   sqlcl_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-sqlcl-XXXXXX")' \
     '   trap '\''rm -rf -- "$sqlcl_dir"'\'' EXIT' \
     '   cd "$sqlcl_dir"' \
     '   export SQLPATH="$sqlcl_dir" ORACLE_PATH="$sqlcl_dir"'
-  printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q %q\n' \
+  printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q %q %q\n' \
     "$sqlcl_connection" "@$runbook_root/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "$app_dir" \
-    "$app_dir/deployments/$app_environment.json" "$app_id" -
+    "$app_dir/deployments/$app_environment.json" "$app_id" - "$runbook_root/scripts/no_application_lock.sql"
   verify_parent="apps/$parsing_schema"
   printf '3. Check that import completed without SQLcl errors and printed "Import successful." and APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
   printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'
@@ -129,8 +131,8 @@ if [ "$manual" = true ]; then
   printf '%s\n' '   test "${#export_dirs[@]}" -eq 1 || { echo "expected exactly one APEX export" >&2; exit 1; }'
   printf '%s\n' '   exported_dir="${export_dirs[0]%/}"'
   printf '   %q "$exported_dir"\n' "$runbook_root/scripts/normalize_apx.sh"
-  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q\n' \
-    "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root"
+  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json\n' \
+    "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root" "$app_dir/deployments/$app_environment.json"
   printf '5. Treat the deployment as verified only if that check prints APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
   exit 0
 fi
