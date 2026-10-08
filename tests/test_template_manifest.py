@@ -64,6 +64,13 @@ class TemplateManifestTests(unittest.TestCase):
     def test_tracked_files_are_not_ambiguously_owned_and_protected_paths_are_unowned(self) -> None:
         self.assert_tracked_ownership_valid(self.tracked)
 
+    def test_template_declares_the_qualified_release_boundary(self) -> None:
+        from scripts.upgrade_template import load_manifest
+        manifest = load_manifest(ROOT)
+        self.assertEqual(manifest["schemaVersion"], 2)
+        self.assertEqual(manifest["apexRelease"], "26.2")
+        self.assertEqual(manifest["minimumSqlclVersion"], "26.3.0.0")
+
     def test_every_non_project_template_file_has_exactly_one_owner(self) -> None:
         for path in self.tracked:
             if protected_project_path(path):

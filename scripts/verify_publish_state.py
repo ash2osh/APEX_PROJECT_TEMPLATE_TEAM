@@ -11,9 +11,13 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from record_export_state import AppState, marker_payload, read_state
-from stamp_publish_version import PUBLISH_TAG, VERSION_LINE, parse_version
-from validate_app_source import validate_app_source
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.record_export_state import AppState, marker_payload, read_state
+from scripts.stamp_publish_version import PUBLISH_TAG, VERSION_LINE, parse_version
+from scripts.validate_app_source import validate_app_source
+from scripts.deployment_descriptor import observe_deployment, read_descriptor, source_projection, remap_subscription_source
 
 
 IGNORED_SOURCE_PATHS = {"apex-team-export.json"}
@@ -64,7 +68,7 @@ def replaced_import_hint(source_dir: Path, exported_dir: Path) -> str:
     )
 
 
-def verify_source_bytes(source_dir: Path, exported_dir: Path) -> None:
+def verify_source_bytes(source_dir: Path, exported_dir: Path, deployment: dict | None = None) -> None:
     source_files_by_path = source_files(source_dir)
     exported_files_by_path = source_files(exported_dir)
     missing = sorted(
@@ -84,7 +88,13 @@ def verify_source_bytes(source_dir: Path, exported_dir: Path) -> None:
     for relative, source_path in source_files_by_path.items():
         if relative not in exported_files_by_path:
             continue  # an empty script the export leaves out, accepted above
-        if source_path.read_bytes() != exported_files_by_path[relative].read_bytes():
+        expected_bytes, observed_bytes = source_path.read_bytes(), exported_files_by_path[relative].read_bytes()
+        if deployment is not None and relative == Path("application.apx"):
+            expected_bytes = source_projection(expected_bytes, deployment)
+            observed_bytes = source_projection(observed_bytes, deployment)
+        if deployment is not None and relative.suffix == '.apx':
+            expected_bytes = remap_subscription_source(expected_bytes, deployment)
+        if expected_bytes != observed_bytes:
             raise ValueError(f"APEXlang source bytes do not match the post-import re-export: {relative.as_posix()}")
 
     for required in (Path("application.apx"), Path(".apex/apexlang.json")):
@@ -128,7 +138,11 @@ def advance_baseline(app_id: int, source_dir: Path, revision: AppState) -> None:
     if marker_path.exists() and not marker_path.is_file():
         raise ValueError(f"export marker path is not a regular file: {marker_path}")
 
-    payload = json.dumps(marker_payload(app_id, revision), indent=2) + "\n"
+    # Legacy markers remain usable for full workflows. A real 26.2 canonical
+    # source additionally records raw content evidence required by partial mode.
+    metadata = json.loads((source_dir / ".apex/apexlang.json").read_text(encoding="utf-8"))
+    canonical_source = source_dir if isinstance(metadata, dict) and "mmdVersion" in metadata else None
+    payload = json.dumps(marker_payload(app_id, revision, canonical_source), indent=2) + "\n"
     descriptor, temporary_name = tempfile.mkstemp(prefix=".apex-team-export.", suffix=".tmp", dir=source_dir)
     temporary_path = Path(temporary_name)
     try:
@@ -154,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("after_file", type=Path)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--record-baseline", action="store_true")
+    parser.add_argument("--deployment-file", type=Path)
+    parser.add_argument("--deployment-state", type=Path)
     args = parser.parse_args(argv)
     if args.app_id < 1:
         parser.error("app_id must be a positive integer")
@@ -161,8 +177,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source_dir = validate_app_source(args.repo_root, args.source_dir)
         exported_dir = args.exported_dir.resolve(strict=True)
+        deployment = None
+        if args.deployment_file is not None:
+            deployment = read_descriptor(args.deployment_file, args.app_id)
+            if args.deployment_state is None:
+                raise ValueError("effective deployment observation is required")
+            observe_deployment(args.deployment_state, exported_dir / "deployments/default.json", deployment)
         try:
-            verify_source_bytes(source_dir, exported_dir)
+            verify_source_bytes(source_dir, exported_dir, deployment)
         except ValueError as mismatch:
             raise ValueError(f"{mismatch}{replaced_import_hint(source_dir, exported_dir)}") from mismatch
         revision = read_verified_revision(args.app_id, args.before_file, args.after_file)

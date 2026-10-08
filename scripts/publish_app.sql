@@ -9,6 +9,7 @@ DEFINE application_source = '&4'
 DEFINE deployment_file = '&5'
 DEFINE expected_app_id = '&6'
 DEFINE expected_live_state = '&7'
+DEFINE lock_assert_script = '&8'
 SET ENCODING UTF-8
 SET HEADING OFF
 SET FEEDBACK OFF
@@ -56,6 +57,8 @@ BEGIN
   END IF;
 END;
 /
+
+@@verify_apex_release.sql
 
 -- The drift guard ran in an earlier session. Re-read the live revision in this
 -- import session so a Builder save or teammate import since then is refused
@@ -113,7 +116,14 @@ BEGIN
 END;
 /
 
+-- Public native-lock assertion immediately before and after import. SQLcl
+-- itself does not enforce another developer's application lock. The generated
+-- assertion uses SET DEFINE OFF for literal workspace/user/comment text.
+@"&&lock_assert_script"
+SET DEFINE ON
 apex import -input "&&application_source" -deployment "&&deployment_file"
+@"&&lock_assert_script"
+SET DEFINE ON
 
 DECLARE
   v_application_count PLS_INTEGER;

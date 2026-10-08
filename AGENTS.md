@@ -1,12 +1,16 @@
 # Team APEX agent contract
 
-This repository is the APEX 26.1+ / APEXlang team template. The template
+This branch is the APEX 26.2 / APEXlang team template; APEX operations require
+SQLcl 26.3.0.0 or newer. APEX 26.1 projects use `codex/apex-26.1`. The template
 repository follows its normal branch and pull-request process. A project
 created from it gives each developer a separate Git repository; the team
 shares its development Oracle database and APEX workspace, not Git history.
 Never exchange downstream commits or assume a colleague's repository changes
 are present locally. A Git branch does not isolate shared database or Builder
 state.
+
+At the start of every agent task, follow the mandatory weekly Oracle skills
+refresh below and report its status to the developer in the current chat.
 
 ## Configuration and application source
 
@@ -64,6 +68,33 @@ state.
   user explicitly directs an override after review. When publish refuses,
   follow [docs/publish-rules.md](docs/publish-rules.md), which lists every
   refusal, its meaning, and the fix.
+- **Native DEV locks:** Set `APEX_WORKSPACE_USERNAME` to your existing Builder
+  developer/admin login, independently of `DEVELOPER_NAME` and the database
+  login. DEV publish acquires a committed public application lock before its
+  final drift check and verifies ownership through import and re-export. Any
+  preexisting lock, including your own, refuses publish; `--force` never breaks
+  a lock. The app must already exist in the descriptor's workspace/schema;
+  working copies are deferred. Use `scripts/team.sh app-lock <id> --env dev`
+  for an explicit lock and `app-unlock <id> --env dev` for an owner-filtered
+  release. SQLcl imports bypass native locks, and same-account native API
+  reentry is not a process mutex. Continue human coordination. An ambiguous
+  import retains the old baseline, native lock and ignored recovery evidence;
+  inspect/reconcile before unlocking or retrying. Page locks are created in
+  Builder; no public SQLcl page-lock setter is qualified.
+- **Selected DEV pages:** Use repeatable `publish <id> --file pages/<file>.apx`
+  for existing non-global pages with a schema-2 baseline. Refuse unselected local
+  edits and selected-page drift; preserve unrelated saved live work through a
+  fresh whole-app snapshot, compiler validation and exact post-import verification.
+  Follow [docs/partial-publish.md](docs/partial-publish.md). Ordinary partial
+  imports retain coordination. `--no-team-notice` asserts separate workspace
+  accounts and an agreed guarded workflow; it additionally requires unchanged
+  pre-edit Builder locks owned by `APEX_WORKSPACE_USERNAME` on every selected
+  page, and an explicitly supplied live-matching checksum salt and URL cutoff.
+  Never claim those checks acquire page locks or prove human account exclusivity.
+  Initial creation, full/global changes and promotion still require coordination;
+  ambiguous partial writes or retained locks require recovery communication.
+  Partial mode refuses `--force` and non-DEV targets; it never falls back to full
+  import. Review all synchronized source, including unrelated live changes.
 - **Migrations:** Put each migration in
   `migrations/YYYY-MM-DD_<name>-rNNN/` with consecutive named SQL steps such as
   `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
@@ -110,6 +141,51 @@ Graphify links cross-schema references and mirrored synonyms when their targets
 are present in the database mirror. The graph reflects this repository's
 files, not shared Builder state.
 
+## Mandatory weekly Oracle skills refresh
+
+- At the start of **every task**, including planning, reviews and non-database
+  work, read SQLcl's user-local `~/.dbtools/skills/skills.json`. Resolve `~`
+  against the current user's home on each platform. SQLcl owns this file;
+  never copy it into a project, edit its dates, or create an extra timestamp file.
+- Check the Oracle repository's `repositories[].lastSync` and the
+  `installations[].installedAt` records for all Oracle skill roots in the actual
+  skill directories loaded by this agent. Match expanded `targetPath` values,
+  not only agent labels, and deduplicate identical records for a shared path.
+  Conflicting duplicates are invalid. Discover expected roots from the synced
+  Oracle catalog (currently `apex`, `db`, `fusion`, `graal` and `oci`); require
+  each installation record and its installed `SKILL.md`. Do not use file mtimes
+  or a fresh repository timestamp as proof of fresh installed skills.
+- If the registry/catalog or required records/files are missing, unreadable or
+  malformed, or any relevant UTC timestamp is invalid, in the future or seven
+  days old or older, automatically refresh all Oracle roots. Start SQLcl without
+  a database connection (`sql /nolog`), then issue `skills sync -force`.
+  SQLcl MCP `skills_sync(force=true)` with all roots selected is equivalent.
+  This instruction authorizes a due refresh; do not ask again.
+- Check the current run completed successfully with no conflicts, then reread
+  SQLcl's native registry and confirm the relevant repository/installation dates
+  and installed files are current. Never manually advance or repair its records.
+  Notify the developer in the **current chat**: "I automatically ran Oracle
+  skills sync with -force and verified SQLcl's native installation dates."
+  Include the verified date and available installation count.
+- If already current, report "Oracle skills are current; recorded installation
+  date: <date>." Use the oldest relevant installation date. Do not claim a new
+  sync ran. The native registry does not persist a force flag or a complete-run
+  conflict/success verdict; its dates establish freshness, not proof that an
+  earlier run used `-force` or completed entirely without conflicts.
+- A failed/conflicted run or unverifiable registry blocks Oracle/APEX
+  implementation and live operations for this task; report it as failed or
+  unavailable. Read-only investigation/planning may continue. SQLcl may advance
+  some native dates during an unsuccessful run: those dates never override an
+  observed failure in the current task. Do not synthesize a success receipt.
+- Preserve project-authored `.agents/skills/` and `.claude/skills/`, compare Git
+  status before/after refresh and report unexpected changes. This authorization
+  covers Oracle-maintained installed skills only. Do not put credentials or
+  full SQLcl logs in tracked files or status notifications.
+- Use APEXlang skills matching the target release; do not mix 26.1 and 26.2.
+  No standalone automation is required. Inactive projects check at next task
+  startup; projects sharing this user's installations reuse native freshness.
+  Notification does not authorize messages to teammates or external channels.
+
 ## Project instructions
 
 - After cloning into a new downstream project, follow the
@@ -145,7 +221,8 @@ files, not shared Builder state.
   their database effects. Do not run a migration, import, or deployment unless
   the user requested that operation. Export only when requested because it
   refreshes tracked source from shared Builder state.
-- Coordinate shared DEV app imports with the human team. There are no database
+- Coordinate shared DEV app imports with the human team, except the explicitly
+  qualified routine page-only policy above. There are no database
   pause tables or acknowledgement commands in this workflow. Never claim that
   team communication or a live database check happened unless it did.
 - Do not commit or push silently. Follow explicit instructions for commits;

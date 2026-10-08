@@ -80,6 +80,9 @@ function Wait-SqlclProcess {
     Stop-SqlclChildren -Children (Get-SqlclDescendants $Process.Id $Process.StartTime) -Deadline ([datetime]::UtcNow.AddSeconds(10))
     $global:LASTEXITCODE = $savedExitCode
   }
+  # The timed overload only waits for process exit. Finish async redirected
+  # output before callers read the transcript (Process.WaitForExit contract).
+  $Process.WaitForExit()
 }
 
 # After an interrupt: hold on until SQLcl has ended, and end it with everything it
@@ -279,4 +282,20 @@ function Assert-SqlclOrdsVersion {
   }
   $result = Invoke-OrdsExportHelper -HelperArguments @("sqlcl-version", $transcript)
   if ($result.Status -ne 0) { throw $result.Text }
+}
+
+function Assert-SqlclApexVersion {
+  param([Parameter(Mandatory = $true)][string] $WorkDirectory)
+  [System.IO.Directory]::CreateDirectory($WorkDirectory) | Out-Null
+  $stdinFile = Join-Path $WorkDirectory ".sqlcl-stdin"
+  [System.IO.File]::WriteAllText($stdinFile, "")
+  $transcript = Join-Path $WorkDirectory "sqlcl-version.txt"
+  $status = Invoke-Sqlcl -WorkingDirectory $WorkDirectory -StdInFile $stdinFile `
+    -TranscriptFile $transcript -Arguments @("-V")
+  if ($status -ne 0) { throw "APEX compatibility unavailable: could not run ``sql -V``" }
+  . (Join-Path $PSScriptRoot "resolve_python.ps1")
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw "Python 3.10 or newer is required for APEX compatibility checks" }
+  $message = & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "apex_compatibility.py") sqlcl-version $transcript 2>&1
+  if ($LASTEXITCODE -ne 0) { throw ($message -join [Environment]::NewLine) }
 }

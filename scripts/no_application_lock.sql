@@ -1,0 +1,2 @@
+-- Confirmed staging/production imports retain their promotion workflow.
+-- DEV wrappers must supply their generated assert-lock.sql instead.

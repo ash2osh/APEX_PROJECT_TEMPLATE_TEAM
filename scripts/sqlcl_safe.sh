@@ -143,3 +143,16 @@ sqlcl_require_ords_version() {
   fi
   python3 "$REPO_ROOT/scripts/ords_export.py" sqlcl-version "$output_file" > /dev/null || return 2
 }
+
+# APEX 26.2 source/import support was qualified with SQLcl 26.3. Runs offline.
+sqlcl_require_apex_version() {
+  [ "$#" -eq 1 ] || { printf 'usage: sqlcl_require_apex_version <work-dir>\n' >&2; return 2; }
+  local work_dir="$1" stdin_file="$1/.sqlcl-stdin" output_file="$1/sqlcl-version.txt"
+  mkdir -p -- "$work_dir"
+  : > "$stdin_file"
+  if ! invoke_sqlcl_safe "$work_dir" -V < "$stdin_file" > "$output_file" 2>&1; then
+    printf 'APEX compatibility unavailable: could not run `sql -V`\n' >&2
+    return 2
+  fi
+  python3 "$REPO_ROOT/scripts/apex_compatibility.py" sqlcl-version "$output_file" > /dev/null || return 2
+}

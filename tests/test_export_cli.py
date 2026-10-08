@@ -14,6 +14,19 @@ PWSH = shutil.which("pwsh")
 
 
 class ExportCliTests(unittest.TestCase):
+    def test_export_requests_translation_repository_and_preserves_generated_bytes(self):
+        for powershell in (False, True):
+            if powershell and not PWSH: continue
+            with self.subTest(powershell=powershell), tempfile.TemporaryDirectory() as temporary:
+                script, _ = self.make_checkout(Path(temporary), powershell)
+                fake = script.parents[1] / 'bin/sql'
+                text = fake.read_text()
+                validation = 'if ! grep -q -- "-exptranslations" "$(dirname "$PROJECT_ENV_FILE")/scripts/export_apps.sql"; then exit 8; fi\nmkdir -p apps/DEMO/exported/generated-artifacts\nprintf "preserved translation repository\\n" > apps/DEMO/exported/generated-artifacts/translations.sql\n'
+                fake.write_text(text.replace('mkdir -p apps/DEMO/exported/.apex', validation + 'mkdir -p apps/DEMO/exported/.apex', 1))
+                result = self.run_export(script, powershell)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((script.parents[1] / 'apps/DEMO/100/generated-artifacts/translations.sql').read_bytes(), b'preserved translation repository\n')
+
     def make_checkout(self, root: Path, powershell: bool) -> tuple[Path, dict[str, bytes]]:
         scripts = root / "scripts"
         scripts.mkdir()
@@ -39,7 +52,7 @@ class ExportCliTests(unittest.TestCase):
                 "normalize_apx.sh",
                 "replace_mirror.sh",
             )
-        names += ("record_export_state.py", "preserve_deployments.py")
+        names += ("record_export_state.py", "source_evidence.py", "preserve_deployments.py", "apex_compatibility.py", "verify_apex_release.sql")
         for name in names:
             source = ROOT / "scripts" / name
             if source.exists():
@@ -70,9 +83,10 @@ class ExportCliTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "cat > /dev/null\n"
+            "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
             "mkdir -p apps/DEMO/exported/.apex apps/DEMO/exported/deployments\n"
             "printf 'new app source\\n' > apps/DEMO/exported/application.apx\n"
-            "printf '{\\\"mmdVersion\\\":1}\\n' > apps/DEMO/exported/.apex/apexlang.json\n"
+            "printf '{\\\"mmdVersion\\\":\\\"26.2.0+3479\\\"}\\n' > apps/DEMO/exported/.apex/apexlang.json\n"
             "printf '{\\\"default\\\":true}\\n' > apps/DEMO/exported/deployments/default.json\n"
             "printf '%s\\n' \"$FAKE_DB_BEFORE\" > .apex-export-before.txt\n"
             "printf '%s\\n' \"$FAKE_DB_AFTER\" > .apex-export-after.txt\n",
@@ -256,6 +270,7 @@ class ExportCliTests(unittest.TestCase):
                 fake_sql = script.parents[1] / "bin" / "sql"
                 fake_sql.write_text(
                     "#!/usr/bin/env bash\ncat > /dev/null\n"
+                    "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
                     "printf 'ORA-20987: APEX - Application 100 not found\\n'\nexit 1\n",
                     encoding="utf-8",
                 )

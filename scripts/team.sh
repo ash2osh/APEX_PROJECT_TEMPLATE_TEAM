@@ -9,7 +9,14 @@ Usage: scripts/team.sh <command> [arguments]
 Commands:
   doctor                                      Validate .env and the DEV SQLcl identities (ORDS too, when configured)
   export <app_id>                             Export one numeric APEX app from DEV
+  upgrade-apexlang <app_id> --env dev --mode builder|files
+                                              Convert source explicitly to canonical APEX 26.2
   publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
+  publish <app_id> --file pages/<file>.apx [--file ...] [--no-team-notice]
+                                              Verify selected existing DEV pages and synchronize source
+  app-lock <app_id> [--env dev] [--comment <text>]
+                                              Acquire a native DEV application lock
+  app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
   migrate <folder> [...] --env dev|staging|prod
@@ -21,7 +28,7 @@ Commands:
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
-  upgrade-template [--source <url|path>] [--ref <ref>] [--dry-run]
+  upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.2] [--dry-run]
                                               Update template-owned files from the template
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template)
@@ -92,16 +99,30 @@ case "$command_name" in
       # Never let SQLcl start in the caller's directory: SQLcl executes a
       # login.sql found there before the doctor script. The optional fourth
       # argument names the script (doctor_ords.sql for the ORDS profile).
-      local connection="$1" expected_user="$2" schema="$3" doctor_script="${4:-doctor.sql}" workdir stdin output status=0
+      local connection="$1" expected_user="$2" schema="$3" doctor_script="${4:-doctor.sql}" doctor_profile="${5:-identity}" workdir stdin output status=0 username_hex="-"
       workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
       doctor_workdir="$workdir"
+      if [ "$doctor_profile" = apex ]; then
+        if [ -z "${APEX_WORKSPACE_USERNAME:-}" ]; then
+          printf 'team error: set APEX_WORKSPACE_USERNAME to the existing Builder developer/admin login\n' >&2
+          rm -rf -- "$workdir"; doctor_workdir=""; return 2
+        fi
+        if ! username_hex="$(python3 -c 'import sys; v=sys.argv[1]; sys.exit("APEX_WORKSPACE_USERNAME must be nonempty text without control characters (at most 255 UTF-8 bytes)") if not v.strip() or any(ord(c)<32 for c in v) or len(v.encode("utf-8"))>255 else print(v.encode("utf-8").hex().upper())' "$APEX_WORKSPACE_USERNAME")"; then
+          rm -rf -- "$workdir"; doctor_workdir=""; return 2
+        fi
+      fi
+      if [ "$doctor_profile" = apex ] && ! sqlcl_require_apex_version "$workdir"; then
+        rm -rf -- "$workdir"
+        doctor_workdir=""
+        return 2
+      fi
       stdin="$workdir/.sqlcl-stdin"
       : > "$stdin"
       output="$workdir/sqlcl-output.log"
       if ! invoke_sqlcl_safe "$workdir" \
         -S -noupdates -name "$connection" \
         "@$REPO_ROOT/scripts/$doctor_script" \
-        "$schema" "$DB_ENVIRONMENT" "$expected_user" \
+        "$schema" "$DB_ENVIRONMENT" "$expected_user" "$doctor_profile" "$username_hex" "$APEX_APP_ID" \
         < "$stdin" > "$output" 2>&1; then
         cat "$output" >&2
         printf 'team error: SQLcl doctor check failed for schema %s (connection %s)\n' "$schema" "$connection" >&2
@@ -110,6 +131,14 @@ case "$command_name" in
         cat "$output"
         if ! grep -Fxq "APEX_DOCTOR_VERIFIED:$expected_user" "$output"; then
           printf 'team error: SQLcl did not verify the doctor script for schema %s; the result is unknown\n' "$schema" >&2
+          status=1
+        fi
+        if [ "$doctor_profile" = apex ] && ! grep -Fxq 'APEX_RELEASE_VERIFIED:26.2' "$output"; then
+          printf 'team error: APEX release was not verified; the result is unknown\n' >&2
+          status=1
+        fi
+        if [ "$doctor_profile" = apex ] && ! grep -Fxq 'APEX_WORKSPACE_USERS_VERIFIED' "$output"; then
+          printf 'team error: workspace developer validation was not verified; the result is unknown\n' >&2
           status=1
         fi
       fi
@@ -121,8 +150,7 @@ case "$command_name" in
     doctor_seen="|"
     doctor_total=0
     doctor_failed=0
-    # The ORDS export needs a newer SQLcl than nothing else does: say so once,
-    # before any check, instead of per schema. `sql -V` connects to nothing.
+    # ORDS has its own floor; APEX checks its qualified floor separately.
     doctor_ords_sqlcl_ok=true
     if [ -n "$ORDS_SCHEMA" ]; then
       doctor_workdir="$(mktemp -d "$REPO_ROOT/scratch/sqlcl-doctor.XXXXXX")"
@@ -160,7 +188,7 @@ case "$command_name" in
           continue
         fi
         doctor_one "${doctor_connection_list[$doctor_index]}" "${doctor_user_list[$doctor_index]}" \
-          "${doctor_schema_list[$doctor_index]}" "$doctor_script" || doctor_failed=$((doctor_failed + 1))
+          "${doctor_schema_list[$doctor_index]}" "$doctor_script" "$doctor_profile" || doctor_failed=$((doctor_failed + 1))
       done
     done
     [ "$doctor_total" -gt 0 ] || fail "no configured profile lists schema ${PROJECT_SCHEMA:-?}"
@@ -189,6 +217,17 @@ case "$command_name" in
     done
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/publish_app.sh" "$@"
+    ;;
+  app-lock|app-unlock)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh $command_name <numeric_app_id> [--env dev]"
+    lock_operation=acquire
+    [ "$command_name" != app-unlock ] || lock_operation=unlock
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      exec "$REPO_ROOT/scripts/app_lock.sh" "$lock_operation" "$@"
+    ;;
+  upgrade-apexlang)
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      exec "$REPO_ROOT/scripts/upgrade_apexlang.sh" "$@"
     ;;
   check-conflicts)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)"

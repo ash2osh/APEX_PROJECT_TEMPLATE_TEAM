@@ -55,8 +55,8 @@ Check each row. The command in the last column prints the version.
 
 | You need | Version | Check with |
 | --- | --- | --- |
-| An Oracle database with **APEX 26.1 or newer** and a workspace | 26.1+ | see the check at the end of step 5 |
-| **SQLcl** | 26.1 or newer | `sql -V` |
+| An Oracle database with **APEX 26.2** and a workspace | 26.2 | see the check at the end of step 5 |
+| **SQLcl** for APEX operations | 26.3.0.0 or newer | `sql -V` |
 | **Git** | any recent | `git --version` |
 | **Python** | 3.10 or newer | `python3 --version` (Windows: `py -3 --version`) |
 | **Bash** | 4.3 or newer | `bash --version` |
@@ -95,7 +95,7 @@ cd uc-local-apex-dev
 
 It opens APEX at `http://localhost:8181/ords/apex` and registers a SQLcl saved
 connection for each user it creates. Run `./local-26ai.sh --help` for the other
-helpers, such as `upgrade-apex` (if you need 26.1 or newer) and
+helpers, such as `upgrade-apex` (if you need 26.2) and
 `unexpire-accounts` (if a login says the account is locked). Their
 [documentation](https://www.united-codes.com/products/uc-local-apex-dev/docs/)
 is the authority for that setup; this template only needs a schema, a
@@ -129,6 +129,15 @@ those three.
 
 ### Post-clone cleanup
 
+For a 26.1 downstream project, use `--ref codex/apex-26.1 --apex-release 26.1`
+instead of the 26.2 commands below. The lock preserves that ref for later
+upgrades. To cross from 26.1 to 26.2, first review and replace the old
+`scripts/upgrade_template.py` with the new engine from the selected template
+ref; the old engine refuses the schema-2 manifest before changing files.
+Then explicitly choose the 26.2 ref and `--apex-release 26.2`. Upgrading files
+does not verify the database: run `doctor` before any APEX operation. `main`
+is the release route after the 26.2 upgrade has been reviewed and merged.
+
 Do this in your new downstream project before its first push. The original
 `APEX_PROJECT_TEMPLATE_TEAM` repository retains its tests, workflows and
 Dependabot for template development. The cleanup below is for a fresh clone;
@@ -137,8 +146,8 @@ in an established project, preserve any project-specific tests or CI first.
 Record the installed template baseline while the checkout is clean:
 
 ```bash
-scripts/team.sh upgrade-template --dry-run
-scripts/team.sh upgrade-template
+scripts/team.sh upgrade-template --ref main --apex-release 26.2 --dry-run
+scripts/team.sh upgrade-template --ref main --apex-release 26.2
 ```
 
 These upgrade commands do not connect to Oracle. Review any `.template-new`
@@ -191,12 +200,34 @@ sql /nolog
 SQL> connmgr list
 ```
 
-While you are connected, check the APEX version (step 2 asks for 26.1 or newer):
+While you are connected, check the APEX version (this branch requires 26.2):
 
 ```text
 SQL> connect -name my-dev
 SQL> select version_no from apex_release;
 ```
+
+### Retired uc-apx settings in existing projects
+
+The 26.2 template retires uc-apx integration. Before using upgraded operational
+commands, remove `INSTALL_UC_APX` and `UC_APX_SKILLS_AGENT` from your root `.env`,
+including values set to `false`. Both loaders refuse these obsolete keys with
+an explicit cleanup message. Template upgrades preserve `.env`; they do not
+edit your configuration for you. Review removal of unchanged template-owned
+installer/workflow files and retain locally edited files through the upgrader's
+conflict/review route. User-managed binaries and generated local skills are not
+automatically uninstalled or deleted; legacy generated payloads stay ignored.
+
+`APEX_WORKSPACE_USERNAME` is the actual Builder developer/admin login for native
+locks, independently configured from `DEVELOPER_NAME` and the SQLcl database
+user. The Docker example uses its existing `DEMO` Builder account. Set your
+own login in each downstream checkout; email and case-preserving logins are
+accepted. Schema/ORDS tasks do not require this setting. Native locks and DEV
+publish validate the account in the selected workspace. `doctor` validates it
+in the live workspaces of the configured app IDs; no visible configured app
+means the workspace check is unavailable. DEV publish needs an existing app:
+coordinate initial creation in Builder, export it, then reconcile your files
+before publishing. Do not start an unprotected first import through `publish`.
 
 ## 6. Configure `.env`
 
