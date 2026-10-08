@@ -48,7 +48,9 @@ class LauncherCompatibilityTests(unittest.TestCase):
         for banner, status, accepted in cases:
             with self.subTest(banner=banner, status=status), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
-                bin_dir = install(directory / "bin", f"printf '%s\\n' '{banner}'\nexit {status}\n")
+                # PowerShell feeds redirected stdin through a pipe; drain it before
+                # exiting so this fast fake cannot race Start-Process's pipe close.
+                bin_dir = install(directory / "bin", f"cat > /dev/null\nprintf '%s\\n' '{banner}'\nexit {status}\n")
                 environment = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
                 work = directory / "work"
                 result = subprocess.run([BASH, "-c", 'REPO_ROOT=$1; source "$1/scripts/sqlcl_safe.sh"; sqlcl_require_apex_version "$2"',
