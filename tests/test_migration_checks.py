@@ -378,6 +378,28 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertNotIn(check.sql, observed["driver"])
         self.assertIn("DBMS_SQL.BIND_VARIABLE(l_cursor, ':target_schema', 'APP')", observed["driver"])
 
+    def test_check_driver_counts_clob_amounts_in_utf16_units(self):
+        # A supplementary character is one character for LENGTH but two code units for a
+        # CLOB, so a LENGTH append amount cuts the query text short. Both the query append
+        # and the payload output loop must use LENGTH2.
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("emoji", "SELECT CASE WHEN '\U0001F600' = '\U0001F600' THEN 1 ELSE 0 END FROM dual", 1)
+        observed = {}
+
+        def runner(_target, driver, run_dir):
+            observed["driver"] = driver.read_text(encoding="utf-8")
+            payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "emoji", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
+            output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        run_checks(target, (check,), Path(self.temporary.name), _runner=runner)
+
+        driver = observed["driver"]
+        self.assertIn("DBMS_LOB.WRITEAPPEND(l_sql, LENGTH2(UTL_I18N.RAW_TO_CHAR(", driver)
+        self.assertNotIn("WRITEAPPEND(l_sql, LENGTH(", driver)
+        self.assertIn("l_offset := l_offset + LENGTH2(l_chunk);", driver)
+        self.assertNotIn("l_offset + LENGTH(l_chunk)", driver)
+
     def test_check_session_cannot_commit_inside_a_stored_function(self):
         # SET TRANSACTION READ ONLY does not stop a stored function that runs as an
         # autonomous transaction: called from a check it inserted a row, or created a
