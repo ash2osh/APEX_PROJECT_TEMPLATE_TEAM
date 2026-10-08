@@ -804,10 +804,12 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
             "  l_sql := EMPTY_CLOB();",
             "  DBMS_LOB.CREATETEMPORARY(l_sql, TRUE);",
         ])
+        # CLOB offsets and append amounts count UTF-16 code units; LENGTH counts characters,
+        # so a supplementary character (4 UTF-8 bytes) needs LENGTH2 or the text is cut short.
         for chunk in _hex_chunks(check.sql.strip().rstrip(";").strip()):
             if chunk:
                 sql_lines.append(
-                    f"  DBMS_LOB.WRITEAPPEND(l_sql, LENGTH(UTL_I18N.RAW_TO_CHAR(HEXTORAW('{chunk}'), 'AL32UTF8')), UTL_I18N.RAW_TO_CHAR(HEXTORAW('{chunk}'), 'AL32UTF8'));"
+                    f"  DBMS_LOB.WRITEAPPEND(l_sql, LENGTH2(UTL_I18N.RAW_TO_CHAR(HEXTORAW('{chunk}'), 'AL32UTF8')), UTL_I18N.RAW_TO_CHAR(HEXTORAW('{chunk}'), 'AL32UTF8'));"
                 )
         sql_lines.extend([
             "  l_result := JSON_OBJECT_T();",
@@ -851,7 +853,7 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         "  WHILE l_offset <= DBMS_LOB.GETLENGTH(l_sql) LOOP",
         "    l_chunk := DBMS_LOB.SUBSTR(l_sql, 8000, l_offset);",
         "    DBMS_OUTPUT.PUT_LINE(l_chunk);",
-        "    l_offset := l_offset + LENGTH(l_chunk);",
+        "    l_offset := l_offset + LENGTH2(l_chunk);",
         "  END LOOP;",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_PAYLOAD_END:" + phase + "');",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_VERIFIED:" + phase + "');",
