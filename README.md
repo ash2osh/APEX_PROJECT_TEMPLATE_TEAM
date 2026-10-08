@@ -539,9 +539,11 @@ is used when no explicit source is supplied:
 
 ```bash
 git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git /tmp/apex-template
-python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git
+python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git --ref main --apex-release 26.2
 ```
 
+The example selects the 26.2 template explicitly. For a project remaining on
+26.1, use `--ref codex/apex-26.1 --apex-release 26.1` instead.
 That first run has no lock, so every file that differs from the template is
 reported as a conflict instead of being overwritten. Keep the project clean
 before running it; conflicts must be reviewed and merged manually.
