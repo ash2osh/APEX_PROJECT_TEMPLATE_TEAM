@@ -1011,7 +1011,7 @@ class TeamCliTests(unittest.TestCase):
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
             "cat > /dev/null\n"
-            'python3 "/home/ash/projects/APEX_PROJECT_TEMPLATE_TEAM/tests/fake_application_lock_sql.py" "$@" >/dev/null\n'
+            f'python3 "{(ROOT / "tests" / "fake_application_lock_sql.py").as_posix()}" "$@" >/dev/null\n'
             "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
             "mode=other; export_schema=DEMO\n"
             "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
