@@ -1,10 +1,11 @@
 # Local improvements: inline review and delivery record
 
-Implementation is on `codex/template-local-improvements`. The developer stopped
-AGY and requested the remaining work inline. No subagents or AGY sessions were
-used after that switch. The original template checkout and the prior maintenance
-fixes were preserved. No staging, commits, pushes, merges or Natrec writes were
-performed for this changeset.
+Implementation was completed on `codex/template-local-improvements` after the
+developer stopped AGY and requested the remaining work inline. No subagents or
+AGY sessions were used after that switch. The changes were committed as
+`6b057a6`, fast-forwarded to local `main`, and pushed to `origin/main` on
+2026-10-09; the feature branch was deleted. The original template checkout and
+prior maintenance fixes were preserved. No Natrec writes were performed.
 
 ## Delivered behavior
 
@@ -73,10 +74,12 @@ regressions. This is prepared backport evidence, not branch integration or live
 Release A's root full suite passed 1,148 tests with 21 skips. Focused migration,
 wrapper, transport, Graphify and readiness checks passed after their changes.
 The final reviewed Python 3.10.20 suite passed **1,245 tests in 405.087 seconds**,
-with 21 platform-specific skips. The host Python focused final checks passed
-114 tests. Logs are `root-final-python310-reviewed-full.log` and
-`root-final-host-focused.log` under the ignored evidence directory. The earlier
-full run had one documentation failure; it was corrected before this fresh run.
+with 21 platform-specific skips. After integration, the same 1,245-test suite
+passed on `main` in 404.893 seconds, also with 21 platform-specific skips. The
+host Python focused final checks passed 114 tests. Logs are
+`root-final-python310-reviewed-full.log` and `root-final-host-focused.log` under
+the ignored evidence directory. The earlier full run had one documentation
+failure; it was corrected before the fresh reviewed run.
 Ruff, Bash/PowerShell parsing, example configuration, JSON and LF checks passed.
 
 [Docker qualification](../../apex-26.2-qualification.md#local-improvements-qualification-on-2026-10-09)
@@ -90,20 +93,20 @@ inspection found ten current installations dated 2026-10-08; no new sync ran.
 Native Windows, live APEX 26.1 and staging/production database imports remain
 unavailable in this qualification. Linux PowerShell and offline promotion tests
 do not establish those behaviors. Compressed transport was not backported to 26.1.
-Evidence remains under ignored `scratch/agy-implementation-20261009/` and
-`.superpowers/sdd/2026-10-09-local-template-improvements/` because this work has
-not been committed.
+Detailed evidence remains under ignored `scratch/agy-implementation-20261009/`
+and `.superpowers/sdd/2026-10-09-local-template-improvements/`; these local logs
+and temporary fixtures are not part of the pushed source commit.
 
 ## Rulings and deferred work
 
 - Follow the user's inline-only instruction, preserving earlier prepared artifacts.
   Cost: the final review has no independent reviewer.
-- Prepare the 26.1 patch without switching the dirty root checkout or advancing
+- Prepare the 26.1 patch without switching the root checkout or advancing its
   branch history. Cost: the backport requires a separate authorized integration.
 - Remove noncanonical Graphify patch exceptions and require the isolated pinned
   environment. Cost: users of older shared installations must set up the local
   environment before extraction.
 
-Deferred functional minors: none. Git integration is a pending user decision,
-not an unverified implementation success. Preserve recovery/review artifacts
-until integration provides the durable record.
+Deferred functional minors: none. Integration to `main` and the push to
+`origin/main` are complete. Preserve the ignored recovery/review evidence for
+future diagnosis.
