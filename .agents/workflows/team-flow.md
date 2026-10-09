@@ -1,3 +1,8 @@
+---
+name: team-flow
+description: Coordinate APEX application edits, guarded publishing, schema migrations and promotion in a shared team workspace
+---
+
 # Team workflow
 
 This template uses one downstream Git repository per developer and a shared

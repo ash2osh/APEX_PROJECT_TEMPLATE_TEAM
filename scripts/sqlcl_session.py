@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import shutil
 import subprocess
 import time
@@ -106,7 +107,53 @@ def _run_bridge(command: list[str], *, cwd: Path, env: Mapping[str, str], timeou
     if os.name == "nt":
         # Ctrl-C must end the wait and the SQLcl under the bridge; see windows_job.
         return windows_job.run(command, input_text="", timeout=timeout_seconds, **options)
-    return subprocess.run(command, input="", timeout=timeout_seconds, check=False, **options)
+    # Killing only the Bash bridge leaves its SQLcl/JVM descendants running.
+    # Give this invocation its own process group so timeout/interrupt cleanup
+    # cannot terminate the caller or another developer's SQLcl session.
+    with subprocess.Popen(command, stdin=subprocess.PIPE, start_new_session=True, **options) as process:
+        previous_handlers = {}
+
+        def stop_tree():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        def terminate(signum, frame):
+            stop_tree()
+            previous = previous_handlers[signum]
+            if callable(previous):
+                previous(signum, frame)
+            else:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+
+        try:
+            # An isolated SQLcl no longer receives the caller's terminal-group
+            # TERM/HUP. Forward termination while preserving the caller's exit
+            # status or existing migration interrupt handler. Only the main
+            # thread can register signal handlers.
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                previous = signal.getsignal(signum)
+                if previous == signal.SIG_IGN:
+                    continue
+                previous_handlers[signum] = previous
+                try:
+                    signal.signal(signum, terminate)
+                except ValueError:
+                    del previous_handlers[signum]
+                    break
+            output, _ = process.communicate("", timeout=timeout_seconds)
+        except BaseException as error:
+            stop_tree()
+            output, _ = process.communicate()
+            if isinstance(error, subprocess.TimeoutExpired):
+                error.stdout = output
+            raise
+        finally:
+            for signum, previous in previous_handlers.items():
+                signal.signal(signum, previous)
+    return subprocess.CompletedProcess(command, process.returncode, output, None)
 
 
 def run_sqlcl(

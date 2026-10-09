@@ -52,10 +52,12 @@ Commands:
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
-  upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.2] [--dry-run]
+  upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.1|26.2] [--dry-run]
                                               Update template-owned files from the template
+  verify-local [--format text|json] [--skills-root <path>] [...] [--live]
+                                              Validate local environment, lock, apps and skills read-only
 Options:
-  --schema <NAME>                             Run one configured schema (any command except upgrade-template)
+  --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
   --help                                      Show this help
 "@ | Write-Output
 }
@@ -176,7 +178,7 @@ if ([string]::IsNullOrWhiteSpace($Command) -or $Command -in @("--help", "-h")) {
 
 # --schema NAME is the one selection channel: strip it and set PROJECT_SCHEMA so
 # every child script's loader narrows to that schema.
-if ($Command -ne "upgrade-template") {
+if ($Command -notin @("upgrade-template", "verify-local")) {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
@@ -278,12 +280,13 @@ try {
           Remove-Item -LiteralPath $versionDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
       }
-      foreach ($doctorProfile in @("apex", "tables", "code", "ords")) {
+      foreach ($doctorProfile in @("apex", "tables", "code", "migration", "ords")) {
         $doctorScript = "doctor.sql"
         switch ($doctorProfile) {
           "apex"   { $doctorSchemas = $env:APEX_PARSING_SCHEMA; $doctorConnections = $env:APEX_SQLCL_CONNECTION; $doctorUsers = $env:APEX_EXPECTED_USER }
           "tables" { $doctorSchemas = $env:TABLES_SCHEMA; $doctorConnections = $env:TABLES_SQLCL_CONNECTION; $doctorUsers = $env:TABLES_EXPECTED_USER }
           "code"   { $doctorSchemas = $env:CODE_SCHEMA; $doctorConnections = $env:CODE_SQLCL_CONNECTION; $doctorUsers = $env:CODE_EXPECTED_USER }
+          "migration" { $doctorSchemas = $env:MIGRATION_SCHEMA; $doctorConnections = $env:MIGRATION_SQLCL_CONNECTION; $doctorUsers = $env:MIGRATION_EXPECTED_USER }
           "ords"   { $doctorSchemas = $env:ORDS_SCHEMA; $doctorConnections = $env:ORDS_SQLCL_CONNECTION; $doctorUsers = $env:ORDS_EXPECTED_USER; $doctorScript = "doctor_ords.sql" }
         }
         if ([string]::IsNullOrEmpty($doctorSchemas)) { continue }
@@ -365,6 +368,14 @@ try {
     "deploy" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 deploy <numeric_app_id> --env <staging|prod> [--manual]" }
       Invoke-TeamBash -ScriptName "deploy.sh" -ScriptArguments $Arguments
+    }
+    "verify-local" {
+      . (Join-Path $PSScriptRoot "resolve_python.ps1")
+      $python = Resolve-TeamPython
+      if ($null -eq $python) { Fail "Python 3.10 or newer is required to verify local readiness (python3, python or py -3)" }
+      $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "verify_local.py") --repo-root $repoRoot @Arguments
+      Exit-Team $LASTEXITCODE
     }
     "upgrade-template" {
       . (Join-Path $PSScriptRoot "resolve_python.ps1")

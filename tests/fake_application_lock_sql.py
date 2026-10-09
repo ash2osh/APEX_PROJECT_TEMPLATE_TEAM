@@ -9,6 +9,20 @@ from pathlib import Path
 def main():
     drivers=[Path(arg[1:]) for arg in sys.argv[1:] if arg.startswith('@')]
     if not drivers or not drivers[0].is_file(): return 3
+    if drivers[0].name=='lifecycle-driver.sql':
+        sql=drivers[0].read_text()
+        match=re.search(r'application_lifecycle.sql" ([0-9A-F]+) ([0-9]+)',sql)
+        workspace=bytes.fromhex(match[1]).decode(); app_id=int(match[2])
+        schema=bytes.fromhex(re.search(r'DEFINE lifecycle_schema_hex = ([0-9A-F]+)',sql)[1]).decode()
+        user=bytes.fromhex(re.search(r'DEFINE lifecycle_user_hex = ([0-9A-F]+)',sql)[1]).decode()
+        state=Path(os.environ.get('FAKE_STATE_DIR','.'))/'import-count.txt'
+        after=state.exists() and state.read_text().strip()!='0'
+        mode=os.environ.get('FAKE_LIFECYCLE_MODE','')
+        if (mode=='pre-unavailable' and not after) or (mode=='post-unavailable' and after):
+            print('ORA-20073: lifecycle visibility unavailable'); return 1
+        instance={'instanceId':'1','definitionId':'9','staticId':'FLOW','state':'ACTIVE','terminal':False}
+        data={'schemaVersion':1,'applicationPresent':True,'identity':dict(session_user=user,current_schema=schema,db_unique_name='TESTDB',container_id='3',container_name='TESTPDB',edition='ORA$BASE',server_host='test',service_name='testpdb'),'release':'26.2.0','workspace':workspace,'workspaceId':'123','appId':app_id,'startedAt':'2026-10-09T10:00:00Z','completedAt':'2026-10-09T10:00:01Z','coverage':dict(application=True,workspace=True,automations=True,workflows=True,tasks=True),'automations':[{'staticId':'AUTO','status':'DISABLED' if after and mode=='automation-disabled' else 'ACTIVE'}],'workflows':[] if after and mode=='lost-instance' else [instance],'tasks':[]}
+        print('LIFECYCLE_PAYLOAD_BEGIN\n'+json.dumps(data)+'\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED'); return 0
     if drivers[0].name == 'export_apps.sql':
         args=sys.argv[1:]; index=args.index('@'+str(drivers[0])); schema,app_id,environment=args[index+1:index+4]
         root=drivers[0].parent.parent

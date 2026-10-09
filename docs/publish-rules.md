@@ -58,6 +58,41 @@ live-matching salt/cutoff settings under the team's separate-account guarded
 workflow. Other routes retain coordination. Partial mode never accepts `--force`
 or falls back to a full import.
 
+## Runtime verification after import
+
+Full and selected-page publish capture scoped public automation, workflow and
+task state before import, then observe it again after exact source verification.
+Staging/production deployment uses the same gate on its explicit descriptor
+target. A new target may be verified absent before initial promotion; it must be
+visible after import. Missing context or incomplete reads are unavailable, never
+treated as empty healthy state.
+
+Changes to previously observed automation statuses/definitions, lost nonterminal
+instances, changed instance definitions, new errors and new workflow suspension
+require attention. Natural task/workflow completion and new automation
+definitions are recorded without automatically refusing success. A newly
+suspended workflow gets at most one additional observation after five seconds.
+The observations report changes; they cannot prove the import caused them.
+
+`publish-verification.json` records `sourceVerified` independently from
+`lifecycleStatus` (`pass`, `attention` or `unavailable`). The report under
+`lifecycle-after/lifecycle-report.json` supplies reasons. A pre-read failure
+prevents import. A failed post-read or attention result exits 2, retaining the
+old DEV baseline, run-owned native lock and recovery evidence. Partial publish
+records the same fields in `partial.json`. Promotion retains its diagnostics
+and does not claim a verified deployment. Manual DBA runbooks also contain the
+capture/verify gate and retain temporary evidence on failure.
+
+Inspect the live automation/workflow/task state with the responsible developer,
+resolve the condition and reconcile source before owner-filtered unlocking or
+retrying. Planned removal of an existing automation still requires that review.
+The wrapper never enables automations, resumes workflows or repairs tasks.
+`--force` does not bypass runtime verification. Docker APEX 26.2 qualification
+observed an enabled automation becoming disabled during a full import; exact
+source bytes alone cannot establish runtime readiness. See
+[local qualification](local-qualification.md) and
+[measured results](apex-26.2-qualification.md).
+
 ## The usual fix
 
 Almost every drift refusal is fixed the same way:

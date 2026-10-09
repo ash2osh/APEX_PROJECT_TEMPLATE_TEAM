@@ -17,6 +17,11 @@ Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:STAGING_SCHEMA,
   Env:ORDS_SCHEMA, Env:ORDS_SQLCL_CONNECTION, Env:ORDS_EXPECTED_USER,
   Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT, Env:APEX_WORKSPACE_USERNAME -ErrorAction SilentlyContinue
+foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
+  foreach ($projectEnvSuffix in @("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER")) {
+    Remove-Item -LiteralPath "Env:${projectEnvMigrationPrefix}MIGRATION_${projectEnvSuffix}" -ErrorAction SilentlyContinue
+  }
+}
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
 # Mirror load_env.sh: a relative PROJECT_ENV_FILE resolves against the
@@ -52,6 +57,11 @@ $projectEnvAllowed = @(
   "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA",
   "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER"
 )
+foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
+  foreach ($projectEnvSuffix in @("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER")) {
+    $projectEnvAllowed += "${projectEnvMigrationPrefix}MIGRATION_${projectEnvSuffix}"
+  }
+}
 foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   $projectEnvLine = $projectEnvLine.TrimEnd("`r")
   if ([string]::IsNullOrWhiteSpace($projectEnvLine) -or $projectEnvLine.StartsWith("#")) { continue }
@@ -133,6 +143,26 @@ function Assert-ProjectEnvTriple([string]$SchemaKey, [string]$ConnectionKey, [st
     throw "project environment error: $ConnectionKey, $UserKey and $SchemaKey must list the same number of entries"
   }
   Assert-ProjectEnvUniqueCsv -Name $SchemaKey -Value ([Environment]::GetEnvironmentVariable($SchemaKey, "Process"))
+}
+foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
+  $projectEnvMigrationKeys = @("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER" | ForEach-Object { "${projectEnvMigrationPrefix}MIGRATION_$_" })
+  $projectEnvMigrationPresent = @($projectEnvMigrationKeys | Where-Object { $projectEnvSeen.ContainsKey($_) }).Count
+  Set-Item -LiteralPath "Env:PROJECT_${projectEnvMigrationPrefix}MIGRATION_CONFIGURED" -Value "false"
+  if ($projectEnvMigrationPresent -notin @(0, 3)) {
+    throw "project environment error: $($projectEnvMigrationKeys -join ', ') must be configured together"
+  }
+  if ($projectEnvMigrationPresent -eq 3) {
+    foreach ($projectEnvKey in $projectEnvMigrationKeys) {
+      if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($projectEnvKey, "Process"))) {
+        throw "project environment error: $projectEnvKey must not be empty"
+      }
+    }
+    Assert-ProjectEnvList -Name $projectEnvMigrationKeys[0] -Kind identifier
+    Assert-ProjectEnvList -Name $projectEnvMigrationKeys[1] -Kind alias
+    Assert-ProjectEnvList -Name $projectEnvMigrationKeys[2] -Kind identifier
+    Assert-ProjectEnvTriple -SchemaKey $projectEnvMigrationKeys[0] -ConnectionKey $projectEnvMigrationKeys[1] -UserKey $projectEnvMigrationKeys[2]
+    Set-Item -LiteralPath "Env:PROJECT_${projectEnvMigrationPrefix}MIGRATION_CONFIGURED" -Value "true"
+  }
 }
 foreach ($projectEnvPrefix in @("PROD", "STAGING")) {
   $projectEnvConnectionKey = "${projectEnvPrefix}_SQLCL_CONNECTION"
@@ -244,11 +274,11 @@ $projectEnvMulti = $false
 # project multi-schema for the commands that need a --schema, but it says
 # nothing about the one-DEV-schema mapping.
 $projectEnvMultiMapping = $false
-foreach ($projectEnvKey in @("TABLES_SCHEMA", "CODE_SCHEMA", "APEX_PARSING_SCHEMA", "ORDS_SCHEMA")) {
+foreach ($projectEnvKey in @("TABLES_SCHEMA", "CODE_SCHEMA", "APEX_PARSING_SCHEMA", "ORDS_SCHEMA", "MIGRATION_SCHEMA", "STAGING_MIGRATION_SCHEMA", "PROD_MIGRATION_SCHEMA")) {
   $projectEnvItems = @(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($projectEnvKey, "Process")))
   if ($projectEnvItems.Count -gt 1) {
     $projectEnvMulti = $true
-    if ($projectEnvKey -ne "ORDS_SCHEMA") { $projectEnvMultiMapping = $true }
+    if ($projectEnvKey -ne "ORDS_SCHEMA" -and $projectEnvKey -notlike "*MIGRATION_SCHEMA") { $projectEnvMultiMapping = $true }
   }
   foreach ($projectEnvItem in $projectEnvItems) {
     if ($projectEnvUnion -cnotcontains $projectEnvItem) { $projectEnvUnion += $projectEnvItem }
@@ -268,6 +298,11 @@ if (@(Split-ProjectEnvList $env:CODE_SCHEMA).Count -eq 1) { $projectEnvDevSchema
 $env:PROJECT_SCHEMAS = ($projectEnvUnion -join ",")
 $env:PROJECT_MULTI_SCHEMA = if ($projectEnvMulti) { "true" } else { "false" }
 $env:PROJECT_CODE_SCHEMAS = $env:CODE_SCHEMA
+$env:PROJECT_MIGRATION_SCHEMAS = if ($env:PROJECT_MIGRATION_CONFIGURED -eq "true") { $env:MIGRATION_SCHEMA } else { $env:CODE_SCHEMA }
+$env:PROJECT_STAGING_MIGRATION_SCHEMAS = if ($env:PROJECT_STAGING_MIGRATION_CONFIGURED -eq "true") { $env:STAGING_MIGRATION_SCHEMA } else { $env:STAGING_SCHEMA }
+$env:PROJECT_PROD_MIGRATION_SCHEMAS = if ($env:PROJECT_PROD_MIGRATION_CONFIGURED -eq "true") { $env:PROD_MIGRATION_SCHEMA } else { $env:PROD_SCHEMA }
+$projectEnvDevMigrationSchema = ""
+if (@(Split-ProjectEnvList $env:PROJECT_MIGRATION_SCHEMAS).Count -eq 1) { $projectEnvDevMigrationSchema = $env:PROJECT_MIGRATION_SCHEMAS }
 
 function Set-ProjectEnvNarrow([string]$SchemaKey, [string]$ConnectionKey, [string]$UserKey, [string]$Mode) {
   $schemas = @(Split-ProjectEnvList ([Environment]::GetEnvironmentVariable($SchemaKey, "Process")))
@@ -281,6 +316,8 @@ function Set-ProjectEnvNarrow([string]$SchemaKey, [string]$ConnectionKey, [strin
     Set-Item -LiteralPath "Env:$SchemaKey" -Value $schemas[$index]
     Set-Item -LiteralPath "Env:$ConnectionKey" -Value $connections[$index]
     Set-Item -LiteralPath "Env:$UserKey" -Value $users[$index]
+  } elseif ($Mode -eq "migration" -and $schemas.Count -eq 1 -and $projectEnvDevMigrationSchema -ne "" -and $env:PROJECT_SCHEMA -ceq $projectEnvDevMigrationSchema) {
+    # A single migration owner maps independently of metadata mirror owners.
   } elseif ($Mode -eq "lenient" -and -not $projectEnvMultiMapping -and $schemas.Count -eq 1 -and
       $projectEnvDevSchema -ne "" -and $env:PROJECT_SCHEMA -ceq $projectEnvDevSchema) {
     # A project with one DEV schema may name staging or production differently,
@@ -306,6 +343,12 @@ if (-not [string]::IsNullOrEmpty($env:PROJECT_SCHEMA)) {
   Set-ProjectEnvNarrow APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER strict
   # With ORDS disabled the three variables stay unset: nothing for a child process to inherit.
   if ($env:PROJECT_ORDS_CONFIGURED -eq "true") { Set-ProjectEnvNarrow ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER strict }
+  if ($env:PROJECT_MIGRATION_CONFIGURED -eq "true") { Set-ProjectEnvNarrow MIGRATION_SCHEMA MIGRATION_SQLCL_CONNECTION MIGRATION_EXPECTED_USER strict }
+  foreach ($projectEnvPrefix in @("STAGING", "PROD")) {
+    if ([Environment]::GetEnvironmentVariable("PROJECT_${projectEnvPrefix}_MIGRATION_CONFIGURED", "Process") -eq "true") {
+      Set-ProjectEnvNarrow "${projectEnvPrefix}_MIGRATION_SCHEMA" "${projectEnvPrefix}_MIGRATION_SQLCL_CONNECTION" "${projectEnvPrefix}_MIGRATION_EXPECTED_USER" migration
+    }
+  }
   foreach ($projectEnvPrefix in @("STAGING", "PROD")) {
     if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable("${projectEnvPrefix}_SCHEMA", "Process"))) {
       Set-ProjectEnvNarrow "${projectEnvPrefix}_SCHEMA" "${projectEnvPrefix}_SQLCL_CONNECTION" "${projectEnvPrefix}_EXPECTED_USER" lenient
@@ -331,6 +374,7 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvItem, projectEnvConnectionCount, projectEnvHead, projectEnvStream,
   projectEnvMultiMapping, projectEnvOrdsKeys, projectEnvOrdsPresent, projectEnvOrdsSchemas, projectEnvOrdsUsers, projectEnvOrdsIndex `
   -ErrorAction SilentlyContinue
+Remove-Variable -Name projectEnvMigrationPrefix, projectEnvMigrationKeys, projectEnvMigrationPresent, projectEnvSuffix, projectEnvDevMigrationSchema -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,
   Function:Assert-ProjectEnvList, Function:Assert-ProjectEnvTriple,
   Function:Set-ProjectEnvNarrow -ErrorAction SilentlyContinue

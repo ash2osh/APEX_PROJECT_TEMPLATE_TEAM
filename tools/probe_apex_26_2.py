@@ -408,6 +408,134 @@ end;
 /
 ''')
 
+    def run_lifecycle(self, source: Path, developer: str, *, allow_writes=False) -> dict:
+        """Exercise production full/partial gates on one run-owned disposable app."""
+        if not allow_writes:
+            raise ProbeError('lifecycle qualification requires explicit --allow-writes')
+        literal(developer)
+        self.report.update(allowWrites=True, scenario='lifecycle', developers=[developer])
+        require_sqlcl_version(self.version_reader(self.directory / 'version'))
+        identity=self.identify()
+        if identity.get('appCount')!=0:
+            raise ProbeError('requested disposable app ID already exists; nothing imported')
+        metadata=json.loads((source / '.apex/apexlang.json').read_text(encoding='utf-8'))
+        application=(source / 'application.apx').read_text(encoding='utf-8')
+        if not str(metadata.get('mmdVersion','')).startswith('26.2.') or re.search(r'(?i)initializ',application):
+            raise ProbeError('lifecycle fixture needs APEX 26.2 source without application initialization code')
+        from scripts.validate_app_source import validate_import_effects
+        validate_import_effects(source)
+        staged=self.directory/'runtime-input'; shutil.copytree(source,staged)
+        text,count=re.subn(r'(?m)^app [^\s]+ \(', 'app '+self.alias+' (', application,count=1)
+        if count!=1:raise ProbeError('fixture requires one application declaration')
+        (staged/'application.apx').write_text(text,encoding='utf-8')
+        runtime=REPO_ROOT/'tests/fixtures/lifecycle/runtime'
+        for name,kind in [('automation','automations'),('workflow','workflows'),('task','task-definitions')]:
+            destination=staged/'shared-components'/kind;destination.mkdir(exist_ok=True)
+            contents=(runtime/(name+'.apx')).read_text(encoding='utf-8')
+            if name=='task':contents=contents.replace('staticValue: DEMO','staticValue: '+json.dumps(developer))
+            (destination/'template-lifecycle-probe.apx').write_text(contents,encoding='utf-8')
+        descriptor=staged/'deployments/probe.json'
+        deployment={'workspace':{'name':self.target.workspace},'app':{'id':self.target.app_id,'databaseSession':{'parsingSchema':self.target.schema}}}
+        descriptor.write_text(json.dumps(deployment)+'\n',encoding='utf-8')
+        t=self.target
+        guard=f'''declare n number;begin
+ select count(*) into n from apex_applications where application_id={t.app_id} or alias={literal(self.alias)};
+ if n<>0 then raise_application_error(-20085,'Disposable application identity occupied');end if;
+ select count(*) into n from apex_workspace_apex_users where workspace_name={literal(t.workspace)} and upper(user_name)=upper({literal(developer)}) and (is_admin='Yes' or is_application_developer='Yes');
+ if n<>1 then raise_application_error(-20084,'Existing workspace developer is required');end if;
+end;
+/
+'''
+        self.execute('runtime-validate',f'apex validate -input {command_path(staged)} -deployment {command_path(descriptor)}\n',success_line='Validation successful.')
+        self.report.update(fixtureWriteAttempted=True,cleanupRequired=True,fixtures=[{'kind':'application','id':t.app_id,'alias':self.alias}])
+        self.save_report()
+        self.execute('runtime-fixture-import',guard+f'apex import -input {command_path(staged)} -deployment {command_path(descriptor)}\n',success_line='Import successful.')
+        output=self.execute('runtime-instances',self.owned_guard()+f'''declare w number;t number;s number;begin
+ apex_session.create_session(p_app_id=>{t.app_id},p_page_id=>1,p_username=>{literal(developer)},p_call_post_authentication=>false);
+ s:=v('APP_SESSION');
+ w:=apex_workflow.start_workflow(p_application_id=>{t.app_id},p_static_id=>'TEMPLATE_LIFECYCLE_PROBE');
+ t:=apex_human_task.create_task(p_application_id=>{t.app_id},p_task_def_static_id=>'TEMPLATE_LIFECYCLE_PROBE');
+ commit;
+ dbms_output.put_line('APEX_PROBE_INSTANCES:'||json_object('workflowId' value w,'taskId' value t));
+ apex_session.delete_session(p_session_id=>s);
+ commit;
+exception when others then
+ if s is not null then apex_session.delete_session(p_session_id=>s);end if;
+ raise;
+end;
+/
+''')
+        instances=[json.loads(line.split(':',1)[1]) for line in output.splitlines() if line.startswith('APEX_PROBE_INSTANCES:')]
+        if len(instances)!=1:raise ProbeError('runtime fixture instance inventory is unknown; retain app')
+        self.report['instanceInventory']=instances[0];self.save_report()
+        from scripts.application_lifecycle import capture_lifecycle,compare_lifecycle
+        selected=Target('dev',t.connection,t.expected_user,t.schema,'development')
+        def observed(name):
+            def guarded(target,driver,directory):
+                text=driver.read_text(encoding='utf-8')
+                prefix=self.preamble().replace('declare v_group number;','SET TRANSACTION READ ONLY;\ndeclare v_group number;')+self.owned_guard()
+                text=re.sub(r'(?im)^SET TRANSACTION READ ONLY;\s*$','',text)
+                driver.write_text(prefix+text,encoding='utf-8');return self.runner(target,driver,directory)
+            return capture_lifecycle(selected,t.workspace,t.app_id,self.directory/'lifecycle'/name,_runner=guarded)
+        before=observed('positive-before')
+        if not all(before[k] for k in ('automations','workflows','tasks')) or not any(not row['terminal'] for row in before['workflows']):raise ProbeError('positive runtime fixture visibility is incomplete; retain app')
+        self.report['checks']['positive-runtime-coverage']={'status':'pass','counts':{k:len(before[k]) for k in ('automations','workflows','tasks')}}
+        automation_id=before['automations'][0]['staticId']
+        self.execute('automation-enable',self.owned_guard()+f"begin apex_automation.enable(p_application_id=>{t.app_id},p_static_id=>{literal(automation_id)});apex_automation.reschedule(p_application_id=>{t.app_id},p_static_id=>{literal(automation_id)},p_next_run_at=>systimestamp+interval '1' day);commit;end;\n/\n")
+        enabled=observed('enabled-before-full')
+        canonical=self.export('runtime-enabled')
+        self.execute('runtime-raw-full',self.owned_guard()+f'apex import -input {command_path(canonical)} -deployment {command_path(descriptor)}\n',success_line='Import successful.')
+        after=observed('after-full')
+        comparison=compare_lifecycle(enabled,after)
+        self.report['checks']['native-full-runtime']={'status':'pass','observedLifecycleStatus':comparison['status'],'changes':comparison['changes'],'reasons':comparison['reasons']}
+        # Disable only this run-owned no-op fixture before the ordinary success path.
+        self.execute('automation-disable-fixture',self.owned_guard()+f"begin apex_automation.disable(p_application_id=>{t.app_id},p_static_id=>{literal(automation_id)});commit;end;\n/\n")
+        checkout=self.directory/'production-checkout';(checkout/'apps'/t.schema).mkdir(parents=True)
+        shutil.copytree(REPO_ROOT/'scripts',checkout/'scripts',ignore=shutil.ignore_patterns('__pycache__'))
+        canonical=self.export('runtime-disabled')
+        app=checkout/'apps'/t.schema/str(t.app_id);shutil.copytree(canonical,app)
+        (app/'deployments/dev.json').write_text(json.dumps(deployment)+'\n',encoding='utf-8')
+        config=(REPO_ROOT/'.env.example').read_text(encoding='utf-8')
+        config=re.sub(r'(?m)^APEX_APP_ID=.*$',f'APEX_APP_ID={t.app_id}',config)
+        for key,value in {'APEX_WORKSPACE_USERNAME':developer,'APEX_PARSING_SCHEMA':t.schema,'APEX_SQLCL_CONNECTION':t.connection,'APEX_EXPECTED_USER':t.expected_user}.items():config=re.sub(r'(?m)^'+key+r'=.*$',key+'='+value,config)
+        (checkout/'.env').write_text(config,encoding='utf-8')
+        subprocess.run(['git','init','-q',str(checkout)],check=True)
+        subprocess.run(['git','-C',str(checkout),'add','apps'],check=True)
+        subprocess.run(['git','-C',str(checkout),'-c','user.name=Qualification Fixture','-c','user.email=fixture@example.test','commit','-qm','Disposable source baseline'],check=True)
+        env=os.environ.copy();env['PROJECT_ENV_FILE']=str(checkout/'.env');env.pop('PROJECT_SCHEMA',None)
+        def command(name,arguments,expected=0):
+            self.execute('owned-before-'+name,self.owned_guard())
+            result=subprocess.run([bash_command(),str(checkout/'scripts/team.sh'),*arguments],cwd=checkout,env=env,capture_output=True,text=True,timeout=180)
+            (self.directory/(name+'-output.log')).write_text(result.stdout+result.stderr,encoding='utf-8')
+            if result.returncode!=expected:raise ProbeError(name+' returned unexpected status; inspect private diagnostics')
+            self.report['checks'][name]={'status':'pass','exitCode':result.returncode};self.save_report()
+            return result
+        command('production-export',['export',str(t.app_id)])
+        command('production-full',['publish',str(t.app_id),'--env','dev'])
+        page=app/'pages/p00001-home.apx';page.write_text(page.read_text().replace('title: Home','title: Lifecycle Partial Probe',1),encoding='utf-8')
+        command('production-partial',['publish',str(t.app_id),'--env','dev','--file','pages/p00001-home.apx'])
+        original_baseline=(app/'apex-team-export.json').read_bytes()
+        helper=checkout/'scripts/application_lifecycle.py';helper_bytes=helper.read_bytes()
+        injected=helper_bytes.decode().replace('def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path, *, _runner=run_sqlcl) -> dict:', 'def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path, *, _runner=run_sqlcl) -> dict:\n    if "lifecycle-after" in Path(run_dir).parts: raise ValueError("controlled qualification post-read failure")')
+        if injected==helper_bytes.decode():raise ProbeError('controlled failure injection did not match the private helper')
+        helper.write_text(injected,encoding='utf-8')
+        try:command('production-postread-failure',['publish',str(t.app_id),'--env','dev'],expected=2)
+        finally:helper.write_bytes(helper_bytes)
+        if (app/'apex-team-export.json').read_bytes()!=original_baseline:raise ProbeError('failed lifecycle observation advanced baseline')
+        summaries=list((checkout/'scratch').rglob('publish-verification.json'))
+        if len(summaries)!=1:raise ProbeError('post-read failure recovery summary is ambiguous')
+        summary=json.loads(summaries[0].read_text())
+        if summary['sourceVerified'] is not True or summary['lifecycleStatus']!='unavailable':raise ProbeError('source/lifecycle failure evidence is incomplete')
+        records=list((checkout/'.sync-state/application-locks'/str(t.app_id)).glob('publish.*/recovery.json'))
+        held=[json.loads(path.read_text()) for path in records if json.loads(path.read_text()).get('status')=='held']
+        if len(held)!=1:raise ProbeError('expected one retained native lock recovery record')
+        evidence=held[0]['evidence']
+        self.execute('verify-retained-failure-lock',self.owned_guard()+f"declare n number;begin select count(*) into n from apex_applications where application_id={t.app_id} and locked_by={literal(evidence['developer'])} and lock_comment={literal(evidence['comment'])};if n<>1 then raise_application_error(-20089,'Recovery lock mismatch');end if;end;\n/\n")
+        self.report['checks']['postread-recovery']={'status':'pass','sourceVerified':True,'lifecycleStatus':'unavailable','baselineRetained':True,'nativeLockRetained':True}
+        self.execute('release-owned-failure-lock',self.owned_guard()+f"declare n number;begin select count(*) into n from apex_applications where application_id={t.app_id} and locked_by={literal(evidence['developer'])} and lock_comment={literal(evidence['comment'])};if n<>1 then raise_application_error(-20089,'Recovery lock mismatch');end if;apex_application_admin.unlock_application({t.app_id},{literal(evidence['developer'])});commit;end;\n/\n")
+        self.report['cleanupRequired']=True;self.save_report()
+        return self.report
+
     def cleanup(self, previous_report: Path) -> dict:
         saved = json.loads(previous_report.read_text(encoding="utf-8"))
         t = self.target
@@ -419,7 +547,8 @@ end;
                 or not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{32}", run_id) is None
                 or saved.get("fixtureAlias") != f"APEX262-PROBE-{t.app_id}-{run_id[:12].upper()}"
                 or any(saved.get("identity", {}).get(key) != value for key, value in expected.items())
-                or not isinstance(developers, list) or len(developers) != 2):
+                or not isinstance(developers, list) or len(developers) != (1 if saved.get('scenario')=='lifecycle' else 2)
+                or (saved.get('scenario')=='lifecycle' and saved.get('fixtures')!=[{'kind':'application','id':t.app_id,'alias':saved.get('fixtureAlias')}] )):
             raise ProbeError("cleanup report does not identify this exact disposable target")
         self.alias = saved["fixtureAlias"]
         self.report["fixtureAlias"] = self.alias
@@ -441,6 +570,10 @@ begin
  commit;
  select count(*) into n from apex_applications where application_id={t.app_id};
  if n<>0 then raise_application_error(-20090,'Fixture cleanup is unverified'); end if;
+ select count(*) into n from apex_workflows where application_id={t.app_id};
+ if n<>0 then raise_application_error(-20090,'Fixture workflows remain after cleanup'); end if;
+ select count(*) into n from apex_tasks where application_id={t.app_id};
+ if n<>0 then raise_application_error(-20090,'Fixture tasks remain after cleanup'); end if;
 end;
 /
 ''')
@@ -456,6 +589,9 @@ def main(argv=None) -> int:
     parser.add_argument("--app-id", type=int, required=True)
     parser.add_argument("--allow-writes", action="store_true", help="only after human authorization of this exact disposable target")
     parser.add_argument("--source-26-1", type=Path)
+    parser.add_argument("--source-26-2", type=Path)
+    parser.add_argument("--lifecycle", action="store_true")
+    parser.add_argument("--developer")
     parser.add_argument("--developers", nargs=2)
     parser.add_argument("--report-dir", type=Path)
     parser.add_argument("--cleanup-report", type=Path, help="explicitly remove only the recorded disposable fixture; requires --allow-writes")
@@ -469,6 +605,9 @@ def main(argv=None) -> int:
             if not args.allow_writes:
                 raise ProbeError("cleanup is a write; supply --allow-writes only after exact-target authorization")
             report = probe.cleanup(args.cleanup_report)
+        elif args.lifecycle:
+            if args.source_26_2 is None or args.developer is None:raise ProbeError('--lifecycle requires --source-26-2 and --developer')
+            report=probe.run_lifecycle(args.source_26_2,args.developer,allow_writes=args.allow_writes)
         else:
             report = probe.run(allow_writes=args.allow_writes, source_26_1=args.source_26_1,
                                developers=tuple(args.developers) if args.developers else None)

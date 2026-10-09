@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "description": "Transport conformance cases for catalog payload encoding and decoding",
+  "multilingual_sample": "Ω café 😀 中 é \n \u0000 🚀 \uD83D\uDE00 math: ∑∏√",
+  "conformance_cases": [
+    {
+      "id": "unsupported_encoding",
+      "description": "Header with unsupported encoding must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:zstd-base64-v1",
+        "YWJj"
+      ],
+      "expected_error": "unsupported catalog encoding"
+    },
+    {
+      "id": "invalid_base64_alphabet",
+      "description": "Base64 chunk with characters outside the alphabet must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:gzip-base64-v1",
+        "%%%INVALID_BASE64%%%"
+      ],
+      "expected_error": "invalid base64"
+    },
+    {
+      "id": "invalid_base64_interior_whitespace",
+      "description": "Base64 chunk with space inside must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:gzip-base64-v1",
+        "YWJj ZGVm"
+      ],
+      "expected_error": "whitespace"
+    },
+    {
+      "id": "invalid_base64_trailing_space",
+      "description": "Base64 chunk with trailing space must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:gzip-base64-v1",
+        "YWJj "
+      ],
+      "expected_error": "whitespace"
+    },
+    {
+      "id": "invalid_base64_padding",
+      "description": "Base64 chunk with invalid padding must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:gzip-base64-v1",
+        "YW==="
+      ],
+      "expected_error": "invalid base64"
+    },
+    {
+      "id": "invalid_base64_middle_padding",
+      "description": "Base64 with padding in the middle followed by data must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:gzip-base64-v1",
+        "YW==YWJj"
+      ],
+      "expected_error": "invalid base64"
+    },
+    {
+      "id": "corrupt_gzip_header",
+      "description": "Compressed payload with corrupt gzip header magic bytes must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:gzip-base64-v1",
+        "AAAAAA=="
+      ],
+      "expected_error": "valid gzip"
+    },
+    {
+      "id": "truncated_base64",
+      "description": "Truncated base64 payload missing end of stream must be rejected",
+      "lines": [
+        "CATALOG_ENCODING:gzip-base64-v1",
+        "H4sIC"
+      ],
+      "expected_error": "base64"
+    },
+    {
+      "id": "invalid_schema_version",
+      "description": "Payload with unsupported schemaVersion must be rejected",
+      "expected_error": "schema version"
+    },
+    {
+      "id": "invalid_phase",
+      "description": "Payload with unsupported phase must be rejected",
+      "expected_error": "phase is unsupported"
+    },
+    {
+      "id": "duplicate_real_keys",
+      "description": "Payload with duplicate real object keys must be rejected",
+      "expected_error": "repeats"
+    }
+  ]
+}

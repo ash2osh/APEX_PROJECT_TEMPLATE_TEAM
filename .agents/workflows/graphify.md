@@ -7,7 +7,7 @@ description: Turn any folder of files into a navigable knowledge graph
 
 Use the graphify skill exposed by the current agent client when available. If
 the client does not expose that skill, use the repository's
-`scripts/setup_graphify_apx.py` and `graphify` CLI commands directly; do not
+`scripts/graphify_project.py` helper commands directly; do not
 assume a provider-specific home directory or invent an unavailable tool.
 
 ## Domain corpus
@@ -27,47 +27,49 @@ domain, not maintenance of the repository template.
 
 The graph is built from this repository only. The shared DEV database and
 Builder are the runtime source of truth; export the app first when the graph
-must reflect Builder state.
+must reflect Builder state. Durable documentation belongs in project-owned
+files (`PROJECT.md`, `docs/`, `app_context/`), not ignored graph artifacts.
 
 ## Fresh setup and full rebuild
 
-After installing the optional Graphify CLI, configure a supported semantic
-backend and run:
+Configure a supported semantic backend and run:
 
 ```bash
-python3 scripts/setup_graphify_apx.py
-graphify extract . --force
+python3 scripts/graphify_project.py setup
+python3 scripts/graphify_project.py extract -- --force
 ```
 
-The setup copies the tracked `scripts/graphify_apexlang_extractor.py` into the
+The setup creates the project-isolated `.venv-graphify/` environment using
+copy mode, installs pinned requirements from `tools/graphify/requirements.txt`,
+copies the tracked `scripts/graphify_apexlang_extractor.py` into the
 isolated Graphify package, registers `.apx`, verifies the installed bytes, and
-runs a smoke extraction. The full extraction indexes Markdown context as well
+clears stale extraction caches. The full extraction indexes Markdown context as well
 as deterministic APEXlang and SQL structure. Do not add `--code-only`: that
 would omit `app_context`.
 
 ## Incremental updates
 
-- After changing `.apx` or database `.sql` source, run `graphify update .`.
+- After changing `.apx` or database `.sql` source, run `python3 scripts/graphify_project.py extract`.
   This refreshes AST relationships without an LLM call and preserves unchanged
   semantic context nodes.
-- After changing `app_context/**/*.md`, run `graphify extract .`. Semantic
+- After changing `app_context/**/*.md`, run `python3 scripts/graphify_project.py extract`. Semantic
   hashes make this incremental; only changed semantic sources should be
   redispatched.
 - After changing `.graphifyignore` or intentionally deleting substantial
-  source, run `graphify extract . --force` and repeat the source-root checks.
+  source, run `python3 scripts/graphify_project.py extract -- --force` and repeat the source-root checks.
 
 ## Upgrade gate
 
-A Graphify upgrade replaces `site-packages` and silently removes the APEXlang
+A Graphify dependency upgrade replaces `site-packages` and silently removes the APEXlang
 patches; nothing detects the reverted state at query time. Before any
-`graphify update` or `graphify extract`, run the pre-flight — it changes
-nothing and exits non-zero when the integration is not installed:
+extraction, run the pre-flight — it changes
+nothing and exits non-zero when the integration or environment is not ready:
 
 ```bash
-python3 scripts/setup_graphify_apx.py --verify
+python3 scripts/graphify_project.py verify
 ```
 
-If it fails, run `python3 scripts/setup_graphify_apx.py` to reinstall. Graphify
+If it fails, run `python3 scripts/graphify_project.py setup` to reinstall. Graphify
 has no supported APEXlang extension point, so setup validates the current
 package anchors and fails closed if an upgrade is incompatible. Never repair
 the installed copy by hand; update the tracked extractor/setup and their tests
@@ -88,8 +90,8 @@ parentheses are not detected.
 Graphify caches its index by repository root, so extraction results cached
 before a mirror existed can retain stubs. After the first
 `scripts/team.sh backup-db`, or when database mirrors change, run
-`python3 scripts/setup_graphify_apx.py` (it clears cached `.apx` and `.sql`
-extractions) and then `graphify update .`.
+`python3 scripts/graphify_project.py setup` (it clears cached `.apx` and `.sql`
+extractions) and then `python3 scripts/graphify_project.py extract`.
 
 Two limits are inherent to Graphify rather than lost data: the graph is
 undirected, so a mutual foreign-key pair (`A -> B` and `B -> A`) shows as one

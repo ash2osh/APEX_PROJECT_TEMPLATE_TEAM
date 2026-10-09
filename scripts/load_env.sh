@@ -8,6 +8,9 @@ unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
 unset ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER
 unset INSTALL_UC_APX UC_APX_SKILLS_AGENT
 unset APEX_WORKSPACE_USERNAME
+unset MIGRATION_SCHEMA MIGRATION_SQLCL_CONNECTION MIGRATION_EXPECTED_USER
+unset STAGING_MIGRATION_SCHEMA STAGING_MIGRATION_SQLCL_CONNECTION STAGING_MIGRATION_EXPECTED_USER
+unset PROD_MIGRATION_SCHEMA PROD_MIGRATION_SQLCL_CONNECTION PROD_MIGRATION_EXPECTED_USER
 
 # README.md documents a relative PROJECT_ENV_FILE. Resolve it against the
 # repository root when it is not found relative to the caller's directory, so a
@@ -116,7 +119,10 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
     APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
     PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|PROD_SCHEMA|\
     STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER|STAGING_SCHEMA|\
-    ORDS_SCHEMA|ORDS_SQLCL_CONNECTION|ORDS_EXPECTED_USER) ;;
+    ORDS_SCHEMA|ORDS_SQLCL_CONNECTION|ORDS_EXPECTED_USER|\
+    MIGRATION_SCHEMA|MIGRATION_SQLCL_CONNECTION|MIGRATION_EXPECTED_USER|\
+    STAGING_MIGRATION_SCHEMA|STAGING_MIGRATION_SQLCL_CONNECTION|STAGING_MIGRATION_EXPECTED_USER|\
+    PROD_MIGRATION_SCHEMA|PROD_MIGRATION_SQLCL_CONNECTION|PROD_MIGRATION_EXPECTED_USER) ;;
     *)
       project_env_fail "unsupported setting in $PROJECT_ENV_FILE: $project_env_key"
       return 1 2>/dev/null || exit 1
@@ -236,6 +242,37 @@ project_env_check_aligned() {
   fi
   project_env_validate_unique_csv "$schema_key" "${!schema_key}"
 }
+
+# Optional migration profiles are independent of mirror and APEX profiles.
+for project_env_migration_prefix in '' STAGING_ PROD_; do
+  project_env_migration_present=0
+  for project_env_key in SCHEMA SQLCL_CONNECTION EXPECTED_USER; do
+    project_env_key="${project_env_migration_prefix}MIGRATION_${project_env_key}"
+    for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+      [ "$project_env_seen_key" != "$project_env_key" ] || project_env_migration_present=$((project_env_migration_present + 1))
+    done
+  done
+  export "PROJECT_${project_env_migration_prefix}MIGRATION_CONFIGURED=false"
+  if [ "$project_env_migration_present" -ne 0 ] && [ "$project_env_migration_present" -ne 3 ]; then
+    project_env_fail "${project_env_migration_prefix}MIGRATION_SCHEMA, SQLCL_CONNECTION and EXPECTED_USER must be configured together"
+    return 1 2>/dev/null || exit 1
+  fi
+  if [ "$project_env_migration_present" -eq 3 ]; then
+    for project_env_key in SCHEMA SQLCL_CONNECTION EXPECTED_USER; do
+      project_env_key="${project_env_migration_prefix}MIGRATION_${project_env_key}"
+      project_env_value="${!project_env_key}"
+      if [ -z "${project_env_value//[[:space:]]/}" ]; then
+        project_env_fail "$project_env_key must not be empty"
+        return 1 2>/dev/null || exit 1
+      fi
+    done
+    project_env_check_list "${project_env_migration_prefix}MIGRATION_SCHEMA" identifier || { return 1 2>/dev/null || exit 1; }
+    project_env_check_list "${project_env_migration_prefix}MIGRATION_EXPECTED_USER" identifier || { return 1 2>/dev/null || exit 1; }
+    project_env_check_list "${project_env_migration_prefix}MIGRATION_SQLCL_CONNECTION" alias || { return 1 2>/dev/null || exit 1; }
+    project_env_check_aligned "${project_env_migration_prefix}MIGRATION_SCHEMA" "${project_env_migration_prefix}MIGRATION_SQLCL_CONNECTION" "${project_env_migration_prefix}MIGRATION_EXPECTED_USER" || { return 1 2>/dev/null || exit 1; }
+    export "PROJECT_${project_env_migration_prefix}MIGRATION_CONFIGURED=true"
+  fi
+done
 
 for project_env_prefix in PROD STAGING; do
   project_env_connection_key="${project_env_prefix}_SQLCL_CONNECTION"
@@ -389,12 +426,12 @@ project_env_multi=false
 # project multi-schema for the commands that need a --schema, but it says
 # nothing about the one-DEV-schema mapping.
 project_env_multi_mapping=false
-for project_env_key in TABLES_SCHEMA CODE_SCHEMA APEX_PARSING_SCHEMA ORDS_SCHEMA; do
+for project_env_key in TABLES_SCHEMA CODE_SCHEMA APEX_PARSING_SCHEMA ORDS_SCHEMA MIGRATION_SCHEMA STAGING_MIGRATION_SCHEMA PROD_MIGRATION_SCHEMA; do
   project_env_items=()
-  project_env_split_csv project_env_items "${!project_env_key}"
+  project_env_split_csv project_env_items "${!project_env_key:-}"
   if [ "${#project_env_items[@]}" -gt 1 ]; then
     project_env_multi=true
-    [ "$project_env_key" = ORDS_SCHEMA ] || project_env_multi_mapping=true
+    case "$project_env_key" in ORDS_SCHEMA|*MIGRATION_SCHEMA) ;; *) project_env_multi_mapping=true ;; esac
   fi
   for project_env_item in "${project_env_items[@]}"; do
     project_env_known=false
@@ -415,7 +452,12 @@ project_env_dev_schema=""
 PROJECT_SCHEMAS="$(IFS=,; printf '%s' "${project_env_union[*]}")"
 PROJECT_MULTI_SCHEMA="$project_env_multi"
 PROJECT_CODE_SCHEMAS="$CODE_SCHEMA"
-export PROJECT_SCHEMAS PROJECT_MULTI_SCHEMA PROJECT_CODE_SCHEMAS
+PROJECT_MIGRATION_SCHEMAS="${MIGRATION_SCHEMA-$CODE_SCHEMA}"
+PROJECT_STAGING_MIGRATION_SCHEMAS="${STAGING_MIGRATION_SCHEMA-${STAGING_SCHEMA:-}}"
+PROJECT_PROD_MIGRATION_SCHEMAS="${PROD_MIGRATION_SCHEMA-${PROD_SCHEMA:-}}"
+project_env_dev_migration_schema=""
+[ "$(project_env_count "$PROJECT_MIGRATION_SCHEMAS")" -ne 1 ] || project_env_dev_migration_schema="$PROJECT_MIGRATION_SCHEMAS"
+export PROJECT_SCHEMAS PROJECT_MULTI_SCHEMA PROJECT_CODE_SCHEMAS PROJECT_MIGRATION_SCHEMAS PROJECT_STAGING_MIGRATION_SCHEMAS PROJECT_PROD_MIGRATION_SCHEMAS
 
 project_env_narrow() {
   # <schema-key> <connection-key> <user-key> <strict|lenient>
@@ -430,6 +472,9 @@ project_env_narrow() {
   done
   if [ "$index" -ge 0 ]; then
     export "$schema_key=${schemas[$index]}" "$connection_key=${connections[$index]}" "$user_key=${users[$index]}"
+  elif [ "$mode" = migration ] && [ "${#schemas[@]}" -eq 1 ] && [ -n "$project_env_dev_migration_schema" ] \
+      && [ "$PROJECT_SCHEMA" = "$project_env_dev_migration_schema" ]; then
+    :
   elif [ "$mode" = lenient ] && [ "$project_env_multi_mapping" != true ] && [ "${#schemas[@]}" -eq 1 ] \
       && [ -n "$project_env_dev_schema" ] && [ "$PROJECT_SCHEMA" = "$project_env_dev_schema" ]; then
     # A project with one DEV schema may name staging or production differently,
@@ -459,6 +504,11 @@ if [ -n "${PROJECT_SCHEMA:-}" ]; then
   project_env_narrow CODE_SCHEMA CODE_SQLCL_CONNECTION CODE_EXPECTED_USER strict
   project_env_narrow APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER strict
   project_env_narrow ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER strict
+  [ "${PROJECT_MIGRATION_CONFIGURED}" != true ] || project_env_narrow MIGRATION_SCHEMA MIGRATION_SQLCL_CONNECTION MIGRATION_EXPECTED_USER strict
+  for project_env_prefix in STAGING PROD; do
+    project_env_key="PROJECT_${project_env_prefix}_MIGRATION_CONFIGURED"
+    [ "${!project_env_key}" != true ] || project_env_narrow "${project_env_prefix}_MIGRATION_SCHEMA" "${project_env_prefix}_MIGRATION_SQLCL_CONNECTION" "${project_env_prefix}_MIGRATION_EXPECTED_USER" migration
+  done
   for project_env_prefix in STAGING PROD; do
     project_env_schema_key="${project_env_prefix}_SCHEMA"
     if [ -n "${!project_env_schema_key:-}" ]; then
@@ -482,6 +532,7 @@ unset project_env_prefix project_env_connection_key project_env_user_key
 unset project_env_connection_seen project_env_user_seen project_env_connection_value
 unset project_env_user_value project_env_schema_key project_env_schema_seen
 unset project_env_first_line project_env_oracle_identifier_regex project_env_oracle_prefix_regex
+unset project_env_migration_prefix project_env_migration_present project_env_dev_migration_schema
 unset project_env_union project_env_multi project_env_items project_env_item
 unset project_env_known project_env_union_item project_env_selected_known project_env_count_items
 unset project_env_dev_schema project_env_multi_mapping project_env_ords_present project_env_ords_schemas project_env_ords_users project_env_ords_index

@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +59,26 @@ class ProbeTests(unittest.TestCase):
             self.probe().run(allow_writes=True, source_26_1=Path(self.temporary.name), developers=("DEMO", "OTHER"))
         self.assertEqual(len(self.calls), 1)
 
+    def test_lifecycle_scenario_refuses_existing_id_before_import(self):
+        self.identity['appCount']=1
+        with self.assertRaises(ProbeError):
+            self.probe().run_lifecycle(Path(self.temporary.name),'DEMO',allow_writes=True)
+        self.assertEqual(len(self.calls),1)
+
+    def test_lifecycle_scenario_requires_explicit_write_opt_in(self):
+        with self.assertRaises(ProbeError):
+            self.probe().run_lifecycle(Path(self.temporary.name),'DEMO')
+        self.assertEqual(self.calls,[])
+
+    def test_lifecycle_scenario_rejects_initialization_code_before_writes(self):
+        source=Path(self.temporary.name)/'source';(source/'.apex').mkdir(parents=True)
+        (source/'.apex/apexlang.json').write_text('{"mmdVersion":"26.2.0"}')
+        (source/'application.apx').write_text('app SAMPLE (\n initializationPlsqlCode: begin null; end;\n)\n')
+        probe=self.probe()
+        with self.assertRaises(ProbeError):
+            probe.run_lifecycle(source,'DEMO',allow_writes=True)
+        self.assertFalse(probe.report.get('fixtureWriteAttempted',False))
+
     def test_unknown_command_cannot_count_as_success(self):
         probe = self.probe()
         probe.runner = lambda *args: SimpleNamespace(output="Unknown Command: apex import\nAPEX_PROBE_VERIFIED:import\n")
@@ -85,3 +106,54 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaises(ProbeError):
             self.probe().cleanup(path)
         self.assertEqual(self.calls, [])
+
+    def lifecycle_cleanup_report(self, probe):
+        saved={'schemaVersion':1,'scenario':'lifecycle','appId':self.target.app_id,
+               'runId':probe.run_id,'fixtureAlias':probe.alias,'identity':self.identity,
+               'developers':['DEMO'],'cleanupRequired':True,
+               'fixtures':[{'kind':'application','id':self.target.app_id,'alias':probe.alias}]}
+        path=Path(self.temporary.name)/'previous-report.json'
+        path.write_text(json.dumps(saved))
+        return path,saved
+
+    def test_lifecycle_cleanup_requires_exact_run_created_inventory(self):
+        probe=self.probe(); path,saved=self.lifecycle_cleanup_report(probe)
+        saved['fixtures'][0]['alias']='PREEXISTING'
+        path.write_text(json.dumps(saved))
+        with self.assertRaises(ProbeError): probe.cleanup(path)
+        self.assertEqual(self.calls,[])
+
+    def test_lifecycle_cleanup_uses_identity_alias_and_lock_owner_guards(self):
+        probe=self.probe(); path,_=self.lifecycle_cleanup_report(probe)
+        def runner(target,driver,directory):
+            script=driver.read_text(); self.calls.append(script)
+            phase=re.search(r'prompt APEX_PROBE_VERIFIED:([^\n]+)',script)[1]
+            payload='APEX_PROBE_IDENTITY:'+json.dumps(self.identity)+'\n' if phase=='identity' else ''
+            return SimpleNamespace(output=payload+'APEX_PROBE_VERIFIED:'+phase+'\n')
+        probe.runner=runner
+        report=probe.cleanup(path)
+        self.assertFalse(report['cleanupRequired'])
+        script=self.calls[-1]
+        self.assertLess(script.index('Disposable application identity mismatch'),script.index('remove_application'))
+        self.assertLess(script.index('Fixture lock belongs to another operation'),script.index('remove_application'))
+        self.assertIn(probe.alias,script)
+        self.assertIn('apex_workflows',script)
+        self.assertIn('apex_tasks',script)
+
+    def test_interrupted_or_ambiguous_import_keeps_owned_inventory_for_recovery(self):
+        source=Path(__file__).parent/'fixtures/apex_26_2/canonical_26_2'
+        for failure in (KeyboardInterrupt(),ProbeError('ambiguous import')):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
+                probe=Probe(self.target,Path(directory),version_reader=lambda p:'26.3.0.0')
+                def runner(target,driver,run_dir,failure=failure):
+                    script=driver.read_text()
+                    phase=re.search(r'prompt APEX_PROBE_VERIFIED:([^\n]+)',script)[1]
+                    if phase=='runtime-fixture-import': raise failure
+                    output='APEX_PROBE_IDENTITY:'+json.dumps(self.identity)+'\n' if phase=='identity' else 'Validation successful.\n'
+                    return SimpleNamespace(output=output+'APEX_PROBE_VERIFIED:'+phase+'\n')
+                probe.runner=runner
+                with self.assertRaises(type(failure)): probe.run_lifecycle(source,'DEMO',allow_writes=True)
+                saved=json.loads((Path(directory)/'report.json').read_text())
+                self.assertTrue(saved['fixtureWriteAttempted'])
+                self.assertTrue(saved['cleanupRequired'])
+                self.assertEqual(saved['fixtures'],[{'kind':'application','id':self.target.app_id,'alias':probe.alias}])

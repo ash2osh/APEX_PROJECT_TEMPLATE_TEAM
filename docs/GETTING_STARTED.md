@@ -156,24 +156,40 @@ files and resolve them before continuing. Keep the generated
 of installed template files. Review and commit the upgrade result in your own
 repository before cleaning it.
 
-Then remove the inherited maintenance files:
+Then perform post-clone cleanup using file-level provenance review:
+
+Downstream projects may prune inherited template-maintenance tests, GitHub
+Actions workflows, and Dependabot configuration that validate template
+upgrades, rather than the downstream application. Do not perform broad directory
+sweeps (never delete a file simply because it lives under `tests/` or
+`docs/superpowers/`). Instead, review file provenance against
+`template-manifest.json` and `.template-lock.json`:
 
 ```bash
-git rm -r --ignore-unmatch tests .github docs/superpowers
+# Example: selectively remove only inherited template-maintenance CI and tests if not needed downstream
+git rm --ignore-unmatch .github/workflows/*.yml .github/dependabot.yml
+# Review tests/ and remove only inherited template-maintenance tests, keeping any project regression tests
 git status --short
 ```
 
-This removes template tests, GitHub Actions workflows, Dependabot configuration
-and tracked historical planning/design documents if present. The daily team
-commands do not require those files. Keep `scripts/`, operational documentation,
-`.agents/`, `.claude/`, `template-manifest.json` and `.template-lock.json`.
-Configure the credential-free root `.env` in step 6 and keep it in your own Git
-repository after validation. Review the cleanup, commit it, and then push to
-your downstream remote.
+Explicitly preserve:
+- Project-specific regression and unit tests in `tests/`
+- Project-owned plans and specs in `docs/superpowers/plans/` and `docs/superpowers/specs/`
+- Durable project documentation (`PROJECT.md`, `docs/`)
+- Project-specific agent instructions and rules (`AGENTS.project.md`, `.agents/rules/project.md`)
+- Operational configuration (`.env`), application source (`apps/`), and migrations (`migrations/`)
+- Migration receipts and recovery evidence
+
+The original template repository retains all tests and CI workflows. Keep
+`scripts/`, operational documentation, `.agents/`, `.claude/`,
+`template-manifest.json`, and `.template-lock.json`. Configure the credential-free
+root `.env` in step 6 and keep it in your own Git repository after validation.
+Review the cleanup, commit it, and then push to your downstream remote.
 
 An upgrade keeps previously installed files deleted (`KEEP-DELETED`), but may
 introduce new template test/workflow files. Review those after every upgrade.
-Do not delete your project's own regression tests as part of repeated cleanup.
+Never delete your project's own regression tests or project plans as part of
+repeated cleanup.
 
 ## 5. Save your SQLcl connection
 
@@ -252,7 +268,15 @@ The example uses the same schema, connection and user for tables, code and APEX,
 which is right for most projects. If you work with an AI assistant, you can ask
 it to run `/init` and it will ask these questions for you.
 
-## 7. Check the connection
+## 7. Check local readiness and database connection
+
+First check local configuration, lock, app descriptors and native Oracle skills offline:
+
+```bash
+scripts/team.sh verify-local
+```
+
+Then check the DEV database connection with `doctor`:
 
 ```bash
 scripts/team.sh doctor
@@ -268,8 +292,9 @@ APEX_DOCTOR_VERIFIED:DEMO
 Doctor checks passed for the configured DEV connection.
 ```
 
-`doctor` only reads. If it fails, [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists
+Both commands only read. If either fails, [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists
 each message and what to do.
+
 
 After validation, review your root `.env` and version it in your own downstream
 Git repository. Keep only literal configuration and saved SQLcl connection

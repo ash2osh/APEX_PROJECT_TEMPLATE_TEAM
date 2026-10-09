@@ -108,6 +108,19 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `schema <X> is not listed in STAGING_SCHEMA` (or `PROD_SCHEMA`) | The schema is not set up for that target. | Add it, with the same name, to the `STAGING_*` or `PROD_*` settings. |
 | `backup-ords error: the ORDS profile does not list schema <X>` | `--schema` names a schema that is not in `ORDS_SCHEMA`. | Use a schema from `ORDS_SCHEMA`, or add it (with its connection and user) to the `ORDS_*` settings. |
 
+## Catalog capture and transport
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `unsupported catalog encoding: <ENCODING>` | The catalog extraction frame declared an unknown transport encoding. | Supported encodings are legacy plain JSON and `CATALOG_ENCODING:gzip-base64-v1`. Upgrade the client and SQL scripts together. |
+| `invalid base64: whitespace is not allowed in payload chunks` or `invalid base64 encoding: ...` | Compressed catalog transport received corrupted or non-base64 chunks, or unexpected whitespace within chunk lines. | Inspect SQLcl output and network filters; the transport requires strict base64 chunks without extraneous whitespace or mangled padding. |
+| `catalog payload is not a valid gzip stream` or `catalog payload gzip decompression failed: ...` | Compressed stream header, block framing, or trailer checksum (CRC32/ISIZE) was corrupted or invalid. | Check database character conversion and SQLcl session output integrity. An unsupported compression adapter fails closed without falling back. |
+| `catalog payload gzip stream is truncated` | The extraction stream terminated before the gzip trailer completed. | Check SQLcl buffer settings, timeouts, and process termination. |
+| `catalog payload gzip stream contains trailing data or multiple streams` | Extraneous bytes followed the gzip trailer, or multiple gzip streams were concatenated. | Ensure the driver script and SQLcl process emit a single clean transport payload. |
+| `decoded catalog payload exceeds maximum permitted size (134217728 bytes)` | The uncompressed catalog payload exceeded the 128 MiB safety cap during streaming decompression. | Narrow the selected catalog capture scope or increase server-side filtering. |
+| `catalog payload contains invalid UTF-8: ...` | Decompressed bytes failed strict UTF-8 decoding. | Verify that database character set conversion preserves valid AL32UTF8 encoding without lossy replacements. |
+| `catalog inventory repeats <OWNER>.<NAME> (<TYPE>)` | The live inventory contains duplicate object keys. | Inspect database catalog integrity for duplicate non-partition or subobject rows. |
+
 ## Knowledge graph
 
 | You see | What it means | What to do |

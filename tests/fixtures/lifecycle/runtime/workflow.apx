@@ -1,0 +1,46 @@
+workflow TEMPLATE_LIFECYCLE_PROBE (
+    name: Template lifecycle probe
+    title: Template lifecycle probe
+    version v1 (
+        settings {
+            state: active
+        }
+        activity start (
+            name: Start
+            type: workflowStart
+            layout {
+                sequence: 10
+            }
+            connection (
+                name: Wait for qualification
+                activity {
+                    to: @wait
+                }
+            )
+        )
+        activity wait (
+            name: Wait for qualification
+            type: wait
+            layout {
+                sequence: 20
+            }
+            timeout {
+                timeoutType: static
+                staticValue: P1D
+            }
+            connection (
+                name: Finish
+                activity {
+                    to: @end
+                }
+            )
+        )
+        activity end (
+            name: End
+            type: workflowEnd
+            layout {
+                sequence: 30
+            }
+        )
+    )
+)

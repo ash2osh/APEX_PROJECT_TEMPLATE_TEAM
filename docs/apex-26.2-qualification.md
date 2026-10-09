@@ -184,3 +184,77 @@ example configuration validation, all repository JSON parsing, LF checks over
 canonical files edits now fail exact-source verification, and selected-page alias
 changes refuse before writing. Project-owned files and original runtime source
 were preserved; no custom team database objects or implicit migrations were added.
+
+## Local improvements qualification on 2026-10-09
+
+These checks used fresh SQLcl 26.3.0.0 CLI processes against the explicitly
+identified Docker DEMO / FREEPDB1 target, APEX 26.2.0 and Oracle 23.26.3.0.0.
+All remaining implementation and final review were performed inline after the
+developer stopped AGY. Existing applications and Natrec were not imported.
+
+### Catalog transport
+
+The production adapter and decoder passed native qualification. Capturing the
+same real DEMO owner with the previous and compressed adapters produced identical
+models: 109 inventory objects, 88 selected parent keys and 239 definitions,
+SHA-256 `376898d1078179e78403c449b9abc98a4a8e796f0f3fe5922348795bc6e6f632`.
+Captured output shrank from 485,157 to 46,255 bytes. Measured total elapsed time
+was 15.6687 versus 15.8176 seconds; Docker evidence shows less transfer, without
+an observed speed improvement or a VPN timing prediction.
+
+A separate temporary-LOB probe, creating no schema objects, fed the production
+decoder 1,350,049 decoded JSON bytes through 49 base64 chunks. Its 1,335,000-byte
+text included supplementary characters, combining characters and escaped
+newlines; exact text SHA-256 was
+`648136ce6f9f58c61d5637dd871b3295a9fbe53adf3f9c0310f5c0b22f42bce0`.
+This synthetic transport proof is separate from the small real owner inventory.
+Offline tests cover 10,000 partitioned rows and corruption/oversize refusals.
+
+The qualified Oracle base64 input chunk is 12,000 bytes. A 24,573-byte attempt
+failed with ORA-06502 because base64 line expansion exceeded the PL/SQL buffer.
+The decoder enforces a 128 MiB decoded cap in bounded chunks, exact encoding,
+base64/gzip integrity, single-stream framing, strict UTF-8 and structural checks.
+Unsupported/corrupt compressed output refuses; legacy plain JSON parsing remains
+supported. This transport has not been backported or live-qualified on APEX 26.1.
+
+### Lifecycle and production wrappers
+
+Read-only public-view observations positively saw four workflows/five tasks in
+app 150 and 23 workflows/17 tasks in app 200. Repeated comparisons passed; their
+empty automation inventories did not qualify positive automation behavior.
+The consolidated read-only runner passed exact identity, catalog and lifecycle
+checks against app 150, without application export/import or schema writes.
+
+Disposable app 940269 supplied one automation, one active waiting workflow and
+one assigned action task. A raw full import changed the enabled automation from
+`ACTIVE` to `DISABLED`; the lifecycle comparison reported attention. The observed
+workflow and task instance IDs/states were preserved. With the fixture automation
+disabled, the actual Bash production full and selected-page wrappers passed
+source and lifecycle verification. A controlled post-import observation failure
+returned exit 2, recorded `sourceVerified=true` / `lifecycleStatus=unavailable`,
+and retained the prior DEV baseline and exact native lock. Run-owned lock
+recovery then passed.
+
+Explicit public-API cleanup verified no remaining app, workflow or task rows for
+940269. Earlier unsuccessful fixture attempts were also explicitly removed
+before retrying. No temporary developer was created for this scenario.
+Private evidence under ignored `scratch/agy-implementation-20261009/` includes:
+
+- `root-catalog-production-comparison.json` and
+  `root-production-unicode-transport/result.json`;
+- `root-consolidated-readonly-qualified/qualification.json`;
+- `root-disposable-lifecycle-production-qualified/report.json` and
+  `root-disposable-lifecycle-production-qualified-cleanup/report.json`.
+
+### Isolated optional Graphify
+
+Pinned project-only Graphify setup, extraction and verification passed in a
+private fixture checkout, using Graphifyy 0.9.75 and tree-sitter-sql 0.3.11.
+A small local SQL/APEXlang corpus yielded four nodes/two edges. All 96 fingerprinted
+shared installation files remained byte-identical. This was a tooling fixture,
+not a database migration or a Natrec graph refresh. Optional Graphify needs
+Python 3.12+; the core workflow remains Python 3.10+.
+
+See [local qualification](local-qualification.md) for reproducible modes and
+cleanup rules. Native Windows, live APEX 26.1, and staging/production database
+imports remain unqualified by these Linux Docker tests.

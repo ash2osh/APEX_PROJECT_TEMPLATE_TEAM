@@ -147,9 +147,8 @@ print(json.dumps({path: _is_ignored(root / path, root, patterns) for path in pat
         combined = "\n".join((rules, workflow, agents, readme))
 
         for command in (
-            "python3 scripts/setup_graphify_apx.py",
-            "graphify extract . --force",
-            "graphify update .",
+            "python3 scripts/graphify_project.py setup",
+            "python3 scripts/graphify_project.py extract",
         ):
             self.assertIn(command, combined)
         for phrase in ("app_context", "Graphify upgrade", "domain"):
@@ -157,10 +156,9 @@ print(json.dumps({path: _is_ignored(root / path, root, patterns) for path in pat
         self.assertNotIn("--force --code-only", combined)
         self.assertNotIn('".apx": extract_sql', combined)
 
-        self.assertIn("graphify extract . --force", workflow)
+        self.assertIn("python3 scripts/graphify_project.py extract", workflow)
         self.assertIn("app_context", workflow)
-        self.assertIn("Graphify upgrade", workflow)
-        self.assertIn("python3 scripts/setup_graphify_apx.py", readme)
+        self.assertIn("python3 scripts/graphify_project.py setup", readme)
 
     def test_graphify_status_is_stated_consistently(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -173,8 +171,8 @@ print(json.dumps({path: _is_ignored(root / path, root, patterns) for path in pat
         self.assertIn("optional", agents.lower())
         self.assertIn("if `graphify-out/`", rules)
         self.assertIn('`AGENTS.md` "Optional Tooling"', rules)
-        self.assertIn("uv tool install graphifyy --with tree-sitter-sql", rules)
-        self.assertIn("python3 scripts/setup_graphify_apx.py --verify", rules)
+        self.assertIn(".venv-graphify", rules)
+        self.assertIn("python3 scripts/graphify_project.py verify", rules)
 
 
 if __name__ == "__main__":

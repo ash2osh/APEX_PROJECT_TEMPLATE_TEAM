@@ -80,6 +80,22 @@ class OrdsExportVerificationTests(unittest.TestCase):
         self.fixture.write(transcript(), first, second)
         self.fixture.verify()
 
+    def test_invalid_utf8_exports_are_refused_without_rewriting_evidence(self) -> None:
+        self.good()
+        first = self.fixture.export.read_bytes().replace(b"null;", b"\xff")
+        second = self.fixture.second.read_bytes().replace(b"null;", b"\xfe")
+        self.fixture.export.write_bytes(first)
+        self.fixture.second.write_bytes(second)
+        self.assert_refused("UTF-8")
+        self.assertEqual(self.fixture.export.read_bytes(), first)
+        self.assertEqual(self.fixture.second.read_bytes(), second)
+
+    def test_invalid_utf8_transcript_is_refused_before_finalizing_export(self) -> None:
+        self.good()
+        self.fixture.transcript.write_bytes(self.fixture.transcript.read_bytes() + b"\xff\n")
+        self.assert_refused("UTF-8")
+        self.assertTrue(self.fixture.second.exists())
+
     def test_a_rest_enabled_schema_without_metadata_is_a_verified_empty_result(self) -> None:
         empty = {key: 0 for key in COUNTS}
         text = export_text(counts=empty)

@@ -77,7 +77,11 @@ whenever sqlerror exit failure rollback
 whenever oserror exit failure rollback
 declare n number; g number; v varchar2(100);begin
 if sys_context('USERENV','SESSION_USER')<>{literal(t.expected_user)} then raise_application_error(-20080,'Wrong conversion session');end if;
-if regexp_like(sys_context('USERENV','SERVICE_NAME'),'(^|[^[:alnum:]])(prod|production|prd|live)([^[:alnum:]]|$)','i') then raise_application_error(-20080,'Conversion is DEV only');end if;
+if regexp_like(regexp_replace(sys_context('USERENV','DB_NAME') || ' ' ||
+       sys_context('USERENV','DB_UNIQUE_NAME') || ' ' || sys_context('USERENV','SERVICE_NAME'),
+       '(pre|non)[-_.]?(prod|prd)', ' ', 1, 0, 'i'),
+       '(^|[^[:alnum:]])(production|live)[[:digit:]]*([^[:alnum:]]|$)|(prod|prd)[[:digit:]]*([^[:alnum:]]|$)|(^|[^[:alnum:]])(prod|prd)(db|[[:digit:]])', 'i') then
+  raise_application_error(-20080,'Conversion is DEV only');end if;
 select version_no into v from apex_release;
 if not regexp_like(v,'^26[.]2([.]|$)') then raise_application_error(-20080,'Conversion requires APEX26.2');end if;
 g:=apex_util.find_security_group_id({literal(self.workspace)});

@@ -348,6 +348,7 @@ cleanup() {
       "${staging_dir#"$REPO_ROOT/"}" >&2
   fi
 }
+printf '%s\n' '{"schemaVersion":1,"sourceVerified":false,"lifecycleStatus":"unavailable"}' > "$staging_dir/publish-verification.json"
 trap cleanup EXIT
 
 # The import session re-checks the live state the drift guard approved; '-'
@@ -365,6 +366,9 @@ if [ "$app_environment" = dev ]; then
   lock_held=true
   lock_assert_script="$lock_recovery/assert-lock.sql"
 fi
+lifecycle_args=(--connection "$sqlcl_connection" --expected-user "$expected_user" --schema "$parsing_schema"
+  --workspace "$workspace_name" --app-id "$app_id" --environment "$app_environment")
+python3 "$REPO_ROOT/scripts/application_lifecycle.py" capture "${lifecycle_args[@]}" --run-dir "$staging_dir/lifecycle-before"
 if [ "$app_environment" = dev ] && [ "$force" != true ]; then
   drift_guard="$REPO_ROOT/scripts/check_builder_drift.py"
   [ -f "$drift_guard" ] || fail "Builder drift guard is missing; refusing import"
@@ -495,6 +499,10 @@ verify_args=(
   --deployment-file "$deployment_file" --deployment-state "$verify_run_dir/.apex-deployment-state.json"
 )
 python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}"
+printf '%s\n' '{"schemaVersion":1,"sourceVerified":true,"lifecycleStatus":"unavailable"}' > "$staging_dir/publish-verification.json"
+python3 "$REPO_ROOT/scripts/application_lifecycle.py" verify "${lifecycle_args[@]}" \
+  --before "$staging_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$staging_dir/lifecycle-after" \
+  --summary-path "$staging_dir/publish-verification.json"
 if [ "$app_environment" = dev ]; then
   python3 "$REPO_ROOT/scripts/application_lock.py" check "${lock_args[@]}"
   python3 "$REPO_ROOT/scripts/application_lock.py" release "${lock_args[@]}"

@@ -186,6 +186,14 @@ class PartialBackend:
     def acquire(self): self.calls.append('acquire')
     def check(self): self.calls.append('check')
     def release(self): self.calls.append('release')
+    def capture_lifecycle(self):
+        from test_application_lifecycle import snapshot
+        self.calls.append('lifecycle-before')
+        if self.fail=='lifecycle-before': raise ValueError('lifecycle pre-read unavailable')
+        return snapshot()
+    def verify_lifecycle(self,before):
+        self.calls.append('lifecycle-after')
+        return {'status':'unavailable' if self.fail=='lifecycle-after' else 'pass'}
     def export(self, name):
         self.calls.append('export'); self.count += 1
         destination = self.root / ('export-' + str(self.count))
@@ -208,6 +216,19 @@ class PartialBackend:
 
 class PartialWorkflowTests(unittest.TestCase):
     fixture = PartialPublishTests.fixture
+    def test_lifecycle_gates_preserve_original_and_retain_lock_only_after_write(self):
+        from scripts.partial_publish import publish_partial
+        for failure in ('lifecycle-before','lifecycle-after'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary); source,backend=self.prepare(root,failure)
+                baseline=(source/'apex-team-export.json').read_bytes()
+                with self.assertRaisesRegex(ValueError,'lifecycle'):
+                    publish_partial(source,100,['pages/p00001-home.apx'],'DEMO',root/'run',backend,'ALICE')
+                self.assertEqual((source/'apex-team-export.json').read_bytes(),baseline)
+                report=json.loads((root/'run/partial.json').read_text())
+                self.assertEqual(report['lockRetained'],failure=='lifecycle-after')
+                self.assertEqual(report['sourceVerified'],failure=='lifecycle-after')
+                self.assertEqual('import' in backend.calls,failure=='lifecycle-after')
     def prepare(self, root, fail=None, no_notice=False):
         from scripts.record_export_state import marker_payload, AppState
         source, _ = self.fixture(root)

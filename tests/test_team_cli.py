@@ -60,6 +60,7 @@ class TeamCliTests(unittest.TestCase):
             "backup-db",
             "deploy",
             "upgrade-template",
+            "verify-local",
         ):
             self.assertIn(command, result.stdout)
         self.assertIn("--env dev|staging|prod", result.stdout)
@@ -78,7 +79,59 @@ class TeamCliTests(unittest.TestCase):
                     self.assertIn('locks target DEV only', result.stderr)
                     self.assertNotIn('configuration file', result.stderr)
 
+    def test_verify_local_dispatches_directly_without_loading_environment_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_repo = Path(temporary) / "repo"
+            fake_repo.mkdir()
+            (fake_repo / "template-manifest.json").write_text(json.dumps({
+                "schemaVersion": 2, "apexRelease": "26.2", "minimumSqlclVersion": "26.3.0.0",
+                "upstream": "https://example.com/template.git", "templateOwned": [], "projectOwned": [], "templateOnly": []
+            }), encoding="utf-8")
+            (fake_repo / "apps").mkdir()
+            secret = "SUPER_SECRET_TOKEN_9999"
+            (fake_repo / ".env").write_text(f"INVALID_LINE {secret}\n", encoding="utf-8")
+            for entry in ("team.sh", "team.ps1"):
+                if entry.endswith("ps1") and not shutil.which("pwsh"):
+                    continue
+                launcher = [BASH] if entry.endswith("sh") else ["pwsh", "-NoProfile", "-File"]
+                result = subprocess.run(
+                    [*launcher, str(ROOT / "scripts" / entry), "verify-local", "--repo-root", str(fake_repo), "--format", "json"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                with self.subTest(entry=entry):
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertNotIn(secret, result.stderr)
+                    self.assertNotIn(secret, result.stdout)
+                    data = json.loads(result.stdout)
+                    self.assertEqual(data["schemaVersion"], 1)
+                    self.assertEqual(data["exitCode"], 2)
+
+    def test_verify_local_clean_pythonpath_and_nonroot_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            # Run from nonrootcwd with clean PYTHONPATH
+            clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+            for entry in ("team.sh", "team.ps1"):
+                if entry.endswith("ps1") and not shutil.which("pwsh"):
+                    continue
+                launcher = [BASH] if entry.endswith("sh") else ["pwsh", "-NoProfile", "-File"]
+                result = subprocess.run(
+                    [*launcher, str(ROOT / "scripts" / entry), "verify-local", "--format", "json"],
+                    cwd=temporary,
+                    env=clean_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                with self.subTest(entry=entry):
+                    self.assertNotIn("ModuleNotFoundError", result.stderr)
+                    self.assertIn('"schemaVersion": 1', result.stdout)
+                    data = json.loads(result.stdout)
+                    self.assertEqual(data["schemaVersion"], 1)
+
     def test_team_migrate_rejects_missing_duplicate_and_invalid_environment_before_loading_env(self) -> None:
+
         for arguments, expected in (
             (["migrations/2026-09-27_create-sample-r001"], "exactly one --env"),
             (["migrations/2026-09-27_create-sample-r001", "--env", "dev", "--env", "prod"], "exactly one --env"),
@@ -975,7 +1028,7 @@ class TeamCliTests(unittest.TestCase):
         for name in (
             "deploy.sh",
             "publish_app.sh",
-            "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "verify_apex_release.sql",
+            "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
             "sqlcl_safe.sh",
             "load_env.sh",
             "export_apps.sql", "verify_deployment_state.sql",
@@ -1011,7 +1064,7 @@ class TeamCliTests(unittest.TestCase):
         fake_sql.write_text(
             "#!/usr/bin/env bash\n"
             "cat > /dev/null\n"
-            f'python3 "{(ROOT / "tests" / "fake_application_lock_sql.py").as_posix()}" "$@" >/dev/null\n'
+            f'python3 "{(ROOT / "tests" / "fake_application_lock_sql.py").as_posix()}" "$@"; fixture_status=$?; [[ $fixture_status == 3 ]] || exit "$fixture_status"\n'
             "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
             "mode=other; export_schema=DEMO\n"
             "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
@@ -1088,6 +1141,8 @@ class TeamCliTests(unittest.TestCase):
                 ],
             )
             self.assertIn("verify_publish_state.py", result.stdout)
+            self.assertIn('application_lifecycle.py capture',result.stdout)
+            self.assertIn('application_lifecycle.py verify',result.stdout)
             self.assertIn("APEX_PUBLISH_SOURCE_VERIFIED:100", result.stdout)
             self.assertFalse(sql_log.exists(), "manual mode must not invoke SQLcl")
 
@@ -1102,7 +1157,8 @@ class TeamCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             lines = [line.strip() for line in result.stdout.splitlines()]
             created = next(index for index, line in enumerate(lines) if line.startswith("verify_dir=$(mktemp -d"))
-            self.assertEqual(lines[created + 1], "trap 'rm -rf -- \"$sqlcl_dir\" \"$verify_dir\"' EXIT", result.stdout)
+            self.assertIn('if [ "$deployment_verified" = true ]; then rm -rf -- "$sqlcl_dir" "$verify_dir"',lines[created + 1])
+            self.assertIn('else echo "Retained recovery:',lines[created + 1])
 
     def test_manual_deploy_works_without_a_local_production_connection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

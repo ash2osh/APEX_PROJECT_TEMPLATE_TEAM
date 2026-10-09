@@ -58,6 +58,29 @@ def git_init(root: Path) -> None:
 class DoctorCliTests(unittest.TestCase):
     NAMES = ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "verify_db_access.sql", "sqlcl_safe.sh", "apex_compatibility.py")
 
+    def test_doctor_checks_independent_migration_identity_and_narrows_to_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), {})
+            with Path(environment['PROJECT_ENV_FILE']).open('a') as stream:
+                stream.write('\nMIGRATION_SCHEMA=API\nMIGRATION_SQLCL_CONNECTION=api-dev\nMIGRATION_EXPECTED_USER=API_DEPLOY\n')
+            result = self.run_team(script, environment, 'doctor')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = Path(environment['FAKE_SQL_CALLS'])
+            self.assertEqual(calls.read_text().splitlines(), ['docker-demo|DEMO|DEMO', 'api-dev|API|API_DEPLOY'])
+            calls.unlink()
+            result = self.run_team(script, environment, 'doctor', '--schema', 'API')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ['api-dev|API|API_DEPLOY'])
+
+    def test_doctor_deduplicates_identical_migration_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            script, environment = self.make_checkout(Path(temporary), {})
+            with Path(environment['PROJECT_ENV_FILE']).open('a') as stream:
+                stream.write('\nMIGRATION_SCHEMA=DEMO\nMIGRATION_SQLCL_CONNECTION=docker-demo\nMIGRATION_EXPECTED_USER=DEMO\n')
+            result = self.run_team(script, environment, 'doctor')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(Path(environment['FAKE_SQL_CALLS']).read_text().splitlines(), ['docker-demo|DEMO|DEMO'])
+
     def test_apex_doctor_requires_explicit_workspace_username(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)

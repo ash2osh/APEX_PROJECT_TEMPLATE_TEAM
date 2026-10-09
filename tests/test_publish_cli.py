@@ -21,6 +21,26 @@ STAMPED_VERSION = r"^Release 1\.0 \[ALICE-\d{{4}}-\d{{2}}-\d{{2}}r{counter}\]$"
 
 
 class PublishAppCliTests(unittest.TestCase):
+    def test_lifecycle_failure_before_or_after_import_preserves_baseline(self):
+        launchers=[('bash',[BASH])] + ([('pwsh',[shutil.which('pwsh'),'-NoProfile','-File'])] if shutil.which('pwsh') else [])
+        for name,launcher in launchers:
+            for mode in ('pre-unavailable','post-unavailable','automation-disabled','lost-instance'):
+                with self.subTest(wrapper=name,mode=mode),tempfile.TemporaryDirectory() as temporary:
+                    root=Path(temporary); runner,_,_,environment,app,state=self.make_stateful_dev_fixture(root)
+                    environment['PROJECT_ENV_FILE']=str(root/'.env'); environment['FAKE_LIFECYCLE_MODE']=mode
+                    baseline=(app/'apex-team-export.json').read_bytes()
+                    script=runner if name=='bash' else runner.with_suffix('.ps1')
+                    result=subprocess.run([*launcher,str(script),'100'],env=environment,capture_output=True,text=True)
+                    self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+                    self.assertEqual((app/'apex-team-export.json').read_bytes(),baseline)
+                    self.assertEqual((state/'import-count.txt').read_text().strip(),'0' if mode=='pre-unavailable' else '1')
+                    if mode!='pre-unavailable':
+                        self.assertNotIn('release',Path(environment['FAKE_LOCK_CALLS']).read_text().splitlines())
+                        reports=list((root/'scratch').rglob('publish-verification.json'))
+                        report=json.loads(reports[0].read_text())
+                        self.assertTrue(report['sourceVerified'])
+                        self.assertIn(report['lifecycleStatus'],('attention','unavailable'))
+
     def test_automatic_supporting_objects_refuse_before_native_lock_or_import(self):
         launchers = [('bash', [BASH])] + ([('pwsh', [shutil.which('pwsh'), '-NoProfile', '-File'])] if shutil.which('pwsh') else [])
         for name, launcher in launchers:
@@ -122,7 +142,8 @@ class PublishAppCliTests(unittest.TestCase):
         for name in (
             "publish_app.sh",
             "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
-            "apex_compatibility.py", "verify_apex_release.sql",
+            "apex_compatibility.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql",
+            "application_lifecycle.py", "application_lifecycle.sql",
             "load_env.sh",
             "check_db_target.sh",
             "export_apps.sql", "verify_deployment_state.sql",
@@ -1218,7 +1239,7 @@ class PublishAppCliTests(unittest.TestCase):
                 for name in (
                     "publish_app.ps1",
                     "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "sqlcl_safe.sh",
-            "apex_compatibility.py", "verify_apex_release.sql",
+            "apex_compatibility.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql",
                     "load_env.ps1",
                     "invoke_sqlcl.ps1", "resolve_python.ps1",
                     "check_db_target.ps1",

@@ -10,6 +10,7 @@ dist/
 # Local worktree/developer caches
 .worktrees/
 .venv/
+.venv-graphify/
 __pycache__/
 *.pyc
 *.egg-info/

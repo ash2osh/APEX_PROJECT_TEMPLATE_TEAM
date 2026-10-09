@@ -46,6 +46,19 @@ def graphify_console_interpreter() -> str | None:
     return interpreter if os.path.exists(interpreter) else None
 
 
+def find_project_graphify_dir(repo_root: Path = REPO_ROOT) -> Path | None:
+    """Find the Graphify package inside the isolated project environment."""
+    env_dir = repo_root / ".venv-graphify"
+    if not env_dir.is_dir():
+        return None
+    for pattern in ("lib/python*/site-packages/graphify", "Lib/site-packages/graphify"):
+        matches = sorted(env_dir.glob(pattern))
+        for m in matches:
+            if m.is_dir() and (m / "detect.py").is_file():
+                return m
+    return None
+
+
 def find_graphify_dirs():
     # 1. The interpreter behind `graphify` on PATH is the installation that
     #    actually runs. Patch only that one when it can be resolved: sweeping
@@ -218,7 +231,7 @@ def _smoke_test_extractor(extractor_path: Path) -> tuple[bool, str]:
         shutil.rmtree(smoke_root, ignore_errors=True)
 
 
-def verify_installation(base: Path) -> tuple[bool, str]:
+def verify_installation(base: Path, run_smoke: bool = True) -> tuple[bool, str]:
     installed = base / "extractors" / "apexlang.py"
     detect_path = base / "detect.py"
     extract_path = base / "extract.py"
@@ -238,6 +251,8 @@ def verify_installation(base: Path) -> tuple[bool, str]:
         return False, "legacy .apx SQL route is still present"
     if SQL_LINK_IMPORT not in extract or '".sql": extract_sql_linked,' not in extract:
         return False, ".sql is not routed through extract_sql_linked"
+    if not run_smoke:
+        return True, "ok"
     return _smoke_test_extractor(installed)
 
 
@@ -270,8 +285,84 @@ def invalidate_apx_cache(cache_root: Path) -> int:
                 print(f"Warning: could not invalidate APEXlang cache '{cache_file}': {exc}")
     return removed
 
-def patch_graphify_dir(base: Path) -> bool:
-    """Install APEXlang support into one Graphify package, failing closed."""
+def is_safe_local_patch_target(base: Path, repo_root: Path | None = None) -> bool:
+    """Mutation belongs only to this project's canonical, unsymlinked environment."""
+    root = (repo_root if repo_root is not None else REPO_ROOT).resolve()
+    env = root / '.venv-graphify'
+    try:
+        candidate = base.absolute()
+        candidate.relative_to(env)
+        for path in (candidate, *candidate.parents):
+            if path == root: break
+            if path.is_symlink(): return False
+        candidate.resolve().relative_to(env)
+    except (ValueError,OSError,RuntimeError):
+        return False
+    return True
+
+
+def _atomic_replace_text(target: Path, text: str, encoding: str = "utf-8") -> None:
+    if target.is_symlink() or os.path.islink(target):
+        raise ValueError(f"Refusing to mutate symbolic link: {target}")
+    mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
+    with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=f".{target.name}.tmp.", delete=False, encoding=encoding) as tf:
+        tf.write(text)
+        temp_path = Path(tf.name)
+    try:
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, target)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def _atomic_replace_bytes(target: Path, data: bytes) -> None:
+    if target.is_symlink() or os.path.islink(target):
+        raise ValueError(f"Refusing to mutate symbolic link: {target}")
+    mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
+    with tempfile.NamedTemporaryFile("wb", dir=target.parent, prefix=f".{target.name}.tmp.", delete=False) as tf:
+        tf.write(data)
+        temp_path = Path(tf.name)
+    try:
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, target)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def _atomic_replace_from_file(source: Path, target: Path) -> None:
+    if target.is_symlink() or os.path.islink(target):
+        raise ValueError(f"Refusing to mutate symbolic link: {target}")
+    mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
+    with tempfile.NamedTemporaryFile("wb", dir=target.parent, prefix=f".{target.name}.tmp.", delete=False) as tf:
+        with open(source, "rb") as sf:
+            shutil.copyfileobj(sf, tf)
+        temp_path = Path(tf.name)
+    try:
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, target)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def patch_graphify_dir(base: Path, *, repo_root: Path | None = None) -> bool:
+    """Install APEXlang support into one Graphify package, failing closed.
+
+    Uses atomic replacement rather than in-place write_text/write_bytes to guarantee
+    that hardlinked files (such as uv package cache links) are decoupled and never mutated
+    across project environments or the shared global tool.
+    """
+    if base.is_symlink() or os.path.islink(base):
+        print(f"Warning: refusing to patch symlinked Graphify directory at '{base}'")
+        return False
+
+    if not is_safe_local_patch_target(base, repo_root):
+        print(f"Warning: refusing to mutate target outside isolated local environment: '{base}'. "
+              "Only project-isolated .venv-graphify may be configured.")
+        return False
+
     detect_path = base / "detect.py"
     extract_path = base / "extract.py"
     extractor_dir = base / "extractors"
@@ -284,6 +375,19 @@ def patch_graphify_dir(base: Path) -> bool:
     if missing:
         print(f"Warning: Graphify at '{base}' is missing required module(s): "
               + ", ".join(path.name for path in missing))
+        return False
+
+    for component in (detect_path, extract_path, extractor_dir, installed_path):
+        if component.exists() and (component.is_symlink() or os.path.islink(component)):
+            print(f"Warning: refusing to patch symlinked Graphify component at '{component}'")
+            return False
+
+    try:
+        detect_path.resolve().relative_to(base.resolve())
+        extract_path.resolve().relative_to(base.resolve())
+        installed_path.resolve().relative_to(base.resolve())
+    except ValueError:
+        print(f"Warning: Graphify components at '{base}' escape isolation boundary")
         return False
 
     detect_bytes = detect_path.read_bytes()
@@ -303,20 +407,20 @@ def patch_graphify_dir(base: Path) -> bool:
         return False
 
     try:
-        detect_path.write_text(patched_detect, encoding="utf-8", newline="")
-        extract_path.write_text(patched_extract, encoding="utf-8", newline="")
-        shutil.copyfile(CANONICAL_EXTRACTOR, installed_path)
+        _atomic_replace_text(detect_path, patched_detect)
+        _atomic_replace_text(extract_path, patched_extract)
+        _atomic_replace_from_file(CANONICAL_EXTRACTOR, installed_path)
         verified, reason = verify_installation(base)
         if not verified:
             raise RuntimeError(reason)
     except Exception as exc:
         try:
-            detect_path.write_bytes(detect_bytes)
-            extract_path.write_bytes(extract_bytes)
+            _atomic_replace_bytes(detect_path, detect_bytes)
+            _atomic_replace_bytes(extract_path, extract_bytes)
             if old_installed is None:
                 installed_path.unlink(missing_ok=True)
             else:
-                installed_path.write_bytes(old_installed)
+                _atomic_replace_bytes(installed_path, old_installed)
         except OSError as rollback_exc:
             print(f"Warning: rollback failed for Graphify at '{base}': {rollback_exc}")
         print(f"Warning: Graphify APEXlang setup failed at '{base}': {exc}")
@@ -326,73 +430,25 @@ def patch_graphify_dir(base: Path) -> bool:
     return True
 
 
-def setup_graphify_apx() -> bool:
-    print("Checking Graphify & tree-sitter-sql setup...")
-
-    # Best-effort: the supported path is `uv tool install graphifyy --with
-    # tree-sitter-sql`. Report what happened rather than discarding it -- a
-    # silent failure here shows up much later as an unindexable database/ tree.
-    py_path = graphify_console_interpreter()
-    if py_path:
-        installed = False
-        for command in (
-            [py_path, "-m", "pip", "install", "tree-sitter-sql"],
-            ["uv", "pip", "install", "--python", py_path, "tree-sitter-sql"],
-        ):
-            try:
-                completed = subprocess.run(
-                    command, capture_output=True, text=True, timeout=300
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if completed.returncode == 0:
-                installed = True
-                break
-        if not installed:
-            print("Note: could not install tree-sitter-sql into Graphify's interpreter.\n"
-                  "      Without it, database/ and supporting-objects/*.sql cannot be indexed.\n"
-                  "      Install it with Graphify instead:\n"
-                  "        uv tool install graphifyy --with tree-sitter-sql --force")
-
-    g_dirs = find_graphify_dirs()
-    if not g_dirs:
-        print("Warning: Graphify installation not found. Install it first:\n"
-              "  uv tool install graphifyy --with tree-sitter-sql")
-        return False
-
-    results = {base: patch_graphify_dir(Path(base)) for base in g_dirs}
-    for base, patched in results.items():
-        if not patched:
-            print(f"Warning: Graphify at '{base}' was not configured")
-    if not any(results.values()):
-        return False
-    # A cache invalidation skipped because some *other* installation failed is
-    # how the graph ends up with cached .apx results from the former SQL route:
-    # zero architectural relationships, no error. Invalidate whenever any
-    # installation was actually patched.
-    removed = invalidate_apx_cache(REPO_ROOT / "graphify-out" / "cache" / "ast")
-    if removed:
-        print(f"Invalidated {removed} stale APEXlang AST cache entr{'y' if removed == 1 else 'ies'}")
-    return all(results.values())
+def setup_graphify_apx(repo_root: Path | None = None) -> bool:
+    """Compatibility entry point for explicitly pinned project-local setup."""
+    try:
+        from scripts.graphify_project import setup_graphify
+    except ImportError:
+        from graphify_project import setup_graphify
+    return setup_graphify(repo_root if repo_root is not None else REPO_ROOT) == 0
 
 
 def main(argv: list[str]) -> int:
-    """Entry point. `--verify` checks the installation without changing it."""
-    if "--verify" in argv:
-        bases = find_graphify_dirs()
-        if not bases:
-            print("Graphify installation not found")
-            return 1
-        failed = False
-        for base in bases:
-            try:
-                verified, reason = verify_installation(Path(base))
-            except Exception as exc:
-                verified = False
-                reason = f"verification raised {type(exc).__name__}: {exc}"
-            print(f"{'OK  ' if verified else 'FAIL'} {base}: {reason}")
-            failed = failed or not verified
-        return 1 if failed else 0
+    if argv == ['--verify']:
+        try:
+            from scripts.graphify_project import verify_graphify
+        except ImportError:
+            from graphify_project import verify_graphify
+        return verify_graphify(REPO_ROOT)
+    if argv:
+        print('Usage: setup_graphify_apx.py [--verify]', file=sys.stderr)
+        return 2
     return 0 if setup_graphify_apx() else 1
 
 

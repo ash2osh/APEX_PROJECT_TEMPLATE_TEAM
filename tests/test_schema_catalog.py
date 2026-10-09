@@ -254,6 +254,45 @@ class SchemaCatalogTests(unittest.TestCase):
             self.assertNotIn("X' OR '1'='1", runner.driver)
             self.assertIn(b"X' OR '1'='1".hex().upper(), runner.driver)
 
+    def test_capture_inventory_and_snapshot_support_compressed_transport(self) -> None:
+        import base64
+        import gzip
+
+        def frame_comp(payload: dict) -> str:
+            name = payload["phase"]
+            raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            b64 = base64.b64encode(gzip.compress(raw)).decode("ascii")
+            return (
+                f"CATALOG_PAYLOAD_BEGIN:{name}\n"
+                f"CATALOG_ENCODING:gzip-base64-v1\n"
+                f"{b64}\n"
+                f"CATALOG_PAYLOAD_END:{name}\n"
+                f"CATALOG_VERIFIED:{name}\n"
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            inv = capture_inventory(
+                target(),
+                run_dir,
+                _runner=lambda t, d, r: SqlclResult(0, frame_comp(fixture_payload("owner-inventory.json")), r),
+            )
+            self.assertIn(ObjectKey("APP_DEV", "CUSTOMERS", "TABLE"), inv.objects)
+
+            # Build matching inventory for snapshot test
+            snap_inv_payload = dict(fixture_payload("owner-inventory.json"))
+            snap_inv_payload["objects"] = fixture_payload("owner-snapshot.json")["before"]
+            snap_inv = parse_inventory(frame_comp(snap_inv_payload), target())
+
+            snap = capture_snapshot(
+                target(),
+                snap_inv,
+                (("CUSTOMERS", "TABLE"),),
+                run_dir,
+                _runner=lambda t, d, r: SqlclResult(0, frame_comp(fixture_payload("owner-snapshot.json")), r),
+            )
+            self.assertIn(ObjectKey("APP_DEV", "CUSTOMERS", "TABLE"), snap.objects)
+
 
 class SchemaCatalogIdentity:
     @staticmethod

@@ -169,11 +169,12 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
     run_dir.mkdir(parents=True, mode=0o700)
     shutil.copytree(source, run_dir / 'source-before')
     report = {'applicationId': app_id, 'selectedFiles': list(files), 'status': 'started',
-              'importAttempted': False, 'lockRetained': False, 'noTeamNoticeRequested': no_team_notice}
+              'sourceVerified': False, 'lifecycleStatus': 'unavailable', 'importAttempted': False, 'lockRetained': False, 'noTeamNoticeRequested': no_team_notice}
     held = False
     try:
         backend.validate_target()
         backend.acquire(); held = True
+        lifecycle_before = backend.capture_lifecycle()
         first = backend.export('live-first')
         first_revision = backend.last_revision
         live = backend.export('live-second')
@@ -213,6 +214,11 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
             raise ValueError('selected Builder page locks changed during partial publication')
         if tree_hashes(source) != original or baseline_hash(source) != original_marker:
             raise ValueError('local source changed during partial publication; baseline retained')
+        report['sourceVerified'] = True
+        lifecycle_report = backend.verify_lifecycle(lifecycle_before)
+        report['lifecycleStatus'] = lifecycle_report['status']
+        from scripts.application_lifecycle import require_verified_lifecycle
+        require_verified_lifecycle(lifecycle_report)
         backend.check(); backend.release(); held = False
         canonical = run_dir / 'canonical'
         shutil.copytree(observed, canonical)
@@ -268,6 +274,14 @@ from scripts.upgrade_apexlang import NativeBackend, quoted, literal
 
 
 class NativePartialBackend(NativeBackend):
+    def capture_lifecycle(self):
+        from scripts.application_lifecycle import capture_lifecycle
+        return capture_lifecycle(self.target, self.workspace, self.app_id, self.base / 'lifecycle-before')
+
+    def verify_lifecycle(self, before):
+        from scripts.application_lifecycle import verify_after_import
+        return verify_after_import(self.target, self.workspace, self.app_id, before, self.base / 'lifecycle-after')
+
     def export(self, name):
         result = super().export(name)
         if name.startswith('live-'):

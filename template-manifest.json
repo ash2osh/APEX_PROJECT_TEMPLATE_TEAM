@@ -26,6 +26,7 @@
     "docs/apex-26.2-qualification.md",
     "docs/apexlang-upgrade.md",
     "docs/known-limitations.md",
+    "docs/local-qualification.md",
     "docs/migration-rules.md",
     "docs/ords-export.md",
     "docs/partial-publish.md",
@@ -38,7 +39,9 @@
     "tests/**",
     "tools/chrome_devtools_client.py",
     "tools/chrome_mcp_daemon.py",
-    "tools/probe_apex_26_2.py"
+    "tools/graphify/**",
+    "tools/probe_apex_26_2.py",
+    "tools/qualify_template_readonly.py"
   ],
   "projectOwned": [
     ".agents/rules/project.md",

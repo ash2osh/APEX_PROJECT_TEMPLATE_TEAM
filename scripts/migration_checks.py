@@ -1212,9 +1212,9 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
     keep_logs = True
     try:
         requested = schema or values.get("PROJECT_SCHEMA") or None
-        chosen = batch_schema([migration.schema for migration in migrations], requested, values)
-        target = resolve_target(values, environment, "read", schema=chosen)
-        assert_single_layout(repo_root, migrations, target.schema, flat_folders_apply=flat_migrations_apply(values))
+        chosen = batch_schema([migration.schema for migration in migrations], requested, values, environment)
+        target = resolve_target(values, environment, "migration", schema=chosen)
+        assert_single_layout(repo_root, migrations, target.schema, flat_folders_apply=flat_migrations_apply(values, environment))
         # Validate operation scope and dependencies before opening SQLcl.
         operations = analyze_batch(migrations, target.schema)
         scratch = repo_root / "scratch"

@@ -61,6 +61,27 @@ def _validate_identifier(value: str, key: str) -> None:
 SCHEMA_KEYS = {"dev": "CODE_SCHEMA", "staging": "STAGING_SCHEMA", "prod": "PROD_SCHEMA"}
 
 
+def migration_profile_keys(values: Mapping[str, str], environment: str) -> tuple[str, str, str] | None:
+    try:
+        prefix = {"dev": "", "staging": "STAGING_", "prod": "PROD_"}[environment]
+    except KeyError:
+        raise TargetResolutionError("environment must be dev, staging, or prod") from None
+    keys = tuple(prefix + "MIGRATION_" + suffix for suffix in ("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER"))
+    flag = f"PROJECT_{prefix}MIGRATION_CONFIGURED"
+    if not any(key in values for key in keys) and values.get(flag) != "true":
+        return None
+    if not all(key in values for key in keys):
+        raise TargetResolutionError(f"{', '.join(keys)} must be configured together")
+    for key in keys:
+        _required(values, key)
+    return keys
+
+
+def configured_migration_schemas(values: Mapping[str, str], environment: str) -> tuple[str, ...]:
+    keys = migration_profile_keys(values, environment)
+    return split_list(values.get(keys[0])) if keys else configured_schemas(values, environment)
+
+
 def split_list(value: str | None) -> tuple[str, ...]:
     """Split a comma-separated setting. An empty or missing value has no entries."""
     if not value:
@@ -83,6 +104,7 @@ def _select_index(
     schemas: tuple[str, ...],
     requested: str | None,
     schema_key: str,
+    dev_schemas: tuple[str, ...] | None = None,
 ) -> int:
     if requested is None:
         if len(schemas) == 1:
@@ -93,7 +115,8 @@ def _select_index(
     _validate_identifier(requested, "--schema")
     if requested in schemas:
         return schemas.index(requested)
-    dev_schemas = split_list(values.get("CODE_SCHEMA"))
+    if dev_schemas is None:
+        dev_schemas = split_list(values.get("CODE_SCHEMA"))
     if environment != "dev" and len(schemas) == 1 and len(dev_schemas) == 1 and requested in dev_schemas:
         # A project with one DEV schema may name its staging or production
         # schema differently. That mapping covers the project's own schema
@@ -136,6 +159,11 @@ def resolve_target(
     else:
         raise TargetResolutionError("environment must be dev, staging, or prod")
 
+    if operation == "migration":
+        migration_keys = migration_profile_keys(values, environment)
+        if migration_keys:
+            schema_key, connection_key, user_key = migration_keys
+
     if schema is not None and not values.get(schema_key):
         # The loader blanks a profile that does not list the selected schema.
         raise TargetResolutionError(f"schema {schema} is not listed in {schema_key} for {environment}")
@@ -148,7 +176,8 @@ def resolve_target(
         )
     if len(set(schemas)) != len(schemas):
         raise TargetResolutionError(f"{schema_key} must not repeat a schema")
-    index = _select_index(values, environment, schemas, schema, schema_key)
+    dev_schemas = configured_migration_schemas(values, "dev") if operation == "migration" else None
+    index = _select_index(values, environment, schemas, schema, schema_key, dev_schemas)
     connection, expected_user, target_schema = connections[index], users[index], schemas[index]
     if SQLCL_ALIAS.fullmatch(connection) is None:
         raise TargetResolutionError(f"{connection_key} contains unsupported characters")
@@ -159,15 +188,24 @@ def resolve_target(
     return Target(environment, connection, expected_user, target_schema, classification)
 
 
-def flat_migrations_apply(values: Mapping[str, str]) -> bool:
-    """Whether a flat migrations/<folder> can run: only with one configured code schema."""
-    return len(split_list(values.get("PROJECT_CODE_SCHEMAS") or values.get("CODE_SCHEMA"))) <= 1
+def flat_migrations_apply(values: Mapping[str, str], environment: str = "dev") -> bool:
+    """Use pre-narrowing migration cardinality, falling back to the original profile."""
+    prefix = {"dev": "", "staging": "STAGING_", "prod": "PROD_"}[environment]
+    preserved = f"PROJECT_{prefix}MIGRATION_SCHEMAS"
+    if preserved in values:
+        schemas = split_list(values[preserved])
+    elif environment == "dev" and migration_profile_keys(values, environment) is None:
+        schemas = split_list(values.get("PROJECT_CODE_SCHEMAS") or values.get("CODE_SCHEMA"))
+    else:
+        schemas = configured_migration_schemas(values, environment)
+    return len(schemas) <= 1
 
 
 def batch_schema(
     schemas: Iterable[str | None],
     requested: str | None,
     values: Mapping[str, str],
+    environment: str = "dev",
 ) -> str | None:
     """Pick the one schema a batch of migration folders targets.
 
@@ -178,7 +216,7 @@ def batch_schema(
     if len(folder_schemas) > 1:
         raise TargetResolutionError("selected migrations belong to different schemas; run one schema at a time")
     folder_schema = next(iter(folder_schemas), None)
-    if folder_schema is None and not flat_migrations_apply(values):
+    if folder_schema is None and not flat_migrations_apply(values, environment):
         raise TargetResolutionError(
             "several schemas are configured, so migrations must live under migrations/<SCHEMA>/; "
             "move the folder into its schema directory"

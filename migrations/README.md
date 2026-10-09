@@ -40,3 +40,18 @@ before SQLcl connects. A SQL statement ends at its `;`. SQLcl would also end it
 at a line holding only `/` or `.`, or splice a file into it at a line starting
 with `@`, so those lines are rejected inside a statement, and a line holding
 only `/` is rejected inside a comment. Blank lines inside a statement are fine.
+
+
+Optional migration profiles let a project mirror code from `CODE` while applying
+migrations to `CUSTDATA` or `API`. Configure `MIGRATION_SCHEMA`,
+`MIGRATION_SQLCL_CONNECTION` and `MIGRATION_EXPECTED_USER` together; use the
+`STAGING_` and `PROD_` prefixes for those environments. Each triple accepts
+position-aligned lists. `--schema API` selects that migration owner even when
+it is absent from `CODE_SCHEMA`. A single DEV migration owner can map to a
+renamed single staging/production owner; unlisted owners never map. If a whole
+triple is absent, migration commands retain the original environment target.
+Partial, empty or misaligned triples refuse before connecting. `check-conflicts`
+uses the same migration identity, and `doctor` includes explicit DEV migration
+identities once per connection/user/schema. Backups and schema comparison keep
+their existing profiles. Flat migration folders require one configured migration
+owner; otherwise use `migrations/<SCHEMA>/…` and keep each batch in one schema.

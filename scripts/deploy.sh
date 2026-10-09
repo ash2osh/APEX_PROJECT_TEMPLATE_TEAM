@@ -109,10 +109,14 @@ if [ "$manual" = true ]; then
     "$runbook_root/scripts/validate_app_source.py" "$runbook_root" "$app_dir"
   printf '%s\n' \
     '2. From a shell with SQLcl and the approved connection configured, run:' \
+    '   set -euo pipefail' \
+    '   deployment_verified=false' \
     '   sqlcl_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-sqlcl-XXXXXX")' \
-    '   trap '\''rm -rf -- "$sqlcl_dir"'\'' EXIT' \
+    '   trap '\''if [ "$deployment_verified" = true ]; then rm -rf -- "$sqlcl_dir"; else echo "Retained recovery: $sqlcl_dir" >&2; fi'\'' EXIT' \
     '   cd "$sqlcl_dir"' \
     '   export SQLPATH="$sqlcl_dir" ORACLE_PATH="$sqlcl_dir"'
+  printf '   python3 %q capture --connection %q --expected-user %q --schema %q --workspace %q --app-id %q --environment %q --run-dir "$sqlcl_dir/lifecycle-before"\n' \
+    "$runbook_root/scripts/application_lifecycle.py" "$sqlcl_connection" "$expected_user" "$parsing_schema" "$workspace_name" "$app_id" "$app_environment"
   printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q %q %q\n' \
     "$sqlcl_connection" "@$runbook_root/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "$app_dir" \
@@ -121,7 +125,7 @@ if [ "$manual" = true ]; then
   printf '3. Check that import completed without SQLcl errors and printed "Import successful." and APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
   printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'
   printf '   verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-manual-verify.XXXXXX")\n'
-  printf '%s\n' '   trap '\''rm -rf -- "$sqlcl_dir" "$verify_dir"'\'' EXIT'
+  printf '%s\n' '   trap '\''if [ "$deployment_verified" = true ]; then rm -rf -- "$sqlcl_dir" "$verify_dir"; else echo "Retained recovery: $sqlcl_dir $verify_dir" >&2; fi'\'' EXIT'
   printf '   cd "$verify_dir"\n'
   printf '   sql -S -noupdates -name %q %q %q %q %q %q\n' \
     "$sqlcl_connection" "@$runbook_root/scripts/export_apps.sql" \
@@ -133,7 +137,13 @@ if [ "$manual" = true ]; then
   printf '   %q "$exported_dir"\n' "$runbook_root/scripts/normalize_apx.sh"
   printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json\n' \
     "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root" "$app_dir/deployments/$app_environment.json"
-  printf '5. Treat the deployment as verified only if that check prints APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
+  printf '   # Source check must print APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
+  printf '5. Verify lifecycle independently; failures retain recovery diagnostics:\n'
+  printf '   python3 %q verify --connection %q --expected-user %q --schema %q --workspace %q --app-id %q --environment %q --before "$sqlcl_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$sqlcl_dir/lifecycle-after" --summary-path "$sqlcl_dir/publish-verification.json"\n' \
+    "$runbook_root/scripts/application_lifecycle.py" "$sqlcl_connection" "$expected_user" "$parsing_schema" "$workspace_name" "$app_id" "$app_environment"
+  printf '   deployment_verified=true\n'
+  printf '   echo "Source and application lifecycle verified."\n'
+
   exit 0
 fi
 

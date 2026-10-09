@@ -257,3 +257,18 @@ DDL can come from different migration files, and an out-of-band manual change
 can mimic a migration. Conversely, normalization intentionally excludes some
 environment-specific metadata. Treat the output as a coarse comparison of
 selected current schema state, then review the implicated SQL and receipts.
+
+
+Optional migration profiles let a project mirror code from `CODE` while applying
+migrations to `CUSTDATA` or `API`. Configure `MIGRATION_SCHEMA`,
+`MIGRATION_SQLCL_CONNECTION` and `MIGRATION_EXPECTED_USER` together; use the
+`STAGING_` and `PROD_` prefixes for those environments. Each triple accepts
+position-aligned lists. `--schema API` selects that migration owner even when
+it is absent from `CODE_SCHEMA`. A single DEV migration owner can map to a
+renamed single staging/production owner; unlisted owners never map. If a whole
+triple is absent, migration commands retain the original environment target.
+Partial, empty or misaligned triples refuse before connecting. `check-conflicts`
+uses the same migration identity, and `doctor` includes explicit DEV migration
+identities once per connection/user/schema. Backups and schema comparison keep
+their existing profiles. Flat migration folders require one configured migration
+owner; otherwise use `migrations/<SCHEMA>/…` and keep each batch in one schema.

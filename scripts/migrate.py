@@ -970,9 +970,9 @@ def main(
         migrations = load_batch(Path(repo_root), args.folders)
         values = os.environ if environ is None else environ
         requested = args.schema or values.get("PROJECT_SCHEMA") or None
-        schema = batch_schema([migration.schema for migration in migrations], requested, values)
+        schema = batch_schema([migration.schema for migration in migrations], requested, values, args.env[0])
         target = resolve_target(values, args.env[0], "migration", schema=schema)
-        assert_single_layout(Path(repo_root), migrations, target.schema, flat_folders_apply=flat_migrations_apply(values))
+        assert_single_layout(Path(repo_root), migrations, target.schema, flat_folders_apply=flat_migrations_apply(values, args.env[0]))
     except (MigrationManifestError, TargetResolutionError, OSError) as error:
         print(f"migration error: {error}", file=sys.stderr)
         return 2

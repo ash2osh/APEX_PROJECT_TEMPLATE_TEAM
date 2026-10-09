@@ -40,9 +40,20 @@ with tempfile.TemporaryDirectory(prefix="graphify-coverage.") as cache:
 """
 
 
-def scan_files(root: Path) -> list[Path]:
+def get_graphify_interpreter(root: Path = ROOT) -> str | None:
+    """Resolve Graphify interpreter, preferring project-isolated .venv-graphify."""
+    env_dir = root / ".venv-graphify"
+    if env_dir.is_dir():
+        py = env_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        if py.is_file():
+            return str(py)
+    return graphify_console_interpreter()
+
+
+def scan_files(root: Path, interpreter: str | None = None) -> list[Path]:
     """Return eligible .apx paths; unavailable/incomplete scans are failures."""
-    interpreter = graphify_console_interpreter()
+    if not interpreter:
+        interpreter = get_graphify_interpreter(root)
     if not interpreter:
         raise RuntimeError("Graphify Python launcher is unavailable")
     if not root.is_dir():
@@ -103,10 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--graph", type=Path, help="also require every eligible .apx source in this graph")
+    parser.add_argument("--interpreter", type=str, help="explicit Python interpreter to run Graphify scan")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
-        files = scan_files(root)
+        files = scan_files(root, interpreter=args.interpreter)
         errors = check_files(root, files, args.graph)
     except (OSError, UnicodeError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"FAIL: {exc}")

@@ -29,7 +29,7 @@ def inventory(owner, db, objects, service="service-a"):
     for name, object_type, extra in objects:
         row = {"owner": owner, "name": name, "type": object_type, "status": "VALID", "last_ddl_time": "2026-09-27T00:00:00"}
         row.update(extra or {})
-        rows[ObjectKey(owner, name, object_type)] = row
+        rows[ObjectKey(owner, name, object_type, row.get("subobject_name") or "")] = row
     return SchemaInventory(
         identity(owner, db, service), rows,
         {"ownerComplete": True, "path": "OWNER_SESSION", "catalogs": ["ALL_OBJECTS"]},
@@ -51,6 +51,32 @@ def snap(inv, definitions):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_partition_subobjects_do_not_expand_exact_or_wildcard_roots(self) -> None:
+        objects = [
+            ("ATTENDANCE", "TABLE", {}),
+            ("ATTENDANCE", "TABLE PARTITION", {"subobject_name": "P1"}),
+            ("ATTENDANCE", "TABLE PARTITION", {"subobject_name": "P2"}),
+            ("ATTENDANCE", "TABLE SUBPARTITION", {"subobject_name": "SP1"}),
+            ("ATTENDANCE_I", "INDEX", {}),
+            ("ATTENDANCE_I", "INDEX PARTITION", {"subobject_name": "P1"}),
+            ("ATTENDANCE_I", "INDEX PARTITION", {"subobject_name": "P2"}),
+        ]
+        source = inventory("APP_DEV", "DEVDB", objects)
+        target = inventory("APP_STAGE", "STAGEDB", objects)
+        for exact, patterns, expected in (
+            (("ATTENDANCE",), (), (("ATTENDANCE", "TABLE"),)),
+            (("ATTENDANCE_I",), (), (("ATTENDANCE_I", "INDEX"),)),
+            ((), ("*",), (("ATTENDANCE", "TABLE"), ("ATTENDANCE_I", "INDEX"))),
+            ((), ("ATTENDANCE*",), (("ATTENDANCE", "TABLE"), ("ATTENDANCE_I", "INDEX"))),
+        ):
+            with self.subTest(exact=exact, patterns=patterns):
+                selected = select_objects(source, target, exact, patterns)
+                self.assertEqual(selected.keys, expected)
+                self.assertEqual(selected.errors, ())
+        # Selection does not discard the owner's partition evidence used for drift checks.
+        self.assertEqual(len(source.objects), 7)
+        self.assertEqual(len(target.objects), 7)
+
     def test_patterns_use_union_and_literal_underscore(self) -> None:
         source = inventory("APP_DEV", "DEVDB", [
             ("HR_DEPARTMENTS", "TABLE", {}), ("HRX_EMPLOYEES", "TABLE", {}), ("GL_CODES", "TABLE", {}),

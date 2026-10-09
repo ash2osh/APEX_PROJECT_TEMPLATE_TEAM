@@ -337,6 +337,7 @@ function Invoke-SwapIfUnchanged([string]$Target, [string]$Expected, [string]$Rep
 }
 $publishedVersion = ""
 try {
+  [System.IO.File]::WriteAllText((Join-Path $publishWorkDir 'publish-verification.json'), '{"schemaVersion":1,"sourceVerified":false,"lifecycleStatus":"unavailable"}')
   Assert-SqlclApexVersion -WorkDirectory (Join-Path $publishWorkDir "version")
   $lockAssertScript = Join-Path $PSScriptRoot 'no_application_lock.sql'
   if ($appEnvironment -eq 'dev') {
@@ -352,6 +353,12 @@ try {
     $lockHeld = $true
     $lockAssertScript = Join-Path $lockRecovery 'assert-lock.sql'
   }
+  $lifecyclePython = Resolve-TeamPython
+  if ($null -eq $lifecyclePython) { throw 'Python 3.10 or newer is required for lifecycle verification' }
+  $lifecycleArguments = @('--connection', $sqlclConnection, '--expected-user', $expectedUser, '--schema', $parsingSchema,
+    '--workspace', [string]$deployment.workspace.name, '--app-id', $AppId, '--environment', $appEnvironment)
+  & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') capture @lifecycleArguments --run-dir (Join-Path $publishWorkDir 'lifecycle-before')
+  if ($LASTEXITCODE -ne 0) { throw 'publish error: lifecycle pre-read unavailable; nothing imported' }
 if ($appEnvironment -eq "dev" -and -not $force) {
   $driftGuard = Join-Path $repoRoot "scripts/check_builder_drift.py"
   if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
@@ -480,6 +487,9 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   if ($LASTEXITCODE -ne 0) {
     throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
   }
+  [System.IO.File]::WriteAllText((Join-Path $publishWorkDir 'publish-verification.json'), '{"schemaVersion":1,"sourceVerified":true,"lifecycleStatus":"unavailable"}')
+  & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') verify @lifecycleArguments --before (Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json') --run-dir (Join-Path $publishWorkDir 'lifecycle-after') --summary-path (Join-Path $publishWorkDir 'publish-verification.json')
+  if ($LASTEXITCODE -ne 0) { throw 'publish error: application lifecycle verification failed; baseline and recovery evidence retained' }
   if ($appEnvironment -eq 'dev') {
     & $lockPython.Path @($lockPython.Prefix) (Join-Path $PSScriptRoot 'application_lock.py') check @lockArguments
     if ($LASTEXITCODE -ne 0) { throw 'publish error: post-import application lock verification failed; baseline retained' }

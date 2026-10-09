@@ -151,9 +151,10 @@ class UpgradeTemplateTests(unittest.TestCase):
     def test_explicit_release_does_not_claim_live_verification(self) -> None:
         self.adopt()
         self.release_26_2()
-        result = self.upgrade("--apex-release", "26.2")
+        result = self.upgrade("--apex-release", "26.2", "--ref", "main")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.lock()["apexRelease"], "26.2")
+        self.assertEqual(self.lock()["templateRef"], "main")
         self.assertNotIn("liveVerified", self.lock())
         self.assertIn("doctor", result.stdout)
 
@@ -167,6 +168,261 @@ class UpgradeTemplateTests(unittest.TestCase):
         result = self.upgrade()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.read("AGENTS.md"), "rules v1\n")
+
+    def test_short_and_fully_qualified_refs_resolve_to_same_commit(self) -> None:
+        git(self.template, "branch", "codex/apex-26.1")
+        target_commit = git(self.template, "rev-parse", "codex/apex-26.1")
+        with tempfile.TemporaryDirectory() as temp1, tempfile.TemporaryDirectory() as temp2:
+            dest1 = Path(temp1) / "t1"
+            dest2 = Path(temp2) / "t2"
+            c1 = upgrade_engine.fetch_template(str(self.template), "codex/apex-26.1", dest1)
+            c2 = upgrade_engine.fetch_template(str(self.template), "refs/remotes/origin/codex/apex-26.1", dest2)
+            self.assertEqual(c1, target_commit)
+            self.assertEqual(c2, target_commit)
+            self.assertEqual(c1, c2)
+
+    def test_explicit_pinned_26_1_apply_never_clones_default_main(self) -> None:
+        self.adopt()
+        git(self.template, "checkout", "-q", "-b", "codex/apex-26.1")
+        write(self.template, {"AGENTS.md": "26.1 maintenance\n"})
+        commit_all(self.template, "26.1 line")
+        git(self.template, "checkout", "-q", "main")
+        self.release_26_2()
+
+        result = self.upgrade("--ref", "codex/apex-26.1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.read("AGENTS.md"), "26.1 maintenance\n")
+        self.assertEqual(self.lock()["templateRef"], "codex/apex-26.1")
+        self.assertEqual(self.lock()["apexRelease"], "26.1")
+        commit_all(self.project, "pinned 26.1")
+
+        git(self.template, "checkout", "-q", "codex/apex-26.1")
+        write(self.template, {"AGENTS.md": "26.1 update\n"})
+        commit_all(self.template, "26.1 update")
+        git(self.template, "checkout", "-q", "main")
+        write(self.template, {"AGENTS.md": "26.2 update\n"})
+        commit_all(self.template, "26.2 update")
+
+        result2 = self.upgrade()
+        self.assertEqual(result2.returncode, 0, result2.stdout + result2.stderr)
+        self.assertEqual(self.read("AGENTS.md"), "26.1 update\n")
+
+    def test_legacy_missing_pin_refuses_apply_without_explicit_choices(self) -> None:
+        git(self.template, "branch", "codex/apex-26.1")
+        legacy_lock = {
+            "schemaVersion": 1,
+            "upstream": str(self.template),
+            "commit": git(self.template, "rev-parse", "HEAD"),
+            "files": {
+                "AGENTS.md": hashlib.sha256(b"rules v1\n").hexdigest(),
+                "docs/migration-rules.md": hashlib.sha256(b"migration rules v1\n").hexdigest(),
+                "scripts/tool.sh": hashlib.sha256(b"echo v1\n").hexdigest(),
+                "scripts/old.sh": hashlib.sha256(b"echo old\n").hexdigest(),
+                "template-manifest.json": hashlib.sha256((self.project / "template-manifest.json").read_bytes()).hexdigest(),
+            },
+        }
+        write(self.project, {".template-lock.json": json.dumps(legacy_lock, indent=2) + "\n"})
+        commit_all(self.project, "legacy lock without pins")
+
+        dry_run_result = self.upgrade("--dry-run")
+        self.assertEqual(dry_run_result.returncode, 0, dry_run_result.stdout + dry_run_result.stderr)
+        self.assertIn("legacy template lock is missing templateRef", dry_run_result.stderr)
+
+        apply_result = self.upgrade()
+        self.assertEqual(apply_result.returncode, 2, apply_result.stdout + apply_result.stderr)
+        self.assertIn("legacy template lock is missing templateRef", apply_result.stderr)
+        self.assertEqual(self.read(".template-lock.json"), json.dumps(legacy_lock, indent=2) + "\n")
+
+        pinned_result = self.upgrade("--ref", "codex/apex-26.1")
+        self.assertEqual(pinned_result.returncode, 0, pinned_result.stdout + pinned_result.stderr)
+        self.assertEqual(self.lock()["templateRef"], "codex/apex-26.1")
+        self.assertEqual(self.lock()["apexRelease"], "26.1")
+
+    def test_release_only_legacy_lock_refuses_apply_without_explicit_ref(self) -> None:
+        git(self.template, "branch", "codex/apex-26.1")
+        release_only_lock = {
+            "schemaVersion": 1,
+            "upstream": str(self.template),
+            "commit": git(self.template, "rev-parse", "HEAD"),
+            "apexRelease": "26.1",
+            "files": {
+                "AGENTS.md": hashlib.sha256(b"rules v1\n").hexdigest(),
+                "docs/migration-rules.md": hashlib.sha256(b"migration rules v1\n").hexdigest(),
+                "scripts/tool.sh": hashlib.sha256(b"echo v1\n").hexdigest(),
+                "scripts/old.sh": hashlib.sha256(b"echo old\n").hexdigest(),
+                "template-manifest.json": hashlib.sha256((self.project / "template-manifest.json").read_bytes()).hexdigest(),
+            },
+        }
+        write(self.project, {".template-lock.json": json.dumps(release_only_lock, indent=2) + "\n"})
+        commit_all(self.project, "release-only lock without templateRef")
+
+        # Applying with no arguments must refuse
+        apply_result = self.upgrade()
+        self.assertEqual(apply_result.returncode, 2, apply_result.stdout + apply_result.stderr)
+        self.assertIn("legacy template lock is missing templateRef", apply_result.stderr)
+
+        # Applying with --apex-release alone must still refuse
+        release_arg_result = self.upgrade("--apex-release", "26.1")
+        self.assertEqual(release_arg_result.returncode, 2, release_arg_result.stdout + release_arg_result.stderr)
+        self.assertIn("legacy template lock is missing templateRef", release_arg_result.stderr)
+
+        # Supplying explicit --ref succeeds and writes both fields
+        pinned_result = self.upgrade("--ref", "codex/apex-26.1")
+        self.assertEqual(pinned_result.returncode, 0, pinned_result.stdout + pinned_result.stderr)
+        self.assertEqual(self.lock()["templateRef"], "codex/apex-26.1")
+        self.assertEqual(self.lock()["apexRelease"], "26.1")
+
+    def test_legacy_both_missing_with_apex_release_alone_refuses_apply(self) -> None:
+        git(self.template, "branch", "codex/apex-26.1")
+        legacy_lock = {
+            "schemaVersion": 1,
+            "upstream": str(self.template),
+            "commit": git(self.template, "rev-parse", "HEAD"),
+            "files": {
+                "AGENTS.md": hashlib.sha256(b"rules v1\n").hexdigest(),
+                "docs/migration-rules.md": hashlib.sha256(b"migration rules v1\n").hexdigest(),
+                "scripts/tool.sh": hashlib.sha256(b"echo v1\n").hexdigest(),
+                "scripts/old.sh": hashlib.sha256(b"echo old\n").hexdigest(),
+                "template-manifest.json": hashlib.sha256((self.project / "template-manifest.json").read_bytes()).hexdigest(),
+            },
+        }
+        write(self.project, {".template-lock.json": json.dumps(legacy_lock, indent=2) + "\n"})
+        commit_all(self.project, "legacy lock without pins")
+
+        # Passing --apex-release alone without --ref must refuse
+        result = self.upgrade("--apex-release", "26.1")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("legacy template lock is missing templateRef", result.stderr)
+
+        # Supplying both --ref and --apex-release succeeds and writes both
+        success_result = self.upgrade("--ref", "codex/apex-26.1", "--apex-release", "26.1")
+        self.assertEqual(success_result.returncode, 0, success_result.stdout + success_result.stderr)
+        self.assertEqual(self.lock()["templateRef"], "codex/apex-26.1")
+        self.assertEqual(self.lock()["apexRelease"], "26.1")
+
+    def test_template_ref_only_lock_resolves_and_persists_manifest_release(self) -> None:
+        git(self.template, "branch", "codex/apex-26.1")
+        ref_only_lock = {
+            "schemaVersion": 1,
+            "upstream": str(self.template),
+            "commit": git(self.template, "rev-parse", "HEAD"),
+            "templateRef": "codex/apex-26.1",
+            "files": {
+                "AGENTS.md": hashlib.sha256(b"rules v1\n").hexdigest(),
+                "docs/migration-rules.md": hashlib.sha256(b"migration rules v1\n").hexdigest(),
+                "scripts/tool.sh": hashlib.sha256(b"echo v1\n").hexdigest(),
+                "scripts/old.sh": hashlib.sha256(b"echo old\n").hexdigest(),
+                "template-manifest.json": hashlib.sha256((self.project / "template-manifest.json").read_bytes()).hexdigest(),
+            },
+        }
+        write(self.project, {".template-lock.json": json.dumps(ref_only_lock, indent=2) + "\n"})
+        commit_all(self.project, "ref-only lock")
+
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lock()["templateRef"], "codex/apex-26.1")
+        self.assertEqual(self.lock()["apexRelease"], "26.1")
+
+    def test_bootstrap_on_non_main_default_branch_records_actual_default_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            custom_template = Path(temp_dir) / "custom_template"
+            custom_project = Path(temp_dir) / "custom_project"
+            init_repo(custom_template)
+            # Create template with default branch 'develop'
+            git(custom_template, "checkout", "-b", "develop")
+            custom_manifest = {**MANIFEST, "upstream": str(custom_template)}
+            write(custom_template, {
+                "template-manifest.json": json.dumps(custom_manifest),
+                "AGENTS.md": "rules develop\n",
+                "docs/migration-rules.md": "migration rules v1\n",
+                "AGENTS.project.md": "<!-- placeholder -->\n",
+                "scripts/tool.sh": "echo v1\n",
+                "scripts/old.sh": "echo old\n",
+                "docs/plan.md": "template only\n",
+            })
+            commit_all(custom_template, "init on develop")
+
+            # Project without lock
+            init_repo(custom_project)
+            write(custom_project, {
+                "template-manifest.json": json.dumps(custom_manifest),
+                "AGENTS.md": "rules develop\n",
+                "docs/migration-rules.md": "migration rules v1\n",
+                "AGENTS.project.md": "our project rules\n",
+                "scripts/tool.sh": "echo v1\n",
+                "scripts/old.sh": "echo old\n",
+            })
+            commit_all(custom_project, "init project")
+
+            # First adoption (bootstrap)
+            result = subprocess.run(
+                [sys.executable, str(ENGINE), "--project-root", str(custom_project), "--source", str(custom_template)],
+                text=True, capture_output=True, check=False
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lock_data = json.loads((custom_project / ".template-lock.json").read_text(encoding="utf-8"))
+            self.assertEqual(lock_data["templateRef"], "develop")
+            self.assertEqual(lock_data["apexRelease"], "26.1")
+            commit_all(custom_project, "commit lock")
+
+            # Create an alternate branch in template with new commits
+            git(custom_template, "checkout", "-b", "feature-x")
+            write(custom_template, {"AGENTS.md": "rules feature-x\n"})
+            commit_all(custom_template, "feature-x commit")
+            # And an update on develop
+            git(custom_template, "checkout", "develop")
+            write(custom_template, {"AGENTS.md": "rules develop update\n"})
+            commit_all(custom_template, "develop update")
+
+            # Subsequent upgrade without --ref must track recorded develop ref, not switch
+            result2 = subprocess.run(
+                [sys.executable, str(ENGINE), "--project-root", str(custom_project), "--source", str(custom_template)],
+                text=True, capture_output=True, check=False
+            )
+            self.assertEqual(result2.returncode, 0, result2.stdout + result2.stderr)
+            self.assertEqual((custom_project / "AGENTS.md").read_text(encoding="utf-8"), "rules develop update\n")
+
+    def test_schema_1_manifest_rejects_unsupported_apex_release(self) -> None:
+        bad_manifest = {**MANIFEST, "schemaVersion": 1, "apexRelease": "26.2", "upstream": str(self.template)}
+        write(self.template, {"template-manifest.json": json.dumps(bad_manifest)})
+        commit_all(self.template, "bad schema 1 manifest")
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("schema-1 template manifest requires apexRelease 26.1", result.stderr)
+
+    def test_bootstrap_detached_head_fails_closed_without_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            detached_template = Path(temp_dir) / "detached_template"
+            detached_project = Path(temp_dir) / "detached_project"
+            init_repo(detached_template)
+            write(detached_template, {
+                "template-manifest.json": json.dumps({**MANIFEST, "upstream": str(detached_template)}),
+                "AGENTS.md": "rules v1\n",
+                "docs/migration-rules.md": "rules\n",
+                "scripts/tool.sh": "echo v1\n",
+                "AGENTS.project.md": "<!-- placeholder -->\n",
+            })
+            commit_all(detached_template, "v1")
+            head_commit = git(detached_template, "rev-parse", "HEAD")
+            git(detached_template, "checkout", "--detach", head_commit)
+            git(detached_template, "branch", "-D", "main")
+
+            init_repo(detached_project)
+            write(detached_project, {
+                "template-manifest.json": json.dumps({**MANIFEST, "upstream": str(detached_template)}),
+                "AGENTS.md": "rules v1\n",
+                "docs/migration-rules.md": "rules\n",
+                "scripts/tool.sh": "echo v1\n",
+                "AGENTS.project.md": "custom project rules\n",
+            })
+            commit_all(detached_project, "init project")
+
+            result = subprocess.run(
+                [sys.executable, str(ENGINE), "--project-root", str(detached_project), "--source", str(detached_template)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("could not determine template default branch from remote HEAD", result.stderr)
 
     def read(self, relative: str) -> str:
         return (self.project / relative).read_text(encoding="utf-8")
@@ -1044,6 +1300,169 @@ class LineEndingPlanTests(unittest.TestCase):
 
             self.assertEqual((project / "AGENTS.md").read_bytes(), b"rules v1\n")
             self.assertFalse((project / upgrade_engine.LOCK_NAME).exists())
+
+
+
+class ConservativeOwnershipUpgradeTests(unittest.TestCase):
+    """Verify conservative file-level ownership, ensuring custom tests, project plans,
+    custom agent rules, durable documentation, and recovery files survive upgrades without sweeps.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        base = Path(self.temporary.name)
+        self.template = base / "template"
+        self.project = base / "project"
+        init_repo(self.template)
+        template_manifest = {
+            "schemaVersion": 2,
+            "apexRelease": "26.2",
+            "minimumSqlclVersion": "26.3.0.0",
+            "upstream": str(self.template),
+            "templateOwned": [
+                "AGENTS.md",
+                "template-manifest.json",
+                "scripts/**",
+                "docs/migration-rules.md",
+                "tools/graphify/**",
+            ],
+            "projectOwned": [
+                "AGENTS.project.md",
+                ".agents/rules/project.md",
+                "PROJECT.md",
+            ],
+            "templateOnly": [
+                "docs/superpowers/**",
+            ],
+        }
+        write(
+            self.template,
+            {
+                "template-manifest.json": json.dumps(template_manifest),
+                "AGENTS.md": "rules v1\n",
+                "docs/migration-rules.md": "migration rules v1\n",
+                "AGENTS.project.md": "<!-- placeholder -->\n",
+                ".agents/rules/project.md": "<!-- project rule placeholder -->\n",
+                "PROJECT.md": "<!-- project overview placeholder -->\n",
+                "scripts/tool.sh": "echo v1\n",
+                "tools/graphify/requirements.txt": "graphifyy==0.9.75\n",
+                "docs/superpowers/plans/template-plan.md": "historical template plan\n",
+            },
+        )
+        commit_all(self.template, "v1")
+
+        init_repo(self.project)
+        write(
+            self.project,
+            {
+                "template-manifest.json": json.dumps(template_manifest),
+                "AGENTS.md": "rules v1\n",
+                "docs/migration-rules.md": "migration rules v1\n",
+                "AGENTS.project.md": "our project rules\n",
+                ".agents/rules/project.md": "our project rules doc\n",
+                ".agents/rules/custom_workflow.md": "custom workflow\n",
+                "PROJECT.md": "Our Custom Project Overview\n",
+                "scripts/tool.sh": "echo v1\n",
+                "tools/graphify/requirements.txt": "graphifyy==0.9.75\n",
+                ".env": "DEVELOPER_NAME=ALICE\n",
+                "apps/DEMO/100/application.apx": "app DEMO ()\n",
+                "migrations/2026-10-01_init/001-table.sql": "CREATE TABLE T (ID NUMBER);\n",
+                "tests/test_custom_feature.py": "# project-specific test\n",
+                "tests/integration/test_orders.py": "# project-specific integration test\n",
+                "docs/superpowers/plans/2026-10-15-custom-plan.md": "# Linked project plan\n",
+                "docs/architecture.md": "# Project Architecture\n",
+                ".venv-graphify/pyvenv.cfg": "home = /mock/py\n",
+                "graphify-out/cache/ast/old.json": "{\"nodes\":[]}\n",
+            },
+        )
+        commit_all(self.project, "project initialized")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def upgrade(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(ENGINE), "--project-root", str(self.project), "--source", str(self.template), *extra],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_unknown_and_project_specific_files_survive_upgrade(self) -> None:
+        # First adopt lock
+        res1 = self.upgrade("--apex-release", "26.2", "--ref", "main")
+        self.assertEqual(res1.returncode, 0, res1.stdout + res1.stderr)
+        commit_all(self.project, "lock adopted")
+
+        # Template releases v2: updates tool.sh and adds scripts/new_tool.sh
+        write(
+            self.template,
+            {
+                "scripts/tool.sh": "echo v2\n",
+                "scripts/new_tool.sh": "echo new\n",
+                "docs/superpowers/plans/new-template-plan.md": "new template plan\n",
+            },
+        )
+        commit_all(self.template, "v2")
+
+        res2 = self.upgrade()
+        self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
+
+        # Assert templateOwned files updated
+        self.assertEqual((self.project / "scripts/tool.sh").read_text(encoding="utf-8"), "echo v2\n")
+        self.assertEqual((self.project / "scripts/new_tool.sh").read_text(encoding="utf-8"), "echo new\n")
+
+        # Assert project-specific test files survive
+        self.assertTrue((self.project / "tests/test_custom_feature.py").is_file())
+        self.assertEqual((self.project / "tests/test_custom_feature.py").read_text(encoding="utf-8"), "# project-specific test\n")
+        self.assertTrue((self.project / "tests/integration/test_orders.py").is_file())
+
+        # Assert linked project plans survive
+        self.assertTrue((self.project / "docs/superpowers/plans/2026-10-15-custom-plan.md").is_file())
+        self.assertEqual((self.project / "docs/superpowers/plans/2026-10-15-custom-plan.md").read_text(encoding="utf-8"), "# Linked project plan\n")
+
+        # Assert templateOnly file from template was NOT copied into project
+        self.assertFalse((self.project / "docs/superpowers/plans/new-template-plan.md").exists())
+
+        # Assert project-owned files survive
+        self.assertEqual((self.project / "PROJECT.md").read_text(encoding="utf-8"), "Our Custom Project Overview\n")
+        self.assertEqual((self.project / "AGENTS.project.md").read_text(encoding="utf-8"), "our project rules\n")
+        self.assertEqual((self.project / ".agents/rules/project.md").read_text(encoding="utf-8"), "our project rules doc\n")
+        self.assertEqual((self.project / ".agents/rules/custom_workflow.md").read_text(encoding="utf-8"), "custom workflow\n")
+        self.assertEqual((self.project / "docs/architecture.md").read_text(encoding="utf-8"), "# Project Architecture\n")
+
+        # Assert project database/app/env files survive
+        self.assertEqual((self.project / ".env").read_text(encoding="utf-8"), "DEVELOPER_NAME=ALICE\n")
+        self.assertTrue((self.project / "apps/DEMO/100/application.apx").is_file())
+        self.assertTrue((self.project / "migrations/2026-10-01_init/001-table.sql").is_file())
+
+        # Assert lock does NOT manage project files or graph cache
+        lock_data = json.loads((self.project / ".template-lock.json").read_text(encoding="utf-8"))
+        self.assertNotIn("tests/test_custom_feature.py", lock_data["files"])
+        self.assertNotIn("docs/superpowers/plans/2026-10-15-custom-plan.md", lock_data["files"])
+        self.assertNotIn(".venv-graphify/pyvenv.cfg", lock_data["files"])
+        self.assertNotIn("graphify-out/cache/ast/old.json", lock_data["files"])
+        self.assertNotIn(".env", lock_data["files"])
+
+    def test_edited_inherited_file_produces_conflict_candidate_without_overwriting(self) -> None:
+        # First adopt lock
+        res1 = self.upgrade("--apex-release", "26.2", "--ref", "main")
+        self.assertEqual(res1.returncode, 0, res1.stdout + res1.stderr)
+        commit_all(self.project, "lock adopted")
+
+        # Project customizes AGENTS.md
+        write(self.project, {"AGENTS.md": "customized rules\n"})
+        commit_all(self.project, "custom rules")
+
+        # Template updates AGENTS.md
+        write(self.template, {"AGENTS.md": "upstream rules v2\n"})
+        commit_all(self.template, "upstream v2")
+
+        res2 = self.upgrade()
+        self.assertEqual(res2.returncode, 1, res2.stdout + res2.stderr)
+        self.assertIn("CONFLICT AGENTS.md", res2.stdout)
+        self.assertEqual((self.project / "AGENTS.md").read_text(encoding="utf-8"), "customized rules\n")
+        self.assertEqual((self.project / "AGENTS.md.template-new").read_text(encoding="utf-8"), "upstream rules v2\n")
 
 
 if __name__ == "__main__":

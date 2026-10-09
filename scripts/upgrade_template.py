@@ -244,6 +244,9 @@ def load_manifest(template_root: Path) -> dict:
         raise UpgradeError("template manifest must be an object with integer schemaVersion")
     if manifest["schemaVersion"] not in (1, 2):
         raise UpgradeError("unsupported template manifest schemaVersion; upgrade this script first")
+    if manifest["schemaVersion"] == 1:
+        if "apexRelease" in manifest and manifest["apexRelease"] != "26.1":
+            raise UpgradeError("schema-1 template manifest requires apexRelease 26.1 when present")
     if manifest["schemaVersion"] == 2:
         if manifest.get("apexRelease") != "26.2":
             raise UpgradeError("schema-2 template manifest requires apexRelease 26.2")
@@ -705,10 +708,28 @@ def main(argv: list[str] | None = None) -> int:
         if not source:
             raise UpgradeError("no template source recorded in lock or manifest; pass --source <template Git URL or path>")
         source = _normalize_source(source)
+        if lock_hash is not None and "templateRef" not in lock and not args.ref:
+            if not args.dry_run:
+                raise UpgradeError(
+                    "legacy template lock is missing templateRef; pass --ref to choose an explicit template ref before applying"
+                )
+            print(
+                "notice: legacy template lock is missing templateRef; pass --ref before applying",
+                file=sys.stderr,
+            )
         with tempfile.TemporaryDirectory(prefix="apex-template-") as temporary:
             template_root = Path(temporary) / "template"
             chosen_ref = args.ref or lock.get("templateRef")
             commit = fetch_template(source, chosen_ref, template_root)
+            if not chosen_ref:
+                try:
+                    origin_head = run_git(template_root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
+                    default_branch = origin_head[len("origin/"):] if origin_head.startswith("origin/") else origin_head
+                except UpgradeError:
+                    default_branch = run_git(template_root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+                if not default_branch or default_branch == "HEAD":
+                    raise UpgradeError("could not determine template default branch from remote HEAD; pass --ref to choose an explicit template ref")
+                chosen_ref = default_branch
             manifest = load_manifest(template_root)
             release = manifest.get("apexRelease", "26.1")
             if release and args.apex_release and args.apex_release != release:
@@ -719,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
             if chosen_ref:
                 metadata["templateRef"] = chosen_ref
             if release or args.apex_release or lock.get("apexRelease"):
-                metadata["apexRelease"] = release or args.apex_release or lock["apexRelease"]
+                metadata["apexRelease"] = release or args.apex_release or lock.get("apexRelease")
             template_owned, placeholders = classify(template_root, manifest)
             validate_lock_ownership(lock, manifest)
             actions, new_lock = plan_upgrade(project_root, template_root, template_owned, placeholders, lock)

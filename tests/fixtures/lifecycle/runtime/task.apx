@@ -1,0 +1,16 @@
+taskDefinition TEMPLATE_LIFECYCLE_PROBE (
+    name: Template lifecycle probe
+    type: action
+    task {
+        subject: Template qualification task
+        priority: 3
+    }
+    participant (
+        type: potentialOwner
+        identityType: user
+        value {
+            type: staticValue
+            staticValue: DEMO
+        }
+    )
+)

@@ -28,29 +28,27 @@ Detect what is already present; never reinstall something that answers:
 | Python 3.10+ | `python3 --version` |
 | Node.js | `node --version` |
 | uv | `uv --version` |
-| Graphify | `graphify --version` |
+| Graphify (optional) | `python3 scripts/graphify_project.py verify` |
 | SQLcl | `sql -v` |
 | Git | `git --version` |
 | perl | `perl --version` |
 
 Report exactly what is missing, then ask for approval before installing
 anything. Install only what the user approves, into user-controlled locations
-on `PATH`, never into this repository.
+on `PATH`, never into this repository (except the project-isolated `.venv-graphify/`
+virtual environment for optional Graphify).
 
-Graphify is the one case with a known-good command, because its distribution
-name (`graphifyy`) differs from its command name (`graphify`) and its SQL
-parser is a separate package:
+Graphify is optional and uses an isolated project virtual environment (`.venv-graphify/`)
+with pinned dependencies in `tools/graphify/requirements.txt`:
 
 ```bash
-uv tool install graphifyy --with tree-sitter-sql
-python3 scripts/setup_graphify_apx.py
+python3 scripts/graphify_project.py setup
 ```
 
-If `graphify` already answers but `.sql` sources are not being indexed, its
-SQL parser is missing; reinstall with `uv tool install graphifyy --with
-tree-sitter-sql --force`. Do not run `graphify extract` during initialization —
-`apps/` and `database/` are still empty, and extraction belongs after the first
-export.
+Do not install or patch shared global packages or modify another project's
+environment. Do not run `python3 scripts/graphify_project.py extract` during
+initialization — `apps/` and `database/` are still empty, and extraction belongs
+after the first export.
 
 For Python, Node.js, uv, SQLcl, and perl, ask which platform package manager
 the user wants to use and follow that tool's own documented command. Do not
@@ -213,6 +211,12 @@ literal configuration and SQLcl saved connection names; credentials stay in
 SQLcl's secure store. The template makes root `.env` available to Git and
 preserves it during upgrades, including when tracked. Do not stage, commit,
 or push it without an explicit instruction.
+
+If the project was newly cloned from the template, direct the user to
+[docs/GETTING_STARTED.md#post-clone-cleanup](docs/GETTING_STARTED.md#post-clone-cleanup)
+for file-level provenance review against `template-manifest.json` and `.template-lock.json`,
+preserving project tests, plans, rules, and documentation rather than performing
+broad directory sweeps.
 
 ## Common mistakes
 

@@ -28,10 +28,12 @@ Commands:
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
                                               Confirm a promotion or print a DBA runbook
-  upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.2] [--dry-run]
+  upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.1|26.2] [--dry-run]
                                               Update template-owned files from the template
+  verify-local [--format text|json] [--skills-root <path>] [...] [--live]
+                                              Validate local environment, lock, apps and skills read-only
 Options:
-  --schema <NAME>                             Run one configured schema (any command except upgrade-template)
+  --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
   --help                                      Show this help
 USAGE
 }
@@ -47,7 +49,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -158,12 +160,13 @@ case "$command_name" in
       rm -rf -- "$doctor_workdir"
       doctor_workdir=""
     fi
-    for doctor_profile in apex tables code ords; do
+    for doctor_profile in apex tables code migration ords; do
       doctor_script=doctor.sql
       case "$doctor_profile" in
         apex)   doctor_schemas="$APEX_PARSING_SCHEMA"; doctor_connections="$APEX_SQLCL_CONNECTION"; doctor_users="$APEX_EXPECTED_USER" ;;
         tables) doctor_schemas="$TABLES_SCHEMA"; doctor_connections="$TABLES_SQLCL_CONNECTION"; doctor_users="$TABLES_EXPECTED_USER" ;;
         code)   doctor_schemas="$CODE_SCHEMA"; doctor_connections="$CODE_SQLCL_CONNECTION"; doctor_users="$CODE_EXPECTED_USER" ;;
+        migration) doctor_schemas="${MIGRATION_SCHEMA:-}"; doctor_connections="${MIGRATION_SQLCL_CONNECTION:-}"; doctor_users="${MIGRATION_EXPECTED_USER:-}" ;;
         ords)   doctor_schemas="$ORDS_SCHEMA"; doctor_connections="$ORDS_SQLCL_CONNECTION"; doctor_users="$ORDS_EXPECTED_USER"; doctor_script=doctor_ords.sql ;;
       esac
       [ -n "$doctor_schemas" ] || continue
@@ -259,6 +262,23 @@ case "$command_name" in
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/deploy.sh" "$@"
     ;;
+  verify-local)
+    verify_script="$REPO_ROOT/scripts/verify_local.py"
+    verify_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          verify_script="$(cygpath -m "$verify_script")"
+          verify_root="$(cygpath -m "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+
+    exec python3 "$verify_script" --repo-root "$verify_root" "$@"
+    ;;
+
+
+
   upgrade-template)
     # A native Python cannot open /c/... paths. Git Bash rewrites them for it only when
     # they hold no glob characters such as [1], so convert them here.

@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,6 +41,17 @@ class Backend:
 
 
 class UpgradeApexlangTests(unittest.TestCase):
+    def test_conversion_and_native_lock_use_the_same_production_identity_guard(self):
+        from scripts.db_targets import Target
+        backend = NativeBackend.__new__(NativeBackend)
+        backend.target = Target("dev", "fake-dev", "DEMO", "DEMO", "development")
+        backend.workspace, backend.app_id = "TEAM", 100
+        context = backend.context()
+        lock = (ROOT / "scripts/application_lock.sql").read_text()
+        predicate = re.compile(r"if (regexp_like\(.*?) then", re.DOTALL)
+        normalized = lambda source: " ".join(predicate.search(source).group(1).split())
+        self.assertEqual(normalized(context), normalized(lock))
+
     def test_legacy_files_conversion_refuses_unqualified_overrides_before_write(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -24,10 +24,12 @@ separate file changes only and do not isolate a shared APEX application.
 | see what an AI assistant can do here | [Skills and agent support](#skills-and-agent-support) |
 
 After cloning this template into your own project, complete the
-[post-clone cleanup](docs/GETTING_STARTED.md#post-clone-cleanup). Downstream
-projects remove inherited template-maintenance tests, GitHub workflows and
-Dependabot; the original template keeps them for its own validation. Retain
-project-specific tests and the operational scripts, `.env`, manifest and lock.
+[post-clone cleanup](docs/GETTING_STARTED.md#post-clone-cleanup) via file-level
+provenance review against `template-manifest.json` and `.template-lock.json`. Downstream
+projects may prune inherited template-maintenance tests and CI workflows; the
+original template keeps them for its own validation. Always retain
+project-specific regression tests, linked project plans, durable docs, custom rules,
+operational scripts, `.env`, manifest and lock.
 
 ## What you get
 
@@ -242,6 +244,13 @@ and target parsing schema. Keep `dev.json` aligned with the configured DEV
 profile. A staging descriptor is needed only when the project uses staging.
 
 ## Several schemas in one workspace
+
+Publishes and deployments verify automation/workflow/task state as well as
+canonical source. A lifecycle refusal preserves recovery evidence; source
+verification alone does not mean runtime readiness. Read the
+[runtime verification and recovery rules](docs/publish-rules.md#runtime-verification-after-import).
+Explicit local test modes are documented in
+[local qualification](docs/local-qualification.md).
 
 The schema, SQLcl connection, and expected-user values in each profile are
 comma-separated lists aligned by position. For example, this DEV setup uses
@@ -597,6 +606,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
+| `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
 
 Exit status, the same in Bash and PowerShell:
 
@@ -628,31 +638,33 @@ database reads and writes, and PL/SQL calls — rather than as generic SQL. The
 graph reflects this repository's files; export first when it must describe
 current Builder state.
 
-Install Graphify and its SQL parser (the distribution is `graphifyy`, the
-command is `graphify`), then configure a supported semantic backend:
+Install the optional, project-isolated Graphify environment into `.venv-graphify/`
+using the pinned dependencies in `tools/graphify/requirements.txt`:
+
+Optional Graphify requires Python 3.12+; the core commands still support Python
+3.10+. After a Graphify upgrade, rerun project setup and read-only verification.
 
 ```bash
-uv tool install graphifyy --with tree-sitter-sql
-python3 scripts/setup_graphify_apx.py
-graphify extract . --force
+python3 scripts/graphify_project.py setup
+python3 scripts/graphify_project.py extract
 ```
 
-- `python3 scripts/setup_graphify_apx.py --verify` checks the installation
-  without changing it; rerun setup after **every Graphify upgrade**.
+- `python3 scripts/graphify_project.py verify` checks the isolated installation,
+  pinned versions, and corpus coverage without modifying any files.
+- `python3 scripts/graphify_project.py setup` creates or updates the isolated
+  `.venv-graphify/` using copy mode, installs pinned dependencies, patches the
+  canonical APEXlang extractor, and clears stale extraction caches.
+- `python3 scripts/graphify_project.py extract` runs extraction within the isolated
+  environment.
 - `python3 scripts/check_graphify_apx.py` before every build, then
   `python3 scripts/check_graphify_apx.py --graph graphify-out/graph.json`
   afterward. Both must pass: Graphify can exit zero after skipping parser
   failures. This checks APEXlang parsing and file presence, not live runtime
   validity or semantic completeness; it uses the default output directory's
   saved corpus exclusions and Git-ignore setting.
-- `graphify update .` after APEXlang or database changes (local, no API cost).
-- `graphify extract .` after changing `app_context`.
-- `python3 scripts/setup_graphify_apx.py` then `graphify update .` after the first
-  `backup-db` or when tables or packages change, so pages link to the real
-  database nodes instead of cached stubs.
-- `graphify extract . --force` after changing `.graphifyignore`.
 
-`graphify-out/` is local and gitignored. See
+`graphify-out/` is local and gitignored; durable documentation belongs in
+project-owned files (`PROJECT.md`, `docs/`, `app_context/`). See
 [`.agents/workflows/graphify.md`](.agents/workflows/graphify.md).
 
 ## Agent guidance
@@ -666,3 +678,18 @@ and [docs/migration-rules.md](docs/migration-rules.md) for migration naming,
 verification, and comparison limits. For browser runtime checks, see
 [Chrome DevTools MCP](docs/CHROME_DEVTOOLS_MCP.md) and use the project browser
 [skill](.agents/skills/chrome-devtools-mcp/SKILL.md).
+
+
+Optional migration profiles let a project mirror code from `CODE` while applying
+migrations to `CUSTDATA` or `API`. Configure `MIGRATION_SCHEMA`,
+`MIGRATION_SQLCL_CONNECTION` and `MIGRATION_EXPECTED_USER` together; use the
+`STAGING_` and `PROD_` prefixes for those environments. Each triple accepts
+position-aligned lists. `--schema API` selects that migration owner even when
+it is absent from `CODE_SCHEMA`. A single DEV migration owner can map to a
+renamed single staging/production owner; unlisted owners never map. If a whole
+triple is absent, migration commands retain the original environment target.
+Partial, empty or misaligned triples refuse before connecting. `check-conflicts`
+uses the same migration identity, and `doctor` includes explicit DEV migration
+identities once per connection/user/schema. Backups and schema comparison keep
+their existing profiles. Flat migration folders require one configured migration
+owner; otherwise use `migrations/<SCHEMA>/…` and keep each batch in one schema.

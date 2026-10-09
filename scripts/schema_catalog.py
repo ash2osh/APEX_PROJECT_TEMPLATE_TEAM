@@ -3,21 +3,27 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
 import shutil
 import tempfile
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from .db_targets import Target, looks_like_production_identity
 from .sqlcl_session import SqlclResult, run_sqlcl
 
 
 SCHEMA_VERSION = 1
+MAX_CATALOG_BYTES = 128 * 1024 * 1024
+CATALOG_ENCODING_GZIP_BASE64 = "CATALOG_ENCODING:gzip-base64-v1"
 SUPPORTED_ROOT_TYPES = {
     "TABLE", "VIEW", "SEQUENCE", "PACKAGE", "PACKAGE BODY", "PROCEDURE",
     "FUNCTION", "TRIGGER", "SYNONYM", "INDEX", "TYPE", "TYPE BODY",
@@ -43,6 +49,7 @@ class ObjectKey:
     owner: str
     name: str
     object_type: str
+    subobject_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,7 +126,10 @@ def _object_rows(rows: object, owner: str) -> dict[ObjectKey, dict]:
             raise CatalogError("catalog inventory contains an incomplete object key")
         if row_owner.upper() != owner:
             raise CatalogError(f"catalog inventory escaped selected owner {owner}")
-        key = ObjectKey(row_owner, name, object_type)
+        subobject_name = row.get("subobject_name")
+        if subobject_name is not None and (not isinstance(subobject_name, str) or not subobject_name):
+            raise CatalogError("catalog inventory contains a malformed subobject name")
+        key = ObjectKey(row_owner, name, object_type, subobject_name or "")
         if key in objects:
             raise CatalogError(f"catalog inventory repeats {row_owner}.{name} ({object_type})")
         objects[key] = dict(row)
@@ -156,6 +166,168 @@ def _coverage(payload: Mapping, target: Target, *, snapshot: bool = False) -> di
     return dict(value)
 
 
+def _reject_json_constant(constant: str) -> None:
+    raise CatalogError(f"catalog payload JSON contains non-standard constant: {constant}")
+
+
+def _strict_json_object_pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise CatalogError(f"catalog payload JSON contains duplicate member key: {key!r}")
+        obj[key] = value
+    return obj
+
+
+def decode_catalog_payload(lines: Sequence[str]) -> dict:
+    """Decode a sequence of framed payload lines into a catalog dictionary.
+
+    Lines may represent either:
+    1. A compressed payload prefixed by exact line 'CATALOG_ENCODING:gzip-base64-v1'
+       followed by base64-encoded gzip chunks.
+    2. A legacy plain-JSON payload (when no CATALOG_ENCODING line is present).
+
+    Enforces MAX_CATALOG_BYTES (128 MiB) during decompression, strict Base64,
+    strict gzip integrity (header, trailer, checksum, truncation, trailing junk/multistream),
+    strict UTF-8, strict JSON, and root/schema/version/phase/duplicate key guards.
+    """
+    if not lines:
+        raise CatalogError("catalog payload is empty")
+
+    first_line = lines[0].rstrip("\r\n")
+    if first_line == CATALOG_ENCODING_GZIP_BASE64:
+        compressed_mode = True
+        payload_chunks = lines[1:]
+    elif first_line.startswith("CATALOG_ENCODING:"):
+        raise CatalogError(f"unsupported catalog encoding: {first_line}")
+    else:
+        compressed_mode = False
+        payload_chunks = lines
+
+    if compressed_mode:
+        if not payload_chunks:
+            raise CatalogError("compressed catalog payload contains no data")
+
+        for chunk in payload_chunks:
+            stripped = chunk.rstrip("\r\n")
+            if not stripped:
+                raise CatalogError("invalid base64: empty lines are not allowed in payload chunks")
+            if any(c.isspace() for c in stripped):
+                raise CatalogError("invalid base64: whitespace is not allowed in payload chunks")
+            if chunk.rstrip("\r\n") != chunk.rstrip():
+                raise CatalogError("invalid base64: whitespace is not allowed in payload chunks")
+
+        b64_joined = "".join(chunk.rstrip("\r\n") for chunk in payload_chunks)
+        try:
+            b64_bytes = b64_joined.encode("ascii")
+        except UnicodeEncodeError as err:
+            raise CatalogError(f"invalid base64 encoding: {err}") from err
+
+        try:
+            compressed_bytes = base64.b64decode(b64_bytes, validate=True)
+        except (binascii.Error, ValueError) as err:
+            raise CatalogError(f"invalid base64 encoding: {err}") from err
+
+        if len(compressed_bytes) < 10 or compressed_bytes[:2] != b"\x1f\x8b" or compressed_bytes[2] != 8:
+            raise CatalogError("catalog payload is not a valid gzip stream")
+
+        decomp = zlib.decompressobj(31)
+        chunk_size = 64 * 1024
+        total_decoded = 0
+        decoded_pieces: list[bytes] = []
+        remaining = compressed_bytes
+
+        try:
+            while True:
+                out = decomp.decompress(remaining, chunk_size)
+                if out:
+                    total_decoded += len(out)
+                    if total_decoded > MAX_CATALOG_BYTES:
+                        raise CatalogError(
+                            f"decoded catalog payload exceeds maximum permitted size ({MAX_CATALOG_BYTES} bytes)"
+                        )
+                    decoded_pieces.append(out)
+                if decomp.eof:
+                    break
+                if not out and not decomp.unconsumed_tail:
+                    break
+                remaining = decomp.unconsumed_tail
+
+        except zlib.error as err:
+            raise CatalogError(f"catalog payload gzip decompression failed: {err}") from err
+
+        if not decomp.eof:
+            raise CatalogError("catalog payload gzip stream is truncated")
+        if decomp.unused_data:
+            raise CatalogError("catalog payload gzip stream contains trailing data or multiple streams")
+        if total_decoded == 0:
+            raise CatalogError("catalog payload decompressed to empty content")
+
+        raw_bytes = b"".join(decoded_pieces)
+        try:
+            decoded_text = raw_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as err:
+            raise CatalogError(f"catalog payload contains invalid UTF-8: {err}") from err
+
+    else:
+        decoded_text = "".join(payload_chunks)
+        try:
+            encoded_len = len(decoded_text.encode("utf-8"))
+        except UnicodeEncodeError as err:
+            raise CatalogError(f"catalog payload contains invalid UTF-8: {err}") from err
+        if encoded_len > MAX_CATALOG_BYTES:
+            raise CatalogError(
+                f"decoded catalog payload exceeds maximum permitted size ({MAX_CATALOG_BYTES} bytes)"
+            )
+
+    try:
+        payload = json.loads(
+            decoded_text,
+            object_pairs_hook=_strict_json_object_pairs_hook,
+            parse_constant=_reject_json_constant,
+        )
+    except CatalogError:
+        raise
+    except (json.JSONDecodeError, UnicodeError, ValueError) as err:
+        raise CatalogError(f"catalog payload JSON is truncated or malformed: {err}") from err
+
+    if not isinstance(payload, dict):
+        raise CatalogError("catalog payload root must be an object")
+
+    version = payload.get("schemaVersion")
+    if type(version) is not int or version != SCHEMA_VERSION:
+        raise CatalogError("catalog payload schema version is unsupported")
+
+    phase = payload.get("phase")
+    if type(phase) is not str or phase not in {"inventory", "snapshot"}:
+        raise CatalogError("catalog payload phase is unsupported")
+
+    for field_name in ("objects", "before", "after"):
+        if field_name in payload:
+            rows = payload.get(field_name)
+            if not isinstance(rows, list):
+                raise CatalogError(f"catalog inventory {field_name} must be an array")
+            seen_keys: set[tuple[str, str, str, str]] = set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise CatalogError("catalog inventory contains a malformed object row")
+                owner = row.get("owner")
+                name = row.get("name")
+                obj_type = row.get("type")
+                if not all(isinstance(v, str) and v for v in (owner, name, obj_type)):
+                    raise CatalogError("catalog inventory contains an incomplete object key")
+                sub = row.get("subobject_name")
+                if sub is not None and (type(sub) is not str or not sub):
+                    raise CatalogError("catalog inventory contains a malformed subobject name")
+                sub_str = sub if isinstance(sub, str) else ""
+                k = (owner.upper(), name, obj_type, sub_str)
+                if k in seen_keys:
+                    raise CatalogError(f"catalog inventory repeats {owner}.{name} ({obj_type})")
+                seen_keys.add(k)
+
+    return payload
+
+
 def _payload_frames(output: str, phase: str) -> list[dict]:
     frames: list[dict] = []
     collecting = False
@@ -178,12 +350,13 @@ def _payload_frames(output: str, phase: str) -> list[dict]:
                 continue
             if not collecting:
                 raise CatalogError("catalog payload end marker has no matching begin marker")
-            try:
-                payload = json.loads("".join(pieces))
-            except (json.JSONDecodeError, UnicodeError) as error:
-                raise CatalogError(f"catalog payload JSON is truncated or malformed: {error}") from error
-            if not isinstance(payload, dict):
-                raise CatalogError("catalog payload root must be an object")
+            # SQLcl 26.3 emits a blank presentation line after DBMS_OUTPUT.
+            # Interior whitespace/chunks remain strict; gzip EOF/CRC is still checked.
+            while pieces and pieces[-1] == "":
+                pieces.pop()
+            payload = decode_catalog_payload(pieces)
+            if payload.get("phase") != phase:
+                raise CatalogError("catalog payload schema version or phase is unsupported")
             frames.append(payload)
             collecting = False
             verified = False
@@ -201,7 +374,8 @@ def _payload_frames(output: str, phase: str) -> list[dict]:
     if not verified:
         raise CatalogError(f"catalog {phase} payload is missing its verification sentinel")
     for payload in frames:
-        if payload.get("schemaVersion") != SCHEMA_VERSION or payload.get("phase") != phase:
+        version = payload.get("schemaVersion")
+        if type(version) is not int or version != SCHEMA_VERSION or payload.get("phase") != phase:
             raise CatalogError("catalog payload schema version or phase is unsupported")
     return frames
 
@@ -229,7 +403,7 @@ def parse_inventory(output: str, target: Target) -> SchemaInventory:
 def _inventory_signature(objects: Mapping[ObjectKey, Mapping]) -> tuple:
     return tuple(sorted(
         (
-            key.owner, key.name, key.object_type, row.get("status"), row.get("last_ddl_time"),
+            key.owner, key.name, key.object_type, key.subobject_name, row.get("status"), row.get("last_ddl_time"),
             row.get("object_id"), row.get("data_object_id"), row.get("object_timestamp"), row.get("identity_sequence"),
         )
         for key, row in objects.items()

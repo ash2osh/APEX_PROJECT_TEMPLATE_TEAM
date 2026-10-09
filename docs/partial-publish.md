@@ -68,6 +68,12 @@ creation and promotion retain their coordination requirements.
 
 ## Recovery
 
+Partial publish also compares scoped automation/workflow/task state before and
+after source verification. The no-notice eligibility rules do not bypass this
+gate. `partial.json` distinguishes `sourceVerified` from `lifecycleStatus`;
+attention or an unavailable post-read retains the old baseline and native lock.
+Follow the [runtime recovery rules](publish-rules.md#runtime-verification-after-import).
+
 Before an import attempt, failure releases only a proven run-owned application
 lock and keeps local edits. After an attempted but unverified write, failure
 retains the old source/baseline, application lock and private recovery evidence

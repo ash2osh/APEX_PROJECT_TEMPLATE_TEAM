@@ -95,7 +95,21 @@ refresh below and report its status to the developer in the current chat.
   ambiguous partial writes or retained locks require recovery communication.
   Partial mode refuses `--force` and non-DEV targets; it never falls back to full
   import. Review all synchronized source, including unrelated live changes.
+- **Runtime verification:** Full/partial publish and promotion require scoped
+  automation/workflow/task observations before and after import, independently
+  of exact source verification. Lifecycle attention or an unavailable post-read
+  retains the old DEV baseline, run-owned lock and recovery evidence. Inspect
+  `sourceVerified`, `lifecycleStatus` and the lifecycle report before recovery.
+  Never automatically enable an automation, resume a workflow or repair a task;
+  `--force` does not bypass this gate. Follow
+  [docs/publish-rules.md](docs/publish-rules.md#runtime-verification-after-import).
 - **Migrations:** Put each migration in
+  an independently configured migration owner when needed: the optional
+  `MIGRATION_SCHEMA`, `MIGRATION_SQLCL_CONNECTION`, `MIGRATION_EXPECTED_USER`
+  triple and its `STAGING_` / `PROD_` equivalents must be configured together.
+  Each accepts aligned lists. An absent triple uses the original environment
+  profile; an incomplete or empty triple refuses. Metadata mirrors retain
+  their own profiles. Then put each migration in
   `migrations/YYYY-MM-DD_<name>-rNNN/` with consecutive named SQL steps such as
   `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
   path. Keep source immutable after a write attempt; a follow-up uses the next
@@ -119,12 +133,14 @@ refresh below and report its status to the developer in the current chat.
   `--manual` to print a DBA runbook without connecting. A deployment writes
   to the selected APEX workspace and parsing schema.
 - **Other commands:** `scripts/team.sh doctor` validates `.env` and performs a
-  read-only SQLcl identity check. `scripts/team.sh backup-db` refreshes the
-  local table and code mirrors, and the ORDS mirror when the ORDS profile
-  exists. `scripts/team.sh backup-ords` exports ORDS metadata only: it never
-  enables REST, imports, changes ORDS configuration, creates metadata, grants
-  privileges or commits, and it never exports OAuth clients or secrets. Read
-  [docs/ords-export.md](docs/ords-export.md) before changing it.
+  read-only SQLcl identity check. `scripts/team.sh verify-local` validates local
+  configuration, lock, app descriptors and native Oracle skills offline.
+  `scripts/team.sh backup-db` refreshes the local table and code mirrors, and the
+  ORDS mirror when the ORDS profile exists. `scripts/team.sh backup-ords`
+  exports ORDS metadata only: it never enables REST, imports, changes ORDS
+  configuration, creates metadata, grants privileges or commits, and it never
+  exports OAuth clients or secrets. Read [docs/ords-export.md](docs/ords-export.md)
+  before changing it.
 
 ## Optional Tooling
 
@@ -132,10 +148,12 @@ refresh below and report its status to the developer in the current chat.
 optional; every script works without it. Its rules live in
 [`.agents/rules/graphify.md`](.agents/rules/graphify.md) and
 [`.agents/workflows/graphify.md`](.agents/workflows/graphify.md), and every rule
-is gated on `graphify-out/graph.json` existing. Install it with
-`uv tool install graphifyy --with tree-sitter-sql`, run
-`python3 scripts/setup_graphify_apx.py` (rerun after every Graphify upgrade;
-`--verify` checks without changing anything), then `graphify extract . --force`.
+is gated on `graphify-out/graph.json` existing. Explicit setup uses
+`python3 scripts/graphify_project.py setup` with pinned dependencies in the
+project's ignored `.venv-graphify/` (Python 3.12+). Run
+`python3 scripts/graphify_project.py verify` for read-only package/cache/coverage
+checks, and `python3 scripts/graphify_project.py extract` to rebuild the canonical
+`graphify-out/`. Never patch a global/shared installation or another project.
 The corpus is a domain allowlist of `apps/`, `database/`, and `app_context/`.
 Graphify links cross-schema references and mirrored synonyms when their targets
 are present in the database mirror. The graph reflects this repository's

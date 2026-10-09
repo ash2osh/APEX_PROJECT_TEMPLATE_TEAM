@@ -1,0 +1,24 @@
+automation TEMPLATE_LIFECYCLE_PROBE (
+    name: Template lifecycle probe
+    execution {
+        type: scheduled
+        actionsInitiatedOn: always
+        scheduleExpression: FREQ=DAILY;BYHOUR=0;BYMINUTE=0;BYSECOND=0
+        scheduleStatus: disabled
+    }
+    action noop (
+        name: No persistent side effects
+        type: executeCode
+        execution {
+            sequence: 10
+        }
+        source {
+            location: localDatabase
+            language: plsql
+            plsqlCode:
+                ```plsql
+                begin null; end;
+                ```
+        }
+    )
+)

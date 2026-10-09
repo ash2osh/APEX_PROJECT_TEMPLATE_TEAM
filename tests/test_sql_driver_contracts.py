@@ -85,7 +85,22 @@ class SqlDriverContractTests(unittest.TestCase):
                     with self.subTest(driver=path.name, buffer=name):
                         self.assertGreaterEqual(size, 4 * int(fill.group(1)), f"{name} VARCHAR2({size}) cannot hold {fill.group(1)} four-byte characters")
                         self.assertLessEqual(size, 32767)
-        self.assertGreaterEqual(checked, 3, "the chunking loops were not found; update this test")
+        self.assertGreaterEqual(checked, 2, "the chunking loops were not found; update this test")
+
+        # schema_catalog.sql now uses compressed BLOB chunking with 12000-byte raw pieces
+        catalog_contents = (ROOT / "scripts" / "schema_catalog.sql").read_text(encoding="utf-8")
+        self.assertIn("CATALOG_ENCODING:gzip-base64-v1", catalog_contents)
+        self.assertRegex(catalog_contents, r"(?i)DBMS_LOB\.SUBSTR\(\s*l_gzip\s*,\s*12000\s*,")
+
+    def test_catalog_driver_cleans_temporary_lobs_on_success_and_exception(self) -> None:
+        contents = (ROOT / "scripts" / "schema_catalog.sql").read_text(encoding="utf-8")
+        self.assertIn("DBMS_LOB.ISTEMPORARY", contents)
+        self.assertIn("DBMS_LOB.FREETEMPORARY", contents)
+        self.assertRegex(contents, r"(?i)cleanup_temp_blob\s*\(\s*l_gzip\s*\)")
+        self.assertRegex(contents, r"(?i)cleanup_temp_blob\s*\(\s*l_blob\s*\)")
+        self.assertRegex(contents, r"(?i)cleanup_temp_lob\s*\(\s*l_raw\s*\)")
+        self.assertRegex(contents, r"(?i)EXCEPTION\s+WHEN\s+OTHERS\s+THEN[\s\S]*?ROLLBACK\s*;[\s\S]*?RAISE\s*;")
+
 
     def test_the_catalog_driver_lifts_the_dbms_output_cap_before_it_prints_the_payload(self) -> None:
         # SQLcl's SERVEROUTPUT SIZE UNLIMITED still leaves a 1,000,000-byte buffer

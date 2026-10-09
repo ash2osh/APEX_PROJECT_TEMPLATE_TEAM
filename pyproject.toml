@@ -15,8 +15,8 @@ packages = []
 py-modules = []
 
 [project.optional-dependencies]
-# Required only by setup_graphify_apx.py.
-graph = ["graphify", "tree-sitter-sql"]
+# Graphify uses its separate pinned .venv-graphify environment; see
+# tools/graphify/requirements.txt and scripts/graphify_project.py setup.
 # Optional Python linting.
 dev = ["ruff>=0.5"]
 

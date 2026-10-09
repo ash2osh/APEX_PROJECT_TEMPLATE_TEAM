@@ -6,8 +6,8 @@
 # refused, and the operator is told to run SELECT statements only.
 set -euo pipefail
 
-OPERATION="${1:?usage: check_db_target.sh <read|write> <tables|code|apex|ords> [schema]}"
-TARGET="${2:?usage: check_db_target.sh <read|write> <tables|code|apex|ords> [schema]}"
+OPERATION="${1:?usage: check_db_target.sh <read|write> <tables|code|apex|ords|migration> [schema]}"
+TARGET="${2:?usage: check_db_target.sh <read|write> <tables|code|apex|ords|migration> [schema]}"
 SCHEMA_ARG="${3:-}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 # A schema argument is the same selection as --schema; the loader narrows on it.
@@ -25,6 +25,12 @@ case "$TARGET" in
   code)   TARGET_CONNECTION="$CODE_SQLCL_CONNECTION" ;;
   apex)   TARGET_CONNECTION="$APEX_SQLCL_CONNECTION" ;;
   ords)   TARGET_CONNECTION="$ORDS_SQLCL_CONNECTION" ;;
+  migration)
+    if [ "$PROJECT_MIGRATION_CONFIGURED" = true ]; then
+      TARGET_CONNECTION="${MIGRATION_SQLCL_CONNECTION:-}"
+    else
+      TARGET_CONNECTION="$CODE_SQLCL_CONNECTION"
+    fi ;;
   *) echo "unsupported database target: $TARGET" >&2; exit 2 ;;
 esac
 
