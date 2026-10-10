@@ -55,7 +55,7 @@ from .schema_catalog import (
     capture_snapshot,
 )
 from .schema_normalization import normalization_coverage
-from .sqlcl_session import SqlclError, run_sqlcl, safe_rmtree
+from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -289,10 +289,85 @@ def _assert_check_identity(expected: Mapping[str, str], report: CheckReport) -> 
     """Refuse check results that were observed on a different database."""
     if not report.results:
         return
+    session_identities = report.coverage.get("sessionIdentities")
+    if isinstance(session_identities, list):
+        for index, observed in enumerate(session_identities, start=1):
+            if not isinstance(observed, Mapping):
+                if report.complete:
+                    raise MigrationApplyError(f"check session {index} did not report its target identity")
+                continue
+            _assert_same_target(expected, observed)
+        return
     observed = report.coverage.get("identity")
     if not isinstance(observed, Mapping):
         raise MigrationApplyError(f"{report.coverage.get('phase', 'check')} session did not report its target identity")
     _assert_same_target(expected, observed)
+
+
+def _verification_failure_details(
+    checks: CheckReport,
+    catalog_errors: Sequence[Mapping],
+    *,
+    verbose: bool,
+) -> str:
+    coverage = checks.coverage
+    parts: list[str] = []
+    no_output = coverage.get("noOutputEvidence")
+    if isinstance(no_output, list) and no_output:
+        reason = "verification produced no output" if coverage.get("outputAvailable") is not True else "some verification sessions produced no output"
+        parts.append(f"{reason}: timeout, size limit or SQLcl crash")
+        for error in checks.errors:
+            if error.get("code") == "SQLCL_TIMEOUT" and error.get("message"):
+                parts.append(str(error["message"]))
+        parts.append("evidence: " + ", ".join(str(path) for path in no_output))
+
+    failed_ids = coverage.get("failedCheckIds")
+    if not isinstance(failed_ids, list):
+        failed_ids = []
+    check_errors = [error for error in checks.errors if isinstance(error.get("check"), str)]
+    if not failed_ids:
+        failed_ids = list(dict.fromkeys(error["check"] for error in check_errors))
+    if check_errors:
+        shown = check_errors if verbose else check_errors[:20]
+        detail_lines = []
+        for error in shown:
+            check_id = str(error["check"])
+            expected = error.get("expected", "?")
+            error_code = error.get("errorCode")
+            if error_code:
+                detail = f"{check_id} expected={expected} error={error_code}"
+                if "observedValue" in error:
+                    detail += f" observed={error['observedValue']}"
+            elif "observedValue" in error:
+                detail = f"{check_id} expected={expected} observed={error['observedValue']}"
+            else:
+                detail = f"{check_id} error={error.get('code', 'CHECK_FAILED')}"
+            detail_lines.append(detail)
+        parts.append(f"failed checks (showing {len(shown)} of {len(failed_ids)}): " + "; ".join(detail_lines))
+        remaining = max(0, len(failed_ids) - len(shown))
+        if remaining and not verbose:
+            parts.append(f"{remaining} more; use --verbose to print all")
+
+    other_errors = [error for error in checks.errors if not isinstance(error.get("check"), str)]
+    if other_errors:
+        shown_errors = other_errors if verbose else other_errors[:20]
+        parts.append("verification errors: " + "; ".join(
+            f"{error.get('code', 'UNKNOWN')}: {error.get('message', error)}" for error in shown_errors
+        ))
+        if len(other_errors) > len(shown_errors) and not verbose:
+            parts.append(f"{len(other_errors) - len(shown_errors)} more; use --verbose to print all")
+
+    if catalog_errors:
+        shown_catalog = catalog_errors if verbose else catalog_errors[:20]
+        parts.append("catalog verification errors: " + "; ".join(
+            f"{error.get('code', 'UNKNOWN')}: {error.get('reason') or error.get('message') or error}" for error in shown_catalog
+        ))
+        if len(catalog_errors) > len(shown_catalog) and not verbose:
+            parts.append(f"{len(catalog_errors) - len(shown_catalog)} more; use --verbose to print all")
+
+    if not parts:
+        return "verification did not produce a complete successful report"
+    return ". ".join(parts)
 
 
 def _verify_receipts_and_attempts(
@@ -604,7 +679,13 @@ def apply_folder(
     driver.chmod(0o600)
     started = _utc_now()
     try:
-        result = run_sqlcl(target, driver, run_dir)
+        result = run_sqlcl(target, driver, run_dir, phase="apply")
+    except SqlclTimeout as error:
+        raise MigrationApplyError(
+            f"SQLcl apply was cut off after {error.timeout_seconds:g} s "
+            f"(elapsed {error.elapsed_seconds:.2f} s); "
+            f"diagnostics: {error.run_dir / 'sqlcl-output.log'}"
+        ) from error
     except SqlclError as error:
         raise MigrationApplyError(f"SQLcl apply failed for {migration.folder.name}; inspect {error.run_dir}") from error
     output = result.output
@@ -745,6 +826,7 @@ def apply_batch(
     run_checks_fn: Callable = run_checks,
     apply_folder_fn: Callable = apply_folder,
     receipt_installer: Callable = install_receipt,
+    verbose: bool = False,
 ) -> int:
     """Freeze, preflight, confirm when needed, apply in input order, and verify."""
     repo_root = Path(repo_root).resolve()
@@ -855,7 +937,10 @@ def apply_batch(
                 record["error"] = str(error)
                 run_manifest["state"] = "apply-failed-or-unknown"
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(f"{original.folder.name} may be partially applied; stop and reconcile. Evidence: {run_dir}") from error
+                raise MigrationApplyError(
+                    f"{original.folder.name} may be partially applied; stop and reconcile. "
+                    f"{error}. Evidence: {run_dir}"
+                ) from error
             if apply_evidence.get("committed") is not True:
                 record["state"] = "apply-failed-or-unknown"
                 run_manifest["state"] = record["state"]
@@ -883,9 +968,24 @@ def apply_batch(
             if not post_checks.complete or not post_checks.passed or catalog_errors:
                 record["state"] = "committed-verification-failed"
                 record["verificationErrors"] = [*post_checks.errors, *catalog_errors]
+                failed_check_ids = post_checks.coverage.get("failedCheckIds")
+                if not isinstance(failed_check_ids, list):
+                    failed_check_ids = []
+                if not failed_check_ids:
+                    failed_check_ids = list(dict.fromkeys(
+                        error["check"] for error in post_checks.errors
+                        if isinstance(error.get("check"), str)
+                    ))
+                record["failedCheckIds"] = failed_check_ids
+                record["verificationEvidence"] = post_checks.coverage.get("evidence")
+                record["verificationOutputAvailable"] = post_checks.coverage.get("outputAvailable")
                 run_manifest["state"] = record["state"]
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(f"{original.folder.name} committed but fresh verification failed; no receipt was written. Reconcile. Evidence: {run_dir}")
+                details = _verification_failure_details(post_checks, catalog_errors, verbose=verbose)
+                raise MigrationApplyError(
+                    f"{original.folder.name} committed but fresh verification failed; no receipt was written. "
+                    f"{details}. Reconcile. Evidence: {run_dir}"
+                )
 
             source_relative = original.folder.relative_to(repo_root).as_posix()
             current_source = load_migration(repo_root, source_relative)
@@ -959,6 +1059,7 @@ def main(
     parser.add_argument("folders", nargs="*")
     parser.add_argument("--env", action="append", choices=("dev", "staging", "prod"))
     parser.add_argument("--schema")
+    parser.add_argument("--verbose", action="store_true", help="print all failed postcondition checks")
     args = parser.parse_args(argv)
     if not args.folders:
         print("usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod", file=sys.stderr)
@@ -976,7 +1077,7 @@ def main(
     except (MigrationManifestError, TargetResolutionError, OSError) as error:
         print(f"migration error: {error}", file=sys.stderr)
         return 2
-    return apply_batch(Path(repo_root), migrations, target, confirm)
+    return apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose)
 
 
 def _interrupt_on_sigterm() -> None:

@@ -593,7 +593,7 @@ def _catalog_driver(run_dir: Path, phase: str, target: Target, keys: Sequence[tu
     return wrapper
 
 
-Runner = Callable[[Target, Path, Path], SqlclResult]
+Runner = Callable[..., SqlclResult]
 
 
 def _private_run_dir(run_dir: Path) -> Path:
@@ -605,7 +605,7 @@ def _private_run_dir(run_dir: Path) -> Path:
 def capture_inventory(target: Target, run_dir: Path, *, _runner: Runner = run_sqlcl) -> SchemaInventory:
     private_dir = _private_run_dir(run_dir)
     driver = _catalog_driver(private_dir, "inventory", target)
-    result = _runner(target, driver, private_dir)
+    result = _runner(target, driver, private_dir, phase="inventory")
     return parse_inventory(result.output, target)
 
 
@@ -619,5 +619,5 @@ def capture_snapshot(
 ) -> SchemaSnapshot:
     private_dir = _private_run_dir(run_dir)
     driver = _catalog_driver(private_dir, "snapshot", target, keys)
-    result = _runner(target, driver, private_dir)
+    result = _runner(target, driver, private_dir, phase="inventory")
     return parse_snapshot(result.output, target, keys, inventory)

@@ -3,7 +3,9 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from fake_sqlcl import environment as fake_environment, install
 from scripts.db_targets import Target
 from scripts.migration_manifest import QueryCheck, load_batch
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
@@ -344,6 +346,106 @@ class MigrationChecksTests(unittest.TestCase):
                 report = run_checks(target, (check,), Path(self.temporary.name), phase="preconditions", _runner=self.fake_runner(outcome))
                 self.assertFalse(report.passed)
 
+    def test_failed_check_report_names_expected_value_observed_value_and_failed_id(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("row-count", "SELECT 1 FROM dual", 1)
+
+        report = run_checks(
+            target, (check,), Path(self.temporary.name),
+            _runner=self.fake_runner({"id": "row-count", "row_count": 1, "column_count": 1, "value": 0, "numeric": True}),
+        )
+
+        self.assertEqual(report.coverage["failedCheckIds"], ["row-count"])
+        self.assertEqual(report.errors[0]["check"], "row-count")
+        self.assertEqual(report.errors[0]["expected"], 1)
+        self.assertEqual(report.errors[0]["observedValue"], 0)
+
+    def test_read_only_check_sessions_are_batched_under_the_configured_driver_budget(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        prefix = "SELECT CASE WHEN LENGTH('"
+        suffix = "') > 0 THEN 1 ELSE 0 END FROM dual"
+        query = prefix + ("x" * (24000 - len(prefix) - len(suffix))) + suffix
+        checks = tuple(
+            QueryCheck(f"check-{index:03}", query, 1)
+            for index in range(200)
+        )
+        identity = {
+            "session_user": "MIGRATOR", "current_schema": "APP", "db_name": "DEVDB",
+            "db_unique_name": "DEVDB_UNIQUE", "service_name": "dev.service", "container_id": "3",
+            "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "19.0",
+        }
+        observed = []
+        failed = {"check-007", "check-127"}
+
+        def runner(_target, driver, run_dir, **kwargs):
+            source = driver.read_text(encoding="utf-8")
+            phase = kwargs.get("phase", "preconditions")
+            ids = re.findall(r"l_result\.put\('id', '([^']+)'\)", source)
+            observed.append((driver.stat().st_size, "SET TRANSACTION READ ONLY;" in source, ids))
+            results = [
+                {"id": check_id, "row_count": 1, "column_count": 1,
+                 "numeric": True, "value": 0 if check_id in failed else 1}
+                for check_id in ids
+            ]
+            payload = {"schemaVersion": 1, "phase": phase, "complete": True,
+                       "identity": identity, "results": results}
+            output = f"CHECK_PAYLOAD_BEGIN:{phase}\n" + json.dumps(payload) + f"\nCHECK_PAYLOAD_END:{phase}\nCHECK_VERIFIED:{phase}\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        budget = 2 * 1024 * 1024
+        with patch.dict("os.environ", {"MIGRATION_CHECK_BATCH_BYTES": str(budget)}):
+            report = run_checks(target, checks, Path(self.temporary.name), phase="postconditions", _runner=runner)
+
+        self.assertGreater(len(observed), 1)
+        self.assertTrue(all(size <= budget for size, _read_only, _ids in observed))
+        self.assertTrue(all(read_only for _size, read_only, _ids in observed))
+        self.assertEqual([result["id"] for result in report.results], [check.id for check in checks])
+        self.assertEqual([error["check"] for error in report.errors], ["check-007", "check-127"])
+        self.assertEqual(len(report.coverage["sessionIdentities"]), len(observed))
+        self.assertEqual([check_id for _size, _read_only, ids in observed for check_id in ids], [check.id for check in checks])
+
+    def test_a_single_check_over_the_driver_budget_fails_with_its_id_without_running_sqlcl(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("oversized-check", "SELECT 1 FROM dual", 1)
+        calls = []
+
+        def runner(*_args, **_kwargs):
+            calls.append(True)
+            raise AssertionError("an over-budget check must not start a SQLcl session")
+
+        with patch.dict("os.environ", {"MIGRATION_CHECK_BATCH_BYTES": "64"}):
+            report = run_checks(target, (check,), Path(self.temporary.name), _runner=runner)
+
+        self.assertFalse(report.passed)
+        self.assertEqual(report.errors[0]["check"], "oversized-check")
+        self.assertIn("oversized-check", report.errors[0]["message"])
+        self.assertEqual(calls, [])
+
+    def test_empty_sqlcl_output_is_recorded_as_missing_check_output(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("one", "SELECT 1 FROM dual", 1)
+        binary = install(self.root / "bin", 'printf "FAKE_SQLCL_NO_CHECK_PAYLOAD\\n"\n')
+
+        with patch.dict("os.environ", fake_environment(binary)):
+            report = run_checks(target, (check,), self.root / "check-run", phase="postconditions")
+
+        self.assertFalse(report.passed)
+        self.assertFalse(report.coverage["outputAvailable"])
+        self.assertTrue(report.coverage["evidence"].endswith("sqlcl-output.log"))
+
+    def test_check_timeout_is_reported_with_the_phase_and_visible_limit(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("one", "SELECT 1 FROM dual", 1)
+        binary = install(self.root / "bin", 'printf "FAKE_SQLCL_STARTED\\n"\nsleep 5\n')
+
+        with patch.dict("os.environ", fake_environment(binary, MIGRATION_CHECK_TIMEOUT_SECONDS="0.05")):
+            report = run_checks(target, (check,), self.root / "timeout-run", phase="preconditions")
+
+        self.assertFalse(report.complete)
+        self.assertEqual(report.errors[0]["code"], "SQLCL_TIMEOUT")
+        self.assertIn("preconditions checks did not finish within 0.05 s", report.errors[0]["message"])
+        self.assertFalse(report.coverage["outputAvailable"])
+
     def fake_runner(self, outcome):
         def runner(_target, driver, run_dir, **_kwargs):
             driver_source = driver.read_text(encoding="utf-8")
@@ -364,7 +466,7 @@ class MigrationChecksTests(unittest.TestCase):
         check = QueryCheck("table-exists", "SELECT COUNT(*) FROM all_tables WHERE owner = :target_schema", 1)
         observed = {}
 
-        def runner(_target, driver, run_dir):
+        def runner(_target, driver, run_dir, **_kwargs):
             observed["driver"] = driver.read_text(encoding="utf-8")
             payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "table-exists", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
             output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
@@ -386,7 +488,7 @@ class MigrationChecksTests(unittest.TestCase):
         check = QueryCheck("emoji", "SELECT CASE WHEN '\U0001F600' = '\U0001F600' THEN 1 ELSE 0 END FROM dual", 1)
         observed = {}
 
-        def runner(_target, driver, run_dir):
+        def runner(_target, driver, run_dir, **_kwargs):
             observed["driver"] = driver.read_text(encoding="utf-8")
             payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "emoji", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
             output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
@@ -409,7 +511,7 @@ class MigrationChecksTests(unittest.TestCase):
         check = QueryCheck("one", "SELECT 1 FROM dual", 1)
         observed = {}
 
-        def runner(_target, driver, run_dir):
+        def runner(_target, driver, run_dir, **_kwargs):
             observed["driver"] = driver.read_text(encoding="utf-8")
             payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "one", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
             output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
@@ -428,7 +530,7 @@ class MigrationChecksTests(unittest.TestCase):
         identity = {"session_user": "MIGRATOR", "current_schema": "APP", "db_name": "DEVDB"}
         observed = {}
 
-        def runner(_target, driver, run_dir):
+        def runner(_target, driver, run_dir, **_kwargs):
             observed["driver"] = driver.read_text(encoding="utf-8")
             payload = {"schemaVersion": 1, "phase": "postconditions", "complete": True, "identity": identity,
                        "results": [{"id": "one", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}

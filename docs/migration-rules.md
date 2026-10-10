@@ -100,8 +100,10 @@ Each check is one `SELECT` (or `WITH ... SELECT`) that returns the number `1`.
 It may use ordinary query syntax, including parenthesized conditions and
 subqueries, and these functions: `AVG`, `CAST`, `COALESCE`, `COUNT`, `LENGTH`,
 `LOWER`, `MAX`, `MIN`, `NVL`, `REGEXP_LIKE`, `SUBSTR`, `SUM`, `TO_CHAR`,
-`TO_NUMBER`, `UPPER`, and `SYS_CONTEXT` for `USERENV` `SESSION_USER` or
-`CURRENT_SCHEMA`. Its only bind is `:target_schema`. Non-ASCII text belongs
+`TO_NUMBER`, `UPPER`, `SYS_CONTEXT` for `USERENV` `SESSION_USER` or
+`CURRENT_SCHEMA`, `CHR`, `ORA_HASH`, `STANDARD_HASH`, `DECODE`, `NULLIF`,
+`INSTR`, `REPLACE`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTHB`, `LPAD`, `RPAD`, and
+`LISTAGG`. Its only bind is `:target_schema`. Non-ASCII text belongs
 inside a string literal, a quoted name or a comment. A call to any other
 function (yours or a built-in not listed) is refused when it is written with
 parentheses, so is a sequence `NEXTVAL`/`CURRVAL`, `FOR UPDATE`, a database
@@ -114,6 +116,79 @@ function that writes, whether directly, through an autonomous transaction or
 through DDL, fails the check with `ORA-00034` instead of writing. Do not call
 stored functions in a check anyway: one that does something that is not
 transactional, such as writing a file or sending a request, is not stopped.
+
+The added functions are deterministic and side-effect free:
+
+| Function | Justification |
+| --- | --- |
+| `CHR` | Maps an integer code to a character without reading or changing database state. |
+| `ORA_HASH` | Computes a repeatable hash for an expression with fixed seed and bucket parameters. |
+| `STANDARD_HASH` | Computes a repeatable digest for the same expression and algorithm. |
+| `DECODE` | Selects an output value by equality comparison. |
+| `NULLIF` | Returns null or its first argument based only on equality. |
+| `INSTR` | Returns a matching position in its input text. |
+| `REPLACE` | Substitutes text using only its input arguments. |
+| `TRIM` | Removes selected edge characters from its input text. |
+| `LTRIM` | Removes selected leading characters from its input text. |
+| `RTRIM` | Removes selected trailing characters from its input text. |
+| `LENGTHB` | Measures the byte length of its input under the current database character set. |
+| `LPAD` | Adds deterministic left padding using its input arguments. |
+| `RPAD` | Adds deterministic right padding using its input arguments. |
+| `LISTAGG` | Aggregates input text in the declared order; use a unique order key when output must be repeatable. |
+
+For exact stored-source checks, a fingerprint can replace a long repeated text
+literal. Record the expected source-line count and hash sum when reviewing the
+change, then use a check shaped like this (replace the object name, type, count
+and sum with reviewed values):
+
+```sql
+SELECT CASE
+         WHEN (SELECT COUNT(*)
+                 FROM USER_SOURCE
+                WHERE name = 'PACKAGE_NAME'
+                  AND type = 'PACKAGE BODY') = 42
+          AND (SELECT SUM(ORA_HASH(TO_CHAR(line) || ':' || text, 4294967295, 0))
+                 FROM USER_SOURCE
+                WHERE name = 'PACKAGE_NAME'
+                  AND type = 'PACKAGE BODY') = 123456789
+         THEN 1 ELSE 0
+       END
+  FROM dual
+```
+
+Including `LINE` makes the sum sensitive to source order; the row count also
+detects missing or extra lines. A count plus hash sum is a compact fingerprint,
+not a collision-proof proof of byte equality. The deployment field note
+available with this plan reports that identical `ORA_HASH` inputs produced the
+same value on Oracle 19c and 26ai; no database was available in this worktree,
+so this phase could not repeat that measurement. Before relying on a
+fingerprint, verify the exact expression,
+seed, bucket limit, line text and expected count/sum on each target database
+version. Prefer exact-source comparison when collision risk is unacceptable.
+
+Check sessions are sequentially split so each generated UTF-8 SQL driver stays
+within `MIGRATION_CHECK_BATCH_BYTES` (default `2097152`, or 2 MiB). Each session
+retains the read-only transaction and disabled-commit guards, and the runner
+checks the observed database identity for every session before accepting the
+merged report. Set the limit to another positive integer number of bytes when a
+large reviewed check requires it. A single check that exceeds the limit is
+refused before SQLcl starts, with its check ID; an individual check is never
+split. A batch that cannot finish is incomplete and cannot produce a receipt.
+When fresh postconditions fail, `migrate` prints up to 20 failing IDs with
+expected and observed values or Oracle/SQLcl error codes. `--verbose` prints all
+failed checks; the run manifest retains their IDs and verification evidence.
+If an attempted verification session returned no result frame, the error says
+that verification produced no output, names likely timeout/size-limit/SQLcl
+failure causes, and gives the saved evidence path.
+
+Each SQLcl apply session is limited by `MIGRATION_APPLY_TIMEOUT_SECONDS`, and
+check plus inventory sessions use `MIGRATION_CHECK_TIMEOUT_SECONDS`. Both
+default to 300 seconds to preserve existing behavior. Set either to a positive
+finite number of seconds (fractional values are accepted). An apply timeout
+reports its phase and cutoff and may leave committed DDL; stop and reconcile
+the retained attempt evidence before retrying. A check or inventory timeout
+means verification did not finish, so no receipt is written. The timeout
+settings and check-driver budget are optional `.env` keys; see `.env.example`.
 
 SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
 so the apply session ends with its own check. Every package, package body,

@@ -46,6 +46,9 @@ ALLOWED_KEYS = frozenset({
     "ORDS_SCHEMA",
     "ORDS_SQLCL_CONNECTION",
     "ORDS_EXPECTED_USER",
+    "MIGRATION_APPLY_TIMEOUT_SECONDS",
+    "MIGRATION_CHECK_TIMEOUT_SECONDS",
+    "MIGRATION_CHECK_BATCH_BYTES",
 }) | frozenset(prefix + "MIGRATION_" + suffix
                for prefix in ("", "STAGING_", "PROD_")
                for suffix in ("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER"))

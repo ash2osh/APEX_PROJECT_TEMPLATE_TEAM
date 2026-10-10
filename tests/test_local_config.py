@@ -50,6 +50,17 @@ class LocalConfigTests(unittest.TestCase):
         self.assertEqual(values["TABLES_SCHEMA"], "DEMO")
         self.assertEqual(values["TABLES_PREFIXES"], "*")
 
+    def test_migration_runtime_limits_are_optional_configuration_keys(self) -> None:
+        content = VALID_BASE_CONFIG + (
+            "MIGRATION_APPLY_TIMEOUT_SECONDS=300\n"
+            "MIGRATION_CHECK_TIMEOUT_SECONDS=45.5\n"
+            "MIGRATION_CHECK_BATCH_BYTES=2097152\n"
+        )
+        values = read_project_env(self.write_env(content))
+        self.assertEqual(values["MIGRATION_APPLY_TIMEOUT_SECONDS"], "300")
+        self.assertEqual(values["MIGRATION_CHECK_TIMEOUT_SECONDS"], "45.5")
+        self.assertEqual(values["MIGRATION_CHECK_BATCH_BYTES"], "2097152")
+
     def test_utf8_bom_stripped_cleanly(self) -> None:
         path = self.write_env(VALID_BASE_CONFIG, prefix=b"\xef\xbb\xbf")
         values = read_project_env(path)

@@ -220,7 +220,7 @@ class SchemaCatalogTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.drivers: list[str] = []
 
-            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path):
+            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path, **_kwargs):
                 self.drivers.append(driver_path.read_text(encoding="utf-8"))
                 return SqlclResult(0, framed(fixture_payload("owner-inventory.json")), run_dir)
 
@@ -243,7 +243,7 @@ class SchemaCatalogTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.driver = ""
 
-            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path):
+            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path, **_kwargs):
                 self.driver = driver_path.read_text(encoding="utf-8")
                 return SqlclResult(0, framed(fixture_payload("owner-snapshot.json")), run_dir)
 
@@ -275,7 +275,7 @@ class SchemaCatalogTests(unittest.TestCase):
             inv = capture_inventory(
                 target(),
                 run_dir,
-                _runner=lambda t, d, r: SqlclResult(0, frame_comp(fixture_payload("owner-inventory.json")), r),
+                _runner=lambda t, d, r, **_kwargs: SqlclResult(0, frame_comp(fixture_payload("owner-inventory.json")), r),
             )
             self.assertIn(ObjectKey("APP_DEV", "CUSTOMERS", "TABLE"), inv.objects)
 
@@ -289,7 +289,7 @@ class SchemaCatalogTests(unittest.TestCase):
                 snap_inv,
                 (("CUSTOMERS", "TABLE"),),
                 run_dir,
-                _runner=lambda t, d, r: SqlclResult(0, frame_comp(fixture_payload("owner-snapshot.json")), r),
+                _runner=lambda t, d, r, **_kwargs: SqlclResult(0, frame_comp(fixture_payload("owner-snapshot.json")), r),
             )
             self.assertIn(ObjectKey("APP_DEV", "CUSTOMERS", "TABLE"), snap.objects)
 

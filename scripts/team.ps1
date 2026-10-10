@@ -43,8 +43,8 @@ Commands:
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
-  migrate <folder> [...] --env dev|staging|prod
-                                              Preflight, then apply selected migration folders
+  migrate <folder> [...] --env dev|staging|prod [--verbose]
+                                              Preflight and apply; --verbose lists every failed postcondition
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only

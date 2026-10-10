@@ -24,7 +24,7 @@ from .migration_manifest import (
     validate_check_query,
 )
 from .schema_catalog import ObjectKey, SchemaSnapshot
-from .sqlcl_session import run_sqlcl, safe_rmtree
+from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
 from .validate_migration import statement_spans
 
 
@@ -46,6 +46,7 @@ CONSTRAINT_SEGMENT_STARTERS = {
 }
 IDENTIFIER_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 HEX_CHUNK_SIZE = 3000
+DEFAULT_CHECK_DRIVER_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,17 @@ class _Token:
 
 class MigrationAnalysisError(ValueError):
     """Selected SQL is malformed or cannot be scoped safely."""
+
+
+class _CheckDriverTooLarge(ValueError):
+    def __init__(self, check_id: str, driver_bytes: int, budget_bytes: int) -> None:
+        self.check_id = check_id
+        self.driver_bytes = driver_bytes
+        self.budget_bytes = budget_bytes
+        super().__init__(
+            f"check {check_id} generates a {driver_bytes}-byte driver, exceeding "
+            f"MIGRATION_CHECK_BATCH_BYTES={budget_bytes}"
+        )
 
 
 def _is_word_start(char: str) -> bool:
@@ -739,13 +751,11 @@ def _hex_chunks(text: str) -> list[str]:
     return result or [""]
 
 
-def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryCheck], phase: str) -> Path:
+def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: str) -> str:
     if phase not in {"preconditions", "postconditions"}:
         raise ValueError("check phase must be preconditions or postconditions")
     if IDENTIFIER_RE.fullmatch(target.schema) is None:
         raise ValueError("target schema must be an uppercase Oracle identifier")
-    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    run_dir.chmod(0o700)
     sql_lines = [
         "SET ENCODING UTF-8",
         "SET SERVEROUTPUT ON SIZE UNLIMITED",
@@ -862,8 +872,15 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         "EXIT SUCCESS ROLLBACK",
         "",
     ])
+    return "\n".join(sql_lines)
+
+
+def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryCheck], phase: str) -> Path:
+    run_dir = Path(run_dir)
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    run_dir.chmod(0o700)
     driver = run_dir / "migration-checks.sql"
-    driver.write_text("\n".join(sql_lines), encoding="utf-8", newline="\n")
+    driver.write_text(_render_check_driver(target, checks, phase), encoding="utf-8", newline="\n")
     try:
         driver.chmod(0o600)
     except OSError:
@@ -871,25 +888,42 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
     return driver
 
 
+def _check_output_available(output: str, phase: str) -> bool:
+    return f"CHECK_PAYLOAD_BEGIN:{phase}" in output or f"CHECK_PAYLOAD_END:{phase}" in output
+
+
+def _failed_check_ids(errors: Sequence[Mapping]) -> list[str]:
+    return list(dict.fromkeys(
+        error["check"] for error in errors
+        if isinstance(error.get("check"), str)
+    ))
+
+
 def _parse_check_output(output: str, checks: Sequence[QueryCheck], phase: str) -> CheckReport:
     begin = f"CHECK_PAYLOAD_BEGIN:{phase}"
     end = f"CHECK_PAYLOAD_END:{phase}"
     sentinel = f"CHECK_VERIFIED:{phase}"
     lines = output.splitlines()
+    coverage: dict = {
+        "phase": phase,
+        "complete": False,
+        "outputAvailable": _check_output_available(output, phase),
+        "failedCheckIds": [],
+    }
     try:
         start = lines.index(begin)
         finish = lines.index(end, start + 1)
     except ValueError:
-        return CheckReport(False, False, (), ({"code": "MISSING_FRAME", "message": "check result frame is missing or truncated"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "MISSING_FRAME", "message": "check result frame is missing or truncated"},), coverage)
     try:
         payload = json.loads("".join(lines[start + 1 : finish]))
     except json.JSONDecodeError as error:
-        return CheckReport(False, False, (), ({"code": "INVALID_JSON", "message": f"check result JSON is malformed: {error}"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "INVALID_JSON", "message": f"check result JSON is malformed: {error}"},), coverage)
     if sentinel not in lines[finish + 1 :] or not isinstance(payload, dict) or payload.get("schemaVersion") != 1 or payload.get("phase") != phase or payload.get("complete") is not True:
-        return CheckReport(False, False, (), ({"code": "UNVERIFIED_FRAME", "message": "check result is missing its verified completion sentinel"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "UNVERIFIED_FRAME", "message": "check result is missing its verified completion sentinel"},), coverage)
     raw_results = payload.get("results")
     if not isinstance(raw_results, list) or len(raw_results) != len(checks):
-        return CheckReport(False, False, (), ({"code": "RESULT_COUNT", "message": "check result count does not match the requested checks"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "RESULT_COUNT", "message": "check result count does not match the requested checks"},), coverage)
     results: list[dict] = []
     errors: list[dict] = []
     for check, result in zip(checks, raw_results, strict=True):
@@ -907,13 +941,64 @@ def _parse_check_output(output: str, checks: Sequence[QueryCheck], phase: str) -
         normalized = {**result, "passed": passed}
         results.append(normalized)
         if not passed:
-            errors.append({"code": "CHECK_FAILED", "check": check.id, "message": result.get("error") or "check must return exactly one row and one numeric column equal to 1", "observed": normalized})
+            message = result.get("error") or "check must return exactly one row and one numeric column equal to 1"
+            failure = {
+                "code": "CHECK_FAILED",
+                "check": check.id,
+                "expected": check.expected,
+                "observedValue": normalized.get("value"),
+                "message": message,
+                "observed": normalized,
+            }
+            error_code = re.search(r"\b(?:ORA|SP2)-\d{4,5}\b", str(result.get("error", "")))
+            if error_code is not None:
+                failure["errorCode"] = error_code.group(0)
+            errors.append(failure)
     complete = len(results) == len(checks) and not any(error["code"] == "RESULT_IDENTITY" for error in errors)
-    coverage: dict = {"phase": phase, "complete": complete}
+    coverage["complete"] = complete
+    coverage["failedCheckIds"] = _failed_check_ids(errors)
     identity = payload.get("identity")
     if isinstance(identity, dict) and all(isinstance(value, str) for value in identity.values()):
         coverage["identity"] = dict(identity)
     return CheckReport(complete and not errors, complete, tuple(results), tuple(errors), coverage)
+
+
+def _check_driver_budget() -> int:
+    raw = os.environ.get("MIGRATION_CHECK_BATCH_BYTES")
+    if raw is None:
+        return DEFAULT_CHECK_DRIVER_BYTES
+    try:
+        value = int(raw.strip(), 10)
+    except (AttributeError, ValueError) as error:
+        raise ValueError("MIGRATION_CHECK_BATCH_BYTES must be a positive integer") from error
+    if value <= 0:
+        raise ValueError("MIGRATION_CHECK_BATCH_BYTES must be a positive integer")
+    return value
+
+
+def _partition_checks(
+    target: Target,
+    checks: Sequence[QueryCheck],
+    phase: str,
+    byte_budget: int,
+) -> tuple[tuple[QueryCheck, ...], ...]:
+    batches: list[tuple[QueryCheck, ...]] = []
+    current: list[QueryCheck] = []
+    for check in checks:
+        candidate = (*current, check)
+        candidate_size = len(_render_check_driver(target, candidate, phase).encode("utf-8"))
+        if candidate_size <= byte_budget:
+            current.append(check)
+            continue
+        if current:
+            batches.append(tuple(current))
+        single_size = len(_render_check_driver(target, (check,), phase).encode("utf-8"))
+        if single_size > byte_budget:
+            raise _CheckDriverTooLarge(check.id, single_size, byte_budget)
+        current = [check]
+    if current:
+        batches.append(tuple(current))
+    return tuple(batches)
 
 
 def run_checks(
@@ -926,13 +1011,101 @@ def run_checks(
 ) -> CheckReport:
     """Execute validated SELECT checks under a read-only SQLcl transaction."""
     if not checks:
-        return CheckReport(True, True, (), (), {"phase": phase, "complete": True, "count": 0})
+        return CheckReport(True, True, (), (), {
+            "phase": phase, "complete": True, "count": 0, "sessions": 0,
+            "outputAvailable": True, "failedCheckIds": [],
+        })
+    run_dir = Path(run_dir)
     try:
-        driver = _driver_for_checks(Path(run_dir), target, checks, phase)
-        result = _runner(target, driver, Path(run_dir))
+        byte_budget = _check_driver_budget()
+    except ValueError as error:
+        return CheckReport(False, False, (), ({"code": "CHECK_CONFIGURATION", "message": str(error)},), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [],
+        })
+    try:
+        batches = _partition_checks(target, checks, phase, byte_budget)
+    except _CheckDriverTooLarge as error:
+        return CheckReport(False, False, (), ({
+            "code": "CHECK_TOO_LARGE", "check": error.check_id,
+            "expected": next(check.expected for check in checks if check.id == error.check_id),
+            "message": str(error),
+        },), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [error.check_id],
+        })
     except (OSError, RuntimeError, ValueError, MigrationManifestError) as error:
-        return CheckReport(False, False, (), ({"code": "CHECK_UNAVAILABLE", "message": str(error)},), {"phase": phase, "complete": False})
-    return _parse_check_output(result.output, checks, phase)
+        return CheckReport(False, False, (), ({"code": "CHECK_UNAVAILABLE", "message": str(error)},), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [],
+        })
+
+    reports: list[CheckReport] = []
+    for index, batch in enumerate(batches, start=1):
+        batch_dir = run_dir if len(batches) == 1 else run_dir / f"batch-{index:03d}"
+        evidence = batch_dir / "sqlcl-output.log"
+        attempted = False
+        try:
+            driver = _driver_for_checks(batch_dir, target, batch, phase)
+            attempted = True
+            result = _runner(target, driver, batch_dir, phase=phase)
+            report = _parse_check_output(result.output, batch, phase)
+        except SqlclTimeout as error:
+            report = CheckReport(False, False, (), ({
+                "code": "SQLCL_TIMEOUT",
+                "phase": phase,
+                "timeoutSeconds": error.timeout_seconds,
+                "elapsedSeconds": error.elapsed_seconds,
+                "message": f"{phase} checks did not finish within {error.timeout_seconds:g} s",
+            },), {
+                "phase": phase, "complete": False,
+                "outputAvailable": _check_output_available(error.output, phase),
+                "failedCheckIds": [],
+            })
+        except (OSError, RuntimeError, ValueError, TypeError, MigrationManifestError) as error:
+            output = error.output if isinstance(error, SqlclError) else ""
+            report = CheckReport(False, False, (), ({
+                "code": "CHECK_UNAVAILABLE", "phase": phase, "message": str(error),
+            },), {
+                "phase": phase, "complete": False,
+                "outputAvailable": _check_output_available(output, phase),
+                "failedCheckIds": [],
+            })
+        coverage = {
+            **report.coverage,
+            "sessionAttempted": attempted,
+            "evidence": str(evidence),
+        }
+        reports.append(CheckReport(report.passed, report.complete, report.results, report.errors, coverage))
+
+    errors = tuple(error for report in reports for error in report.errors)
+    results = tuple(result for report in reports for result in report.results)
+    evidence_paths = [report.coverage["evidence"] for report in reports]
+    identities = [report.coverage.get("identity") for report in reports]
+    coverage = {
+        "phase": phase,
+        "complete": all(report.complete for report in reports),
+        "count": len(checks),
+        "sessions": len(reports),
+        "outputAvailable": any(report.coverage.get("outputAvailable") is True for report in reports),
+        "noOutputEvidence": [
+            report.coverage["evidence"] for report in reports
+            if report.coverage.get("sessionAttempted") is True and report.coverage.get("outputAvailable") is not True
+        ],
+        "failedCheckIds": _failed_check_ids(errors),
+        "sessionIdentities": identities,
+        "evidence": evidence_paths[0] if len(evidence_paths) == 1 else evidence_paths,
+    }
+    observed_identities = [identity for identity in identities if isinstance(identity, dict)]
+    if observed_identities:
+        coverage["identity"] = dict(observed_identities[0])
+    return CheckReport(
+        all(report.passed for report in reports),
+        coverage["complete"],
+        results,
+        errors,
+        coverage,
+    )
 
 
 def _initial_objects(snapshot: SchemaSnapshot) -> dict[str, set[str]]:

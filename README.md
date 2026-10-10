@@ -420,6 +420,12 @@ scripts/team.sh migrate \
   migrations/2026-09-27_create-customers-r001 --env dev
 ```
 
+Fresh postcondition failures name up to 20 failed checks; add `--verbose` to
+print all of them. Apply and verification session limits are configurable with
+`MIGRATION_APPLY_TIMEOUT_SECONDS`, `MIGRATION_CHECK_TIMEOUT_SECONDS`, and
+`MIGRATION_CHECK_BATCH_BYTES` in `.env`; see the [migration rules](docs/migration-rules.md)
+for defaults, batching and timeout recovery.
+
 The offline `--local` checker analyzes selected files only. Live preflight
 compares the selected batch with the target catalog, but cannot see pending
 files in another developer's independent repository. Two developers can pass
@@ -600,7 +606,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
-| `scripts/team.sh migrate <folder> [...] --env <env>` | Verify and apply selected migration folders to DEV, staging, or production. |
+| `scripts/team.sh migrate <folder> [...] --env <env> [--verbose]` | Verify and apply selected migration folders; `--verbose` prints every failed postcondition. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
