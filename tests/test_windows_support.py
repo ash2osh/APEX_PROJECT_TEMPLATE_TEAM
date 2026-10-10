@@ -105,6 +105,51 @@ class BashCommandTests(unittest.TestCase):
         self.assertEqual(Path(result), git_root / "bin" / "bash.exe")
 
 
+class TeamPowerShellVerifyCommandTests(unittest.TestCase):
+    """The PowerShell entry point advertises and dispatches read-only verification."""
+
+    def engines(self):
+        engines = []
+        for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh"):
+            engine = shutil.which(name)
+            if engine and "/snap/bin/" not in Path(engine).as_posix():
+                engines.append(engine)
+        return engines
+
+    def test_help_describes_verify_options(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "--help"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("verify <folder>", result.stdout)
+                self.assertIn("--jobs N", result.stdout)
+
+    def test_verify_without_folders_reports_its_usage(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "verify"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("usage: scripts/team.ps1 verify", result.stderr)
+
+
 class SqlclNativePathTests(unittest.TestCase):
     def test_native_path_is_the_identity_off_windows(self) -> None:
         if os.name == "nt":

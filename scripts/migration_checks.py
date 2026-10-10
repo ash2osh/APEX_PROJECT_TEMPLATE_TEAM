@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1007,9 +1008,17 @@ def run_checks(
     run_dir: Path,
     *,
     phase: str = "preconditions",
+    jobs: int = 1,
     _runner: Callable = run_sqlcl,
 ) -> CheckReport:
     """Execute validated SELECT checks under a read-only SQLcl transaction."""
+    if type(jobs) is not int or jobs < 1:
+        return CheckReport(False, False, (), ({
+            "code": "CHECK_CONFIGURATION", "message": "jobs must be a positive integer",
+        },), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [],
+        })
     if not checks:
         return CheckReport(True, True, (), (), {
             "phase": phase, "complete": True, "count": 0, "sessions": 0,
@@ -1040,8 +1049,7 @@ def run_checks(
             "outputAvailable": False, "failedCheckIds": [],
         })
 
-    reports: list[CheckReport] = []
-    for index, batch in enumerate(batches, start=1):
+    def run_batch(index: int, batch: Sequence[QueryCheck]) -> CheckReport:
         batch_dir = run_dir if len(batches) == 1 else run_dir / f"batch-{index:03d}"
         evidence = batch_dir / "sqlcl-output.log"
         attempted = False
@@ -1076,7 +1084,16 @@ def run_checks(
             "sessionAttempted": attempted,
             "evidence": str(evidence),
         }
-        reports.append(CheckReport(report.passed, report.complete, report.results, report.errors, coverage))
+        return CheckReport(report.passed, report.complete, report.results, report.errors, coverage)
+
+    if jobs == 1 or len(batches) == 1:
+        reports = [run_batch(index, batch) for index, batch in enumerate(batches, start=1)]
+    else:
+        with ThreadPoolExecutor(max_workers=min(jobs, len(batches))) as executor:
+            reports = list(executor.map(
+                lambda item: run_batch(*item),
+                enumerate(batches, start=1),
+            ))
 
     errors = tuple(error for report in reports for error in report.errors)
     results = tuple(result for report in reports for result in report.results)
@@ -1094,6 +1111,8 @@ def run_checks(
         ],
         "failedCheckIds": _failed_check_ids(errors),
         "sessionIdentities": identities,
+        "sessionCheckIds": [[check.id for check in batch] for batch in batches],
+        "sessionResultCounts": [len(report.results) for report in reports],
         "evidence": evidence_paths[0] if len(evidence_paths) == 1 else evidence_paths,
     }
     observed_identities = [identity for identity in identities if isinstance(identity, dict)]

@@ -404,6 +404,67 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual(len(report.coverage["sessionIdentities"]), len(observed))
         self.assertEqual([check_id for _size, _read_only, ids in observed for check_id in ids], [check.id for check in checks])
 
+    def test_check_driver_preserves_whitespace_hyphen_and_quote_inside_expected_text(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        expected_text = "first line\n   \ntrailing-\n'quoted text'"
+        literal = expected_text.replace("'", "''")
+        sql = f"SELECT CASE WHEN '{literal}' = '{literal}' THEN 1 ELSE 0 END FROM dual"
+        check = QueryCheck("source-text", sql, 1)
+        observed = {}
+
+        def runner(_target, driver, run_dir, **_kwargs):
+            observed["driver"] = driver.read_text(encoding="utf-8")
+            payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [
+                {"id": "source-text", "row_count": 1, "column_count": 1, "value": 1, "numeric": True},
+            ]}
+            output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        report = run_checks(target, (check,), Path(self.temporary.name), _runner=runner)
+
+        self.assertTrue(report.passed)
+        chunks = re.findall(r"HEXTORAW\('([0-9A-F]+)'\)", observed["driver"])
+        self.assertEqual(chunks[::2], chunks[1::2])
+        reconstructed = b"".join(bytes.fromhex(chunk) for chunk in chunks[::2]).decode("utf-8")
+        self.assertEqual(reconstructed, sql)
+
+    def test_jobs_runs_independent_check_sessions_in_parallel(self):
+        from threading import Barrier, Lock
+
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        checks = tuple(QueryCheck(f"check-{index:03}", "SELECT 1 FROM dual", 1) for index in range(4))
+        identity = {
+            "session_user": "MIGRATOR", "current_schema": "APP", "db_name": "DEVDB",
+            "db_unique_name": "DEVDB_UNIQUE", "service_name": "dev.service", "container_id": "3",
+            "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "19.0",
+        }
+        barrier = Barrier(2)
+        lock = Lock()
+        active = 0
+        peak = 0
+
+        def runner(_target, driver, run_dir, **kwargs):
+            nonlocal active, peak
+            ids = re.findall(r"l_result\.put\('id', '([^']+)'\)", driver.read_text(encoding="utf-8"))
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            barrier.wait(timeout=2)
+            with lock:
+                active -= 1
+            phase = kwargs["phase"]
+            payload = {"schemaVersion": 1, "phase": phase, "complete": True, "identity": identity,
+                       "results": [{"id": check_id, "row_count": 1, "column_count": 1,
+                                    "numeric": True, "value": 1} for check_id in ids]}
+            output = f"CHECK_PAYLOAD_BEGIN:{phase}\n" + json.dumps(payload) + f"\nCHECK_PAYLOAD_END:{phase}\nCHECK_VERIFIED:{phase}\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        with patch.dict("os.environ", {"MIGRATION_CHECK_BATCH_BYTES": "5000"}):
+            report = run_checks(target, checks, Path(self.temporary.name), jobs=2, _runner=runner)
+
+        self.assertTrue(report.passed, report.to_dict())
+        self.assertGreaterEqual(peak, 2)
+
     def test_a_single_check_over_the_driver_budget_fails_with_its_id_without_running_sqlcl(self):
         target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
         check = QueryCheck("oversized-check", "SELECT 1 FROM dual", 1)

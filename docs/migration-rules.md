@@ -166,20 +166,49 @@ fingerprint, verify the exact expression,
 seed, bucket limit, line text and expected count/sum on each target database
 version. Prefer exact-source comparison when collision risk is unacceptable.
 
-Check sessions are sequentially split so each generated UTF-8 SQL driver stays
-within `MIGRATION_CHECK_BATCH_BYTES` (default `2097152`, or 2 MiB). Each session
-retains the read-only transaction and disabled-commit guards, and the runner
-checks the observed database identity for every session before accepting the
-merged report. Set the limit to another positive integer number of bytes when a
-large reviewed check requires it. A single check that exceeds the limit is
-refused before SQLcl starts, with its check ID; an individual check is never
-split. A batch that cannot finish is incomplete and cannot produce a receipt.
+Long check lists are split so each generated UTF-8 SQL driver stays within
+`MIGRATION_CHECK_BATCH_BYTES` (default `2097152`, or 2 MiB). `migrate` runs its
+check sessions sequentially; `verify --jobs N` can run up to N sessions in
+parallel and defaults to one. Each session retains the read-only transaction
+and disabled-commit guards, and the runner checks the observed database
+identity for every session before accepting the merged report. Set the limit to
+another positive integer number of bytes when a large reviewed check requires
+it. A single check that exceeds the limit is refused before SQLcl starts, with
+its check ID; an individual check is never split. `migrate` cannot produce a
+receipt when postcondition verification is incomplete.
 When fresh postconditions fail, `migrate` prints up to 20 failing IDs with
 expected and observed values or Oracle/SQLcl error codes. `--verbose` prints all
 failed checks; the run manifest retains their IDs and verification evidence.
 If an attempted verification session returned no result frame, the error says
 that verification produced no output, names likely timeout/size-limit/SQLcl
 failure causes, and gives the saved evidence path.
+
+Use `verify` to evaluate declared checks without running the migration SQL or
+writing a receipt:
+
+```bash
+scripts/team.sh verify migrations/2026-09-27_create-customers-r001 \
+  --env dev --phase both --format text
+scripts/team.sh verify migrations/DEMO/2026-09-27_create-customers-r001 \
+  --env staging --schema DEMO --phase post --only-failed --jobs 2
+```
+
+`--phase pre`, `--phase post` and `--phase both` select preconditions,
+postconditions or both; each selected folder's checks are evaluated. The
+default is `both`. `--only-failed` hides rows that returned their expected
+value, and `--format json` emits a versioned JSON report. `--jobs N` allows up
+to N batched SQLcl check sessions to run concurrently; its default is 1. Each
+session keeps the same read-only transaction, disabled-commit guard and
+per-session target identity verification used by `migrate`. The command runs
+no migration SQL and writes no receipt or apply run manifest. Temporary files
+live in a private `scratch/migration-verify-*` directory, which is removed on
+success and retained with diagnostics when any check is false or verification
+errors.
+
+`verify` exits 0 when every requested check is true, 1 when at least one check
+is false, and 2 when a check errors, a session is incomplete, or the selected
+target identity cannot be verified. A SQL or identity error takes precedence
+over false results and returns 2.
 
 Each SQLcl apply session is limited by `MIGRATION_APPLY_TIMEOUT_SECONDS`, and
 check plus inventory sessions use `MIGRATION_CHECK_TIMEOUT_SECONDS`. Both

@@ -21,6 +21,8 @@ Commands:
                                               Preflight selected migrations against local/live scope
   migrate <folder> [...] --env dev|staging|prod [--verbose]
                                               Preflight and apply; --verbose lists every failed postcondition
+  verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
+         [--format text|json] [--jobs N]     Evaluate migration checks read-only
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
@@ -241,6 +243,11 @@ case "$command_name" in
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/migrate.sh" "$@"
+    ;;
+  verify)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh verify <migration-folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      exec "$REPO_ROOT/scripts/verify_checks.sh" "$@"
     ;;
   compare-schema)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]"

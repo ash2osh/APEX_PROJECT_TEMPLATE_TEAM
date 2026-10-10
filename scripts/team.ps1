@@ -45,6 +45,8 @@ Commands:
                                               Preflight selected migrations against local/live scope
   migrate <folder> [...] --env dev|staging|prod [--verbose]
                                               Preflight and apply; --verbose lists every failed postcondition
+  verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
+         [--format text|json] [--jobs N]     Evaluate migration checks read-only
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
@@ -350,6 +352,10 @@ try {
     "migrate" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod" }
       Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
+    }
+    "verify" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]" }
+      Invoke-TeamBash -ScriptName "verify_checks.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
     }
     "compare-schema" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }

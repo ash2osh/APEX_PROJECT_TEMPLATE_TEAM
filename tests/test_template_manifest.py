@@ -64,6 +64,15 @@ class TemplateManifestTests(unittest.TestCase):
     def test_tracked_files_are_not_ambiguously_owned_and_protected_paths_are_unowned(self) -> None:
         self.assert_tracked_ownership_valid(self.tracked)
 
+    def test_read_only_verifier_files_are_covered_by_template_ownership(self) -> None:
+        for path in (
+            "scripts/verify_checks.py",
+            "scripts/verify_checks.sh",
+            "tests/test_verify_checks.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+
     def test_template_declares_the_qualified_release_boundary(self) -> None:
         from scripts.upgrade_template import load_manifest
         manifest = load_manifest(ROOT)
