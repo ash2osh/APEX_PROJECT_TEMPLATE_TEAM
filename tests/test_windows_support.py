@@ -249,6 +249,44 @@ class TeamPowerShellMigrationRehearsalTests(unittest.TestCase):
         self.assertIn('"--report=" + (ConvertTo-MigrationFolderArgument $reportValue)', wrapper)
 
 
+class TeamPowerShellMigrationRevisionTests(unittest.TestCase):
+    """The PowerShell entry point exposes and converts arguments for revision handling."""
+
+    def engines(self):
+        return [
+            engine
+            for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh")
+            if (engine := shutil.which(name)) and "/snap/bin/" not in Path(engine).as_posix()
+        ]
+
+    def test_help_describes_revision_and_check_options(self):
+        wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        self.assertIn("revise <folder> [--reason TEXT]", wrapper)
+        self.assertIn("revise --check <folder>", wrapper)
+
+    def test_revision_without_arguments_reports_usage(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "revise"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("usage: scripts/team.ps1 revise", result.stderr)
+
+    def test_wrapper_converts_folder_argument_for_git_bash(self):
+        wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        self.assertIn('$revisionArguments[1] = ConvertTo-MigrationFolderArgument', wrapper)
+        self.assertIn('$revisionArguments[0] = ConvertTo-MigrationFolderArgument', wrapper)
+        self.assertIn('Invoke-TeamBash -ScriptName "team.sh"', wrapper)
+
+
 class SqlclNativePathTests(unittest.TestCase):
     def test_native_path_is_the_identity_off_windows(self) -> None:
         if os.name == "nt":

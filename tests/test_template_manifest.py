@@ -91,6 +91,14 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
+    def test_migration_revision_files_are_covered_by_template_ownership(self) -> None:
+        for path in (
+            "scripts/migration_revision.py",
+            "tests/test_migration_revision.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+
     def test_template_declares_the_qualified_release_boundary(self) -> None:
         from scripts.upgrade_template import load_manifest
         manifest = load_manifest(ROOT)

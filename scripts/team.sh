@@ -21,6 +21,8 @@ Commands:
                                               Preflight selected migrations against local/live scope
   migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
                                               Apply, or rehearse DML in one transaction and roll it back
+  revise <folder> [--reason TEXT]             Copy to the next migration revision
+  revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
@@ -242,9 +244,14 @@ case "$command_name" in
       exec "$REPO_ROOT/scripts/check_conflicts.sh" "$@"
     ;;
   migrate)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/migrate.sh" "$@"
+    ;;
+  revise)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh revise <folder> [--reason TEXT] | revise --check <folder>"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.migration_revision "$@"
     ;;
   verify)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh verify <migration-folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]"

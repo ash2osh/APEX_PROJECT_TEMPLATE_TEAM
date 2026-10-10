@@ -15,6 +15,7 @@ from scripts.db_targets import Target
 from scripts.migrate import MigrationApplyError, _assert_check_identity, apply_batch, apply_folder, main
 from scripts.migration_checks import CheckReport, analyze_batch, run_checks
 from scripts.migration_manifest import load_batch, validate_receipt
+from scripts.migration_revision import inspect_migration_lock
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
@@ -272,6 +273,121 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
         self.assertFalse((folder / "status.dev.json").exists())
 
+    def test_identity_guard_refusal_is_recorded_as_not_started_and_allows_retry(self):
+        folder = self.add_folder(
+            "2026-09-28_identity-refusal-r001",
+            {"001-insert-row.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        identity = json.dumps(fake.identity(), separators=(",", ":"))
+        refusal = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nORA-20987: MIGRATION_IDENTITY_GUARD_REFUSED: target differs\n"
+        )
+        binary = install(self.root / "fake-bin", "cat <<'FAKE_SQLCL_OUTPUT'\n" + refusal + "FAKE_SQLCL_OUTPUT\nexit 1\n")
+        stderr = io.StringIO()
+
+        with patch.dict("os.environ", fake_environment(binary)), contextlib.redirect_stderr(stderr):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        self.assertIn("no payload statement started", stderr.getvalue())
+        manifest = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(manifest.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-not-started")
+        self.assertFalse(recorded["writeAttempted"])
+        self.assertEqual(inspect_migration_lock(self.root, f"migrations/{folder.name}").status, "unlocked")
+
+        success = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-insert-row.sql\n"
+            "1 row inserted.\nMIGRATION_APPLY_COMPLETED\n"
+        )
+        install(self.root / "fake-bin", "cat <<'FAKE_SQLCL_OUTPUT'\n" + success + "FAKE_SQLCL_OUTPUT\n")
+        with patch.dict("os.environ", fake_environment(binary)):
+            retried, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(retried, 0)
+        self.assertTrue((folder / "status.dev.json").is_file())
+
+    def test_connection_refusal_before_payload_is_recorded_as_not_started(self):
+        folder = self.add_folder(
+            "2026-09-28_connection-refusal-r001",
+            {"001-insert-row.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        binary = install(
+            self.root / "fake-bin",
+            "printf '%s\\n' 'ORA-12154: TNS could not resolve the connect identifier'\nexit 1\n",
+        )
+
+        with patch.dict("os.environ", fake_environment(binary)), contextlib.redirect_stderr(io.StringIO()):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        attempt = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(attempt.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-not-started")
+        self.assertEqual(recorded["applyStartClassification"], "connection-failed-before-payload")
+        self.assertFalse(recorded["writeAttempted"])
+
+    def test_ora_error_after_payload_started_remains_locked(self):
+        folder = self.add_folder(
+            "2026-09-28_payload-error-r001",
+            {"001-insert-row.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        identity = json.dumps(fake.identity(), separators=(",", ":"))
+        output = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-insert-row.sql\n"
+            "ORA-00942: table or view does not exist\n"
+        )
+        binary = install(self.root / "fake-bin", "cat <<'FAKE_SQLCL_OUTPUT'\n" + output + "FAKE_SQLCL_OUTPUT\nexit 1\n")
+
+        with patch.dict("os.environ", fake_environment(binary)), contextlib.redirect_stderr(io.StringIO()):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        attempt = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(attempt.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-failed-or-unknown")
+        self.assertTrue(recorded["writeAttempted"])
+        self.assertEqual(inspect_migration_lock(self.root, f"migrations/{folder.name}").status, "locked")
+
+    def test_timeout_after_payload_started_without_ora_stays_locked(self):
+        folder = self.add_folder(
+            "2026-09-28_payload-timeout-r001",
+            {"001-large.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        identity = json.dumps(fake.identity(), separators=(",", ":"))
+        output = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-large.sql\n"
+        )
+        binary = install(
+            self.root / "fake-bin",
+            "cat <<'FAKE_SQLCL_OUTPUT'\n" + output + "FAKE_SQLCL_OUTPUT\nsleep 2\n",
+        )
+
+        with patch.dict("os.environ", fake_environment(binary, MIGRATION_APPLY_TIMEOUT_SECONDS="0.05")), contextlib.redirect_stderr(io.StringIO()):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        attempt = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(attempt.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-failed-or-unknown")
+        self.assertTrue(recorded["writeAttempted"])
+
     def test_a_retained_attempt_with_a_duplicate_key_still_blocks_replay(self):
         # json.loads keeps the last of two equal keys, so "writeAttempted": true
         # followed by "writeAttempted": false read as false and let the DDL run
@@ -412,6 +528,7 @@ class MigrateCliTests(unittest.TestCase):
             self.assertIn("@@verify_migration_access.sql", (working / "migrate.sql").read_text(encoding="utf-8"))
             self.assertIn("SET DEFINE OFF", content)
             self.assertIn("@@../payload/2026-09-28_create-driver-r001/001-create-t.sql", content)
+            self.assertIn("PROMPT MIGRATION_PAYLOAD_STARTED:001-create-t.sql", content)
             self.assertIn("EXIT SUCCESS COMMIT", content)
             payload_at = content.index("@@../payload/")
             # SQLcl ends a plain SQL statement at a blank line unless told

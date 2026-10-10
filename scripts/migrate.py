@@ -46,6 +46,7 @@ from .migration_manifest import (
     validate_receipt,
     verify_loaded_input_hashes,
 )
+from .migration_revision import attempt_record_is_locked, not_started_reason, RUN_ID_RE, RUN_MANIFEST_NAME
 from .schema_catalog import (
     CatalogError,
     ObjectDefinition,
@@ -62,8 +63,6 @@ from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_VERSION = "template-migration-v1"
 STATUS_SCHEMA_VERSION = 1
-RUN_MANIFEST_NAME = "run-manifest.json"
-RUN_ID_RE = re.compile(r"migration-attempt-[A-Za-z0-9_-]+\Z", re.ASCII)
 IDENTITY_FIELDS = (
     "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
     "container_id", "container_name", "edition", "database_version",
@@ -421,8 +420,12 @@ def _verify_receipts_and_attempts(
         for record in manifest["migrations"]:
             if not isinstance(record, dict) or record.get("folder") not in selected:
                 continue
-            if target_record.get("environment") != environment or not record.get("writeAttempted"):
+            if target_record.get("environment") != environment or not attempt_record_is_locked(record):
                 continue
+            if record.get("writeAttempted") is not True:
+                raise MigrationApplyError(
+                    f"a retained attempt for {record['folder']} has an uncertain state; inspect {run_dir} and reconcile"
+                )
             if record.get("payloadDigest") != selected[record["folder"]].payload_digest:
                 raise MigrationApplyError(f"a prior write attempt has different bytes for {record['folder']}; reconcile before applying")
             raise MigrationApplyError(f"a prior {environment} write attempt for {record['folder']} has no current verified receipt; inspect {run_dir} and reconcile")
@@ -565,7 +568,7 @@ def _identity_guard_lines(expected_identity: Mapping[str, str]) -> list[str]:
         )
     lines.extend([
         "  IF l_mismatch IS NOT NULL THEN",
-        "    RAISE_APPLICATION_ERROR(-20987, 'Migration apply session differs from the preflight target:' || l_mismatch);",
+        "    RAISE_APPLICATION_ERROR(-20987, 'MIGRATION_IDENTITY_GUARD_REFUSED: Migration apply session differs from the preflight target:' || l_mismatch);",
         "  END IF;",
         "END;",
         "/",
@@ -665,6 +668,7 @@ def apply_folder(
     if expected_identity is not None:
         driver_lines.extend(_identity_guard_lines(expected_identity))
     for file in migration.files:
+        driver_lines.append(f"PROMPT MIGRATION_PAYLOAD_STARTED:{file.name}")
         driver_lines.append(f"@@../payload/{migration.folder.name}/{file.name}")
     # The payload may have changed these settings (for example WHENEVER
     # SQLERROR CONTINUE); the compile guard's error must still stop the commit.
@@ -934,6 +938,23 @@ def apply_batch(
                 _atomic_write_json(manifest_path, run_manifest)
                 raise MigrationApplyError(f"{original.folder.name} was interrupted and may be partially applied; stop and reconcile. Evidence: {run_dir}") from None
             except (MigrationApplyError, OSError, RuntimeError) as error:
+                output_path = folder_run_dir / "sqlcl-output.log"
+                try:
+                    output = output_path.read_text(encoding="utf-8", errors="replace") if not output_path.is_symlink() else ""
+                except OSError:
+                    output = ""
+                not_started = not_started_reason(output)
+                if not_started is not None:
+                    record["writeAttempted"] = False
+                    record["state"] = "apply-not-started"
+                    record["applyStartClassification"] = not_started
+                    record["error"] = str(error)
+                    run_manifest["state"] = "apply-not-started"
+                    _atomic_write_json(manifest_path, run_manifest)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} did not start applying: no payload statement started "
+                        f"({not_started}); retry is permitted. {error}. Evidence: {run_dir}"
+                    ) from error
                 record["state"] = "apply-failed-or-unknown"
                 record["error"] = str(error)
                 run_manifest["state"] = "apply-failed-or-unknown"

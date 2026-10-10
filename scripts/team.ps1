@@ -45,6 +45,8 @@ Commands:
                                               Preflight selected migrations against local/live scope
   migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
                                               Apply, or rehearse DML in one transaction and roll it back
+  revise <folder> [--reason TEXT]             Copy to the next migration revision
+  revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
@@ -366,6 +368,18 @@ try {
         }
       }
       Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments $migrateArguments
+    }
+    "revise" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 revise <folder> [--reason TEXT] | revise --check <folder>" }
+      $revisionArguments = @($Arguments)
+      if ($revisionArguments[0] -ceq "--check") {
+        if ($revisionArguments.Count -lt 2) { Fail "usage: scripts/team.ps1 revise --check <folder>" }
+        $revisionArguments[1] = ConvertTo-MigrationFolderArgument ([string] $revisionArguments[1])
+      } else {
+        $revisionArguments[0] = ConvertTo-MigrationFolderArgument ([string] $revisionArguments[0])
+      }
+      $teamArguments = @("revise") + $revisionArguments
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments $teamArguments
     }
     "verify" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]" }

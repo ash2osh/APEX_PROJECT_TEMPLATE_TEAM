@@ -411,6 +411,19 @@ second contains the follow-up change. Keep a migration and its `checks.json`
 immutable once an apply attempt may have started. A recovery belongs in the
 next revision.
 
+Create that follow-up from the prior folder with `revise`. It copies the SQL
+files and checks into the next `-rNNN` folder, keeps their names and numbering,
+adds a `Supersedes` line to the new `README.md`, and leaves the source untouched.
+Use `--reason` to explain the correction; if omitted, the header says
+`follow-up revision`. The command refuses when a later revision already exists
+and prints the explicit migration order hint. It does not copy environment
+receipts into the new revision.
+
+Use `revise --check` to inspect local attempt and receipt evidence without
+connecting. It exits 0 for unlocked, 1 for locked, and 2 when evidence is
+unknown or unreadable. See the [migration rules](docs/migration-rules.md) for
+the exact `apply-not-started` classification and its limits.
+
 Run a selected live preflight and apply with an explicit environment:
 
 ```bash
@@ -626,6 +639,8 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
 | `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. |
+| `scripts/team.sh revise <folder> [--reason TEXT]` | Copy a migration to its next revision; the old folder stays unchanged. |
+| `scripts/team.sh revise --check <folder>` | Report whether local receipt or attempt evidence locks a migration folder; exit 0/1/2 for unlocked/locked/unknown. |
 | `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
 | `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]` | Run a frozen, ordered migration, SQL, ORDS and app deployment plan; staging and production show one manifest-wide hash confirmation. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
@@ -651,8 +666,8 @@ Exit status, the same in Bash and PowerShell:
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Done; for `check-conflicts` and `compare-schema`, nothing found; for `verify`, every requested check returned its expected value. |
-| 1 | `check-conflicts` found conflicts, `compare-schema` found differences, or `verify` found a false check; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
+| 0 | Done; for `check-conflicts` and `compare-schema`, nothing found; for `verify`, every requested check returned its expected value; for `revise --check`, the folder is unlocked. |
+| 1 | `check-conflicts` found conflicts, `compare-schema` found differences, or `verify` found a false check; `revise --check` found a lock; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
 | 2 | Refused or failed; the message says why and what changed. Also `migrate` interrupted while a SQL step runs ("may be partially applied"). |
 | 130 / 143 | Stopped by Ctrl-C / by SIGTERM (`kill`). |
 

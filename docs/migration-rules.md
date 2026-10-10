@@ -50,6 +50,16 @@ one schema are separate, sequential migrations for the same intent. `r002`
 contains the incremental follow-up, not a replacement copy of `r001`; its SQL
 sequence starts again at `001`.
 
+Use `scripts/team.sh revise <folder> [--reason TEXT]` to copy a folder into the
+next revision in that same flat or `migrations/<SCHEMA>/` layout. It preserves
+SQL filenames, sequence numbers, checks and existing README content, prepends
+`Supersedes <old-folder>: <reason>` to the new README, and leaves the old folder
+unchanged. The default reason is `follow-up revision`. Existing environment
+receipts are not copied. The command refuses a source without an `-rNNN`
+suffix, a revision at `r999`, a gap in the family history, or any newer family
+revision. Its order hint lists the local family in ascending revision order;
+include only folders that still need to be applied.
+
 Each immediate SQL file is named `NNN-<step-name>.sql`; sequence numbers must
 be unique and consecutive from `001`. The runner executes those files in
 ascending numeric order in one migration session. When several folders are
@@ -388,10 +398,50 @@ and exits 2, because the result is unknown; interrupted anywhere else it exits
 130 and says whether a write was attempted ("no writes were attempted", or
 "interrupted after a write was attempted; stop and reconcile").
 
-Every `migrate` that reaches the database leaves its record in
-`scratch/migration-attempt-*` (SQL, SQLcl log and outcome). It is what lets
-`migrate` refuse a folder you edited or that is half applied, so do not delete
-it until you have reconciled that folder with the database. `scratch/` is
+Every `migrate` that reaches the apply boundary leaves its record in
+`scratch/migration-attempt-*` (SQL, SQLcl log and outcome). For each folder, the
+runner writes `write-attempted` before starting SQLcl. Before each payload file
+it prints `MIGRATION_PAYLOAD_STARTED:<filename>`; successful completion prints
+`MIGRATION_APPLY_COMPLETED`.
+
+A failed apply becomes `apply-not-started` and is not locked only when the
+retained SQLcl output proves a pre-payload refusal: a migration identity guard
+error (`ORA-20980` through `ORA-20985` before `MIGRATION_IDENTITY_VERIFIED`,
+or `ORA-20987` with both `MIGRATION_IDENTITY_VERIFIED` and
+`MIGRATION_IDENTITY_GUARD_REFUSED`), a recognized connection error before
+the first `MIGRATION_PAYLOAD_STARTED` marker (`ORA-01017`,
+`ORA-12154`, `ORA-12514`, `ORA-12537`, `ORA-12541`, `ORA-12545`, `ORA-12547`,
+`ORA-12560`, `ORA-12637`, or `SP2-0640`), or a local SQLcl start failure. The
+output must not contain `MIGRATION_PAYLOAD_STARTED` or
+`MIGRATION_APPLY_COMPLETED`. The record sets `writeAttempted` to false and the
+folder can be retried or revised.
+
+Any payload-start marker, a missing or unreadable log, an unrecognized error,
+an interrupt, or a timeout remains locked as `apply-failed-or-unknown`.
+`write-attempted`, `committed-unverified`, `committed-verification-failed`,
+`committed-receipt-failed`, `committed-source-or-payload-changed`, and
+`verified` attempt/receipt states are locked too. Only `frozen` and
+`apply-not-started` records with `writeAttempted: false` are unlocked;
+inconsistent or unknown evidence does not unlock a folder. A
+timeout after a payload marker stays locked even when SQLcl printed no ORA
+error: this covers the DEV26 1,856-statement file cut off after five minutes.
+ORA errors after a payload marker also stay locked because earlier statements
+may have run. A verified receipt locks the folder as well. Use
+`scripts/team.sh revise --check <folder>` to see the local attempt and receipt
+states; exit 0 means unlocked, 1 means locked, and 2 means evidence is unknown
+or unreadable. An attempt directory without `run-manifest.json` is incomplete
+evidence and returns 2 because its target folder cannot be established.
+
+This rule is intentionally narrow. It recognizes the identity refusal and
+connection/start errors above only when no payload marker was printed; a
+recognized connection error after the identity marker but before the first
+payload marker still qualifies. SQLcl does not provide a durable per-statement
+execution ledger, so a truncated, missing, or ambiguous output cannot prove
+that the database was untouched and stays locked. A connection loss after
+SQLcl prints a payload marker is also ambiguous and stays locked, even if the
+first statement may not have reached Oracle. The local check sees only this
+checkout's receipts and ignored `scratch/` evidence; it does not see another
+developer's repository or prove current live schema state. `scratch/` is
 ignored by Git and is not shared with teammates.
 
 The runner creates `status.dev.json`, `status.staging.json`, or

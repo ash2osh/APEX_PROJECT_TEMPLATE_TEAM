@@ -96,6 +96,8 @@ class DocumentationContractTests(unittest.TestCase):
             "publish 100",
             "check-conflicts",
             "team.sh migrate",
+            "team.sh revise",
+            "revise --check",
             "--rehearse",
             "--report scratch/customer-seed-rehearsal.json",
             "team.sh rollout",
@@ -122,7 +124,11 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn(".template-new", readme)
         self.assertIn("python3 /tmp/apex-template/scripts/upgrade_template.py", readme)
         self.assertIn("2026-09-27_create-customers-r001", readme)
+        self.assertIn("apply-not-started", readme)
         migration_guide = contents[ROOT / "docs" / "migration-rules.md"]
+        self.assertIn("MIGRATION_PAYLOAD_STARTED", migration_guide)
+        self.assertIn("ORA-20987", migration_guide)
+        self.assertIn("1,856", migration_guide)
         self.assertIn("other developers' pending files", migration_guide)
         self.assertIn("status.<env>.json", migration_guide)
         self.assertIn("STAGING_SCHEMA", migration_guide)
@@ -205,6 +211,10 @@ class DocumentationContractTests(unittest.TestCase):
             "not reliable migration-file attribution",
             "can mimic a migration",
             "cannot set the browser's sort direction",
+            "apply-not-started",
+            "revise --check",
+            "MIGRATION_PAYLOAD_STARTED",
+            "committed-source-or-payload-changed",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, guide)
