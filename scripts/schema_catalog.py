@@ -247,7 +247,11 @@ def _strict_json_object_pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, An
     return obj
 
 
-def decode_catalog_payload(lines: Sequence[str]) -> dict:
+def decode_catalog_payload(
+    lines: Sequence[str],
+    *,
+    parse_float: Callable[[str], Any] | None = None,
+) -> dict:
     """Decode a sequence of framed payload lines into a catalog dictionary.
 
     Lines may represent either:
@@ -353,6 +357,7 @@ def decode_catalog_payload(lines: Sequence[str]) -> dict:
             decoded_text,
             object_pairs_hook=_strict_json_object_pairs_hook,
             parse_constant=_reject_json_constant,
+            parse_float=parse_float,
         )
     except CatalogError:
         raise
@@ -396,7 +401,12 @@ def decode_catalog_payload(lines: Sequence[str]) -> dict:
     return payload
 
 
-def _payload_frames(output: str, phase: str) -> list[dict]:
+def _payload_frames(
+    output: str,
+    phase: str,
+    *,
+    parse_float: Callable[[str], Any] | None = None,
+) -> list[dict]:
     frames: list[dict] = []
     collecting = False
     pieces: list[str] = []
@@ -422,7 +432,7 @@ def _payload_frames(output: str, phase: str) -> list[dict]:
             # Interior whitespace/chunks remain strict; gzip EOF/CRC is still checked.
             while pieces and pieces[-1] == "":
                 pieces.pop()
-            payload = decode_catalog_payload(pieces)
+            payload = decode_catalog_payload(pieces, parse_float=parse_float)
             if payload.get("phase") != phase:
                 raise CatalogError("catalog payload schema version or phase is unsupported")
             frames.append(payload)
@@ -448,11 +458,16 @@ def _payload_frames(output: str, phase: str) -> list[dict]:
     return frames
 
 
-def parse_framed_catalog_payloads(output: str, phase: str) -> list[dict]:
+def parse_framed_catalog_payloads(
+    output: str,
+    phase: str,
+    *,
+    parse_float: Callable[[str], Any] | None = None,
+) -> list[dict]:
     """Decode verified, compressed SQLcl payload frames for a catalog phase."""
     if phase not in {"inventory", "snapshot", "compare-env"}:
         raise CatalogError("catalog payload phase is unsupported")
-    return _payload_frames(output, phase)
+    return _payload_frames(output, phase, parse_float=parse_float)
 
 
 def parse_inventory(output: str, target: Target) -> SchemaInventory:

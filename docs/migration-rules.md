@@ -651,14 +651,43 @@ New folders pass the normal migration loader and SQL/check validators. Existing
 folders remain immutable; a changed build uses the next family revision, and
 receipt or attempt evidence is reported without rewriting the folder.
 
+`baseline export-data --from <env>` captures only the tables and columns named
+in `referenceData.tables`, under `scratch/baseline/<env>/data/<schema>/`. Each
+table declares excluded columns, natural-key columns, matching label columns,
+identity handling, and a row limit. Export uses the read-only SQLcl catalog
+session and refuses incomplete paging or a cap hit. The `baseline build`
+command accepts `--to <env> [--from <env>] --data`; it reads a prior source
+export and observes the target tables before generating a `baseline-data`
+folder. It inserts only rows with
+missing natural keys, groups DML into bounded steps, preserves existing rows,
+and creates count-based checks. Use `migrate <folder> --env <env> --rehearse`
+to rehearse and roll back the eligible DML; identity advancement is a separate
+DDL step and is skipped during rehearsal.
+
+### Reference data: never copy foreign keys by id
+
+When a foreign key points to another allow-listed table, the generated insert
+resolves the target row through the parent's configured label columns. Source
+IDs never enter the child insert. A missing or duplicate target parent label
+blocks generation; different non-key values on a same-key row are reported as
+a precondition-visible difference and the row is left untouched. This avoids
+copying a policy row's source reason ID into a target schema where that ID
+belongs to a different reason. See [baseline configuration and limits](baseline.md).
+
+`baseline filter-ords --exclude-module NAME [...] --input <file> --output
+<file>` validates an ORDS schema export, removes the named module together
+with its templates and handlers, and refuses a name that is not present. Use
+the filtered output as the file of an `ords-import` rollout step. Filtering is
+local and does not change the source export.
+
 The generator handles guarded creates, missing columns, selected named
 constraints and indexes, not-null transitions, sequence/identity advancement,
 additive object grants and exact stored source. It does not generate drops,
 system privilege grants or general column/table alteration migrations. Review
 all reported environment differences that fall outside these generated
 classes. `baseline.json` can carry a `referenceData.tables` allow-list for a
-later phase, but baseline export/build does not process table rows or filter
-ORDS exports. See [baseline configuration and limits](baseline.md).
+schema-specific export and additive reference-data build. See
+[baseline configuration and limits](baseline.md).
 
 Exit status: **0** means all selected sections were complete and identical;
 **1** means complete capture with differences; **2** means capture error,

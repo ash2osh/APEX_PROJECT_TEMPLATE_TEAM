@@ -37,7 +37,12 @@ Commands:
                                               Export configured exact stored source and settings
   baseline export-grants --from <env> [--scratch <dir>]
                                               Export configured object and system grants
-  baseline build --to <env> [--from <env>]    Build structure, grants, and exact-source migrations
+  baseline export-data --from <env> [--scratch <dir>]
+                                              Export allow-listed reference rows without excluded columns
+  baseline build --to <env> [--from <env>] [--data]
+                                              Build structure, grants, source, and optional reference-data migrations
+  baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
+                                              Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
@@ -286,9 +291,13 @@ case "$command_name" in
     ;;
   baseline)
     if [ "$#" -eq 0 ]; then
-      fail "usage: scripts/team.sh baseline <export-source|export-grants|build> [options]"
+      fail "usage: scripts/team.sh baseline <export-source|export-grants|export-data|build|filter-ords> [options]"
     fi
     if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+      cd "$REPO_ROOT"
+      exec python3 -m scripts.baseline "$@"
+    fi
+    if [ "$1" = "filter-ords" ]; then
       cd "$REPO_ROOT"
       exec python3 -m scripts.baseline "$@"
     fi

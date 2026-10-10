@@ -318,7 +318,10 @@ class TeamPowerShellBaselineCommandTests(unittest.TestCase):
         wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
         self.assertIn("baseline export-source --from <env>", wrapper)
         self.assertIn("baseline export-grants --from <env>", wrapper)
+        self.assertIn("baseline export-data --from <env>", wrapper)
         self.assertIn("baseline build --to <env>", wrapper)
+        self.assertIn("baseline filter-ords --exclude-module NAME", wrapper)
+        self.assertIn('"--data-dir", "--input", "--output"', wrapper)
         engines = self.engines()
         if not engines:
             self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
@@ -332,7 +335,9 @@ class TeamPowerShellBaselineCommandTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("baseline export-source", result.stdout)
                 self.assertIn("baseline export-grants", result.stdout)
+                self.assertIn("baseline export-data", result.stdout)
                 self.assertIn("baseline build", result.stdout)
+                self.assertIn("baseline filter-ords", result.stdout)
 
     def test_baseline_without_subcommand_reports_usage(self):
         engines = self.engines()
@@ -350,10 +355,11 @@ class TeamPowerShellBaselineCommandTests(unittest.TestCase):
 
     def test_wrapper_converts_the_scratch_path_for_git_bash(self):
         wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
-        self.assertIn('$baselineArguments[$baselineIndex] -ceq "--scratch"', wrapper)
+        self.assertIn('$pathOptions = @("--scratch", "--data-dir", "--input", "--output")', wrapper)
+        self.assertIn('$pathOptions -ccontains ([string] $baselineArguments[$baselineIndex])', wrapper)
         self.assertIn('ConvertTo-MigrationFolderArgument ([string] $baselineArguments[$baselineIndex])', wrapper)
-        self.assertIn('Substring("--scratch=".Length)', wrapper)
-        self.assertIn('"--scratch=" + (ConvertTo-MigrationFolderArgument $scratchValue)', wrapper)
+        self.assertIn('$prefix = $pathOption + "="', wrapper)
+        self.assertIn('$baselineArguments[$baselineIndex] = $prefix + (ConvertTo-MigrationFolderArgument $pathValue)', wrapper)
 
 
 class TeamPowerShellMigrationRevisionTests(unittest.TestCase):

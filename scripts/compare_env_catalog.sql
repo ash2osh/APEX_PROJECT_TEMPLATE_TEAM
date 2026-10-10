@@ -10,6 +10,7 @@ DEFINE compare_sections_hex = '&5'
 DEFINE compare_baseline_internal = '&6'
 DEFINE compare_baseline_prefixes_hex = '&7'
 DEFINE compare_baseline_excluded_hex = '&8'
+DEFINE compare_baseline_data_tables_hex = '&9'
 SET LONG 2000000000
 SET LONGCHUNKSIZE 32767
 SET SERVEROUTPUT ON SIZE UNLIMITED
@@ -26,6 +27,7 @@ DECLARE
   c_selected_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_sections_hex'));
   c_baseline_prefixes_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_prefixes_hex'));
   c_baseline_excluded_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_excluded_hex'));
+  c_baseline_data_tables_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_data_tables_hex'));
   c_page_size CONSTANT PLS_INTEGER := 500;
   c_max_rows CONSTANT PLS_INTEGER := 100000;
   l_payload JSON_OBJECT_T := JSON_OBJECT_T();
@@ -206,6 +208,206 @@ DECLARE
     l_page.put('reason', p_reason);
     l_page.put('pages', JSON_ARRAY_T.parse('[0]'));
     l_coverage_sections.put(p_name, l_page);
+  END;
+
+  PROCEDURE add_baseline_data IS
+    specs JSON_ARRAY_T;
+    spec JSON_OBJECT_T;
+    excluded_columns JSON_ARRAY_T;
+    key_columns JSON_ARRAY_T;
+    label_columns JSON_ARRAY_T;
+    expected_identity_element JSON_ELEMENT_T;
+    expected_identity JSON_OBJECT_T;
+    table_payload JSON_OBJECT_T;
+    column_payload JSON_OBJECT_T;
+    column_rows JSON_ARRAY_T;
+    table_rows JSON_ARRAY_T;
+    table_pages JSON_ARRAY_T;
+    column_names JSON_ARRAY_T;
+    order_list VARCHAR2(32767);
+    dynamic_sql VARCHAR2(32767);
+    l_table_name VARCHAR2(128);
+    column_name VARCHAR2(128);
+    excluded BOOLEAN;
+    row_limit PLS_INTEGER;
+    total_rows PLS_INTEGER;
+    base_table_count PLS_INTEGER;
+    offset_rows PLS_INTEGER;
+    page_rows PLS_INTEGER;
+    actual_identity_column VARCHAR2(128);
+    actual_identity_generation VARCHAR2(30);
+    identity_found BOOLEAN;
+  BEGIN
+    IF NOT selected('baseline-data') THEN RETURN; END IF;
+    specs := JSON_ARRAY_T.parse(c_baseline_data_tables_json);
+    l_rows := JSON_ARRAY_T();
+    l_pages := JSON_ARRAY_T();
+    IF specs.get_size > c_max_rows THEN
+      RAISE_APPLICATION_ERROR(-20995, 'baseline-data configured table list exceeded its 100000-table cap');
+    END IF;
+
+    FOR spec_index IN 0 .. specs.get_size - 1 LOOP
+      spec := TREAT(specs.get(spec_index) AS JSON_OBJECT_T);
+      l_table_name := spec.get_string('name');
+      excluded_columns := spec.get_array('excludeColumns');
+      key_columns := spec.get_array('keyColumns');
+      label_columns := spec.get_array('labelColumns');
+      row_limit := spec.get_number('rowLimit');
+      IF l_table_name IS NULL OR row_limit IS NULL OR row_limit < 1 OR row_limit > c_max_rows THEN
+        RAISE_APPLICATION_ERROR(-20994, 'baseline-data table configuration is malformed');
+      END IF;
+      SELECT COUNT(*) INTO base_table_count
+        FROM all_tables
+       WHERE owner = c_schema AND table_name = l_table_name;
+      IF base_table_count != 1 THEN
+        RAISE_APPLICATION_ERROR(-20994, 'baseline-data allow-list entry is missing or is not a table: ' || l_table_name);
+      END IF;
+      table_payload := JSON_OBJECT_T();
+      table_payload.put('name', l_table_name);
+      table_payload.put('rowLimit', row_limit);
+      column_payload := JSON_OBJECT_T();
+      column_rows := JSON_ARRAY_T();
+      column_names := JSON_ARRAY_T();
+      FOR c IN (
+        SELECT column_name, data_type, data_length, data_precision, data_scale,
+               char_used, char_length, nullable, column_id
+          FROM all_tab_cols c
+         WHERE c.owner = c_schema AND c.table_name = l_table_name
+           AND c.hidden_column = 'NO' AND c.virtual_column = 'NO'
+         ORDER BY c.column_id
+      ) LOOP
+        excluded := FALSE;
+        IF excluded_columns IS NOT NULL THEN
+          FOR exclude_index IN 0 .. excluded_columns.get_size - 1 LOOP
+            IF UPPER(excluded_columns.get_string(exclude_index)) = UPPER(c.column_name) THEN
+              excluded := TRUE;
+              EXIT;
+            END IF;
+          END LOOP;
+        END IF;
+        IF NOT excluded THEN
+          column_names.append(c.column_name);
+          column_payload := JSON_OBJECT_T();
+          column_payload.put('name', c.column_name);
+          column_payload.put('data_type', c.data_type);
+          column_payload.put('data_length', c.data_length);
+          IF c.data_precision IS NULL THEN column_payload.put_null('data_precision'); ELSE column_payload.put('data_precision', c.data_precision); END IF;
+          IF c.data_scale IS NULL THEN column_payload.put_null('data_scale'); ELSE column_payload.put('data_scale', c.data_scale); END IF;
+          IF c.char_used IS NULL THEN column_payload.put_null('char_used'); ELSE column_payload.put('char_used', c.char_used); END IF;
+          IF c.char_length IS NULL THEN column_payload.put_null('char_length'); ELSE column_payload.put('char_length', c.char_length); END IF;
+          column_payload.put('nullable', c.nullable);
+          column_payload.put('position', c.column_id);
+          column_rows.append(column_payload);
+        END IF;
+      END LOOP;
+
+      IF column_names.get_size = 0 THEN
+        RAISE_APPLICATION_ERROR(-20994, 'baseline-data table ' || l_table_name || ' is missing or has no exportable columns');
+      END IF;
+      FOR required_index IN 0 .. key_columns.get_size - 1 LOOP
+        excluded := TRUE;
+        FOR column_index IN 0 .. column_names.get_size - 1 LOOP
+          IF UPPER(column_names.get_string(column_index)) = UPPER(key_columns.get_string(required_index)) THEN excluded := FALSE; EXIT; END IF;
+        END LOOP;
+        IF excluded THEN RAISE_APPLICATION_ERROR(-20994, 'baseline-data natural key column is unavailable in ' || l_table_name); END IF;
+      END LOOP;
+      FOR required_index IN 0 .. label_columns.get_size - 1 LOOP
+        excluded := TRUE;
+        FOR column_index IN 0 .. column_names.get_size - 1 LOOP
+          IF UPPER(column_names.get_string(column_index)) = UPPER(label_columns.get_string(required_index)) THEN excluded := FALSE; EXIT; END IF;
+        END LOOP;
+        IF excluded THEN RAISE_APPLICATION_ERROR(-20994, 'baseline-data label column is unavailable in ' || l_table_name); END IF;
+      END LOOP;
+
+      order_list := NULL;
+      FOR key_index IN 0 .. key_columns.get_size - 1 LOOP
+        IF order_list IS NOT NULL THEN order_list := order_list || ', '; END IF;
+        order_list := order_list || 't.' || DBMS_ASSERT.ENQUOTE_NAME(key_columns.get_string(key_index), FALSE);
+      END LOOP;
+      dynamic_sql := 'SELECT COUNT(*) FROM ' || DBMS_ASSERT.ENQUOTE_NAME(c_schema, FALSE) || '.' || DBMS_ASSERT.ENQUOTE_NAME(l_table_name, FALSE);
+      EXECUTE IMMEDIATE dynamic_sql INTO total_rows;
+      IF total_rows > row_limit THEN
+        RAISE_APPLICATION_ERROR(-20995, 'baseline-data table ' || l_table_name || ' reached rowLimit ' || row_limit || '; no partial export was emitted');
+      END IF;
+
+      actual_identity_column := NULL;
+      actual_identity_generation := NULL;
+      identity_found := FALSE;
+      BEGIN
+        EXECUTE IMMEDIATE 'SELECT column_name, generation_type FROM all_tab_identity_cols WHERE owner = :1 AND table_name = :2'
+          INTO actual_identity_column, actual_identity_generation USING c_schema, l_table_name;
+        identity_found := TRUE;
+      EXCEPTION
+        WHEN NO_DATA_FOUND THEN NULL;
+      END;
+      expected_identity_element := spec.get('identity');
+      IF expected_identity_element IS NOT NULL AND NOT expected_identity_element.is_null THEN
+        expected_identity := TREAT(expected_identity_element AS JSON_OBJECT_T);
+        IF NOT identity_found OR UPPER(expected_identity.get_string('column')) != UPPER(actual_identity_column)
+           OR UPPER(REPLACE(expected_identity.get_string('generationType'), ' ', '')) != UPPER(REPLACE(actual_identity_generation, ' ', '')) THEN
+          RAISE_APPLICATION_ERROR(-20994, 'baseline-data identity configuration does not match ' || l_table_name);
+        END IF;
+        table_payload.put('identity', expected_identity);
+      ELSE
+        IF identity_found THEN
+          RAISE_APPLICATION_ERROR(-20994, 'baseline-data identity configuration is null but ' || l_table_name || ' has an identity column');
+        END IF;
+        table_payload.put_null('identity');
+      END IF;
+
+      table_payload.put('columns', column_rows);
+      table_payload.put('rowCount', total_rows);
+      table_rows := JSON_ARRAY_T();
+      table_pages := JSON_ARRAY_T();
+      offset_rows := 0;
+      LOOP
+        page_rows := 0;
+        dynamic_sql := 'SELECT JSON_OBJECT(';
+        FOR column_index IN 0 .. column_names.get_size - 1 LOOP
+          IF column_index > 0 THEN dynamic_sql := dynamic_sql || ', '; END IF;
+          column_name := column_names.get_string(column_index);
+          dynamic_sql := dynamic_sql || 'KEY ''' || REPLACE(column_name, '''', '''''') || ''' VALUE t.' || DBMS_ASSERT.ENQUOTE_NAME(column_name, FALSE);
+        END LOOP;
+        dynamic_sql := dynamic_sql || ' NULL ON NULL RETURNING CLOB) FROM ' || DBMS_ASSERT.ENQUOTE_NAME(c_schema, FALSE) || '.' || DBMS_ASSERT.ENQUOTE_NAME(l_table_name, FALSE)
+          || ' t ORDER BY ' || order_list || ' OFFSET :1 ROWS FETCH NEXT :2 ROWS ONLY';
+        OPEN l_cursor FOR dynamic_sql USING offset_rows, c_page_size;
+        LOOP
+          FETCH l_cursor INTO l_row_json;
+          EXIT WHEN l_cursor%NOTFOUND;
+          page_rows := page_rows + 1;
+          table_rows.append(JSON_OBJECT_T(l_row_json));
+        END LOOP;
+        CLOSE l_cursor;
+        table_pages.append(page_rows);
+        EXIT WHEN page_rows < c_page_size;
+        offset_rows := offset_rows + c_page_size;
+      END LOOP;
+      IF table_rows.get_size != total_rows THEN
+        RAISE_APPLICATION_ERROR(-20994, 'baseline-data table ' || l_table_name || ' row count changed during paged export');
+      END IF;
+      table_payload.put('rows', table_rows);
+      table_payload.put('pages', table_pages);
+      table_payload.put('complete', TRUE);
+      l_rows.append(table_payload);
+    END LOOP;
+
+    IF l_rows.get_size = 0 THEN
+      l_pages.append(0);
+    ELSE
+      FOR page_index IN 0 .. TRUNC((l_rows.get_size - 1) / c_page_size) LOOP
+        l_pages.append(LEAST(c_page_size, l_rows.get_size - page_index * c_page_size));
+      END LOOP;
+      IF MOD(l_rows.get_size, c_page_size) = 0 THEN l_pages.append(0); END IF;
+    END IF;
+    l_sections.put('baseline-data', l_rows);
+    l_page := JSON_OBJECT_T();
+    l_page.put('complete', TRUE);
+    l_page.put('pages', l_pages);
+    l_coverage_sections.put('baseline-data', l_page);
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF l_cursor%ISOPEN THEN CLOSE l_cursor; END IF;
+      RAISE;
   END;
 
   PROCEDURE add_views IS
@@ -547,6 +749,7 @@ BEGIN
        ORDER BY p.type, p.name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
     add_baseline_views;
+    add_baseline_data;
   END IF;
 
   add_query_section('invalid-objects', q'~

@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -158,6 +159,37 @@ class EnvironmentComparisonTests(unittest.TestCase):
         report = compare_environment_catalogs(parsed, parsed, sections=("tables",))
         self.assertEqual(len(report["identical"]), 501)
         self.assertEqual(report["exit_code"], 0)
+
+    def test_baseline_data_capture_preserves_oracle_number_precision(self) -> None:
+        payload = catalog("dev")
+        exact_number = "12345678901234567890.12345678901234567890"
+        payload["sections"]["baseline-data"] = [{
+            "name": "APP_NUMBERS", "complete": True, "rowCount": 1, "pages": [1],
+            "identity": None,
+            "columns": [{"name": "AMOUNT", "data_type": "NUMBER"}],
+            "rows": [{"AMOUNT": "DECIMAL_MARKER"}],
+        }]
+        payload["coverage"]["sections"]["baseline-data"] = {"complete": True, "pages": [1]}
+        encoded_json = json.dumps(payload, separators=(",", ":")).replace(
+            '"AMOUNT":"DECIMAL_MARKER"', f'"AMOUNT":{exact_number}',
+        )
+        encoded = base64.b64encode(gzip.compress(encoded_json.encode("utf-8"))).decode("ascii")
+        output = "\n".join((
+            "CATALOG_PAYLOAD_BEGIN:compare-env",
+            "CATALOG_ENCODING:gzip-base64-v1",
+            *[encoded[index:index + 120] for index in range(0, len(encoded), 120)],
+            "CATALOG_PAYLOAD_END:compare-env",
+            "CATALOG_VERIFIED:compare-env",
+        ))
+
+        parsed = parse_environment_catalog_output(
+            output, sections=("baseline-data",), baseline_capture=True,
+        )
+
+        self.assertEqual(
+            parsed["sections"]["baseline-data"][0]["rows"][0]["AMOUNT"],
+            Decimal(exact_number),
+        )
 
     def test_full_last_page_without_terminal_short_page_is_rejected(self) -> None:
         payload = catalog("dev")

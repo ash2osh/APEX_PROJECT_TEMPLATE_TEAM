@@ -61,7 +61,12 @@ Commands:
                                               Export configured exact stored source and settings
   baseline export-grants --from <env> [--scratch <dir>]
                                               Export configured object and system grants
-  baseline build --to <env> [--from <env>]    Build structure, grants, and exact-source migrations
+  baseline export-data --from <env> [--scratch <dir>]
+                                              Export allow-listed reference rows without excluded columns
+  baseline build --to <env> [--from <env>] [--data]
+                                              Build structure, grants, source, and optional reference-data migrations
+  baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
+                                              Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
@@ -428,15 +433,22 @@ try {
       Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments (@("compare-env") + $compareArguments)
     }
     "baseline" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 baseline <export-source|export-grants|build> [options]" }
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 baseline <export-source|export-grants|export-data|build|filter-ords> [options]" }
       $baselineArguments = @($Arguments)
       for ($baselineIndex = 0; $baselineIndex -lt $baselineArguments.Count; $baselineIndex++) {
-        if ($baselineArguments[$baselineIndex] -ceq "--scratch" -and $baselineIndex + 1 -lt $baselineArguments.Count) {
+        $pathOptions = @("--scratch", "--data-dir", "--input", "--output")
+        if ($pathOptions -ccontains ([string] $baselineArguments[$baselineIndex]) -and $baselineIndex + 1 -lt $baselineArguments.Count) {
           $baselineIndex++
           $baselineArguments[$baselineIndex] = ConvertTo-MigrationFolderArgument ([string] $baselineArguments[$baselineIndex])
-        } elseif (([string] $baselineArguments[$baselineIndex]).StartsWith("--scratch=", [System.StringComparison]::Ordinal)) {
-          $scratchValue = ([string] $baselineArguments[$baselineIndex]).Substring("--scratch=".Length)
-          $baselineArguments[$baselineIndex] = "--scratch=" + (ConvertTo-MigrationFolderArgument $scratchValue)
+        } else {
+          foreach ($pathOption in $pathOptions) {
+            $prefix = $pathOption + "="
+            if (([string] $baselineArguments[$baselineIndex]).StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+              $pathValue = ([string] $baselineArguments[$baselineIndex]).Substring($prefix.Length)
+              $baselineArguments[$baselineIndex] = $prefix + (ConvertTo-MigrationFolderArgument $pathValue)
+              break
+            }
+          }
         }
       }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("baseline") + $baselineArguments)

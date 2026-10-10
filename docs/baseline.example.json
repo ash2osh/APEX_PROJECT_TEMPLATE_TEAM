@@ -7,7 +7,14 @@
     "tables": [
       {
         "name": "APP_COUNTRIES",
-        "excludeColumns": ["INTERNAL_NOTE"]
+        "excludeColumns": ["INTERNAL_NOTE", "API_TOKEN", "PASSWORD_HASH"],
+        "keyColumns": ["COUNTRY_CODE"],
+        "labelColumns": ["COUNTRY_NAME"],
+        "identity": {
+          "column": "COUNTRY_ID",
+          "generationType": "BY DEFAULT"
+        },
+        "rowLimit": 5000
       }
     ]
   },

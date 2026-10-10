@@ -1,0 +1,47 @@
+{
+  "APP_CANCEL_REASON": {
+    "name": "APP_CANCEL_REASON",
+    "columns": [
+      {"name": "REASON_ID", "data_type": "NUMBER", "nullable": "N", "position": 1},
+      {"name": "REASON_CODE", "data_type": "VARCHAR2", "nullable": "N", "position": 2},
+      {"name": "REASON_LABEL", "data_type": "VARCHAR2", "nullable": "N", "position": 3}
+    ],
+    "identity": {"column": "REASON_ID", "generationType": "ALWAYS"},
+    "rowCount": 1,
+    "pages": [1],
+    "complete": true,
+    "rows": [
+      {"REASON_ID": 1, "REASON_CODE": "USR_CANCEL", "REASON_LABEL": "User cancelled"}
+    ]
+  },
+  "APP_CANCEL_POLICY": {
+    "name": "APP_CANCEL_POLICY",
+    "columns": [
+      {"name": "POLICY_ID", "data_type": "NUMBER", "nullable": "N", "position": 1},
+      {"name": "POLICY_CODE", "data_type": "VARCHAR2", "nullable": "N", "position": 2},
+      {"name": "POLICY_NAME", "data_type": "VARCHAR2", "nullable": "N", "position": 3},
+      {"name": "REASON_ID", "data_type": "NUMBER", "nullable": "N", "position": 4},
+      {"name": "POLICY_NOTE", "data_type": "CLOB", "nullable": "Y", "position": 5},
+      {"name": "DATE_TEXT", "data_type": "VARCHAR2", "nullable": "Y", "position": 6},
+      {"name": "EFFECTIVE_ON", "data_type": "DATE", "nullable": "Y", "position": 7}
+    ],
+    "identity": {"column": "POLICY_ID", "generationType": "BY DEFAULT"},
+    "rowCount": 0,
+    "pages": [0],
+    "complete": true,
+    "rows": []
+  },
+  "APP_ALWAYS_LOOKUP": {
+    "name": "APP_ALWAYS_LOOKUP",
+    "columns": [
+      {"name": "LOOKUP_ID", "data_type": "NUMBER", "nullable": "N", "position": 1},
+      {"name": "LOOKUP_CODE", "data_type": "VARCHAR2", "nullable": "N", "position": 2},
+      {"name": "LOOKUP_LABEL", "data_type": "VARCHAR2", "nullable": "N", "position": 3}
+    ],
+    "identity": {"column": "LOOKUP_ID", "generationType": "ALWAYS"},
+    "rowCount": 0,
+    "pages": [0],
+    "complete": true,
+    "rows": []
+  }
+}

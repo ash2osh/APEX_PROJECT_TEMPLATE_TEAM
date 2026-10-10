@@ -1,0 +1,10 @@
+[
+  {
+    "name": "APP_CANCEL_POLICY_REASON_FK",
+    "table_name": "APP_CANCEL_POLICY",
+    "constraint_type": "R",
+    "columns": ["REASON_ID"],
+    "referenced_table": "<CONFIGURED_SCHEMA>.APP_CANCEL_REASON",
+    "referenced_columns": ["REASON_ID"]
+  }
+]

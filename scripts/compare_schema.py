@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 import tempfile
+from decimal import Decimal
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -54,7 +55,7 @@ COMPARE_ENV_SECTIONS = (
 COMPARE_ENV_DBA_SECTIONS = frozenset({
     "system-privileges", "roles", "network-aces", "ords", "installed-options",
 })
-BASELINE_INTERNAL_SECTIONS = frozenset({"baseline-source", "baseline-settings", "baseline-views"})
+BASELINE_INTERNAL_SECTIONS = frozenset({"baseline-source", "baseline-settings", "baseline-views", "baseline-data"})
 COMPARE_ENV_PAGE_SIZE = 500
 COMPARE_ENV_MAX_ROWS = 100_000
 COMPARE_ENV_NOT_COMPARED = (
@@ -530,7 +531,11 @@ def parse_environment_catalog_output(
 ) -> dict:
     """Parse one complete, paged compare-env payload from SQLcl output."""
     requested = _validate_compare_env_sections(sections, allow_baseline_internal=baseline_capture)
-    payloads = parse_framed_catalog_payloads(output, "compare-env")
+    payloads = parse_framed_catalog_payloads(
+        output,
+        "compare-env",
+        parse_float=Decimal if "baseline-data" in requested else None,
+    )
     if len(payloads) != 1:
         raise CatalogError("compare-env capture must contain exactly one complete payload")
     payload = payloads[0]
@@ -1063,10 +1068,11 @@ def _environment_driver(
     baseline_capture: bool = False,
     baseline_prefixes: Sequence[str] = (),
     baseline_excluded: Sequence[str] = (),
+    baseline_data_tables: Sequence[Mapping] = (),
 ) -> Path:
     selected = _validate_compare_env_sections(sections, allow_baseline_internal=baseline_capture)
-    if not baseline_capture and (baseline_prefixes or baseline_excluded):
-        raise CatalogError("baseline object filters require the private baseline capture mode")
+    if not baseline_capture and (baseline_prefixes or baseline_excluded or baseline_data_tables):
+        raise CatalogError("baseline filters and data tables require the private baseline capture mode")
     sql_source = Path(__file__).with_name("compare_env_catalog.sql")
     if not sql_source.is_file():
         raise CatalogError("compare-env SQL catalog driver is missing")
@@ -1075,6 +1081,7 @@ def _environment_driver(
     section_json = json.dumps(list(selected), separators=(",", ":"))
     prefix_json = json.dumps(list(baseline_prefixes), separators=(",", ":"))
     excluded_json = json.dumps(list(baseline_excluded), separators=(",", ":"))
+    data_tables_json = json.dumps(list(baseline_data_tables), separators=(",", ":"))
     driver = run_dir / "compare-env-driver.sql"
     content = "\n".join((
         f"-- COMPARE_ENVIRONMENT:{environment}",
@@ -1088,7 +1095,7 @@ def _environment_driver(
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
         "SET TRANSACTION READ ONLY;",
-        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user if not dba_capture else '')} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)}",
+        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user if not dba_capture else '')} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)} {_environment_hex(data_tables_json)}",
         "SET DEFINE OFF",
         "EXIT SUCCESS ROLLBACK",
         "",
@@ -1108,6 +1115,7 @@ def capture_environment_catalog(
     baseline_capture: bool = False,
     baseline_prefixes: Sequence[str] = (),
     baseline_excluded: Sequence[str] = (),
+    baseline_data_tables: Sequence[Mapping] = (),
     _runner: Callable = run_sqlcl,
 ) -> dict:
     """Capture selected environment catalog sections through read-only SQLcl."""
@@ -1125,6 +1133,7 @@ def capture_environment_catalog(
             private_dir, target, environment, sections,
             dba_capture=dba_capture, baseline_capture=baseline_capture,
             baseline_prefixes=baseline_prefixes, baseline_excluded=baseline_excluded,
+            baseline_data_tables=baseline_data_tables,
         )
         result = _runner(target, driver, private_dir, phase="inventory")
         return parse_environment_catalog_output(

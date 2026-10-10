@@ -108,7 +108,10 @@ class DocumentationContractTests(unittest.TestCase):
             "compare-env --from dev --to staging",
             "baseline export-source --from dev",
             "baseline export-grants --from dev",
+            "baseline export-data --from dev",
             "baseline build --from dev --to staging",
+            "baseline build --from dev --to staging --data",
+            "baseline filter-ords --exclude-module",
             "--emit-dba-script",
             "status.<env>.json",
             "backup-db",
@@ -144,6 +147,8 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("## Comparing full environments", migration_guide)
         self.assertIn("not compared (no DBA connection)", migration_guide)
         self.assertIn("by label, not id", migration_guide)
+        self.assertIn("Reference data: never copy foreign keys by id", migration_guide)
+        self.assertIn("Reference data: never copy foreign keys by id", contents[ROOT / "docs" / "baseline.md"])
         self.assertIn("ERP and camp data", migration_guide)
         self.assertIn("one manifest-level confirmation", migration_guide)
         self.assertIn("rollout-manifest.example.json", migration_guide)
@@ -353,6 +358,8 @@ class GuideContractTests(unittest.TestCase):
         baseline_example = json.loads((ROOT / "docs" / "baseline.example.json").read_text(encoding="utf-8"))
         self.assertEqual(baseline_example["schemaVersion"], 1)
         self.assertIn("schemas", baseline_example)
+        table = baseline_example["referenceData"]["tables"][0]
+        self.assertEqual(set(table), {"name", "excludeColumns", "keyColumns", "labelColumns", "identity", "rowLimit"})
 
     def test_deployment_descriptor_example_has_the_keys_publish_reads(self) -> None:
         text = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")

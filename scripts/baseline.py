@@ -12,6 +12,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import quote
 
@@ -24,6 +25,7 @@ from .compare_schema import (
 from .db_targets import TargetResolutionError, resolve_target
 from .migration_manifest import FOLDER_RE, MigrationManifestError, load_migration, validate_check_query, validate_sql_only
 from .migration_revision import inspect_migration_lock
+from .rollout import RolloutError, exclude_ords_modules
 from .schema_catalog import (
     CatalogError,
     ObjectDefinition,
@@ -39,6 +41,10 @@ ENVIRONMENTS = ("dev", "staging", "prod")
 SOURCE_TYPES = frozenset({"PACKAGE", "PACKAGE BODY", "TRIGGER", "FUNCTION", "PROCEDURE", "TYPE", "TYPE BODY"})
 SCHEMA_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 PREFIX_RE = re.compile(r"[A-Za-z0-9_$#]+\Z", re.ASCII)
+DATA_PAGE_SIZE = 500
+DATA_STEP_STATEMENT_LIMIT = 100
+DATA_STEP_BYTE_LIMIT = 50_000
+DATA_TEXT_CHUNK_CHARS = 32
 
 
 class BaselineError(ValueError):
@@ -49,16 +55,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="scripts/team.sh baseline")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("export-source", "export-grants"):
+    for name in ("export-source", "export-grants", "export-data"):
         export = commands.add_parser(name, help=f"export configured {name.removeprefix('export-')} data")
         export.add_argument("--from", dest="source_environment", choices=ENVIRONMENTS, required=True)
         export.add_argument("--scratch", type=Path, help="scratch output directory (default: scratch/baseline/<env>)")
 
-    build = commands.add_parser("build", help="build structure, grants, and exact-source migrations")
+    build = commands.add_parser("build", help="build structure, grants, exact-source, and optional reference-data migrations")
     build.add_argument("--to", dest="target_environment", choices=ENVIRONMENTS, required=True)
     build.add_argument("--from", dest="source_environment", choices=ENVIRONMENTS, default="dev")
     build.add_argument("--schema", action="append", default=[], help="limit configured schemas; repeat for several")
     build.add_argument("--scratch", type=Path, help="scratch directory (default: scratch/baseline/build)")
+    build.add_argument("--data", action="store_true", help="build reference-data migration from a prior export-data capture")
+    build.add_argument("--data-dir", type=Path, help="export-data root (default: scratch/baseline/<from>/data)")
+
+    filter_ords = commands.add_parser("filter-ords", help="remove complete named modules from an ORDS schema export")
+    filter_ords.add_argument("--exclude-module", action="append", required=True, metavar="NAME")
+    filter_ords.add_argument("--input", required=True, type=Path)
+    filter_ords.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -96,6 +109,41 @@ def load_config(path: Path) -> dict:
     reference = config.get("referenceData", {})
     if not isinstance(reference, dict) or not isinstance(reference.get("tables", []), list):
         raise BaselineError("baseline.json referenceData.tables must be an array")
+    seen_reference_tables: set[str] = set()
+    for table in reference.get("tables", []):
+        if not isinstance(table, dict) or not isinstance(table.get("name"), str) or SCHEMA_RE.fullmatch(table["name"]) is None:
+            raise BaselineError("baseline.json referenceData.tables entries need uppercase Oracle table names")
+        name = table["name"]
+        if name in seen_reference_tables:
+            raise BaselineError(f"baseline.json referenceData.tables cannot repeat table {name}")
+        seen_reference_tables.add(name)
+        if any(field not in table for field in ("excludeColumns", "keyColumns", "labelColumns", "identity", "rowLimit")):
+            raise BaselineError(f"reference table {name} must declare exclusions, key/label columns, identity handling, and rowLimit")
+        for field in ("excludeColumns", "keyColumns", "labelColumns"):
+            values = table.get(field)
+            if not isinstance(values, list) or (field != "excludeColumns" and not values) or any(
+                not isinstance(item, str) or SCHEMA_RE.fullmatch(item) is None for item in values
+            ):
+                raise BaselineError(f"baseline.json referenceData.tables.{field} must contain uppercase column names")
+            if len(set(values)) != len(values):
+                raise BaselineError(f"baseline.json referenceData.tables.{field} cannot contain duplicates")
+        if not set(table["keyColumns"]).isdisjoint(table["excludeColumns"]):
+            raise BaselineError(f"reference table {name} cannot exclude a natural-key column")
+        if not set(table["labelColumns"]).isdisjoint(table["excludeColumns"]):
+            raise BaselineError(f"reference table {name} cannot exclude a label column")
+        row_limit = table.get("rowLimit")
+        if type(row_limit) is not int or not 1 <= row_limit <= 100_000:
+            raise BaselineError(f"reference table {name} rowLimit must be between 1 and 100000")
+        identity = table.get("identity")
+        if identity is not None:
+            if not isinstance(identity, dict) or not isinstance(identity.get("column"), str) or SCHEMA_RE.fullmatch(identity["column"]) is None:
+                raise BaselineError(f"reference table {name} identity must be null or name a column and generationType")
+            if identity.get("generationType") not in {"ALWAYS", "BY DEFAULT", "BY DEFAULT ON NULL"}:
+                raise BaselineError(f"reference table {name} identity generationType must be ALWAYS, BY DEFAULT, or BY DEFAULT ON NULL")
+            if identity["column"] in table["excludeColumns"]:
+                raise BaselineError(f"reference table {name} cannot exclude its identity column")
+            if identity["column"] in table["keyColumns"]:
+                raise BaselineError(f"reference table {name} natural keys must not use its identity column")
     grant_policy = config.get("grants", {})
     if not isinstance(grant_policy, dict):
         raise BaselineError("baseline.json grants must be an object")
@@ -122,7 +170,31 @@ def load_config(path: Path) -> dict:
 
 
 def _json_bytes(value: object) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    def encode(item: object, depth: int = 0) -> str:
+        if isinstance(item, Decimal):
+            if not item.is_finite():
+                raise BaselineError("reference-data JSON cannot contain a non-finite number")
+            return format(item, "f")
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise TypeError("baseline JSON object keys must be strings")
+            if not item:
+                return "{}"
+            indent = " " * (depth + 2)
+            fields = [
+                f"{indent}{json.dumps(key, ensure_ascii=False)}: {encode(item[key], depth + 2)}"
+                for key in sorted(item)
+            ]
+            return "{\n" + ",\n".join(fields) + "\n" + " " * depth + "}"
+        if isinstance(item, (list, tuple)):
+            if not item:
+                return "[]"
+            indent = " " * (depth + 2)
+            entries = [f"{indent}{encode(child, depth + 2)}" for child in item]
+            return "[\n" + ",\n".join(entries) + "\n" + " " * depth + "]"
+        return json.dumps(item, ensure_ascii=False, allow_nan=False)
+
+    return (encode(value) + "\n").encode("utf-8")
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -178,6 +250,7 @@ def _capture(
     dba: bool = False,
     baseline_prefixes: Sequence[str] = (),
     baseline_excluded: Sequence[str] = (),
+    baseline_data_tables: Sequence[Mapping] = (),
 ) -> dict:
     try:
         target = resolve_target(values, environment, "read", schema=schema)
@@ -193,6 +266,7 @@ def _capture(
             baseline_capture=any(section in BASELINE_INTERNAL_SECTIONS for section in sections) or bool(baseline_prefixes or baseline_excluded),
             baseline_prefixes=baseline_prefixes,
             baseline_excluded=baseline_excluded,
+            baseline_data_tables=baseline_data_tables,
         )
     except TargetResolutionError as error:
         raise BaselineError(str(error)) from error
@@ -342,6 +416,123 @@ def _export_grants(config: Mapping, values: Mapping[str, str], environment: str,
         })
 
 
+def _reference_tables(config: Mapping) -> list[dict]:
+    return [dict(table) for table in config.get("referenceData", {}).get("tables", [])]
+
+
+def _validate_reference_capture(table: Mapping, specification: Mapping, environment: str, schema: str) -> dict:
+    if not isinstance(specification, Mapping) or not isinstance(specification.get("name"), str):
+        raise BaselineError("baseline-data returned a table outside the configured allow-list")
+    name = specification["name"]
+    if table.get("name", table.get("table")) != name or table.get("complete") is not True:
+        raise BaselineError(f"reference-data capture for {name} is missing or incomplete")
+    columns = table.get("columns")
+    rows = table.get("rows")
+    pages = table.get("pages")
+    row_count = table.get("rowCount")
+    if not isinstance(columns, list) or not columns or not isinstance(rows, list) or type(row_count) is not int:
+        raise BaselineError(f"reference-data capture for {name} has malformed columns or rows")
+    if row_count > specification["rowLimit"]:
+        raise BaselineError(f"reference-data capture for {name} exceeded its rowLimit {specification['rowLimit']}")
+    if row_count != len(rows) or any(not isinstance(row, dict) for row in rows):
+        raise BaselineError(f"reference-data capture for {name} is truncated or has a row-count mismatch")
+    if not isinstance(pages, list) or not pages or any(type(count) is not int or count < 0 or count > DATA_PAGE_SIZE for count in pages):
+        raise BaselineError(f"reference-data capture for {name} has invalid page evidence")
+    if any(count != DATA_PAGE_SIZE for count in pages[:-1]) or pages[-1] == DATA_PAGE_SIZE or sum(pages) != row_count:
+        raise BaselineError(f"reference-data capture for {name} does not prove a complete final page")
+    if row_count == 0 and pages != [0]:
+        raise BaselineError(f"reference-data capture for empty table {name} has invalid page evidence")
+
+    column_map: dict[str, dict] = {}
+    for column in columns:
+        if not isinstance(column, dict) or not isinstance(column.get("name"), str) or not isinstance(column.get("data_type"), str):
+            raise BaselineError(f"reference-data capture for {name} has malformed column metadata")
+        column_name = column["name"].upper()
+        if column_name in column_map:
+            raise BaselineError(f"reference-data capture for {name} repeats column {column_name}")
+        column_map[column_name] = dict(column)
+    excluded = {value.upper() for value in specification["excludeColumns"]}
+    if excluded.intersection(column_map):
+        raise BaselineError(f"reference-data capture for {name} contains an excluded column")
+    required = set(specification["keyColumns"]) | set(specification["labelColumns"])
+    identity = specification["identity"]
+    if identity is not None:
+        required.add(identity["column"])
+    if not required.issubset(column_map):
+        raise BaselineError(f"reference-data capture for {name} omits a configured key, label, or identity column")
+    observed_identity = table.get("identity")
+    if observed_identity != identity:
+        raise BaselineError(f"reference-data identity handling for {name} does not match the captured table")
+    column_names = set(column_map)
+    for row_number, row in enumerate(rows, start=1):
+        row_columns = {str(key).upper() for key in row}
+        if excluded.intersection(row_columns):
+            raise BaselineError(f"reference-data row {row_number} for {name} includes an excluded column")
+        if row_columns != column_names:
+            raise BaselineError(f"reference-data row {row_number} for {name} does not contain exactly the captured columns")
+        if any(row.get(column) is None for column in specification["keyColumns"]):
+            raise BaselineError(f"reference-data row {row_number} for {name} has a NULL natural key")
+        if any(row.get(column) is None for column in specification["labelColumns"]):
+            raise BaselineError(f"reference-data row {row_number} for {name} has a NULL matching label")
+
+    return {
+        "schemaVersion": 1,
+        "environment": environment,
+        "schema": schema,
+        "table": name,
+        "columns": [column_map[key] for key in sorted(column_map, key=lambda value: (column_map[value].get("position", 0), value))],
+        "identity": identity,
+        "rowCount": row_count,
+        "pages": pages,
+        "complete": True,
+        "rows": rows,
+    }
+
+
+def _export_data(config: Mapping, values: Mapping[str, str], environment: str, scratch: Path, schemas: Sequence[str] | None = None) -> None:
+    tables = _reference_tables(config)
+    selected_schemas = schemas or config["schemas"]
+    if not tables:
+        print("No referenceData.tables allow-list is configured; wrote empty data manifests")
+    for schema in selected_schemas:
+        output = scratch / environment / "data" / schema
+        if not tables:
+            _write_json(output / "manifest.json", {
+                "schemaVersion": 1, "environment": environment, "schema": schema,
+                "tableCount": 0, "rowCount": 0, "complete": True,
+            })
+            continue
+        catalog = _capture(
+            values, environment, schema, ("baseline-data",), scratch / f"sqlcl-data-{environment}-{schema}",
+            baseline_data_tables=tables,
+        )
+        _complete(catalog, ("baseline-data",))
+        captured = catalog["sections"]["baseline-data"]
+        by_name = {}
+        for row in captured:
+            name = row.get("name")
+            if not isinstance(name, str) or name in by_name:
+                raise BaselineError("baseline-data returned a malformed or duplicate table record")
+            by_name[name] = row
+        if set(by_name) != {table["name"] for table in tables}:
+            raise BaselineError("baseline-data did not return every allow-listed reference table")
+        total_rows = 0
+        validated_tables: list[tuple[str, dict]] = []
+        for specification in tables:
+            data = _validate_reference_capture(by_name[specification["name"]], specification, environment, schema)
+            encoded = _json_bytes(data)
+            if len(encoded) > 128 * 1024 * 1024:
+                raise BaselineError(f"reference-data export for {specification['name']} exceeded the 128 MiB file cap")
+            validated_tables.append((specification["name"], data))
+            total_rows += data["rowCount"]
+        for name, data in validated_tables:
+            _write_json(output / f"{name}.json", data)
+        _write_json(output / "manifest.json", {
+            "schemaVersion": 1, "environment": environment, "schema": schema,
+            "tableCount": len(tables), "rowCount": total_rows, "complete": True,
+        })
+
+
 def _sql_identifier(value: str) -> str:
     if not isinstance(value, str) or not value or any(character in value for character in "\r\n\x00"):
         raise BaselineError("catalog returned an unsafe empty identifier")
@@ -366,6 +557,564 @@ def _q_literal(value: str) -> str:
         if closing + "'" not in value:
             return f"q'{opening}{value}{closing}'"
     return _sql_literal(value)
+
+
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z", re.ASCII)
+_ISO_TIMESTAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\Z",
+    re.ASCII,
+)
+
+
+def _text_sql_literal(value: str) -> str:
+    if value == "":
+        return "NULL"
+    pieces: list[str] = []
+    text: list[str] = []
+
+    def flush() -> None:
+        line = "".join(text)
+        text.clear()
+        for offset in range(0, len(line), DATA_TEXT_CHUNK_CHARS):
+            chunk = line[offset : offset + DATA_TEXT_CHUNK_CHARS]
+            if chunk:
+                pieces.append(_q_literal(chunk))
+
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character not in "\r\n":
+            text.append(character)
+            index += 1
+            continue
+        flush()
+        if character == "\r":
+            pieces.append("CHR(13)")
+            if value[index + 1 : index + 2] == "\n":
+                pieces.append("CHR(10)")
+                index += 2
+            else:
+                index += 1
+        else:
+            pieces.append("CHR(10)")
+            index += 1
+    flush()
+    return " || ".join(pieces) if pieces else "NULL"
+
+
+def format_sql_value(value: object, column: Mapping) -> str:
+    """Format one captured reference-data value as a strict Oracle SQL expression."""
+    if value is None:
+        return "NULL"
+    data_type = str(column.get("data_type", "")).upper()
+    if isinstance(value, bool):
+        raise BaselineError(f"Oracle reference-data column {column.get('name', '?')} returned a JSON boolean")
+    if data_type in {"NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "DECIMAL", "INTEGER"}:
+        if not isinstance(value, (int, float, Decimal)):
+            raise BaselineError(f"numeric reference-data column {column.get('name', '?')} returned non-numeric data")
+        try:
+            number = Decimal(str(value))
+        except InvalidOperation as error:
+            raise BaselineError(f"numeric reference-data column {column.get('name', '?')} returned an invalid number") from error
+        if not number.is_finite():
+            raise BaselineError(f"numeric reference-data column {column.get('name', '?')} returned a non-finite number")
+        return format(number, "f")
+    if data_type == "DATE" or data_type.startswith("TIMESTAMP"):
+        if not isinstance(value, str):
+            raise BaselineError(f"date reference-data column {column.get('name', '?')} returned non-text data")
+        if _ISO_DATE_RE.fullmatch(value):
+            try:
+                dt.date.fromisoformat(value)
+            except ValueError as error:
+                raise BaselineError(f"invalid ISO date in reference-data column {column.get('name', '?')}: {value}") from error
+            if data_type == "DATE":
+                return f"TO_DATE({_sql_literal(value)}, 'YYYY-MM-DD')"
+            timestamp_text = value + "T00:00:00"
+            model = 'YYYY-MM-DD"T"HH24:MI:SS'
+        elif _ISO_TIMESTAMP_RE.fullmatch(value):
+            normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+            try:
+                parsed = dt.datetime.fromisoformat(normalized)
+            except ValueError as error:
+                raise BaselineError(f"invalid ISO timestamp in reference-data column {column.get('name', '?')}: {value}") from error
+            has_zone = parsed.tzinfo is not None
+            if data_type == "DATE":
+                if has_zone or "." in value:
+                    raise BaselineError(f"Oracle DATE column {column.get('name', '?')} cannot preserve timezone or fractional seconds")
+                return f"TO_DATE({_sql_literal(value)}, 'YYYY-MM-DD\"T\"HH24:MI:SS')"
+            if data_type.startswith("TIMESTAMP WITH TIME ZONE"):
+                if not has_zone:
+                    raise BaselineError(f"timestamp-with-time-zone column {column.get('name', '?')} has no timezone")
+                timestamp_text = normalized
+                model = 'YYYY-MM-DD"T"HH24:MI:SS' + (".FF" if "." in normalized else "") + "TZH:TZM"
+                return f"TO_TIMESTAMP_TZ({_sql_literal(timestamp_text)}, {_sql_literal(model)})"
+            if has_zone:
+                raise BaselineError(f"timestamp column {column.get('name', '?')} cannot preserve a timezone")
+            timestamp_text = value
+            model = 'YYYY-MM-DD"T"HH24:MI:SS' + (".FF" if "." in value else "")
+        else:
+            raise BaselineError(f"date column {column.get('name', '?')} requires a full valid ISO date or timestamp")
+        return f"TO_TIMESTAMP({_sql_literal(timestamp_text)}, {_sql_literal(model)})"
+    if data_type in {"VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "CLOB", "NCLOB", "LONG"}:
+        if not isinstance(value, str):
+            raise BaselineError(f"text reference-data column {column.get('name', '?')} returned non-text data")
+        return _text_sql_literal(value)
+    raise BaselineError(f"unsupported reference-data column type {data_type!r} for {column.get('name', '?')}")
+
+
+def _check_sql_value(value: object, column: Mapping) -> str:
+    """Format check literals without q-quotes, which the migration checker forbids."""
+    data_type = str(column.get("data_type", "")).upper()
+    if data_type == "DATE" or data_type.startswith("TIMESTAMP"):
+        return format_sql_value(value, column)
+    if not isinstance(value, str):
+        return format_sql_value(value, column)
+    if value == "":
+        return "NULL"
+    pieces: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char not in "\r\n":
+            current.append(char)
+            index += 1
+            continue
+        if current:
+            pieces.append(_sql_literal("".join(current)))
+            current = []
+        if char == "\r" and value[index + 1 : index + 2] == "\n":
+            pieces.append("CHR(10)")
+            index += 2
+        else:
+            pieces.append("CHR(13)" if char == "\r" else "CHR(10)")
+            index += 1
+    if current:
+        pieces.append(_sql_literal("".join(current)))
+    return " || ".join(pieces) if pieces else "NULL"
+
+
+def _data_tuple(value: object) -> tuple | object:
+    if isinstance(value, list):
+        return tuple(_data_tuple(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(sorted((key, _data_tuple(item)) for key, item in value.items()))
+    return value
+
+
+def _reference_data_tables(catalog: Mapping, config_tables: Sequence[Mapping], environment: str, schema: str) -> dict[str, dict]:
+    rows = catalog.get("sections", {}).get("baseline-data", [])
+    result: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            raise BaselineError("baseline-data catalog row is malformed")
+        name = row["name"]
+        if name in result:
+            raise BaselineError(f"baseline-data catalog contains duplicate table {name}")
+        specification = next((item for item in config_tables if item["name"] == name), None)
+        result[name] = _validate_reference_capture(row, specification, environment, schema)
+    if set(result) != {table["name"] for table in config_tables}:
+        raise BaselineError("baseline-data target capture did not include every configured reference table")
+    return result
+
+
+def _read_exported_reference_data(data_root: Path, config_tables: Sequence[Mapping], environment: str, schema: str) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for specification in config_tables:
+        path = data_root / schema / f"{specification['name']}.json"
+        try:
+            value = json.loads(
+                path.read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_pairs,
+                parse_float=Decimal,
+            )
+        except OSError as error:
+            raise BaselineError(f"reference-data export is missing for {specification['name']}: {path}") from error
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise BaselineError(f"reference-data export is invalid for {specification['name']}: {error}") from error
+        if not isinstance(value, dict) or value.get("environment") != environment or value.get("schema") != schema or value.get("table") != specification["name"]:
+            raise BaselineError(f"reference-data export identity does not match {environment}/{schema}/{specification['name']}")
+        result[specification["name"]] = _validate_reference_capture(value, specification, environment, schema)
+    return result
+
+
+def _reference_data_bundle(
+    config: Mapping,
+    source_schema: str,
+    target_schema: str,
+    source_catalog: Mapping,
+    target_catalog: Mapping,
+    source_data: Mapping[str, Mapping],
+    target_data: Mapping[str, Mapping],
+) -> tuple[dict[str, str], dict, list[str]]:
+    specifications = {table["name"]: table for table in _reference_tables(config)}
+    column_maps = {
+        name: {column["name"].upper(): column for column in data["columns"]}
+        for name, data in source_data.items()
+    }
+    target_column_maps = {
+        name: {column["name"].upper(): column for column in data["columns"]}
+        for name, data in target_data.items()
+    }
+    for name, columns in column_maps.items():
+        if name not in target_column_maps or not set(columns).issubset(target_column_maps[name]):
+            raise BaselineError(f"target table {name} is missing one or more exported reference-data columns")
+
+    relationships: list[dict] = []
+    for constraint in source_catalog.get("sections", {}).get("constraints", []):
+        if constraint.get("constraint_type") != "R":
+            continue
+        child = constraint.get("table_name")
+        reference = constraint.get("referenced_table")
+        if not isinstance(child, str) or child not in specifications or not isinstance(reference, str):
+            continue
+        prefix = "<CONFIGURED_SCHEMA>."
+        if not reference.startswith(prefix):
+            continue
+        parent = reference[len(prefix):]
+        if parent not in specifications:
+            continue
+        child_columns = constraint.get("columns")
+        parent_columns = constraint.get("referenced_columns")
+        if not isinstance(child_columns, list) or not isinstance(parent_columns, list) or not child_columns or len(child_columns) != len(parent_columns):
+            raise BaselineError(f"reference foreign key {constraint.get('name', '?')} has malformed column mapping")
+        if any(not isinstance(item, str) for item in child_columns + parent_columns):
+            raise BaselineError(f"reference foreign key {constraint.get('name', '?')} has non-text columns")
+        relationships.append({
+            "name": str(constraint.get("name", "foreign-key")),
+            "child": child,
+            "parent": parent,
+            "childColumns": [value.upper() for value in child_columns],
+            "parentColumns": [value.upper() for value in parent_columns],
+        })
+
+    for relationship in relationships:
+        child = relationship["child"]
+        parent = relationship["parent"]
+        missing = [
+            f"{table}.{column}"
+            for table, columns in (
+                (child, relationship["childColumns"]),
+                (parent, relationship["parentColumns"]),
+            )
+            for column in columns
+            if column not in column_maps[table] or column not in target_column_maps[table]
+        ]
+        if missing:
+            raise BaselineError(
+                f"reference foreign key {relationship['name']} cannot be label-mapped because "
+                f"an exported key column is missing or excluded: {', '.join(missing)}"
+            )
+
+    label_indexes: dict[tuple[str, str], dict[tuple, list[dict]]] = {}
+    for side, data_by_table in (("source", source_data), ("target", target_data)):
+        for table_name, data in data_by_table.items():
+            specification = specifications[table_name]
+            label_index: dict[tuple, list[dict]] = defaultdict(list)
+            for row in data["rows"]:
+                label = tuple(_data_tuple(row[column]) for column in specification["labelColumns"])
+                label_index[label].append(row)
+            label_indexes[(side, table_name)] = label_index
+            if not set(specification["keyColumns"]).issubset(column_maps[table_name] if side == "source" else target_column_maps[table_name]):
+                raise BaselineError(f"reference-data natural key for {table_name} is not present in {side} captured columns")
+
+    # A label is the cross-environment identity of an allow-listed parent row.
+    source_fk_labels: dict[tuple[str, int, str], dict[str, object]] = {}
+    target_fk_labels: dict[tuple[str, int, str], dict[str, object]] = {}
+    source_sql_expressions: dict[tuple[str, int, str], dict[str, str]] = {}
+    target_relationship_labels: dict[tuple[str, int, str], dict[str, object]] = {}
+    required_target_labels: dict[tuple[str, tuple], tuple[str, tuple]] = {}
+
+    for relationship in relationships:
+        child = relationship["child"]
+        parent = relationship["parent"]
+        parent_spec = specifications[parent]
+        for side, data_by_table, fk_map, expression_map in (
+            ("source", source_data, source_fk_labels, source_sql_expressions),
+            ("target", target_data, target_fk_labels, None),
+        ):
+            parent_rows = data_by_table[parent]["rows"]
+            parent_key_index: dict[tuple, list[dict]] = defaultdict(list)
+            for parent_row in parent_rows:
+                parent_key = tuple(_data_tuple(parent_row[column]) for column in relationship["parentColumns"])
+                parent_key_index[parent_key].append(parent_row)
+            for row_index, child_row in enumerate(data_by_table[child]["rows"]):
+                foreign_values = tuple(_data_tuple(child_row[column]) for column in relationship["childColumns"])
+                if any(value is None for value in foreign_values):
+                    if all(value is None for value in foreign_values):
+                        continue
+                    raise BaselineError(
+                        f"foreign key {relationship['name']} in {side} {child} is partially NULL; "
+                        "its parent cannot be resolved safely by label"
+                    )
+                parents = parent_key_index.get(foreign_values, [])
+                if len(parents) != 1:
+                    raise BaselineError(
+                        f"foreign key {relationship['name']} in {side} {child} cannot resolve its {parent} parent id "
+                        f"{foreign_values!r} to exactly one row"
+                    )
+                parent_row = parents[0]
+                label = tuple(_data_tuple(parent_row[column]) for column in parent_spec["labelColumns"])
+                if any(value is None for value in label):
+                    raise BaselineError(f"foreign key {relationship['name']} has a NULL {parent} label")
+                if side == "source" and len(label_indexes[("source", parent)].get(label, [])) != 1:
+                    raise BaselineError(f"foreign key {relationship['name']} source parent label {label!r} is duplicated in {parent}")
+                target_label_matches = label_indexes[("target", parent)].get(label, [])
+                if side == "source" and len(target_label_matches) != 1:
+                    reason = "missing" if not target_label_matches else "ambiguous or duplicated"
+                    raise BaselineError(
+                        f"foreign key {relationship['name']} parent label {label!r} is {reason} on target table {parent}"
+                    )
+                if side == "source":
+                    required_target_labels[(parent, label)] = (parent, label)
+                for position, child_column in enumerate(relationship["childColumns"]):
+                    if side == "source":
+                        source_fk_labels[(child, row_index, child_column)] = {
+                            "parent": parent, "label": label, "position": position,
+                        }
+                        where = " AND ".join(
+                            f"P.{_sql_identifier(label_column)} = {format_sql_value(parent_row[label_column], column_maps[parent][label_column])}"
+                            for label_column in parent_spec["labelColumns"]
+                        )
+                        check_where = " AND ".join(
+                            f"P.{_sql_identifier(label_column)} = {_check_sql_value(parent_row[label_column], target_column_maps[parent][label_column])}"
+                            for label_column in parent_spec["labelColumns"]
+                        )
+                        source_sql_expressions[(child, row_index, child_column)] = {
+                            "sql": f"(SELECT P.{_sql_identifier(relationship['parentColumns'][position])} FROM {_sql_identifier(target_schema)}.{_sql_identifier(parent)} P WHERE {where})",
+                            "checkSql": f"(SELECT P.{_sql_identifier(relationship['parentColumns'][position])} FROM {_sql_identifier(target_schema)}.{_sql_identifier(parent)} P WHERE {check_where})",
+                        }
+                    else:
+                        target_fk_labels[(child, row_index, child_column)] = {
+                            "parent": parent, "label": label, "position": position,
+                        }
+                        target_relationship_labels[(child, row_index, child_column)] = {
+                            "parent": parent, "label": label,
+                        }
+
+    def canonical_row(side: str, table_name: str, row_index: int, row: Mapping) -> dict[str, object]:
+        mapping = source_fk_labels if side == "source" else target_fk_labels
+        values = {str(column).upper(): _data_tuple(value) for column, value in row.items()}
+        for column in values:
+            ref = mapping.get((table_name, row_index, column))
+            if ref is not None:
+                values[column] = ("LABEL", ref["parent"], ref["label"], ref["position"])
+        return values
+
+    source_canonical: dict[str, list[dict[str, object]]] = {}
+    target_canonical: dict[str, list[dict[str, object]]] = {}
+    for side, data_by_table, output in (
+        ("source", source_data, source_canonical),
+        ("target", target_data, target_canonical),
+    ):
+        for table_name, data in data_by_table.items():
+            values = [canonical_row(side, table_name, index, row) for index, row in enumerate(data["rows"])]
+            output[table_name] = values
+
+    statements: list[str] = []
+    preconditions: list[dict] = []
+    postconditions: list[dict] = []
+    differences: list[str] = []
+    seen_parent_checks: set[tuple[str, tuple]] = set()
+    for parent, label in sorted(required_target_labels, key=lambda item: (item[0], repr(item[1]))):
+        if (parent, label) in seen_parent_checks:
+            continue
+        seen_parent_checks.add((parent, label))
+        label_spec = specifications[parent]
+        predicates = [
+            f"P.{_sql_identifier(column)} = {_check_sql_value(value, target_column_maps[parent][column])}"
+            for column, value in zip(label_spec["labelColumns"], label, strict=True)
+        ]
+        query = f"SELECT COUNT(*) FROM {_sql_identifier(target_schema)}.{_sql_identifier(parent)} P WHERE " + " AND ".join(predicates)
+        preconditions.append(_check(f"reference-parent-label-{_safe_check_slug(parent + repr(label))}", query))
+
+    for table_name in sorted(specifications):
+        specification = specifications[table_name]
+        source_rows = source_data[table_name]["rows"]
+        target_rows = target_data[table_name]["rows"]
+        source_values = source_canonical[table_name]
+        target_values = target_canonical[table_name]
+        source_key_counts: dict[tuple, int] = defaultdict(int)
+        for values in source_values:
+            source_key_counts[tuple(values[column] for column in specification["keyColumns"])] += 1
+        target_by_key: dict[tuple, list[int]] = defaultdict(list)
+        for row_index, values in enumerate(target_values):
+            target_key = tuple(values[column] for column in specification["keyColumns"])
+            target_by_key[target_key].append(row_index)
+        for row_index, source_row in enumerate(source_rows):
+            canonical = source_values[row_index]
+            key = tuple(canonical[column] for column in specification["keyColumns"])
+            if source_key_counts[key] != 1:
+                raise BaselineError(f"reference-data natural key is duplicated in source table {table_name}: {key!r}")
+            existing_indices = target_by_key.get(key, [])
+            if len(existing_indices) > 1:
+                raise BaselineError(f"reference-data natural key is ambiguous in target table {table_name}: {key!r}")
+            source_columns = column_maps[table_name]
+            identity = specification["identity"]
+            if identity and identity["generationType"] == "ALWAYS" and identity["column"] in specification["keyColumns"]:
+                raise BaselineError(f"ALWAYS identity column {identity['column']} cannot be a natural key for {table_name}")
+
+            target_columns = target_column_maps[table_name]
+            label_key = tuple(_data_tuple(source_row[column]) for column in specification["labelColumns"])
+            label_matches = label_indexes[("target", table_name)].get(label_key, [])
+            if len(label_matches) > 1:
+                raise BaselineError(f"reference-data label {label_key!r} is ambiguous or duplicated in target table {table_name}")
+            def expression_for(column: str, *, for_check: bool = False) -> str:
+                relationship = source_sql_expressions.get((table_name, row_index, column))
+                if relationship is not None:
+                    return relationship["checkSql"] if for_check else relationship["sql"]
+                return _check_sql_value(source_row[column], target_columns[column]) if for_check else format_sql_value(source_row[column], source_columns[column])
+
+            key_predicates = [
+                f"T.{_sql_identifier(column)} = {expression_for(column)}"
+                for column in specification["keyColumns"]
+            ]
+            check_key_predicates = [
+                f"T.{_sql_identifier(column)} = {expression_for(column, for_check=True)}"
+                for column in specification["keyColumns"]
+            ]
+            target_count = len(existing_indices)
+            row_slug = _safe_check_slug(table_name + repr(key))
+            before_check = _reference_count_check(
+                f"reference-key-before-{row_slug}",
+                f"SELECT COUNT(*) FROM {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} T WHERE " + " AND ".join(check_key_predicates),
+                target_count,
+            )
+            preconditions.append(before_check)
+            postconditions.append(_check(
+                f"reference-key-after-{row_slug}",
+                f"SELECT COUNT(*) FROM {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} T WHERE " + " AND ".join(check_key_predicates),
+            ))
+            # Baseline preconditions describe the live observation used to generate this migration.
+            postconditions[-1]["expected"] = 1
+
+            if label_matches and not existing_indices:
+                label_predicates = [
+                    f"T.{_sql_identifier(column)} = {_check_sql_value(value, target_columns[column])}"
+                    for column, value in zip(specification["labelColumns"], label_key, strict=True)
+                ]
+                differences.append(
+                    f"{table_name} label {label_key!r}: target natural key differs; the existing row is preserved and the label conflict is a migration precondition"
+                )
+                label_check = _reference_count_check(
+                    f"reference-label-conflict-{row_slug}",
+                    f"SELECT COUNT(*) FROM {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} T WHERE " + " AND ".join(label_predicates),
+                    0,
+                )
+                preconditions.append(label_check)
+
+            if existing_indices:
+                target_index = existing_indices[0]
+                target_row = target_rows[target_index]
+                target_canonical_values = target_values[target_index]
+                ignored = set(specification["keyColumns"])
+                if identity is not None:
+                    ignored.add(identity["column"])
+                differing = [
+                    column for column in source_columns
+                    if column not in ignored and column in target_row
+                    and canonical.get(column) != target_canonical_values.get(column)
+                ]
+                if differing:
+                    key_text = repr(tuple(source_row[column] for column in specification["keyColumns"]))
+                    message = f"{table_name} natural key {key_text}: target columns differ: {', '.join(sorted(differing))}; existing row is preserved"
+                    differences.append(message)
+                    preconditions.append(_check(
+                        f"reference-existing-row-{row_slug}",
+                        f"SELECT COUNT(*) FROM {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} T WHERE " + " AND ".join(check_key_predicates),
+                    ))
+
+            insert_columns = [column for column in source_columns]
+            if identity is not None and (
+                identity["generationType"] == "ALWAYS"
+                or source_row.get(identity["column"]) is None
+            ):
+                insert_columns.remove(identity["column"])
+            values_sql = [expression_for(column) for column in insert_columns]
+            statement = (
+                f"INSERT INTO {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} "
+                f"({', '.join(_sql_identifier(column) for column in insert_columns)})\n"
+                f"SELECT {', '.join(values_sql)} FROM DUAL\n"
+                f"WHERE NOT EXISTS (SELECT 1 FROM {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} T WHERE {' AND '.join(key_predicates)});"
+            )
+            statements.append(statement)
+
+    steps: dict[str, str] = {}
+    batch: list[str] = []
+    bytes_in_batch = 0
+    for statement in statements:
+        size = len(statement.encode("utf-8"))
+        if size + 1 > DATA_STEP_BYTE_LIMIT:
+            raise BaselineError("one reference-data insert exceeds the 50000-byte migration step limit")
+        if batch and (
+            len(batch) >= DATA_STEP_STATEMENT_LIMIT
+            or bytes_in_batch + 2 + size + 1 > DATA_STEP_BYTE_LIMIT
+        ):
+            steps[f"{len(steps) + 1:03d}-reference-data.sql"] = "\n\n".join(batch) + "\n"
+            batch, bytes_in_batch = [], 0
+        if batch:
+            bytes_in_batch += 2
+        batch.append(statement)
+        bytes_in_batch += size
+    if batch:
+        steps[f"{len(steps) + 1:03d}-reference-data.sql"] = "\n\n".join(batch) + "\n"
+
+    identity_statements = []
+    for table_name in sorted(specifications):
+        identity = specifications[table_name]["identity"]
+        if not identity or identity["generationType"] not in {"BY DEFAULT", "BY DEFAULT ON NULL"} or not source_data[table_name]["rows"]:
+            continue
+        generation = "GENERATED BY DEFAULT ON NULL" if identity["generationType"] == "BY DEFAULT ON NULL" else "GENERATED BY DEFAULT"
+        identity_statements.append(
+            f"ALTER TABLE {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} MODIFY "
+            f"({_sql_identifier(identity['column'])} {generation} AS IDENTITY (START WITH LIMIT VALUE));"
+        )
+    for statement in identity_statements:
+        steps[f"{len(steps) + 1:03d}-identity-limit.sql"] = statement + "\n"
+
+    return steps, {"preconditions": preconditions, "postconditions": postconditions}, differences
+
+
+def _filter_ords(args) -> None:
+    input_path = args.input if args.input.is_absolute() else ROOT / args.input
+    output_path = args.output if args.output.is_absolute() else ROOT / args.output
+    input_path = input_path.absolute()
+    output_path = output_path.absolute()
+    if input_path.resolve() == output_path.resolve():
+        raise BaselineError("filter-ords input and output must be different files")
+    try:
+        raw = input_path.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            raise BaselineError("ORDS export must be UTF-8 without a byte-order mark")
+        source = raw.decode("utf-8")
+    except OSError as error:
+        raise BaselineError(f"cannot read ORDS export {input_path}: {error}") from error
+    except UnicodeError as error:
+        raise BaselineError("ORDS export must be strict UTF-8") from error
+    schemas = re.findall(r"(?im)^--[ \t]*Schema:[ \t]*([A-Z][A-Z0-9_$#]{0,127})(?:[ \t]+Date:.*)?[ \t]*$", source)
+    if len(set(schemas)) != 1:
+        raise BaselineError("ORDS export must contain one unambiguous '-- Schema: <OWNER>' header")
+    if len(set(args.exclude_module)) != len(args.exclude_module):
+        raise BaselineError("filter-ords cannot repeat an excluded module name")
+    try:
+        filtered, removed = exclude_ords_modules(source, args.exclude_module, schemas[0])
+    except RolloutError as error:
+        raise BaselineError(str(error)) from error
+    if output_path.is_symlink() or (output_path.exists() and not output_path.is_file()):
+        raise BaselineError("filter-ords output must be a regular file and cannot be a symbolic link")
+    output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = output_path.with_name(output_path.name + ".tmp")
+    if temporary.exists() or temporary.is_symlink():
+        raise BaselineError(f"filter-ords output has an unfinished temporary file: {temporary}")
+    try:
+        temporary.write_text(filtered, encoding="utf-8", newline="\n")
+        os.chmod(temporary, 0o600)
+        temporary.replace(output_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    print(f"Removed ORDS modules: {', '.join(removed)}")
+    print(f"Filtered ORDS export: {output_path}")
 
 
 def _ddl_without_terminator(ddl: str) -> str:
@@ -439,6 +1188,14 @@ def _column_sql(row: Mapping) -> str:
 def _check(check_id: str, sql: str) -> dict:
     validate_check_query(sql)
     return {"id": check_id, "sql": sql, "expected": 1}
+
+
+def _reference_count_check(check_id: str, count_sql: str, expected_count: int) -> dict:
+    if expected_count == 1:
+        return _check(check_id, count_sql)
+    if expected_count == 0:
+        return _check(check_id, f"SELECT CASE WHEN ({count_sql}) = 0 THEN 1 ELSE 0 END FROM DUAL")
+    raise BaselineError("reference-data checks support only zero or one natural-key match")
 
 
 def _safe_check_slug(value: str) -> str:
@@ -1097,6 +1854,12 @@ def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source
             f"object-{slug}",
             f"ALL_OBJECTS WHERE OWNER = {_sql_literal(target_schema)} AND OBJECT_NAME = {_sql_literal(name)} AND OBJECT_TYPE = {_sql_literal(object_type)}", 1,
         ))
+        postconditions.append(_check(
+            f"valid-object-{slug}",
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_OBJECTS "
+            f"WHERE OWNER = {_sql_literal(target_schema)} AND OBJECT_NAME = {_sql_literal(name)} "
+            f"AND OBJECT_TYPE = {_sql_literal(object_type)} AND STATUS = 'VALID') THEN 1 ELSE 0 END FROM DUAL",
+        ))
 
     source_views = {
         row["name"]: row for row in source.get("sections", {}).get("baseline-views", [])
@@ -1241,6 +2004,15 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
         "triggers", "identity-columns", "object-grants", "baseline-source", "baseline-settings", "baseline-views",
     )
     compared = sections[:-3]
+    reference_specs = _reference_tables(config) if getattr(args, "data", False) else []
+    if getattr(args, "data_dir", None) is not None and not getattr(args, "data", False):
+        raise BaselineError("--data-dir requires --data")
+    if getattr(args, "data", False) and not reference_specs:
+        print("No referenceData.tables allow-list is configured; no baseline-data folder will be built")
+    data_root = _scratch_path(
+        getattr(args, "data_dir", None),
+        ROOT / "scratch" / "baseline" / args.source_environment / "data",
+    ) if reference_specs else None
     for schema in schemas:
         try:
             source_target = resolve_target(values, args.source_environment, "read", schema=schema)
@@ -1252,13 +2024,15 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
             scratch / f"sqlcl-{args.source_environment}-{schema}", baseline_capture=True,
             baseline_prefixes=config.get("prefixes", []), baseline_excluded=config.get("excludedObjects", []),
         )
+        target_sections = sections + (("baseline-data",) if reference_specs else ())
         target = capture_environment_catalog(
-            target_target, args.target_environment, sections,
+            target_target, args.target_environment, target_sections,
             scratch / f"sqlcl-{args.target_environment}-{schema}", baseline_capture=True,
             baseline_prefixes=config.get("prefixes", []), baseline_excluded=config.get("excludedObjects", []),
+            baseline_data_tables=reference_specs,
         )
         _complete(source, sections)
-        _complete(target, sections)
+        _complete(target, target_sections)
         report = compare_environment_catalogs(source, target, sections=compared, prefixes=config.get("prefixes", []))
         if report.get("exit_code") == 2:
             raise BaselineError("compare-env returned incomplete evidence; no migration folder was generated")
@@ -1277,6 +2051,25 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
             ("baseline-grants", "Grouped additive object grants generated from complete source and target grant observations.", grants_steps, grants_checks),
             ("baseline-code", "Exact stored source, per-unit compiler settings, and name-based source checks.", code_steps, code_checks),
         )
+        data_bundle = None
+        if reference_specs:
+            assert data_root is not None
+            source_data = _read_exported_reference_data(data_root, reference_specs, args.source_environment, source_target.schema)
+            target_data = _reference_data_tables(target, reference_specs, args.target_environment, target_target.schema)
+            data_bundle = _reference_data_bundle(
+                config, source_target.schema, target_target.schema, source, target, source_data, target_data,
+            )
+            data_steps, data_checks, data_differences = data_bundle
+            if data_differences:
+                print(f"Reference-data target differences for {schema} (preconditions make them visible):")
+                for difference in data_differences:
+                    print(f"  {difference}")
+            bundles += ((
+                "baseline-data",
+                "Natural-key-guarded reference-data inserts with foreign keys resolved from target labels; existing rows are never updated.",
+                data_steps,
+                data_checks,
+            ),)
         for family, note, steps, checks in bundles:
             if not steps:
                 print(f"No {family} changes for {schema}; no migration folder created")
@@ -1286,6 +2079,13 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
                 f"Source: {args.source_environment} / {source_target.schema}. Target: {args.target_environment} / {target_target.schema}.\n"
                 "Review generated SQL and checks before applying this migration."
             )
+            if family == "baseline-data":
+                readme += (
+                    "\n\nUse the ordinary `migrate <folder> --env <env> --rehearse` command to run the DML in one transaction and roll it back. "
+                    "The rehearsal skips DDL, including `START WITH LIMIT VALUE`; review the identity step separately.\n"
+                )
+                if data_differences:
+                    readme += "\n## Target precondition differences\n\n" + "\n".join(f"- {item}" for item in data_differences) + "\n"
             _build_migration_folder(ROOT, target_target.schema, family, _migration_bytes(steps, checks, readme))
 
 
@@ -1293,6 +2093,9 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
+        if args.command == "filter-ords":
+            _filter_ords(args)
+            return 0
         values = os.environ if environ is None else environ
         config = load_config(ROOT / "baseline.json")
         schemas = _selected_schemas(config, values, getattr(args, "schema", ()))
@@ -1302,6 +2105,9 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         elif args.command == "export-grants":
             scratch = _scratch_path(args.scratch, ROOT / "scratch" / "baseline")
             _export_grants(config, values, args.source_environment, scratch, schemas)
+        elif args.command == "export-data":
+            scratch = _scratch_path(args.scratch, ROOT / "scratch" / "baseline")
+            _export_data(config, values, args.source_environment, scratch, schemas)
         else:
             scratch = _scratch_path(args.scratch, ROOT / "scratch" / "baseline" / "build")
             _build(args, config, values, scratch)

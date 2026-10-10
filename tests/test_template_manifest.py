@@ -130,7 +130,12 @@ class TemplateManifestTests(unittest.TestCase):
             "docs/baseline.example.json",
             "tests/test_baseline.py",
             "tests/fixtures/baseline/source_dev.json",
+            "tests/fixtures/baseline/data_dev.json",
             "tests/fixtures/baseline/build_dev.json",
+            "tests/fixtures/baseline/reference_data_source.json",
+            "tests/fixtures/baseline/reference_data_target.json",
+            "tests/fixtures/baseline/reference_data_constraints.json",
+            "tests/fixtures/baseline/ords_modules.sql",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
