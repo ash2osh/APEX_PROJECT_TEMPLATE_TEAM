@@ -1389,7 +1389,7 @@ def run_rollout(
         }
         if from_step > 1:
             _safe_scratch_root(root)
-            for item, step_report in zip(plan[: from_step - 1], report["steps"][: from_step - 1]):
+            for item, step_report in zip(plan[: from_step - 1], report["steps"][: from_step - 1], strict=False):
                 receipt, receipt_path = _verify_receipt(root, manifest, environment, item)
                 step_report.update({
                     "status": "resumed",

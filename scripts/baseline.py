@@ -18,17 +18,15 @@ from urllib.parse import quote
 
 from .compare_schema import (
     BASELINE_INTERNAL_SECTIONS,
-    COMPARE_ENV_FIELDS,
     capture_environment_catalog,
     compare_environment_catalogs,
 )
 from .db_targets import TargetResolutionError, resolve_target
-from .migration_manifest import FOLDER_RE, MigrationManifestError, load_migration, validate_check_query, validate_sql_only
+from .migration_manifest import FOLDER_RE, load_migration, validate_check_query, validate_sql_only
 from .migration_revision import inspect_migration_lock
 from .rollout import RolloutError, exclude_ords_modules
 from .schema_catalog import (
     CatalogError,
-    ObjectDefinition,
     ObjectKey,
     SchemaSnapshot,
     capture_inventory_snapshot_with_retries,
@@ -829,7 +827,7 @@ def _reference_data_bundle(
         child = relationship["child"]
         parent = relationship["parent"]
         parent_spec = specifications[parent]
-        for side, data_by_table, fk_map, expression_map in (
+        for side, data_by_table, _fk_map, _expression_map in (
             ("source", source_data, source_fk_labels, source_sql_expressions),
             ("target", target_data, target_fk_labels, None),
         ):
@@ -959,11 +957,12 @@ def _reference_data_bundle(
             label_matches = label_indexes[("target", table_name)].get(label_key, [])
             if len(label_matches) > 1:
                 raise BaselineError(f"reference-data label {label_key!r} is ambiguous or duplicated in target table {table_name}")
-            def expression_for(column: str, *, for_check: bool = False) -> str:
-                relationship = source_sql_expressions.get((table_name, row_index, column))
+            def expression_for(column: str, *, for_check: bool = False, _table_name=table_name, _row_index=row_index,
+                               _source_row=source_row, _source_columns=source_columns, _target_columns=target_columns) -> str:
+                relationship = source_sql_expressions.get((_table_name, _row_index, column))
                 if relationship is not None:
                     return relationship["checkSql"] if for_check else relationship["sql"]
-                return _check_sql_value(source_row[column], target_columns[column]) if for_check else format_sql_value(source_row[column], source_columns[column])
+                return _check_sql_value(_source_row[column], _target_columns[column]) if for_check else format_sql_value(_source_row[column], _source_columns[column])
 
             key_predicates = [
                 f"T.{_sql_identifier(column)} = {expression_for(column)}"

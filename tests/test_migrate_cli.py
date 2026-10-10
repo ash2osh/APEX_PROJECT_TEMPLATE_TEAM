@@ -759,7 +759,7 @@ class MigrateCliTests(unittest.TestCase):
                 migrations = self.load(folder.name)
                 fake = FakeDatabase(self.target())
 
-                def fail_postconditions(target, checks, run_dir, *, phase):
+                def fail_postconditions(target, checks, run_dir, *, phase, fake=fake):
                     if phase != "postconditions":
                         return fake.run_checks(target, checks, run_dir, phase=phase)
                     ids = [check.id for check in checks]

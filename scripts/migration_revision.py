@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -153,7 +152,7 @@ def revise_folder(repo_root: Path, relative_folder: str, reason: str | None = No
         raise MigrationRevisionError("--reason must be one printable line")
 
     relative_destination = destination.relative_to(root).as_posix()
-    header = f"Supersedes {source.name}: {selected_reason}\n".encode("utf-8")
+    header = f"Supersedes {source.name}: {selected_reason}\n".encode()
     original_readme = source / "README.md"
     try:
         readme_bytes = original_readme.read_bytes() if original_readme.exists() else b""

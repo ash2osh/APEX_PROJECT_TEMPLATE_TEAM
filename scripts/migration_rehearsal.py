@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import sys
@@ -309,7 +308,7 @@ def _attach_frames(
 def _row_counts(output: str, frozen: Sequence, classified: Sequence[Sequence[Mapping]]) -> dict[tuple[int, int], list[int]]:
     lines = output.splitlines()
     counts: dict[tuple[int, int], list[int]] = {}
-    for folder_index, item in enumerate(frozen, start=1):
+    for folder_index, _item in enumerate(frozen, start=1):
         for file_index, plan in enumerate(classified[folder_index - 1], start=1):
             if plan.get("status") != "rehearsed":
                 continue
@@ -669,7 +668,7 @@ def rehearse_batch(
 
 def _mark_file_results(folders: list[dict], frozen: Sequence, classified: Sequence[Sequence[Mapping]], output: str) -> None:
     lines = output.splitlines()
-    for folder_index, (folder, item) in enumerate(zip(folders, frozen, strict=True), start=1):
+    for folder_index, (folder, _item) in enumerate(zip(folders, frozen, strict=True), start=1):
         for file_index, file in enumerate(folder["files"], start=1):
             if file["status"] != "rehearsed":
                 continue

@@ -4,9 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import fnmatch
-import gzip
 import hashlib
 import json
 import os
@@ -781,7 +779,7 @@ def _compare_env_records(section: str, source_rows: Sequence[Mapping], target_ro
         for signature in sorted(set(source_generated) & set(target_generated), key=str):
             left = sorted(source_generated[signature], key=lambda item: str(item[0]))
             right = sorted(target_generated[signature], key=lambda item: str(item[0]))
-            for (source_key, source_row), (target_key, target_row) in zip(left, right):
+            for (source_key, source_row), (target_key, target_row) in zip(left, right, strict=False):
                 display_key = (signature[0], signature[1], f"{source_row.get('name')} / {target_row.get('name')}")
                 add_pair(source_row, target_row, display_key)
                 consumed_source.add(source_key)
