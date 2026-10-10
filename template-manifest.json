@@ -20,6 +20,7 @@
     "app_context/README.md",
     "apps/templates/**",
     "docs/CHROME_DEVTOOLS_MCP.md",
+    "docs/compare-env.md",
     "docs/EXAMPLES.md",
     "docs/GETTING_STARTED.md",
     "docs/TROUBLESHOOTING.md",

@@ -43,6 +43,9 @@ ALLOWED_KEYS = frozenset({
     "STAGING_SQLCL_CONNECTION",
     "STAGING_EXPECTED_USER",
     "STAGING_SCHEMA",
+    "DEV_DBA_SQLCL_CONNECTION",
+    "STAGING_DBA_SQLCL_CONNECTION",
+    "PROD_DBA_SQLCL_CONNECTION",
     "ORDS_SCHEMA",
     "ORDS_SQLCL_CONNECTION",
     "ORDS_EXPECTED_USER",
@@ -297,5 +300,13 @@ def read_project_env(path: Path) -> dict[str, str]:
         for s_item, u_item in zip(ords_schemas, ords_users, strict=True):
             if s_item != u_item:
                 raise ConfigError("ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry: the ORDS export logs in as the REST schema owner")
+
+    for key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
+        if key in seen_keys:
+            if not values[key].strip():
+                raise ConfigError(f"{key} must not be empty when configured")
+            _check_alias_list(key, values[key])
+            if "," in values[key]:
+                raise ConfigError(f"{key} accepts one saved SQLcl connection alias")
 
     return values

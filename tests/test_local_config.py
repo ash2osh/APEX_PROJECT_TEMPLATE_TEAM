@@ -63,6 +63,18 @@ class LocalConfigTests(unittest.TestCase):
         self.assertEqual(values["MIGRATION_CHECK_BATCH_BYTES"], "2097152")
         self.assertEqual(values["MIGRATION_PREFLIGHT_INVENTORY_RETRIES"], "3")
 
+    def test_compare_env_dba_connection_aliases_are_optional_single_aliases(self) -> None:
+        content = VALID_BASE_CONFIG + (
+            "DEV_DBA_SQLCL_CONNECTION=dev-readonly\n"
+            "STAGING_DBA_SQLCL_CONNECTION=stage-readonly\n"
+        )
+        values = read_project_env(self.write_env(content))
+        self.assertEqual(values["DEV_DBA_SQLCL_CONNECTION"], "dev-readonly")
+        self.assertEqual(values["STAGING_DBA_SQLCL_CONNECTION"], "stage-readonly")
+        for value in ("", "bad alias", "dev-one,dev-two"):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                read_project_env(self.write_env(VALID_BASE_CONFIG + f"DEV_DBA_SQLCL_CONNECTION={value}\n"))
+
     def test_preflight_inventory_retries_accepts_zero_and_rejects_invalid_counts(self) -> None:
         values = read_project_env(self.write_env(VALID_BASE_CONFIG + "MIGRATION_PREFLIGHT_INVENTORY_RETRIES=0\n"))
         self.assertEqual(values["MIGRATION_PREFLIGHT_INVENTORY_RETRIES"], "0")

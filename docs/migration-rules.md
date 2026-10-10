@@ -575,6 +575,66 @@ can mimic a migration. Conversely, normalization intentionally excludes some
 environment-specific metadata. Treat the output as a coarse comparison of
 selected current schema state, then review the implicated SQL and receipts.
 
+## Comparing full environments
+
+Use `compare-env` for a paged readiness comparison of full schema catalogs:
+
+```bash
+scripts/team.sh compare-env --from dev --to staging
+scripts/team.sh compare-env --from dev --to prod \
+  --section tables --section columns --section constraints --section triggers
+scripts/team.sh compare-env --from dev --to staging --format markdown
+scripts/team.sh compare-env --from dev --to staging \
+  --emit-dba-script scratch/dev-to-staging-dba.sql
+```
+
+The tool extends `scripts/compare_schema.py`; the existing `compare-schema`
+selectors and output remain available. `--section` is repeatable. The section
+names are `tables`, `columns`, `constraints`, `indexes`, `triggers`,
+`sequences`, `synonyms`, `views`, `stored-code`, `invalid-objects`,
+`identity-columns`, `object-grants`, `system-privileges`, `roles`,
+`network-aces`, `ords`, `java-mle`, `installed-options`, and `versions`.
+Catalog rows are paged in sorted order, 500 at a time. A section over 100,000
+rows, a compressed payload over 128 MiB, missing page evidence, or a SQLcl
+capture error fails closed. The report groups blockers, differences, identical
+records and deliberate exclusions. Each difference is `missing on target`,
+`different`, or `only on target`.
+
+All sections match records by names and stable keys, then compare the listed
+catalog fields. The implementation does not compare catalog query output as a
+whole line. System-generated `SYS_C...` constraints with different names can
+pair when their table, type, ordered columns, referenced columns and condition
+match. Triggers, views and stored code compare line counts and
+`SUM(ORA_HASH(text))` after ignoring source line 1; the hash can collide and
+does not replace an exact source export.
+
+The optional read-only connection aliases are `DEV_DBA_SQLCL_CONNECTION`,
+`STAGING_DBA_SQLCL_CONNECTION` and `PROD_DBA_SQLCL_CONNECTION`. Each accepts
+one saved SQLcl connection alias. Configure the alias only if it can read the
+selected DBA catalogs. It is used only for system privileges, roles, network
+ACEs, ORDS catalogs and installed options; its session disables commit in
+stored code and uses `SET TRANSACTION READ ONLY`. Without an alias, a selected
+DBA section is reported as `not compared (no DBA connection)` under blockers
+and returns exit 2. An unreadable required view also blocks readiness.
+
+`--emit-dba-script <file>` writes additive object, system-privilege and role
+GRANTs, network ACE and ORDS schema-enable statements from complete catalog
+evidence. Review the file and target before adding it to a rollout `sql-script`
+step. The DBA read-only alias is never used to apply this script. Generated
+output does not change default-role settings, create schema/code objects or
+ORDS modules, templates and handlers, and it does not revoke or drop privileges.
+
+Reference rows are out of scope: ERP and camp data changes do not count as
+structure differences. Foreign-key definitions compare referenced table and
+column names; compare foreign-key reference data **by label, not id**. Other
+limits include data rows, sequence `LAST_NUMBER`, identity runtime values,
+comments, storage placement, optimizer statistics and exact source bytes. See
+[the compare-env section list, output contract and limits](compare-env.md).
+
+Exit status: **0** means all selected sections were complete and identical;
+**1** means complete capture with differences; **2** means capture error,
+readiness blocker, missing DBA connection or cap/incomplete-page refusal.
+
 
 Optional migration profiles let a project mirror code from `CODE` while applying
 migrations to `CUSTDATA` or `API`. Configure `MIGRATION_SCHEMA`,

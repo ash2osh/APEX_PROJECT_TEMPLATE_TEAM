@@ -40,8 +40,8 @@ CAPTURE_CATALOGS = {
     "ALL_TAB_IDENTITY_COLS", "ALL_SEQUENCES", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS", "ALL_INDEXES",
     "ALL_IND_COLUMNS", "ALL_TRIGGERS", "SYNONYMS", "OBJECT_GRANTS",
 }
-FRAME_RE = re.compile(r"^CATALOG_PAYLOAD_(BEGIN|END):(inventory|snapshot)$")
-VERIFIED_RE = re.compile(r"^CATALOG_VERIFIED:(inventory|snapshot)$")
+FRAME_RE = re.compile(r"^CATALOG_PAYLOAD_(BEGIN|END):(inventory|snapshot|compare-env)$")
+VERIFIED_RE = re.compile(r"^CATALOG_VERIFIED:(inventory|snapshot|compare-env)$")
 HEX_SCHEMA_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 
 
@@ -367,7 +367,7 @@ def decode_catalog_payload(lines: Sequence[str]) -> dict:
         raise CatalogError("catalog payload schema version is unsupported")
 
     phase = payload.get("phase")
-    if type(phase) is not str or phase not in {"inventory", "snapshot"}:
+    if type(phase) is not str or phase not in {"inventory", "snapshot", "compare-env"}:
         raise CatalogError("catalog payload phase is unsupported")
 
     for field_name in ("objects", "before", "after"):
@@ -446,6 +446,13 @@ def _payload_frames(output: str, phase: str) -> list[dict]:
         if type(version) is not int or version != SCHEMA_VERSION or payload.get("phase") != phase:
             raise CatalogError("catalog payload schema version or phase is unsupported")
     return frames
+
+
+def parse_framed_catalog_payloads(output: str, phase: str) -> list[dict]:
+    """Decode verified, compressed SQLcl payload frames for a catalog phase."""
+    if phase not in {"inventory", "snapshot", "compare-env"}:
+        raise CatalogError("catalog payload phase is unsupported")
+    return _payload_frames(output, phase)
 
 
 def parse_inventory(output: str, target: Target) -> SchemaInventory:

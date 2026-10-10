@@ -293,6 +293,7 @@ Pass `--schema <NAME>` to narrow a command to one schema. `doctor` and
 | `deploy <id> --env staging\|prod` | The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection. |
 | `migrate`, `check-conflicts` | Uses `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/`; the folder selects the target entry. Scans, revision ordering, and receipts are scoped to one schema, and one invocation cannot mix schemas. |
 | `compare-schema` | Requires `--schema` when more than one schema is configured and compares that schema across the selected environments. |
+| `compare-env` | Requires `--schema` when more than one schema is configured and compares that schema's full catalog across the selected environments. |
 
 When `CODE_SCHEMA` has one schema, the existing flat
 `migrations/YYYY-MM-DD_<name>-rNNN/` layout remains valid and the
@@ -493,6 +494,27 @@ with follow-up review but cannot reliably prove which migration file caused a
 shape: separate migrations may produce the same DDL, and a manual change can
 mimic a migration.
 
+Use `compare-env` for a complete, paged readiness comparison by object name:
+
+```bash
+scripts/team.sh compare-env --from dev --to staging
+scripts/team.sh compare-env --from dev --to staging \
+  --section tables --section columns --section constraints --section triggers
+scripts/team.sh compare-env --from dev --to staging --format markdown
+scripts/team.sh compare-env --from dev --to staging \
+  --emit-dba-script scratch/dev-to-staging-dba.sql
+```
+
+The report groups blockers, differences, identical records and deliberate
+exclusions. Differences say `missing on target`, `different`, or `only on target`.
+DBA-level sections use optional `DEV_DBA_SQLCL_CONNECTION`,
+`STAGING_DBA_SQLCL_CONNECTION`, and `PROD_DBA_SQLCL_CONNECTION` aliases only
+for read-only catalog capture. Missing DBA access is reported as
+`not compared (no DBA connection)` and exits 2. The emitted SQL is an additive
+review artifact for object and direct system/role grants, network ACEs and
+ORDS schema enablement; it does not run automatically. See [compare-env sections, connections and
+limits](docs/compare-env.md).
+
 ## Staging and production deployments
 
 For direct promotion, configure the target connection/user pair in `.env` and
@@ -646,6 +668,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
 | `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]` | Run a frozen, ordered migration, SQL, ORDS and app deployment plan; staging and production show one manifest-wide hash confirmation. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
+| `scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [--format text\|json\|markdown] [--emit-dba-script <file>]` | Compare complete, paged environment catalogs by object name; see [compare-env](docs/compare-env.md). |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
@@ -668,9 +691,9 @@ Exit status, the same in Bash and PowerShell:
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Done; for `check-conflicts` and `compare-schema`, nothing found; for `verify`, every requested check returned its expected value; for `revise --check`, the folder is unlocked. |
-| 1 | `check-conflicts` found conflicts, `compare-schema` found differences, or `verify` found a false check; `revise --check` found a lock; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
-| 2 | Refused or failed; the message says why and what changed. Also `migrate` interrupted while a SQL step runs ("may be partially applied"). |
+| 0 | Done; for `check-conflicts` and `compare-schema`, nothing found; for `compare-env`, every selected section was identical and complete; for `verify`, every requested check returned its expected value; for `revise --check`, the folder is unlocked. |
+| 1 | `check-conflicts` found conflicts, `compare-schema` or complete `compare-env` found differences, or `verify` found a false check; `revise --check` found a lock; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
+| 2 | Refused or failed; this includes incomplete `compare-env` capture or selected DBA sections without a DBA connection. The message says why and what changed. Also `migrate` interrupted while a SQL step runs ("may be partially applied"). |
 | 130 / 143 | Stopped by Ctrl-C / by SIGTERM (`kill`). |
 
 SIGTERM is for Bash: `team.sh` hands its process to the command it runs, so a

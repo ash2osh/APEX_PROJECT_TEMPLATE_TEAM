@@ -57,6 +57,8 @@ class TeamCliTests(unittest.TestCase):
             "check-conflicts",
             "migrate",
             "compare-schema",
+            "compare-env",
+            "--emit-dba-script <file>",
             "backup-db",
             "deploy",
             "upgrade-template",

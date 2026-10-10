@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 2,
+  "phase": "compare-env",
+  "environment": "dev",
+  "schema": "APP_DEV",
+  "identity": {
+    "session_user": "APP_DEV",
+    "current_schema": "APP_DEV",
+    "db_name": "DEVDB",
+    "db_unique_name": "DEVDB_UNIQUE",
+    "service_name": "DEV_SERVICE",
+    "container_id": "3",
+    "container_name": "APP_PDB",
+    "edition": "ORA$BASE",
+    "database_version": "19.26"
+  },
+  "coverage": {
+    "complete": true,
+    "pageSize": 500,
+    "maxRows": 100000,
+    "sections": {
+      "tables": {"complete": true, "pages": [2]},
+      "constraints": {"complete": true, "pages": [2]},
+      "triggers": {"complete": true, "pages": [1]},
+      "object-grants": {"complete": true, "pages": [1]},
+      "network-aces": {"complete": true, "pages": [1]},
+      "ords": {"complete": true, "pages": [2]},
+      "versions": {"complete": true, "pages": [2]}
+    }
+  },
+  "sections": {
+    "tables": [
+      {"name": "T_SHARED", "temporary": "N", "partitioned": "N", "definition_line": "DEV formatting only"},
+      {"name": "T_FROM_ONLY", "temporary": "N", "partitioned": "N"}
+    ],
+    "constraints": [
+      {"name": "SYS_C100", "table_name": "T_SHARED", "constraint_type": "C", "columns": ["LEGACY_ID"], "referenced_table": null, "condition": "LEGACY_ID IS NOT NULL", "status": "ENABLED", "validated": "VALIDATED"},
+      {"name": "CK_STATE", "table_name": "T_SHARED", "constraint_type": "C", "columns": ["STATE"], "referenced_table": null, "condition": "STATE IN ('N','Y')", "status": "ENABLED", "validated": "VALIDATED"}
+    ],
+    "triggers": [
+      {"name": "TRG_AUDIT", "table_name": "T_SHARED", "trigger_type": "BEFORE EACH ROW", "triggering_event": "INSERT OR UPDATE", "status": "ENABLED", "line_count": 4, "source_hash": 1234, "source_header": "CREATE OR REPLACE TRIGGER APP_DEV.TRG_AUDIT"}
+    ],
+    "object-grants": [
+      {"owner": "APP_DEV", "object_name": "T_SHARED", "grantee": "REPORT_ROLE", "privilege": "SELECT", "grantable": "NO"}
+    ],
+    "network-aces": [
+      {"host": "api.example.test", "lower_port": 443, "upper_port": 443, "principal": "APP_DEV", "principal_type": "DATABASE", "privilege": "connect", "grant_type": "GRANT", "inverted_principal": "NO"}
+    ],
+    "ords": [
+      {"kind": "schema", "name": "APP_DEV", "enabled": true, "url_mapping_type": "BASE_PATH", "url_mapping_pattern": "app", "auto_rest_auth": false},
+      {"kind": "module", "name": "app.api", "uri_prefix": "api/", "status": "PUBLISHED"}
+    ],
+    "versions": [
+      {"component": "database", "version": "19.26"},
+      {"component": "apex", "version": "24.2.0"}
+    ]
+  }
+}

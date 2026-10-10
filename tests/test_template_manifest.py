@@ -111,6 +111,18 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
+    def test_compare_env_files_and_recorded_catalogs_are_template_owned(self) -> None:
+        for path in (
+            "scripts/compare_schema.py",
+            "scripts/compare_env_catalog.sql",
+            "docs/compare-env.md",
+            "tests/test_compare_env.py",
+            "tests/fixtures/compare_env/dev.json",
+            "tests/fixtures/compare_env/staging.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+
     def test_template_declares_the_qualified_release_boundary(self) -> None:
         from scripts.upgrade_template import load_manifest
         manifest = load_manifest(ROOT)

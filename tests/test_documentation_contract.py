@@ -17,6 +17,7 @@ DOCS = (
     ROOT / "app_context" / "README.md",
     ROOT / "migrations" / "README.md",
     ROOT / "docs" / "migration-rules.md",
+    ROOT / "docs" / "compare-env.md",
     ROOT / "docs" / "publish-rules.md",
     ROOT / "docs" / "GETTING_STARTED.md",
     ROOT / "docs" / "EXAMPLES.md",
@@ -103,6 +104,8 @@ class DocumentationContractTests(unittest.TestCase):
             "team.sh rollout",
             "--env dev",
             "compare-schema",
+            "compare-env --from dev --to staging",
+            "--emit-dba-script",
             "status.<env>.json",
             "backup-db",
             "deploy 100 --env staging",
@@ -134,6 +137,10 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("STAGING_SCHEMA", migration_guide)
         self.assertIn("cannot reliably prove", readme)
         self.assertIn("## Rollout", migration_guide)
+        self.assertIn("## Comparing full environments", migration_guide)
+        self.assertIn("not compared (no DBA connection)", migration_guide)
+        self.assertIn("by label, not id", migration_guide)
+        self.assertIn("ERP and camp data", migration_guide)
         self.assertIn("one manifest-level confirmation", migration_guide)
         self.assertIn("rollout-manifest.example.json", migration_guide)
         for required in (
@@ -148,9 +155,17 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, migration_guide)
         limitations = contents[ROOT / "docs" / "known-limitations.md"]
-        for limitation in ("whitespace-only lines", "trailing hyphen", "DBMS_LOB.APPEND", "five-minute", "patch levels"):
+        for limitation in ("whitespace-only lines", "trailing hyphen", "DBMS_LOB.APPEND", "five-minute", "patch levels", "compare-env", "ORA_HASH"):
             with self.subTest(limitation=limitation):
                 self.assertIn(limitation, limitations)
+        compare_guide = contents[ROOT / "docs" / "compare-env.md"]
+        for phrase in (
+            "tables", "constraints", "object-grants", "network-aces", "ORDS",
+            "not compared (no DBA connection)", "by label, not id", "ERP and camp data",
+            "| 0 |", "| 1 |", "| 2 |", "500", "100,000", "128 MiB",
+        ):
+            with self.subTest(compare_env=phrase):
+                self.assertIn(phrase, compare_guide)
 
     def test_publish_guide_explains_every_refusal_and_is_linked(self) -> None:
         guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")

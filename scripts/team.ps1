@@ -54,6 +54,9 @@ Commands:
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
+  compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown]
+              [--emit-dba-script <file>]
+                                              Compare complete environment catalogs by name, read-only
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
@@ -67,6 +70,7 @@ Options:
   --help                                      Show this help
 Environment:
   MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
+  <ENV>_DBA_SQLCL_CONNECTION                   Optional read-only compare-env catalog connection
 "@ | Write-Output
 }
 
@@ -403,6 +407,20 @@ try {
     "compare-schema" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }
       Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments $Arguments
+    }
+    "compare-env" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown] [--emit-dba-script <file>]" }
+      $compareArguments = @($Arguments)
+      for ($compareIndex = 0; $compareIndex -lt $compareArguments.Count; $compareIndex++) {
+        if ($compareArguments[$compareIndex] -ceq "--emit-dba-script" -and $compareIndex + 1 -lt $compareArguments.Count) {
+          $compareIndex++
+          $compareArguments[$compareIndex] = ConvertTo-MigrationFolderArgument ([string] $compareArguments[$compareIndex])
+        } elseif ([string] $compareArguments[$compareIndex] -clike "--emit-dba-script=*") {
+          $scriptValue = ([string] $compareArguments[$compareIndex]).Substring("--emit-dba-script=".Length)
+          $compareArguments[$compareIndex] = "--emit-dba-script=" + (ConvertTo-MigrationFolderArgument $scriptValue)
+        }
+      }
+      Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments (@("compare-env") + $compareArguments)
     }
     "backup-db" {
       if ($Arguments.Count -ne 0) { Fail "backup-db does not accept arguments" }
