@@ -40,6 +40,7 @@ operational scripts, `.env`, manifest and lock.
 | Safe publish | Refuses to overwrite newer Builder work, stamps who published and when, then re-exports the app and checks it byte for byte against your files. |
 | SQL migrations | Dated folders of numbered SQL plus `checks.json`; a live check for conflicts before applying; a verified receipt after. |
 | Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production. |
+| Environment baselines | Read-only source and grant exports plus reviewed structure, grant and exact-source migration generation from `baseline.json`. |
 | Several schemas per workspace | Comma-separated lists in `.env` and `--schema`; apps, database copies and migrations are kept per schema. |
 | Staging and production | Per-app descriptors, an explicit `[y/N]` confirmation, and `--manual` to print a runbook for a DBA. |
 | Read-only database copy | `backup-db` mirrors tables, views, packages, procedures, functions, triggers and synonyms (structure only, never data). `backup-ords` adds an optional, read-only export of a schema's ORDS (REST) definition. |
@@ -515,6 +516,27 @@ review artifact for object and direct system/role grants, network ACEs and
 ORDS schema enablement; it does not run automatically. See [compare-env sections, connections and
 limits](docs/compare-env.md).
 
+### Generate an environment baseline
+
+Copy `docs/baseline.example.json` to the project root as `baseline.json` and
+set the actual schema names, object prefixes, exclusions, grant policy and
+sequence mappings. Export stored source or grants, then compare environments
+and generate new migration folders:
+
+```bash
+scripts/team.sh baseline export-source --from dev
+scripts/team.sh baseline export-grants --from dev
+scripts/team.sh baseline build --from dev --to staging
+```
+
+Exports go to `scratch/baseline/<environment>/<schema>/` unless `--scratch`
+selects another root. The build writes structure, grouped object grant and
+exact-source code families under `migrations/<TARGET_SCHEMA>/`; it never
+applies them. Review generated SQL and checks before using the regular
+`check-conflicts` and `migrate` workflow. Reference-data and ORDS filtering are
+not implemented in this phase. See [baseline generation](docs/baseline.md) for
+configuration, coverage and limits.
+
 ## Staging and production deployments
 
 For direct promotion, configure the target connection/user pair in `.env` and
@@ -669,6 +691,9 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]` | Run a frozen, ordered migration, SQL, ORDS and app deployment plan; staging and production show one manifest-wide hash confirmation. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
 | `scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [--format text\|json\|markdown] [--emit-dba-script <file>]` | Compare complete, paged environment catalogs by object name; see [compare-env](docs/compare-env.md). |
+| `scripts/team.sh baseline export-source --from <env>` | Export configured exact stored source, compiler settings and view text to scratch. |
+| `scripts/team.sh baseline export-grants --from <env>` | Export configured object grants and the schema's direct system privileges. |
+| `scripts/team.sh baseline build --to <env> [--from <env>]` | Generate validated structure, object grant and exact-source migration folders; see [baseline generation](docs/baseline.md). |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |

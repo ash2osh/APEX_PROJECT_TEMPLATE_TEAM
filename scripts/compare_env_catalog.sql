@@ -7,6 +7,9 @@ DEFINE compare_user_hex = '&2'
 DEFINE compare_environment_hex = '&3'
 DEFINE compare_dba = '&4'
 DEFINE compare_sections_hex = '&5'
+DEFINE compare_baseline_internal = '&6'
+DEFINE compare_baseline_prefixes_hex = '&7'
+DEFINE compare_baseline_excluded_hex = '&8'
 SET LONG 2000000000
 SET LONGCHUNKSIZE 32767
 SET SERVEROUTPUT ON SIZE UNLIMITED
@@ -19,7 +22,10 @@ DECLARE
   c_expected_user CONSTANT VARCHAR2(128) := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_user_hex'));
   c_environment CONSTANT VARCHAR2(16) := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_environment_hex'));
   c_dba_mode CONSTANT BOOLEAN := '&&compare_dba' = '1';
+  c_baseline_internal CONSTANT BOOLEAN := '&&compare_baseline_internal' = '1';
   c_selected_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_sections_hex'));
+  c_baseline_prefixes_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_prefixes_hex'));
+  c_baseline_excluded_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_excluded_hex'));
   c_page_size CONSTANT PLS_INTEGER := 500;
   c_max_rows CONSTANT PLS_INTEGER := 100000;
   l_payload JSON_OBJECT_T := JSON_OBJECT_T();
@@ -149,7 +155,13 @@ DECLARE
     l_total := 0;
     LOOP
       l_page_count := 0;
-      OPEN l_cursor FOR p_query USING c_schema, l_offset, c_page_size;
+      IF p_section IN ('baseline-source', 'baseline-settings', 'object-grants') THEN
+        OPEN l_cursor FOR p_query USING
+          c_schema, c_baseline_prefixes_json, c_baseline_prefixes_json,
+          c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
+      ELSE
+        OPEN l_cursor FOR p_query USING c_schema, l_offset, c_page_size;
+      END IF;
       LOOP
         FETCH l_cursor INTO l_row_json;
         EXIT WHEN l_cursor%NOTFOUND;
@@ -238,6 +250,84 @@ DECLARE
     l_coverage_sections.put('views', l_page);
   EXCEPTION
     WHEN OTHERS THEN
+      RAISE;
+  END;
+
+  PROCEDURE add_baseline_views IS
+    view_cursor INTEGER;
+    view_execute INTEGER;
+    view_offset INTEGER;
+    view_piece_length INTEGER;
+    view_piece VARCHAR2(32767);
+    view_text CLOB;
+    view_ddl CLOB;
+    view_json JSON_OBJECT_T;
+  BEGIN
+    IF NOT selected('baseline-views') THEN RETURN; END IF;
+    l_rows := JSON_ARRAY_T();
+    l_pages := JSON_ARRAY_T();
+    l_offset := 0;
+    l_total := 0;
+    LOOP
+      l_page_count := 0;
+      FOR view_row IN (
+        SELECT v.view_name
+          FROM all_views v
+         WHERE v.owner = c_schema
+           AND (DBMS_LOB.GETLENGTH(c_baseline_prefixes_json) <= 2 OR EXISTS (
+             SELECT 1 FROM JSON_TABLE(c_baseline_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) p
+              WHERE SUBSTR(v.view_name, 1, LENGTH(p.prefix)) = UPPER(p.prefix)))
+           AND (DBMS_LOB.GETLENGTH(c_baseline_excluded_json) <= 2 OR NOT EXISTS (
+             SELECT 1 FROM JSON_TABLE(c_baseline_excluded_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) e
+              WHERE v.view_name = UPPER(e.object_name)))
+         ORDER BY v.view_name OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
+      ) LOOP
+        IF l_total >= c_max_rows THEN
+          RAISE_APPLICATION_ERROR(-20995, 'compare-env baseline-views exceeded its 100000-row cap');
+        END IF;
+        DBMS_LOB.CREATETEMPORARY(view_text, TRUE);
+        view_cursor := DBMS_SQL.OPEN_CURSOR;
+        DBMS_SQL.PARSE(view_cursor,
+          'SELECT text FROM all_views WHERE owner = :owner AND view_name = :name', DBMS_SQL.NATIVE);
+        DBMS_SQL.BIND_VARIABLE(view_cursor, ':owner', c_schema);
+        DBMS_SQL.BIND_VARIABLE(view_cursor, ':name', view_row.view_name);
+        DBMS_SQL.DEFINE_COLUMN_LONG(view_cursor, 1);
+        view_execute := DBMS_SQL.EXECUTE(view_cursor);
+        IF DBMS_SQL.FETCH_ROWS(view_cursor) = 0 THEN
+          RAISE_APPLICATION_ERROR(-20996, 'compare-env could not read ALL_VIEWS.TEXT for ' || view_row.view_name);
+        END IF;
+        view_offset := 0;
+        LOOP
+          DBMS_SQL.COLUMN_VALUE_LONG(view_cursor, 1, 32767, view_offset, view_piece, view_piece_length);
+          EXIT WHEN view_piece_length = 0;
+          DBMS_LOB.WRITEAPPEND(view_text, LENGTH(view_piece), view_piece);
+          view_offset := view_offset + view_piece_length;
+        END LOOP;
+        DBMS_SQL.CLOSE_CURSOR(view_cursor);
+        view_cursor := NULL;
+        view_ddl := DBMS_METADATA.GET_DDL('VIEW', view_row.view_name, c_schema);
+        view_json := JSON_OBJECT_T();
+        view_json.put('name', view_row.view_name);
+        view_json.put('text', view_text);
+        view_json.put('ddl', view_ddl);
+        l_rows.append(view_json);
+        DBMS_LOB.FREETEMPORARY(view_text);
+        l_page_count := l_page_count + 1;
+        l_total := l_total + 1;
+      END LOOP;
+      l_pages.append(l_page_count);
+      EXIT WHEN l_page_count < c_page_size;
+      l_offset := l_offset + c_page_size;
+    END LOOP;
+    l_sections.put('baseline-views', l_rows);
+    l_page := JSON_OBJECT_T();
+    l_page.put('complete', TRUE);
+    l_page.put('pages', l_pages);
+    l_coverage_sections.put('baseline-views', l_page);
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF view_cursor IS NOT NULL AND DBMS_SQL.IS_OPEN(view_cursor) THEN DBMS_SQL.CLOSE_CURSOR(view_cursor); END IF;
+      IF DBMS_LOB.ISTEMPORARY(view_text) = 1 THEN DBMS_LOB.FREETEMPORARY(view_text); END IF;
       RAISE;
   END;
 
@@ -425,6 +515,40 @@ BEGIN
 
   add_stored_code;
 
+  IF c_baseline_internal THEN
+    add_query_section('baseline-source', q'~
+      SELECT JSON_OBJECT('name' VALUE s.name, 'type' VALUE s.type, 'line' VALUE s.line,
+        'text' VALUE s.text NULL ON NULL RETURNING CLOB) row_json
+        FROM all_source s
+       WHERE s.owner = :scope
+         AND s.type IN ('PACKAGE','PACKAGE BODY','TRIGGER','FUNCTION','PROCEDURE','TYPE','TYPE BODY')
+         AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+           SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) p
+            WHERE SUBSTR(s.name, 1, LENGTH(p.prefix)) = UPPER(p.prefix)))
+         AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
+           SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) e
+            WHERE s.name = UPPER(e.object_name)))
+       ORDER BY s.type, s.name, s.line OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+
+    add_query_section('baseline-settings', q'~
+      SELECT JSON_OBJECT('name' VALUE p.name, 'type' VALUE p.type,
+        'plsql_optimize_level' VALUE p.plsql_optimize_level,
+        'plsql_code_type' VALUE p.plsql_code_type, 'plsql_debug' VALUE p.plsql_debug,
+        'plsql_warnings' VALUE p.plsql_warnings, 'nls_length_semantics' VALUE p.nls_length_semantics,
+        'plsql_ccflags' VALUE p.plsql_ccflags, 'plscope_settings' VALUE p.plscope_settings RETURNING CLOB) row_json
+       FROM all_plsql_object_settings p
+       WHERE p.owner = :scope
+         AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+           SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
+            WHERE SUBSTR(p.name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))
+         AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
+           SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x
+            WHERE p.name = UPPER(x.object_name)))
+       ORDER BY p.type, p.name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+
+    add_baseline_views;
+  END IF;
+
   add_query_section('invalid-objects', q'~
     SELECT JSON_OBJECT('name' VALUE o.object_name, 'type' VALUE o.object_type, 'status' VALUE o.status RETURNING CLOB) row_json
       FROM all_objects o WHERE o.owner = :scope AND o.status = 'INVALID' AND o.subobject_name IS NULL
@@ -432,7 +556,8 @@ BEGIN
 
   add_query_section('identity-columns', q'~
     SELECT JSON_OBJECT('table_name' VALUE i.table_name, 'column_name' VALUE i.column_name,
-      'generation_type' VALUE i.generation_type, 'identity_options' VALUE i.identity_options RETURNING CLOB) row_json
+      'generation_type' VALUE i.generation_type, 'identity_options' VALUE i.identity_options,
+      'sequence_name' VALUE i.sequence_name RETURNING CLOB) row_json
       FROM all_tab_identity_cols i WHERE i.owner = :scope
      ORDER BY i.table_name, i.column_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
@@ -440,6 +565,12 @@ BEGIN
     SELECT JSON_OBJECT('owner' VALUE p.table_schema, 'object_name' VALUE p.table_name,
       'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
       FROM all_tab_privs p WHERE p.table_schema = :scope
+       AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+         SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
+          WHERE SUBSTR(p.table_name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))
+       AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
+         SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x
+          WHERE p.table_name = UPPER(x.object_name)))
      ORDER BY p.table_name, p.grantee, p.privilege OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_query_section('java-mle', q'~

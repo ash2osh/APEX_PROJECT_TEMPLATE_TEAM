@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "schemas": ["APP"],
+  "prefixes": ["APP_", "PKG_", "V_"],
+  "excludedObjects": [],
+  "referenceData": {
+    "tables": [
+      {
+        "name": "APP_COUNTRIES",
+        "excludeColumns": ["INTERNAL_NOTE"]
+      }
+    ]
+  },
+  "grants": {
+    "skipGrantees": ["SYS", "SYSTEM", "PUBLIC"],
+    "includeGrantees": [],
+    "keepGrantOptions": true
+  },
+  "sequenceMappings": [
+    {
+      "sequence": "APP_ITEMS_SEQ",
+      "table": "APP_ITEMS",
+      "column": "ITEM_ID"
+    }
+  ]
+}

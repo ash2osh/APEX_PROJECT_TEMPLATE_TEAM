@@ -33,6 +33,11 @@ Commands:
   compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown]
               [--emit-dba-script <file>]
                                               Compare complete environment catalogs by name, read-only
+  baseline export-source --from <env> [--scratch <dir>]
+                                              Export configured exact stored source and settings
+  baseline export-grants --from <env> [--scratch <dir>]
+                                              Export configured object and system grants
+  baseline build --to <env> [--from <env>]    Build structure, grants, and exact-source migrations
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
@@ -46,7 +51,7 @@ Options:
   --help                                      Show this help
 Environment:
   MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
-  <ENV>_DBA_SQLCL_CONNECTION                   Optional read-only compare-env catalog connection
+  <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env and baseline grant-export connection
 USAGE
 }
 
@@ -278,6 +283,20 @@ case "$command_name" in
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown] [--emit-dba-script <file>]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/compare_schema.sh" compare-env "$@"
+    ;;
+  baseline)
+    if [ "$#" -eq 0 ]; then
+      fail "usage: scripts/team.sh baseline <export-source|export-grants|build> [options]"
+    fi
+    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+      cd "$REPO_ROOT"
+      exec python3 -m scripts.baseline "$@"
+    fi
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    # shellcheck source=load_env.sh
+    source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.baseline "$@"
     ;;
   backup-db)
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"

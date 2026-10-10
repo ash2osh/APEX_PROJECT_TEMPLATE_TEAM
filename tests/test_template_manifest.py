@@ -123,6 +123,18 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
+    def test_baseline_files_and_recorded_fixtures_are_template_owned(self) -> None:
+        for path in (
+            "scripts/baseline.py",
+            "docs/baseline.md",
+            "docs/baseline.example.json",
+            "tests/test_baseline.py",
+            "tests/fixtures/baseline/source_dev.json",
+            "tests/fixtures/baseline/build_dev.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+
     def test_template_declares_the_qualified_release_boundary(self) -> None:
         from scripts.upgrade_template import load_manifest
         manifest = load_manifest(ROOT)

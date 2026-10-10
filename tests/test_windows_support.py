@@ -304,6 +304,58 @@ class TeamPowerShellMigrationRehearsalTests(unittest.TestCase):
         self.assertIn('"--report=" + (ConvertTo-MigrationFolderArgument $reportValue)', wrapper)
 
 
+class TeamPowerShellBaselineCommandTests(unittest.TestCase):
+    """The PowerShell entry point advertises and forwards baseline commands."""
+
+    def engines(self):
+        return [
+            engine
+            for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh")
+            if (engine := shutil.which(name)) and "/snap/bin/" not in Path(engine).as_posix()
+        ]
+
+    def test_help_describes_baseline_exports_and_build(self):
+        wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        self.assertIn("baseline export-source --from <env>", wrapper)
+        self.assertIn("baseline export-grants --from <env>", wrapper)
+        self.assertIn("baseline build --to <env>", wrapper)
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "--help"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("baseline export-source", result.stdout)
+                self.assertIn("baseline export-grants", result.stdout)
+                self.assertIn("baseline build", result.stdout)
+
+    def test_baseline_without_subcommand_reports_usage(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "baseline"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("usage: scripts/team.ps1 baseline", result.stderr)
+
+    def test_wrapper_converts_the_scratch_path_for_git_bash(self):
+        wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        self.assertIn('$baselineArguments[$baselineIndex] -ceq "--scratch"', wrapper)
+        self.assertIn('ConvertTo-MigrationFolderArgument ([string] $baselineArguments[$baselineIndex])', wrapper)
+        self.assertIn('Substring("--scratch=".Length)', wrapper)
+        self.assertIn('"--scratch=" + (ConvertTo-MigrationFolderArgument $scratchValue)', wrapper)
+
+
 class TeamPowerShellMigrationRevisionTests(unittest.TestCase):
     """The PowerShell entry point exposes and converts arguments for revision handling."""
 

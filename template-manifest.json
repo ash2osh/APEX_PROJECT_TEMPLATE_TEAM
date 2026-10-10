@@ -26,6 +26,8 @@
     "docs/TROUBLESHOOTING.md",
     "docs/apex-26.2-qualification.md",
     "docs/apexlang-upgrade.md",
+    "docs/baseline.example.json",
+    "docs/baseline.md",
     "docs/known-limitations.md",
     "docs/local-qualification.md",
     "docs/migration-rules.md",

@@ -17,6 +17,7 @@ DOCS = (
     ROOT / "app_context" / "README.md",
     ROOT / "migrations" / "README.md",
     ROOT / "docs" / "migration-rules.md",
+    ROOT / "docs" / "baseline.md",
     ROOT / "docs" / "compare-env.md",
     ROOT / "docs" / "publish-rules.md",
     ROOT / "docs" / "GETTING_STARTED.md",
@@ -105,6 +106,9 @@ class DocumentationContractTests(unittest.TestCase):
             "--env dev",
             "compare-schema",
             "compare-env --from dev --to staging",
+            "baseline export-source --from dev",
+            "baseline export-grants --from dev",
+            "baseline build --from dev --to staging",
             "--emit-dba-script",
             "status.<env>.json",
             "backup-db",
@@ -346,6 +350,9 @@ class GuideContractTests(unittest.TestCase):
             for index, block in enumerate(re.findall(r"```json\n(.*?)```", text, re.DOTALL), start=1):
                 with self.subTest(file=name, block=index):
                     json.loads(block)
+        baseline_example = json.loads((ROOT / "docs" / "baseline.example.json").read_text(encoding="utf-8"))
+        self.assertEqual(baseline_example["schemaVersion"], 1)
+        self.assertIn("schemas", baseline_example)
 
     def test_deployment_descriptor_example_has_the_keys_publish_reads(self) -> None:
         text = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")

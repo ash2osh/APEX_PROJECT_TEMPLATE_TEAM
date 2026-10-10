@@ -54,6 +54,7 @@ COMPARE_ENV_SECTIONS = (
 COMPARE_ENV_DBA_SECTIONS = frozenset({
     "system-privileges", "roles", "network-aces", "ords", "installed-options",
 })
+BASELINE_INTERNAL_SECTIONS = frozenset({"baseline-source", "baseline-settings", "baseline-views"})
 COMPARE_ENV_PAGE_SIZE = 500
 COMPARE_ENV_MAX_ROWS = 100_000
 COMPARE_ENV_NOT_COMPARED = (
@@ -525,9 +526,10 @@ def parse_environment_catalog_output(
     schema: str | None = None,
     expected_user: str | None = None,
     dba_capture: bool = False,
+    baseline_capture: bool = False,
 ) -> dict:
     """Parse one complete, paged compare-env payload from SQLcl output."""
-    requested = _validate_compare_env_sections(sections)
+    requested = _validate_compare_env_sections(sections, allow_baseline_internal=baseline_capture)
     payloads = parse_framed_catalog_payloads(output, "compare-env")
     if len(payloads) != 1:
         raise CatalogError("compare-env capture must contain exactly one complete payload")
@@ -605,13 +607,20 @@ def parse_environment_catalog_output(
     return parsed
 
 
-def _validate_compare_env_sections(sections: Sequence[str] | None) -> tuple[str, ...]:
+def _validate_compare_env_sections(
+    sections: Sequence[str] | None,
+    *,
+    allow_baseline_internal: bool = False,
+) -> tuple[str, ...]:
     if sections is None or len(sections) == 0:
         return COMPARE_ENV_SECTIONS
     requested = tuple(sections)
     if len(set(requested)) != len(requested):
         raise ValueError("--section cannot be repeated with the same value")
-    unknown = [section for section in requested if section not in COMPARE_ENV_SECTIONS]
+    allowed = set(COMPARE_ENV_SECTIONS)
+    if allow_baseline_internal:
+        allowed.update(BASELINE_INTERNAL_SECTIONS)
+    unknown = [section for section in requested if section not in allowed]
     if unknown:
         raise ValueError("unsupported compare-env section: " + ", ".join(unknown))
     return requested
@@ -1044,19 +1053,34 @@ def _environment_hex(value: str) -> str:
     return value.encode("utf-8").hex().upper()
 
 
-def _environment_driver(run_dir: Path, target: Target, environment: str, sections: Sequence[str], *, dba_capture: bool) -> Path:
-    selected = _validate_compare_env_sections(sections)
+def _environment_driver(
+    run_dir: Path,
+    target: Target,
+    environment: str,
+    sections: Sequence[str],
+    *,
+    dba_capture: bool,
+    baseline_capture: bool = False,
+    baseline_prefixes: Sequence[str] = (),
+    baseline_excluded: Sequence[str] = (),
+) -> Path:
+    selected = _validate_compare_env_sections(sections, allow_baseline_internal=baseline_capture)
+    if not baseline_capture and (baseline_prefixes or baseline_excluded):
+        raise CatalogError("baseline object filters require the private baseline capture mode")
     sql_source = Path(__file__).with_name("compare_env_catalog.sql")
     if not sql_source.is_file():
         raise CatalogError("compare-env SQL catalog driver is missing")
     shutil.copyfile(sql_source, run_dir / "compare_env_catalog.sql")
     os.chmod(run_dir / "compare_env_catalog.sql", 0o600)
     section_json = json.dumps(list(selected), separators=(",", ":"))
+    prefix_json = json.dumps(list(baseline_prefixes), separators=(",", ":"))
+    excluded_json = json.dumps(list(baseline_excluded), separators=(",", ":"))
     driver = run_dir / "compare-env-driver.sql"
     content = "\n".join((
         f"-- COMPARE_ENVIRONMENT:{environment}",
         f"-- COMPARE_ENV_SCHEMA:{target.schema}",
         f"-- COMPARE_ENV_DBA:{'true' if dba_capture else 'false'}",
+        f"-- COMPARE_ENV_BASELINE_INTERNAL:{'true' if baseline_capture else 'false'}",
         "SET ECHO OFF",
         "SET VERIFY OFF",
         "SET FEEDBACK OFF",
@@ -1064,7 +1088,7 @@ def _environment_driver(run_dir: Path, target: Target, environment: str, section
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
         "SET TRANSACTION READ ONLY;",
-        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user if not dba_capture else '')} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)}",
+        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user if not dba_capture else '')} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)}",
         "SET DEFINE OFF",
         "EXIT SUCCESS ROLLBACK",
         "",
@@ -1081,6 +1105,9 @@ def capture_environment_catalog(
     run_dir: Path,
     *,
     dba_capture: bool = False,
+    baseline_capture: bool = False,
+    baseline_prefixes: Sequence[str] = (),
+    baseline_excluded: Sequence[str] = (),
     _runner: Callable = run_sqlcl,
 ) -> dict:
     """Capture selected environment catalog sections through read-only SQLcl."""
@@ -1094,7 +1121,11 @@ def capture_environment_catalog(
         raise CatalogError("compare-env SQLcl directory cannot be a symlink")
     private_dir = Path(tempfile.mkdtemp(prefix=f"compare-env-{environment}-", dir=run_dir))
     try:
-        driver = _environment_driver(private_dir, target, environment, sections, dba_capture=dba_capture)
+        driver = _environment_driver(
+            private_dir, target, environment, sections,
+            dba_capture=dba_capture, baseline_capture=baseline_capture,
+            baseline_prefixes=baseline_prefixes, baseline_excluded=baseline_excluded,
+        )
         result = _runner(target, driver, private_dir, phase="inventory")
         return parse_environment_catalog_output(
             result.output,
@@ -1103,6 +1134,7 @@ def capture_environment_catalog(
             schema=target.schema,
             expected_user=target.expected_user,
             dba_capture=dba_capture,
+            baseline_capture=baseline_capture,
         )
     except (CatalogError, OSError, RuntimeError):
         raise

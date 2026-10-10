@@ -57,6 +57,11 @@ Commands:
   compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown]
               [--emit-dba-script <file>]
                                               Compare complete environment catalogs by name, read-only
+  baseline export-source --from <env> [--scratch <dir>]
+                                              Export configured exact stored source and settings
+  baseline export-grants --from <env> [--scratch <dir>]
+                                              Export configured object and system grants
+  baseline build --to <env> [--from <env>]    Build structure, grants, and exact-source migrations
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
@@ -70,7 +75,7 @@ Options:
   --help                                      Show this help
 Environment:
   MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
-  <ENV>_DBA_SQLCL_CONNECTION                   Optional read-only compare-env catalog connection
+  <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env and baseline grant-export connection
 "@ | Write-Output
 }
 
@@ -421,6 +426,20 @@ try {
         }
       }
       Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments (@("compare-env") + $compareArguments)
+    }
+    "baseline" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 baseline <export-source|export-grants|build> [options]" }
+      $baselineArguments = @($Arguments)
+      for ($baselineIndex = 0; $baselineIndex -lt $baselineArguments.Count; $baselineIndex++) {
+        if ($baselineArguments[$baselineIndex] -ceq "--scratch" -and $baselineIndex + 1 -lt $baselineArguments.Count) {
+          $baselineIndex++
+          $baselineArguments[$baselineIndex] = ConvertTo-MigrationFolderArgument ([string] $baselineArguments[$baselineIndex])
+        } elseif (([string] $baselineArguments[$baselineIndex]).StartsWith("--scratch=", [System.StringComparison]::Ordinal)) {
+          $scratchValue = ([string] $baselineArguments[$baselineIndex]).Substring("--scratch=".Length)
+          $baselineArguments[$baselineIndex] = "--scratch=" + (ConvertTo-MigrationFolderArgument $scratchValue)
+        }
+      }
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("baseline") + $baselineArguments)
     }
     "backup-db" {
       if ($Arguments.Count -ne 0) { Fail "backup-db does not accept arguments" }

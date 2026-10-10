@@ -631,6 +631,35 @@ limits include data rows, sequence `LAST_NUMBER`, identity runtime values,
 comments, storage placement, optimizer statistics and exact source bytes. See
 [the compare-env section list, output contract and limits](compare-env.md).
 
+## Baseline generation
+
+`scripts/team.sh baseline` uses the project's root `baseline.json` and the
+existing read-only SQLcl catalog sessions. `export-source --from <env>` writes
+the selected owner-scoped `ALL_SOURCE.TEXT` rows, compiler settings and exact view text to
+`scratch/baseline/<env>/<schema>/`. `export-grants --from <env>` records object
+grantable flags and schema-owner system privilege admin options. The latter
+requires the matching `<ENV>_DBA_SQLCL_CONNECTION`; it verifies the DBA
+connection reached the same database scope as the ordinary schema connection.
+Capture is paged at 500 rows and refuses incomplete evidence or sections over
+100,000 rows.
+
+`baseline build --to <env> [--from <env>]` defaults its source to DEV. It
+compares complete environment catalogs and creates new migration families
+under `migrations/<TARGET_SCHEMA>/` for supported structure deltas, grouped
+object grants and changed source units or views. It never applies a migration.
+New folders pass the normal migration loader and SQL/check validators. Existing
+folders remain immutable; a changed build uses the next family revision, and
+receipt or attempt evidence is reported without rewriting the folder.
+
+The generator handles guarded creates, missing columns, selected named
+constraints and indexes, not-null transitions, sequence/identity advancement,
+additive object grants and exact stored source. It does not generate drops,
+system privilege grants or general column/table alteration migrations. Review
+all reported environment differences that fall outside these generated
+classes. `baseline.json` can carry a `referenceData.tables` allow-list for a
+later phase, but baseline export/build does not process table rows or filter
+ORDS exports. See [baseline configuration and limits](baseline.md).
+
 Exit status: **0** means all selected sections were complete and identical;
 **1** means complete capture with differences; **2** means capture error,
 readiness blocker, missing DBA connection or cap/incomplete-page refusal.
