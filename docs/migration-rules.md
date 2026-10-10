@@ -210,6 +210,61 @@ is false, and 2 when a check errors, a session is incomplete, or the selected
 target identity cannot be verified. A SQL or identity error takes precedence
 over false results and returns 2.
 
+## Rehearsal
+
+Use `migrate --rehearse` to try data changes on the selected real target and
+roll them back without writing a receipt or a migration write-attempt marker:
+
+```bash
+scripts/team.sh migrate \
+  migrations/2026-09-27_seed-customers-r001 \
+  migrations/2026-09-28_assign-customers-r001 \
+  --env dev --rehearse --report scratch/customer-rehearsal.json
+```
+
+The command freezes the selected files, verifies the target identity, and
+requires staging/production confirmation as the normal apply does. Before the
+data session it sets `AUTOCOMMIT OFF` and verifies SQLcl reports it off. If
+SQLcl cannot confirm that state, rehearsal stops before any migration file is
+run. The data session also uses `WHENEVER SQLERROR EXIT FAILURE ROLLBACK`, the
+migration identity guard, and `ALTER SESSION DISABLE COMMIT IN PROCEDURE`.
+
+The existing `analyze_batch` analyzer classifies every file. A file runs only
+when all its statements are `INSERT`, `UPDATE`, `DELETE`, or `MERGE`, and its
+folder declares both preconditions and postconditions. A file with DDL,
+`TRUNCATE`, privilege changes, PL/SQL, an unrecognized statement, or a mixture
+of data changes and any other statement is skipped in full and reported as
+`not rehearsable` with the analyzer's reason. The command never executes the
+skipped file. This limit keeps implicit-commit and unmodeled SQL outside the
+rollback claim.
+
+For each folder, rehearsal evaluates its preconditions, runs its eligible
+files in input order, then evaluates its postconditions. These check queries
+are validated by the same `SAFE_FUNCTIONS` check validator as ordinary
+migration checks, but run as SELECTs inside the rehearsal SQLcl session without
+starting a separate read-only transaction. Later folders therefore see rows
+from earlier folders in the same rehearsal. SQLcl feedback is associated with
+each statement where it prints a row count; otherwise that statement's
+`rowsAffected` is null.
+
+After all selected folders, the driver issues `ROLLBACK`. The rollback proof
+includes the preconditions re-run after `ROLLBACK`: each folder's own checks,
+evaluated in that same session. When the data session exits early on an SQL error or failed
+precondition, the command uses fresh read-only check sessions to re-run those
+preconditions after SQLcl's rollback. The report marks rollback proof true only
+when the preconditions are complete and still true.
+An SQL error still returns 2 even when the fresh preconditions prove rollback;
+inspect the error and report before deciding what to change.
+
+`--report <file>` writes schema-version 1 JSON with each folder's files,
+statements, rows affected, postcondition status, and rollback proof. It is
+valid only with `--rehearse`. Exit 0 means every selected file was rehearsable,
+postconditions passed, and rollback was proven. Exit 1 means a check was false
+or at least one file was skipped as not rehearsable. Exit 2 means SQLcl,
+identity, configuration, check evaluation, report writing, or rollback proof
+could not complete. Rehearsal evidence is kept under
+`scratch/migration-rehearsal-*` when SQLcl fails; successful runs remove it.
+
 ## Rollout
 
 `rollout` runs a reviewed release as an ordered manifest. It uses the existing

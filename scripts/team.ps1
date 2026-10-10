@@ -43,8 +43,8 @@ Commands:
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
-  migrate <folder> [...] --env dev|staging|prod [--verbose]
-                                              Preflight and apply; --verbose lists every failed postcondition
+  migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
+                                              Apply, or rehearse DML in one transaction and roll it back
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
@@ -352,8 +352,20 @@ try {
       Invoke-TeamBash -ScriptName "check_conflicts.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
     }
     "migrate" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod" }
-      Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]" }
+      $migrateArguments = @($Arguments)
+      for ($migrateIndex = 0; $migrateIndex -lt $migrateArguments.Count; $migrateIndex++) {
+        if ($migrateArguments[$migrateIndex] -ceq "--report" -and $migrateIndex + 1 -lt $migrateArguments.Count) {
+          $migrateIndex++
+          $migrateArguments[$migrateIndex] = ConvertTo-MigrationFolderArgument ([string] $migrateArguments[$migrateIndex])
+        } elseif ([string] $migrateArguments[$migrateIndex] -clike "--report=*") {
+          $reportValue = ([string] $migrateArguments[$migrateIndex]).Substring("--report=".Length)
+          $migrateArguments[$migrateIndex] = "--report=" + (ConvertTo-MigrationFolderArgument $reportValue)
+        } elseif (-not ([string] $migrateArguments[$migrateIndex]).StartsWith("-")) {
+          $migrateArguments[$migrateIndex] = ConvertTo-MigrationFolderArgument ([string] $migrateArguments[$migrateIndex])
+        }
+      }
+      Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments $migrateArguments
     }
     "verify" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]" }

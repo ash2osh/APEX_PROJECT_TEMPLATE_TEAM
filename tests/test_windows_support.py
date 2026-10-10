@@ -197,6 +197,58 @@ class TeamPowerShellRolloutCommandTests(unittest.TestCase):
                 self.assertIn("usage: scripts/team.ps1 rollout", result.stderr)
 
 
+class TeamPowerShellMigrationRehearsalTests(unittest.TestCase):
+    """The PowerShell wrapper advertises and forwards rehearsal reports."""
+
+    def engines(self):
+        return [
+            engine
+            for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh")
+            if (engine := shutil.which(name)) and "/snap/bin/" not in Path(engine).as_posix()
+        ]
+
+    def test_help_describes_migration_rehearsal(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "--help"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("migrate <folder>", result.stdout)
+                self.assertIn("--rehearse", result.stdout)
+                self.assertIn("--report <file>", result.stdout)
+
+    def test_migrate_without_folders_reports_rehearsal_usage(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "migrate"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("usage: scripts/team.ps1 migrate", result.stderr)
+                self.assertIn("--rehearse", result.stderr)
+
+    def test_wrapper_converts_a_report_path_for_git_bash(self):
+        wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        self.assertIn('$migrateArguments[$migrateIndex] -ceq "--report"', wrapper)
+        self.assertIn('ConvertTo-MigrationFolderArgument ([string] $migrateArguments[$migrateIndex])', wrapper)
+        self.assertIn('"--report=" + (ConvertTo-MigrationFolderArgument $reportValue)', wrapper)
+
+
 class SqlclNativePathTests(unittest.TestCase):
     def test_native_path_is_the_identity_off_windows(self) -> None:
         if os.name == "nt":

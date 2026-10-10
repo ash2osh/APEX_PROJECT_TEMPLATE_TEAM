@@ -19,8 +19,8 @@ Commands:
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
-  migrate <folder> [...] --env dev|staging|prod [--verbose]
-                                              Preflight and apply; --verbose lists every failed postcondition
+  migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
+                                              Apply, or rehearse DML in one transaction and roll it back
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]

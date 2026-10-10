@@ -1049,6 +1049,19 @@ def _confirm_from_terminal(prompt: str) -> bool:
     return answer in {"y", "yes"}
 
 
+def rehearse_batch(
+    repo_root: Path,
+    migrations: Sequence[Migration],
+    target: Target,
+    confirm: Callable[[str], bool],
+    **options,
+) -> int:
+    """Load the rehearsal implementation lazily to keep apply imports acyclic."""
+    from .migration_rehearsal import rehearse_batch as run_rehearsal
+
+    return run_rehearsal(repo_root, migrations, target, confirm, **options)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1062,9 +1075,14 @@ def main(
     parser.add_argument("--env", action="append", choices=("dev", "staging", "prod"))
     parser.add_argument("--schema")
     parser.add_argument("--verbose", action="store_true", help="print all failed postcondition checks")
+    parser.add_argument("--rehearse", action="store_true", help="run transaction-safe data files, check them, then roll back")
+    parser.add_argument("--report", type=Path, help="write rehearsal results as JSON (requires --rehearse)")
     args = parser.parse_args(argv)
     if not args.folders:
-        print("usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod", file=sys.stderr)
+        print("usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]", file=sys.stderr)
+        return 2
+    if args.report is not None and not args.rehearse:
+        print("migration error: --report requires --rehearse", file=sys.stderr)
         return 2
     if len(args.env or []) != 1:
         print("migration error: specify exactly one --env dev|staging|prod", file=sys.stderr)
@@ -1081,6 +1099,8 @@ def main(
     except (MigrationManifestError, TargetResolutionError, OSError) as error:
         print(f"migration error: {error}", file=sys.stderr)
         return 2
+    if args.rehearse:
+        return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report)
     return apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose)
 
 

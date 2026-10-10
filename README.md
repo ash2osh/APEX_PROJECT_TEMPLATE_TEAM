@@ -420,6 +420,25 @@ scripts/team.sh migrate \
   migrations/2026-09-27_create-customers-r001 --env dev
 ```
 
+Before applying generated data changes, rehearse ordered folders against the
+configured target and write a JSON report:
+
+```bash
+scripts/team.sh migrate \
+  migrations/2026-09-27_seed-customers-r001 \
+  migrations/2026-09-28_assign-customers-r001 \
+  --env dev --rehearse --report scratch/customer-seed-rehearsal.json
+```
+
+Rehearsal runs analyzer-approved DML files in one SQLcl transaction, evaluates
+each folder's postconditions in that same transaction, then rolls back and
+rechecks each folder's preconditions. SQLcl row counts are reported per
+statement when printed. DDL, implicit-commit statements, and files the analyzer
+cannot prove transaction-safe are listed as `not rehearsable` and are skipped.
+Staging and production still require confirmation. Rehearsal creates no
+migration receipt or write-attempt marker. See the [migration rules](docs/migration-rules.md)
+for classification, rollback proof, report fields, and exit codes.
+
 Fresh postcondition failures name up to 20 failed checks; add `--verbose` to
 print all of them. Apply and verification session limits are configurable with
 `MIGRATION_APPLY_TIMEOUT_SECONDS`, `MIGRATION_CHECK_TIMEOUT_SECONDS`, and
@@ -606,7 +625,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
-| `scripts/team.sh migrate <folder> [...] --env <env> [--verbose]` | Verify and apply selected migration folders; `--verbose` prints every failed postcondition. |
+| `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. |
 | `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
 | `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]` | Run a frozen, ordered migration, SQL, ORDS and app deployment plan; staging and production show one manifest-wide hash confirmation. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |

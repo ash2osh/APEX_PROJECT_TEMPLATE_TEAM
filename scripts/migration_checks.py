@@ -752,7 +752,16 @@ def _hex_chunks(text: str) -> list[str]:
     return result or [""]
 
 
-def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: str) -> str:
+def _render_check_driver(
+    target: Target,
+    checks: Sequence[QueryCheck],
+    phase: str,
+    *,
+    read_only_transaction: bool = True,
+    exit_on_finish: bool = True,
+    configure_session: bool = True,
+    fail_on_false: bool = False,
+) -> str:
     if phase not in {"preconditions", "postconditions"}:
         raise ValueError("check phase must be preconditions or postconditions")
     if IDENTIFIER_RE.fullmatch(target.schema) is None:
@@ -762,13 +771,19 @@ def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: st
         "SET SERVEROUTPUT ON SIZE UNLIMITED",
         "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
         "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
-        f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
+    ]
+    if configure_session:
+        sql_lines.extend([
+            f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         # A read-only transaction does not stop a stored function that runs as an
         # autonomous transaction: called from a check it can insert, or run DDL, and
         # commit. The text validator cannot see such a function when it is named
         # without parentheses, so the session refuses the commit (ORA-00034).
-        "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
-        "SET TRANSACTION READ ONLY;",
+            "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
+        ])
+    if read_only_transaction:
+        sql_lines.append("SET TRANSACTION READ ONLY;")
+    sql_lines.extend([
         "DECLARE",
         "  l_payload JSON_OBJECT_T := JSON_OBJECT_T();",
         "  l_results JSON_ARRAY_T := JSON_ARRAY_T();",
@@ -782,6 +797,7 @@ def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: st
         "  l_chunk VARCHAR2(32767);",
         "  l_offset INTEGER;",
         "  l_error VARCHAR2(4000);",
+        "  l_failed BOOLEAN := FALSE;",
         "BEGIN",
         "  l_payload.put('schemaVersion', 1);",
         f"  l_payload.put('phase', '{phase}');",
@@ -799,7 +815,7 @@ def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: st
         "  l_result.put('edition', NVL(SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'), '<NONEDITIONED>'));",
         "  l_result.put('database_version', TO_CHAR(DBMS_DB_VERSION.VERSION) || '.' || TO_CHAR(DBMS_DB_VERSION.RELEASE));",
         "  l_payload.put('identity', l_result);",
-    ]
+    ])
     for check in checks:
         validate_check_query(check.sql)
         if not isinstance(check.id, str) or CHECK_ID_RE.fullmatch(check.id) is None:
@@ -829,6 +845,8 @@ def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: st
             "  l_result.put('column_count', 0);",
             "  l_result.put('numeric', FALSE);",
             "  l_value := NULL;",
+            "  l_rows := 0;",
+            "  l_columns := 0;",
             "  l_error := NULL;",
             "  l_cursor := DBMS_SQL.OPEN_CURSOR;",
             "  BEGIN",
@@ -856,6 +874,10 @@ def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: st
             "  DBMS_LOB.FREETEMPORARY(l_sql);",
             "  l_results.append(l_result);",
         ])
+        if fail_on_false:
+            sql_lines.append(
+                f"  IF l_rows != 1 OR l_columns != 1 OR l_value IS NULL OR l_value != {check.expected} OR l_error IS NOT NULL THEN l_failed := TRUE; END IF;"
+            )
     sql_lines.extend([
         "  l_payload.put('results', l_results);",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_PAYLOAD_BEGIN:" + phase + "');",
@@ -868,12 +890,38 @@ def _render_check_driver(target: Target, checks: Sequence[QueryCheck], phase: st
         "  END LOOP;",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_PAYLOAD_END:" + phase + "');",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_VERIFIED:" + phase + "');",
-        "END;",
-        "/",
-        "EXIT SUCCESS ROLLBACK",
-        "",
     ])
+    if fail_on_false:
+        sql_lines.extend([
+            "  IF l_failed THEN",
+            f"    DBMS_OUTPUT.PUT_LINE('CHECK_REHEARSAL_FAILED:{phase}');",
+            "    RAISE_APPLICATION_ERROR(-20985, 'Migration rehearsal precondition failed');",
+            "  END IF;",
+        ])
+    sql_lines.extend(["END;", "/"])
+    if exit_on_finish:
+        sql_lines.append("EXIT SUCCESS ROLLBACK")
+    sql_lines.append("")
     return "\n".join(sql_lines)
+
+
+def render_in_session_check_driver(
+    target: Target,
+    checks: Sequence[QueryCheck],
+    phase: str,
+    *,
+    fail_on_false: bool = False,
+) -> str:
+    """Render validated checks that run in the caller's current transaction."""
+    return _render_check_driver(
+        target,
+        checks,
+        phase,
+        read_only_transaction=False,
+        exit_on_finish=False,
+        configure_session=False,
+        fail_on_false=fail_on_false,
+    )
 
 
 def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryCheck], phase: str) -> Path:

@@ -4,12 +4,15 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/migrate.sh <migration-folder> [...] --env <dev|staging|prod> [--verbose]
+Usage: scripts/migrate.sh <migration-folder> [...] --env <dev|staging|prod> [--verbose] [--rehearse] [--report <file>]
 
 Select one or more migrations/<YYYY-MM-DD_name-rNNN>/ folders in execution
 order. Files inside each folder execute in ascending NNN order. Staging and
 production require a live preflight and an explicit terminal confirmation.
 Use --verbose to print every failed postcondition when fresh verification fails.
+Use --rehearse to run transaction-safe DML, check its postconditions, then roll it back.
+DDL and any file the analyzer cannot prove transaction-safe are listed as not rehearsable.
+--report writes the rehearsal result as JSON and is valid only with --rehearse.
 USAGE
 }
 

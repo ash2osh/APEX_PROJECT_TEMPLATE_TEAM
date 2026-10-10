@@ -96,6 +96,8 @@ class DocumentationContractTests(unittest.TestCase):
             "publish 100",
             "check-conflicts",
             "team.sh migrate",
+            "--rehearse",
+            "--report scratch/customer-seed-rehearsal.json",
             "team.sh rollout",
             "--env dev",
             "compare-schema",
@@ -128,6 +130,17 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("## Rollout", migration_guide)
         self.assertIn("one manifest-level confirmation", migration_guide)
         self.assertIn("rollout-manifest.example.json", migration_guide)
+        for required in (
+            "## Rehearsal",
+            "AUTOCOMMIT OFF",
+            "SAFE_FUNCTIONS",
+            "not rehearsable",
+            "preconditions re-run after `ROLLBACK`",
+            "--report <file>",
+            "scratch/migration-rehearsal-*",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, migration_guide)
         limitations = contents[ROOT / "docs" / "known-limitations.md"]
         for limitation in ("whitespace-only lines", "trailing hyphen", "DBMS_LOB.APPEND", "five-minute", "patch levels"):
             with self.subTest(limitation=limitation):
