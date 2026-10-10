@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/deploy.sh <app_id> --env <staging|prod> [--manual]
+Usage: scripts/deploy.sh <app_id> --env <staging|prod> [--manual] [--app-source-dir <dir>]
 
 Direct deployment shows the selected workspace and schema, then requires
 interactive confirmation. --manual prints SQLcl instructions without connecting.
@@ -23,6 +23,7 @@ app_id="${1:-}"
 shift
 app_environment=""
 manual=false
+app_source_dir=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env)
@@ -33,6 +34,11 @@ while [ "$#" -gt 0 ]; do
     --manual)
       manual=true
       shift
+      ;;
+    --app-source-dir)
+      [ "$#" -ge 2 ] || fail "--app-source-dir requires a directory"
+      app_source_dir="$2"
+      shift 2
       ;;
     --help|-h)
       usage
@@ -51,11 +57,16 @@ PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
 # shellcheck source=load_env.sh
 source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
 
+app_source_args=()
+if [ -n "$app_source_dir" ]; then
+  app_source_args=(--app-source-dir "$app_source_dir")
+fi
+
 description_file="$(mktemp "${TMPDIR:-/tmp}/apex-deploy-description.XXXXXX")"
 cleanup() { rm -f -- "$description_file"; }
 trap cleanup EXIT
 PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/publish_app.sh" \
-  "$app_id" --env "$app_environment" --describe > "$description_file"
+  "$app_id" --env "$app_environment" "${app_source_args[@]}" --describe > "$description_file"
 mapfile -t description < "$description_file"
 [ "${#description[@]}" -eq 6 ] || fail "could not read the application deployment descriptor"
 app_dir="${description[0]}"
@@ -148,4 +159,4 @@ if [ "$manual" = true ]; then
 fi
 
 PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/publish_app.sh" \
-  "$app_id" --env "$app_environment"
+  "$app_id" --env "$app_environment" "${app_source_args[@]}"

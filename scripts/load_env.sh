@@ -5,12 +5,15 @@ project_env_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ENV_FILE="${1:-${PROJECT_ENV_FILE:-$project_env_repo_root/.env}}"
 unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER PROD_SCHEMA
 unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
+unset DEV_DBA_SQLCL_CONNECTION STAGING_DBA_SQLCL_CONNECTION PROD_DBA_SQLCL_CONNECTION
 unset ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER
 unset INSTALL_UC_APX UC_APX_SKILLS_AGENT
 unset APEX_WORKSPACE_USERNAME
 unset MIGRATION_SCHEMA MIGRATION_SQLCL_CONNECTION MIGRATION_EXPECTED_USER
 unset STAGING_MIGRATION_SCHEMA STAGING_MIGRATION_SQLCL_CONNECTION STAGING_MIGRATION_EXPECTED_USER
 unset PROD_MIGRATION_SCHEMA PROD_MIGRATION_SQLCL_CONNECTION PROD_MIGRATION_EXPECTED_USER
+unset MIGRATION_APPLY_TIMEOUT_SECONDS MIGRATION_CHECK_TIMEOUT_SECONDS MIGRATION_CHECK_BATCH_BYTES
+unset MIGRATION_PREFLIGHT_INVENTORY_RETRIES
 
 # README.md documents a relative PROJECT_ENV_FILE. Resolve it against the
 # repository root when it is not found relative to the caller's directory, so a
@@ -119,10 +122,13 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
     APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
     PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|PROD_SCHEMA|\
     STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER|STAGING_SCHEMA|\
+    DEV_DBA_SQLCL_CONNECTION|STAGING_DBA_SQLCL_CONNECTION|PROD_DBA_SQLCL_CONNECTION|\
     ORDS_SCHEMA|ORDS_SQLCL_CONNECTION|ORDS_EXPECTED_USER|\
     MIGRATION_SCHEMA|MIGRATION_SQLCL_CONNECTION|MIGRATION_EXPECTED_USER|\
     STAGING_MIGRATION_SCHEMA|STAGING_MIGRATION_SQLCL_CONNECTION|STAGING_MIGRATION_EXPECTED_USER|\
-    PROD_MIGRATION_SCHEMA|PROD_MIGRATION_SQLCL_CONNECTION|PROD_MIGRATION_EXPECTED_USER) ;;
+    PROD_MIGRATION_SCHEMA|PROD_MIGRATION_SQLCL_CONNECTION|PROD_MIGRATION_EXPECTED_USER|\
+    MIGRATION_APPLY_TIMEOUT_SECONDS|MIGRATION_CHECK_TIMEOUT_SECONDS|MIGRATION_CHECK_BATCH_BYTES|\
+    MIGRATION_PREFLIGHT_INVENTORY_RETRIES) ;;
     *)
       project_env_fail "unsupported setting in $PROJECT_ENV_FILE: $project_env_key"
       return 1 2>/dev/null || exit 1
@@ -271,6 +277,25 @@ for project_env_migration_prefix in '' STAGING_ PROD_; do
     project_env_check_list "${project_env_migration_prefix}MIGRATION_SQLCL_CONNECTION" alias || { return 1 2>/dev/null || exit 1; }
     project_env_check_aligned "${project_env_migration_prefix}MIGRATION_SCHEMA" "${project_env_migration_prefix}MIGRATION_SQLCL_CONNECTION" "${project_env_migration_prefix}MIGRATION_EXPECTED_USER" || { return 1 2>/dev/null || exit 1; }
     export "PROJECT_${project_env_migration_prefix}MIGRATION_CONFIGURED=true"
+  fi
+done
+
+for project_env_dba_key in DEV_DBA_SQLCL_CONNECTION STAGING_DBA_SQLCL_CONNECTION PROD_DBA_SQLCL_CONNECTION; do
+  project_env_dba_seen=false
+  for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+    [ "$project_env_seen_key" != "$project_env_dba_key" ] || project_env_dba_seen=true
+  done
+  if [ "$project_env_dba_seen" = true ]; then
+    project_env_dba_value="${!project_env_dba_key:-}"
+    if [ -z "${project_env_dba_value//[[:space:]]/}" ]; then
+      project_env_fail "$project_env_dba_key must not be empty when configured"
+      return 1 2>/dev/null || exit 1
+    fi
+    if [[ "$project_env_dba_value" == *,* ]]; then
+      project_env_fail "$project_env_dba_key accepts one saved SQLcl connection alias"
+      return 1 2>/dev/null || exit 1
+    fi
+    project_env_check_list "$project_env_dba_key" alias || { return 1 2>/dev/null || exit 1; }
   fi
 done
 

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 2,
+  "phase": "compare-env",
+  "environment": "dev",
+  "schema": "APP_DEV",
+  "identity": {
+    "session_user": "APP_DBA",
+    "current_schema": "APP_DEV",
+    "db_name": "DEVDB",
+    "db_unique_name": "DEVDB",
+    "service_name": "DEVDB",
+    "container_id": "1",
+    "container_name": "DEV",
+    "edition": "ORA$BASE",
+    "database_version": "19.0"
+  },
+  "coverage": {"pageSize": 500, "maxRows": 100000, "sections": {"system-privileges": {"complete": true, "pages": [1]}}},
+  "sections": {"system-privileges": [{"grantee": "APP_DEV", "privilege": "CREATE SESSION", "admin_option": "NO"}]},
+  "unavailable": {}
+}
+

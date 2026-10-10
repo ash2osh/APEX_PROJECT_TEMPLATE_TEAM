@@ -1,0 +1,9 @@
+{
+  "definitions": [
+    {"owner": "APP_DEV", "name": "APP_ITEMS", "type": "TABLE", "raw_ddl": "CREATE TABLE \"APP_DEV\".\"APP_ITEMS\" (\"STATUS\" VARCHAR2(1 BYTE))", "attributes": {"columns": []}, "dependents": [{"owner": "APP_DEV", "name": "APP_ITEMS_CK", "type": "CONSTRAINT"}]},
+    {"owner": "APP_DEV", "name": "APP_NEW_TABLE", "type": "TABLE", "raw_ddl": "CREATE TABLE \"APP_DEV\".\"APP_NEW_TABLE\" (\"ID\" NUMBER)", "attributes": {"columns": []}, "dependents": []},
+    {"owner": "APP_DEV", "name": "APP_ITEMS_CK", "type": "CONSTRAINT", "raw_ddl": "ALTER TABLE APP_DEV.APP_ITEMS ADD CONSTRAINT APP_ITEMS_CK CHECK (STATUS IN ('A', 'B'))", "attributes": {}, "dependents": []},
+    {"owner": "APP_DEV", "name": "APP_ITEMS_IX_NEW", "type": "INDEX", "raw_ddl": "CREATE INDEX \"APP_DEV\".\"APP_ITEMS_IX_NEW\" ON \"APP_DEV\".\"APP_ITEMS\" (\"ITEM_ID\")", "attributes": {}, "dependents": []}
+  ]
+}
+

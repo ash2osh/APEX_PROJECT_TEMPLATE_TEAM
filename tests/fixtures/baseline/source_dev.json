@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "phase": "compare-env",
+  "environment": "dev",
+  "schema": "APP_DEV",
+  "identity": {
+    "session_user": "APP_DEV",
+    "current_schema": "APP_DEV",
+    "db_name": "DEVDB",
+    "db_unique_name": "DEVDB",
+    "service_name": "DEVDB",
+    "container_id": "1",
+    "container_name": "DEV",
+    "edition": "ORA$BASE",
+    "database_version": "19.0"
+  },
+  "coverage": {
+    "pageSize": 500,
+    "maxRows": 100000,
+    "sections": {
+      "baseline-source": {"complete": true, "pages": [3]},
+      "baseline-settings": {"complete": true, "pages": [1]},
+      "baseline-views": {"complete": true, "pages": [1]}
+    }
+  },
+  "sections": {
+    "baseline-source": [
+      {"name": "PKG_ALPHA", "type": "PACKAGE", "line": 1, "text": "PACKAGE PKG_ALPHA AS\n"},
+      {"name": "PKG_ALPHA", "type": "PACKAGE", "line": 2, "text": "  value   \n"},
+      {"name": "PKG_ALPHA", "type": "PACKAGE", "line": 3, "text": "\n"}
+    ],
+    "baseline-settings": [
+      {"name": "PKG_ALPHA", "type": "PACKAGE", "plsql_optimize_level": "2", "plsql_code_type": "INTERPRETED", "plsql_debug": "FALSE", "plsql_warnings": "ENABLE:ALL", "nls_length_semantics": "BYTE", "plsql_ccflags": null, "plscope_settings": "IDENTIFIERS:NONE"}
+    ],
+    "baseline-views": [
+      {"name": "V_ALPHA", "text": "SELECT 'view text' AS VALUE FROM DUAL\n", "ddl": "CREATE OR REPLACE FORCE EDITIONABLE VIEW \"APP_DEV\".\"V_ALPHA\" AS SELECT 'view text' AS VALUE FROM DUAL"}
+    ]
+  },
+  "unavailable": {}
+}

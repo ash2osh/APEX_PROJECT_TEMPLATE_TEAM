@@ -8,12 +8,15 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from fake_sqlcl import environment as fake_environment, install
 from scripts.db_targets import Target
-from scripts.migrate import MigrationApplyError, apply_batch, apply_folder, main
-from scripts.migration_checks import CheckReport, analyze_batch
+from scripts.migrate import MigrationApplyError, _assert_check_identity, apply_batch, apply_folder, main
+from scripts.migration_checks import CheckReport, analyze_batch, run_checks
 from scripts.migration_manifest import load_batch, validate_receipt
-from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
+from scripts.migration_revision import inspect_migration_lock
+from scripts.schema_catalog import InventoryChangedError, ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
@@ -182,15 +185,19 @@ class MigrateCliTests(unittest.TestCase):
     def apply(self, migrations, target=None, *, confirm=None, fake=None, **overrides):
         target = target or self.target()
         fake = fake or FakeDatabase(target)
+        capture_inventory_fn = overrides.pop("capture_inventory_fn", fake.capture_inventory)
+        capture_snapshot_fn = overrides.pop("capture_snapshot_fn", fake.capture_snapshot)
+        run_checks_fn = overrides.pop("run_checks_fn", fake.run_checks)
+        apply_folder_fn = overrides.pop("apply_folder_fn", fake.apply_folder)
         result = apply_batch(
             self.root,
             migrations,
             target,
             confirm or (lambda _prompt: True),
-            capture_inventory_fn=fake.capture_inventory,
-            capture_snapshot_fn=fake.capture_snapshot,
-            run_checks_fn=fake.run_checks,
-            apply_folder_fn=fake.apply_folder,
+            capture_inventory_fn=capture_inventory_fn,
+            capture_snapshot_fn=capture_snapshot_fn,
+            run_checks_fn=run_checks_fn,
+            apply_folder_fn=apply_folder_fn,
             **overrides,
         )
         return result, fake
@@ -213,6 +220,31 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in receipt["checks"] if item.get("kind")], ["catalog", "catalog"])
         self.assertNotIn("developer", json.dumps(receipt).casefold())
         self.assertNotIn("password", json.dumps(receipt).casefold())
+
+    def test_inventory_retry_exhaustion_reports_live_preflight_code_and_fingerprints(self):
+        folder = self.add_folder(
+            "2026-09-28_create-retry-r001",
+            {"001-create-table.sql": "CREATE TABLE RETRY_T (ID NUMBER);\n"},
+        )
+        migrations = self.load(folder.name)
+        target = self.target()
+        fake = FakeDatabase(target)
+        after = {ObjectKey(target.schema, "RACING_T", "TABLE"): {
+            "owner": target.schema, "name": "RACING_T", "type": "TABLE",
+        }}
+
+        def changing_snapshot(_target, inventory, _keys, _run_dir):
+            raise InventoryChangedError("owner inventory changed", inventory, after)
+
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {"MIGRATION_PREFLIGHT_INVENTORY_RETRIES": "0"}), contextlib.redirect_stderr(stderr):
+            result, fake = self.apply(migrations, fake=fake, capture_snapshot_fn=changing_snapshot)
+
+        self.assertEqual(result, 2)
+        self.assertIn("LIVE_PREFLIGHT_UNAVAILABLE", stderr.getvalue())
+        self.assertIn("inventory fingerprints: first=", stderr.getvalue())
+        self.assertIn(", second=", stderr.getvalue())
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
 
     def test_stage_and_prod_require_exact_confirmation_and_decline_performs_no_apply(self):
         for environment in ("staging", "prod"):
@@ -265,6 +297,121 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual(retry, 2)
         self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
         self.assertFalse((folder / "status.dev.json").exists())
+
+    def test_identity_guard_refusal_is_recorded_as_not_started_and_allows_retry(self):
+        folder = self.add_folder(
+            "2026-09-28_identity-refusal-r001",
+            {"001-insert-row.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        identity = json.dumps(fake.identity(), separators=(",", ":"))
+        refusal = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nORA-20987: MIGRATION_IDENTITY_GUARD_REFUSED: target differs\n"
+        )
+        binary = install(self.root / "fake-bin", "cat <<'FAKE_SQLCL_OUTPUT'\n" + refusal + "FAKE_SQLCL_OUTPUT\nexit 1\n")
+        stderr = io.StringIO()
+
+        with patch.dict("os.environ", fake_environment(binary)), contextlib.redirect_stderr(stderr):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        self.assertIn("no payload statement started", stderr.getvalue())
+        manifest = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(manifest.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-not-started")
+        self.assertFalse(recorded["writeAttempted"])
+        self.assertEqual(inspect_migration_lock(self.root, f"migrations/{folder.name}").status, "unlocked")
+
+        success = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-insert-row.sql\n"
+            "1 row inserted.\nMIGRATION_APPLY_COMPLETED\n"
+        )
+        install(self.root / "fake-bin", "cat <<'FAKE_SQLCL_OUTPUT'\n" + success + "FAKE_SQLCL_OUTPUT\n")
+        with patch.dict("os.environ", fake_environment(binary)):
+            retried, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(retried, 0)
+        self.assertTrue((folder / "status.dev.json").is_file())
+
+    def test_connection_refusal_before_payload_is_recorded_as_not_started(self):
+        folder = self.add_folder(
+            "2026-09-28_connection-refusal-r001",
+            {"001-insert-row.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        binary = install(
+            self.root / "fake-bin",
+            "printf '%s\\n' 'ORA-12154: TNS could not resolve the connect identifier'\nexit 1\n",
+        )
+
+        with patch.dict("os.environ", fake_environment(binary)), contextlib.redirect_stderr(io.StringIO()):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        attempt = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(attempt.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-not-started")
+        self.assertEqual(recorded["applyStartClassification"], "connection-failed-before-payload")
+        self.assertFalse(recorded["writeAttempted"])
+
+    def test_ora_error_after_payload_started_remains_locked(self):
+        folder = self.add_folder(
+            "2026-09-28_payload-error-r001",
+            {"001-insert-row.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        identity = json.dumps(fake.identity(), separators=(",", ":"))
+        output = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-insert-row.sql\n"
+            "ORA-00942: table or view does not exist\n"
+        )
+        binary = install(self.root / "fake-bin", "cat <<'FAKE_SQLCL_OUTPUT'\n" + output + "FAKE_SQLCL_OUTPUT\nexit 1\n")
+
+        with patch.dict("os.environ", fake_environment(binary)), contextlib.redirect_stderr(io.StringIO()):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        attempt = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(attempt.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-failed-or-unknown")
+        self.assertTrue(recorded["writeAttempted"])
+        self.assertEqual(inspect_migration_lock(self.root, f"migrations/{folder.name}").status, "locked")
+
+    def test_timeout_after_payload_started_without_ora_stays_locked(self):
+        folder = self.add_folder(
+            "2026-09-28_payload-timeout-r001",
+            {"001-large.sql": "INSERT INTO T (ID) VALUES (1);\n"},
+            preconditions=[{"id": "before-row", "sql": "SELECT 1 FROM dual", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        identity = json.dumps(fake.identity(), separators=(",", ":"))
+        output = (
+            "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
+            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-large.sql\n"
+        )
+        binary = install(
+            self.root / "fake-bin",
+            "cat <<'FAKE_SQLCL_OUTPUT'\n" + output + "FAKE_SQLCL_OUTPUT\nsleep 2\n",
+        )
+
+        with patch.dict("os.environ", fake_environment(binary, MIGRATION_APPLY_TIMEOUT_SECONDS="0.05")), contextlib.redirect_stderr(io.StringIO()):
+            failed, _ = self.apply(migrations, fake=fake, apply_folder_fn=apply_folder)
+
+        self.assertEqual(failed, 2)
+        attempt = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        recorded = json.loads(attempt.read_text(encoding="utf-8"))["migrations"][0]
+        self.assertEqual(recorded["state"], "apply-failed-or-unknown")
+        self.assertTrue(recorded["writeAttempted"])
 
     def test_a_retained_attempt_with_a_duplicate_key_still_blocks_replay(self):
         # json.loads keeps the last of two equal keys, so "writeAttempted": true
@@ -400,11 +547,13 @@ class MigrateCliTests(unittest.TestCase):
             "db_unique_name": "DEVDB_UNIQUE", "service_name": "dev.service", "container_id": "3",
             "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "19.0",
         })
-        def fake_sqlcl(_target, driver, working):
+        def fake_sqlcl(_target, driver, working, **kwargs):
+            self.assertEqual(kwargs["phase"], "apply")
             content = driver.read_text(encoding="utf-8")
             self.assertIn("@@verify_migration_access.sql", (working / "migrate.sql").read_text(encoding="utf-8"))
             self.assertIn("SET DEFINE OFF", content)
             self.assertIn("@@../payload/2026-09-28_create-driver-r001/001-create-t.sql", content)
+            self.assertIn("PROMPT MIGRATION_PAYLOAD_STARTED:001-create-t.sql", content)
             self.assertIn("EXIT SUCCESS COMMIT", content)
             payload_at = content.index("@@../payload/")
             # SQLcl ends a plain SQL statement at a blank line unless told
@@ -594,6 +743,129 @@ class MigrateCliTests(unittest.TestCase):
         result, fake = self.apply(migration, fake=fake)
         self.assertEqual(result, 2)
         self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+
+    def test_failed_postconditions_name_check_ids_store_them_and_verbose_shows_all(self):
+        for verbose in (False, True):
+            with self.subTest(verbose=verbose):
+                suffix = "verbose" if verbose else "brief"
+                folder = self.add_folder(
+                    f"2026-10-03_{suffix}-r001",
+                    {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"},
+                    postconditions=[
+                        {"id": f"check-{index:02}", "sql": "SELECT 1 FROM dual", "expected": 1}
+                        for index in range(22)
+                    ],
+                )
+                migrations = self.load(folder.name)
+                fake = FakeDatabase(self.target())
+
+                def fail_postconditions(target, checks, run_dir, *, phase, fake=fake):
+                    if phase != "postconditions":
+                        return fake.run_checks(target, checks, run_dir, phase=phase)
+                    ids = [check.id for check in checks]
+                    results = tuple({
+                        "id": check.id, "row_count": 1, "column_count": 1,
+                        "numeric": True, "value": 0, "passed": False,
+                    } for check in checks)
+                    errors = tuple({
+                        "code": "CHECK_FAILED", "check": check.id, "expected": 1,
+                        "observedValue": 0, "message": "assertion returned zero",
+                    } for check in checks)
+                    return CheckReport(False, True, results, errors, {
+                        "phase": phase, "complete": True, "identity": fake.identity(),
+                        "failedCheckIds": ids,
+                    })
+
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    result, _ = self.apply(
+                        migrations, fake=fake, run_checks_fn=fail_postconditions, verbose=verbose,
+                    )
+
+                self.assertEqual(result, 2)
+                message = stderr.getvalue()
+                self.assertIn("check-00", message)
+                self.assertIn("expected=1", message)
+                self.assertIn("observed=0", message)
+                if verbose:
+                    self.assertIn("check-21", message)
+                    self.assertNotIn("use --verbose", message)
+                else:
+                    self.assertNotIn("check-21", message)
+                    self.assertIn("2 more", message)
+                manifest_path = next(
+                    path for path in (self.root / "scratch").glob("migration-attempt-*/run-manifest.json")
+                    if json.loads(path.read_text(encoding="utf-8"))["migrations"][0]["folder"] == folder.name
+                )
+                record = json.loads(manifest_path.read_text(encoding="utf-8"))["migrations"][0]
+                self.assertEqual(record["failedCheckIds"], [f"check-{index:02}" for index in range(22)])
+
+    def test_postcondition_with_no_check_output_says_why_and_keeps_evidence(self):
+        folder = self.add_folder("2026-10-03_no-output-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        fake = FakeDatabase(self.target())
+        binary = install(self.root / "fake-bin", 'printf "FAKE_SQLCL_NO_CHECK_PAYLOAD\\n"\n')
+
+        def only_postconditions_use_sqlcl(target, checks, run_dir, *, phase):
+            if phase == "postconditions":
+                return run_checks(target, checks, run_dir, phase=phase)
+            return fake.run_checks(target, checks, run_dir, phase=phase)
+
+        stderr = io.StringIO()
+        with patch.dict("os.environ", fake_environment(binary)), contextlib.redirect_stderr(stderr):
+            result, _ = self.apply(migrations, fake=fake, run_checks_fn=only_postconditions_use_sqlcl)
+
+        self.assertEqual(result, 2)
+        self.assertIn("verification produced no output: timeout, size limit or SQLcl crash", stderr.getvalue())
+        self.assertIn("sqlcl-output.log", stderr.getvalue())
+        self.assertFalse((folder / "status.dev.json").exists())
+
+    def test_apply_timeout_says_it_was_cut_off_and_may_be_partially_applied(self):
+        folder = self.add_folder("2026-10-03_apply-timeout-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        binary = install(self.root / "fake-bin", 'printf "FAKE_SQLCL_APPLY_STARTED\\n"\nsleep 5\n')
+        stderr = io.StringIO()
+
+        with patch.dict("os.environ", fake_environment(binary, MIGRATION_APPLY_TIMEOUT_SECONDS="0.05")), contextlib.redirect_stderr(stderr):
+            result, _ = self.apply(migrations, apply_folder_fn=apply_folder)
+
+        self.assertEqual(result, 2)
+        self.assertIn("cut off after 0.05 s", stderr.getvalue())
+        self.assertIn("may be partially applied", stderr.getvalue())
+        self.assertFalse((folder / "status.dev.json").exists())
+
+    def test_migrate_cli_accepts_and_forwards_verbose(self):
+        folder = self.add_folder("2026-10-03_verbose-cli-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP", "CODE_SQLCL_CONNECTION": "dev-profile", "CODE_EXPECTED_USER": "MIGRATOR",
+        }
+
+        with patch("scripts.migrate.apply_batch", return_value=0) as apply:
+            result = main([f"migrations/{folder.name}", "--env", "dev", "--verbose"],
+                          environ=values, repo_root=self.root)
+
+        self.assertEqual(result, 0)
+        self.assertIs(apply.call_args.kwargs["verbose"], True)
+
+    def test_each_batched_check_session_must_match_the_preflight_identity(self):
+        identity = FakeDatabase(self.target()).identity()
+        report = CheckReport(True, True, ({"id": "verified", "passed": True},), (), {
+            "phase": "postconditions",
+            "identity": identity,
+            "sessionIdentities": [identity, {**identity, "db_unique_name": "OTHERDB_UNIQUE"}],
+        })
+
+        with self.assertRaisesRegex(MigrationApplyError, "different database/schema identity"):
+            _assert_check_identity(identity, report)
+
+    def test_migrate_cli_help_exposes_verbose_verification_reporting(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit) as caught:
+            main(["--help"])
+
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("--verbose", stdout.getvalue())
 
 
 if __name__ == "__main__":

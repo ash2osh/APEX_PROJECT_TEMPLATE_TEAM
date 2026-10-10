@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "phase": "compare-env",
+  "environment": "staging",
+  "schema": "APP_STAGE",
+  "identity": {
+    "session_user": "APP_STAGE",
+    "current_schema": "APP_STAGE",
+    "db_name": "STAGEDB",
+    "db_unique_name": "STAGEDB_UNIQUE",
+    "service_name": "STAGE_SERVICE",
+    "container_id": "4",
+    "container_name": "APP_PDB",
+    "edition": "ORA$BASE",
+    "database_version": "19.26"
+  },
+  "coverage": {
+    "complete": true,
+    "pageSize": 500,
+    "maxRows": 100000,
+    "sections": {
+      "tables": {"complete": true, "pages": [2]},
+      "constraints": {"complete": true, "pages": [2]},
+      "triggers": {"complete": true, "pages": [1]},
+      "object-grants": {"complete": true, "pages": [0]},
+      "network-aces": {"complete": true, "pages": [0]},
+      "ords": {"complete": true, "pages": [2]},
+      "versions": {"complete": true, "pages": [2]}
+    }
+  },
+  "sections": {
+    "tables": [
+      {"name": "T_SHARED", "temporary": "N", "partitioned": "N", "definition_line": "STAGE formatting only"},
+      {"name": "T_TARGET_ONLY", "temporary": "N", "partitioned": "N"}
+    ],
+    "constraints": [
+      {"name": "SYS_C900", "table_name": "T_SHARED", "constraint_type": "C", "columns": ["LEGACY_ID"], "referenced_table": null, "condition": "LEGACY_ID IS NOT NULL", "status": "ENABLED", "validated": "VALIDATED"},
+      {"name": "CK_STATE", "table_name": "T_SHARED", "constraint_type": "C", "columns": ["STATE"], "referenced_table": null, "condition": "STATE IN ('N','Y','P')", "status": "ENABLED", "validated": "VALIDATED"}
+    ],
+    "triggers": [
+      {"name": "TRG_AUDIT", "table_name": "T_SHARED", "trigger_type": "BEFORE EACH ROW", "triggering_event": "INSERT OR UPDATE", "status": "ENABLED", "line_count": 4, "source_hash": 9876, "source_header": "CREATE OR REPLACE TRIGGER APP_STAGE.TRG_AUDIT with different formatting"}
+    ],
+    "object-grants": [],
+    "network-aces": [],
+    "ords": [
+      {"kind": "schema", "name": "APP_STAGE", "enabled": false, "url_mapping_type": "BASE_PATH", "url_mapping_pattern": "app", "auto_rest_auth": false},
+      {"kind": "module", "name": "app.api", "uri_prefix": "api/", "status": "PUBLISHED"}
+    ],
+    "versions": [
+      {"component": "database", "version": "19.26"},
+      {"component": "apex", "version": "24.2.0"}
+    ]
+  }
+}

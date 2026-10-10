@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,8 +24,8 @@ from .migration_manifest import (
     _strip_sql_comments_and_tokenize,
     validate_check_query,
 )
-from .schema_catalog import ObjectKey, SchemaSnapshot
-from .sqlcl_session import run_sqlcl, safe_rmtree
+from .schema_catalog import CatalogError, ObjectKey, SchemaSnapshot
+from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
 from .validate_migration import statement_spans
 
 
@@ -46,6 +47,16 @@ CONSTRAINT_SEGMENT_STARTERS = {
 }
 IDENTIFIER_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 HEX_CHUNK_SIZE = 3000
+DEFAULT_CHECK_DRIVER_BYTES = 2 * 1024 * 1024
+DEFAULT_PREFLIGHT_INVENTORY_RETRIES = 3
+SELECTABLE_SYNONYM_TARGET_TYPES = {"TABLE", "VIEW", "MATERIALIZED VIEW"}
+
+
+def preflight_inventory_retries(values: Mapping[str, str]) -> int:
+    raw = values.get("MIGRATION_PREFLIGHT_INVENTORY_RETRIES", str(DEFAULT_PREFLIGHT_INVENTORY_RETRIES))
+    if not isinstance(raw, str) or not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+        raise CatalogError("MIGRATION_PREFLIGHT_INVENTORY_RETRIES must be a non-negative integer")
+    return int(raw)
 
 
 @dataclass(frozen=True)
@@ -94,6 +105,17 @@ class _Token:
 
 class MigrationAnalysisError(ValueError):
     """Selected SQL is malformed or cannot be scoped safely."""
+
+
+class _CheckDriverTooLarge(ValueError):
+    def __init__(self, check_id: str, driver_bytes: int, budget_bytes: int) -> None:
+        self.check_id = check_id
+        self.driver_bytes = driver_bytes
+        self.budget_bytes = budget_bytes
+        super().__init__(
+            f"check {check_id} generates a {driver_bytes}-byte driver, exceeding "
+            f"MIGRATION_CHECK_BATCH_BYTES={budget_bytes}"
+        )
 
 
 def _is_word_start(char: str) -> bool:
@@ -739,25 +761,38 @@ def _hex_chunks(text: str) -> list[str]:
     return result or [""]
 
 
-def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryCheck], phase: str) -> Path:
+def _render_check_driver(
+    target: Target,
+    checks: Sequence[QueryCheck],
+    phase: str,
+    *,
+    read_only_transaction: bool = True,
+    exit_on_finish: bool = True,
+    configure_session: bool = True,
+    fail_on_false: bool = False,
+) -> str:
     if phase not in {"preconditions", "postconditions"}:
         raise ValueError("check phase must be preconditions or postconditions")
     if IDENTIFIER_RE.fullmatch(target.schema) is None:
         raise ValueError("target schema must be an uppercase Oracle identifier")
-    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    run_dir.chmod(0o700)
     sql_lines = [
         "SET ENCODING UTF-8",
         "SET SERVEROUTPUT ON SIZE UNLIMITED",
         "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
         "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
-        f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
+    ]
+    if configure_session:
+        sql_lines.extend([
+            f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         # A read-only transaction does not stop a stored function that runs as an
         # autonomous transaction: called from a check it can insert, or run DDL, and
         # commit. The text validator cannot see such a function when it is named
         # without parentheses, so the session refuses the commit (ORA-00034).
-        "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
-        "SET TRANSACTION READ ONLY;",
+            "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
+        ])
+    if read_only_transaction:
+        sql_lines.append("SET TRANSACTION READ ONLY;")
+    sql_lines.extend([
         "DECLARE",
         "  l_payload JSON_OBJECT_T := JSON_OBJECT_T();",
         "  l_results JSON_ARRAY_T := JSON_ARRAY_T();",
@@ -771,6 +806,7 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         "  l_chunk VARCHAR2(32767);",
         "  l_offset INTEGER;",
         "  l_error VARCHAR2(4000);",
+        "  l_failed BOOLEAN := FALSE;",
         "BEGIN",
         "  l_payload.put('schemaVersion', 1);",
         f"  l_payload.put('phase', '{phase}');",
@@ -788,7 +824,7 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         "  l_result.put('edition', NVL(SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'), '<NONEDITIONED>'));",
         "  l_result.put('database_version', TO_CHAR(DBMS_DB_VERSION.VERSION) || '.' || TO_CHAR(DBMS_DB_VERSION.RELEASE));",
         "  l_payload.put('identity', l_result);",
-    ]
+    ])
     for check in checks:
         validate_check_query(check.sql)
         if not isinstance(check.id, str) or CHECK_ID_RE.fullmatch(check.id) is None:
@@ -818,6 +854,8 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
             "  l_result.put('column_count', 0);",
             "  l_result.put('numeric', FALSE);",
             "  l_value := NULL;",
+            "  l_rows := 0;",
+            "  l_columns := 0;",
             "  l_error := NULL;",
             "  l_cursor := DBMS_SQL.OPEN_CURSOR;",
             "  BEGIN",
@@ -845,6 +883,10 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
             "  DBMS_LOB.FREETEMPORARY(l_sql);",
             "  l_results.append(l_result);",
         ])
+        if fail_on_false:
+            sql_lines.append(
+                f"  IF l_rows != 1 OR l_columns != 1 OR l_value IS NULL OR l_value != {check.expected} OR l_error IS NOT NULL THEN l_failed := TRUE; END IF;"
+            )
     sql_lines.extend([
         "  l_payload.put('results', l_results);",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_PAYLOAD_BEGIN:" + phase + "');",
@@ -857,13 +899,46 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
         "  END LOOP;",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_PAYLOAD_END:" + phase + "');",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_VERIFIED:" + phase + "');",
-        "END;",
-        "/",
-        "EXIT SUCCESS ROLLBACK",
-        "",
     ])
+    if fail_on_false:
+        sql_lines.extend([
+            "  IF l_failed THEN",
+            f"    DBMS_OUTPUT.PUT_LINE('CHECK_REHEARSAL_FAILED:{phase}');",
+            "    RAISE_APPLICATION_ERROR(-20985, 'Migration rehearsal precondition failed');",
+            "  END IF;",
+        ])
+    sql_lines.extend(["END;", "/"])
+    if exit_on_finish:
+        sql_lines.append("EXIT SUCCESS ROLLBACK")
+    sql_lines.append("")
+    return "\n".join(sql_lines)
+
+
+def render_in_session_check_driver(
+    target: Target,
+    checks: Sequence[QueryCheck],
+    phase: str,
+    *,
+    fail_on_false: bool = False,
+) -> str:
+    """Render validated checks that run in the caller's current transaction."""
+    return _render_check_driver(
+        target,
+        checks,
+        phase,
+        read_only_transaction=False,
+        exit_on_finish=False,
+        configure_session=False,
+        fail_on_false=fail_on_false,
+    )
+
+
+def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryCheck], phase: str) -> Path:
+    run_dir = Path(run_dir)
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    run_dir.chmod(0o700)
     driver = run_dir / "migration-checks.sql"
-    driver.write_text("\n".join(sql_lines), encoding="utf-8", newline="\n")
+    driver.write_text(_render_check_driver(target, checks, phase), encoding="utf-8", newline="\n")
     try:
         driver.chmod(0o600)
     except OSError:
@@ -871,25 +946,42 @@ def _driver_for_checks(run_dir: Path, target: Target, checks: Sequence[QueryChec
     return driver
 
 
+def _check_output_available(output: str, phase: str) -> bool:
+    return f"CHECK_PAYLOAD_BEGIN:{phase}" in output or f"CHECK_PAYLOAD_END:{phase}" in output
+
+
+def _failed_check_ids(errors: Sequence[Mapping]) -> list[str]:
+    return list(dict.fromkeys(
+        error["check"] for error in errors
+        if isinstance(error.get("check"), str)
+    ))
+
+
 def _parse_check_output(output: str, checks: Sequence[QueryCheck], phase: str) -> CheckReport:
     begin = f"CHECK_PAYLOAD_BEGIN:{phase}"
     end = f"CHECK_PAYLOAD_END:{phase}"
     sentinel = f"CHECK_VERIFIED:{phase}"
     lines = output.splitlines()
+    coverage: dict = {
+        "phase": phase,
+        "complete": False,
+        "outputAvailable": _check_output_available(output, phase),
+        "failedCheckIds": [],
+    }
     try:
         start = lines.index(begin)
         finish = lines.index(end, start + 1)
     except ValueError:
-        return CheckReport(False, False, (), ({"code": "MISSING_FRAME", "message": "check result frame is missing or truncated"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "MISSING_FRAME", "message": "check result frame is missing or truncated"},), coverage)
     try:
         payload = json.loads("".join(lines[start + 1 : finish]))
     except json.JSONDecodeError as error:
-        return CheckReport(False, False, (), ({"code": "INVALID_JSON", "message": f"check result JSON is malformed: {error}"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "INVALID_JSON", "message": f"check result JSON is malformed: {error}"},), coverage)
     if sentinel not in lines[finish + 1 :] or not isinstance(payload, dict) or payload.get("schemaVersion") != 1 or payload.get("phase") != phase or payload.get("complete") is not True:
-        return CheckReport(False, False, (), ({"code": "UNVERIFIED_FRAME", "message": "check result is missing its verified completion sentinel"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "UNVERIFIED_FRAME", "message": "check result is missing its verified completion sentinel"},), coverage)
     raw_results = payload.get("results")
     if not isinstance(raw_results, list) or len(raw_results) != len(checks):
-        return CheckReport(False, False, (), ({"code": "RESULT_COUNT", "message": "check result count does not match the requested checks"},), {"phase": phase, "complete": False})
+        return CheckReport(False, False, (), ({"code": "RESULT_COUNT", "message": "check result count does not match the requested checks"},), coverage)
     results: list[dict] = []
     errors: list[dict] = []
     for check, result in zip(checks, raw_results, strict=True):
@@ -907,13 +999,64 @@ def _parse_check_output(output: str, checks: Sequence[QueryCheck], phase: str) -
         normalized = {**result, "passed": passed}
         results.append(normalized)
         if not passed:
-            errors.append({"code": "CHECK_FAILED", "check": check.id, "message": result.get("error") or "check must return exactly one row and one numeric column equal to 1", "observed": normalized})
+            message = result.get("error") or "check must return exactly one row and one numeric column equal to 1"
+            failure = {
+                "code": "CHECK_FAILED",
+                "check": check.id,
+                "expected": check.expected,
+                "observedValue": normalized.get("value"),
+                "message": message,
+                "observed": normalized,
+            }
+            error_code = re.search(r"\b(?:ORA|SP2)-\d{4,5}\b", str(result.get("error", "")))
+            if error_code is not None:
+                failure["errorCode"] = error_code.group(0)
+            errors.append(failure)
     complete = len(results) == len(checks) and not any(error["code"] == "RESULT_IDENTITY" for error in errors)
-    coverage: dict = {"phase": phase, "complete": complete}
+    coverage["complete"] = complete
+    coverage["failedCheckIds"] = _failed_check_ids(errors)
     identity = payload.get("identity")
     if isinstance(identity, dict) and all(isinstance(value, str) for value in identity.values()):
         coverage["identity"] = dict(identity)
     return CheckReport(complete and not errors, complete, tuple(results), tuple(errors), coverage)
+
+
+def _check_driver_budget() -> int:
+    raw = os.environ.get("MIGRATION_CHECK_BATCH_BYTES")
+    if raw is None:
+        return DEFAULT_CHECK_DRIVER_BYTES
+    try:
+        value = int(raw.strip(), 10)
+    except (AttributeError, ValueError) as error:
+        raise ValueError("MIGRATION_CHECK_BATCH_BYTES must be a positive integer") from error
+    if value <= 0:
+        raise ValueError("MIGRATION_CHECK_BATCH_BYTES must be a positive integer")
+    return value
+
+
+def _partition_checks(
+    target: Target,
+    checks: Sequence[QueryCheck],
+    phase: str,
+    byte_budget: int,
+) -> tuple[tuple[QueryCheck, ...], ...]:
+    batches: list[tuple[QueryCheck, ...]] = []
+    current: list[QueryCheck] = []
+    for check in checks:
+        candidate = (*current, check)
+        candidate_size = len(_render_check_driver(target, candidate, phase).encode("utf-8"))
+        if candidate_size <= byte_budget:
+            current.append(check)
+            continue
+        if current:
+            batches.append(tuple(current))
+        single_size = len(_render_check_driver(target, (check,), phase).encode("utf-8"))
+        if single_size > byte_budget:
+            raise _CheckDriverTooLarge(check.id, single_size, byte_budget)
+        current = [check]
+    if current:
+        batches.append(tuple(current))
+    return tuple(batches)
 
 
 def run_checks(
@@ -922,17 +1065,123 @@ def run_checks(
     run_dir: Path,
     *,
     phase: str = "preconditions",
+    jobs: int = 1,
     _runner: Callable = run_sqlcl,
 ) -> CheckReport:
     """Execute validated SELECT checks under a read-only SQLcl transaction."""
+    if type(jobs) is not int or jobs < 1:
+        return CheckReport(False, False, (), ({
+            "code": "CHECK_CONFIGURATION", "message": "jobs must be a positive integer",
+        },), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [],
+        })
     if not checks:
-        return CheckReport(True, True, (), (), {"phase": phase, "complete": True, "count": 0})
+        return CheckReport(True, True, (), (), {
+            "phase": phase, "complete": True, "count": 0, "sessions": 0,
+            "outputAvailable": True, "failedCheckIds": [],
+        })
+    run_dir = Path(run_dir)
     try:
-        driver = _driver_for_checks(Path(run_dir), target, checks, phase)
-        result = _runner(target, driver, Path(run_dir))
+        byte_budget = _check_driver_budget()
+    except ValueError as error:
+        return CheckReport(False, False, (), ({"code": "CHECK_CONFIGURATION", "message": str(error)},), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [],
+        })
+    try:
+        batches = _partition_checks(target, checks, phase, byte_budget)
+    except _CheckDriverTooLarge as error:
+        return CheckReport(False, False, (), ({
+            "code": "CHECK_TOO_LARGE", "check": error.check_id,
+            "expected": next(check.expected for check in checks if check.id == error.check_id),
+            "message": str(error),
+        },), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [error.check_id],
+        })
     except (OSError, RuntimeError, ValueError, MigrationManifestError) as error:
-        return CheckReport(False, False, (), ({"code": "CHECK_UNAVAILABLE", "message": str(error)},), {"phase": phase, "complete": False})
-    return _parse_check_output(result.output, checks, phase)
+        return CheckReport(False, False, (), ({"code": "CHECK_UNAVAILABLE", "message": str(error)},), {
+            "phase": phase, "complete": False, "count": len(checks), "sessions": 0,
+            "outputAvailable": False, "failedCheckIds": [],
+        })
+
+    def run_batch(index: int, batch: Sequence[QueryCheck]) -> CheckReport:
+        batch_dir = run_dir if len(batches) == 1 else run_dir / f"batch-{index:03d}"
+        evidence = batch_dir / "sqlcl-output.log"
+        attempted = False
+        try:
+            driver = _driver_for_checks(batch_dir, target, batch, phase)
+            attempted = True
+            result = _runner(target, driver, batch_dir, phase=phase)
+            report = _parse_check_output(result.output, batch, phase)
+        except SqlclTimeout as error:
+            report = CheckReport(False, False, (), ({
+                "code": "SQLCL_TIMEOUT",
+                "phase": phase,
+                "timeoutSeconds": error.timeout_seconds,
+                "elapsedSeconds": error.elapsed_seconds,
+                "message": f"{phase} checks did not finish within {error.timeout_seconds:g} s",
+            },), {
+                "phase": phase, "complete": False,
+                "outputAvailable": _check_output_available(error.output, phase),
+                "failedCheckIds": [],
+            })
+        except (OSError, RuntimeError, ValueError, TypeError, MigrationManifestError) as error:
+            output = error.output if isinstance(error, SqlclError) else ""
+            report = CheckReport(False, False, (), ({
+                "code": "CHECK_UNAVAILABLE", "phase": phase, "message": str(error),
+            },), {
+                "phase": phase, "complete": False,
+                "outputAvailable": _check_output_available(output, phase),
+                "failedCheckIds": [],
+            })
+        coverage = {
+            **report.coverage,
+            "sessionAttempted": attempted,
+            "evidence": str(evidence),
+        }
+        return CheckReport(report.passed, report.complete, report.results, report.errors, coverage)
+
+    if jobs == 1 or len(batches) == 1:
+        reports = [run_batch(index, batch) for index, batch in enumerate(batches, start=1)]
+    else:
+        with ThreadPoolExecutor(max_workers=min(jobs, len(batches))) as executor:
+            reports = list(executor.map(
+                lambda item: run_batch(*item),
+                enumerate(batches, start=1),
+            ))
+
+    errors = tuple(error for report in reports for error in report.errors)
+    results = tuple(result for report in reports for result in report.results)
+    evidence_paths = [report.coverage["evidence"] for report in reports]
+    identities = [report.coverage.get("identity") for report in reports]
+    coverage = {
+        "phase": phase,
+        "complete": all(report.complete for report in reports),
+        "count": len(checks),
+        "sessions": len(reports),
+        "outputAvailable": any(report.coverage.get("outputAvailable") is True for report in reports),
+        "noOutputEvidence": [
+            report.coverage["evidence"] for report in reports
+            if report.coverage.get("sessionAttempted") is True and report.coverage.get("outputAvailable") is not True
+        ],
+        "failedCheckIds": _failed_check_ids(errors),
+        "sessionIdentities": identities,
+        "sessionCheckIds": [[check.id for check in batch] for batch in batches],
+        "sessionResultCounts": [len(report.results) for report in reports],
+        "evidence": evidence_paths[0] if len(evidence_paths) == 1 else evidence_paths,
+    }
+    observed_identities = [identity for identity in identities if isinstance(identity, dict)]
+    if observed_identities:
+        coverage["identity"] = dict(observed_identities[0])
+    return CheckReport(
+        all(report.passed for report in reports),
+        coverage["complete"],
+        results,
+        errors,
+        coverage,
+    )
 
 
 def _initial_objects(snapshot: SchemaSnapshot) -> dict[str, set[str]]:
@@ -959,6 +1208,35 @@ def _table_columns(snapshot: SchemaSnapshot, name: str) -> set[str] | None:
             return None
         result.add(column["name"])
     return result
+
+
+def _dependency_available_through_synonym(
+    snapshot: SchemaSnapshot,
+    name: str,
+    owner: str,
+    live_common: Mapping[str, set[str]],
+    staged_kinds: Mapping[str, str],
+) -> bool:
+    """Accept a direct owner/PUBLIC synonym only when its target is selectable."""
+    private = next((item for item in snapshot.synonyms if item.owner == owner and item.name == name), None)
+    public = next((item for item in snapshot.synonyms if item.owner == "PUBLIC" and item.name == name), None)
+    synonym = private or public
+    if synonym is None or synonym.db_link:
+        return False
+    if synonym.table_owner == owner:
+        live_types = live_common.get(synonym.table_name, set())
+        staged_kind = staged_kinds.get(synonym.table_name)
+        return (
+            bool(live_types & SELECTABLE_SYNONYM_TARGET_TYPES)
+            or staged_kind in {"CREATE_TABLE", "CREATE_VIEW"}
+        )
+    return any(
+        grant.owner == synonym.table_owner
+        and grant.table_name == synonym.table_name
+        and grant.grantee in {owner, "PUBLIC"}
+        and grant.privilege == "SELECT"
+        for grant in snapshot.grants
+    )
 
 
 def _has_explicit_reviews(migration: Migration) -> bool:
@@ -1107,7 +1385,14 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
                     coverage["complete"] = False
                 elif dependency_name.upper() == "DUAL":
                     continue
-                elif dependency_name not in staged_common and dependency_name not in live_common and dependency_name not in staged_opaque:
+                elif (
+                    dependency_name not in staged_common
+                    and dependency_name not in staged_opaque
+                    and not (live_common.get(dependency_name, set()) - {"SYNONYM"})
+                    and not _dependency_available_through_synonym(
+                        snapshot, dependency_name, owner, live_common, staged_kinds
+                    )
+                ):
                     conflicts.append({"code": "MISSING_PREREQUISITE", "name": dependency_name, "required_by": name, **location})
         elif kind == "ALTER_ADD_COLUMN":
             table_name = operation["table"]
@@ -1203,7 +1488,12 @@ def _local_report(migrations: Sequence[Migration], repo_root: Path) -> Preflight
 
 def _live_report(migrations: Sequence[Migration], environment: str, repo_root: Path, schema: str | None = None) -> PreflightReport:
     from .db_targets import TargetResolutionError, batch_schema, flat_migrations_apply, resolve_target
-    from .schema_catalog import CatalogError, capture_inventory, capture_snapshot
+    from .schema_catalog import (
+        CatalogError,
+        capture_inventory,
+        capture_inventory_snapshot_with_retries,
+        capture_snapshot,
+    )
 
     values = os.environ
     work_dir: Path | None = None
@@ -1220,13 +1510,24 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
         scratch = repo_root / "scratch"
         scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         work_dir = Path(tempfile.mkdtemp(prefix="migration-preflight-", dir=scratch))
-        inventory = capture_inventory(target, work_dir)
+        retries = preflight_inventory_retries(values)
         keys = sorted({
             (operation.get("table"), "TABLE") for operation in operations if operation.get("table")
         } | {
             (operation.get("name"), operation.get("object_type")) for operation in operations if operation.get("name") and operation.get("object_type") in {"TABLE", "VIEW", "SEQUENCE", "INDEX"}
         })
-        snapshot = capture_snapshot(target, inventory, keys, work_dir) if keys else SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
+        if keys:
+            _inventory, snapshot = capture_inventory_snapshot_with_retries(
+                target,
+                keys,
+                work_dir,
+                retries=retries,
+                _capture_inventory=capture_inventory,
+                _capture_snapshot=capture_snapshot,
+            )
+        else:
+            inventory = capture_inventory(target, work_dir)
+            snapshot = SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
         checks_result = run_checks(target, batch_preconditions(migrations), work_dir, phase="preconditions")
         report = preflight(migrations, snapshot, checks_result)
         keep_logs = report.exit_code not in (0, 1)

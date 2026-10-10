@@ -202,6 +202,47 @@ class MigrationManifestTests(unittest.TestCase):
                 with self.assertRaises(api.MigrationManifestError):
                     api.load_migration(root, "migrations/2026-09-27_create-customers-r001")
 
+    def test_deterministic_builtin_helpers_are_allowed_but_qualified_calls_remain_blocked(self) -> None:
+        api = self.require_manifest()
+        allowed = (
+            "SELECT CHR(65) FROM dual",
+            "SELECT ORA_HASH('text', 4294967295, 0) FROM dual",
+            "SELECT STANDARD_HASH('text', 'SHA256') FROM dual",
+            "SELECT DECODE(1, 1, 1, 0) FROM dual",
+            "SELECT NULLIF(1, 2) FROM dual",
+            "SELECT INSTR('text', 'e') FROM dual",
+            "SELECT REPLACE('text', 'e', 'a') FROM dual",
+            "SELECT TRIM(' text ') FROM dual",
+            "SELECT LTRIM(' text ') FROM dual",
+            "SELECT RTRIM(' text ') FROM dual",
+            "SELECT LENGTHB('text') FROM dual",
+            "SELECT LPAD('x', 2, '0') FROM dual",
+            "SELECT RPAD('x', 2, '0') FROM dual",
+            "SELECT LISTAGG('x', ',') WITHIN GROUP (ORDER BY line) FROM dual",
+        )
+        for query in allowed:
+            with self.subTest(query=query):
+                api.validate_check_query(query)
+
+        names = (
+            "CHR", "ORA_HASH", "STANDARD_HASH", "DECODE", "NULLIF", "INSTR", "REPLACE",
+            "TRIM", "LTRIM", "RTRIM", "LENGTHB", "LPAD", "RPAD", "LISTAGG",
+        )
+        for name in names:
+            with self.subTest(function=name):
+                with self.assertRaisesRegex(api.MigrationManifestError, "schema-qualified function calls"):
+                    api.validate_check_query(f"SELECT app.{name}(1) FROM dual")
+
+        for query in (
+            "SELECT CHR(COMMIT) FROM dual",
+            "SELECT DECODE(1, 1, 1, 0) FROM dual FOR UPDATE",
+            "SELECT ORA_HASH('x') FROM dual@other_db",
+            "SELECT LISTAGG('x', ',') FROM dual; DROP TABLE T",
+        ):
+            with self.subTest(query=query):
+                with self.assertRaises(api.MigrationManifestError):
+                    api.validate_check_query(query)
+
     def test_independent_same_name_folders_have_content_bound_digests(self) -> None:
         api = self.require_manifest()
         with tempfile.TemporaryDirectory() as other_temp:

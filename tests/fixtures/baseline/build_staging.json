@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 2,
+  "phase": "compare-env",
+  "environment": "staging",
+  "schema": "APP_STAGE",
+  "identity": {"session_user": "APP_STAGE", "current_schema": "APP_STAGE", "db_name": "STAGEDB", "db_unique_name": "STAGEDB1", "service_name": "STAGE", "container_id": "3", "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "19.26"},
+  "coverage": {"pageSize": 500, "maxRows": 100000, "sections": {
+    "tables": {"complete": true, "pages": [1]}, "columns": {"complete": true, "pages": [1]},
+    "constraints": {"complete": true, "pages": [1]}, "indexes": {"complete": true, "pages": [1]},
+    "sequences": {"complete": true, "pages": [0]}, "views": {"complete": true, "pages": [0]},
+    "stored-code": {"complete": true, "pages": [1]}, "triggers": {"complete": true, "pages": [0]},
+    "identity-columns": {"complete": true, "pages": [0]}, "object-grants": {"complete": true, "pages": [0]},
+    "baseline-source": {"complete": true, "pages": [2]}, "baseline-settings": {"complete": true, "pages": [1]},
+    "baseline-views": {"complete": true, "pages": [1]}
+  }},
+  "sections": {
+    "tables": [{"name": "APP_ITEMS", "temporary": "N", "partitioned": "N", "iot_type": null, "nested": "N", "secondary": "N", "compression": "DISABLED", "logging": "YES"}],
+    "columns": [{"table_name": "APP_ITEMS", "name": "STATUS", "data_type": "VARCHAR2", "data_type_mod": null, "data_type_owner": null, "data_length": 1, "data_precision": null, "data_scale": null, "char_used": "B", "char_length": 1, "nullable": "Y", "hidden": "N", "virtual": "N"}],
+    "constraints": [{"name": "APP_ITEMS_CK", "table_name": "APP_ITEMS", "constraint_type": "C", "columns": ["STATUS"], "referenced_table": null, "referenced_columns": [], "condition": "STATUS = 'A'", "condition_truncated": "N", "status": "ENABLED", "validated": "NOT VALIDATED", "delete_rule": null, "deferrable": "NOT DEFERRABLE", "deferred": "IMMEDIATE", "rely": "N"}],
+    "indexes": [{"name": "APP_ITEMS_IX_OLD", "table_name": "APP_ITEMS", "uniqueness": "NONUNIQUE", "columns": [{"name": "ITEM_ID", "position": 1, "descend": "ASC"}], "index_type": "NORMAL", "visibility": "VISIBLE", "status": "VALID"}],
+    "sequences": [],
+    "views": [],
+    "stored-code": [{"name": "PKG_ALPHA", "type": "PACKAGE", "status": "VALID", "line_count": 2, "source_hash": 100}],
+    "triggers": [],
+    "identity-columns": [],
+    "object-grants": [],
+    "baseline-source": [
+      {"name": "PKG_ALPHA", "type": "PACKAGE", "line": 1, "text": "PACKAGE PKG_ALPHA AS\n"},
+      {"name": "PKG_ALPHA", "type": "PACKAGE", "line": 2, "text": "END;\n"}
+    ],
+    "baseline-settings": [{"name": "PKG_ALPHA", "type": "PACKAGE", "plsql_optimize_level": "1", "plsql_code_type": "INTERPRETED", "plsql_debug": "FALSE", "plsql_warnings": "DISABLE:ALL", "nls_length_semantics": "BYTE", "plsql_ccflags": null, "plscope_settings": "IDENTIFIERS:NONE"}],
+    "baseline-views": [{"name": "V_ALPHA", "text": "SELECT 'target view' AS VALUE FROM DUAL\n", "ddl": "CREATE OR REPLACE FORCE EDITIONABLE VIEW \"APP_STAGE\".\"V_ALPHA\" AS SELECT 'target view' AS VALUE FROM DUAL"}]
+  },
+  "unavailable": {}
+}

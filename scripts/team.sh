@@ -19,11 +19,30 @@ Commands:
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
-  migrate <folder> [...] --env dev|staging|prod
-                                              Preflight, then apply selected migration folders
+  migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
+                                              Apply, or rehearse DML in one transaction and roll it back
+  revise <folder> [--reason TEXT]             Copy to the next migration revision
+  revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
+  verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
+         [--format text|json] [--jobs N]     Evaluate migration checks read-only
+  rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
+                                              Run an ordered, hash-checked deployment manifest
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
+  compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown]
+              [--emit-dba-script <file>]
+                                              Compare complete environment catalogs by name, read-only
+  baseline export-source --from <env> [--scratch <dir>]
+                                              Export configured exact stored source and settings
+  baseline export-grants --from <env> [--scratch <dir>]
+                                              Export configured object and system grants
+  baseline export-data --from <env> [--scratch <dir>]
+                                              Export allow-listed reference rows without excluded columns
+  baseline build --to <env> [--from <env>] [--data]
+                                              Build structure, grants, source, and optional reference-data migrations
+  baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
+                                              Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual]
@@ -35,6 +54,9 @@ Commands:
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
   --help                                      Show this help
+Environment:
+  MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
+  <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env and baseline grant-export connection
 USAGE
 }
 
@@ -238,14 +260,52 @@ case "$command_name" in
       exec "$REPO_ROOT/scripts/check_conflicts.sh" "$@"
     ;;
   migrate)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/migrate.sh" "$@"
+    ;;
+  revise)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh revise <folder> [--reason TEXT] | revise --check <folder>"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.migration_revision "$@"
+    ;;
+  verify)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh verify <migration-folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      exec "$REPO_ROOT/scripts/verify_checks.sh" "$@"
+    ;;
+  rollout)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      exec "$REPO_ROOT/scripts/rollout.sh" "$@"
     ;;
   compare-schema)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/compare_schema.sh" "$@"
+    ;;
+  compare-env)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown] [--emit-dba-script <file>]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
+      exec "$REPO_ROOT/scripts/compare_schema.sh" compare-env "$@"
+    ;;
+  baseline)
+    if [ "$#" -eq 0 ]; then
+      fail "usage: scripts/team.sh baseline <export-source|export-grants|export-data|build|filter-ords> [options]"
+    fi
+    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+      cd "$REPO_ROOT"
+      exec python3 -m scripts.baseline "$@"
+    fi
+    if [ "$1" = "filter-ords" ]; then
+      cd "$REPO_ROOT"
+      exec python3 -m scripts.baseline "$@"
+    fi
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    # shellcheck source=load_env.sh
+    source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.baseline "$@"
     ;;
   backup-db)
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"

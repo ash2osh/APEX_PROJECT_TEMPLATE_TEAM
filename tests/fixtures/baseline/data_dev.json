@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "phase": "compare-env",
+  "environment": "dev",
+  "schema": "APP_DEV",
+  "identity": {
+    "session_user": "APP_DEV",
+    "current_schema": "APP_DEV",
+    "db_name": "DEVDB",
+    "db_unique_name": "DEVDB1",
+    "service_name": "DEV",
+    "container_id": "3",
+    "container_name": "APP_PDB",
+    "edition": "ORA$BASE",
+    "database_version": "19.26"
+  },
+  "coverage": {
+    "complete": true,
+    "pageSize": 500,
+    "maxRows": 100000,
+    "sections": {
+      "baseline-data": {"complete": true, "pages": [1]}
+    }
+  },
+  "sections": {
+    "baseline-data": [
+      {
+        "name": "APP_REF_ITEMS",
+        "complete": true,
+        "rowCount": 2,
+        "pages": [2],
+        "identity": null,
+        "columns": [
+          {"name": "ITEM_CODE", "data_type": "VARCHAR2", "nullable": "N"},
+          {"name": "ITEM_LABEL", "data_type": "VARCHAR2", "nullable": "N"},
+          {"name": "ITEM_NOTE", "data_type": "VARCHAR2", "nullable": "Y"}
+        ],
+        "rows": [
+          {"ITEM_CODE": "A-1", "ITEM_LABEL": "First item", "ITEM_NOTE": "safe"},
+          {"ITEM_CODE": "B-2", "ITEM_LABEL": "Second item", "ITEM_NOTE": "safe"}
+        ]
+      }
+    ]
+  },
+  "unavailable": {}
+}

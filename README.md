@@ -40,6 +40,7 @@ operational scripts, `.env`, manifest and lock.
 | Safe publish | Refuses to overwrite newer Builder work, stamps who published and when, then re-exports the app and checks it byte for byte against your files. |
 | SQL migrations | Dated folders of numbered SQL plus `checks.json`; a live check for conflicts before applying; a verified receipt after. |
 | Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production. |
+| Environment baselines | Read-only source, grant and allow-listed reference-row exports plus reviewed structure, grant, source and optional reference-data migrations from `baseline.json`. |
 | Several schemas per workspace | Comma-separated lists in `.env` and `--schema`; apps, database copies and migrations are kept per schema. |
 | Staging and production | Per-app descriptors, an explicit `[y/N]` confirmation, and `--manual` to print a runbook for a DBA. |
 | Read-only database copy | `backup-db` mirrors tables, views, packages, procedures, functions, triggers and synonyms (structure only, never data). `backup-ords` adds an optional, read-only export of a schema's ORDS (REST) definition. |
@@ -293,6 +294,7 @@ Pass `--schema <NAME>` to narrow a command to one schema. `doctor` and
 | `deploy <id> --env staging\|prod` | The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection. |
 | `migrate`, `check-conflicts` | Uses `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/`; the folder selects the target entry. Scans, revision ordering, and receipts are scoped to one schema, and one invocation cannot mix schemas. |
 | `compare-schema` | Requires `--schema` when more than one schema is configured and compares that schema across the selected environments. |
+| `compare-env` | Requires `--schema` when more than one schema is configured and compares that schema's full catalog across the selected environments. |
 
 When `CODE_SCHEMA` has one schema, the existing flat
 `migrations/YYYY-MM-DD_<name>-rNNN/` layout remains valid and the
@@ -411,6 +413,19 @@ second contains the follow-up change. Keep a migration and its `checks.json`
 immutable once an apply attempt may have started. A recovery belongs in the
 next revision.
 
+Create that follow-up from the prior folder with `revise`. It copies the SQL
+files and checks into the next `-rNNN` folder, keeps their names and numbering,
+adds a `Supersedes` line to the new `README.md`, and leaves the source untouched.
+Use `--reason` to explain the correction; if omitted, the header says
+`follow-up revision`. The command refuses when a later revision already exists
+and prints the explicit migration order hint. It does not copy environment
+receipts into the new revision.
+
+Use `revise --check` to inspect local attempt and receipt evidence without
+connecting. It exits 0 for unlocked, 1 for locked, and 2 when evidence is
+unknown or unreadable. See the [migration rules](docs/migration-rules.md) for
+the exact `apply-not-started` classification and its limits.
+
 Run a selected live preflight and apply with an explicit environment:
 
 ```bash
@@ -419,6 +434,33 @@ scripts/team.sh check-conflicts \
 scripts/team.sh migrate \
   migrations/2026-09-27_create-customers-r001 --env dev
 ```
+
+Before applying generated data changes, rehearse ordered folders against the
+configured target and write a JSON report:
+
+```bash
+scripts/team.sh migrate \
+  migrations/2026-09-27_seed-customers-r001 \
+  migrations/2026-09-28_assign-customers-r001 \
+  --env dev --rehearse --report scratch/customer-seed-rehearsal.json
+```
+
+Rehearsal runs analyzer-approved DML files in one SQLcl transaction, evaluates
+each folder's postconditions in that same transaction, then rolls back and
+rechecks each folder's preconditions. SQLcl row counts are reported per
+statement when printed. DDL, implicit-commit statements, and files the analyzer
+cannot prove transaction-safe are listed as `not rehearsable` and are skipped.
+Staging and production still require confirmation. Rehearsal creates no
+migration receipt or write-attempt marker. See the [migration rules](docs/migration-rules.md)
+for classification, rollback proof, report fields, and exit codes.
+
+Fresh postcondition failures name up to 20 failed checks; add `--verbose` to
+print all of them. Apply and verification session limits are configurable with
+`MIGRATION_APPLY_TIMEOUT_SECONDS`, `MIGRATION_CHECK_TIMEOUT_SECONDS`, and
+`MIGRATION_CHECK_BATCH_BYTES` in `.env`. Live catalog capture retries are
+configurable with `MIGRATION_PREFLIGHT_INVENTORY_RETRIES` (default `3`); see
+the [migration rules](docs/migration-rules.md) for defaults, batching, timeout
+recovery and preflight behavior.
 
 The offline `--local` checker analyzes selected files only. Live preflight
 compares the selected batch with the target catalog, but cannot see pending
@@ -452,6 +494,58 @@ This reports current catalog drift for the selection. Status receipts can help
 with follow-up review but cannot reliably prove which migration file caused a
 shape: separate migrations may produce the same DDL, and a manual change can
 mimic a migration.
+
+Use `compare-env` for a complete, paged readiness comparison by object name:
+
+```bash
+scripts/team.sh compare-env --from dev --to staging
+scripts/team.sh compare-env --from dev --to staging \
+  --section tables --section columns --section constraints --section triggers
+scripts/team.sh compare-env --from dev --to staging --format markdown
+scripts/team.sh compare-env --from dev --to staging \
+  --emit-dba-script scratch/dev-to-staging-dba.sql
+```
+
+The report groups blockers, differences, identical records and deliberate
+exclusions. Differences say `missing on target`, `different`, or `only on target`.
+DBA-level sections use optional `DEV_DBA_SQLCL_CONNECTION`,
+`STAGING_DBA_SQLCL_CONNECTION`, and `PROD_DBA_SQLCL_CONNECTION` aliases only
+for read-only catalog capture. Missing DBA access is reported as
+`not compared (no DBA connection)` and exits 2. The emitted SQL is an additive
+review artifact for object and direct system/role grants, network ACEs and
+ORDS schema enablement; it does not run automatically. See [compare-env sections, connections and
+limits](docs/compare-env.md).
+
+### Generate an environment baseline
+
+Copy `docs/baseline.example.json` to the project root as `baseline.json` and
+set the actual schema names, object prefixes, exclusions, grant policy,
+sequence mappings and reference-data table/column allow-list. Export stored
+source, grants or reference rows, then compare environments and generate new
+migration folders:
+
+```bash
+scripts/team.sh baseline export-source --from dev
+scripts/team.sh baseline export-grants --from dev
+scripts/team.sh baseline export-data --from dev
+scripts/team.sh baseline build --from dev --to staging
+scripts/team.sh baseline build --from dev --to staging --data
+scripts/team.sh baseline filter-ords --exclude-module legacy.api --input scratch/ords/schema.sql --output scratch/ords/schema-filtered.sql
+```
+
+Source and grant exports go to `scratch/baseline/<environment>/<schema>/`;
+reference rows go to `scratch/baseline/<environment>/data/<schema>/`. Reference
+tables declare excluded columns, natural keys, matching labels, identity
+handling and per-table row limits. Excluded passwords, tokens and other
+environment-specific fields never enter the export. `build --data` writes
+natural-key-guarded inserts, resolves allow-listed foreign keys by target
+labels, and reports existing rows whose values differ. Existing rows are never
+updated. Use `migrate <folder> --env <env> --rehearse` to roll back a rehearsal
+of the generated DML; identity advancement is DDL and must be reviewed
+separately. `filter-ords` validates the filtered file and can refuse a named
+module that is not present; use the output file in an `ords-import` rollout
+step. These commands never apply migrations or import ORDS metadata. See
+[baseline generation](docs/baseline.md) for configuration, coverage and limits.
 
 ## Staging and production deployments
 
@@ -600,21 +694,43 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
-| `scripts/team.sh migrate <folder> [...] --env <env>` | Verify and apply selected migration folders to DEV, staging, or production. |
+| `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. |
+| `scripts/team.sh revise <folder> [--reason TEXT]` | Copy a migration to its next revision; the old folder stays unchanged. |
+| `scripts/team.sh revise --check <folder>` | Report whether local receipt or attempt evidence locks a migration folder; exit 0/1/2 for unlocked/locked/unknown. |
+| `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
+| `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]` | Run a frozen, ordered migration, SQL, ORDS and app deployment plan; staging and production show one manifest-wide hash confirmation. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
+| `scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [--format text\|json\|markdown] [--emit-dba-script <file>]` | Compare complete, paged environment catalogs by object name; see [compare-env](docs/compare-env.md). |
+| `scripts/team.sh baseline export-source --from <env>` | Export configured exact stored source, compiler settings and view text to scratch. |
+| `scripts/team.sh baseline export-grants --from <env>` | Export configured object grants and the schema's direct system privileges. |
+| `scripts/team.sh baseline export-data --from <env>` | Export allow-listed reference rows, excluding configured sensitive columns, to scratch. |
+| `scripts/team.sh baseline build --to <env> [--from <env>] [--data]` | Generate validated structure, grant, exact-source and optional reference-data migration folders; see [baseline generation](docs/baseline.md). |
+| `scripts/team.sh baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>` | Remove complete named modules from an ORDS export for a rollout import step. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
 
+`rollout` validates and hashes every referenced source file before it starts,
+stops on the first failed step and writes JSON and Markdown timing/evidence
+reports. A production or staging run has one explicit confirmation listing the
+manifest and every step/input SHA-256. Resume with `--from-step N` only after
+the earlier successful step receipts under `scratch/` match this exact
+manifest, environment and input set. `--dry-run` validates local inputs and
+prints the hashes before execution. The confirmation includes app workspace
+and schema or standalone SQL connection/user/schema details. The command
+prints JSON/Markdown report paths, including on step failure; report outputs
+cannot overwrite inputs, receipts or recovery evidence. See the [rollout rules and manifest
+schema](docs/migration-rules.md#rollout) and [example manifest](docs/rollout-manifest.example.json).
+
 Exit status, the same in Bash and PowerShell:
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Done; for `check-conflicts` and `compare-schema`, nothing found. |
-| 1 | `check-conflicts` found conflicts or `compare-schema` found differences; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
-| 2 | Refused or failed; the message says why and what changed. Also `migrate` interrupted while a SQL step runs ("may be partially applied"). |
+| 0 | Done; for `check-conflicts` and `compare-schema`, nothing found; for `compare-env`, every selected section was identical and complete; for `verify`, every requested check returned its expected value; for `revise --check`, the folder is unlocked. |
+| 1 | `check-conflicts` found conflicts, `compare-schema` or complete `compare-env` found differences, or `verify` found a false check; `revise --check` found a lock; a `[y/N]` prompt was declined; `upgrade-template` left `.template-new` files to merge; or `.env` is invalid (`project environment error: ...`). |
+| 2 | Refused or failed; this includes incomplete `compare-env` capture or selected DBA sections without a DBA connection. The message says why and what changed. Also `migrate` interrupted while a SQL step runs ("may be partially applied"). |
 | 130 / 143 | Stopped by Ctrl-C / by SIGTERM (`kill`). |
 
 SIGTERM is for Bash: `team.sh` hands its process to the command it runs, so a

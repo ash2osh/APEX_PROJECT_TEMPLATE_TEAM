@@ -15,6 +15,7 @@ try {
 Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:PROD_SCHEMA, Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
   Env:STAGING_SCHEMA,
+  Env:DEV_DBA_SQLCL_CONNECTION, Env:STAGING_DBA_SQLCL_CONNECTION, Env:PROD_DBA_SQLCL_CONNECTION,
   Env:ORDS_SCHEMA, Env:ORDS_SQLCL_CONNECTION, Env:ORDS_EXPECTED_USER,
   Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT, Env:APEX_WORKSPACE_USERNAME -ErrorAction SilentlyContinue
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
@@ -22,6 +23,8 @@ foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
     Remove-Item -LiteralPath "Env:${projectEnvMigrationPrefix}MIGRATION_${projectEnvSuffix}" -ErrorAction SilentlyContinue
   }
 }
+Remove-Item -Path Env:MIGRATION_APPLY_TIMEOUT_SECONDS, Env:MIGRATION_CHECK_TIMEOUT_SECONDS,
+  Env:MIGRATION_CHECK_BATCH_BYTES, Env:MIGRATION_PREFLIGHT_INVENTORY_RETRIES -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
 # Mirror load_env.sh: a relative PROJECT_ENV_FILE resolves against the
@@ -55,7 +58,10 @@ $projectEnvAllowed = @(
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
   "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER", "PROD_SCHEMA",
   "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA",
-  "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER"
+  "DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION",
+  "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER",
+  "MIGRATION_APPLY_TIMEOUT_SECONDS", "MIGRATION_CHECK_TIMEOUT_SECONDS", "MIGRATION_CHECK_BATCH_BYTES",
+  "MIGRATION_PREFLIGHT_INVENTORY_RETRIES"
 )
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
   foreach ($projectEnvSuffix in @("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER")) {
@@ -261,6 +267,14 @@ foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHE
 }
 foreach ($projectEnvKey in @("TABLES_SQLCL_CONNECTION", "CODE_SQLCL_CONNECTION", "APEX_SQLCL_CONNECTION")) {
   Assert-ProjectEnvList -Name $projectEnvKey -Kind alias
+}
+foreach ($projectEnvKey in @("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION")) {
+  if ($projectEnvSeen.ContainsKey($projectEnvKey)) {
+    $projectEnvValue = [Environment]::GetEnvironmentVariable($projectEnvKey, "Process")
+    if ([string]::IsNullOrWhiteSpace($projectEnvValue)) { throw "project environment error: $projectEnvKey must not be empty when configured" }
+    if ($projectEnvValue.Contains(",")) { throw "project environment error: $projectEnvKey accepts one saved SQLcl connection alias" }
+    Assert-ProjectEnvList -Name $projectEnvKey -Kind alias
+  }
 }
 Assert-ProjectEnvTriple -SchemaKey TABLES_SCHEMA -ConnectionKey TABLES_SQLCL_CONNECTION -UserKey TABLES_EXPECTED_USER
 Assert-ProjectEnvTriple -SchemaKey CODE_SCHEMA -ConnectionKey CODE_SQLCL_CONNECTION -UserKey CODE_EXPECTED_USER

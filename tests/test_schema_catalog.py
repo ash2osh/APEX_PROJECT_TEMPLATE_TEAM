@@ -17,6 +17,7 @@ from scripts.schema_catalog import (
 from scripts.sqlcl_session import SqlclError, SqlclResult, run_sqlcl
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 import fake_sqlcl
+import scripts.schema_catalog as schema_catalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,96 @@ class SchemaCatalogTests(unittest.TestCase):
         self.assertIn("punctuation ; , ( )", definition.raw_ddl)
         self.assertIn("\n-- café Ω", definition.raw_ddl)
         self.assertEqual(len(definition.dependents), 3)
+
+    def test_snapshot_preserves_owner_and_public_synonym_and_select_grant_evidence(self) -> None:
+        payload = fixture_payload("view-synonyms.json")
+        app_target = Target("dev", "dev-profile", "APP", "APP", "development")
+        snapshot = parse_snapshot(framed(payload), app_target)
+
+        self.assertEqual(
+            {(item.owner, item.name, item.table_owner, item.table_name) for item in snapshot.synonyms},
+            {
+                ("PUBLIC", "ZZ_PUBLIC_CUSTOMERS", "DATA_OWNER", "CUSTOMERS"),
+                ("APP", "ZZ_PRIVATE_ORDERS", "DATA_OWNER", "ORDERS"),
+                ("PUBLIC", "ZZ_PUBLIC_NO_GRANT", "DATA_OWNER", "NO_GRANT_TABLE"),
+            },
+        )
+        self.assertEqual(
+            {(item.owner, item.table_name, item.grantee, item.privilege) for item in snapshot.grants},
+            {
+                ("DATA_OWNER", "CUSTOMERS", "APP", "SELECT"),
+                ("DATA_OWNER", "ORDERS", "PUBLIC", "SELECT"),
+            },
+        )
+
+    def test_inventory_signature_ignores_status_ddl_and_object_metadata_changes(self) -> None:
+        inventory_payload = fixture_payload("owner-inventory.json")
+        inventory = parse_inventory(framed(inventory_payload), target())
+        snapshot_payload = fixture_payload("owner-snapshot.json")
+        snapshot_payload["before"] = [dict(row) for row in inventory_payload["objects"]]
+        snapshot_payload["after"] = [dict(row) for row in inventory_payload["objects"]]
+        for index, row in enumerate(snapshot_payload["before"] + snapshot_payload["after"]):
+            row["status"] = "INVALID" if row.get("status") == "VALID" else "VALID"
+            row["last_ddl_time"] = "2026-10-02T10:00:00Z"
+            row["object_id"] = 1000 + index
+            row["data_object_id"] = 2000 + index
+            row["object_timestamp"] = "changed-by-recompile"
+
+        snapshot = parse_snapshot(
+            framed(snapshot_payload), target(), (("CUSTOMERS", "TABLE"),), inventory
+        )
+
+        self.assertEqual(
+            schema_catalog.inventory_fingerprint(inventory),
+            schema_catalog.inventory_fingerprint(snapshot.inventory),
+        )
+
+    def test_new_object_retries_then_reports_both_inventory_fingerprints(self) -> None:
+        inventory_payload = fixture_payload("owner-inventory.json")
+        snapshot_payload = fixture_payload("owner-snapshot.json")
+        snapshot_payload["before"] = [dict(row) for row in inventory_payload["objects"]]
+        snapshot_payload["before"].append(
+            {"owner": "APP_DEV", "name": "CONCURRENT_TABLE", "type": "TABLE", "status": "VALID"}
+        )
+        snapshot_payload["after"] = [dict(row) for row in snapshot_payload["before"]]
+
+        class RecordedCatalogCapture:
+            def __init__(self):
+                self.inventory_captures = 0
+                self.snapshot_captures = 0
+
+            def __call__(self, selected_target, driver_path, run_dir, **_kwargs):
+                driver = driver_path.read_text(encoding="utf-8")
+                if "schema_catalog.sql inventory " in driver:
+                    self.inventory_captures += 1
+                    payload = inventory_payload
+                else:
+                    self.snapshot_captures += 1
+                    payload = snapshot_payload
+                return SqlclResult(0, framed(payload), run_dir)
+
+        capture = RecordedCatalogCapture()
+        expected_before = schema_catalog.inventory_fingerprint(
+            parse_inventory(framed(inventory_payload), target())
+        )
+        expected_after = schema_catalog.inventory_fingerprint(
+            parse_inventory(
+                framed({**inventory_payload, "objects": snapshot_payload["before"]}), target()
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(CatalogError) as caught:
+                schema_catalog.capture_snapshot_with_retries(
+                    target(), (("CUSTOMERS", "TABLE"),), Path(temporary),
+                    retries=2, _runner=capture,
+                )
+
+        self.assertEqual(capture.inventory_captures, 3)
+        self.assertEqual(capture.snapshot_captures, 3)
+        self.assertEqual(caught.exception.code, "LIVE_PREFLIGHT_UNAVAILABLE")
+        self.assertIn(expected_before, str(caught.exception))
+        self.assertIn(expected_after, str(caught.exception))
 
     def test_service_aliases_do_not_change_database_scope_identity(self) -> None:
         first = fixture_payload("owner-inventory.json")["identity"]
@@ -128,10 +219,11 @@ class SchemaCatalogTests(unittest.TestCase):
         with self.assertRaises(CatalogError):
             parse_snapshot(truncated, target(), (("CUSTOMERS", "TABLE"),))
 
-    def test_concurrent_ddl_between_inventory_boundaries_is_rejected(self) -> None:
+    def test_object_created_between_inventory_boundaries_is_rejected(self) -> None:
         payload = fixture_payload("owner-snapshot.json")
-        payload["before"][0]["object_id"] = 41
-        payload["after"][0]["object_id"] = 42
+        payload["after"].append(
+            {"owner": "APP_DEV", "name": "CONCURRENT_TABLE", "type": "TABLE", "status": "VALID"}
+        )
 
         with self.assertRaises(CatalogError):
             parse_snapshot(framed(payload), target(), (("CUSTOMERS", "TABLE"),))
@@ -220,7 +312,7 @@ class SchemaCatalogTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.drivers: list[str] = []
 
-            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path):
+            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path, **_kwargs):
                 self.drivers.append(driver_path.read_text(encoding="utf-8"))
                 return SqlclResult(0, framed(fixture_payload("owner-inventory.json")), run_dir)
 
@@ -238,12 +330,30 @@ class SchemaCatalogTests(unittest.TestCase):
             "foreign-key metadata type must be REF_CONSTRAINT; other constraints stay CONSTRAINT",
         )
 
+    def test_snapshot_capture_includes_owner_and_public_synonyms_and_select_grants(self) -> None:
+        source = (ROOT / "scripts/schema_catalog.sql").read_text(encoding="utf-8").upper()
+
+        for catalog in ("ALL_SYNONYMS", "DBA_SYNONYMS", "ALL_TAB_PRIVS", "DBA_TAB_PRIVS"):
+            with self.subTest(catalog=catalog):
+                self.assertIn(catalog, source)
+        self.assertIn("PRIVILEGE = 'SELECT'", source)
+        metadata_branch = source.split("IF L_PATH = 'METADATA_PRIVILEGE' THEN", 1)[1].split("ELSE", 1)[0]
+        owner_session_branch = source.split("IF L_PATH = 'METADATA_PRIVILEGE' THEN", 1)[1].split("ELSE", 1)[1]
+        self.assertIn("SELECT DISTINCT PRIVILEGE_ROW.OWNER", metadata_branch)
+        self.assertIn("SYNONYM_ROW.TABLE_OWNER = PRIVILEGE_ROW.OWNER", metadata_branch)
+        self.assertIn("SELECT DISTINCT PRIVILEGE_ROW.TABLE_SCHEMA OWNER", owner_session_branch)
+        self.assertIn("SYNONYM_ROW.TABLE_OWNER = PRIVILEGE_ROW.TABLE_SCHEMA", owner_session_branch)
+        self.assertIn("L_CATALOGS.APPEND('SYNONYMS')", source)
+        self.assertIn("L_CATALOGS.APPEND('OBJECT_GRANTS')", source)
+        self.assertIn("L_PAYLOAD.PUT('SCHEMAVERSION', 2)", source)
+        self.assertNotRegex(source, r"\b(?:INSERT\s+INTO|UPDATE\s+\w+|DELETE\s+FROM|MERGE\s+INTO|COMMIT)\b")
+
     def test_selected_key_input_is_encoded_without_sql_interpolation(self) -> None:
         class Capture:
             def __init__(self) -> None:
                 self.driver = ""
 
-            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path):
+            def __call__(self, selected_target: Target, driver_path: Path, run_dir: Path, **_kwargs):
                 self.driver = driver_path.read_text(encoding="utf-8")
                 return SqlclResult(0, framed(fixture_payload("owner-snapshot.json")), run_dir)
 
@@ -275,7 +385,7 @@ class SchemaCatalogTests(unittest.TestCase):
             inv = capture_inventory(
                 target(),
                 run_dir,
-                _runner=lambda t, d, r: SqlclResult(0, frame_comp(fixture_payload("owner-inventory.json")), r),
+                _runner=lambda t, d, r, **_kwargs: SqlclResult(0, frame_comp(fixture_payload("owner-inventory.json")), r),
             )
             self.assertIn(ObjectKey("APP_DEV", "CUSTOMERS", "TABLE"), inv.objects)
 
@@ -289,7 +399,7 @@ class SchemaCatalogTests(unittest.TestCase):
                 snap_inv,
                 (("CUSTOMERS", "TABLE"),),
                 run_dir,
-                _runner=lambda t, d, r: SqlclResult(0, frame_comp(fixture_payload("owner-snapshot.json")), r),
+                _runner=lambda t, d, r, **_kwargs: SqlclResult(0, frame_comp(fixture_payload("owner-snapshot.json")), r),
             )
             self.assertIn(ObjectKey("APP_DEV", "CUSTOMERS", "TABLE"), snap.objects)
 

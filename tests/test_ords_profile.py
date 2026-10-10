@@ -110,6 +110,25 @@ class OrdsProfileTests(unittest.TestCase):
     def test_all_three_keys_omitted_leaves_ords_disabled_and_changes_nothing_else(self) -> None:
         self.assert_loaded(write_env(self.directory), "false|false|DEMO||||DEMO")
 
+    def test_migration_runtime_limits_load_in_both_shells(self) -> None:
+        env_path = write_env(
+            self.directory,
+            "\nMIGRATION_APPLY_TIMEOUT_SECONDS=240\n"
+            "MIGRATION_CHECK_TIMEOUT_SECONDS=90.5\n"
+            "MIGRATION_CHECK_BATCH_BYTES=1048576\n",
+        )
+        for shell, load in self.loaders():
+            with self.subTest(shell=shell):
+                probe = (
+                    'printf "%s|%s|%s\\n" "$MIGRATION_APPLY_TIMEOUT_SECONDS" '
+                    '"$MIGRATION_CHECK_TIMEOUT_SECONDS" "$MIGRATION_CHECK_BATCH_BYTES"'
+                    if shell == "bash" else
+                    '"$($env:MIGRATION_APPLY_TIMEOUT_SECONDS)|$($env:MIGRATION_CHECK_TIMEOUT_SECONDS)|$($env:MIGRATION_CHECK_BATCH_BYTES)"'
+                )
+                result = load(env_path, probe=probe)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual("240|90.5|1048576", result.stdout.strip())
+
     def test_a_stale_shell_value_never_enables_ords(self) -> None:
         self.assert_loaded(write_env(self.directory), "false|false|DEMO||||DEMO", ORDS_SCHEMA="LEAK", ORDS_SQLCL_CONNECTION="leak", ORDS_EXPECTED_USER="LEAK")
 

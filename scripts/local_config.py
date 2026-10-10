@@ -43,9 +43,16 @@ ALLOWED_KEYS = frozenset({
     "STAGING_SQLCL_CONNECTION",
     "STAGING_EXPECTED_USER",
     "STAGING_SCHEMA",
+    "DEV_DBA_SQLCL_CONNECTION",
+    "STAGING_DBA_SQLCL_CONNECTION",
+    "PROD_DBA_SQLCL_CONNECTION",
     "ORDS_SCHEMA",
     "ORDS_SQLCL_CONNECTION",
     "ORDS_EXPECTED_USER",
+    "MIGRATION_APPLY_TIMEOUT_SECONDS",
+    "MIGRATION_CHECK_TIMEOUT_SECONDS",
+    "MIGRATION_CHECK_BATCH_BYTES",
+    "MIGRATION_PREFLIGHT_INVENTORY_RETRIES",
 }) | frozenset(prefix + "MIGRATION_" + suffix
                for prefix in ("", "STAGING_", "PROD_")
                for suffix in ("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER"))
@@ -74,6 +81,7 @@ RE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 RE_PREFIX_LIST = re.compile(r"^[A-Z][A-Z0-9_$#]*(,[A-Z][A-Z0-9_$#]*)*$")
 RE_APP_ID_LIST = re.compile(r"^[1-9][0-9]{0,17}(,[1-9][0-9]{0,17})*$")
 RE_DEVELOPER_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,29}$")
+RE_NONNEGATIVE_INTEGER = re.compile(r"^(?:0|[1-9][0-9]*)$")
 
 
 def _check_csv_shape(key: str, value: str) -> None:
@@ -184,6 +192,10 @@ def read_project_env(path: Path) -> dict[str, str]:
         if key not in values or not values[key].strip():
             raise ConfigError(f"{key} is required in {path}")
 
+    retry_key = "MIGRATION_PREFLIGHT_INVENTORY_RETRIES"
+    if retry_key in values and not RE_NONNEGATIVE_INTEGER.fullmatch(values[retry_key]):
+        raise ConfigError(f"{retry_key} must be a non-negative integer")
+
     # Developer name validation
     if not RE_DEVELOPER_NAME.fullmatch(values["DEVELOPER_NAME"]):
         raise ConfigError("DEVELOPER_NAME must be uppercase letters, digits, or underscores (at most 30), such as ASHARIF")
@@ -288,5 +300,13 @@ def read_project_env(path: Path) -> dict[str, str]:
         for s_item, u_item in zip(ords_schemas, ords_users, strict=True):
             if s_item != u_item:
                 raise ConfigError("ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry: the ORDS export logs in as the REST schema owner")
+
+    for key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
+        if key in seen_keys:
+            if not values[key].strip():
+                raise ConfigError(f"{key} must not be empty when configured")
+            _check_alias_list(key, values[key])
+            if "," in values[key]:
+                raise ConfigError(f"{key} accepts one saved SQLcl connection alias")
 
     return values
