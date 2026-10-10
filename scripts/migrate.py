@@ -44,6 +44,7 @@ from .migration_manifest import (
     load_batch,
     load_migration,
     validate_receipt,
+    verify_loaded_input_hashes,
 )
 from .schema_catalog import (
     CatalogError,
@@ -1054,6 +1055,7 @@ def main(
     environ: Mapping[str, str] | None = None,
     repo_root: Path = ROOT,
     confirm: Callable[[str], bool] = _confirm_from_terminal,
+    expected_input_hashes: Mapping[str, str] | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folders", nargs="*")
@@ -1069,6 +1071,8 @@ def main(
         return 2
     try:
         migrations = load_batch(Path(repo_root), args.folders)
+        if expected_input_hashes is not None:
+            verify_loaded_input_hashes(migrations, Path(repo_root), expected_input_hashes)
         values = os.environ if environ is None else environ
         requested = args.schema or values.get("PROJECT_SCHEMA") or None
         schema = batch_schema([migration.schema for migration in migrations], requested, values, args.env[0])

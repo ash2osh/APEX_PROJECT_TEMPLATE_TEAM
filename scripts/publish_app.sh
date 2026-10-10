@@ -6,6 +6,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/publish_app.sh <app_id> [--env <dev|staging|prod>] [--force]
        scripts/publish_app.sh <app_id> --env dev --file <pages/file.apx> [--file ...] [--no-team-notice]
+       scripts/publish_app.sh <app_id> --env staging|prod --app-source-dir <dir>
 
 Imports one APEXlang application with deployments/<env>.json. Staging and
 production imports require interactive confirmation. --force skips only the
@@ -29,6 +30,7 @@ force=false
 describe=false
 selected_files=()
 no_team_notice=false
+app_source_override=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env)
@@ -51,6 +53,11 @@ while [ "$#" -gt 0 ]; do
       describe=true
       shift
       ;;
+    --app-source-dir)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail '--app-source-dir requires a directory'
+      app_source_override="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -66,6 +73,7 @@ if [ "${#selected_files[@]}" -gt 0 ]; then
   [ "$app_environment" = dev ] || fail 'partial publishing targets DEV only'
   [ "$force" = false ] || fail 'partial publishing does not accept --force'
   [ "$describe" = false ] || fail '--describe cannot be combined with --file'
+  [ -z "$app_source_override" ] || fail '--app-source-dir cannot be combined with --file'
 elif [ "$no_team_notice" = true ]; then
   fail '--no-team-notice requires --file'
 fi
@@ -77,24 +85,31 @@ source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
 # shellcheck source=sqlcl_safe.sh
 source "$REPO_ROOT/scripts/sqlcl_safe.sh"
 
-preferred_app_dir="$REPO_ROOT/apps/${PROJECT_SCHEMA:-$APEX_PARSING_SCHEMA}/$app_id"
-if [ -d "$preferred_app_dir" ]; then
-  app_dir="$preferred_app_dir"
-else
-  candidates=()
-  direct_app_dir="$REPO_ROOT/apps/$app_id"
-  [ ! -d "$direct_app_dir" ] || candidates+=("$direct_app_dir")
-  shopt -s nullglob
-  nested_candidates=("$REPO_ROOT"/apps/*/"$app_id")
-  shopt -u nullglob
-  for candidate in "${nested_candidates[@]}"; do
-    [ ! -d "$candidate" ] || candidates+=("$candidate")
-  done
-  case "${#candidates[@]}" in
-    0) fail "no application source directory found for id $app_id under apps/<schema>/$app_id or apps/$app_id" ;;
-    1) app_dir="${candidates[0]}" ;;
-    *) fail "application id $app_id resolves to multiple source directories; keep it unique or configure APEX_PARSING_SCHEMA" ;;
+if [ -n "$app_source_override" ]; then
+  case "$app_source_override" in
+    /*|[A-Za-z]:/*) app_dir="$app_source_override" ;;
+    *) app_dir="$REPO_ROOT/$app_source_override" ;;
   esac
+else
+  preferred_app_dir="$REPO_ROOT/apps/${PROJECT_SCHEMA:-$APEX_PARSING_SCHEMA}/$app_id"
+  if [ -d "$preferred_app_dir" ]; then
+    app_dir="$preferred_app_dir"
+  else
+    candidates=()
+    direct_app_dir="$REPO_ROOT/apps/$app_id"
+    [ ! -d "$direct_app_dir" ] || candidates+=("$direct_app_dir")
+    shopt -s nullglob
+    nested_candidates=("$REPO_ROOT"/apps/*/"$app_id")
+    shopt -u nullglob
+    for candidate in "${nested_candidates[@]}"; do
+      [ ! -d "$candidate" ] || candidates+=("$candidate")
+    done
+    case "${#candidates[@]}" in
+      0) fail "no application source directory found for id $app_id under apps/<schema>/$app_id or apps/$app_id" ;;
+      1) app_dir="${candidates[0]}" ;;
+      *) fail "application id $app_id resolves to multiple source directories; keep it unique or configure APEX_PARSING_SCHEMA" ;;
+    esac
+  fi
 fi
 
 python3 "$REPO_ROOT/scripts/validate_app_source.py" "$REPO_ROOT" "$app_dir" || exit 2

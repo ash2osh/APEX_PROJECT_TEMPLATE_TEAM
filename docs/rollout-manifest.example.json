@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "steps": [
+    {
+      "type": "verify",
+      "folders": [
+        "migrations/APP/2026-10-10_release-r001"
+      ],
+      "phase": "pre"
+    },
+    {
+      "type": "migrate",
+      "folders": [
+        "migrations/APP/2026-10-10_release-r001"
+      ]
+    },
+    {
+      "type": "sql-script",
+      "file": "database/APP/dba/release-prerequisites.sql",
+      "connection": "APP_DBA",
+      "expectedUser": "APP_DBA",
+      "schema": "APP"
+    },
+    {
+      "type": "ords-import",
+      "file": "database/REST_API/ords/schema.sql",
+      "connection": "REST_API",
+      "expectedUser": "REST_API",
+      "schema": "REST_API",
+      "excludeModules": [
+        "legacy.api"
+      ]
+    },
+    {
+      "type": "app-deploy",
+      "appId": 100
+    },
+    {
+      "type": "verify",
+      "folders": [
+        "migrations/APP/2026-10-10_release-r001"
+      ],
+      "phase": "post"
+    },
+    {
+      "type": "pause",
+      "message": "Run the approved browser smoke checks before closing the deployment window."
+    }
+  ]
+}

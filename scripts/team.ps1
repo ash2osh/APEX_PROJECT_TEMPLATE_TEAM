@@ -47,6 +47,8 @@ Commands:
                                               Preflight and apply; --verbose lists every failed postcondition
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
+  rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
+                                              Run an ordered, hash-checked deployment manifest
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
@@ -356,6 +358,19 @@ try {
     "verify" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]" }
       Invoke-TeamBash -ScriptName "verify_checks.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
+    }
+    "rollout" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]" }
+      $rolloutArguments = @($Arguments)
+      for ($rolloutIndex = 0; $rolloutIndex -lt $rolloutArguments.Count; $rolloutIndex++) {
+        if ($rolloutIndex -eq 0 -or $rolloutArguments[$rolloutIndex - 1] -ceq "--report") {
+          $rolloutArguments[$rolloutIndex] = ConvertTo-MigrationFolderArgument ([string] $rolloutArguments[$rolloutIndex])
+        } elseif ([string] $rolloutArguments[$rolloutIndex] -clike "--report=*") {
+          $reportValue = ([string] $rolloutArguments[$rolloutIndex]).Substring("--report=".Length)
+          $rolloutArguments[$rolloutIndex] = "--report=" + (ConvertTo-MigrationFolderArgument $reportValue)
+        }
+      }
+      Invoke-TeamBash -ScriptName "rollout.sh" -ScriptArguments $rolloutArguments
     }
     "compare-schema" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }

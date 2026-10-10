@@ -36,6 +36,14 @@ Then report that difference. Each entry says why it is kept and what to do inste
 | The ORDS export was verified live only on ORDS 26.2.3 with SQLcl 26.2.2.0; other ORDS releases, non-REST-enabled and empty schemas, AutoREST objects and Windows were not. | The tests use a scripted fake SQLcl for everything else. | Run `scripts/team.sh doctor` and `backup-ords` against your DEV before relying on it; see [ords-export.md](ords-export.md#limitations-and-what-has-not-been-verified). |
 | `backup-ords` lets the dictionary list more roles and privileges than the export holds. | The dictionary includes the roles and privileges that ship with ORDS, which ORDS does not export. | Nothing; an export with more of them than the dictionary lists is still refused. |
 
+## SQLcl and rollout
+
+| Behaviour | Why it is kept | What to do |
+| --- | --- | --- |
+| SQLcl trims whitespace-only lines in a plain script and treats a line ending in `-` as a continuation of the next line. | The SQLcl script reader normalizes these forms before Oracle sees the statement; a reviewed file cannot guarantee those exact bytes reach the database. | Do not deliver a PL/SQL package with intentional whitespace-only source lines through a `sql-script` rollout step. Assemble the source in a CLOB (for example, with `DBMS_LOB.APPEND`) and execute that CLOB from reviewed migration SQL. Avoid a trailing hyphen where a continuation is not intended. |
+| SQLcl-backed rollout steps use a five-minute session timeout by default. | The shared SQLcl session runner keeps the existing 300-second default and records timeout evidence. A longer step can extend a production window or leave an apply outcome unknown. | Keep each step below about five minutes. Split a reviewed batch into independently verified steps; raise `MIGRATION_APPLY_TIMEOUT_SECONDS` only when the target operation and recovery plan justify it. |
+| Exact APEXlang source-byte verification after an app import can differ across APEX patch levels, including trailing blank lines, comments and message ordering. | `verify_publish_state.py` intentionally requires the imported source to match the local source exactly after its documented projections; it cannot assume which patch-level serialization changes are harmless. | Prefer the same APEX patch level on source and target. On a mismatch, retain the publish evidence, compare a fresh target export and qualify each difference before retrying. Do not weaken the byte check based only on a patch-level guess. |
+
 ## Interrupts and signals
 
 | Behaviour | Why it is kept | What to do |

@@ -593,6 +593,27 @@ def load_batch(repo_root: Path, relative_folders: Sequence[str]) -> tuple[Migrat
     return batch
 
 
+def verify_loaded_input_hashes(
+    migrations: Sequence[Migration],
+    repo_root: Path,
+    expected_hashes: Mapping[str, str],
+) -> None:
+    """Require loaded migration payload and check bytes to match an outer reviewed hash set."""
+    root = repo_root.resolve()
+    for migration in migrations:
+        folder = migration.folder.resolve()
+        relative_folder = folder.relative_to(root).as_posix()
+        for source_file in migration.files:
+            relative = f"{relative_folder}/{source_file.name}"
+            observed = hashlib.sha256(source_file.source).hexdigest()
+            if expected_hashes.get(relative) != observed:
+                raise MigrationManifestError(f"migration input does not match the confirmed SHA-256: {relative}")
+        checks_path = f"{relative_folder}/checks.json"
+        observed_checks = hashlib.sha256(migration.checks_source).hexdigest()
+        if expected_hashes.get(checks_path) != observed_checks:
+            raise MigrationManifestError(f"migration input does not match the confirmed SHA-256: {checks_path}")
+
+
 def _validate_timestamp(value: object, field: str) -> datetime:
     if not isinstance(value, str):
         raise MigrationManifestError(f"receipt {field} must be an ISO-8601 timestamp")

@@ -150,6 +150,53 @@ class TeamPowerShellVerifyCommandTests(unittest.TestCase):
                 self.assertIn("usage: scripts/team.ps1 verify", result.stderr)
 
 
+class TeamPowerShellRolloutCommandTests(unittest.TestCase):
+    """The PowerShell entry point exposes the same rollout contract as Bash."""
+
+    def engines(self):
+        return [
+            engine
+            for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh")
+            if (engine := shutil.which(name)) and "/snap/bin/" not in Path(engine).as_posix()
+        ]
+
+    def test_help_describes_rollout_options(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "--help"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("rollout <manifest.json>", result.stdout)
+                self.assertIn("--from-step N", result.stdout)
+                self.assertIn("--dry-run", result.stdout)
+                self.assertIn("--report <file>", result.stdout)
+                self.assertIn('ConvertTo-MigrationFolderArgument $reportValue', (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8"))
+
+    def test_rollout_without_manifest_reports_its_usage(self):
+        engines = self.engines()
+        if not engines:
+            self.skipTest("PowerShell is not installed outside the sandbox-blocked snap launcher")
+        for engine in engines:
+            with self.subTest(engine=Path(engine).name):
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "team.ps1"), "rollout"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("usage: scripts/team.ps1 rollout", result.stderr)
+
+
 class SqlclNativePathTests(unittest.TestCase):
     def test_native_path_is_the_identity_off_windows(self) -> None:
         if os.name == "nt":

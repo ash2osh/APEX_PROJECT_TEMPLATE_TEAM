@@ -28,6 +28,7 @@ from .migration_manifest import (
     MigrationManifestError,
     assert_single_layout,
     load_batch,
+    verify_loaded_input_hashes,
 )
 from .schema_catalog import CatalogError, capture_inventory
 from .sqlcl_session import safe_rmtree
@@ -222,6 +223,7 @@ def main(
     *,
     environ: Mapping[str, str] | None = None,
     repo_root: Path = ROOT,
+    expected_input_hashes: Mapping[str, str] | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folders", nargs="*")
@@ -258,6 +260,8 @@ def main(
 
         root = Path(repo_root).resolve()
         migrations = load_batch(root, args.folders)
+        if expected_input_hashes is not None:
+            verify_loaded_input_hashes(migrations, root, expected_input_hashes)
         values = os.environ if environ is None else environ
         environment = args.env[0]
         requested = args.schema or values.get("PROJECT_SCHEMA") or None

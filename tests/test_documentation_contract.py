@@ -96,6 +96,7 @@ class DocumentationContractTests(unittest.TestCase):
             "publish 100",
             "check-conflicts",
             "team.sh migrate",
+            "team.sh rollout",
             "--env dev",
             "compare-schema",
             "status.<env>.json",
@@ -124,6 +125,13 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("status.<env>.json", migration_guide)
         self.assertIn("STAGING_SCHEMA", migration_guide)
         self.assertIn("cannot reliably prove", readme)
+        self.assertIn("## Rollout", migration_guide)
+        self.assertIn("one manifest-level confirmation", migration_guide)
+        self.assertIn("rollout-manifest.example.json", migration_guide)
+        limitations = contents[ROOT / "docs" / "known-limitations.md"]
+        for limitation in ("whitespace-only lines", "trailing hyphen", "DBMS_LOB.APPEND", "five-minute", "patch levels"):
+            with self.subTest(limitation=limitation):
+                self.assertIn(limitation, limitations)
 
     def test_publish_guide_explains_every_refusal_and_is_linked(self) -> None:
         guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")

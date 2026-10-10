@@ -608,12 +608,25 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
 | `scripts/team.sh migrate <folder> [...] --env <env> [--verbose]` | Verify and apply selected migration folders; `--verbose` prints every failed postcondition. |
 | `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
+| `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]` | Run a frozen, ordered migration, SQL, ORDS and app deployment plan; staging and production show one manifest-wide hash confirmation. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
+
+`rollout` validates and hashes every referenced source file before it starts,
+stops on the first failed step and writes JSON and Markdown timing/evidence
+reports. A production or staging run has one explicit confirmation listing the
+manifest and every step/input SHA-256. Resume with `--from-step N` only after
+the earlier successful step receipts under `scratch/` match this exact
+manifest, environment and input set. `--dry-run` validates local inputs and
+prints the hashes before execution. The confirmation includes app workspace
+and schema or standalone SQL connection/user/schema details. The command
+prints JSON/Markdown report paths, including on step failure; report outputs
+cannot overwrite inputs, receipts or recovery evidence. See the [rollout rules and manifest
+schema](docs/migration-rules.md#rollout) and [example manifest](docs/rollout-manifest.example.json).
 
 Exit status, the same in Bash and PowerShell:
 

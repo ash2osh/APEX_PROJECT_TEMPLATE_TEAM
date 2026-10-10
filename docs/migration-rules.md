@@ -210,6 +210,91 @@ is false, and 2 when a check errors, a session is incomplete, or the selected
 target identity cannot be verified. A SQL or identity error takes precedence
 over false results and returns 2.
 
+## Rollout
+
+`rollout` runs a reviewed release as an ordered manifest. It uses the existing
+migration, read-only verification and app deployment paths; standalone DBA
+scripts get a private SQLcl driver with an identity check before the payload.
+The [example manifest](rollout-manifest.example.json) shows every supported
+step type. Replace its example folders, schema, connection alias, ORDS source
+and application ID with files and descriptors in the project before running
+it.
+
+The manifest is UTF-8 JSON with no duplicate keys. Its root has exactly these
+properties:
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `schemaVersion` | integer, `1` | Manifest format. |
+| `steps` | nonempty array | Steps in execution order; the runner never sorts them. |
+
+Each step is an object with a `type` and only the properties listed below.
+File and folder paths use forward slashes, are relative to the repository root,
+and may not contain `.`/`..`, symbolic links, or generated `scratch/` state.
+
+| Type | Required properties | Optional properties | Behavior |
+| --- | --- | --- | --- |
+| `migrate` | `folders`: ordered nonempty array of migration folder paths | — | Runs one normal migration batch with its preflight, boundary checks and receipts. |
+| `verify` | `folders`, `phase`: `pre`, `post` or `both` | — | Runs the standard read-only migration checks. |
+| `sql-script` | `file`, `connection`, `expectedUser`, `schema` | — | Runs a reviewed DBA SQL file after checking `SESSION_USER`, `CURRENT_SCHEMA`, and the live database/service identity. The saved-connection alias must exactly equal `expectedUser`. |
+| `ords-import` | `file`, `connection`, `expectedUser`, `schema` | `excludeModules`: array of module names | Validates a generated ORDS export, rejects OAuth material, optionally removes complete calls for the named modules, then uses the guarded SQL script path. `expectedUser` and `schema` must match. |
+| `app-deploy` | `appId`: positive numeric application ID | — | Runs the existing deployment command and the environment's descriptor; staging and production only. |
+| `pause` | `message`: nonempty text | — | Prints the message and waits for Enter before continuing. |
+
+Every source file used by a step is hashed before execution. The runner shows
+the manifest digest, each step digest and every referenced file digest in the
+staging/production confirmation. It checks the same hashes before and after
+each step and stops if a source changes. The one manifest-level confirmation
+is held by the running rollout process and recorded in private local evidence;
+the process forwards that approval to its existing staging or production
+child path. It shows each step's destination information, including an app's
+workspace/schema or a standalone SQL step's connection/user/schema. There is
+no `--force` or confirmation bypass. DEV uses the normal DEV identity and
+migration guards.
+
+Migration `status.<env>.json` receipts and the app export baseline file
+`apex-team-export.json` are local verification metadata rather than input
+payloads, so they are excluded from step input hashes. App source files and the
+selected deployment descriptor are included.
+
+Standalone `sql-script` and `ords-import` steps use a guarded SQLcl driver:
+`WHENEVER SQLERROR EXIT FAILURE ROLLBACK`, `WHENEVER OSERROR EXIT FAILURE
+ROLLBACK`, a `SESSION_USER`/`CURRENT_SCHEMA` check, a check of the live
+`DB_NAME`, `DB_UNIQUE_NAME` and `SERVICE_NAME` against the production marker,
+and a completion marker. The observed user, schema, database and service are
+printed and checked in SQLcl output retained in the report evidence. The source
+may not change connections, include another SQLcl file, alter the current
+schema after the guard, exit SQLcl, override the error behavior, or emit
+rollout verification markers. The manifest sets `connection` equal to
+`expectedUser`; the session identity must also match the declared user and
+schema. The reviewed SQL bytes are checked again as they are read into the
+private driver payload. App deploy imports a private copy of the hashed source;
+migration and verification runners compare their loaded payload/check files to
+the rollout hashes. Oracle DDL may commit implicitly, so a failing script can
+still have database effects; review it as a migration and reconcile the
+evidence before retrying. For an ORDS step, use the committed `schema.sql`
+produced by `backup-ords`; exclusions remove only whole generated API calls
+tied to the listed module names.
+
+After each successful step, a local receipt is written under
+`scratch/rollout-receipts/<manifest-sha256>/<env>/`. `--from-step N` requires a
+matching successful receipt for every earlier step: manifest digest,
+environment, step digest, input hashes, timing and evidence fields must match.
+It then starts at step N. Receipts are local recovery evidence, not a shared
+database ledger; inspect the target state before resuming after an ambiguous
+write.
+
+`--dry-run` validates the manifest and local step inputs, prints all hashes,
+and writes the report pair without running the steps. `--report <file>` writes
+JSON and Markdown siblings; a `.json` or `.md` suffix is replaced to select the
+pair's common base name. By default, both reports go under `scratch/`. Reports
+include the overall and per-step start/end times, durations, status, hashes,
+messages and evidence paths. The command prints both report paths on success,
+decline and step failure, and prints a concise error for a failed step. A report
+cannot overlap rollout inputs, receipts or recovery evidence. Exit status is 0
+for success or a dry run, 1 for a declined confirmation or step status 1, 2 for
+a refusal or other failure, and 130 for an interrupt.
+
 Each SQLcl apply session is limited by `MIGRATION_APPLY_TIMEOUT_SECONDS`, and
 check plus inventory sessions use `MIGRATION_CHECK_TIMEOUT_SECONDS`. Both
 default to 300 seconds to preserve existing behavior. Set either to a positive
