@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "phase": "snapshot",
   "complete": true,
   "coverage": {
     "ownerComplete": true,
     "path": "OWNER_SESSION",
-    "catalogs": ["ALL_OBJECTS", "ALL_TABLES", "ALL_TAB_COLUMNS", "ALL_TAB_COLS", "ALL_TAB_IDENTITY_COLS", "ALL_VIEWS", "ALL_SEQUENCES", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS", "ALL_INDEXES", "ALL_IND_COLUMNS", "ALL_TRIGGERS"],
+    "catalogs": ["ALL_OBJECTS", "ALL_TABLES", "ALL_TAB_COLUMNS", "ALL_TAB_COLS", "ALL_TAB_IDENTITY_COLS", "ALL_VIEWS", "ALL_SEQUENCES", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS", "ALL_INDEXES", "ALL_IND_COLUMNS", "ALL_TRIGGERS", "SYNONYMS", "OBJECT_GRANTS"],
     "unsupported": []
   },
   "identity": {
@@ -44,5 +44,7 @@
     {"owner": "APP_DEV", "name": "CUSTOMERS_PK", "type": "CONSTRAINT", "valid": true, "attributes": {}, "raw_ddl": "ALTER TABLE APP_DEV.CUSTOMERS ADD CONSTRAINT CUSTOMERS_PK PRIMARY KEY (NOTE)", "dependents": []},
     {"owner": "APP_DEV", "name": "CUSTOMERS_IX", "type": "INDEX", "valid": true, "attributes": {}, "raw_ddl": "CREATE INDEX APP_DEV.CUSTOMERS_IX ON APP_DEV.CUSTOMERS (NOTE)", "dependents": []},
     {"owner": "APP_DEV", "name": "CUSTOMERS_TRG", "type": "TRIGGER", "valid": true, "attributes": {}, "raw_ddl": "CREATE TRIGGER APP_DEV.CUSTOMERS_TRG BEFORE INSERT ON APP_DEV.CUSTOMERS BEGIN NULL; END;", "dependents": []}
-  ]
+  ],
+  "synonyms": [],
+  "grants": []
 }

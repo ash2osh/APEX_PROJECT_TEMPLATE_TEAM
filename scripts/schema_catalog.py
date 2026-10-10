@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from .db_targets import Target, looks_like_production_identity
 from .sqlcl_session import SqlclResult, run_sqlcl
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_CATALOG_BYTES = 128 * 1024 * 1024
 CATALOG_ENCODING_GZIP_BASE64 = "CATALOG_ENCODING:gzip-base64-v1"
 SUPPORTED_ROOT_TYPES = {
@@ -37,7 +38,7 @@ BASE_CATALOGS = {"ALL_OBJECTS"}
 CAPTURE_CATALOGS = {
     "ALL_OBJECTS", "ALL_TABLES", "ALL_TAB_COLUMNS", "ALL_TAB_COLS", "ALL_VIEWS",
     "ALL_TAB_IDENTITY_COLS", "ALL_SEQUENCES", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS", "ALL_INDEXES",
-    "ALL_IND_COLUMNS", "ALL_TRIGGERS",
+    "ALL_IND_COLUMNS", "ALL_TRIGGERS", "SYNONYMS", "OBJECT_GRANTS",
 }
 FRAME_RE = re.compile(r"^CATALOG_PAYLOAD_(BEGIN|END):(inventory|snapshot)$")
 VERIFIED_RE = re.compile(r"^CATALOG_VERIFIED:(inventory|snapshot)$")
@@ -61,6 +62,23 @@ class ObjectDefinition:
     valid: bool
 
 
+@dataclass(frozen=True, order=True)
+class SynonymDefinition:
+    owner: str
+    name: str
+    table_owner: str
+    table_name: str
+    db_link: str = ""
+
+
+@dataclass(frozen=True, order=True)
+class ObjectGrant:
+    owner: str
+    table_name: str
+    grantee: str
+    privilege: str
+
+
 @dataclass(frozen=True)
 class SchemaInventory:
     identity: dict
@@ -78,6 +96,8 @@ class SchemaSnapshot:
     coverage: dict
     started_at: str
     completed_at: str
+    synonyms: tuple[SynonymDefinition, ...] = ()
+    grants: tuple[ObjectGrant, ...] = ()
 
 
 class CatalogError(RuntimeError):
@@ -134,6 +154,54 @@ def _object_rows(rows: object, owner: str) -> dict[ObjectKey, dict]:
             raise CatalogError(f"catalog inventory repeats {row_owner}.{name} ({object_type})")
         objects[key] = dict(row)
     return objects
+
+
+def _synonym_rows(rows: object, owner: str) -> tuple[SynonymDefinition, ...]:
+    if not isinstance(rows, list):
+        raise CatalogError("catalog synonym list is malformed")
+    synonyms: dict[tuple[str, str], SynonymDefinition] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise CatalogError("catalog synonym row is malformed")
+        synonym_owner, name = row.get("owner"), row.get("name")
+        table_owner, table_name = row.get("table_owner"), row.get("table_name")
+        db_link = row.get("db_link", "")
+        if db_link is None:
+            db_link = ""
+        if not all(isinstance(value, str) and value for value in (synonym_owner, name, table_owner, table_name)):
+            raise CatalogError("catalog synonym row is missing its owner, name, or target")
+        if synonym_owner.upper() not in {owner, "PUBLIC"}:
+            raise CatalogError("catalog synonym escaped the selected owner and PUBLIC scope")
+        if not isinstance(db_link, str):
+            raise CatalogError("catalog synonym database link is malformed")
+        key = (synonym_owner, name)
+        if key in synonyms:
+            raise CatalogError(f"catalog repeats synonym {synonym_owner}.{name}")
+        synonyms[key] = SynonymDefinition(synonym_owner, name, table_owner, table_name, db_link)
+    return tuple(sorted(synonyms.values()))
+
+
+def _grant_rows(rows: object, owner: str) -> tuple[ObjectGrant, ...]:
+    if not isinstance(rows, list):
+        raise CatalogError("catalog object grant list is malformed")
+    grants: dict[tuple[str, str, str, str], ObjectGrant] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise CatalogError("catalog object grant row is malformed")
+        object_owner, table_name = row.get("owner"), row.get("table_name")
+        grantee, privilege = row.get("grantee"), row.get("privilege")
+        if not all(isinstance(value, str) and value for value in (object_owner, table_name, grantee, privilege)):
+            raise CatalogError("catalog object grant row is missing its owner, table, grantee, or privilege")
+        if grantee.upper() not in {owner, "PUBLIC"}:
+            raise CatalogError("catalog object grant escaped the selected owner and PUBLIC scope")
+        if privilege.upper() != "SELECT":
+            raise CatalogError("catalog object grant is not direct SELECT evidence")
+        grant = ObjectGrant(object_owner, table_name, grantee, privilege.upper())
+        key = (grant.owner, grant.table_name, grant.grantee, grant.privilege)
+        if key in grants:
+            raise CatalogError(f"catalog repeats SELECT grant on {object_owner}.{table_name} to {grantee}")
+        grants[key] = grant
+    return tuple(sorted(grants.values()))
 
 
 def _coverage(payload: Mapping, target: Target, *, snapshot: bool = False) -> dict:
@@ -401,13 +469,41 @@ def parse_inventory(output: str, target: Target) -> SchemaInventory:
 
 
 def _inventory_signature(objects: Mapping[ObjectKey, Mapping]) -> tuple:
-    return tuple(sorted(
-        (
-            key.owner, key.name, key.object_type, key.subobject_name, row.get("status"), row.get("last_ddl_time"),
-            row.get("object_id"), row.get("data_object_id"), row.get("object_timestamp"), row.get("identity_sequence"),
-        )
-        for key, row in objects.items()
-    ))
+    """Return stable owner object and subobject names/types, excluding volatile attributes."""
+    return tuple(sorted((key.owner, key.name, key.object_type, key.subobject_name) for key in objects))
+
+
+def inventory_fingerprint(inventory: SchemaInventory | SchemaSnapshot | Mapping[ObjectKey, Mapping]) -> str:
+    """Fingerprint the owner object/subobject names and types, excluding volatile attributes."""
+    if isinstance(inventory, SchemaInventory):
+        objects = inventory.objects
+    elif isinstance(inventory, SchemaSnapshot):
+        objects = inventory.inventory
+    else:
+        objects = inventory
+    encoded = json.dumps(_inventory_signature(objects), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class InventoryChangedError(CatalogError):
+    """Two complete owner inventory captures contained different object keys."""
+
+    def __init__(
+        self,
+        message: str,
+        before: SchemaInventory | SchemaSnapshot | Mapping[ObjectKey, Mapping],
+        after: SchemaInventory | SchemaSnapshot | Mapping[ObjectKey, Mapping],
+        partial: SchemaSnapshot | SchemaInventory | None = None,
+    ) -> None:
+        self.before_fingerprint = inventory_fingerprint(before)
+        self.after_fingerprint = inventory_fingerprint(after)
+        super().__init__(message, partial)
+
+
+class InventoryRetriesExhaustedError(CatalogError):
+    """Repeated owner-inventory churn prevented a stable live preflight."""
+
+    code = "LIVE_PREFLIGHT_UNAVAILABLE"
 
 
 def _capture_window(payload: Mapping) -> tuple[str, str]:
@@ -459,6 +555,7 @@ def parse_snapshot(
     first = payloads[0]
     identity = _target_identity(first.get("identity"), target)
     coverage = _coverage(first, target, snapshot=True)
+    inventory_provided = inventory is not None
     baseline: dict[ObjectKey, dict] = {}
     if inventory is not None:
         if inventory.identity.get("session_user", "").upper() != target.expected_user or inventory.identity.get("current_schema", "").upper() != target.schema:
@@ -472,8 +569,10 @@ def parse_snapshot(
     snapshots: list[SchemaSnapshot] = []
     known_inventory = baseline
     definitions: dict[ObjectKey, ObjectDefinition] = {}
-    all_rows_before: tuple | None = None
-    all_rows_after: tuple | None = None
+    all_rows_before: dict[ObjectKey, dict] | None = None
+    all_rows_after: dict[ObjectKey, dict] | None = None
+    synonyms: tuple[SynonymDefinition, ...] | None = None
+    grants: tuple[ObjectGrant, ...] | None = None
     started: str | None = None
     completed: str | None = None
     for payload in payloads:
@@ -490,15 +589,34 @@ def parse_snapshot(
         after = _object_rows(payload.get("after"), target.schema)
         if _inventory_signature(before) != _inventory_signature(after):
             partial = SchemaSnapshot(identity, before, dict(definitions), coverage, str(started or ""), str(completed or ""))
-            raise CatalogError("owner inventory changed while selected definitions were being retrieved", partial)
-        if known_inventory and _inventory_signature(known_inventory) != _inventory_signature(before):
+            raise InventoryChangedError("owner inventory changed while selected definitions were being retrieved", before, after, partial)
+        if inventory_provided and _inventory_signature(baseline) != _inventory_signature(before):
             partial = SchemaSnapshot(identity, before, dict(definitions), coverage, str(started or ""), str(completed or ""))
-            raise CatalogError("owner inventory changed since selector discovery", partial)
-        if all_rows_before is not None and (all_rows_before != _inventory_signature(before) or all_rows_after != _inventory_signature(after)):
+            raise InventoryChangedError("owner inventory changed since selector discovery", baseline, before, partial)
+        if all_rows_before is not None and (
+            _inventory_signature(all_rows_before) != _inventory_signature(before)
+            or all_rows_after is None
+            or _inventory_signature(all_rows_after) != _inventory_signature(after)
+        ):
             partial = SchemaSnapshot(identity, before, dict(definitions), coverage, str(started or ""), str(completed or ""))
-            raise CatalogError("owner inventory changed between selected definition batches", partial)
-        all_rows_before = _inventory_signature(before)
-        all_rows_after = _inventory_signature(after)
+            first, second = all_rows_before, before
+            if (
+                _inventory_signature(first) == _inventory_signature(second)
+                and all_rows_after is not None
+                and _inventory_signature(all_rows_after) != _inventory_signature(after)
+            ):
+                first, second = all_rows_after, after
+            raise InventoryChangedError("owner inventory changed between selected definition batches", first, second, partial)
+        all_rows_before = before
+        all_rows_after = after
+        current_synonyms = _synonym_rows(payload.get("synonyms"), target.schema)
+        current_grants = _grant_rows(payload.get("grants"), target.schema)
+        if synonyms is not None and synonyms != current_synonyms:
+            raise CatalogError("synonym catalog changed between selected definition batches")
+        if grants is not None and grants != current_grants:
+            raise CatalogError("object grant catalog changed between selected definition batches")
+        synonyms = current_synonyms
+        grants = current_grants
         known_inventory = before
         if started is None:
             started = payload_started
@@ -550,7 +668,10 @@ def parse_snapshot(
         if key not in definitions:
             raise CatalogError(f"selected dependent definition is missing for {key.owner}.{key.name} ({key.object_type})", SchemaSnapshot(identity, known_inventory, definitions, coverage, str(started or ""), str(completed or "")))
     selected_definitions = {key: definitions[key] for key in required}
-    return SchemaSnapshot(identity, known_inventory, selected_definitions, coverage, str(started or ""), str(completed or ""))
+    return SchemaSnapshot(
+        identity, known_inventory, selected_definitions, coverage,
+        str(started or ""), str(completed or ""), synonyms or (), grants or (),
+    )
 
 
 def _hex(value: str) -> str:
@@ -621,3 +742,53 @@ def capture_snapshot(
     driver = _catalog_driver(private_dir, "snapshot", target, keys)
     result = _runner(target, driver, private_dir, phase="inventory")
     return parse_snapshot(result.output, target, keys, inventory)
+
+
+def capture_snapshot_with_retries(
+    target: Target,
+    keys: Sequence[tuple[str, str]],
+    run_dir: Path,
+    *,
+    retries: int = 3,
+    _runner: Runner = run_sqlcl,
+) -> SchemaSnapshot:
+    """Return a stable selected snapshot after retrying object-set churn only."""
+    return capture_inventory_snapshot_with_retries(
+        target, keys, run_dir, retries=retries, _runner=_runner,
+    )[1]
+
+
+def capture_inventory_snapshot_with_retries(
+    target: Target,
+    keys: Sequence[tuple[str, str]],
+    run_dir: Path,
+    *,
+    retries: int = 3,
+    _runner: Runner = run_sqlcl,
+    _capture_inventory: Callable | None = None,
+    _capture_snapshot: Callable | None = None,
+) -> tuple[SchemaInventory, SchemaSnapshot]:
+    """Retry a complete inventory/definition pair after object-set churn only."""
+    if type(retries) is not int or retries < 0:
+        raise CatalogError("preflight inventory retry count must be a non-negative integer")
+    inventory_capture = _capture_inventory or (
+        lambda selected_target, directory: capture_inventory(selected_target, directory, _runner=_runner)
+    )
+    snapshot_capture = _capture_snapshot or (
+        lambda selected_target, inventory, selected_keys, directory:
+            capture_snapshot(selected_target, inventory, selected_keys, directory, _runner=_runner)
+    )
+    for attempt in range(retries + 1):
+        inventory = inventory_capture(target, run_dir)
+        try:
+            snapshot = snapshot_capture(target, inventory, keys, run_dir)
+            return inventory, snapshot
+        except InventoryChangedError as error:
+            if attempt < retries:
+                continue
+            raise InventoryRetriesExhaustedError(
+                f"{error}; inventory remained inconsistent after {attempt + 1} capture attempt(s); "
+                f"inventory fingerprints: first={error.before_fingerprint}, second={error.after_fingerprint}",
+                error.partial,
+            ) from error
+    raise CatalogError("preflight inventory capture did not produce a stable snapshot")

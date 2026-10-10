@@ -23,7 +23,7 @@ foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
   }
 }
 Remove-Item -Path Env:MIGRATION_APPLY_TIMEOUT_SECONDS, Env:MIGRATION_CHECK_TIMEOUT_SECONDS,
-  Env:MIGRATION_CHECK_BATCH_BYTES -ErrorAction SilentlyContinue
+  Env:MIGRATION_CHECK_BATCH_BYTES, Env:MIGRATION_PREFLIGHT_INVENTORY_RETRIES -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
 # Mirror load_env.sh: a relative PROJECT_ENV_FILE resolves against the
@@ -58,7 +58,8 @@ $projectEnvAllowed = @(
   "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER", "PROD_SCHEMA",
   "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA",
   "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER",
-  "MIGRATION_APPLY_TIMEOUT_SECONDS", "MIGRATION_CHECK_TIMEOUT_SECONDS", "MIGRATION_CHECK_BATCH_BYTES"
+  "MIGRATION_APPLY_TIMEOUT_SECONDS", "MIGRATION_CHECK_TIMEOUT_SECONDS", "MIGRATION_CHECK_BATCH_BYTES",
+  "MIGRATION_PREFLIGHT_INVENTORY_RETRIES"
 )
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
   foreach ($projectEnvSuffix in @("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER")) {

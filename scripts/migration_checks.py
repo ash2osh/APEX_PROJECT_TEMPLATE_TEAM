@@ -24,7 +24,7 @@ from .migration_manifest import (
     _strip_sql_comments_and_tokenize,
     validate_check_query,
 )
-from .schema_catalog import ObjectKey, SchemaSnapshot
+from .schema_catalog import CatalogError, ObjectKey, SchemaSnapshot
 from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
 from .validate_migration import statement_spans
 
@@ -48,6 +48,15 @@ CONSTRAINT_SEGMENT_STARTERS = {
 IDENTIFIER_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 HEX_CHUNK_SIZE = 3000
 DEFAULT_CHECK_DRIVER_BYTES = 2 * 1024 * 1024
+DEFAULT_PREFLIGHT_INVENTORY_RETRIES = 3
+SELECTABLE_SYNONYM_TARGET_TYPES = {"TABLE", "VIEW", "MATERIALIZED VIEW"}
+
+
+def preflight_inventory_retries(values: Mapping[str, str]) -> int:
+    raw = values.get("MIGRATION_PREFLIGHT_INVENTORY_RETRIES", str(DEFAULT_PREFLIGHT_INVENTORY_RETRIES))
+    if not isinstance(raw, str) or not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+        raise CatalogError("MIGRATION_PREFLIGHT_INVENTORY_RETRIES must be a non-negative integer")
+    return int(raw)
 
 
 @dataclass(frozen=True)
@@ -1201,6 +1210,35 @@ def _table_columns(snapshot: SchemaSnapshot, name: str) -> set[str] | None:
     return result
 
 
+def _dependency_available_through_synonym(
+    snapshot: SchemaSnapshot,
+    name: str,
+    owner: str,
+    live_common: Mapping[str, set[str]],
+    staged_kinds: Mapping[str, str],
+) -> bool:
+    """Accept a direct owner/PUBLIC synonym only when its target is selectable."""
+    private = next((item for item in snapshot.synonyms if item.owner == owner and item.name == name), None)
+    public = next((item for item in snapshot.synonyms if item.owner == "PUBLIC" and item.name == name), None)
+    synonym = private or public
+    if synonym is None or synonym.db_link:
+        return False
+    if synonym.table_owner == owner:
+        live_types = live_common.get(synonym.table_name, set())
+        staged_kind = staged_kinds.get(synonym.table_name)
+        return (
+            bool(live_types & SELECTABLE_SYNONYM_TARGET_TYPES)
+            or staged_kind in {"CREATE_TABLE", "CREATE_VIEW"}
+        )
+    return any(
+        grant.owner == synonym.table_owner
+        and grant.table_name == synonym.table_name
+        and grant.grantee in {owner, "PUBLIC"}
+        and grant.privilege == "SELECT"
+        for grant in snapshot.grants
+    )
+
+
 def _has_explicit_reviews(migration: Migration) -> bool:
     return bool(migration.preconditions and migration.postconditions)
 
@@ -1347,7 +1385,14 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
                     coverage["complete"] = False
                 elif dependency_name.upper() == "DUAL":
                     continue
-                elif dependency_name not in staged_common and dependency_name not in live_common and dependency_name not in staged_opaque:
+                elif (
+                    dependency_name not in staged_common
+                    and dependency_name not in staged_opaque
+                    and not (live_common.get(dependency_name, set()) - {"SYNONYM"})
+                    and not _dependency_available_through_synonym(
+                        snapshot, dependency_name, owner, live_common, staged_kinds
+                    )
+                ):
                     conflicts.append({"code": "MISSING_PREREQUISITE", "name": dependency_name, "required_by": name, **location})
         elif kind == "ALTER_ADD_COLUMN":
             table_name = operation["table"]
@@ -1443,7 +1488,12 @@ def _local_report(migrations: Sequence[Migration], repo_root: Path) -> Preflight
 
 def _live_report(migrations: Sequence[Migration], environment: str, repo_root: Path, schema: str | None = None) -> PreflightReport:
     from .db_targets import TargetResolutionError, batch_schema, flat_migrations_apply, resolve_target
-    from .schema_catalog import CatalogError, capture_inventory, capture_snapshot
+    from .schema_catalog import (
+        CatalogError,
+        capture_inventory,
+        capture_inventory_snapshot_with_retries,
+        capture_snapshot,
+    )
 
     values = os.environ
     work_dir: Path | None = None
@@ -1460,13 +1510,24 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
         scratch = repo_root / "scratch"
         scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         work_dir = Path(tempfile.mkdtemp(prefix="migration-preflight-", dir=scratch))
-        inventory = capture_inventory(target, work_dir)
+        retries = preflight_inventory_retries(values)
         keys = sorted({
             (operation.get("table"), "TABLE") for operation in operations if operation.get("table")
         } | {
             (operation.get("name"), operation.get("object_type")) for operation in operations if operation.get("name") and operation.get("object_type") in {"TABLE", "VIEW", "SEQUENCE", "INDEX"}
         })
-        snapshot = capture_snapshot(target, inventory, keys, work_dir) if keys else SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
+        if keys:
+            _inventory, snapshot = capture_inventory_snapshot_with_retries(
+                target,
+                keys,
+                work_dir,
+                retries=retries,
+                _capture_inventory=capture_inventory,
+                _capture_snapshot=capture_snapshot,
+            )
+        else:
+            inventory = capture_inventory(target, work_dir)
+            snapshot = SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
         checks_result = run_checks(target, batch_preconditions(migrations), work_dir, phase="preconditions")
         report = preflight(migrations, snapshot, checks_result)
         keep_logs = report.exit_code not in (0, 1)

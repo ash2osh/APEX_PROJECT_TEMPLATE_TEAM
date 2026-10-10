@@ -160,6 +160,11 @@ class TeamPowerShellRolloutCommandTests(unittest.TestCase):
             if (engine := shutil.which(name)) and "/snap/bin/" not in Path(engine).as_posix()
         ]
 
+    def test_help_documents_preflight_inventory_retry_setting(self):
+        text = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        self.assertIn("MIGRATION_PREFLIGHT_INVENTORY_RETRIES", text)
+        self.assertIn("default 3", text)
+
     def test_help_describes_rollout_options(self):
         engines = self.engines()
         if not engines:
@@ -392,6 +397,32 @@ class WindowsShellGateTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), "file")
+
+    def test_load_env_accepts_preflight_inventory_retry_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            environment = self.environment(directory, "Linux")
+            env_file = directory / ".env"
+            env_file.write_text(
+                (ROOT / ".env.example").read_text(encoding="utf-8")
+                + "\nMIGRATION_PREFLIGHT_INVENTORY_RETRIES=4\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1" "$2" && printf "%s\\n" "$MIGRATION_PREFLIGHT_INVENTORY_RETRIES"',
+                 "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_file)],
+                capture_output=True,
+                text=True,
+                env=environment,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "4")
+
+    def test_powershell_env_loader_allows_and_clears_preflight_retry_setting(self) -> None:
+        text = (ROOT / "scripts" / "load_env.ps1").read_text(encoding="utf-8")
+        self.assertGreaterEqual(text.count("MIGRATION_PREFLIGHT_INVENTORY_RETRIES"), 2)
 
     def test_load_env_python3_converts_existing_paths_on_a_windows_shell(self) -> None:
         for uname in ("MINGW64_NT-10.0-26100", "MSYS_NT-10.0-26100", "CYGWIN_NT-10.0"):

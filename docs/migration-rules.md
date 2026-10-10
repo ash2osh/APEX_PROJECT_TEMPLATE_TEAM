@@ -368,6 +368,9 @@ reports its phase and cutoff and may leave committed DDL; stop and reconcile
 the retained attempt evidence before retrying. A check or inventory timeout
 means verification did not finish, so no receipt is written. The timeout
 settings and check-driver budget are optional `.env` keys; see `.env.example`.
+The optional `MIGRATION_PREFLIGHT_INVENTORY_RETRIES` key accepts a
+non-negative integer and controls inventory-change retries, independently of
+the SQLcl timeout.
 
 SQLcl reports a PL/SQL or view compilation error as a warning and carries on,
 so the apply session ends with its own check. Every package, package body,
@@ -469,6 +472,26 @@ selected environment's observed catalog. `migrate` repeats the live
 preconditions before applying. The checker handles common object namespace
 collisions, table columns, and supported dependencies; it reports when an SQL
 form needs explicit checks or cannot be analyzed safely.
+
+For unqualified view dependencies, live preflight captures private synonyms in
+the selected owner and PUBLIC synonyms, plus direct `SELECT` grants to that
+owner or `PUBLIC`. An owner synonym takes precedence over a PUBLIC synonym. A
+reference through either synonym is satisfied only when its direct target is a
+live table, view or materialized view, an earlier-staged table or view, or a
+matching direct `SELECT` grant proves the owner can read the external target.
+A missing target, missing grant, synonym chain or database-link target remains
+a missing prerequisite. These catalog reads are read-only; local-only analysis
+cannot establish synonym or grant reachability.
+
+Live preflight compares the owner inventory by object owner, object name,
+subobject name and type. Status, `LAST_DDL_TIME`, object IDs and other volatile
+attributes that can change without an object or subobject name/type change are
+ignored. If an object or subobject name or type changes between discovery and
+selected-definition capture, preflight retries the full inventory/snapshot pair up to
+`MIGRATION_PREFLIGHT_INVENTORY_RETRIES` times after the first attempt. The
+default is `3` retries; `0` disables them. After the retries are exhausted it
+returns `LIVE_PREFLIGHT_UNAVAILABLE` with SHA-256 fingerprints for both
+inventories; wait for catalog activity to settle and rerun the check.
 
 A table, view or sequence name that is already taken is a conflict, whether the
 database holds it or an earlier selected folder creates it. The one exception is

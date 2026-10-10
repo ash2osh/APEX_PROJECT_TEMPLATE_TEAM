@@ -17,6 +17,7 @@ from scripts.schema_catalog import (
     CatalogError,
     MAX_CATALOG_BYTES,
     ObjectKey,
+    SCHEMA_VERSION,
     _inventory_signature,
     decode_catalog_payload,
     parse_inventory,
@@ -357,7 +358,7 @@ sys.exit(1)
 
     def test_invalid_schema_version_and_phase_refuse(self) -> None:
         payload_bad_version = dict(self.base_inventory)
-        payload_bad_version["schemaVersion"] = 2
+        payload_bad_version["schemaVersion"] = SCHEMA_VERSION + 1
         with self.assertRaises(CatalogError) as ctx:
             decode_catalog_payload(["CATALOG_ENCODING:gzip-base64-v1", base64.b64encode(gzip.compress(json.dumps(payload_bad_version).encode("utf-8"))).decode("ascii")])
         self.assertIn("schema version", str(ctx.exception))

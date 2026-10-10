@@ -455,8 +455,10 @@ for classification, rollback proof, report fields, and exit codes.
 Fresh postcondition failures name up to 20 failed checks; add `--verbose` to
 print all of them. Apply and verification session limits are configurable with
 `MIGRATION_APPLY_TIMEOUT_SECONDS`, `MIGRATION_CHECK_TIMEOUT_SECONDS`, and
-`MIGRATION_CHECK_BATCH_BYTES` in `.env`; see the [migration rules](docs/migration-rules.md)
-for defaults, batching and timeout recovery.
+`MIGRATION_CHECK_BATCH_BYTES` in `.env`. Live catalog capture retries are
+configurable with `MIGRATION_PREFLIGHT_INVENTORY_RETRIES` (default `3`); see
+the [migration rules](docs/migration-rules.md) for defaults, batching, timeout
+recovery and preflight behavior.
 
 The offline `--local` checker analyzes selected files only. Live preflight
 compares the selected batch with the target catalog, but cannot see pending

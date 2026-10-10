@@ -361,6 +361,31 @@ class GuideContractTests(unittest.TestCase):
                     migration_manifest.load_migration(Path(temporary), "migrations/2026-09-30_example-r001")
         self.assertGreaterEqual(found, 2)
 
+    def test_preflight_retry_setting_and_synonym_evidence_are_documented(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        rules = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
+        limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        bash_wrapper = (ROOT / "scripts" / "team.sh").read_text(encoding="utf-8")
+        powershell_wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        bash_loader = (ROOT / "scripts" / "load_env.sh").read_text(encoding="utf-8")
+        powershell_loader = (ROOT / "scripts" / "load_env.ps1").read_text(encoding="utf-8")
+        help_result = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        for text in (readme, rules, env_example, bash_wrapper, powershell_wrapper, bash_loader, powershell_loader, help_result.stdout):
+            with self.subTest(setting="MIGRATION_PREFLIGHT_INVENTORY_RETRIES"):
+                self.assertIn("MIGRATION_PREFLIGHT_INVENTORY_RETRIES", text)
+        self.assertIn("default is `3` retries", rules)
+        self.assertIn("status", rules)
+        self.assertIn("fingerprint", rules)
+        self.assertIn("one direct", limitations)
+
 
 if __name__ == "__main__":
     unittest.main()

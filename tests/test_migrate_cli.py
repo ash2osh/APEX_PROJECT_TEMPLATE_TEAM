@@ -16,7 +16,7 @@ from scripts.migrate import MigrationApplyError, _assert_check_identity, apply_b
 from scripts.migration_checks import CheckReport, analyze_batch, run_checks
 from scripts.migration_manifest import load_batch, validate_receipt
 from scripts.migration_revision import inspect_migration_lock
-from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
+from scripts.schema_catalog import InventoryChangedError, ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
@@ -220,6 +220,31 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in receipt["checks"] if item.get("kind")], ["catalog", "catalog"])
         self.assertNotIn("developer", json.dumps(receipt).casefold())
         self.assertNotIn("password", json.dumps(receipt).casefold())
+
+    def test_inventory_retry_exhaustion_reports_live_preflight_code_and_fingerprints(self):
+        folder = self.add_folder(
+            "2026-09-28_create-retry-r001",
+            {"001-create-table.sql": "CREATE TABLE RETRY_T (ID NUMBER);\n"},
+        )
+        migrations = self.load(folder.name)
+        target = self.target()
+        fake = FakeDatabase(target)
+        after = {ObjectKey(target.schema, "RACING_T", "TABLE"): {
+            "owner": target.schema, "name": "RACING_T", "type": "TABLE",
+        }}
+
+        def changing_snapshot(_target, inventory, _keys, _run_dir):
+            raise InventoryChangedError("owner inventory changed", inventory, after)
+
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {"MIGRATION_PREFLIGHT_INVENTORY_RETRIES": "0"}), contextlib.redirect_stderr(stderr):
+            result, fake = self.apply(migrations, fake=fake, capture_snapshot_fn=changing_snapshot)
+
+        self.assertEqual(result, 2)
+        self.assertIn("LIVE_PREFLIGHT_UNAVAILABLE", stderr.getvalue())
+        self.assertIn("inventory fingerprints: first=", stderr.getvalue())
+        self.assertIn(", second=", stderr.getvalue())
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
 
     def test_stage_and_prod_require_exact_confirmation_and_decline_performs_no_apply(self):
         for environment in ("staging", "prod"):

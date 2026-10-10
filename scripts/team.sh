@@ -41,6 +41,8 @@ Commands:
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
   --help                                      Show this help
+Environment:
+  MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
 USAGE
 }
 

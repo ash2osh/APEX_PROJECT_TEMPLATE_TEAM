@@ -32,6 +32,7 @@ from .migration_checks import (
     batch_preconditions,
     compiled_units,
     preflight,
+    preflight_inventory_retries,
     run_checks,
 )
 from .migration_manifest import (
@@ -49,11 +50,13 @@ from .migration_manifest import (
 from .migration_revision import attempt_record_is_locked, not_started_reason, RUN_ID_RE, RUN_MANIFEST_NAME
 from .schema_catalog import (
     CatalogError,
+    InventoryRetriesExhaustedError,
     ObjectDefinition,
     ObjectKey,
     SchemaInventory,
     SchemaSnapshot,
     capture_inventory,
+    capture_inventory_snapshot_with_retries,
     capture_snapshot,
 )
 from .schema_normalization import normalization_coverage
@@ -259,18 +262,6 @@ def _selected_keys(operations: Sequence[Mapping]) -> tuple[tuple[str, str], ...]
             if isinstance(table, str):
                 keys.add((table, "TABLE"))
     return tuple(sorted(keys))
-
-
-def _snapshot_for(
-    target: Target,
-    inventory: SchemaInventory,
-    keys: Sequence[tuple[str, str]],
-    run_dir: Path,
-    capture_snapshot_fn: Callable,
-) -> SchemaSnapshot:
-    if keys:
-        return capture_snapshot_fn(target, inventory, keys, run_dir)
-    return SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
 
 
 def _explicit_checks(migrations: Sequence[Migration], phase: str) -> tuple:
@@ -773,9 +764,17 @@ def _preflight_snapshot(
     run_checks_fn: Callable,
 ) -> tuple[SchemaInventory, SchemaSnapshot, CheckReport, PreflightReport]:
     operations = analyze_batch(migrations, target.schema)
-    inventory = capture_inventory_fn(target, run_dir)
     keys = _selected_keys(operations)
-    snapshot = _snapshot_for(target, inventory, keys, run_dir, capture_snapshot_fn)
+    retries = preflight_inventory_retries(os.environ)
+    if keys:
+        inventory, snapshot = capture_inventory_snapshot_with_retries(
+            target, keys, run_dir, retries=retries,
+            _capture_inventory=capture_inventory_fn,
+            _capture_snapshot=capture_snapshot_fn,
+        )
+    else:
+        inventory = capture_inventory_fn(target, run_dir)
+        snapshot = SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
     checks = _check_report(target, migrations, "preconditions", run_dir / "preconditions", run_checks_fn)
     report = preflight(migrations, snapshot, checks)
     return inventory, snapshot, checks, report
@@ -979,11 +978,21 @@ def apply_batch(
             if not isinstance(apply_identity, Mapping):
                 raise MigrationApplyError(f"{original.folder.name} committed, but apply identity is unavailable; reconcile. Evidence: {run_dir}")
             _assert_same_target(initial_target_identity, apply_identity)
-            fresh_inventory = capture_inventory_fn(target, run_dir / f"verify-inventory-{folder_index:03d}")
+            operations = analyze_batch((original,), target.schema)
+            selected_keys = _selected_keys(operations)
+            retries = preflight_inventory_retries(os.environ)
+            if selected_keys:
+                fresh_inventory, fresh_snapshot = capture_inventory_snapshot_with_retries(
+                    target, selected_keys, run_dir / f"verify-inventory-{folder_index:03d}",
+                    retries=retries,
+                    _capture_inventory=capture_inventory_fn,
+                    _capture_snapshot=capture_snapshot_fn,
+                )
+            else:
+                fresh_inventory = capture_inventory_fn(target, run_dir / f"verify-inventory-{folder_index:03d}")
+                fresh_snapshot = SchemaSnapshot(fresh_inventory.identity, fresh_inventory.objects, {}, fresh_inventory.coverage, fresh_inventory.started_at, fresh_inventory.completed_at)
             fresh_identity = _identity_for_receipt(fresh_inventory, target)
             _assert_same_target(initial_target_identity, fresh_identity)
-            operations = analyze_batch((original,), target.schema)
-            fresh_snapshot = _snapshot_for(target, fresh_inventory, _selected_keys(operations), run_dir / f"verify-snapshot-{folder_index:03d}", capture_snapshot_fn)
             post_checks = _check_report(target, (original,), "postconditions", run_dir / f"postconditions-{folder_index:03d}", run_checks_fn)
             _assert_check_identity(initial_target_identity, post_checks)
             catalog_results, catalog_errors = _verify_structural_postconditions(original, fresh_snapshot, target.schema)
@@ -1047,7 +1056,12 @@ def apply_batch(
             print("migration interrupted; no writes were attempted", file=sys.stderr)
         return 130
     except (MigrationApplyError, MigrationManifestError, CatalogError, TargetResolutionError, OSError, RuntimeError, ValueError) as error:
-        print(f"migration error: {error}", file=sys.stderr)
+        code = (
+            f"{InventoryRetriesExhaustedError.code}: "
+            if isinstance(error, InventoryRetriesExhaustedError)
+            else ""
+        )
+        print(f"migration error: {code}{error}", file=sys.stderr)
         if attempted and run_dir is not None:
             print(f"Retained attempt evidence: {run_dir}", file=sys.stderr)
             if manifest_path is not None and run_manifest is not None:

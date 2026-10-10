@@ -99,6 +99,18 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
+    def test_preflight_catalog_and_recorded_fixtures_are_template_owned(self) -> None:
+        for path in (
+            "scripts/schema_catalog.py",
+            "scripts/schema_catalog.sql",
+            "scripts/migration_checks.py",
+            "tests/test_schema_catalog.py",
+            "tests/test_migration_checks.py",
+            "tests/fixtures/schema_catalog/view-synonyms.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+
     def test_template_declares_the_qualified_release_boundary(self) -> None:
         from scripts.upgrade_template import load_manifest
         manifest = load_manifest(ROOT)

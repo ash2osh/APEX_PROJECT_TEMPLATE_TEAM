@@ -8,8 +8,8 @@ from unittest.mock import patch
 from fake_sqlcl import environment as fake_environment, install
 from scripts.db_targets import Target
 from scripts.migration_manifest import QueryCheck, load_batch
-from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
-from scripts.migration_checks import CheckReport, analyze_batch, compiled_units, preflight, run_checks
+from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot, parse_inventory, parse_snapshot
+from scripts.migration_checks import CheckReport, analyze_batch, compiled_units, preflight, preflight_inventory_retries, run_checks
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
@@ -159,6 +159,193 @@ class MigrationChecksTests(unittest.TestCase):
         report = preflight(self.migration_batch("2026-09-30_nolink-r001"), self.snapshot(), CheckReport(True, True, (), (), {"complete": True}))
         self.assertIn(
             ("MISSING_PREREQUISITE", "ZZ_LINK_S"),
+            [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+        )
+
+    def test_preflight_inventory_retry_setting_defaults_to_three_and_allows_zero(self):
+        self.assertEqual(preflight_inventory_retries({}), 3)
+        self.assertEqual(preflight_inventory_retries({"MIGRATION_PREFLIGHT_INVENTORY_RETRIES": "0"}), 0)
+        with self.assertRaisesRegex(RuntimeError, "non-negative integer"):
+            preflight_inventory_retries({"MIGRATION_PREFLIGHT_INVENTORY_RETRIES": "1.5"})
+
+    def test_runner_preflight_retries_catalog_churn_before_resolving_a_synonym(self):
+        from scripts.migrate import _preflight_snapshot
+
+        folder = self.add_folder(
+            "2026-10-02_view-through-synonym-r001",
+            "CREATE VIEW ZZ_PUBLIC_CUSTOMERS_V AS SELECT ID FROM ZZ_PUBLIC_CUSTOMERS;\n",
+        )
+        migrations = self.migration_batch(folder.name)
+        target = Target("dev", "dev-profile", "APP", "APP", "development")
+        inventory_payload = json.loads((Path(__file__).parent / "fixtures" / "schema_catalog" / "owner-inventory.json").read_text(encoding="utf-8"))
+        inventory_payload["identity"]["session_user"] = "APP"
+        inventory_payload["identity"]["current_schema"] = "APP"
+        inventory_payload["objects"] = [
+            {"owner": "APP", "name": "ZZ_PRIVATE_ORDERS", "type": "SYNONYM", "status": "VALID"}
+        ]
+        inventory_payload["coverage"]["catalogs"] = ["ALL_OBJECTS"]
+        inventory_output = (
+            "CATALOG_PAYLOAD_BEGIN:inventory\n" + json.dumps(inventory_payload)
+            + "\nCATALOG_PAYLOAD_END:inventory\nCATALOG_VERIFIED:inventory\n"
+        )
+        snapshot_payload = json.loads((Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json").read_text(encoding="utf-8"))
+        changing_payload = dict(snapshot_payload)
+        changing_payload["before"] = [{"owner": "APP", "name": "CONCURRENT_TABLE", "type": "TABLE"}]
+        changing_payload["after"] = list(changing_payload["before"])
+        snapshot_outputs = iter((changing_payload, snapshot_payload))
+        calls = {"inventory": 0, "snapshot": 0}
+
+        def capture_inventory(_target, _run_dir):
+            calls["inventory"] += 1
+            return parse_inventory(inventory_output, target)
+
+        def capture_snapshot(_target, inventory, keys, _run_dir):
+            calls["snapshot"] += 1
+            payload = next(snapshot_outputs)
+            output = (
+                "CATALOG_PAYLOAD_BEGIN:snapshot\n" + json.dumps(payload)
+                + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n"
+            )
+            return parse_snapshot(output, target, keys, inventory)
+
+        _, snapshot, checks, report = _preflight_snapshot(
+            migrations, target, self.root / "run",
+            capture_inventory, capture_snapshot,
+            lambda *_args, **_kwargs: self.passing_checks(),
+        )
+
+        self.assertEqual(calls, {"inventory": 2, "snapshot": 2})
+        self.assertTrue(checks.passed)
+        self.assertEqual(report.exit_code, 0, report.to_dict())
+        self.assertTrue(snapshot.synonyms)
+
+    def test_view_over_owner_or_public_synonym_requires_a_direct_select_grant(self):
+        fixture = Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        snapshot = parse_snapshot(
+            "CATALOG_PAYLOAD_BEGIN:snapshot\n"
+            + json.dumps(payload, separators=(",", ":"))
+            + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n",
+            Target("dev", "dev-profile", "APP", "APP", "development"),
+        )
+        checks = self.passing_checks()
+
+        for synonym_name in ("ZZ_PUBLIC_CUSTOMERS", "ZZ_PRIVATE_ORDERS"):
+            with self.subTest(synonym=synonym_name):
+                folder = self.add_folder(
+                    f"2026-10-02_view-{synonym_name.lower().replace('_', '-')}-r001",
+                    f"CREATE VIEW {synonym_name}_V AS SELECT ID FROM {synonym_name};\n",
+                )
+                report = preflight(load_batch(self.root, [f"migrations/{folder.name}"]), snapshot, checks)
+                self.assertEqual(report.exit_code, 0, report.to_dict())
+
+    def test_view_over_a_missing_table_still_reports_missing_prerequisite(self):
+        fixture = Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        snapshot = parse_snapshot(
+            "CATALOG_PAYLOAD_BEGIN:snapshot\n"
+            + json.dumps(payload, separators=(",", ":"))
+            + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n",
+            Target("dev", "dev-profile", "APP", "APP", "development"),
+        )
+        folder = self.add_folder(
+            "2026-10-02_view-missing-r001",
+            "CREATE VIEW ZZ_MISSING_V AS SELECT ID FROM ZZ_NO_SUCH_TABLE;\n",
+        )
+
+        report = preflight(load_batch(self.root, [f"migrations/{folder.name}"]), snapshot, self.passing_checks())
+
+        self.assertIn(
+            ("MISSING_PREREQUISITE", "ZZ_NO_SUCH_TABLE"),
+            [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+        )
+
+    def test_synonym_without_select_grant_does_not_satisfy_view_prerequisite(self):
+        fixture = Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        payload["synonyms"] = [
+            synonym for synonym in payload["synonyms"]
+            if synonym["name"] == "ZZ_PUBLIC_NO_GRANT"
+        ]
+        payload["grants"] = []
+        snapshot = parse_snapshot(
+            "CATALOG_PAYLOAD_BEGIN:snapshot\n"
+            + json.dumps(payload, separators=(",", ":"))
+            + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n",
+            Target("dev", "dev-profile", "APP", "APP", "development"),
+        )
+        folder = self.add_folder(
+            "2026-10-02_view-no-grant-r001",
+            "CREATE VIEW ZZ_NO_GRANT_V AS SELECT ID FROM ZZ_PUBLIC_NO_GRANT;\n",
+        )
+
+        report = preflight(load_batch(self.root, [f"migrations/{folder.name}"]), snapshot, self.passing_checks())
+
+        self.assertIn(
+            ("MISSING_PREREQUISITE", "ZZ_PUBLIC_NO_GRANT"),
+            [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+        )
+
+    def test_synonym_chain_to_missing_target_does_not_satisfy_view_prerequisite(self):
+        fixture = Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        payload["before"] = [
+            {"owner": "APP", "name": "ZZ_OWNER_CHAIN", "type": "SYNONYM", "status": "VALID"},
+            {"owner": "APP", "name": "ZZ_CHAIN_TARGET", "type": "SYNONYM", "status": "VALID"},
+        ]
+        payload["after"] = [dict(row) for row in payload["before"]]
+        payload["synonyms"] = [
+            {"owner": "APP", "name": "ZZ_OWNER_CHAIN", "table_owner": "APP", "table_name": "ZZ_CHAIN_TARGET"},
+            {"owner": "APP", "name": "ZZ_CHAIN_TARGET", "table_owner": "DATA_OWNER", "table_name": "ZZ_MISSING_TARGET"},
+        ]
+        payload["grants"] = []
+        snapshot = parse_snapshot(
+            "CATALOG_PAYLOAD_BEGIN:snapshot\n"
+            + json.dumps(payload, separators=(",", ":"))
+            + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n",
+            Target("dev", "dev-profile", "APP", "APP", "development"),
+        )
+        folder = self.add_folder(
+            "2026-10-02_view-through-dangling-chain-r001",
+            "CREATE VIEW ZZ_CHAIN_VIEW AS SELECT ID FROM ZZ_OWNER_CHAIN;\n",
+        )
+
+        report = preflight(load_batch(self.root, [f"migrations/{folder.name}"]), snapshot, self.passing_checks())
+
+        self.assertIn(
+            ("MISSING_PREREQUISITE", "ZZ_OWNER_CHAIN"),
+            [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+        )
+
+    def test_owner_synonym_takes_precedence_over_a_selectable_public_synonym(self):
+        fixture = Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        payload["synonyms"] = [
+            {"owner": "PUBLIC", "name": "ZZ_SHADOWED", "table_owner": "DATA_OWNER", "table_name": "CUSTOMERS"},
+            {"owner": "APP", "name": "ZZ_SHADOWED", "table_owner": "DATA_OWNER", "table_name": "NO_GRANT_TABLE"},
+        ]
+        payload["before"] = [
+            {"owner": "APP", "name": "ZZ_SHADOWED", "type": "SYNONYM", "status": "VALID"}
+        ]
+        payload["after"] = [dict(payload["before"][0])]
+        payload["grants"] = [
+            {"owner": "DATA_OWNER", "table_name": "CUSTOMERS", "grantee": "APP", "privilege": "SELECT"},
+        ]
+        snapshot = parse_snapshot(
+            "CATALOG_PAYLOAD_BEGIN:snapshot\n"
+            + json.dumps(payload, separators=(",", ":"))
+            + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n",
+            Target("dev", "dev-profile", "APP", "APP", "development"),
+        )
+        folder = self.add_folder(
+            "2026-10-02_view-shadowed-synonym-r001",
+            "CREATE VIEW ZZ_SHADOWED_V AS SELECT ID FROM ZZ_SHADOWED;\n",
+        )
+
+        report = preflight(load_batch(self.root, [f"migrations/{folder.name}"]), snapshot, self.passing_checks())
+
+        self.assertIn(
+            ("MISSING_PREREQUISITE", "ZZ_SHADOWED"),
             [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
         )
 
