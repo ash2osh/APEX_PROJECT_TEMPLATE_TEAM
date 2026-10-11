@@ -1,6 +1,8 @@
--- APEX 26.2 public-view adapter; caller starts a read-only transaction.
+-- APEX 26.2 adapter: CAPTURE runs in a read-only transaction; RESTORE_CONTEXT
+-- validates the target and sets the workspace context for the following API calls.
 DEFINE lifecycle_workspace_hex = '&1'
 DEFINE lifecycle_app_id = '&2'
+DEFINE lifecycle_action = '&3'
 DECLARE
   v_workspace VARCHAR2(255) := UTL_I18N.RAW_TO_CHAR(HEXTORAW('&&lifecycle_workspace_hex'),'AL32UTF8');
   v_app NUMBER := TO_NUMBER('&&lifecycle_app_id');
@@ -27,6 +29,10 @@ BEGIN
   SELECT COUNT(*), MAX(owner), MAX(workspace) INTO v_count,v_owner,v_app_workspace FROM apex_applications WHERE application_id=v_app;
   IF v_count>1 OR (v_count=1 AND (v_owner<>SYS_CONTEXT('USERENV','CURRENT_SCHEMA') OR v_app_workspace<>v_workspace)) THEN RAISE_APPLICATION_ERROR(-20073,'Lifecycle application scope mismatch'); END IF;
   v_present:=v_count=1;
+  IF '&&lifecycle_action'='RESTORE_CONTEXT' THEN
+    IF NOT v_present THEN RAISE_APPLICATION_ERROR(-20073,'Lifecycle application is absent for automation restore'); END IF;
+    DBMS_OUTPUT.PUT_LINE('LIFECYCLE_CONTEXT_VERIFIED');
+  ELSIF '&&lifecycle_action'='CAPTURE' THEN
   apex_json.initialize_clob_output;
   apex_json.open_object;
   apex_json.write('schemaVersion',1);
@@ -75,6 +81,9 @@ BEGIN
   DBMS_OUTPUT.PUT_LINE('LIFECYCLE_PAYLOAD_END');
   apex_json.free_output;
   DBMS_OUTPUT.PUT_LINE('LIFECYCLE_VERIFIED');
+  ELSE
+    RAISE_APPLICATION_ERROR(-20073,'Unknown lifecycle action');
+  END IF;
 EXCEPTION WHEN OTHERS THEN
   apex_json.free_output;
   RAISE;

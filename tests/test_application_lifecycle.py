@@ -1,5 +1,8 @@
 """Runtime verification cannot confuse missing visibility with a healthy app."""
 import copy
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,3 +96,84 @@ class LifecycleTests(unittest.TestCase):
         def missing(target,driver,directory): return SqlclResult(0,'LIFECYCLE_VERIFIED\n',directory)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ValueError): lifecycle.capture_lifecycle(TARGET,'DEMO',150,Path(directory),_runner=missing)
+
+    def test_restore_enables_only_pre_import_active_automations_and_prints_readback(self):
+        from scripts.sqlcl_session import SqlclResult
+
+        before = snapshot()
+        before['automations'] = [
+            {'staticId': 'ACTIVE_AUTO', 'status': 'ACTIVE'},
+            {'staticId': 'DISABLED_AUTO', 'status': 'DISABLED'},
+        ]
+        imported = copy.deepcopy(before)
+        imported['automations'] = [
+            {'staticId': 'ACTIVE_AUTO', 'status': 'DISABLED'},
+            {'staticId': 'DISABLED_AUTO', 'status': 'DISABLED'},
+            {'staticId': 'NEW_AUTO', 'status': 'DISABLED'},
+        ]
+        restored = copy.deepcopy(imported)
+        restored['automations'][0]['status'] = 'ACTIVE'
+        calls = []
+
+        def runner(target, driver, directory):
+            text = driver.read_text(encoding='utf-8')
+            if 'automation-restore-driver.sql' in str(driver):
+                calls.append(text)
+                return SqlclResult(0, 'LIFECYCLE_CONTEXT_VERIFIED\nAUTOMATION_RESTORE_OK:4143544956455F4155544F\nAUTOMATION_RESTORE_COMPLETE\n', directory)
+            if 'observation-before-enable' in str(driver):
+                data = imported
+            else:
+                data = restored
+            return SqlclResult(0, 'LIFECYCLE_PAYLOAD_BEGIN\n' + json.dumps(data) + '\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED\n', directory)
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as output:
+            report = lifecycle.restore_automations(TARGET, 'DEMO', 150, before, Path(directory), _runner=runner)
+
+        self.assertEqual(report['status'], 'pass')
+        self.assertEqual(report['enabledStaticIds'], ['ACTIVE_AUTO'])
+        driver = calls[0]
+        self.assertEqual(driver.count('APEX_AUTOMATION.ENABLE'), 1)
+        self.assertIn("APEX_AUTOMATION.ENABLE(p_application_id => 150, p_static_id => UTL_I18N.RAW_TO_CHAR(HEXTORAW('4143544956455F4155544F'),'AL32UTF8'))", driver)
+        self.assertLess(driver.index('RESTORE_CONTEXT'), driver.index('APEX_AUTOMATION.ENABLE'))
+        self.assertNotIn('DISABLED_AUTO', driver)
+        self.assertNotIn('NEW_AUTO', driver)
+        self.assertIn('ACTIVE_AUTO | ACTIVE | ACTIVE', output.getvalue())
+        self.assertIn('DISABLED_AUTO | DISABLED | DISABLED', output.getvalue())
+
+    def test_restore_reports_attention_when_a_previously_active_automation_stays_disabled(self):
+        from scripts.sqlcl_session import SqlclResult
+
+        before = snapshot()
+        before['automations'] = [{'staticId': 'ACTIVE_AUTO', 'status': 'ACTIVE'}]
+        imported = copy.deepcopy(before)
+        imported['automations'][0]['status'] = 'DISABLED'
+        final = copy.deepcopy(imported)
+
+        def runner(target, driver, directory):
+            if 'automation-restore-driver.sql' in str(driver):
+                return SqlclResult(0, 'LIFECYCLE_CONTEXT_VERIFIED\nAUTOMATION_RESTORE_OK:4143544956455F4155544F\nAUTOMATION_RESTORE_COMPLETE\n', directory)
+            data = imported if 'observation-before-enable' in str(driver) else final
+            return SqlclResult(0, 'LIFECYCLE_PAYLOAD_BEGIN\n' + json.dumps(data) + '\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED\n', directory)
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            report = lifecycle.restore_automations(TARGET, 'DEMO', 150, before, Path(directory), _runner=runner)
+
+        self.assertEqual(report['status'], 'attention')
+        self.assertEqual(report['reasons'], ['previously active automation is not active after restore: ACTIVE_AUTO'])
+
+    def test_restore_action_exits_nonzero_on_attention(self):
+        before = snapshot()
+        with tempfile.TemporaryDirectory() as directory:
+            before_path = Path(directory) / 'before.json'
+            before_path.write_text(json.dumps(before), encoding='utf-8')
+            output = io.StringIO()
+            with contextlib.redirect_stderr(output), patch.object(
+                lifecycle, 'restore_automations', return_value={'status': 'attention', 'reasons': ['missed restore']}
+            ):
+                result = lifecycle.main([
+                    'restore-automations', '--connection', 'docker-demo', '--expected-user', 'DEMO',
+                    '--schema', 'DEMO', '--workspace', 'DEMO', '--environment', 'dev',
+                    '--run-dir', str(Path(directory) / 'run'), '--app-id', '150', '--before', str(before_path),
+                ])
+        self.assertEqual(result, 2)
+        self.assertIn('missed restore', output.getvalue())

@@ -37,7 +37,7 @@ operational scripts, `.env`, manifest and lock.
 | --- | --- |
 | APEX apps as text in Git | `export` copies a live app into APEXlang files you can review, diff and commit. |
 | Two ways to work | **Builder-first** (change it in APEX, export it) or **file-first** (edit the files, publish them). |
-| Safe publish | Refuses to overwrite newer Builder work, stamps who published and when, then re-exports the app and checks it byte for byte against your files. |
+| Safe publish | Refuses newer Builder work, restores only automations that were active before import, then verifies normalized source. |
 | SQL migrations | Dated folders of numbered SQL plus `checks.json`; a live check for conflicts before applying; a verified receipt after. |
 | Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production. |
 | Environment baselines | Read-only source, grant and allow-listed reference-row exports plus reviewed structure, grant, source and optional reference-data migrations from `baseline.json`. |
@@ -291,7 +291,7 @@ Pass `--schema <NAME>` to narrow a command to one schema. `doctor` and
 | `backup-db` | Runs the tables scope for each tables schema and the code scope for each code schema, plus the ORDS scope for each ORDS schema when the optional ORDS profile exists. Each has a staging directory, a completeness check, and a dirty-mirror check. Nothing is installed until every schema verifies; one mirror replacement installs them all. `--schema` narrows the run. |
 | `backup-ords` | Exports each ORDS schema (`ORDS_SCHEMA`, optional) to `database/<SCHEMA>/ords/schema.sql` and replaces only that folder. `--schema` narrows the run; an ORDS-only schema is selectable. |
 | `publish <id>` | Requires the app folder, descriptor, and live app parsing schema to agree and be listed, then uses that schema's connection. Full mode keeps the app-wide drift guard; selected-page mode verifies a fresh merged snapshot. |
-| `deploy <id> --env staging\|prod` | The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection. |
+| `deploy <id> --env staging\|prod` | The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection; imports restore previously active automations. |
 | `migrate`, `check-conflicts` | Uses `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/`; the folder selects the target entry. Scans, revision ordering, and receipts are scoped to one schema, and one invocation cannot mix schemas. |
 | `compare-schema` | Requires `--schema` when more than one schema is configured and compares that schema across the selected environments. |
 | `compare-env` | Requires `--schema` when more than one schema is configured and compares that schema's full catalog across the selected environments. |
@@ -376,12 +376,22 @@ restores the unstamped file. The tag appears wherever the theme renders
 `#APP_VERSION#`, such as the Universal Theme footer, and `deploy` ships it to
 staging and production unchanged.
 
-After a successful DEV import, `publish` exports the app again and compares the
-APEXlang file names and bytes with the local source, excluding the local
-deployment descriptors and export marker. It advances the drift baseline only
-when that source matches and the live Builder revision stayed stable during the
-verification export. If SQLcl reports an error, the source differs, or the
-revision is ambiguous, publish fails and leaves the old baseline in place.
+After a successful import, `publish` restores exactly the automations recorded
+as ACTIVE before import, then prints their before/after status table. Full
+publish and deployment compare normalized APEXlang source, excluding local deployment
+descriptors and the export marker. Normalization removes `//` comment lines,
+sorts `textMessage` blocks by key and language, report `column` blocks by name,
+and `displayColumn` blocks by column, and strips trailing whitespace and blank
+lines. Real differences are reported for every file with its first differing
+line. Cosmetic-only differences pass with one summary line. Pass `--strict-bytes`
+to require raw byte equality; `--no-restore-automations` keeps the previous
+post-import automation behavior.
+
+DEV advances the drift baseline only when the imported source matches the
+normalized comparison, a second re-export has the same normalized form, and the
+live Builder revision stays stable across both exports. If SQLcl reports an
+error, the source differs, the second export is unstable, or the revision is
+ambiguous, publish fails and leaves the old baseline in place.
 SQLcl can exit successfully without importing, for example when a descriptor
 names an unknown workspace, so publish also requires its `Import successful.`
 line.
@@ -690,8 +700,8 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
 | `scripts/team.sh doctor` | Validate `.env` and check the DEV SQLcl identity. |
 | `scripts/team.sh export <id>` | Export one numeric app from shared DEV Builder. |
-| `scripts/team.sh publish <id> --env dev` | Drift-check and import one app to DEV. |
-| `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
+| `scripts/team.sh publish <id> --env dev [--strict-bytes] [--no-restore-automations]` | Drift-check and import one app to DEV; by default restores automations that were active before import. |
+| `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice] [--no-restore-automations]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
 | `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. |
@@ -708,7 +718,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>` | Remove complete named modules from an ORDS export for a rollout import step. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
-| `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
+| `scripts/team.sh deploy <id> --env <staging\|prod> [--manual] [--strict-bytes] [--no-restore-automations]` | Confirm a promotion or print a DBA runbook with the automation restore step. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
 

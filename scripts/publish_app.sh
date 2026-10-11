@@ -4,13 +4,15 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/publish_app.sh <app_id> [--env <dev|staging|prod>] [--force]
-       scripts/publish_app.sh <app_id> --env dev --file <pages/file.apx> [--file ...] [--no-team-notice]
+Usage: scripts/publish_app.sh <app_id> [--env <dev|staging|prod>] [--force] [--strict-bytes] [--no-restore-automations]
+       scripts/publish_app.sh <app_id> --env dev --file <pages/file.apx> [--file ...] [--no-team-notice] [--no-restore-automations]
        scripts/publish_app.sh <app_id> --env staging|prod --app-source-dir <dir>
 
 Imports one APEXlang application with deployments/<env>.json. Staging and
 production imports require interactive confirmation. --force skips only the
 Builder drift check; it does not skip target confirmation or identity checks.
+--strict-bytes keeps byte-exact source comparison. --no-restore-automations
+preserves pre-change behavior by leaving post-import automation state untouched.
 USAGE
 }
 
@@ -30,6 +32,8 @@ force=false
 describe=false
 selected_files=()
 no_team_notice=false
+restore_automations=true
+strict_bytes=false
 app_source_override=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -48,6 +52,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-team-notice)
       no_team_notice=true; shift
+      ;;
+    --no-restore-automations)
+      restore_automations=false; shift
+      ;;
+    --strict-bytes)
+      strict_bytes=true; shift
       ;;
     --describe)
       describe=true
@@ -74,6 +84,7 @@ if [ "${#selected_files[@]}" -gt 0 ]; then
   [ "$force" = false ] || fail 'partial publishing does not accept --force'
   [ "$describe" = false ] || fail '--describe cannot be combined with --file'
   [ -z "$app_source_override" ] || fail '--app-source-dir cannot be combined with --file'
+  [ "$strict_bytes" = false ] || fail '--strict-bytes is not supported for selected-page publishing'
 elif [ "$no_team_notice" = true ]; then
   fail '--no-team-notice requires --file'
 fi
@@ -237,6 +248,7 @@ if [ "${#selected_files[@]}" -gt 0 ]; then
   partial_args=()
   for selected_file in "${selected_files[@]}"; do partial_args+=(--file "$selected_file"); done
   [ "$no_team_notice" = false ] || partial_args+=(--no-team-notice)
+  [ "$restore_automations" = true ] || partial_args+=(--no-restore-automations)
   exec python3 "$REPO_ROOT/scripts/partial_publish.py" "$app_id" "${partial_args[@]}" \
     --source-dir "$app_dir" --repo-root "$REPO_ROOT" --workspace "$workspace_name" \
     --schema "$parsing_schema" --connection "$sqlcl_connection" --expected-user "$expected_user" \
@@ -467,9 +479,14 @@ fi
 restore_unstamped=false
 import_unverified=true
 
-# Re-export from the selected target and compare exact APEXlang bytes before
-# claiming success. In DEV this same stable observation advances the drift
-# baseline; staging and production checks never modify the DEV marker.
+if [ "$restore_automations" = true ]; then
+  python3 "$REPO_ROOT/scripts/application_lifecycle.py" restore-automations "${lifecycle_args[@]}" \
+    --before "$staging_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$staging_dir/automation-restore"
+fi
+
+# Re-export from the selected target and compare normalized APEXlang source
+# before claiming success. DEV takes a second stable snapshot before advancing
+# the drift baseline; staging and production do not modify the DEV marker.
 verify_run_dir="$staging_dir/post-import/runs/$app_id"
 verify_parent="$verify_run_dir/apps/$parsing_schema"
 mkdir -p "$verify_parent"
@@ -513,7 +530,50 @@ verify_args=(
   --repo-root "$REPO_ROOT"
   --deployment-file "$deployment_file" --deployment-state "$verify_run_dir/.apex-deployment-state.json"
 )
-python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}"
+if [ "$strict_bytes" = true ]; then verify_args+=(--strict-bytes); fi
+stability_args=()
+if [ "$app_environment" = dev ]; then
+  stability_run_dir="$staging_dir/post-import-stability/runs/$app_id"
+  stability_parent="$stability_run_dir/apps/$parsing_schema"
+  mkdir -p "$stability_parent"
+  stability_sqlcl_output="$staging_dir/post-import-stability/sqlcl-output.log"
+  stability_status=0
+  (
+    invoke_sqlcl_safe "$stability_run_dir" \
+      -S -noupdates -name "$sqlcl_connection" \
+      "@$REPO_ROOT/scripts/export_apps.sql" \
+      "$parsing_schema" "$app_id" "$target_environment" "$expected_user" \
+      < "$sqlcl_stdin"
+  ) > "$stability_sqlcl_output" 2>&1 || stability_status=$?
+  if [ "$stability_status" -ne 0 ]; then
+    if [ "$stability_status" -gt 128 ]; then exit "$stability_status"; fi
+    cat "$stability_sqlcl_output" >&2
+    fail "second post-import APEX export failed; the imported source was not verified as stable"
+  fi
+  cat "$stability_sqlcl_output"
+  if grep -Eq '(SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:' "$stability_sqlcl_output"; then
+    fail "SQLcl reported an error during the second post-import APEX export"
+  fi
+  stability_dirs=()
+  while IFS= read -r -d '' stability_dir; do
+    stability_dirs+=("$stability_dir")
+  done < <(find "$stability_parent" -mindepth 1 -maxdepth 1 -type d -print0)
+  if [ "${#stability_dirs[@]}" -ne 1 ]; then
+    fail "expected exactly one second post-import export for application $app_id, found ${#stability_dirs[@]}"
+  fi
+  stability_exported_dir="${stability_dirs[0]}"
+  if [ ! -f "$stability_exported_dir/application.apx" ] || [ ! -f "$stability_exported_dir/.apex/apexlang.json" ]; then
+    fail "second post-import export for application $app_id is missing required APEXlang source files"
+  fi
+  "$REPO_ROOT/scripts/normalize_apx.sh" "$stability_exported_dir"
+  stability_args=(
+    --stability-export-dir "$stability_exported_dir"
+    --stability-before-file "$stability_run_dir/.apex-export-before.txt"
+    --stability-after-file "$stability_run_dir/.apex-export-after.txt"
+    --stability-deployment-state "$stability_run_dir/.apex-deployment-state.json"
+  )
+fi
+python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}" "${stability_args[@]}"
 printf '%s\n' '{"schemaVersion":1,"sourceVerified":true,"lifecycleStatus":"unavailable"}' > "$staging_dir/publish-verification.json"
 python3 "$REPO_ROOT/scripts/application_lifecycle.py" verify "${lifecycle_args[@]}" \
   --before "$staging_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$staging_dir/lifecycle-after" \
@@ -523,7 +583,7 @@ if [ "$app_environment" = dev ]; then
   python3 "$REPO_ROOT/scripts/application_lock.py" release "${lock_args[@]}"
   lock_held=false
   import_attempted=false
-  python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}" --record-baseline
+  python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}" "${stability_args[@]}" --record-baseline
 fi
 import_unverified=false
 printf 'Published APEX App %s to %s (%s / %s).\n' \

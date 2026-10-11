@@ -194,6 +194,9 @@ class PartialBackend:
     def verify_lifecycle(self,before):
         self.calls.append('lifecycle-after')
         return {'status':'unavailable' if self.fail=='lifecycle-after' else 'pass'}
+    def restore_automations(self,before):
+        self.calls.append('automation-restore')
+        return {'status':'attention' if self.fail=='automation-restore' else 'pass'}
     def export(self, name):
         self.calls.append('export'); self.count += 1
         destination = self.root / ('export-' + str(self.count))
@@ -229,6 +232,15 @@ class PartialWorkflowTests(unittest.TestCase):
                 self.assertEqual(report['lockRetained'],failure=='lifecycle-after')
                 self.assertEqual(report['sourceVerified'],failure=='lifecycle-after')
                 self.assertEqual('import' in backend.calls,failure=='lifecycle-after')
+    def test_partial_publish_restores_automations_after_import_before_export(self):
+        from scripts.partial_publish import publish_partial
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); source,backend=self.prepare(root)
+            publish_partial(source,100,['pages/p00001-home.apx'],'DEMO',root/'run',backend,'ALICE')
+            self.assertLess(backend.calls.index('import'),backend.calls.index('automation-restore'))
+            self.assertLess(backend.calls.index('automation-restore'),backend.calls.index('export', backend.calls.index('import')))
+            report=json.loads((root/'run/partial.json').read_text())
+            self.assertEqual(report['automationRestoreStatus'],'pass')
     def prepare(self, root, fail=None, no_notice=False):
         from scripts.record_export_state import marker_payload, AppState
         source, _ = self.fixture(root)

@@ -144,7 +144,7 @@ def require_no_notice_cutoff(live: Path, selected_descriptor: dict | None = None
 
 def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
                     run_dir: Path, backend, developer_name: str,
-                    *, no_team_notice: bool = False) -> Path:
+                    *, no_team_notice: bool = False, restore_automations: bool = True) -> Path:
     """Return a verified canonical stage, leaving original files untouched.
 
     Installation requires an exact pre-import source receipt under the shared
@@ -169,7 +169,7 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
     run_dir.mkdir(parents=True, mode=0o700)
     shutil.copytree(source, run_dir / 'source-before')
     report = {'applicationId': app_id, 'selectedFiles': list(files), 'status': 'started',
-              'sourceVerified': False, 'lifecycleStatus': 'unavailable', 'importAttempted': False, 'lockRetained': False, 'noTeamNoticeRequested': no_team_notice}
+              'sourceVerified': False, 'lifecycleStatus': 'unavailable', 'automationRestoreStatus': 'unavailable', 'importAttempted': False, 'lockRetained': False, 'noTeamNoticeRequested': no_team_notice}
     held = False
     try:
         backend.validate_target()
@@ -202,6 +202,13 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
         backend.check()
         report['importAttempted'] = True
         backend.import_pages(stage, tuple(stage / selected_relative(path) for path in selected), version, locks)
+        if restore_automations:
+            restore_report = backend.restore_automations(lifecycle_before)
+            report['automationRestoreStatus'] = restore_report['status']
+            if restore_report['status'] != 'pass':
+                raise ValueError('automation restore did not verify; inspect private partial diagnostics')
+        else:
+            report['automationRestoreStatus'] = 'skipped'
         observed = backend.export('after-import')
         normalize_source(observed)
         preserve_authored(source, observed)
@@ -282,6 +289,10 @@ class NativePartialBackend(NativeBackend):
         from scripts.application_lifecycle import verify_after_import
         return verify_after_import(self.target, self.workspace, self.app_id, before, self.base / 'lifecycle-after')
 
+    def restore_automations(self, before):
+        from scripts.application_lifecycle import restore_automations
+        return restore_automations(self.target, self.workspace, self.app_id, before, self.base / 'automation-restore')
+
     def export(self, name):
         result = super().export(name)
         if name.startswith('live-'):
@@ -355,6 +366,7 @@ def main(argv=None):
     parser.add_argument('--developer', required=True)
     parser.add_argument('--developer-name', required=True)
     parser.add_argument('--no-team-notice', action='store_true', help='assert separate workspace accounts and the agreed guarded workflow; all ownership/cutoff checks still apply')
+    parser.add_argument('--no-restore-automations', action='store_true', help='preserve the previous import behavior without restoring pre-import active automations')
     args = parser.parse_args(argv)
     base = args.repo_root / 'scratch' / ('apex-partial.' + uuid.uuid4().hex)
     try:
@@ -363,7 +375,7 @@ def main(argv=None):
         original_marker = baseline_hash(source)
         target = Target('dev', args.connection, args.expected_user, args.schema, args.classification)
         backend = NativePartialBackend(target, args.app_id, source, args.workspace, base, args.developer, args.repo_root)
-        stage = publish_partial(source, args.app_id, args.file, args.workspace, base / 'publication', backend, args.developer_name, no_team_notice=args.no_team_notice)
+        stage = publish_partial(source, args.app_id, args.file, args.workspace, base / 'publication', backend, args.developer_name, no_team_notice=args.no_team_notice, restore_automations=not args.no_restore_automations)
         relative = source.relative_to(args.repo_root.resolve()).as_posix()
         receipt = base / 'verified-local-source.json'
         receipt.write_text(json.dumps({'schemaVersion': 1, 'relativeDirectory': relative, 'sourceFiles': original, 'baselineHash': original_marker}) + '\n', encoding='utf-8')

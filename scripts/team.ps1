@@ -35,8 +35,9 @@ Commands:
   export <app_id>                             Export one numeric APEX app from DEV
   upgrade-apexlang <app_id> --env dev --mode builder|files
                                               Convert source explicitly to canonical APEX 26.2
-  publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
-  publish <app_id> --file pages/<file>.apx [--file ...] [--no-team-notice]
+  publish <app_id> [--env dev] [--force] [--strict-bytes] [--no-restore-automations]
+                                              Drift-check, restore active automations and import to DEV
+  publish <app_id> --file pages/<file>.apx [--file ...] [--no-team-notice] [--no-restore-automations]
                                               Verify selected existing DEV pages and synchronize source
   app-lock <app_id> [--env dev] [--comment <text>]
                                               Acquire a native DEV application lock
@@ -69,7 +70,7 @@ Commands:
                                               Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
-  deploy <app_id> --env <staging|prod> [--manual]
+  deploy <app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations]
                                               Confirm a promotion or print a DBA runbook
   upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.1|26.2] [--dry-run]
                                               Update template-owned files from the template
@@ -464,7 +465,7 @@ try {
       if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
     }
     "deploy" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 deploy <numeric_app_id> --env <staging|prod> [--manual]" }
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 deploy <numeric_app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations]" }
       Invoke-TeamBash -ScriptName "deploy.sh" -ScriptArguments $Arguments
     }
     "verify-local" {

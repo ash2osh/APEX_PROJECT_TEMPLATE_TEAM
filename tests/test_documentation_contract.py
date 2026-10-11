@@ -63,8 +63,11 @@ PUBLISH_REFUSALS = (
     ("scripts/publish_app.sh", "SQLcl did not verify the imported application"),
     ("scripts/publish_app.sh", "SQLcl did not report a successful APEX import"),
     ("scripts/publish_app.sh", "post-import APEX export failed"),
+    ("scripts/publish_app.sh", "second post-import APEX export failed"),
+    ("scripts/application_lifecycle.py", "automation restore did not verify"),
     ("scripts/verify_publish_state.py", "APEXlang source file set does not match the post-import re-export"),
     ("scripts/verify_publish_state.py", "APEXlang source bytes do not match the post-import re-export"),
+    ("scripts/verify_publish_state.py", "post-import APEXlang source was not stable across the second post-import re-export"),
     ("scripts/verify_publish_state.py", "is not visible in the post-import state"),
     ("scripts/verify_publish_state.py", "changed while its post-import source was being verified"),
     ("scripts/verify_publish_state.py", "same database second"),
@@ -120,8 +123,11 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, readme)
-        self.assertIn("After a successful DEV import", readme)
-        self.assertIn("APEXlang file names and bytes", readme)
+        self.assertIn("After a successful import", readme)
+        self.assertIn("normalized APEXlang source", readme)
+        self.assertIn("second re-export has the same normalized form", readme)
+        self.assertIn("--strict-bytes", readme)
+        self.assertIn("--no-restore-automations", readme)
         self.assertIn("leaves the old baseline in place", readme)
         self.assertIn("commands such as `SET DEFINE`", readme)
         self.assertIn("APEX does not stamp `last_updated_on` while importing", readme)
@@ -187,8 +193,8 @@ class DocumentationContractTests(unittest.TestCase):
                 self.assertIn("docs/publish-rules.md", path.read_text(encoding="utf-8"))
 
     def test_publish_guide_explains_the_first_publish_of_a_generated_starter_app(self) -> None:
-        # `apex generate` writes files APEX does not export back byte for byte, so the first
-        # publish imports the app and then refuses to record a baseline; the guide says what to do.
+        # `apex generate` can leave source differences beyond the documented normalizer; the
+        # guide says to export canonical source and reconcile before the normal workflow.
         guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
         for phrase in ("apex generate", "extra blank line", "deinstall", "scripts/team.sh export <id>"):
             with self.subTest(phrase=phrase):

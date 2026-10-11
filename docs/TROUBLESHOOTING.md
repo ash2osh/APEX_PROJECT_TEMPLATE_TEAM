@@ -63,7 +63,12 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `ORA-20016: Live application changed after the Builder drift check` | Someone saved or imported the app in the moments between the drift check and the import. Nothing was imported. | `scripts/team.sh export <id>`, review and merge, publish again. |
 | `the application path contains characters SQLcl cannot pass` | The repository path contains `'`, `"` or `&`. | Move the checkout to a path without them. |
 | `SQLcl did not report a successful APEX import` | SQLcl exited without importing, for example because the workspace name in the descriptor is wrong. | Check `workspace.name` in the descriptor. |
-| `APEXlang source bytes do not match the post-import re-export` | APEX normalized the source on import. | Run `export`, commit the canonical source, and publish again. |
+| `post-import APEX export failed` | The first verification export failed. | Check SQLcl output and the descriptor target, then reconcile the live app before retrying. |
+| `second post-import APEX export failed` | The DEV stability export failed, so the baseline was not advanced. | Check SQLcl output and target availability, then reconcile the live app before retrying. |
+| `APEXlang source bytes do not match the post-import re-export` | One or more real differences remain after normalization, or `--strict-bytes` found raw byte differences. The output names every changed file and first differing line. | Review each named file. Export and reconcile real differences; cosmetic-only differences are reported separately and pass by default. |
+| `APEXlang cosmetic-only differences: ...` | APEX removed comment lines, reordered the documented component blocks or changed trailing whitespace. | No action is needed when normalized output matches. Use `--strict-bytes` if raw file identity is required. |
+| `automation restore did not verify` | A call or read-back did not verify all automations that were ACTIVE before import. | Keep the publish recovery evidence, inspect `automation-restore-report.json` and the live automation states, then reconcile before retrying. `--no-restore-automations` skips restoration but does not skip lifecycle verification. |
+| `post-import APEXlang source was not stable across the second post-import re-export` | The normalized source or app revision changed between the two DEV exports. | Keep the old baseline, check for concurrent Builder saves/imports and export/merge before retrying. |
 
 ## Migrations
 
