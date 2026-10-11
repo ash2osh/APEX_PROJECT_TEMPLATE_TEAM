@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -91,6 +92,29 @@ class SchemaCatalogTests(unittest.TestCase):
                 ("DATA_OWNER", "ORDERS", "PUBLIC", "SELECT"),
             },
         )
+
+    def test_snapshot_preserves_verified_synonym_target_existence_and_type(self) -> None:
+        payload = fixture_payload("view-synonyms.json")
+        payload["synonyms"][0]["target_exists"] = True
+        payload["synonyms"][0]["target_type"] = "TABLE"
+
+        snapshot = parse_snapshot(framed(payload), Target("dev", "dev-profile", "APP", "APP", "development"))
+
+        synonym = next(item for item in snapshot.synonyms if item.name == "ZZ_PUBLIC_CUSTOMERS")
+        self.assertIs(getattr(synonym, "target_exists", None), True)
+        self.assertEqual(getattr(synonym, "target_type", None), "TABLE")
+
+    def test_owner_synonym_catalog_keeps_privileged_dictionary_references_dynamic(self) -> None:
+        source = (ROOT / "scripts" / "schema_catalog.sql").read_text(encoding="utf-8")
+        start = source.index("PROCEDURE add_dependency_catalogs IS")
+        end = source.index("PROCEDURE add_definition(", start)
+        procedure = source[start:end]
+        dynamic_literals_removed = re.sub(r"q'~.*?~'", " ", procedure, flags=re.DOTALL | re.IGNORECASE)
+        executable = re.sub(r"'(?:''|[^'])*'", " ", dynamic_literals_removed, flags=re.DOTALL).upper()
+
+        self.assertNotRegex(executable, r"\bDBA_(?:SYNONYMS|TAB_PRIVS|OBJECTS)\b")
+        self.assertIn("DBA_SYNONYMS", procedure.upper())
+        self.assertIn("DBA_TAB_PRIVS", procedure.upper())
 
     def test_inventory_signature_ignores_status_ddl_and_object_metadata_changes(self) -> None:
         inventory_payload = fixture_payload("owner-inventory.json")
@@ -337,12 +361,24 @@ class SchemaCatalogTests(unittest.TestCase):
             with self.subTest(catalog=catalog):
                 self.assertIn(catalog, source)
         self.assertIn("PRIVILEGE = 'SELECT'", source)
-        metadata_branch = source.split("IF L_PATH = 'METADATA_PRIVILEGE' THEN", 1)[1].split("ELSE", 1)[0]
-        owner_session_branch = source.split("IF L_PATH = 'METADATA_PRIVILEGE' THEN", 1)[1].split("ELSE", 1)[1]
-        self.assertIn("SELECT DISTINCT PRIVILEGE_ROW.OWNER", metadata_branch)
-        self.assertIn("SYNONYM_ROW.TABLE_OWNER = PRIVILEGE_ROW.OWNER", metadata_branch)
-        self.assertIn("SELECT DISTINCT PRIVILEGE_ROW.TABLE_SCHEMA OWNER", owner_session_branch)
-        self.assertIn("SYNONYM_ROW.TABLE_OWNER = PRIVILEGE_ROW.TABLE_SCHEMA", owner_session_branch)
+        dependency_start = source.index("PROCEDURE ADD_DEPENDENCY_CATALOGS IS")
+        dependency_end = source.index("PROCEDURE ADD_DEFINITION(", dependency_start)
+        dependency_procedure = source[dependency_start:dependency_end]
+        dynamic_queries = re.findall(
+            r"OPEN\s+DEPENDENCY_CURSOR\s+FOR\s+Q'~(.*?)~'",
+            dependency_procedure,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        self.assertEqual(len(dynamic_queries), 4)
+        metadata_synonyms, owner_synonyms, metadata_grants, owner_grants = dynamic_queries
+        self.assertIn("FROM DBA_SYNONYMS S", metadata_synonyms)
+        self.assertIn("FROM DBA_TAB_PRIVS P", metadata_grants)
+        self.assertIn("P.OWNER", metadata_grants)
+        self.assertIn("S.TABLE_OWNER = P.OWNER", metadata_grants)
+        self.assertIn("FROM ALL_SYNONYMS S", owner_synonyms)
+        self.assertIn("FROM ALL_TAB_PRIVS P", owner_grants)
+        self.assertIn("P.TABLE_SCHEMA OWNER", owner_grants)
+        self.assertIn("S.TABLE_OWNER = P.TABLE_SCHEMA", owner_grants)
         self.assertIn("L_CATALOGS.APPEND('SYNONYMS')", source)
         self.assertIn("L_CATALOGS.APPEND('OBJECT_GRANTS')", source)
         self.assertIn("L_PAYLOAD.PUT('SCHEMAVERSION', 2)", source)

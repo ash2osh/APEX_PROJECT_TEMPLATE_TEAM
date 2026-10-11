@@ -49,6 +49,8 @@ Commands:
   revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
+  query --env <env> --connection <profile> [--file <path> | SQL]
+                                              Run one bounded, conservative SELECT read-only
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
                                               Run an ordered, hash-checked deployment manifest
   compare-schema [--from <env>] (--to <env>|--env <env>)
@@ -384,6 +386,10 @@ try {
         }
       }
       Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments $migrateArguments
+    }
+    "query" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 query --env dev|staging|prod --connection tables|code|apex|ords|migration [--file <path> | SQL]" }
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("query") + @($Arguments))
     }
     "revise" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 revise <folder> [--reason TEXT] | revise --check <folder>" }

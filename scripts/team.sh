@@ -25,6 +25,8 @@ Commands:
   revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
+  query --env <env> --connection <profile> [--file <path> | SQL]
+                                              Run one bounded, conservative SELECT read-only
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
                                               Run an ordered, hash-checked deployment manifest
   compare-schema [--from <env>] (--to <env>|--env <env>)
@@ -263,6 +265,12 @@ case "$command_name" in
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/migrate.sh" "$@"
+    ;;
+  query)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh query --env dev|staging|prod --connection tables|code|apex|ords|migration [--file <path> | SQL]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.read_only_query "$@"
     ;;
   revise)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh revise <folder> [--reason TEXT] | revise --check <folder>"

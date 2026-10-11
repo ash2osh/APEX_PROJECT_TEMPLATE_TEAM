@@ -56,6 +56,7 @@ class TeamCliTests(unittest.TestCase):
             "app-unlock",
             "check-conflicts",
             "migrate",
+            "query",
             "compare-schema",
             "compare-env",
             "--emit-dba-script <file>",
@@ -67,6 +68,24 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn(command, result.stdout)
         self.assertIn("--env dev|staging|prod", result.stdout)
         self.assertIn("--pattern", result.stdout)
+
+    def test_query_command_is_exposed_and_rejects_non_select_before_loading_configuration(self) -> None:
+        for entry in ("team.sh", "team.ps1"):
+            if entry.endswith("ps1") and not shutil.which("pwsh"):
+                continue
+            launcher = [BASH] if entry.endswith("sh") else ["pwsh", "-NoProfile", "-File"]
+            result = subprocess.run(
+                [*launcher, str(ROOT / "scripts" / entry), "query", "--env", "dev", "--connection", "code", "UPDATE t SET x=1"],
+                env=dict(os.environ, PROJECT_ENV_FILE="/no/such/project.env"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            with self.subTest(entry=entry):
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("query error:", result.stderr)
+                self.assertIn("SELECT", result.stderr)
+                self.assertNotIn("configuration file not found", result.stderr)
 
     def test_application_lock_rejects_non_dev_before_loading_environment(self):
         for command in ('app-lock', 'app-unlock'):

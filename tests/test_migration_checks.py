@@ -1,6 +1,12 @@
 import json
+import os
 import re
+import signal
+import sqlite3
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -285,6 +291,177 @@ class MigrationChecksTests(unittest.TestCase):
             ("MISSING_PREREQUISITE", "ZZ_PUBLIC_NO_GRANT"),
             [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
         )
+
+    def _external_synonym_report(self, evidence, folder_name):
+        fixture = Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        payload["before"] = [{"owner": "APP", "name": "ZZ_EXTERNAL", "type": "SYNONYM", "status": "VALID"}]
+        payload["after"] = [dict(payload["before"][0])]
+        payload["synonyms"] = [{
+            "owner": "APP", "name": "ZZ_EXTERNAL", "table_owner": "DATA_OWNER", "table_name": "COUNTER",
+            **evidence,
+        }]
+        payload["grants"] = [{
+            "owner": "DATA_OWNER", "table_name": "COUNTER", "grantee": "APP", "privilege": "SELECT",
+        }]
+        snapshot = parse_snapshot(
+            "CATALOG_PAYLOAD_BEGIN:snapshot\n" + json.dumps(payload, separators=(",", ":"))
+            + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n",
+            Target("dev", "dev-profile", "APP", "APP", "development"),
+        )
+        folder = self.add_folder(
+            folder_name, "CREATE VIEW ZZ_EXTERNAL_V AS SELECT ID FROM ZZ_EXTERNAL;\n",
+        )
+        return preflight(load_batch(self.root, [f"migrations/{folder.name}"]), snapshot, self.passing_checks())
+
+    def test_select_granted_external_sequence_is_not_a_view_prerequisite(self):
+        report = self._external_synonym_report(
+            {"target_exists": True, "target_type": "SEQUENCE"},
+            "2026-10-11_view-through-external-sequence-r001",
+        )
+
+        self.assertIn(
+            ("MISSING_PREREQUISITE", "ZZ_EXTERNAL"),
+            [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+        )
+
+    def test_external_synonym_without_target_type_evidence_fails_closed(self):
+        report = self._external_synonym_report(
+            {"target_exists": True},
+            "2026-10-11_view-through-unknown-external-target-r001",
+        )
+
+        self.assertIn(
+            ("MISSING_PREREQUISITE", "ZZ_EXTERNAL"),
+            [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+        )
+
+    def test_privileged_synonym_adapter_resolves_namespace_collisions_conservatively(self):
+        adapter = (Path(__file__).resolve().parents[1] / "scripts" / "schema_catalog.sql").read_text(encoding="utf-8").upper()
+        procedure_start = adapter.index("PROCEDURE ADD_DEPENDENCY_CATALOGS IS")
+        procedure_end = adapter.index("PROCEDURE ADD_DEFINITION(", procedure_start)
+        queries = re.findall(
+            r"OPEN\s+DEPENDENCY_CURSOR\s+FOR\s+q'~(.*?)~'",
+            adapter[procedure_start:procedure_end],
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        connection = sqlite3.connect(":memory:")
+        connection.create_function("NVL", 2, lambda value, fallback: fallback if value is None else value)
+        connection.executescript(
+            "CREATE TABLE dba_synonyms (owner TEXT, synonym_name TEXT, table_owner TEXT, table_name TEXT, db_link TEXT);"
+            "CREATE TABLE dba_objects (owner TEXT, object_name TEXT, object_type TEXT, namespace INTEGER);"
+            "CREATE TABLE all_synonyms (owner TEXT, synonym_name TEXT, table_owner TEXT, table_name TEXT, db_link TEXT);"
+            "CREATE TABLE all_objects (owner TEXT, object_name TEXT, object_type TEXT, namespace INTEGER);"
+        )
+        synonym_rows = [
+            ("APP", "ZZ_MV", "DATA_OWNER", "MV_TARGET", ""),
+            ("APP", "ZZ_TABLE_INDEX", "DATA_OWNER", "TABLE_INDEX_TARGET", ""),
+            ("APP", "ZZ_MV_INDEX", "DATA_OWNER", "MV_INDEX_TARGET", ""),
+            ("APP", "ZZ_WRONG_INDEX_NS", "DATA_OWNER", "WRONG_INDEX_NS_TARGET", ""),
+            ("APP", "ZZ_WRONG_MV_NS", "DATA_OWNER", "WRONG_MV_NS_TARGET", ""),
+            ("APP", "ZZ_WRONG_TABLE_NS", "DATA_OWNER", "WRONG_TABLE_NS_TARGET", ""),
+            ("APP", "ZZ_AMBIG", "DATA_OWNER", "AMBIG_TARGET", ""),
+            ("APP", "ZZ_DUP", "DATA_OWNER", "DUP_TARGET", ""),
+            ("APP", "ZZ_SEQ", "DATA_OWNER", "SEQ_TARGET", ""),
+            ("APP", "ZZ_MISSING", "DATA_OWNER", "MISSING_TARGET", ""),
+        ]
+        object_rows = [
+            ("DATA_OWNER", "MV_TARGET", "TABLE", 1),
+            ("DATA_OWNER", "MV_TARGET", "MATERIALIZED VIEW", 19),
+            ("DATA_OWNER", "MV_TARGET", "INDEX", 4),
+            ("DATA_OWNER", "TABLE_INDEX_TARGET", "TABLE", 1),
+            ("DATA_OWNER", "TABLE_INDEX_TARGET", "INDEX", 4),
+            ("DATA_OWNER", "MV_INDEX_TARGET", "TABLE", 1),
+            ("DATA_OWNER", "MV_INDEX_TARGET", "MATERIALIZED VIEW", 19),
+            ("DATA_OWNER", "MV_INDEX_TARGET", "INDEX", 4),
+            ("DATA_OWNER", "WRONG_INDEX_NS_TARGET", "TABLE", 1),
+            ("DATA_OWNER", "WRONG_INDEX_NS_TARGET", "INDEX", 5),
+            ("DATA_OWNER", "WRONG_MV_NS_TARGET", "TABLE", 1),
+            ("DATA_OWNER", "WRONG_MV_NS_TARGET", "MATERIALIZED VIEW", 2),
+            ("DATA_OWNER", "WRONG_TABLE_NS_TARGET", "TABLE", 2),
+            ("DATA_OWNER", "WRONG_TABLE_NS_TARGET", "MATERIALIZED VIEW", 19),
+            ("DATA_OWNER", "AMBIG_TARGET", "TABLE", 1),
+            ("DATA_OWNER", "AMBIG_TARGET", "VIEW", 1),
+            ("DATA_OWNER", "DUP_TARGET", "TABLE", 1),
+            ("DATA_OWNER", "DUP_TARGET", "TABLE", 2),
+            ("DATA_OWNER", "SEQ_TARGET", "SEQUENCE", 1),
+        ]
+        for synonym_catalog, object_catalog in (("dba_synonyms", "dba_objects"), ("all_synonyms", "all_objects")):
+            connection.executemany(f"INSERT INTO {synonym_catalog} VALUES (?, ?, ?, ?, ?)", synonym_rows)
+            connection.executemany(f"INSERT INTO {object_catalog} VALUES (?, ?, ?, ?)", object_rows)
+
+        expected_types = {
+            "ZZ_MV": (True, "MATERIALIZED VIEW"),
+            "ZZ_TABLE_INDEX": (True, "TABLE"),
+            "ZZ_MV_INDEX": (True, "MATERIALIZED VIEW"),
+            "ZZ_WRONG_INDEX_NS": (True, None),
+            "ZZ_WRONG_MV_NS": (True, None),
+            "ZZ_WRONG_TABLE_NS": (True, None),
+            "ZZ_AMBIG": (True, None),
+            "ZZ_DUP": (True, None),
+            "ZZ_SEQ": (True, "SEQUENCE"),
+            "ZZ_MISSING": (False, None),
+        }
+        for route, query in (("dba", queries[0]), ("owner", queries[1])):
+            with self.subTest(route=route):
+                captured_rows = connection.execute(
+                    query,
+                    {"TARGET_SCHEMA": "APP", "PUBLIC_OWNER": "PUBLIC"},
+                ).fetchall()
+                captured = {
+                    row[1]: {
+                        "owner": row[0], "name": row[1], "table_owner": row[2], "table_name": row[3],
+                        "db_link": row[4], "target_exists": row[5] == "Y", "target_type": row[6],
+                    }
+                    for row in captured_rows
+                }
+                self.assertEqual(
+                    {name: (row["target_exists"], row["target_type"]) for name, row in captured.items()},
+                    expected_types,
+                )
+
+                payload = json.loads(
+                    (Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json")
+                    .read_text(encoding="utf-8")
+                )
+                payload["before"] = [
+                    {"owner": "APP", "name": name, "type": "SYNONYM", "status": "VALID"}
+                    for name in captured
+                ]
+                payload["after"] = [dict(row) for row in payload["before"]]
+                payload["synonyms"] = list(captured.values())
+                payload["grants"] = [
+                    {"owner": row["table_owner"], "table_name": row["table_name"], "grantee": "APP", "privilege": "SELECT"}
+                    for name, row in captured.items() if name != "ZZ_MISSING"
+                ]
+                snapshot = parse_snapshot(
+                    "CATALOG_PAYLOAD_BEGIN:snapshot\n" + json.dumps(payload, separators=(",", ":"))
+                    + "\nCATALOG_PAYLOAD_END:snapshot\nCATALOG_VERIFIED:snapshot\n",
+                    Target("dev", "dev-profile", "APP", "APP", "development"),
+                )
+                for name, accepted in (
+                    ("ZZ_MV", True), ("ZZ_TABLE_INDEX", True), ("ZZ_MV_INDEX", True),
+                    ("ZZ_WRONG_INDEX_NS", False),
+                    ("ZZ_WRONG_MV_NS", False), ("ZZ_WRONG_TABLE_NS", False),
+                    ("ZZ_AMBIG", False), ("ZZ_DUP", False), ("ZZ_SEQ", False), ("ZZ_MISSING", False),
+                ):
+                    with self.subTest(synonym=name):
+                        folder = self.add_folder(
+                            f"2026-10-11_{route}-view-through-{name.lower().replace('_', '-')}-r001",
+                            f"CREATE VIEW {name}_V AS SELECT ID FROM {name};\n",
+                        )
+                        report = preflight(
+                            load_batch(self.root, [f"migrations/{folder.name}"]), snapshot, self.passing_checks(),
+                        )
+                        if accepted:
+                            self.assertEqual(report.exit_code, 0, report.to_dict())
+                            self.assertEqual(report.conflicts, ())
+                        else:
+                            self.assertIn(
+                                ("MISSING_PREREQUISITE", name),
+                                [(conflict.get("code"), conflict.get("name")) for conflict in report.conflicts],
+                            )
+        connection.close()
 
     def test_synonym_chain_to_missing_target_does_not_satisfy_view_prerequisite(self):
         fixture = Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json"
@@ -651,6 +828,90 @@ class MigrationChecksTests(unittest.TestCase):
 
         self.assertTrue(report.passed, report.to_dict())
         self.assertGreaterEqual(peak, 2)
+
+    @unittest.skipIf(os.name == "nt", "SIGINT process-tree cancellation regression is POSIX-specific")
+    def test_interrupt_cancels_parallel_sqlcl_workers_and_their_child_processes(self):
+        pid_dir = self.root / "worker-pids"
+        pid_dir.mkdir()
+        late_writer = self.root / "late_writer.py"
+        late_writer.write_text(
+            "import sys, time\nfrom pathlib import Path\ntime.sleep(1.2)\nPath(sys.argv[1]).write_text('survived')\n",
+            encoding="utf-8",
+        )
+        binary = install(
+            self.root / "bin",
+            'printf "%s\\n" "$(ps -o pgid= -p $$ | tr -d \' \')" > "$FAKE_PID_DIR/group-$$"\n'
+            'python3 "$FAKE_LATE_WRITER" "$FAKE_PID_DIR/late-$$" &\n'
+            'child=$!\nprintf "%s\\n" "$child" > "$FAKE_PID_DIR/child-$$"\n'
+            'printf "FAKE_SQLCL_STARTED\\n"\nwait "$child"\nprintf "FAKE_SQLCL_FINISHED\\n"\n',
+        )
+        caller = self.root / "run_checks.py"
+        caller.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "from scripts.db_targets import Target\n"
+            "from scripts.migration_checks import run_checks\n"
+            "from scripts.migration_manifest import QueryCheck\n"
+            "checks=tuple(QueryCheck(f'check-{i}', 'SELECT 1 FROM dual', 1) for i in range(4))\n"
+            "run_checks(Target('dev','fake-dev','APP','APP','development'), checks, "
+            "Path(sys.argv[1]) / 'check-runs', jobs=2, phase='preconditions')\n",
+            encoding="utf-8",
+        )
+        repo = Path(__file__).resolve().parents[1]
+        environment = fake_environment(
+            binary,
+            FAKE_PID_DIR=str(pid_dir),
+            FAKE_LATE_WRITER=str(late_writer),
+            MIGRATION_CHECK_BATCH_BYTES="5000",
+            MIGRATION_CHECK_TIMEOUT_SECONDS="30",
+        )
+        environment["PYTHONPATH"] = str(repo)
+        process = subprocess.Popen(
+            [sys.executable, str(caller), str(self.root)],
+            cwd=repo,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while len(list(pid_dir.glob("child-*"))) < 2 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertGreaterEqual(len(list(pid_dir.glob("child-*"))), 2, "parallel SQLcl children never started")
+            interrupted_at = time.monotonic()
+            os.kill(process.pid, signal.SIGINT)
+            try:
+                returncode = process.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                self.fail("run_checks waited for SQLcl workers instead of cancelling their process groups")
+            process.communicate()
+            self.assertLess(time.monotonic() - interrupted_at, 1.5)
+            self.assertNotEqual(returncode, 0)
+            time.sleep(1.3)
+            self.assertFalse(list(pid_dir.glob("late-*")), "an SQLcl descendant survived interruption")
+            for child_file in pid_dir.glob("child-*"):
+                child_pid = int(child_file.read_text(encoding="utf-8"))
+                proc_stat = Path(f"/proc/{child_pid}/stat")
+                if proc_stat.is_file():
+                    state = proc_stat.read_text(encoding="utf-8").rsplit(") ", 1)[-1][:1]
+                    self.assertEqual(state, "Z", f"SQLcl child {child_pid} is still running after cancellation")
+            output_logs = list((self.root / "check-runs").rglob("sqlcl-output.log"))
+            self.assertGreaterEqual(len(output_logs), 2)
+            for output_log in output_logs:
+                output = output_log.read_text(encoding="utf-8")
+                self.assertIn("FAKE_SQLCL_STARTED", output)
+                self.assertNotIn("FAKE_SQLCL_FINISHED", output)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+            for group_file in pid_dir.glob("group-*"):
+                try:
+                    group = int(group_file.read_text(encoding="utf-8"))
+                    if group != os.getpgrp():
+                        os.killpg(group, signal.SIGKILL)
+                except (OSError, ValueError, ProcessLookupError):
+                    pass
 
     def test_a_single_check_over_the_driver_budget_fails_with_its_id_without_running_sqlcl(self):
         target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")

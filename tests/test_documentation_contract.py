@@ -24,6 +24,8 @@ DOCS = (
     ROOT / "docs" / "EXAMPLES.md",
     ROOT / "docs" / "TROUBLESHOOTING.md",
     ROOT / "docs" / "known-limitations.md",
+    ROOT / "docs" / "production-deployment.md",
+    ROOT / "docs" / "template-feedback.md",
 )
 # Each refusal the publish guide explains, and the script that prints it. The
 # guide quotes these verbatim, so rewording a message must update the guide.
@@ -157,7 +159,7 @@ class DocumentationContractTests(unittest.TestCase):
             "AUTOCOMMIT OFF",
             "SAFE_FUNCTIONS",
             "not rehearsable",
-            "preconditions re-run after `ROLLBACK`",
+            "folder's captured starting value",
             "--report <file>",
             "scratch/migration-rehearsal-*",
         ):

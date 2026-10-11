@@ -40,21 +40,27 @@
       "name": "ZZ_PUBLIC_CUSTOMERS",
       "table_owner": "DATA_OWNER",
       "table_name": "CUSTOMERS",
-      "db_link": null
+      "db_link": null,
+      "target_exists": true,
+      "target_type": "TABLE"
     },
     {
       "owner": "APP",
       "name": "ZZ_PRIVATE_ORDERS",
       "table_owner": "DATA_OWNER",
       "table_name": "ORDERS",
-      "db_link": null
+      "db_link": null,
+      "target_exists": true,
+      "target_type": "VIEW"
     },
     {
       "owner": "PUBLIC",
       "name": "ZZ_PUBLIC_NO_GRANT",
       "table_owner": "DATA_OWNER",
       "table_name": "NO_GRANT_TABLE",
-      "db_link": null
+      "db_link": null,
+      "target_exists": true,
+      "target_type": "MATERIALIZED VIEW"
     }
   ],
   "grants": [

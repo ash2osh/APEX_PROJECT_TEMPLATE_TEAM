@@ -570,13 +570,26 @@ check. A human DBA executes it using an approved saved connection. App
 promotion uses deployment descriptors; schema migrations use the separate
 `migrate --env` command and explicit target-schema settings.
 
+For a one-window release manifest, pre-window comparison and rehearsal,
+post-window checks, recovery ownership, and the release packet checklist, use
+the [production deployment runbook](docs/production-deployment.md). A reviewed
+manifest can run in one command:
+
+```bash
+scripts/team.sh rollout release/rollout.json --env prod --dry-run
+scripts/team.sh rollout release/rollout.json --env prod
+```
+
+The dry run prints the local manifest and input hashes. The production run
+shows its target and requires the manifest confirmation.
+
 ## Upgrading from the template
 
 Projects created from this template do not share its Git history, so updates
 are copied file by file. `template-manifest.json` decides which repository
 files the upgrade may touch: template scripts, tests, CI, and agent guidance
 are upgraded; project files such as `AGENTS.project.md`,
-`.agents/rules/project.md`, and `PROJECT.md` are created once and never
+`.agents/rules/project.md`, `PROJECT.md`, and `TODO.md` are created once and never
 overwritten; application source, database mirrors, migrations,
 `app_context/<id>/`, and `.env` are never touched, even when `.env` is tracked
 in Git. Put project-specific
@@ -689,6 +702,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh app-unlock <id> --env dev` | Release only the configured developer's application lock after reconciliation. |
 | `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
 | `scripts/team.sh doctor` | Validate `.env` and check the DEV SQLcl identity. |
+| `scripts/team.sh query --env <dev\|staging\|prod> --connection <tables\|code\|apex\|ords\|migration> [--schema NAME] [--file PATH \| SQL]` | Run one conservative, bounded SELECT in a read-only SQLcl transaction; see [read-only ad-hoc queries](#read-only-ad-hoc-queries). |
 | `scripts/team.sh export <id>` | Export one numeric app from shared DEV Builder. |
 | `scripts/team.sh publish <id> --env dev` | Drift-check and import one app to DEV. |
 | `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
@@ -711,6 +725,50 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
+
+## Read-only ad-hoc queries
+
+Use `query` for a one-off inspection without adding a script or migration:
+
+```bash
+scripts/team.sh query --env dev --connection tables --schema DEMO "SELECT table_name FROM user_tables ORDER BY table_name"
+scripts/team.sh query --env dev --connection code --file scratch/query.sql
+```
+
+`--connection` names a configured profile, never an arbitrary SQLcl alias or
+connection string. In DEV, `tables`, `code`, `apex` and `ords` use their own
+aligned schema, SQLcl connection and expected-user settings. `migration` uses
+the configured migration-owner triple when present, otherwise the existing DEV
+code profile. In staging or production, non-migration profiles use that
+environment's aligned schema/connection/expected-user triple; `migration` uses
+its environment-specific migration triple when configured and otherwise that
+same environment profile. ORDS is DEV-only. Missing or incomplete settings,
+an unlisted schema, or a multi-schema profile without `--schema` refuses before
+SQLcl starts.
+
+The input must be one statement beginning with `SELECT` or a SELECT-producing
+`WITH`. The gate handles quoted strings/identifiers and comments, permits only
+a conservative set of built-ins, and refuses DML, DDL, PL/SQL, SQLcl commands,
+remote links, sequence reads, package/member calls and unknown functions.
+SQLcl substitution is disabled; the session changes to the configured schema,
+disables commits in stored procedures, checks login/schema and observed
+database/service identity before the query, starts a read-only transaction,
+and exits with rollback. A production-marked live identity refuses a DEV or
+staging target even when the selected saved connection is named for that
+environment. Results are CSV without headings. Defaults are a
+32 KiB SQL input limit, 60-second timeout, 500-row result limit and 1 MiB
+captured-output limit. Crossing a row or byte cap, timing out, a SQLcl error,
+or incomplete identity/framing refuses the result rather than displaying a
+partial success. The result is withheld on errors.
+
+The read-only transaction and syntax gate reduce risk; they do not provide
+database privilege isolation or prove that every object selected is side-effect
+free. The lexical gate cannot distinguish a bare zero-argument stored function
+from a column reference. Disabling commits in stored procedures blocks their
+database commits, including autonomous-transaction commits, but cannot prevent
+nontransactional external effects. A view, virtual column or other database
+object can hide behavior outside the query text. Use a suitably read-only
+account and review the selected objects.
 
 `rollout` validates and hashes every referenced source file before it starts,
 stops on the first failed step and writes JSON and Markdown timing/evidence
@@ -793,7 +851,9 @@ for the full repository contract, [migrations/README.md](migrations/README.md),
 and [docs/migration-rules.md](docs/migration-rules.md) for migration naming,
 verification, and comparison limits. For browser runtime checks, see
 [Chrome DevTools MCP](docs/CHROME_DEVTOOLS_MCP.md) and use the project browser
-[skill](.agents/skills/chrome-devtools-mcp/SKILL.md).
+[skill](.agents/skills/chrome-devtools-mcp/SKILL.md). For confirmed inherited-
+template issues, keep a sanitized local record in [TODO.md](TODO.md) and follow
+the [upstream feedback guide](docs/template-feedback.md).
 
 
 Optional migration profiles let a project mirror code from `CODE` while applying

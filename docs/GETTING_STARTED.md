@@ -46,6 +46,7 @@ What each folder is for:
 | `migrations/` | Dated SQL changes you write, one folder each | you |
 | `app_context/` | Notes about each app, for AI assistants | you |
 | `.env` | Literal configuration and SQLcl saved connection names (no credentials) | you; review and keep it in your own Git repository |
+| `TODO.md` | Project tasks and sanitized inherited-template feedback history | you; template upgrades preserve it |
 | `scripts/`, operational `docs/`, `.agents/` | Command implementations and guidance | template upgrades |
 | Inherited `tests/` and `.github/` | Original-template maintenance and CI | remove from a new downstream clone after recording the upgrade baseline |
 
@@ -177,6 +178,8 @@ Explicitly preserve:
 - Project-owned plans and specs in `docs/superpowers/plans/` and `docs/superpowers/specs/`
 - Durable project documentation (`PROJECT.md`, `docs/`)
 - Project-specific agent instructions and rules (`AGENTS.project.md`, `.agents/rules/project.md`)
+- Project task and upstream-feedback history (`TODO.md`); use the
+  [template feedback guide](template-feedback.md) for inherited defects
 - Operational configuration (`.env`), application source (`apps/`), and migrations (`migrations/`)
 - Migration receipts and recovery evidence
 

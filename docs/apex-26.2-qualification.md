@@ -258,3 +258,19 @@ Python 3.12+; the core workflow remains Python 3.10+.
 See [local qualification](local-qualification.md) for reproducible modes and
 cleanup rules. Native Windows, live APEX 26.1, and staging/production database
 imports remain unqualified by these Linux Docker tests.
+
+## Separate deployment-tool qualification on 2026-10-11
+
+The root task qualified schema and migration tooling on local disposable
+`DEMO2` using Oracle Database 23.26.3.0.0, APEX 26.2.0, and SQLcl 26.3.0.0.
+It observed read-only owner verification, same-schema comparison and source
+capture; dependent DML rehearsal with successful scalar rollback checks; a
+committed INSERT/UPDATE rollout; receipt-based resume without payload replay;
+and a separate post-run verify. Independent cleanup reported zero owned
+fixtures. The detailed scope and ignored evidence paths are in
+[local qualification](local-qualification.md#deployment-speedup-qualification-on-2026-10-11).
+
+This was schema/migration qualification, not an APEX application import or
+publish. It does not add evidence for shared-app writes, promotion to a distinct
+target, native Windows, an APEX 26.1 runtime/backport, or APEX patch-pair
+tolerant source comparison. Those remain separate qualification gates.

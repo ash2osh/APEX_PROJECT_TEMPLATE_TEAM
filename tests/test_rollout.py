@@ -13,6 +13,7 @@ import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 from fake_sqlcl import environment as fake_environment, install as install_fake_sqlcl
 
 from scripts import rollout
+from scripts.migration_manifest import load_batch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,9 +25,52 @@ class RolloutManifestTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "scripts").mkdir()
         self.manifest_path = self.root / "rollout.json"
+        self.project_env_file = self.root / "test-project.env"
+        self.project_env_values = {
+            "PROJECT_NAME": "TEST_PROJECT",
+            "DEVELOPER_NAME": "TESTDEV",
+            "DB_ENVIRONMENT": "development",
+            "APEX_APP_ID": "100",
+            "TABLES_SCHEMA": "DEMO",
+            "TABLES_PREFIXES": "*",
+            "TABLES_SQLCL_CONNECTION": "DEV_ALIAS",
+            "TABLES_EXPECTED_USER": "DEMO",
+            "CODE_SCHEMA": "DEMO",
+            "CODE_PREFIXES": "*",
+            "CODE_SQLCL_CONNECTION": "DEV_ALIAS",
+            "CODE_EXPECTED_USER": "DEMO",
+            "APEX_PARSING_SCHEMA": "DEMO",
+            "APEX_SQLCL_CONNECTION": "DEV_ALIAS",
+            "APEX_EXPECTED_USER": "DEMO",
+            "STAGING_SCHEMA": "DEMO",
+            "STAGING_SQLCL_CONNECTION": "STAGE_ALIAS",
+            "STAGING_EXPECTED_USER": "DEMO",
+            "PROD_SCHEMA": "DEMO",
+            "PROD_SQLCL_CONNECTION": "PROD_ALIAS",
+            "PROD_EXPECTED_USER": "DEMO",
+        }
+        self.write_project_env(self.project_env_values)
+        self.environment_patch = patch.dict(os.environ, {
+            **self.project_env_values,
+            "PROJECT_ENV_FILE": str(self.project_env_file),
+            "PROJECT_SCHEMA": "",
+        }, clear=False)
+        self.environment_patch.start()
+        self.addCleanup(self.environment_patch.stop)
+        self.identity_patch = patch(
+            "scripts.rollout._observe_target_identity", side_effect=self.observe_target_identity,
+        )
+        self.identity_patch.start()
+        self.addCleanup(self.identity_patch.stop)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def write_project_env(self, values: dict[str, str]) -> None:
+        self.project_env_file.write_text(
+            "".join(f"{key}={value}\n" for key, value in sorted(values.items())),
+            encoding="utf-8",
+        )
 
     def write_manifest(self, steps: list[dict], **extra) -> Path:
         value = {"schemaVersion": 1, "steps": steps, **extra}
@@ -71,6 +115,20 @@ class RolloutManifestTests(unittest.TestCase):
             return rollout.StepResult(code, (evidence.relative_to(self.root).as_posix(),), "simulated")
 
         return execute
+
+    def observe_target_identity(self, target, run_dir):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "session_user": target.expected_user,
+            "current_schema": target.schema,
+            "db_name": "TESTDB",
+            "db_unique_name": "TESTDB_UNIQUE",
+            "service_name": "test.service",
+            "container_id": "3",
+            "container_name": "TEST_PDB",
+            "edition": "ORA$BASE",
+            "database_version": "23.0.0.0.0",
+        }
 
     def test_rollout_stops_at_first_failed_step_and_reports_times_and_evidence(self) -> None:
         calls: list[int] = []
@@ -181,6 +239,65 @@ class RolloutManifestTests(unittest.TestCase):
         self.assertEqual(rejected_status, 2)
         self.assertEqual(calls, [])
 
+    def test_resume_revalidates_independent_database_identity_before_skipping(self) -> None:
+        folder = self.add_migration()
+        manifest = self.write_manifest([
+            {"type": "verify", "folders": [folder], "phase": "post"},
+            {"type": "pause", "message": "finish"},
+        ])
+        first_identity = {
+            "session_user": "APP", "current_schema": "APP", "db_name": "DBA",
+            "db_unique_name": "DBA_UNQ", "service_name": "APP_SERVICE", "container_id": "3",
+            "container_name": "PDBA", "edition": "ORA$BASE", "database_version": "23.0.0.0.0",
+        }
+        repointed_identity = {**first_identity, "db_name": "DBB", "db_unique_name": "DBB_UNQ", "container_name": "PDBB"}
+        configured = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "DEV_ALIAS",
+            "CODE_EXPECTED_USER": "APP",
+        }
+        calls: list[int] = []
+
+        def execute(step, **context):
+            number = context["step_number"]
+            calls.append(number)
+            evidence = context["evidence_dir"] / f"step-{number:03d}.log"
+            evidence.write_text("verified\n", encoding="utf-8")
+            return rollout.StepResult(0, (evidence.relative_to(self.root).as_posix(),), "simulated")
+
+        def observer(identity):
+            def observe(_target, run_dir):
+                run_dir.mkdir(parents=True, exist_ok=True)
+                return identity
+            return observe
+
+        initial_observer = observer(first_identity)
+
+        with patch.dict(os.environ, configured, clear=False), patch(
+            "scripts.rollout.execute_step", side_effect=execute
+        ), patch("scripts.rollout._observe_target_identity", side_effect=initial_observer):
+            first_status = rollout.run_rollout(
+                manifest, "dev", repo_root=self.root, report_path=self.root / "scratch" / "identity-first",
+                confirm=lambda _prompt: True,
+            )
+        self.assertEqual(first_status, 0)
+
+        calls.clear()
+        with patch.dict(os.environ, configured, clear=False), patch(
+            "scripts.rollout.execute_step", side_effect=execute
+        ), patch("scripts.rollout._observe_target_identity", side_effect=observer(repointed_identity)):
+            resumed_status = rollout.run_rollout(
+                manifest, "dev", from_step=2, repo_root=self.root,
+                report_path=self.root / "scratch" / "identity-resume",
+                confirm=lambda _prompt: True,
+            )
+
+        self.assertEqual(resumed_status, 2)
+        self.assertEqual(calls, [])
+        resumed = json.loads((self.root / "scratch" / "identity-resume.json").read_text(encoding="utf-8"))
+        self.assertIn("differs from its successful receipt", resumed["error"])
+
     def test_file_change_during_a_step_aborts_before_the_next_step(self) -> None:
         payload = self.root / "scripts" / "second.sql"
         payload.write_text("SELECT 1 FROM dual;\n", encoding="utf-8")
@@ -256,6 +373,85 @@ class RolloutManifestTests(unittest.TestCase):
         ):
             with self.subTest(source=source), self.assertRaises(rollout.RolloutError):
                 rollout.validate_sql_script(source)
+
+    def test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards(self) -> None:
+        for source in (
+            "conn OTHER\nCREATE TABLE T (ID NUMBER);\n",
+            "sta other.sql\nCREATE TABLE T (ID NUMBER);\n",
+            "GET other.sql /\nCREATE TABLE T (ID NUMBER);\n",
+            "/* hidden reader hazard\n/\n*/\nCONNECT OTHER\n",
+        ):
+            with self.subTest(source=source), self.assertRaises(rollout.RolloutError):
+                rollout.validate_sql_script(source)
+
+    def test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change(self) -> None:
+        payload = self.root / "scripts" / "prerequisite.sql"
+        payload.write_text("CREATE TABLE APP.PRECHECK (ID NUMBER);\n", encoding="utf-8")
+        manifest = self.write_manifest([{
+            "type": "sql-script", "file": "scripts/prerequisite.sql",
+            "connection": "OPS", "expectedUser": "OPS", "schema": "APP",
+        }])
+        loaded = rollout.load_manifest(manifest, self.root)
+        with patch.dict(os.environ, {"DB_ENVIRONMENT": "development"}, clear=False):
+            plan = rollout._prepare_plan(loaded, "dev")
+            binding = plan[0].get("targetBinding")
+            self.assertEqual(binding, {
+                "environment": "dev", "connection": "OPS", "expectedUser": "OPS",
+                "schema": "APP", "classification": "development",
+            })
+            with patch.dict(os.environ, {"DB_ENVIRONMENT": "test"}, clear=False):
+                with self.assertRaisesRegex(rollout.RolloutError, "target binding changed"):
+                    rollout._snapshot(loaded, plan, "before step 1", "dev")
+
+    def test_rollout_migration_resume_requires_exact_source_and_observed_target_receipts(self) -> None:
+        folder = self.add_migration()
+        migration = load_batch(self.root, [folder])[0]
+        observed = {
+            "session_user": "APP", "current_schema": "APP", "db_name": "DBA",
+            "db_unique_name": "DBA_UNQ", "service_name": "APP_SERVICE", "container_id": "3",
+            "container_name": "PDBA", "edition": "ORA$BASE", "database_version": "23.0.0.0.0",
+        }
+        target_identity = {
+            "environment": "dev", "connection": "DEV_ALIAS", "expected_user": "APP", **observed,
+        }
+        receipt = {
+            "schemaVersion": 1,
+            "state": "verified",
+            "environment": "dev",
+            "migration": migration.folder.name,
+            "createdDate": migration.date,
+            "family": migration.family,
+            "revision": migration.revision,
+            "files": [{"name": item.name, "sequence": item.sequence, "sha256": item.sha256} for item in migration.files],
+            "checksSha256": migration.checks_sha256,
+            "payloadDigest": migration.payload_digest,
+            "target": target_identity,
+            "applyStartedAt": "2026-10-11T00:00:00Z",
+            "applyCompletedAt": "2026-10-11T00:01:00Z",
+            "verifiedAt": "2026-10-11T00:02:00Z",
+            "checks": [{"id": check.id, "passed": True, "rows": 1, "value": 1} for check in migration.postconditions],
+            "verifier": "template-migration-v1",
+            "normalization": "normalization-v1",
+        }
+        status_path = migration.folder / "status.dev.json"
+        status_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+        step = {"type": "migrate", "folders": [folder]}
+        binding = {
+            "environment": "dev", "connection": "DEV_ALIAS", "expectedUser": "APP",
+            "schema": "APP", "classification": "development",
+        }
+
+        rollout._verify_migration_receipts(self.root, step, binding, observed)
+
+        wrong_target = {**receipt, "target": {**target_identity, "db_unique_name": "OTHER_DB"}}
+        status_path.write_text(json.dumps(wrong_target) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(rollout.RolloutError, "exact source and observed target"):
+            rollout._verify_migration_receipts(self.root, step, binding, observed)
+
+        status_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+        (migration.folder / migration.files[0].name).write_text("CREATE TABLE T (ID NUMBER, EXTRA NUMBER);\n", encoding="utf-8")
+        with self.assertRaisesRegex(rollout.RolloutError, "exact source and observed target"):
+            rollout._verify_migration_receipts(self.root, step, binding, observed)
 
     def test_sql_script_runs_through_fake_sqlcl_with_identity_and_failure_guards(self) -> None:
         payload = self.root / "scripts" / "prerequisite.sql"
@@ -434,7 +630,9 @@ class RolloutManifestTests(unittest.TestCase):
             callback_approvals.append(confirm("child migration prompt"))
             return 0
 
-        with patch("scripts.rollout.migrate.main", side_effect=fake_migrate_main):
+        with patch("scripts.rollout.migrate.main", side_effect=fake_migrate_main), patch(
+            "scripts.rollout._verify_migration_receipts"
+        ):
             status = rollout.run_rollout(
                 manifest,
                 "staging",
@@ -452,12 +650,17 @@ class RolloutManifestTests(unittest.TestCase):
         self.add_app()
         manifest = self.write_manifest([{"type": "app-deploy", "appId": 100}])
         prompts: list[str] = []
+        self.write_project_env({
+            **self.project_env_values,
+            "STAGING_SQLCL_CONNECTION": "TEAM_STAGE",
+            "STAGING_EXPECTED_USER": "APP_SCHEMA",
+        })
         with patch.dict(os.environ, {
             "APEX_PARSING_SCHEMA": "DEMO",
             "STAGING_SCHEMA": "DEMO",
             "STAGING_SQLCL_CONNECTION": "TEAM_STAGE",
             "STAGING_EXPECTED_USER": "APP_SCHEMA",
-        }, clear=True), patch(
+        }, clear=False), patch(
             "scripts.rollout.subprocess.run",
             return_value=subprocess.CompletedProcess(["bash"], 0, "deployment complete\n"),
         ):
@@ -502,6 +705,7 @@ class RolloutManifestTests(unittest.TestCase):
                 expected_input_hashes[f"{folder}/checks.json"],
                 hashlib.sha256((self.root / folder / "checks.json").read_bytes()).hexdigest(),
             )
+            (self.root / "scratch" / "check-evidence").mkdir(parents=True, exist_ok=True)
             print(json.dumps({"schemaVersion": 1, "evidenceDir": "scratch/check-evidence"}))
             return 0
 
@@ -524,6 +728,11 @@ class RolloutManifestTests(unittest.TestCase):
         manifest = self.write_manifest([{"type": "app-deploy", "appId": 100}])
         prompts: list[str] = []
         completed = subprocess.CompletedProcess(["bash"], 0, "deployment complete\n")
+        self.write_project_env({
+            **self.project_env_values,
+            "STAGING_SQLCL_CONNECTION": "TEAM_STAGE",
+            "STAGING_EXPECTED_USER": "APP_SCHEMA",
+        })
 
         def deploy_frozen_source(command, **_kwargs):
             staged = Path(command[command.index("--app-source-dir") + 1])
@@ -533,7 +742,12 @@ class RolloutManifestTests(unittest.TestCase):
             (app_dir / "application.apx").write_bytes(original)
             return completed
 
-        with patch.dict(os.environ, {"APEX_PARSING_SCHEMA": "DEMO"}, clear=True), patch(
+        with patch.dict(os.environ, {
+            "APEX_PARSING_SCHEMA": "DEMO",
+            "STAGING_SCHEMA": "DEMO",
+            "STAGING_SQLCL_CONNECTION": "TEAM_STAGE",
+            "STAGING_EXPECTED_USER": "APP_SCHEMA",
+        }, clear=False), patch(
             "scripts.rollout.subprocess.run", side_effect=deploy_frozen_source
         ) as run:
             status = rollout.run_rollout(
@@ -561,6 +775,166 @@ class RolloutManifestTests(unittest.TestCase):
         confirmation = json.loads((self.root / report["confirmationPath"]).read_text(encoding="utf-8"))
         self.assertEqual(confirmation["status"], "confirmed")
         self.assertEqual(confirmation["steps"][0]["sha256"], report["steps"][0]["sha256"])
+
+    def test_app_deploy_uses_frozen_child_configuration_after_original_changes_after_confirmation(self) -> None:
+        self.add_app()
+        manifest = self.write_manifest([{"type": "app-deploy", "appId": 100}])
+        deploy_script = self.root / "scripts" / "deploy.sh"
+        loader = ROOT / "scripts" / "load_env.sh"
+        deploy_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"source {loader.as_posix()!r} \"$PROJECT_ENV_FILE\"\n"
+            "printf 'CHILD_TARGET:%s:%s\\n' \"$STAGING_SQLCL_CONNECTION\" \"$STAGING_EXPECTED_USER\"\n",
+            encoding="utf-8",
+        )
+        deploy_script.chmod(0o700)
+        prompts: list[str] = []
+
+        def confirm_after_mutating_original(prompt: str) -> bool:
+            prompts.append(prompt)
+            changed = {
+                **self.project_env_values,
+                "STAGING_SQLCL_CONNECTION": "CHANGED_STAGE",
+                "STAGING_EXPECTED_USER": "OTHER_APP",
+            }
+            self.write_project_env(changed)
+            return True
+
+        report_base = self.root / "scratch" / "frozen-app-config"
+        status = rollout.run_rollout(
+            manifest,
+            "staging",
+            repo_root=self.root,
+            report_path=report_base,
+            confirm=confirm_after_mutating_original,
+        )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("child configuration SHA-256", prompts[0])
+        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        confirmation = json.loads((self.root / report["confirmationPath"]).read_text(encoding="utf-8"))
+        config_hash = report["steps"][0]["childConfigurationSha256"]
+        self.assertEqual(confirmation["steps"][0]["childConfigurationSha256"], config_hash)
+        deploy_log_path = next(
+            self.root / path
+            for path in report["steps"][0]["evidencePaths"]
+            if path.endswith("deploy-output.log")
+        )
+        deploy_log = deploy_log_path.read_text(encoding="utf-8")
+        self.assertIn("CHILD_TARGET:STAGE_ALIAS:DEMO", deploy_log)
+        self.assertNotIn("CHANGED_STAGE", deploy_log)
+        self.assertEqual(rollout.read_project_env(self.project_env_file)["STAGING_SQLCL_CONNECTION"], "CHANGED_STAGE")
+        frozen_env_path = next(
+            self.root / path
+            for path in report["steps"][0]["evidencePaths"]
+            if path.endswith("app-deploy.env")
+        )
+        self.assertNotEqual(frozen_env_path, self.project_env_file)
+        self.assertEqual(rollout.read_project_env(frozen_env_path)["STAGING_SQLCL_CONNECTION"], "STAGE_ALIAS")
+
+    def test_app_deploy_rejects_child_configuration_target_mismatch_before_confirmation(self) -> None:
+        self.add_app()
+        self.write_project_env({
+            **self.project_env_values,
+            "STAGING_SQLCL_CONNECTION": "DIFFERENT_STAGE",
+        })
+        manifest = self.write_manifest([{"type": "app-deploy", "appId": 100}])
+        loaded = rollout.load_manifest(manifest, self.root)
+
+        with self.assertRaisesRegex(rollout.RolloutError, "does not match the rollout target binding"):
+            rollout._prepare_plan(loaded, "staging")
+
+    def test_app_deploy_preserves_dev_selector_for_distinct_staging_and_prod_schemas(self) -> None:
+        app_dir = self.add_app()
+        app_id = 100
+        for environment, schema in (("staging", "STAGE_OWNER"), ("prod", "PROD_OWNER")):
+            descriptor = {
+                "workspace": {"name": "TEAM_WS"},
+                "app": {"id": app_id, "databaseSession": {"parsingSchema": schema}},
+            }
+            (app_dir / "deployments" / f"{environment}.json").write_text(
+                json.dumps(descriptor) + "\n", encoding="utf-8",
+            )
+
+        config = {
+            **self.project_env_values,
+            "STAGING_SCHEMA": "STAGE_OWNER",
+            "STAGING_SQLCL_CONNECTION": "STAGE_ALIAS",
+            "STAGING_EXPECTED_USER": "STAGE_OWNER",
+            "PROD_SCHEMA": "PROD_OWNER",
+            "PROD_SQLCL_CONNECTION": "PROD_ALIAS",
+            "PROD_EXPECTED_USER": "PROD_OWNER",
+        }
+        self.write_project_env(config)
+        deploy_script = self.root / "scripts" / "deploy.sh"
+        loader = ROOT / "scripts" / "load_env.sh"
+        deploy_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"source {loader.as_posix()!r} \"$PROJECT_ENV_FILE\"\n"
+            "printf 'SOURCE_SELECTOR:%s\\n' \"${PROJECT_SCHEMA:-<unset>}\"\n"
+            "printf 'STAGING_PROFILE:%s:%s:%s\\n' \"${STAGING_SCHEMA:-}\" \"${STAGING_SQLCL_CONNECTION:-}\" \"${STAGING_EXPECTED_USER:-}\"\n"
+            "printf 'PROD_PROFILE:%s:%s:%s\\n' \"${PROD_SCHEMA:-}\" \"${PROD_SQLCL_CONNECTION:-}\" \"${PROD_EXPECTED_USER:-}\"\n",
+            encoding="utf-8",
+        )
+        deploy_script.chmod(0o700)
+        manifest = self.write_manifest([{"type": "app-deploy", "appId": app_id}])
+
+        for selector in (None, "DEMO"):
+            for environment, schema, alias in (
+                ("staging", "STAGE_OWNER", "STAGE_ALIAS"),
+                ("prod", "PROD_OWNER", "PROD_ALIAS"),
+            ):
+                with self.subTest(selector=selector, environment=environment):
+                    self.write_project_env(config)
+                    configured = {
+                        **config,
+                        "PROJECT_ENV_FILE": str(self.project_env_file),
+                        "PROJECT_SCHEMA": selector or "",
+                    }
+                    prompts: list[str] = []
+                    report_base = self.root / "scratch" / f"selector-{selector or 'unset'}-{environment}"
+
+                    def confirm_after_changing_process_selector(
+                        prompt: str,
+                        captured_prompts: list[str] = prompts,
+                    ) -> bool:
+                        captured_prompts.append(prompt)
+                        os.environ["PROJECT_SCHEMA"] = "STAGE_OWNER"
+                        return True
+
+                    with patch.dict(os.environ, configured, clear=False):
+                        if selector is None:
+                            os.environ.pop("PROJECT_SCHEMA", None)
+                        status = rollout.run_rollout(
+                            manifest,
+                            environment,
+                            repo_root=self.root,
+                            report_path=report_base,
+                            confirm=confirm_after_changing_process_selector,
+                        )
+
+                    self.assertEqual(status, 0)
+                    self.assertEqual(len(prompts), 1)
+                    selector_label = selector if selector is not None else "<unset>"
+                    self.assertIn(f"source PROJECT_SCHEMA selector: {selector_label}", prompts[0])
+                    self.assertIn(f"parsing schema {schema}", prompts[0])
+                    report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+                    self.assertEqual(report["steps"][0]["sourceSchemaSelector"], selector)
+                    confirmation = json.loads((self.root / report["confirmationPath"]).read_text(encoding="utf-8"))
+                    self.assertEqual(confirmation["steps"][0]["sourceSchemaSelector"], selector)
+                    child_log = next(
+                        self.root / path
+                        for path in report["steps"][0]["evidencePaths"]
+                        if path.endswith("deploy-output.log")
+                    ).read_text(encoding="utf-8")
+                    self.assertIn(f"SOURCE_SELECTOR:{selector_label}", child_log)
+                    self.assertIn("STAGING_PROFILE:STAGE_OWNER:STAGE_ALIAS:STAGE_OWNER", child_log)
+                    self.assertIn("PROD_PROFILE:PROD_OWNER:PROD_ALIAS:PROD_OWNER", child_log)
+                    self.assertIn(f'"schema": "{schema}"', prompts[0])
+                    self.assertIn(f'"connection": "{alias}"', prompts[0])
 
     def test_app_hashes_do_not_omit_unrelated_files_named_like_migration_receipts(self) -> None:
         app_dir = self.add_app()

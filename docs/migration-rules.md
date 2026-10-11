@@ -257,14 +257,24 @@ from earlier folders in the same rehearsal. SQLcl feedback is associated with
 each statement where it prints a row count; otherwise that statement's
 `rowsAffected` is null.
 
-After all selected folders, the driver issues `ROLLBACK`. The rollback proof
-includes the preconditions re-run after `ROLLBACK`: each folder's own checks,
-evaluated in that same session. When the data session exits early on an SQL error or failed
-precondition, the command uses fresh read-only check sessions to re-run those
-preconditions after SQLcl's rollback. The report marks rollback proof true only
-when the preconditions are complete and still true.
+Before any payload runs, the driver captures each folder's rollback-check
+precondition values in the data session. After all selected folders, it issues
+`ROLLBACK` and reruns those checks in that session. The preconditions are
+re-run after `ROLLBACK`; rollback proof compares each final value with that
+folder's captured starting value, not with a later folder's apply-boundary
+expectation. If the data session exits
+early on an SQL error or failed precondition, or SQLcl does not confirm the final
+`ROLLBACK`, the command uses fresh read-only check sessions after SQLcl exits and
+compares their results with the captured values. The report marks rollback proof
+true only when every check is complete and its final value equals its starting
+value.
 An SQL error still returns 2 even when the fresh preconditions prove rollback;
 inspect the error and report before deciding what to change.
+
+This proof compares only the scalar values returned by the declared checks; it
+does not establish that every effect was undone. Oracle sequence and identity
+advancement may remain after a successful rollback, and autonomous trigger or
+external effects are outside these checks. Review such effects separately.
 
 `--report <file>` writes schema-version 1 JSON with each folder's files,
 statements, rows affected, postcondition status, and rollback proof. It is
@@ -280,6 +290,9 @@ could not complete. Rehearsal evidence is kept under
 `rollout` runs a reviewed release as an ordered manifest. It uses the existing
 migration, read-only verification and app deployment paths; standalone DBA
 scripts get a private SQLcl driver with an identity check before the payload.
+For the pre-window checklist, DML rehearsal, one-window execution, browser
+checks, and DBA-owned recovery plan, see the
+[production deployment runbook](production-deployment.md).
 The [example manifest](rollout-manifest.example.json) shows every supported
 step type. Replace its example folders, schema, connection alias, ORDS source
 and application ID with files and descriptors in the project before running
@@ -347,7 +360,15 @@ matching successful receipt for every earlier step: manifest digest,
 environment, step digest, input hashes, timing and evidence fields must match.
 It then starts at step N. Receipts are local recovery evidence, not a shared
 database ledger; inspect the target state before resuming after an ambiguous
-write.
+write. They bind the configured target and record an independently observed
+database/service/container/schema/user tuple. That tuple is scoped evidence,
+not proof of a globally unique physical database or clone. Resume refuses a
+legacy receipt without independently observed target identity. Preserve the
+original receipt, report, SQLcl evidence, and immutable migration folders;
+inspect the live target independently and obtain a reviewed continuation plan
+before any further writes. Never edit or fabricate receipt identity, delete
+evidence to bypass the refusal, or replay completed writes merely to create a
+fresh receipt.
 
 `--dry-run` validates the manifest and local step inputs, prints all hashes,
 and writes the report pair without running the steps. `--report <file>` writes
@@ -478,10 +499,11 @@ the selected owner and PUBLIC synonyms, plus direct `SELECT` grants to that
 owner or `PUBLIC`. An owner synonym takes precedence over a PUBLIC synonym. A
 reference through either synonym is satisfied only when its direct target is a
 live table, view or materialized view, an earlier-staged table or view, or a
-matching direct `SELECT` grant proves the owner can read the external target.
-A missing target, missing grant, synonym chain or database-link target remains
-a missing prerequisite. These catalog reads are read-only; local-only analysis
-cannot establish synonym or grant reachability.
+matching direct `SELECT` grant and catalog evidence proves that an external
+target exists as a table, view or materialized view. A missing target, missing
+target-type evidence, missing grant, sequence target, synonym chain or
+database-link target remains a missing prerequisite. These catalog reads are
+read-only; local-only analysis cannot establish synonym or grant reachability.
 
 Live preflight compares the owner inventory by object owner, object name,
 subobject name and type. Status, `LAST_DDL_TIME`, object IDs and other volatile

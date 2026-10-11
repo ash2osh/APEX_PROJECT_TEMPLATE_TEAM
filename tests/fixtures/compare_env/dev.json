@@ -24,7 +24,7 @@
       "triggers": {"complete": true, "pages": [1]},
       "object-grants": {"complete": true, "pages": [1]},
       "network-aces": {"complete": true, "pages": [1]},
-      "ords": {"complete": true, "pages": [2]},
+      "ords": {"complete": true, "pages": [2], "kindPages": {"schema": [1], "module": [1], "template": [0], "handler": [0]}},
       "versions": {"complete": true, "pages": [2]}
     }
   },
@@ -47,8 +47,8 @@
       {"host": "api.example.test", "lower_port": 443, "upper_port": 443, "principal": "APP_DEV", "principal_type": "DATABASE", "privilege": "connect", "grant_type": "GRANT", "inverted_principal": "NO"}
     ],
     "ords": [
-      {"kind": "schema", "name": "APP_DEV", "enabled": true, "url_mapping_type": "BASE_PATH", "url_mapping_pattern": "app", "auto_rest_auth": false},
-      {"kind": "module", "name": "app.api", "uri_prefix": "api/", "status": "PUBLISHED"}
+      {"kind": "schema", "name": "APP_DEV", "url_mapping_id": 3, "url_mapping_type": "BASE_PATH", "url_mapping_pattern": "app", "mapping_complete": true, "status": "ENABLED", "auto_rest_auth": "N"},
+      {"kind": "module", "name": "app.api", "module_name": "app.api", "uri_prefix": "api/", "items_per_page": 0, "status": "PUBLISHED"}
     ],
     "versions": [
       {"component": "database", "version": "19.26"},

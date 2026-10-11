@@ -149,6 +149,8 @@ class MigrationRehearsalTests(unittest.TestCase):
         output_lines = [
             "AUTOCOMMIT is OFF",
             self.identity_frame(),
+            self.frame("rollback-start", "first-before", 1),
+            self.frame("rollback-start", "second-before", 0),
             self.frame("preconditions", "first-before"),
             "MIGRATION_REHEARSAL_FILE_BEGIN:001:001",
             "1 row inserted.",
@@ -161,7 +163,7 @@ class MigrationRehearsalTests(unittest.TestCase):
             self.frame("postconditions", "second-after"),
             "MIGRATION_REHEARSAL_ROLLBACK_COMPLETED",
             self.frame("preconditions", "first-before"),
-            self.frame("preconditions", "second-before"),
+            self.frame("preconditions", "second-before", 0),
         ]
         self.fake_sqlcl("\n".join(output_lines))
         report_path = self.root / "rehearsal.json"
@@ -173,6 +175,8 @@ class MigrationRehearsalTests(unittest.TestCase):
         driver = drivers[0]
         self.assertLess(driver.index("@@pre-001.sql"), driver.index("001-seed.sql"))
         self.assertLess(driver.index("001-seed.sql"), driver.index("@@post-001.sql"))
+        self.assertLess(driver.index("@@rollback-start-001.sql"), driver.index("001-seed.sql"))
+        self.assertLess(driver.index("@@rollback-start-002.sql"), driver.index("001-seed.sql"))
         self.assertLess(driver.index("@@post-001.sql"), driver.index("@@pre-002.sql"))
         self.assertLess(driver.index("@@pre-002.sql"), driver.index("001-worker.sql"))
         self.assertLess(driver.index("001-worker.sql"), driver.index("@@post-002.sql"))
@@ -188,6 +192,8 @@ class MigrationRehearsalTests(unittest.TestCase):
         self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
         report = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(report["rollbackProof"]["status"], "true")
+        self.assertEqual(report["folders"][0]["rollbackProof"]["checks"][0]["startingValue"], 1)
+        self.assertEqual(report["folders"][1]["rollbackProof"]["checks"][0]["startingValue"], 0)
         self.assertEqual([folder["postconditions"]["status"] for folder in report["folders"]], ["true", "true"])
         self.assertEqual(report["folders"][0]["statements"][0]["rowsAffected"], 1)
         self.assertEqual(report["folders"][1]["statements"][0]["rowsAffected"], 1)
@@ -209,6 +215,7 @@ class MigrationRehearsalTests(unittest.TestCase):
         output = "\n".join((
             "AUTOCOMMIT is OFF",
             self.identity_frame(),
+            self.frame("rollback-start", "before"),
             self.frame("preconditions", "before"),
             "MIGRATION_REHEARSAL_FILE_BEGIN:001:001",
             "1 row inserted.",
@@ -241,6 +248,7 @@ class MigrationRehearsalTests(unittest.TestCase):
         output = "\n".join((
             "AUTOCOMMIT is OFF",
             self.identity_frame(),
+            self.frame("rollback-start", "workers-exist"),
             self.frame("preconditions", "workers-exist"),
             "MIGRATION_REHEARSAL_FILE_BEGIN:001:001",
             "0 rows updated.",
@@ -270,6 +278,7 @@ class MigrationRehearsalTests(unittest.TestCase):
         self.fake_sqlcl("\n".join((
             "AUTOCOMMIT is OFF",
             self.identity_frame(),
+            self.frame("rollback-start", "service-ready"),
             self.frame("preconditions", "service-ready", 0),
             "CHECK_REHEARSAL_FAILED:preconditions",
             "ORA-20985: Migration rehearsal precondition failed",
@@ -302,6 +311,7 @@ class MigrationRehearsalTests(unittest.TestCase):
         self.fake_sqlcl("\n".join((
             "AUTOCOMMIT is OFF",
             self.identity_frame(),
+            self.frame("rollback-start", "service-area-ready"),
             self.frame("preconditions", "service-area-ready"),
             "MIGRATION_REHEARSAL_FILE_BEGIN:001:001",
             "ORA-00001: unique constraint (APP.SERVICE_AREA_U1) violated",
@@ -327,6 +337,130 @@ class MigrationRehearsalTests(unittest.TestCase):
         self.assertEqual(report["folders"][0]["postconditions"]["status"], "not run")
         self.assertFalse((folder / "status.dev.json").exists())
 
+    def test_separate_read_fallback_compares_dependent_checks_to_saved_starting_values(self) -> None:
+        first = self.add_folder(
+            "2026-10-05_fallback-seed-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="first-before",
+            post_id="first-after",
+        )
+        second = self.add_folder(
+            "2026-10-06_fallback-worker-r001",
+            {"001-worker.sql": "UPDATE ITEMS SET CLAIMED = 'Y' WHERE ID = 1;\n"},
+            pre_id="second-before",
+            post_id="second-after",
+        )
+        self.fake_sqlcl("\n".join((
+            "AUTOCOMMIT is OFF",
+            self.identity_frame(),
+            self.frame("rollback-start", "first-before", 1),
+            self.frame("rollback-start", "second-before", 0),
+            self.frame("preconditions", "first-before"),
+            "MIGRATION_REHEARSAL_FILE_BEGIN:001:001",
+            "1 row inserted.",
+            "MIGRATION_REHEARSAL_FILE_END:001:001",
+            self.frame("postconditions", "first-after"),
+            self.frame("preconditions", "second-before"),
+            "MIGRATION_REHEARSAL_FILE_BEGIN:002:001",
+            "ORA-00001: simulated worker failure",
+        )), status=1)
+
+        def unchanged_state_checks(target, checks, run_dir, *, phase):
+            results = tuple({
+                "id": check.id, "row_count": 1, "column_count": 1, "numeric": True,
+                "value": 1 if check.id == "first-before" else 0,
+            } for check in checks)
+            return CheckReport(True, True, results, (), {"phase": phase, "identity": self.identity})
+
+        report_path = self.root / "fallback-baseline.json"
+        status, _stdout, _drivers = self.invoke_rehearsal(
+            self.load(first.name, second.name), report_path=report_path,
+            run_checks_fn=unchanged_state_checks,
+        )
+
+        self.assertEqual(status, 2)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["rollbackProof"]["status"], "true")
+        self.assertEqual(report["folders"][1]["rollbackProof"]["checks"][0]["startingValue"], 0)
+        self.assertEqual(report["folders"][1]["rollbackProof"]["checks"][0]["observed"], 0)
+
+    def test_rollback_proof_is_unverified_when_initial_or_final_values_are_unavailable(self) -> None:
+        folder = self.add_folder(
+            "2026-10-06_missing-frame-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="before",
+            post_id="after",
+        )
+        base_lines = [
+            "AUTOCOMMIT is OFF",
+            self.identity_frame(),
+            self.frame("rollback-start", "before"),
+            self.frame("preconditions", "before"),
+            "MIGRATION_REHEARSAL_FILE_BEGIN:001:001",
+            "1 row inserted.",
+            "MIGRATION_REHEARSAL_FILE_END:001:001",
+            self.frame("postconditions", "after"),
+            "MIGRATION_REHEARSAL_ROLLBACK_COMPLETED",
+            self.frame("preconditions", "before"),
+        ]
+        for label, lines in (
+            ("missing-start", [line for line in base_lines if "rollback-start" not in line]),
+            ("missing-final", base_lines[:-1]),
+        ):
+            with self.subTest(label=label):
+                self.fake_sqlcl("\n".join(lines))
+                report_path = self.root / f"{label}.json"
+                status, _stdout, _drivers = self.invoke_rehearsal(
+                    self.load(folder.name), report_path=report_path,
+                )
+                self.assertEqual(status, 2)
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                self.assertEqual(report["rollbackProof"]["status"], "error")
+
+    def test_initial_rollback_check_query_error_prevents_payload_execution(self) -> None:
+        folder = self.add_folder(
+            "2026-10-07_start-query-error-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="before",
+            post_id="after",
+        )
+        failed_frame = {
+            "schemaVersion": 1,
+            "phase": "rollback-start",
+            "complete": True,
+            "identity": self.identity,
+            "results": [{
+                "id": "before",
+                "row_count": 0,
+                "column_count": 1,
+                "numeric": False,
+                "error": "ORA-00942: table or view does not exist",
+            }],
+        }
+        self.fake_sqlcl("\n".join((
+            "AUTOCOMMIT is OFF",
+            self.identity_frame(),
+            "CHECK_PAYLOAD_BEGIN:rollback-start",
+            json.dumps(failed_frame, separators=(",", ":")),
+            "CHECK_PAYLOAD_END:rollback-start",
+            "CHECK_VERIFIED:rollback-start",
+            "CHECK_REHEARSAL_FAILED:rollback-start",
+            "ORA-00942: table or view does not exist",
+        )), status=1)
+        report_path = self.root / "start-query-error.json"
+
+        status, _stdout, drivers = self.invoke_rehearsal(self.load(folder.name), report_path=report_path)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(len(drivers), 1)
+        self.assertLess(drivers[0].index("@@rollback-start-001.sql"), drivers[0].index("001-seed.sql"))
+        self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", drivers[0])
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["folders"][0]["rollbackStart"]["status"], "error")
+        self.assertIn("ORA-00942", report["folders"][0]["rollbackStart"]["checks"][0]["error"])
+        self.assertEqual(report["rollbackProof"]["status"], "error")
+        self.assertNotEqual(report["folders"][0]["files"][0]["executionStatus"], "complete")
+
     def test_rollback_proof_rejects_preconditions_observed_on_a_different_target(self) -> None:
         folder = self.add_folder(
             "2026-10-05_wrong-proof-target-r001",
@@ -337,6 +471,7 @@ class MigrationRehearsalTests(unittest.TestCase):
         self.fake_sqlcl("\n".join((
             "AUTOCOMMIT is OFF",
             self.identity_frame(),
+            self.frame("rollback-start", "before"),
             self.frame("preconditions", "before"),
             "MIGRATION_REHEARSAL_FILE_BEGIN:001:001",
             "ORA-00001: unique constraint (APP.ITEMS_U1) violated",
@@ -424,6 +559,100 @@ class MigrationRehearsalTests(unittest.TestCase):
                 [QueryCheck("unsafe", "SELECT UTL_HTTP.REQUEST('https://example.invalid') FROM dual", 1)],
                 "postconditions",
             )
+
+    def test_report_refuses_reserved_evidence_and_unselected_migration_paths_before_database_sessions(self) -> None:
+        selected = self.add_folder(
+            "2026-10-10_selected-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="before",
+            post_id="after",
+        )
+        unselected = self.root / "migrations" / "2026-10-11_unselected-r001"
+        unselected.mkdir()
+        destinations = (
+            self.root / "scratch" / "migration-attempt-test" / "run-manifest.json",
+            self.root / "scratch" / "migration-verify-test" / "verification.json",
+            self.root / "scratch" / "migration-rehearsal-retained" / "sqlcl-output.log",
+            self.root / "scratch" / "rollout-runs" / "run-1" / "step-001.json",
+            self.root / "scratch" / "rollout-receipts" / "manifest" / "dev" / "step-001.json",
+            self.root / "scratch" / "apex-publish.retained" / "publish-verification.json",
+            self.root / "scratch" / "apex-publish-retained" / "publish-verification.json",
+            self.root / "scratch" / "apex-partial.retained" / "partial-verification.json",
+            self.root / "scratch" / "apex-partial-retained" / "partial-verification.json",
+            self.root / "scratch" / "apexlang-upgrade.retained" / "conversion.json",
+            self.root / "scratch" / "apex-export.retained" / "export.log",
+            self.root / "scratch" / "apex-export-retained" / "export.log",
+            self.root / "scratch" / "apex-lookup.retained" / "lookup.log",
+            self.root / "scratch" / "apex-lookup-retained" / "lookup.log",
+            self.root / "scratch" / "sqlcl-doctor.retained" / "doctor.log",
+            self.root / "scratch" / "sqlcl-doctor-retained" / "doctor.log",
+            self.root / "scratch" / "db-backup.retained" / "backup.log",
+            self.root / "scratch" / "db-backup-retained" / "backup.log",
+            self.root / ".sync-state" / "publish.json",
+            unselected / "report.json",
+        )
+        session_calls = []
+
+        def observe(_target, _run_dir):
+            session_calls.append("inventory")
+            return SimpleNamespace(identity=self.identity)
+
+        def run_session(*_args, **_kwargs):
+            session_calls.append("session")
+            return SimpleNamespace(output="AUTOCOMMIT is OFF\n")
+
+        for destination in destinations:
+            with self.subTest(destination=destination):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                original = b"preserve retained evidence\n"
+                destination.write_bytes(original)
+                session_calls.clear()
+                status = rehearse_batch(
+                    self.root,
+                    self.load(selected.name),
+                    self.target,
+                    lambda _prompt: True,
+                    capture_inventory_fn=observe,
+                    run_session_fn=run_session,
+                    report_path=destination,
+                )
+                self.assertEqual(status, 2)
+                self.assertEqual(destination.read_bytes(), original)
+                self.assertEqual(session_calls, [])
+
+    @unittest.skipIf(os.name == "nt", "symlink-parent refusal regression uses POSIX symlinks")
+    def test_report_refuses_symlinked_parent_before_database_sessions(self) -> None:
+        folder = self.add_folder(
+            "2026-10-12_symlink-report-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="before",
+            post_id="after",
+        )
+        real = self.root / "real-evidence-dir"
+        real.mkdir()
+        target_file = real / "report.json"
+        original = b"keep this file\n"
+        target_file.write_bytes(original)
+        link = self.root / "evidence-link"
+        link.symlink_to(real, target_is_directory=True)
+        calls = []
+
+        def observe(_target, _run_dir):
+            calls.append("inventory")
+            return SimpleNamespace(identity=self.identity)
+
+        status = rehearse_batch(
+            self.root,
+            self.load(folder.name),
+            self.target,
+            lambda _prompt: True,
+            capture_inventory_fn=observe,
+            report_path=link / "report.json",
+        )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(target_file.read_bytes(), original)
+        self.assertEqual(calls, [])
 
     def test_report_is_rejected_without_rehearsal(self) -> None:
         stderr = io.StringIO()

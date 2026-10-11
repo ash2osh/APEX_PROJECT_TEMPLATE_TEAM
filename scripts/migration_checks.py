@@ -7,9 +7,10 @@ import argparse
 import json
 import os
 import re
+import threading
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,7 @@ from .migration_manifest import (
     validate_check_query,
 )
 from .schema_catalog import CatalogError, ObjectKey, SchemaSnapshot
-from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
+from .sqlcl_session import SqlclCancelled, SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
 from .validate_migration import statement_spans
 
 
@@ -770,9 +771,10 @@ def _render_check_driver(
     exit_on_finish: bool = True,
     configure_session: bool = True,
     fail_on_false: bool = False,
+    fail_on_error: bool = False,
 ) -> str:
-    if phase not in {"preconditions", "postconditions"}:
-        raise ValueError("check phase must be preconditions or postconditions")
+    if phase not in {"preconditions", "postconditions", "rollback-start"}:
+        raise ValueError("check phase must be preconditions, postconditions, or rollback-start")
     if IDENTIFIER_RE.fullmatch(target.schema) is None:
         raise ValueError("target schema must be an uppercase Oracle identifier")
     sql_lines = [
@@ -887,6 +889,10 @@ def _render_check_driver(
             sql_lines.append(
                 f"  IF l_rows != 1 OR l_columns != 1 OR l_value IS NULL OR l_value != {check.expected} OR l_error IS NOT NULL THEN l_failed := TRUE; END IF;"
             )
+        elif fail_on_error:
+            sql_lines.append(
+                "  IF l_rows != 1 OR l_columns != 1 OR l_value IS NULL OR l_error IS NOT NULL THEN l_failed := TRUE; END IF;"
+            )
     sql_lines.extend([
         "  l_payload.put('results', l_results);",
         "  DBMS_OUTPUT.PUT_LINE('CHECK_PAYLOAD_BEGIN:" + phase + "');",
@@ -907,6 +913,13 @@ def _render_check_driver(
             "    RAISE_APPLICATION_ERROR(-20985, 'Migration rehearsal precondition failed');",
             "  END IF;",
         ])
+    elif fail_on_error:
+        sql_lines.extend([
+            "  IF l_failed THEN",
+            f"    DBMS_OUTPUT.PUT_LINE('CHECK_REHEARSAL_FAILED:{phase}');",
+            "    RAISE_APPLICATION_ERROR(-20986, 'Migration rehearsal rollback baseline could not be captured');",
+            "  END IF;",
+        ])
     sql_lines.extend(["END;", "/"])
     if exit_on_finish:
         sql_lines.append("EXIT SUCCESS ROLLBACK")
@@ -920,6 +933,7 @@ def render_in_session_check_driver(
     phase: str,
     *,
     fail_on_false: bool = False,
+    fail_on_error: bool = False,
 ) -> str:
     """Render validated checks that run in the caller's current transaction."""
     return _render_check_driver(
@@ -930,6 +944,7 @@ def render_in_session_check_driver(
         exit_on_finish=False,
         configure_session=False,
         fail_on_false=fail_on_false,
+        fail_on_error=fail_on_error,
     )
 
 
@@ -1106,15 +1121,37 @@ def run_checks(
             "outputAvailable": False, "failedCheckIds": [],
         })
 
-    def run_batch(index: int, batch: Sequence[QueryCheck]) -> CheckReport:
+    def run_batch(
+        index: int,
+        batch: Sequence[QueryCheck],
+        cancel_event: threading.Event | None = None,
+    ) -> CheckReport:
         batch_dir = run_dir if len(batches) == 1 else run_dir / f"batch-{index:03d}"
         evidence = batch_dir / "sqlcl-output.log"
+        if cancel_event is not None and cancel_event.is_set():
+            return CheckReport(False, False, (), ({
+                "code": "SQLCL_CANCELLED", "phase": phase, "message": "check worker cancelled before SQLcl started",
+            },), {
+                "phase": phase, "complete": False, "outputAvailable": False,
+                "failedCheckIds": [], "sessionAttempted": False, "evidence": str(evidence),
+            })
         attempted = False
         try:
             driver = _driver_for_checks(batch_dir, target, batch, phase)
             attempted = True
-            result = _runner(target, driver, batch_dir, phase=phase)
+            runner_options = {"phase": phase}
+            if cancel_event is not None and _runner is run_sqlcl:
+                runner_options["cancel_event"] = cancel_event
+            result = _runner(target, driver, batch_dir, **runner_options)
             report = _parse_check_output(result.output, batch, phase)
+        except SqlclCancelled as error:
+            report = CheckReport(False, False, (), ({
+                "code": "SQLCL_CANCELLED", "phase": phase, "message": str(error),
+            },), {
+                "phase": phase, "complete": False,
+                "outputAvailable": _check_output_available(error.output, phase),
+                "failedCheckIds": [],
+            })
         except SqlclTimeout as error:
             report = CheckReport(False, False, (), ({
                 "code": "SQLCL_TIMEOUT",
@@ -1146,11 +1183,23 @@ def run_checks(
     if jobs == 1 or len(batches) == 1:
         reports = [run_batch(index, batch) for index, batch in enumerate(batches, start=1)]
     else:
-        with ThreadPoolExecutor(max_workers=min(jobs, len(batches))) as executor:
-            reports = list(executor.map(
-                lambda item: run_batch(*item),
-                enumerate(batches, start=1),
-            ))
+        cancel_event = threading.Event()
+        executor = ThreadPoolExecutor(max_workers=min(jobs, len(batches)))
+        futures: list[Future[CheckReport]] = []
+        try:
+            futures = [
+                executor.submit(run_batch, index, batch, cancel_event)
+                for index, batch in enumerate(batches, start=1)
+            ]
+            reports = [future.result() for future in futures]
+        except BaseException:
+            cancel_event.set()
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
     errors = tuple(error for report in reports for error in report.errors)
     results = tuple(result for report in reports for result in report.results)
@@ -1230,12 +1279,16 @@ def _dependency_available_through_synonym(
             bool(live_types & SELECTABLE_SYNONYM_TARGET_TYPES)
             or staged_kind in {"CREATE_TABLE", "CREATE_VIEW"}
         )
-    return any(
-        grant.owner == synonym.table_owner
-        and grant.table_name == synonym.table_name
-        and grant.grantee in {owner, "PUBLIC"}
-        and grant.privilege == "SELECT"
-        for grant in snapshot.grants
+    return (
+        synonym.target_exists is True
+        and synonym.target_type in SELECTABLE_SYNONYM_TARGET_TYPES
+        and any(
+            grant.owner == synonym.table_owner
+            and grant.table_name == synonym.table_name
+            and grant.grantee in {owner, "PUBLIC"}
+            and grant.privilege == "SELECT"
+            for grant in snapshot.grants
+        )
     )
 
 

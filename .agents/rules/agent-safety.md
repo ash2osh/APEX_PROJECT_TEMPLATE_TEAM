@@ -42,4 +42,21 @@
   manual output as an executed deployment.
 - Do not claim a live check passed unless it actually ran. Report unavailable
   checks as unknown.
+- Use `scripts/team.sh verify` for declared read-only checks and
+  `scripts/team.sh query` with a named configured profile for ad-hoc shared-
+  target reads. `migrate --rehearse` executes eligible DML on the real selected
+  target; run it only when that target and the DML are authorized. Its scalar
+  rollback checks do not prove sequence/identity counters, autonomous work,
+  external effects, or DDL were undone. Keep reviewed assertions intact; never
+  weaken a check to obtain a green result. The documented disposable-fixture
+  qualification path remains available only for its explicitly approved
+  local target and cleanup.
+- For confirmed inherited-template issues, check known limitations, record a
+  sanitized entry in project-owned `TODO.md`, and follow
+  [`docs/template-feedback.md`](../../docs/template-feedback.md). Resolve the
+  repository from the template lock and manifest, never the downstream
+  `origin`; search existing upstream issues/PRs before filing. A focused PR
+  needs current-task authorization for upstream-only commit/push. Queue
+  ambiguous or unsafe reports locally and continue safe work. Never disclose
+  credentials, project source/data, or full logs.
 - Do not commit or push without an explicit instruction. Never silently push.

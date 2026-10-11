@@ -131,9 +131,25 @@ refresh below and report its status to the developer in the current chat.
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
   each direct import requires the displayed `[y/N]` confirmation. Add
   `--manual` to print a DBA runbook without connecting. A deployment writes
-  to the selected APEX workspace and parsing schema.
+  to the selected APEX workspace and parsing schema. For an ordered release
+  manifest and recovery packet, follow
+  [the production deployment runbook](docs/production-deployment.md).
+- **Checks and shared-target reads:** Use `scripts/team.sh verify` to evaluate
+  declared migration checks read-only. For ad-hoc shared-target reads, use
+  `scripts/team.sh query` with a named configured profile and identity guards;
+  do not improvise a raw SQLcl read. `migrate --rehearse` runs eligible DML on
+  the selected real target and rolls back its transaction, so use it only when
+  that exact target and DML have been authorized. Its scalar checks do not
+  prove that sequence/identity advancement, autonomous work, external effects,
+  or DDL were undone. Do not lower or remove a reviewed assertion just to make a
+  command pass. The explicitly approved disposable-fixture route in
+  [local qualification](docs/local-qualification.md) remains scoped to its
+  named local target and cleanup.
 - **Other commands:** `scripts/team.sh doctor` validates `.env` and performs a
-  read-only SQLcl identity check. `scripts/team.sh verify-local` validates local
+  read-only SQLcl identity check. `scripts/team.sh query --env <env>
+  --connection <profile> [--schema NAME] [--file PATH | SQL]` runs the bounded,
+  conservative read-only query flow described in [README.md](README.md#read-only-ad-hoc-queries).
+  `scripts/team.sh verify-local` validates local
   configuration, lock, app descriptors and native Oracle skills offline.
   `scripts/team.sh backup-db` refreshes the local table and code mirrors, and the
   ORDS mirror when the ORDS profile exists. `scripts/team.sh backup-ords`
@@ -223,6 +239,19 @@ files, not shared Builder state.
   When they conflict with this file, ask the user which applies.
 
 ## Rules for coding agents
+
+- **Upstream template feedback:** For a confirmed inherited-template issue,
+  check [known limitations](docs/known-limitations.md), record sanitized
+  evidence and local status in project-owned [TODO.md](TODO.md), and follow
+  [the feedback guide](docs/template-feedback.md). Resolve the repository from
+  `.template-lock.json`, then `template-manifest.json`; never use the downstream
+  `origin`. Search existing upstream issues/PRs first and link a match, or open
+  a concise sanitized issue in the verified upstream by default. A focused PR
+  requires current-task authorization for its upstream-only commit and push.
+  If provenance, access or safe disclosure is unclear, keep the entry queued
+  with the reason and continue the safe local work. Never disclose credentials,
+  project source/data or full logs; never auto-merge, deploy, or upgrade from a
+  report.
 
 - Before reporting a defect or changing behaviour in a review or test run,
   check [docs/known-limitations.md](docs/known-limitations.md). The behaviour

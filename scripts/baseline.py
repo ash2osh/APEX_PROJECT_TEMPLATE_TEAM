@@ -1211,14 +1211,17 @@ def _count_check(check_id: str, table_and_where: str, expected: int) -> dict:
 
 def _source_line_matches(name: str, object_type: str, schema: str, line_number: int, line: str, *, final: bool) -> str:
     exact = _sql_literal(line[:-1] if final and line.endswith("\n") else line)
-    text = f"S.TEXT = {exact}"
+    text = f"(S.TEXT || CHR(1)) = ({exact} || CHR(1))"
     if final:
         final_newline = _sql_literal((line[:-1] if line.endswith("\n") else line) + "\n")
-        text = f"S.TEXT IN ({exact}, {final_newline})"
+        text = (
+            f"(S.TEXT || CHR(1)) = ({exact} || CHR(1)) OR "
+            f"(S.TEXT || CHR(1)) = ({final_newline} || CHR(1))"
+        )
     return (
         "EXISTS (SELECT 1 FROM ALL_SOURCE S "
         f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} AND S.TYPE = {_sql_literal(object_type)} "
-        f"AND S.LINE = {line_number} AND {text})"
+        f"AND S.LINE = {line_number} AND ({text}))"
     )
 
 
@@ -1226,7 +1229,7 @@ def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000)
     name, object_type = str(unit["name"]), str(unit["type"])
     lines = unit["lines"]
     slug = _safe_check_slug(f"{name}-{object_type}")
-    expected_rows = [(line_no, line) for line_no, line in enumerate(lines, start=1) if line.rstrip("\n") != ""]
+    expected_rows = list(enumerate(lines, start=1))
 
     def query(rows: Sequence[tuple[int, str]]) -> str:
         predicates = [
@@ -1237,7 +1240,7 @@ def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000)
         return (
             "SELECT CASE WHEN "
             f"(SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = {_sql_literal(schema)} AND NAME = {_sql_literal(name)} AND TYPE = {_sql_literal(object_type)}) = {len(lines)} "
-            f"AND {text_match} THEN 1 ELSE 0 END FROM DUAL"
+            f"AND ({text_match}) THEN 1 ELSE 0 END FROM DUAL"
         )
 
     result: list[dict] = []
@@ -1716,10 +1719,32 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         if name.upper().startswith("SYS_C"):
             continue
         existing = target_constraints.get(key)
-        replace_check = bool(
-            existing and row.get("constraint_type") == "C" and existing.get("constraint_type") == "C"
-            and _condition_key(str(row.get("condition", ""))) != _condition_key(str(existing.get("condition", "")))
+        constraint_fields = (
+            "constraint_type", "columns", "referenced_table", "referenced_columns", "condition",
+            "condition_truncated", "status", "validated", "delete_rule", "deferrable", "deferred", "rely",
         )
+        changed_fields = [
+            field for field in constraint_fields
+            if (
+                _condition_key(str(row.get(field) or "")) != _condition_key(str(existing.get(field) or ""))
+                if field == "condition" and existing is not None
+                else existing is not None and row.get(field) != existing.get(field)
+            )
+        ]
+        truncated_condition = any(
+            str(constraint.get("condition_truncated", "")).upper() in {"Y", "YES", "TRUE", "1"}
+            for constraint in (row, existing or {})
+        )
+        replace_check = bool(
+            existing and changed_fields == ["condition"]
+            and row.get("constraint_type") == "C" and existing.get("constraint_type") == "C"
+            and not truncated_condition
+        )
+        if existing is not None and changed_fields and not replace_check:
+            raise BaselineError(
+                f"same-name constraint differences need a reviewed migration: "
+                f"{table_name}.{name} ({', '.join(changed_fields)})"
+            )
         if existing is None or replace_check:
             if ObjectKey(source_schema, name, "CONSTRAINT") not in definitions:
                 raise BaselineError(f"source constraint definition is missing for {table_name}.{name}")

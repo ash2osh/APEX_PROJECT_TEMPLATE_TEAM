@@ -81,12 +81,28 @@ DECLARE
     RETURN FALSE;
   END;
 
+  FUNCTION read_view_ddl(p_view_name VARCHAR2) RETURN CLOB IS
+    view_ddl CLOB;
+  BEGIN
+    EXECUTE IMMEDIATE 'ALTER SESSION ENABLE COMMIT IN PROCEDURE';
+    BEGIN
+      view_ddl := DBMS_METADATA.GET_DDL('VIEW', p_view_name, c_schema);
+    EXCEPTION
+      WHEN OTHERS THEN
+        EXECUTE IMMEDIATE 'ALTER SESSION DISABLE COMMIT IN PROCEDURE';
+        RAISE;
+    END;
+    EXECUTE IMMEDIATE 'ALTER SESSION DISABLE COMMIT IN PROCEDURE';
+    RETURN view_ddl;
+  END;
+
   PROCEDURE fingerprint(p_text CLOB, p_line_count OUT PLS_INTEGER, p_hash_sum OUT NUMBER) IS
     position_value PLS_INTEGER := 1;
     text_length PLS_INTEGER := DBMS_LOB.GETLENGTH(p_text);
     next_line PLS_INTEGER;
     line_length PLS_INTEGER;
     current_line VARCHAR2(32767);
+    line_hash NUMBER;
   BEGIN
     p_line_count := 0;
     p_hash_sum := 0;
@@ -107,11 +123,79 @@ DECLARE
       END IF;
       p_line_count := p_line_count + 1;
       IF p_line_count > 1 AND line_length > 0 THEN
-        p_hash_sum := p_hash_sum + ORA_HASH(current_line);
+        SELECT ORA_HASH(current_line) INTO line_hash FROM dual;
+        p_hash_sum := p_hash_sum + line_hash;
       END IF;
       EXIT WHEN next_line = 0;
       position_value := next_line + 1;
     END LOOP;
+  END;
+
+  PROCEDURE hash_text_clob(
+    p_source CLOB,
+    p_source_hash OUT NUMBER,
+    p_line_count OUT NUMBER,
+    p_source_length OUT NUMBER,
+    p_source_complete OUT BOOLEAN
+  ) IS
+    c_chunk_units CONSTANT PLS_INTEGER := 8000;
+    text_length NUMBER;
+    offset_value NUMBER := 1;
+    consumed_units PLS_INTEGER;
+    consumed_bytes PLS_INTEGER;
+    newline_count NUMBER := 0;
+    chunk_value VARCHAR2(32767);
+    line_hash NUMBER;
+    hash_state NUMBER := 0;
+    final_character VARCHAR2(4);
+  BEGIN
+    p_source_hash := NULL;
+    p_line_count := NULL;
+    p_source_length := NULL;
+    p_source_complete := FALSE;
+    IF p_source IS NULL THEN RETURN; END IF;
+
+    text_length := DBMS_LOB.GETLENGTH(p_source);
+    p_source_length := text_length;
+    p_source_hash := 0;
+    IF text_length = 0 THEN
+      p_line_count := 0;
+      p_source_complete := TRUE;
+      RETURN;
+    END IF;
+
+    WHILE offset_value <= text_length LOOP
+      chunk_value := DBMS_LOB.SUBSTR(p_source, c_chunk_units, offset_value);
+      consumed_units := LENGTH2(chunk_value);
+      consumed_bytes := LENGTHB(chunk_value);
+      IF consumed_units IS NULL OR consumed_units = 0
+         OR consumed_units > c_chunk_units OR consumed_bytes IS NULL
+         OR consumed_bytes = 0 OR consumed_bytes > 32767 THEN
+        RAISE_APPLICATION_ERROR(-20998, 'ORDS handler source chunk was not consumed completely');
+      END IF;
+      newline_count := newline_count + LENGTH2(chunk_value)
+        - NVL(LENGTH2(REPLACE(chunk_value, CHR(10), '')), 0);
+      SELECT ORA_HASH(chunk_value, 4294967295, hash_state) INTO line_hash FROM dual;
+      hash_state := line_hash;
+      final_character := SUBSTR(chunk_value, -1, 1);
+      offset_value := offset_value + consumed_units;
+    END LOOP;
+
+    IF offset_value != text_length + 1 THEN
+      RAISE_APPLICATION_ERROR(-20998, 'ORDS handler source character count did not reach the CLOB end');
+    END IF;
+    p_source_hash := hash_state;
+    p_line_count := newline_count + CASE WHEN final_character = CHR(10) THEN 0 ELSE 1 END;
+    IF p_source_hash IS NULL OR p_line_count IS NULL OR p_source_length IS NULL THEN
+      RAISE_APPLICATION_ERROR(-20998, 'ORDS handler source fingerprint metadata is incomplete');
+    END IF;
+    p_source_complete := TRUE;
+  EXCEPTION
+    WHEN OTHERS THEN
+      p_source_hash := NULL;
+      p_line_count := NULL;
+      p_source_length := NULL;
+      p_source_complete := FALSE;
   END;
 
   PROCEDURE fingerprint_source(
@@ -208,6 +292,139 @@ DECLARE
     l_page.put('reason', p_reason);
     l_page.put('pages', JSON_ARRAY_T.parse('[0]'));
     l_coverage_sections.put(p_name, l_page);
+  END;
+
+  PROCEDURE add_ords IS
+    ords_cursor SYS_REFCURSOR;
+    ords_row_json CLOB;
+    ords_source CLOB;
+    ords_rows JSON_ARRAY_T := JSON_ARRAY_T();
+    ords_pages JSON_ARRAY_T := JSON_ARRAY_T();
+    ords_kind_pages JSON_OBJECT_T := JSON_OBJECT_T();
+    ords_row JSON_OBJECT_T;
+    ords_source_hash NUMBER;
+    ords_line_count NUMBER;
+    ords_source_length NUMBER;
+    ords_source_complete BOOLEAN;
+    ords_total PLS_INTEGER := 0;
+    ords_page_count PLS_INTEGER;
+
+    PROCEDURE append_ords_kind(p_kind VARCHAR2, p_query VARCHAR2) IS
+      kind_pages JSON_ARRAY_T := JSON_ARRAY_T();
+    BEGIN
+      l_offset := 0;
+      LOOP
+        ords_page_count := 0;
+        OPEN ords_cursor FOR p_query USING c_schema, l_offset, c_page_size;
+        LOOP
+          FETCH ords_cursor INTO ords_row_json, ords_source;
+          EXIT WHEN ords_cursor%NOTFOUND;
+          IF ords_total >= c_max_rows THEN
+            RAISE_APPLICATION_ERROR(-20995, 'compare-env ords exceeded its 100000-row cap');
+          END IF;
+          ords_total := ords_total + 1;
+          ords_page_count := ords_page_count + 1;
+          ords_row := JSON_OBJECT_T(ords_row_json);
+          IF p_kind = 'handler' THEN
+            hash_text_clob(ords_source, ords_source_hash, ords_line_count,
+              ords_source_length, ords_source_complete);
+            ords_row.put('source_complete', ords_source_complete);
+            IF ords_source_complete THEN
+              ords_row.put('source_hash', ords_source_hash);
+              ords_row.put('line_count', ords_line_count);
+              ords_row.put('source_length', ords_source_length);
+            ELSE
+              ords_row.put_null('source_hash');
+              ords_row.put_null('line_count');
+              ords_row.put_null('source_length');
+            END IF;
+          END IF;
+          ords_rows.append(ords_row);
+        END LOOP;
+        CLOSE ords_cursor;
+        kind_pages.append(ords_page_count);
+        EXIT WHEN ords_page_count < c_page_size;
+        l_offset := l_offset + c_page_size;
+      END LOOP;
+      ords_kind_pages.put(p_kind, kind_pages);
+    END;
+  BEGIN
+    IF NOT selected('ords') THEN RETURN; END IF;
+    EXECUTE IMMEDIATE
+      'SELECT COUNT(*) FROM DBA_OBJECTS WHERE OWNER = ''ORDS_METADATA'' AND OBJECT_TYPE = ''TABLE'' ' ||
+      'AND OBJECT_NAME IN (''ORDS_SCHEMAS'',''ORDS_URL_MAPPINGS'',''ORDS_MODULES'',''ORDS_TEMPLATES'',''ORDS_HANDLERS'')'
+      INTO l_ords_count;
+    IF l_ords_count < 5 THEN
+      add_unavailable('ords', 'ORDS metadata catalog is not installed or readable through the DBA connection');
+      RETURN;
+    END IF;
+
+    append_ords_kind('schema', q'~
+      SELECT JSON_OBJECT('kind' VALUE 'schema', 'name' VALUE s.parsing_schema,
+        'url_mapping_id' VALUE s.url_mapping_id, 'url_mapping_type' VALUE u.type,
+        'url_mapping_pattern' VALUE u.pattern,
+        'mapping_complete' VALUE CASE
+          WHEN s.url_mapping_id IS NULL OR (u.id IS NOT NULL AND u.type IS NOT NULL AND u.pattern IS NOT NULL)
+          THEN 'true' ELSE 'false' END FORMAT JSON,
+        'status' VALUE s.status, 'auto_rest_auth' VALUE s.auto_rest_auth RETURNING CLOB) row_json,
+        TO_CLOB(NULL) handler_source
+        FROM ords_metadata.ords_schemas s
+        LEFT JOIN ords_metadata.ords_url_mappings u ON u.id = s.url_mapping_id
+       WHERE s.parsing_schema = :scope
+       ORDER BY s.parsing_schema OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    append_ords_kind('module', q'~
+      SELECT JSON_OBJECT('kind' VALUE 'module', 'name' VALUE m.name, 'module_name' VALUE m.name,
+        'uri_prefix' VALUE m.uri_prefix, 'items_per_page' VALUE m.items_per_page,
+        'status' VALUE m.status RETURNING CLOB) row_json,
+        TO_CLOB(NULL) handler_source
+        FROM ords_metadata.ords_modules m
+        JOIN ords_metadata.ords_schemas s ON s.id = m.schema_id
+       WHERE s.parsing_schema = :scope
+       ORDER BY m.name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    append_ords_kind('template', q'~
+      SELECT JSON_OBJECT('kind' VALUE 'template', 'module_name' VALUE m.name,
+        'name' VALUE t.uri_template, 'uri_template' VALUE t.uri_template,
+        'priority' VALUE t.priority RETURNING CLOB) row_json,
+        TO_CLOB(NULL) handler_source
+        FROM ords_metadata.ords_templates t
+        JOIN ords_metadata.ords_modules m ON m.id = t.module_id
+        JOIN ords_metadata.ords_schemas s ON s.id = m.schema_id
+       WHERE s.parsing_schema = :scope
+       ORDER BY m.name, t.uri_template OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    append_ords_kind('handler', q'~
+      SELECT JSON_OBJECT('kind' VALUE 'handler', 'module_name' VALUE m.name,
+        'uri_template' VALUE t.uri_template, 'method' VALUE h.method,
+        'source_type' VALUE h.source_type, 'items_per_page' VALUE h.items_per_page,
+        'mimes_allowed' VALUE h.mimes_allowed RETURNING CLOB) row_json,
+        h.source handler_source
+        FROM ords_metadata.ords_handlers h
+        JOIN ords_metadata.ords_templates t ON t.id = h.template_id
+        JOIN ords_metadata.ords_modules m ON m.id = t.module_id
+        JOIN ords_metadata.ords_schemas s ON s.id = m.schema_id
+       WHERE s.parsing_schema = :scope
+       ORDER BY m.name, t.uri_template, h.method OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+
+    l_offset := 0;
+    IF ords_total = 0 THEN
+      ords_pages.append(0);
+    ELSE
+      WHILE l_offset < ords_total LOOP
+        ords_page_count := LEAST(c_page_size, ords_total - l_offset);
+        ords_pages.append(ords_page_count);
+        l_offset := l_offset + c_page_size;
+      END LOOP;
+      IF MOD(ords_total, c_page_size) = 0 THEN ords_pages.append(0); END IF;
+    END IF;
+    l_sections.put('ords', ords_rows);
+    l_page := JSON_OBJECT_T();
+    l_page.put('complete', TRUE);
+    l_page.put('pages', ords_pages);
+    l_page.put('kindPages', ords_kind_pages);
+    l_coverage_sections.put('ords', l_page);
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF ords_cursor%ISOPEN THEN CLOSE ords_cursor; END IF;
+      add_unavailable('ords', 'ORDS metadata capture is unavailable: ' || SQLERRM);
   END;
 
   PROCEDURE add_baseline_data IS
@@ -430,7 +647,7 @@ DECLARE
         IF l_total >= c_max_rows THEN
           RAISE_APPLICATION_ERROR(-20995, 'compare-env views exceeded its 100000-row cap');
         END IF;
-        l_view_ddl := DBMS_METADATA.GET_DDL('VIEW', view_row.view_name, c_schema);
+        l_view_ddl := read_view_ddl(view_row.view_name);
         fingerprint(l_view_ddl, l_view_lines, l_view_hash);
         l_page := JSON_OBJECT_T();
         l_page.put('name', view_row.view_name);
@@ -507,7 +724,7 @@ DECLARE
         END LOOP;
         DBMS_SQL.CLOSE_CURSOR(view_cursor);
         view_cursor := NULL;
-        view_ddl := DBMS_METADATA.GET_DDL('VIEW', view_row.view_name, c_schema);
+        view_ddl := read_view_ddl(view_row.view_name);
         view_json := JSON_OBJECT_T();
         view_json.put('name', view_row.view_name);
         view_json.put('text', view_text);
@@ -811,45 +1028,7 @@ BEGIN
        ORDER BY a.host, a.lower_port, a.upper_port, a.ace_order OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
     BEGIN
-      SELECT COUNT(*) INTO l_ords_count FROM dba_objects
-       WHERE owner = 'ORDS_METADATA' AND object_type = 'TABLE'
-         AND object_name IN ('ORDS_SCHEMAS','ORDS_MODULES','ORDS_TEMPLATES','ORDS_HANDLERS');
-      IF l_ords_count < 4 THEN
-        add_unavailable('ords', 'ORDS metadata catalog is not installed or readable through the DBA connection');
-      ELSE
-        add_query_section('ords', q'~
-          SELECT row_json FROM (
-          WITH selected_schema AS (SELECT :scope schema_name FROM dual)
-          SELECT 'schema' kind, s.schema module_name, CAST(NULL AS VARCHAR2(4000)) uri_template,
-              CAST(NULL AS VARCHAR2(30)) method,
-              JSON_OBJECT('kind' VALUE 'schema', 'name' VALUE s.schema,
-                'enabled' VALUE CASE WHEN UPPER(TO_CHAR(s.enabled)) IN ('YES','Y','TRUE','1') THEN 'true' ELSE 'false' END FORMAT JSON,
-                'url_mapping_type' VALUE s.url_mapping_type, 'url_mapping_pattern' VALUE s.url_mapping_pattern,
-                'auto_rest_auth' VALUE CASE WHEN UPPER(TO_CHAR(s.auto_rest_auth)) IN ('YES','Y','TRUE','1') THEN 'true' ELSE 'false' END FORMAT JSON RETURNING CLOB) row_json
-              FROM ords_metadata.ords_schemas s JOIN selected_schema x ON x.schema_name = s.schema
-            UNION ALL
-            SELECT 'module', s.schema, CAST(NULL AS VARCHAR2(4000)), CAST(NULL AS VARCHAR2(30)),
-              JSON_OBJECT('kind' VALUE 'module', 'name' VALUE m.name, 'module_name' VALUE m.name,
-                'uri_prefix' VALUE m.uri_prefix, 'status' VALUE m.status, 'module_type' VALUE m.module_type RETURNING CLOB)
-              FROM ords_metadata.ords_modules m JOIN ords_metadata.ords_schemas s ON s.id = m.schema_id
-                JOIN selected_schema x ON x.schema_name = s.schema
-            UNION ALL
-            SELECT 'template', m.name, t.uri_template, CAST(NULL AS VARCHAR2(30)),
-              JSON_OBJECT('kind' VALUE 'template', 'module_name' VALUE m.name, 'name' VALUE t.uri_template,
-                'uri_template' VALUE t.uri_template, 'priority' VALUE t.priority, 'status' VALUE m.status RETURNING CLOB)
-              FROM ords_metadata.ords_templates t JOIN ords_metadata.ords_modules m ON m.id = t.module_id
-                JOIN ords_metadata.ords_schemas s ON s.id = m.schema_id
-                JOIN selected_schema x ON x.schema_name = s.schema
-            UNION ALL
-            SELECT 'handler', m.name, t.uri_template, h.method,
-              JSON_OBJECT('kind' VALUE 'handler', 'module_name' VALUE m.name, 'uri_template' VALUE t.uri_template,
-                'method' VALUE h.method, 'source_type' VALUE h.source_type, 'items_per_page' VALUE h.items_per_page,
-                'mime_type' VALUE h.mimetype, 'format' VALUE h.format, 'status' VALUE m.status RETURNING CLOB)
-              FROM ords_metadata.ords_handlers h JOIN ords_metadata.ords_templates t ON t.id = h.template_id
-                JOIN ords_metadata.ords_modules m ON m.id = t.module_id JOIN ords_metadata.ords_schemas s ON s.id = m.schema_id
-                JOIN selected_schema x ON x.schema_name = s.schema
-          ) ORDER BY kind, module_name, uri_template, method OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
-      END IF;
+      add_ords();
     EXCEPTION
       WHEN OTHERS THEN
         add_unavailable('ords', 'ORDS catalog query is unavailable: ' || SQLERRM);
