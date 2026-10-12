@@ -1,14 +1,10 @@
-"""Run a command on Windows so that Ctrl-C interrupts the wait and ends everything the command started.
+"""Run a command on Windows so that Ctrl-C interrupts the wait and ends its process tree.
 
-On Linux and macOS a Ctrl-C reaches the whole foreground process group: Python's wait
-for its child ends at once, and the Bash and SQLcl processes below it stop as well.
-Neither holds on Windows. A Ctrl-C keypress is CTRL_C_EVENT for every process on the
-console, but Python waits for a child in a call that only returns when the child has
-ended, so KeyboardInterrupt arrives after SQLcl has finished, and the Git Bash
-processes that Python starts do not take the event, so SQLcl keeps running when
-Python stops. run() therefore waits in short steps and puts the command in a job
-object, which ends every process in it, whatever its parent, once it is terminated or
-closed (also when this process is killed).
+Console events do not behave like POSIX foreground-group signals. Git Bash can leave
+Ctrl-C disabled for a native child, and waiting on that child can delay Python's
+KeyboardInterrupt. ``run`` installs a console handler that wakes its polling loop,
+then terminates the command's job object, including SQLcl and any descendants. The
+job is also closed on process exit so its children cannot outlive the caller.
 """
 
 from __future__ import annotations
@@ -148,6 +144,35 @@ if os.name == "nt":
                 self._kernel32.CloseHandle(self._handle)
                 self._handle = None
 
+    class _ConsoleControlEvent:
+        """Turn console Ctrl-C/Break into a cancellation event for the polling loop."""
+
+        def __init__(self) -> None:
+            self.event = threading.Event()
+            self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self._kernel32.SetConsoleCtrlHandler.argtypes = (wintypes.LPVOID, wintypes.BOOL)
+            self._kernel32.SetConsoleCtrlHandler.restype = wintypes.BOOL
+            callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+            def handle_control_event(event_type: int) -> bool:
+                if event_type in (0, 1):  # CTRL_C_EVENT or CTRL_BREAK_EVENT
+                    self.event.set()
+                    return True
+                return False
+
+            self._callback = callback_type(handle_control_event)
+            self._callback_pointer = ctypes.cast(self._callback, wintypes.LPVOID)
+            # Git Bash can mark Ctrl-C as ignored for itself and its children.
+            # Reset that inherited state, then install a handler that wakes the
+            # polling loop so it can terminate the SQLcl job and finish cleanup.
+            self._kernel32.SetConsoleCtrlHandler(None, False)
+            self._installed = bool(self._kernel32.SetConsoleCtrlHandler(self._callback_pointer, True))
+
+        def close(self) -> None:
+            if self._installed:
+                self._kernel32.SetConsoleCtrlHandler(self._callback_pointer, False)
+                self._installed = False
+
 
 def run(
     command: Sequence[str],
@@ -166,15 +191,31 @@ def run(
     """
     if os.name != "nt":
         raise OSError("windows_job.run is for Windows")
-    # Git Bash can mark Ctrl-C as ignored for itself and its children. A Python
-    # helper launched beneath that shell must clear the inherited ignore state
-    # before it waits, otherwise KeyboardInterrupt never reaches the job cleanup.
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.SetConsoleCtrlHandler.argtypes = (wintypes.LPVOID, wintypes.BOOL)
-    kernel32.SetConsoleCtrlHandler.restype = wintypes.BOOL
-    # A process without a console cannot receive CTRL_C_EVENT; in that case the
-    # API call fails and there is no console state to restore.
-    kernel32.SetConsoleCtrlHandler(None, False)
+    control_event = _ConsoleControlEvent()
+    try:
+        return _run_with_control_event(
+            command,
+            input_text=input_text,
+            timeout=timeout,
+            output_limit_bytes=output_limit_bytes,
+            cancel_event=cancel_event,
+            console_cancel_event=control_event.event,
+            **popen_options,
+        )
+    finally:
+        control_event.close()
+
+
+def _run_with_control_event(
+    command: Sequence[str],
+    *,
+    input_text: str,
+    timeout: float | None,
+    output_limit_bytes: int | None,
+    cancel_event: threading.Event | None,
+    console_cancel_event: threading.Event,
+    **popen_options: Any,
+) -> subprocess.CompletedProcess:
     if output_limit_bytes is not None:
         return _run_bounded(
             command,
@@ -182,6 +223,7 @@ def run(
             timeout=timeout,
             output_limit_bytes=output_limit_bytes,
             cancel_event=cancel_event,
+            console_cancel_event=console_cancel_event,
             **popen_options,
         )
     try:
@@ -199,6 +241,8 @@ def run(
                 job = None
         pending: str | None = input_text
         while True:
+            if console_cancel_event.is_set():
+                raise KeyboardInterrupt
             if cancel_event is not None and cancel_event.is_set():
                 partial = _end(process, job)
                 raise Cancelled(partial or "")
@@ -228,6 +272,7 @@ def _run_bounded(
     timeout: float | None,
     output_limit_bytes: int,
     cancel_event: threading.Event | None = None,
+    console_cancel_event: threading.Event | None = None,
     **popen_options: Any,
 ) -> subprocess.CompletedProcess:
     """Capture a fixed byte budget and terminate the Windows job as soon as it overflows."""
@@ -274,6 +319,8 @@ def _run_bounded(
         reader = threading.Thread(target=read_output, name="sqlcl-output-reader", daemon=True)
         reader.start()
         while True:
+            if console_cancel_event is not None and console_cancel_event.is_set():
+                raise KeyboardInterrupt
             if cancel_event is not None and cancel_event.is_set():
                 _terminate_tree(process, job)
                 reader.join(GONE_SECONDS)

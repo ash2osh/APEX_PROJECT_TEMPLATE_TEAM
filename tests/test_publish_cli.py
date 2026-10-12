@@ -705,11 +705,14 @@ class PublishAppCliTests(unittest.TestCase):
                 process, screen, _ = _console_ctrl_c.interrupt(command, root, environment, pause, wait_seconds=60)
 
                 self.assertEqual(process.returncode, 130, screen)
-                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("apex-publish*")), [])
+                publish_work_dirs = sorted((root / "scratch").glob("apex-publish*"))
+                self.assertEqual(len(publish_work_dirs), 1, screen)
+                self.assertTrue((publish_work_dirs[0] / "publish-verification.json").is_file())
                 plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", screen).split())
                 self.assertIn("interrupted while the import was running", plain)
                 self.assertIn("its result is unknown", plain)
                 self.assertIn("scripts/team.ps1 export 100", plain)
+                self.assertIn("unverified import diagnostics retained", plain)
                 self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
                 self.assertEqual((app / "application.apx").read_bytes(), original)
 

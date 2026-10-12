@@ -18,6 +18,14 @@ from fake_sqlcl import BASH
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def set_environment_value(environment: dict[str, str], name: str, value: str | None) -> None:
+    for existing_name in list(environment):
+        if existing_name.casefold() == name.casefold():
+            del environment[existing_name]
+    if value is not None:
+        environment[name] = value
+
+
 class TeamCliTests(unittest.TestCase):
     def run_bash_env_loader(self, environment: Path) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -712,8 +720,8 @@ class TeamCliTests(unittest.TestCase):
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         environment = os.environ.copy()
-        environment.pop("TEAM_BASH", None)
-        environment["PATH"] = str(Path(pwsh).parent)  # pwsh itself, but no bash
+        set_environment_value(environment, "TEAM_BASH", None)
+        set_environment_value(environment, "PATH", str(Path(pwsh).parent))  # pwsh itself, but no bash
         if shutil.which("bash", path=environment["PATH"]):
             self.skipTest("bash lives next to pwsh on this machine")
         with tempfile.TemporaryDirectory() as temporary:
@@ -724,7 +732,7 @@ class TeamCliTests(unittest.TestCase):
             if os.name == "nt":
                 # team.ps1 also looks for Git for Windows under Program Files and LOCALAPPDATA\Programs.
                 for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"):
-                    environment[name] = str(empty)
+                    set_environment_value(environment, name, str(empty))
             result = subprocess.run(
                 [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
                 cwd=ROOT, env=environment, text=True, capture_output=True, check=False,

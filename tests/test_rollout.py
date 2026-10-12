@@ -14,6 +14,7 @@ from fake_sqlcl import environment as fake_environment, install as install_fake_
 
 from scripts import rollout
 from scripts.migration_manifest import load_batch
+from scripts.path_utils import relative_to_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,7 +113,7 @@ class RolloutManifestTests(unittest.TestCase):
             if mutate is not None:
                 mutate(number)
             code = 2 if number == fail_at else 0
-            return rollout.StepResult(code, (evidence.relative_to(self.root).as_posix(),), "simulated")
+            return rollout.StepResult(code, (relative_to_root(evidence, self.root).as_posix(),), "simulated")
 
         return execute
 
