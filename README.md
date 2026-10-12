@@ -47,17 +47,18 @@ operational scripts, `.env`, manifest and lock.
 | Safety built in | Every connection is identity-checked, production-looking names are caught, production is read-only, file installs are all-or-nothing, and your uncommitted work is never overwritten. |
 | Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
 | Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
-| AI-assistant support | Repository rules, workflows, 24 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
+| AI-assistant support | Repository rules, workflows, 25 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
 | Bash and PowerShell | `scripts/team.sh` and `scripts/team.ps1` expose the same commands. |
 
 ## Skills and agent support
 
 AI coding assistants read [AGENTS.md](AGENTS.md) (Claude Code loads it through
 `CLAUDE.md`) for the rules and load a skill on their own when a task matches
-its description. The same 24 skills are listed in `.agents/skills/` (for agents
+its description. The same 25 skills are listed in `.agents/skills/` (for agents
 that follow the `AGENTS.md` convention) and `.claude/skills/` (for Claude Code).
-Three Claude Code entries (`chrome-devtools-mcp`, `safeguarding-apexlang-text-messages`
-and `sqlcl-mcp-r0`) are short pointers to the full `.agents/skills/` copy.
+Four Claude Code entries (`building-apex-template-components`, `chrome-devtools-mcp`,
+`safeguarding-apexlang-text-messages` and `sqlcl-mcp-r0`) are short pointers to the full
+`.agents/skills/` copy.
 You do not have to call them by name.
 
 At the start of every task, agents read SQLcl's own
@@ -100,6 +101,7 @@ startup. Agents preserve project-authored skills and use release-matched APEXlan
 | `sqlcl-mcp-r0` | An assistant operates SQLcl through MCP at restriction level 0. |
 | `sqlcl-script-path-debugging` | Nested SQLcl scripts load the wrong file, or relative `SPOOL` and include paths misbehave. |
 | `chrome-devtools-mcp` | Inspecting or driving your running web app in Chrome through the project's persistent DevTools daemon. |
+| `building-apex-template-components` | Creating, translating or debugging an APEX template component (report type) for cards or lists: files, placeholders, region mapping, mobile and Arabic layout, optional Alpine.js, import and browser testing. |
 
 **Workflow skills** (from the Superpowers collection): `brainstorming`,
 `writing-plans`, `executing-plans`, `subagent-driven-development`,

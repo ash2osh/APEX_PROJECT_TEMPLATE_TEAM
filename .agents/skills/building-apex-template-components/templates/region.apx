@@ -1,0 +1,113 @@
+    region ticket-cards (
+        name: "&{TC_REGION_TICKETS}."
+        type: appTemplateComponent/ticketCard
+        source {
+            location: localDatabase
+            type: sqlQuery
+            sqlQuery:
+                ```sql
+                -- plain data only: no HTML, no inline styles. Column names are the keys of the settings block below.
+                SELECT t.ticket_id,
+                       t.title,
+                       t.status_code,
+                       APEX_LANG.MESSAGE('TC_STATUS_' || t.status_code) AS status_text,
+                       t.assignee,
+                       TO_CHAR(t.due_date, 'DD Mon YYYY') AS due_text
+                  FROM tickets t
+                 ORDER BY t.due_date
+                ```
+        }
+        layout {
+            sequence: 10
+            slot: body
+        }
+        appearance {
+            template: @/blank-with-attributes-no-grid
+            templateOptions: #DEFAULT#
+        }
+        accessibility {
+            landmarkType: region
+        }
+        advanced {
+            htmlDomId: ticket-cards
+        }
+        componentAppearance {
+            display: report
+        }
+        settings {
+            ticketId: TICKET_ID
+            title: TITLE
+            statusCode: STATUS_CODE
+            statusText: STATUS_TEXT
+            assignee: ASSIGNEE
+            dueText: DUE_TEXT
+        }
+        pagination {
+            entitiesPerPage: 50
+        }
+        messages {
+            whenNoDataFound: "&{TC_EMPTY}."
+            noDataFoundIcon: fa-clipboard fa-lg
+        }
+
+        column TICKET_ID (
+            layout {
+                sequence: 10
+            }
+            source {
+                databaseColumn: TICKET_ID
+                dataType: number
+                primaryKey: true
+            }
+        )
+
+        column TITLE (
+            layout {
+                sequence: 20
+            }
+            source {
+                databaseColumn: TITLE
+                dataType: varchar2
+            }
+        )
+
+        column STATUS_CODE (
+            layout {
+                sequence: 30
+            }
+            source {
+                databaseColumn: STATUS_CODE
+                dataType: varchar2
+            }
+        )
+
+        column STATUS_TEXT (
+            layout {
+                sequence: 40
+            }
+            source {
+                databaseColumn: STATUS_TEXT
+                dataType: varchar2
+            }
+        )
+
+        column ASSIGNEE (
+            layout {
+                sequence: 50
+            }
+            source {
+                databaseColumn: ASSIGNEE
+                dataType: varchar2
+            }
+        )
+
+        column DUE_TEXT (
+            layout {
+                sequence: 60
+            }
+            source {
+                databaseColumn: DUE_TEXT
+                dataType: varchar2
+            }
+        )
+    )
