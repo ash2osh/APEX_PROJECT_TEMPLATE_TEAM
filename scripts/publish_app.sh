@@ -512,6 +512,9 @@ verify_args=(
   "$verify_run_dir/.apex-export-before.txt" "$verify_run_dir/.apex-export-after.txt"
   --repo-root "$REPO_ROOT"
   --deployment-file "$deployment_file" --deployment-state "$verify_run_dir/.apex-deployment-state.json"
+  --summary-path "$staging_dir/publish-verification.json"
+  --target-apex-release-before "$verify_run_dir/.apex-release-before.txt"
+  --target-apex-release-after "$verify_run_dir/.apex-release-after.txt"
 )
 python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}"
 printf '%s\n' '{"schemaVersion":1,"sourceVerified":true,"lifecycleStatus":"unavailable"}' > "$staging_dir/publish-verification.json"

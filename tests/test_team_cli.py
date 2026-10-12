@@ -18,6 +18,14 @@ from fake_sqlcl import BASH
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def set_environment_value(environment: dict[str, str], name: str, value: str | None) -> None:
+    for existing_name in list(environment):
+        if existing_name.casefold() == name.casefold():
+            del environment[existing_name]
+    if value is not None:
+        environment[name] = value
+
+
 class TeamCliTests(unittest.TestCase):
     def run_bash_env_loader(self, environment: Path) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -30,7 +38,7 @@ class TeamCliTests(unittest.TestCase):
                     BASH,
                     "-c",
                     'set -e; source "$1" "$2"; printf "%s|%s|%s|%s\\n" "$CODE_SCHEMA" "$CODE_EXPECTED_USER" "$CODE_PREFIXES" "$APEX_PARSING_SCHEMA"',
-                    "bash",
+                    BASH,
                     str(loader),
                     str(environment),
                 ],
@@ -262,7 +270,7 @@ class TeamCliTests(unittest.TestCase):
                 [
                     BASH, "-c",
                     'set -e; source "$1" "$2"; printf "%s|%s|%s\\n" "$STAGING_SQLCL_CONNECTION" "$STAGING_EXPECTED_USER" "$STAGING_SCHEMA"',
-                    "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment),
+                    BASH, str(ROOT / "scripts" / "load_env.sh"), str(environment),
                 ],
                 text=True, capture_output=True, check=False,
             )
@@ -289,7 +297,7 @@ class TeamCliTests(unittest.TestCase):
                 [
                     BASH, "-c",
                     'export STAGING_SCHEMA=INHERITED PROD_SCHEMA=INHERITED; source "$1" "$2"; printf "%s|%s\\n" "${STAGING_SCHEMA-}" "${PROD_SCHEMA-}"',
-                    "bash", str(ROOT / "scripts" / "load_env.sh"), str(environment),
+                    BASH, str(ROOT / "scripts" / "load_env.sh"), str(environment),
                 ],
                 text=True, capture_output=True, check=False,
             )
@@ -712,15 +720,19 @@ class TeamCliTests(unittest.TestCase):
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         environment = os.environ.copy()
-        environment.pop("TEAM_BASH", None)
-        environment["PATH"] = str(Path(pwsh).parent)  # pwsh itself, but no bash
+        set_environment_value(environment, "TEAM_BASH", None)
+        set_environment_value(environment, "PATH", str(Path(pwsh).parent))  # pwsh itself, but no bash
         if shutil.which("bash", path=environment["PATH"]):
             self.skipTest("bash lives next to pwsh on this machine")
-        with tempfile.TemporaryDirectory() as empty:
+        with tempfile.TemporaryDirectory() as temporary:
+            empty = Path(temporary)
+            env_file = empty / ".env"
+            shutil.copy2(ROOT / ".env.example", env_file)
+            environment["PROJECT_ENV_FILE"] = str(env_file)
             if os.name == "nt":
                 # team.ps1 also looks for Git for Windows under Program Files and LOCALAPPDATA\Programs.
                 for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"):
-                    environment[name] = empty
+                    set_environment_value(environment, name, str(empty))
             result = subprocess.run(
                 [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
                 cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
@@ -780,7 +792,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertFalse(login_marker.exists(), "SQLcl must not start in the caller's directory")
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("docker-demo", args)
-            self.assertIn("@" + fake_sqlcl.native(scripts / "doctor.sql"), args)
+            self.assertIn("@" + fake_sqlcl.native((scripts / "doctor.sql").resolve()), args)
             doctor_sql = (scripts / "doctor.sql").read_text(encoding="utf-8")
             self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", doctor_sql)
             self.assertIn("@@verify_db_access.sql", doctor_sql)
@@ -1055,10 +1067,11 @@ class TeamCliTests(unittest.TestCase):
             "export_apps.sql", "verify_deployment_state.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
-            "record_export_state.py", "source_evidence.py",
+            "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "verify_publish_state.py",
             "stamp_publish_version.py",
             "validate_app_source.py",
+            "path_utils.py",
         ):
             source = ROOT / "scripts" / name
             if source.exists():
@@ -1091,6 +1104,7 @@ class TeamCliTests(unittest.TestCase):
             "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
             "if [[ $mode == export ]]; then found_script=0; for arg in \"$@\"; do if [[ $found_script == 1 ]]; then export_schema=$arg; break; fi; case \"$arg\" in *@*export_apps.sql) found_script=1 ;; esac; done; fi\n"
             "if [[ $mode == import ]]; then printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"; printf '%s\\n' 'Import successful.' 'APEX_IMPORT_VERIFIED:100'; fi\n"
+            "printf '26.2.0|2026-10-12T03:00:00.000Z\\n' > .apex-release-before.txt; printf '26.2.0|2026-10-12T03:00:01.000Z\\n' > .apex-release-after.txt\n"
             "if [[ $mode == export ]]; then exported=\"$PWD/apps/$export_schema/100\"; mkdir -p \"$exported/.apex\"; cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"; cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"; printf '%s\\n' '2026-09-26T09:30:00|2026-09-26T09:30:02|Release 1.0' > \"$PWD/.apex-export-before.txt\"; cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"; fi\n",
             encoding="utf-8",
         )
@@ -1127,6 +1141,7 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("deployments/prod.json", result.stdout)
             sql_lines = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("sql ")]
             self.assertEqual(len(sql_lines), 2, result.stdout)
+            checkout_root = script.parents[1].resolve()
             self.assertEqual(
                 shlex.split(sql_lines[0]),
                 [
@@ -1135,15 +1150,15 @@ class TeamCliTests(unittest.TestCase):
                     "-noupdates",
                     "-name",
                     "prod-db",
-                    "@" + fake_sqlcl.native(script.parents[1] / "scripts" / "publish_app.sql"),
+                    "@" + fake_sqlcl.native(checkout_root / "scripts" / "publish_app.sql"),
                     "PROD_APP",
                     "production",
                     "PROD_DEPLOYER",
-                    fake_sqlcl.native(script.parents[1] / "apps/DEMO/100"),
-                    fake_sqlcl.native(script.parents[1] / "apps/DEMO/100/deployments/prod.json"),
+                    fake_sqlcl.native(checkout_root / "apps/DEMO/100"),
+                    fake_sqlcl.native(checkout_root / "apps/DEMO/100/deployments/prod.json"),
                     "100",
                     "-",
-                    fake_sqlcl.native(script.parents[1] / "scripts/no_application_lock.sql"),
+                    fake_sqlcl.native(checkout_root / "scripts/no_application_lock.sql"),
                 ],
             )
             self.assertEqual(
@@ -1154,7 +1169,7 @@ class TeamCliTests(unittest.TestCase):
                     "-noupdates",
                     "-name",
                     "prod-db",
-                    "@" + fake_sqlcl.native(script.parents[1] / "scripts" / "export_apps.sql"),
+                    "@" + fake_sqlcl.native(checkout_root / "scripts" / "export_apps.sql"),
                     "PROD_APP",
                     "100",
                     "production",
@@ -1212,7 +1227,7 @@ class TeamCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("prod-db", args)
-            self.assertIn(fake_sqlcl.native(script.parents[1] / "apps/DEMO/100/deployments/prod.json"), args)
+            self.assertIn(fake_sqlcl.native((script.parents[1] / "apps/DEMO/100/deployments/prod.json").resolve()), args)
 
     def make_upgrade_fixture(self, root: Path) -> tuple[Path, Path]:
         template = root / "template"

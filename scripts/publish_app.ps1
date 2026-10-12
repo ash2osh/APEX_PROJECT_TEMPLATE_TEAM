@@ -481,7 +481,10 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     (Join-Path $verifyRunDir ".apex-export-before.txt"),
     (Join-Path $verifyRunDir ".apex-export-after.txt"),
     "--repo-root", $repoRoot,
-    "--deployment-file", $deploymentFile, "--deployment-state", (Join-Path $verifyRunDir ".apex-deployment-state.json")
+    "--deployment-file", $deploymentFile, "--deployment-state", (Join-Path $verifyRunDir ".apex-deployment-state.json"),
+    "--summary-path", (Join-Path $publishWorkDir "publish-verification.json"),
+    "--target-apex-release-before", (Join-Path $verifyRunDir ".apex-release-before.txt"),
+    "--target-apex-release-after", (Join-Path $verifyRunDir ".apex-release-after.txt")
   )
   & $python.Path @($python.Prefix) @verifyArgs
   if ($LASTEXITCODE -ne 0) {

@@ -150,9 +150,10 @@ class PublishAppCliTests(unittest.TestCase):
             "lookup_app_schema.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
-            "record_export_state.py", "source_evidence.py",
+            "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "verify_publish_state.py",
             "validate_app_source.py",
+            "path_utils.py",
             "stamp_publish_version.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
@@ -244,6 +245,8 @@ class PublishAppCliTests(unittest.TestCase):
             "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then live=$(cat \"$FAKE_STATE_DIR/live.txt\"); db=$(cat \"$FAKE_STATE_DIR/database.txt\"); version=$(cat \"$FAKE_STATE_DIR/version.txt\"); else live=${FAKE_REVISION:-2026-09-26T09:30:00}; db=${FAKE_DATABASE_TIME:-2026-09-26T09:30:02}; version=${FAKE_VERSION:-Release 1.0}; fi\n"
             "    printf '%s|%s|%s\\n' \"$live\" \"$db\" \"$version\" > \"$PWD/.apex-export-before.txt\"\n"
             "    cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"\n"
+            "printf '26.2.0|2026-10-12T03:00:00.000Z\\n' > .apex-release-before.txt\n"
+            "printf '26.2.0|2026-10-12T03:00:01.000Z\\n' > .apex-release-after.txt\n"
             "    ;;\n"
             "  *) : ;;\n"
             "esac\n",
@@ -271,7 +274,7 @@ class PublishAppCliTests(unittest.TestCase):
             "verify_db_access.sql",
             "normalize_apx.sh",
             "normalize_apx.ps1",
-            "record_export_state.py", "source_evidence.py",
+            "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "preserve_deployments.py",
             "verify_publish_state.py",
             "publish_app.ps1",
@@ -357,9 +360,9 @@ class PublishAppCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("docker-demo", args)
-            self.assertIn("@" + fake_sqlcl.native(runner.parent / "publish_app.sql"), args)
-            self.assertIn(fake_sqlcl.native(root / "apps/DEMO/100"), args)
-            self.assertIn(fake_sqlcl.native(root / "apps/DEMO/100" / "deployments/dev.json"), args)
+            self.assertIn("@" + fake_sqlcl.native((runner.parent / "publish_app.sql").resolve()), args)
+            self.assertIn(fake_sqlcl.native((root / "apps/DEMO/100").resolve()), args)
+            self.assertIn(fake_sqlcl.native((root / "apps/DEMO/100" / "deployments/dev.json").resolve()), args)
             self.assertNotEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(root / "apps/DEMO/100"))
 
     def test_publish_does_not_start_sqlcl_in_application_source(self) -> None:
@@ -702,11 +705,14 @@ class PublishAppCliTests(unittest.TestCase):
                 process, screen, _ = _console_ctrl_c.interrupt(command, root, environment, pause, wait_seconds=60)
 
                 self.assertEqual(process.returncode, 130, screen)
-                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("apex-publish*")), [])
+                publish_work_dirs = sorted((root / "scratch").glob("apex-publish*"))
+                self.assertEqual(len(publish_work_dirs), 1, screen)
+                self.assertTrue((publish_work_dirs[0] / "publish-verification.json").is_file())
                 plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", screen).split())
                 self.assertIn("interrupted while the import was running", plain)
                 self.assertIn("its result is unknown", plain)
                 self.assertIn("scripts/team.ps1 export 100", plain)
+                self.assertIn("unverified import diagnostics retained", plain)
                 self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
                 self.assertEqual((app / "application.apx").read_bytes(), original)
 
@@ -1246,9 +1252,10 @@ class PublishAppCliTests(unittest.TestCase):
                     "export_apps.sql", "verify_deployment_state.sql",
                     "verify_db_access.sql",
                     "normalize_apx.ps1",
-                    "record_export_state.py", "source_evidence.py",
+                    "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
                     "verify_publish_state.py",
                     "validate_app_source.py",
+                    "path_utils.py",
                     "stamp_publish_version.py",
                 ):
                     shutil.copy2(ROOT / "scripts" / name, scripts / name)
@@ -1289,6 +1296,8 @@ class PublishAppCliTests(unittest.TestCase):
                     "  cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"\n"
                     "  printf '%s\\n' '2026-09-26T09:30:00|2026-09-26T09:30:02|Release 1.0' > \"$PWD/.apex-export-before.txt\"\n"
                     "  cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"\n"
+            "printf '26.2.0|2026-10-12T03:00:00.000Z\\n' > .apex-release-before.txt\n"
+            "printf '26.2.0|2026-10-12T03:00:01.000Z\\n' > .apex-release-after.txt\n"
                     "fi\n",
                     encoding="utf-8",
                 )

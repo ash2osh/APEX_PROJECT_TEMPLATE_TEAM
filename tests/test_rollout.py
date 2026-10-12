@@ -14,6 +14,7 @@ from fake_sqlcl import environment as fake_environment, install as install_fake_
 
 from scripts import rollout
 from scripts.migration_manifest import load_batch
+from scripts.path_utils import relative_to_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,7 +113,7 @@ class RolloutManifestTests(unittest.TestCase):
             if mutate is not None:
                 mutate(number)
             code = 2 if number == fail_at else 0
-            return rollout.StepResult(code, (evidence.relative_to(self.root).as_posix(),), "simulated")
+            return rollout.StepResult(code, (relative_to_root(evidence, self.root).as_posix(),), "simulated")
 
         return execute
 
@@ -264,7 +265,7 @@ class RolloutManifestTests(unittest.TestCase):
             calls.append(number)
             evidence = context["evidence_dir"] / f"step-{number:03d}.log"
             evidence.write_text("verified\n", encoding="utf-8")
-            return rollout.StepResult(0, (evidence.relative_to(self.root).as_posix(),), "simulated")
+            return rollout.StepResult(0, (relative_to_root(evidence, self.root).as_posix(),), "simulated")
 
         def observer(identity):
             def observe(_target, run_dir):
@@ -622,7 +623,7 @@ class RolloutManifestTests(unittest.TestCase):
         def fake_migrate_main(arguments, *, environ, repo_root, confirm, expected_input_hashes):
             self.assertEqual(arguments, [folder, "--env", "staging"])
             self.assertIs(environ, os.environ)
-            self.assertEqual(repo_root, self.root)
+            self.assertEqual(relative_to_root(repo_root, self.root), Path("."))
             self.assertEqual(
                 expected_input_hashes[f"{folder}/001-create-table.sql"],
                 hashlib.sha256((self.root / folder / "001-create-table.sql").read_bytes()).hexdigest(),

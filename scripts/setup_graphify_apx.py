@@ -203,6 +203,7 @@ def _smoke_test_extractor(extractor_path: Path) -> tuple[bool, str]:
             "    )\n"
             ")\n",
             encoding="utf-8",
+            newline="\n",
         )
         spec = importlib.util.spec_from_file_location(module_name, extractor_path)
         if spec is None or spec.loader is None:
@@ -305,7 +306,7 @@ def _atomic_replace_text(target: Path, text: str, encoding: str = "utf-8") -> No
     if target.is_symlink() or os.path.islink(target):
         raise ValueError(f"Refusing to mutate symbolic link: {target}")
     mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
-    with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=f".{target.name}.tmp.", delete=False, encoding=encoding) as tf:
+    with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=f".{target.name}.tmp.", delete=False, encoding=encoding, newline="") as tf:
         tf.write(text)
         temp_path = Path(tf.name)
     try:

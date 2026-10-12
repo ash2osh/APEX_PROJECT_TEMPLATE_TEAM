@@ -148,13 +148,14 @@ class SqlclTimeoutConfigurationTests(unittest.TestCase):
                 run.mkdir()
                 driver = run / "driver.sql"
                 driver.write_text("EXIT SUCCESS ROLLBACK\n", encoding="utf-8")
-                binary = install(root / "bin", 'printf "FAKE_SQLCL_STARTED\\n"\nsleep 5\n')
+                binary = install(root / "bin", 'printf "FAKE_SQLCL_STARTED\\n"\nsleep 10\n')
+                selected_timeout = 5 if os.name == "nt" else 0.5
                 values = {
                     # Leave enough time for a loaded CI worker to start Bash and
                     # emit the banner before the timeout; phase selection is the
                     # assertion here, not a 50 ms process-start benchmark.
-                    "MIGRATION_APPLY_TIMEOUT_SECONDS": "0.5" if setting.endswith("APPLY_TIMEOUT_SECONDS") else "2",
-                    "MIGRATION_CHECK_TIMEOUT_SECONDS": "0.5" if setting.endswith("CHECK_TIMEOUT_SECONDS") else "2",
+                    "MIGRATION_APPLY_TIMEOUT_SECONDS": str(selected_timeout) if setting.endswith("APPLY_TIMEOUT_SECONDS") else "8",
+                    "MIGRATION_CHECK_TIMEOUT_SECONDS": str(selected_timeout) if setting.endswith("CHECK_TIMEOUT_SECONDS") else "8",
                 }
                 environment = fake_environment(binary, **values)
 
@@ -167,7 +168,7 @@ class SqlclTimeoutConfigurationTests(unittest.TestCase):
 
                 self.assertEqual(type(caught).__name__, "SqlclTimeout")
                 self.assertEqual(caught.phase, phase)
-                self.assertEqual(caught.timeout_seconds, 0.5)
+                self.assertEqual(caught.timeout_seconds, selected_timeout)
                 self.assertGreater(caught.elapsed_seconds, 0)
                 self.assertIn("FAKE_SQLCL_STARTED", (run / "sqlcl-output.log").read_text(encoding="utf-8"))
 

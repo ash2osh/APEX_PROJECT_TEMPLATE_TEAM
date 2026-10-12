@@ -10,7 +10,12 @@
 
 **Spec:** [Validity and design](../specs/2026-10-11-deployment-followup-ideas-design.md).
 
-**Status:** Draft plan only. The current user requested planning these ideas, not their implementation. Native targets, app IDs and credentials are deliberately not invented.
+**Historical status — 2026-10-11:** This was a draft plan when written; native
+targets, app IDs and credentials were deliberately not invented. On 2026-10-12,
+the user authorized implementation. The current execution order and PR #20
+reconciliation are tracked by the [consolidated remaining-work plan](2026-10-12-remaining-work-and-pr20.md),
+which supersedes this plan's task sequence while retaining this file's original
+design and qualification notes.
 
 ## Global Constraints
 

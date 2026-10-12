@@ -15,6 +15,7 @@ from scripts.apex_compatibility import require_sqlcl_version
 from scripts.application_lifecycle import capture_lifecycle
 from scripts.schema_catalog import capture_inventory
 from scripts.db_targets import Target
+from scripts.path_utils import relative_to_root
 from scripts.sqlcl_session import run_sqlcl
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -22,13 +23,13 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def _output_path(output: Path, repo_root: Path) -> Path:
     root=repo_root.resolve(); scratch=root/'scratch'; candidate=output.absolute()
-    try: candidate.relative_to(scratch)
+    try: relative_to_root(candidate, scratch)
     except ValueError as exc: raise ValueError('--output must be a fresh directory under this repository scratch/') from exc
     if candidate==scratch or candidate.exists() or candidate.is_symlink(): raise ValueError('qualification requires a fresh output directory')
     for path in (candidate,*candidate.parents):
         if path==root: break
         if path.is_symlink(): raise ValueError('qualification output cannot contain symlinked parents')
-    if not candidate.resolve().is_relative_to(scratch): raise ValueError('qualification output escaped scratch/')
+    if not relative_to_root(candidate.resolve(), scratch): raise ValueError('qualification output escaped scratch/')
     return candidate
 
 
@@ -38,7 +39,7 @@ def qualify(target: ProbeTarget, output: Path, *, repo_root=ROOT, runner=run_sql
             'limitations':['Observations do not qualify imports or native Windows behavior.', 'Empty automation/workflow/task arrays prove scoped readability, not positive runtime behavior.']}
     probe=Probe(target,directory/'identity',runner=runner,version_reader=version_reader)
     # Every adapter invocation repeats exact host/service/user/schema/context guards.
-    def guarded(selected,driver,run_dir):
+    def guarded(selected,driver,run_dir,**runner_options):
         original=driver.read_text(encoding='utf-8')
         # Catalog capture selects a session schema; it creates no schema objects.
         original=re.sub(r'(?im)^\s*SET TRANSACTION READ ONLY;\s*$', '', original)
@@ -46,7 +47,7 @@ def qualify(target: ProbeTarget, output: Path, *, repo_root=ROOT, runner=run_sql
         if re.search(r'(?im)^\s*(?:apex\s+(?:export|import)|commit\b|(?:create|alter|drop|truncate)\s)',original): raise ValueError('read-only qualification rejected a write command')
         preamble=probe.preamble().replace('declare v_group number;','SET TRANSACTION READ ONLY;\ndeclare v_group number;')
         driver.write_text(preamble+original,encoding='utf-8')
-        return runner(selected,driver,run_dir)
+        return runner(selected,driver,run_dir,**runner_options)
     probe.runner=guarded
     def check(name,operation):
         started=time.perf_counter()

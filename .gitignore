@@ -5,6 +5,7 @@
 !/.env
 .sync-state/
 scratch/
+migrations/**/attempt-event.*.json
 dist/
 
 # Local worktree/developer caches

@@ -388,6 +388,16 @@ line.
 Publish preflight also requires the selected application tree to be physically
 inside the checkout and rejects symbolic links and reparse points.
 
+The export marker includes `sourceProvenance` only when the guarded export
+observed the same exact APEX release before and after reading source. It binds
+that release and the database UTC observation time to the canonical source file
+set used by strict comparison. `sourceFormat.apexRelease` still identifies the
+26.2 format family. Local edits make provenance stale; legacy or manually
+staged source remains unknown. Publish reports an observed source/target APEX
+version pair when available, but the pair never relaxes byte verification.
+Stored database-code exports record their independently observed database
+release in `source-manifest.json`; they do not infer an APEX release.
+
 When publish refuses, see [docs/publish-rules.md](docs/publish-rules.md) for
 every rule, what each message means, and what to do.
 
@@ -469,7 +479,11 @@ before either writes; preflight runs again before apply, though a concurrent
 change can still race it. See [docs/migration-rules.md](docs/migration-rules.md)
 for coverage and recovery limits.
 
-`checks.json` requires read-only preconditions and postconditions.
+`checks.json` requires read-only preconditions and postconditions. Its original
+schema version 1 stays unchanged; optional schema version 2 can add
+rehearsal-only scalar metrics for before, after, and rollback values. See
+[`docs/migration-rules.md`](docs/migration-rules.md#folder-and-file-names) for
+the exact fields and limits.
 `status.<env>.json` appears only after the committed result has been verified
 through a fresh connection. It is local evidence, not a shared deployment
 ledger. Migration SQL can use standalone slash terminators for PL/SQL blocks,
@@ -617,6 +631,13 @@ A differing `.env.example` on the first upgrade also leaves an
 `.env.example.template-new` review copy; merge it into the example before
 reviewing any corresponding changes to your own `.env`.
 
+Run `scripts/team.sh template-status` to compare template-owned files with the
+local lock. It never fetches by default. For a read-only upstream comparison,
+pass both `--upstream` and an explicit `--ref`; the command reports the fetched
+commit and file statuses without installing or changing files. A missing lock
+in a downstream project is reported as unknown, while the original template
+repository does not require a downstream lock.
+
 The lock also records the selected `templateRef` and `apexRelease`. Later runs
 reuse the recorded ref when `--ref` is omitted. Keep a 26.1 project pinned with
 `--ref codex/apex-26.1 --apex-release 26.1`. Moving to the 26.2 line requires
@@ -725,6 +746,35 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual]` | Confirm a promotion or print a DBA runbook. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
+| `scripts/team.sh template-status [--format text\|json]` | Compare template-owned files with the local lock; no network access by default. |
+| `scripts/team.sh template-status --upstream --ref <ref>` | Explicitly compare local files with a branch, tag or commit from the manifest's upstream repository. |
+| `scripts/team.sh automations list <id> --env <env> --schema <schema>` | Read one application's automation status in its descriptor workspace. |
+| `scripts/team.sh automations check <id> --env <env> --schema <schema> --automation <static-id> --expected-status ACTIVE` | Check an exact selected automation against APEX 26.2's `ACTIVE`, `DISABLED`, or `ERROR` schedule states. |
+| `scripts/team.sh automations enable|disable|run-once <id> --env <env> --schema <schema> --automation <static-id>` | Explicitly change one automation's schedule or run it once after typed target/action confirmation; no publish path invokes these operations. |
+
+Each write accepts one exact static ID, rechecks target/app/status and native
+application lock before calling the public APEX API, then reads the same app
+state back. `run-once` runs synchronously and is verified only by a completed
+successful APEX execution log plus an independent lifecycle read. A timeout or
+missing log is `unknown`; reconcile the automation and execution log before any
+repeat. Session creation/deletion may run the application's configured session
+initialization and cleanup code, which the command displays before confirmation.
+The command does not advance a failed publish baseline or release a recovery lock.
+
+For an `unknown` action result, do not replay `run-once`. First inspect the exact
+automation and its APEX execution log, then reconcile its state independently:
+
+```bash
+scripts/team.sh automations list "$APP_ID" --env dev --schema "$SCHEMA"
+scripts/team.sh automations check "$APP_ID" --env dev --schema "$SCHEMA" \
+  --automation "$AUTOMATION_STATIC_ID" --expected-status DISABLED
+```
+
+Set `APP_ID`, `SCHEMA`, and `AUTOMATION_STATIC_ID` from the verified deployment
+descriptor and the selected app's exact static ID; choose the expected status
+from the observed recovery decision. If the execution log or lifecycle read is
+inconclusive, leave the result unknown and investigate manually. This check does
+not change a publish baseline or release a recovery lock.
 
 ## Read-only ad-hoc queries
 

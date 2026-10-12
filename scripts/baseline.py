@@ -310,6 +310,10 @@ def _export_source(config: Mapping, values: Mapping[str, str], environment: str,
             baseline_prefixes=config.get("prefixes", []), baseline_excluded=config.get("excludedObjects", []),
         )
         _complete(catalog, sections)
+        identity = catalog.get("identity")
+        database_version = identity.get("database_version") if isinstance(identity, Mapping) else None
+        if not isinstance(database_version, str) or not database_version.strip():
+            raise BaselineError(f"baseline source export did not observe the database release for {schema}")
         source_rows = catalog["sections"]["baseline-source"]
         settings_rows = catalog["sections"]["baseline-settings"]
         view_rows = catalog["sections"]["baseline-views"]
@@ -349,6 +353,7 @@ def _export_source(config: Mapping, values: Mapping[str, str], environment: str,
             _write_json(views_output / f"{_encoded_name(row['name'])}.json", row)
         _write_json(output / "source-manifest.json", {
             "schemaVersion": 1, "environment": environment, "schema": schema,
+            "databaseVersion": database_version,
             "codeUnits": len(grouped), "views": len(selected_views),
             "sourceRows": sum(len(rows) for rows in grouped.values()),
             "settingsRows": len(selected_settings), "complete": True,

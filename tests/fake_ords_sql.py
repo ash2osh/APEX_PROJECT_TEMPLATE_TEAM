@@ -104,8 +104,8 @@ def ords_session(config: dict, schema: str, expected_user: str, spool_schema: st
         if scenario == "old-ords":
             message = "Failed to execute the ORDS export function. Please ensure you have latest ORDS version installed in your database.\n"
             print(message.strip())
-            first.write_text(message, encoding="utf-8")
-            second.write_text(message, encoding="utf-8")
+            first.write_text(message, encoding="utf-8", newline="\n")
+            second.write_text(message, encoding="utf-8", newline="\n")
         elif scenario != "no-files":
             first.write_text(text[: len(text) // 2] if scenario == "truncated" else text, encoding="utf-8", newline="")
             second.write_text(
@@ -133,11 +133,12 @@ def database_session(config: dict, arguments: list[str]) -> int:
     name = {"tables": "FAKE_TABLE", "code": "FAKE_VIEW"}[scope]
     target = Path.cwd() / "database" / spool_schema / directory
     target.mkdir(parents=True, exist_ok=True)
-    (target / f"{name}.sql").write_text(f"CREATE FAKE {name} FOR {schema};\n", encoding="utf-8")
+    (target / f"{name}.sql").write_text(f"CREATE FAKE {name} FOR {schema};\n", encoding="utf-8", newline="\n")
     manifest = Path.cwd() / "database" / spool_schema / f"manifest-{scope}.txt"
     manifest.write_text(
         "TABLE=1\n" if scope == "tables" else "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n",
         encoding="utf-8",
+        newline="\n",
     )
     return 0
 

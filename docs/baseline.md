@@ -67,7 +67,10 @@ JSON files under `stored-source/`; each stores the configured owner's
 Each view JSON preserves the exact `ALL_VIEWS.TEXT` value and also carries
 `DBMS_METADATA.GET_DDL` output for later executable view migrations. Grant
 output is under `grants/` and keeps object grantable flags and system privilege
-admin-option flags.
+admin-option flags. The per-schema `source-manifest.json` records the database
+release observed in the same guarded catalog session. It does not infer or
+record an APEX release; application exports capture APEX release provenance
+through their own guarded APEX session.
 
 Catalog sections are captured in sorted pages of 500 rows, with a 100,000-row
 cap and completeness evidence. Reference rows use the same read-only

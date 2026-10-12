@@ -21,6 +21,16 @@ what the live app looked like at that moment:
   `application.apx` before importing, so the version shows which import is
   live.
 
+A full guarded APEX export also records an optional `sourceProvenance` object
+with the exact observed APEX release, database UTC export time, and a digest of
+the canonical source file set. This is separate from `sourceFormat.apexRelease`,
+which identifies the template's APEXlang format family. Older, manually staged,
+or edited source has unknown or stale provenance. Release pairs appear in
+verification and recovery summaries when available; they are diagnostic only.
+Source acceptance remains strict byte equality after the existing documented
+deployment projections. A missing target export observation, such as before a
+manual runbook connects, is reported as an unknown target release.
+
 Before importing, publish reads the same two values from the live app and
 compares them with your baseline. The import session then reads them once more,
 immediately before `apex import`, and refuses if they changed after the drift
@@ -231,6 +241,18 @@ commit. Publish prints these steps when it stops here.
 | `is not visible in the post-import state` | The app is missing after import. |
 | `changed while its post-import source was being verified` | Someone edited or imported during the verification. |
 | `same database second` / `later than the database-time observation` | The revision is ambiguous; export and retry. |
+
+The source verifier remains strict after its existing deployment projections. It
+reports every relative path that is missing, unexpected, missing from the
+required local input set, or byte-different; byte differences include the first
+differing line when available. It never prints source text. Comments,
+whitespace, ordering, and a matching second export do not excuse a byte mismatch.
+Review the named files, export and reconcile the live app, then retry through the
+normal drift and lifecycle gates.
+
+The verification report preserves `sourceProvenanceStatus`, `sourceApexRelease`,
+`targetApexRelease`, and a sanitized `versionPair`. A `stale` or `unknown`
+source release never changes source comparison or selects a tolerant profile.
 
 **A new app from `apex generate`.** DEV publish requires an existing app to
 acquire its native lock. Coordinate initial creation in Builder, or a separately

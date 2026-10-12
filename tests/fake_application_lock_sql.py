@@ -24,7 +24,12 @@ def main():
         data={'schemaVersion':1,'applicationPresent':True,'identity':dict(session_user=user,current_schema=schema,db_unique_name='TESTDB',container_id='3',container_name='TESTPDB',edition='ORA$BASE',server_host='test',service_name='testpdb'),'release':'26.2.0','workspace':workspace,'workspaceId':'123','appId':app_id,'startedAt':'2026-10-09T10:00:00Z','completedAt':'2026-10-09T10:00:01Z','coverage':dict(application=True,workspace=True,automations=True,workflows=True,tasks=True),'automations':[{'staticId':'AUTO','status':'DISABLED' if after and mode=='automation-disabled' else 'ACTIVE'}],'workflows':[] if after and mode=='lost-instance' else [instance],'tasks':[]}
         print('LIFECYCLE_PAYLOAD_BEGIN\n'+json.dumps(data)+'\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED'); return 0
     if drivers[0].name == 'export_apps.sql':
-        args=sys.argv[1:]; index=args.index('@'+str(drivers[0])); schema,app_id,environment=args[index+1:index+4]
+        args = sys.argv[1:]
+        index = next(
+            i for i, argument in enumerate(args)
+            if argument.startswith('@') and Path(argument[1:]).resolve() == drivers[0].resolve()
+        )
+        schema, app_id, environment = args[index + 1:index + 4]
         root=drivers[0].parent.parent
         environment={'production':'prod','development':'dev','test':'dev'}.get(environment,environment)
         descriptors=list((root/'apps').glob(f'*/{app_id}/deployments/{environment}.json'))

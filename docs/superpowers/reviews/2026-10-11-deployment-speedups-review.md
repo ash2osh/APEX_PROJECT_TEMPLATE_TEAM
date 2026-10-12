@@ -1,5 +1,18 @@
 # Deployment speedups review — 2026-10-11
 
+## Current integration status — 2026-10-12
+
+- The reviewed phase 1–10 delivery and final fixes are on `main` at
+  `df22dbbfc5a53bac6dc28f2b4f4910fec6604c6e`.
+- TF-001's local fix is merged; its newly added mixed-index case still needs
+  native qualification. Upstream issue #19 remains open.
+- PR #20 remains open at `9a59a855ae098243d5b9d06966f117c3777c1814` and conflicts
+  with `main`. Its remote branch is unchanged; the local implementation branch is
+  developing strict mismatch diagnostics and does not carry automation restoration
+  or normalized source acceptance. See the [consolidated remaining-work plan](../plans/2026-10-12-remaining-work-and-pr20.md).
+- The review findings and qualification results below describe the 2026-10-11
+  review snapshot. This update does not claim new test or database results.
+
 ## Scope and verdict
 
 - **Verdict: accepted for the implemented scope, with qualification limits.** The phase 1–8 review findings were repaired or explicitly narrowed; phase 9 query and phase 10 documentation are delivered. Task 13 supplies upstream-feedback policy and a project-owned TODO. The final whole-branch review found a synonym target namespace aggregation bug and a broken design-document anchor; both were corrected and rechecked. A sanitized upstream report is recorded as [issue #19](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/issues/19). The nine follow-up ideas remain a draft plan, not implemented behavior.
@@ -37,6 +50,6 @@
 - The review found no basis to relax exact-byte verification. Version diagnostics and any serializer profile remain a future plan; unknown source/version pairs continue to use strict comparison.
 - The upstream feedback workflow is built into template guidance. One confirmed inherited-template issue was filed as sanitized upstream issue #19 and recorded in project TODO. No pull request, commit, or push was made. Database/runtime issues and ordinary project defects remain outside that narrow reporting route.
 
-## Release note
+## Historical release note — 2026-10-11
 
 This uncommitted delivery adds the bounded configured-profile query flow, owner-safe catalog/ORDS capture and source checks, target-bound rollout/resume receipts, safer rehearsal cancellation/rollback evidence handling, production runbook and scoped local qualification, plus upstream feedback instructions and a preserved project TODO scaffold. Strict source comparisons and refusal gates remain in place. Follow-up implementation ideas are linked from [the updated handoff plan](../plans/2026-10-10-deployment-speedups-next.md) and are not included in this delivery.

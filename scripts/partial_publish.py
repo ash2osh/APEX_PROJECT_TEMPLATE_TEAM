@@ -13,6 +13,7 @@ if __package__ in (None, ''):
 
 from scripts.source_evidence import tree_hashes
 from scripts.upgrade_apexlang import preserve_authored
+from scripts.apexlang_diff import SourceMismatch, display_path, first_differing_line
 
 
 def page_lines(path: Path) -> list[str]:
@@ -93,9 +94,13 @@ def stage_partial_source(live_source: Path, local_source: Path, selected: tuple[
 
 def verify_partial_source(expected: Path, observed: Path, live_updated_on: str | None) -> None:
     left, right = tree_hashes(expected), tree_hashes(observed)
-    if left.keys() != right.keys():
-        raise ValueError('whole-app source file set changed unexpectedly during partial publication')
-    for name in left:
+    mismatches: list[SourceMismatch] = []
+    for name in sorted(left.keys() - right.keys()):
+        mismatches.append(SourceMismatch(name, 'missing'))
+    for name in sorted(right.keys() - left.keys()):
+        mismatches.append(SourceMismatch(name, 'unexpected'))
+    for name in sorted(left.keys() & right.keys()):
+        changed = left[name] != right[name]
         if name == 'deployments/default.json':
             a = json.loads((expected / name).read_text(encoding='utf-8'))
             b = json.loads((observed / name).read_text(encoding='utf-8'))
@@ -109,10 +114,22 @@ def verify_partial_source(expected: Path, observed: Path, live_updated_on: str |
                     protection.pop('allowUrlsCreatedAfter', None)
                     if not protection:
                         descriptor.get('app', {}).pop('sessionStateProtection', None)
-            if a != b:
-                raise ValueError('unrelated effective deployment changed during partial publication')
-        elif left[name] != right[name]:
-            raise ValueError('whole-app source bytes changed unexpectedly during partial publication: ' + name)
+            changed = a != b
+        if changed:
+            mismatches.append(SourceMismatch(
+                name,
+                'bytes',
+                first_differing_line((expected / name).read_bytes(), (observed / name).read_bytes()),
+            ))
+    if mismatches:
+        details = ', '.join(
+            display_path(item.path)
+            + (f' (first differing line {item.first_differing_line})' if item.first_differing_line else '')
+            for item in sorted(mismatches, key=lambda item: (item.path, item.kind))
+        )
+        if any(item.kind in {'missing', 'unexpected'} for item in mismatches):
+            raise ValueError('whole-app source file set changed unexpectedly during partial publication: ' + details)
+        raise ValueError('whole-app source bytes changed unexpectedly during partial publication: ' + details)
 
 
 def selected_lock_rows(rows, selected: tuple[Path, ...], app_id: int, workspace: str, owner: str) -> list[dict]:
@@ -152,9 +169,9 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
     """
     from datetime import date
     from scripts.source_evidence import read_content_baseline, content_evidence
+    from scripts.source_provenance import preserve_source_provenance
     from scripts.record_export_state import marker_payload
     from scripts.stamp_publish_version import stamp_application, DEVELOPER_NAME
-    from scripts.upgrade_apexlang import normalize_source
     from scripts.validate_app_source import validate_import_effects
     from scripts.check_mirror_source import baseline_hash
     if DEVELOPER_NAME.fullmatch(developer_name) is None:
@@ -178,7 +195,6 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
         first = backend.export('live-first')
         first_revision = backend.last_revision
         live = backend.export('live-second')
-        normalize_source(first); normalize_source(live)
         content_evidence(live)
         if tree_hashes(first) != tree_hashes(live) or first_revision != backend.last_revision:
             raise ValueError('live application snapshot was unstable before partial publication')
@@ -203,7 +219,6 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
         report['importAttempted'] = True
         backend.import_pages(stage, tuple(stage / selected_relative(path) for path in selected), version, locks)
         observed = backend.export('after-import')
-        normalize_source(observed)
         preserve_authored(source, observed)
         verify_partial_source(stage, observed, backend.last_revision.last_updated_on)
         backend.verify_effective(source, observed)
@@ -222,7 +237,13 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
         backend.check(); backend.release(); held = False
         canonical = run_dir / 'canonical'
         shutil.copytree(observed, canonical)
-        new_marker = marker_payload(app_id, backend.last_revision, canonical, backend.last_page_locks)
+        new_marker = marker_payload(
+            app_id,
+            backend.last_revision,
+            canonical,
+            backend.last_page_locks,
+            preserve_source_provenance(source),
+        )
         (canonical / 'apex-team-export.json').write_text(json.dumps(new_marker, indent=2) + '\n', encoding='utf-8')
         report.update(status='verified', noTeamNoticeEligible=no_team_notice,
                       changedLiveFiles=sorted(name for name in baseline.keys() | tree_hashes(live).keys()
