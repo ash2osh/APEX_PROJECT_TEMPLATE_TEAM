@@ -402,7 +402,7 @@ class GuideContractTests(unittest.TestCase):
         bash_loader = (ROOT / "scripts" / "load_env.sh").read_text(encoding="utf-8")
         powershell_loader = (ROOT / "scripts" / "load_env.ps1").read_text(encoding="utf-8")
         help_result = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
+            [BASH, str(ROOT / "scripts" / "team.sh"), "--help"],
             capture_output=True,
             text=True,
             check=False,

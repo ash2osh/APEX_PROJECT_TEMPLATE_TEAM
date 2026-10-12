@@ -153,6 +153,7 @@ class PublishAppCliTests(unittest.TestCase):
             "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "verify_publish_state.py",
             "validate_app_source.py",
+            "path_utils.py",
             "stamp_publish_version.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
@@ -1251,6 +1252,7 @@ class PublishAppCliTests(unittest.TestCase):
                     "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
                     "verify_publish_state.py",
                     "validate_app_source.py",
+                    "path_utils.py",
                     "stamp_publish_version.py",
                 ):
                     shutil.copy2(ROOT / "scripts" / name, scripts / name)

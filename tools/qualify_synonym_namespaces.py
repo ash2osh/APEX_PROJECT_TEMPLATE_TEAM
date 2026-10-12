@@ -17,6 +17,7 @@ if __package__ in (None, ""):
 
 from scripts.apex_compatibility import require_sqlcl_version
 from scripts.db_targets import Target
+from scripts.path_utils import relative_to_root
 from scripts.migration_checks import CheckReport, preflight
 from scripts.migration_manifest import load_batch
 from scripts.schema_catalog import capture_inventory_snapshot_with_retries
@@ -89,7 +90,7 @@ def _output_path(output: Path, repo_root: Path) -> Path:
     scratch = root / "scratch"
     candidate = Path(os.path.abspath(output if output.is_absolute() else root / output))
     try:
-        candidate.relative_to(scratch)
+        relative_to_root(candidate, scratch)
     except ValueError as error:
         raise QualificationError("--report-dir must be a fresh directory under this checkout's scratch/") from error
     if candidate == scratch or candidate.exists() or candidate.is_symlink():
@@ -99,7 +100,7 @@ def _output_path(output: Path, repo_root: Path) -> Path:
             break
         if path.is_symlink():
             raise QualificationError("qualification output cannot contain symlinked parents")
-    if not candidate.resolve().is_relative_to(scratch):
+    if not relative_to_root(candidate.resolve(), scratch):
         raise QualificationError("qualification output escaped scratch/")
     return candidate
 

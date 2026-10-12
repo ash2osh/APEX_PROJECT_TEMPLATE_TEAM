@@ -40,8 +40,8 @@ class MigrationRevisionTests(unittest.TestCase):
         second = revise_folder(self.root, "migrations/2026-10-01_create-things-r001", "correct generated DDL")
         third = revise_folder(self.root, "migrations/2026-10-01_create-things-r002", "fix follow-up")
 
-        self.assertEqual(second.folder, self.root / "migrations/2026-10-01_create-things-r002")
-        self.assertEqual(third.folder, self.root / "migrations/2026-10-01_create-things-r003")
+        self.assertEqual(second.folder, (self.root / "migrations/2026-10-01_create-things-r002").resolve())
+        self.assertEqual(third.folder, (self.root / "migrations/2026-10-01_create-things-r003").resolve())
         self.assertEqual(sorted(item.name for item in second.folder.iterdir()), ["001-create-table.sql", "002-add-index.sql", "README.md", "checks.json"])
         self.assertEqual((second.folder / "001-create-table.sql").read_bytes(), old_bytes["001-create-table.sql"])
         self.assertEqual((second.folder / "002-add-index.sql").read_bytes(), old_bytes["002-add-index.sql"])
@@ -57,7 +57,7 @@ class MigrationRevisionTests(unittest.TestCase):
 
         result = revise_folder(self.root, "migrations/DEMO/2026-10-01_create-things-r001")
 
-        self.assertEqual(result.folder.parent, old.parent)
+        self.assertEqual(result.folder.parent, old.parent.resolve())
         self.assertEqual(
             (result.folder / "README.md").read_bytes(),
             b"Supersedes 2026-10-01_create-things-r001: follow-up revision\nNotes without final newline",

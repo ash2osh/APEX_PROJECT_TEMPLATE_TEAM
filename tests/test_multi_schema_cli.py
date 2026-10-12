@@ -644,7 +644,7 @@ class PublishCliTests(unittest.TestCase):
     NAMES = (
         "publish_app.sh", "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "apex_compatibility.py", "verify_apex_release.sql", "load_env.sh", "check_db_target.sh", "export_apps.sql", "verify_deployment_state.sql",
         "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.sh", "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "deployment_descriptor.py", "source_evidence.py",
-        "verify_publish_state.py", "validate_app_source.py", "stamp_publish_version.py",
+        "verify_publish_state.py", "validate_app_source.py", "path_utils.py", "stamp_publish_version.py",
         "check_builder_drift.py", "check_builder_drift.sql", "sqlcl_safe.sh",
     )
 
@@ -881,7 +881,7 @@ class PowerShellPublishCliTests(PublishCliTests):
     NAMES = (
         "publish_app.ps1", "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "verify_apex_release.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1",
         "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "verify_apex_release.sql", "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.ps1",
-        "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "deployment_descriptor.py", "source_evidence.py", "verify_publish_state.py", "validate_app_source.py",
+        "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "deployment_descriptor.py", "source_evidence.py", "verify_publish_state.py", "validate_app_source.py", "path_utils.py",
         "stamp_publish_version.py", "check_builder_drift.py", "check_builder_drift.sql",
     )
 

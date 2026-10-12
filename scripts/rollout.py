@@ -35,6 +35,7 @@ from scripts.db_targets import (
 from scripts.deployment_descriptor import read_descriptor
 from scripts.migration_manifest import MigrationManifestError, load_batch, validate_receipt as validate_migration_receipt
 from scripts.local_config import ALLOWED_KEYS, ConfigError, read_project_env
+from scripts.path_utils import relative_to_root
 from scripts.ords_export import OrdsExportError, check_no_oauth, check_structure, mask_sql
 from scripts.sqlcl_session import ALIAS_RE, SqlclError, run_sqlcl
 from scripts.sqlcl_transport import generated_clob_assembly, lint_sqlcl_transport
@@ -99,7 +100,7 @@ def _read_json(path: Path, label: str) -> object:
 
 def _assert_no_symlink(path: Path, root: Path) -> None:
     try:
-        relative = path.relative_to(root)
+        relative = relative_to_root(path, root)
     except ValueError as error:
         raise RolloutError(f"path is outside the repository: {path}") from error
     current = root
@@ -131,14 +132,14 @@ def _repo_file(value: object, root: Path, label: str, *, kind: str | None = None
     except OSError as error:
         raise RolloutError(f"{label} does not exist: {value}") from error
     try:
-        resolved.relative_to(root)
+        relative_to_root(resolved, root)
     except ValueError as error:
         raise RolloutError(f"{label} resolves outside the repository: {value}") from error
     if kind == "file" and not resolved.is_file():
         raise RolloutError(f"{label} must name a regular file: {value}")
     if kind == "directory" and not resolved.is_dir():
         raise RolloutError(f"{label} must name a directory: {value}")
-    return resolved.relative_to(root).as_posix(), resolved
+    return relative_to_root(resolved, root).as_posix(), resolved
 
 
 def _exact_keys(value: dict, required: set[str], optional: set[str], label: str) -> None:
@@ -240,7 +241,7 @@ def load_manifest(path: Path | str, repo_root: Path = ROOT) -> RolloutManifest:
     try:
         _assert_no_symlink(candidate, root)
         manifest_path = candidate.resolve(strict=True)
-        manifest_path.relative_to(root)
+        relative_to_root(manifest_path, root)
     except (OSError, ValueError) as error:
         raise RolloutError(f"rollout manifest must be a regular file inside the repository: {path}") from error
     if not manifest_path.is_file():
@@ -306,13 +307,13 @@ def _read_app_inputs(repo_root: Path, app_id: int, environment: str) -> tuple[st
         descriptor = app_dir / "deployments" / f"{environment}.json"
         _assert_no_symlink(descriptor, repo_root)
         if not descriptor.is_file():
-            raise RolloutError(f"deployment descriptor not found: {descriptor.relative_to(repo_root).as_posix()}")
+            raise RolloutError(f"deployment descriptor not found: {relative_to_root(descriptor, repo_root).as_posix()}")
         read_descriptor(descriptor, app_id)
     except (OSError, ValueError) as error:
         if isinstance(error, RolloutError):
             raise
         raise RolloutError(f"application {app_id} failed local deployment preflight: {error}") from error
-    return validated.relative_to(repo_root).as_posix(), validated
+    return relative_to_root(validated, repo_root).as_posix(), validated
 
 
 def _directory_input_paths(
@@ -373,7 +374,7 @@ def _input_hashes(paths: Sequence[Path], root: Path) -> list[dict[str, str]]:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as error:
             raise RolloutError(f"cannot hash rollout input {path}: {error}") from error
-        result.append({"path": path.relative_to(root).as_posix(), "sha256": digest})
+        result.append({"path": relative_to_root(path, root).as_posix(), "sha256": digest})
     return result
 
 
@@ -749,7 +750,7 @@ def _report_paths(root: Path, report_path: str | Path | None) -> tuple[Path, Pat
     for path in (json_path, markdown_path):
         try:
             resolved = path.resolve(strict=False)
-            resolved.relative_to(root)
+            relative_to_root(resolved, root)
         except (OSError, ValueError) as error:
             raise RolloutError("report files must be written inside the repository") from error
         _assert_no_symlink(path.parent, root)
@@ -835,8 +836,8 @@ def _markdown_report(report: dict) -> str:
 def _write_reports(report: dict, paths: tuple[Path, Path]) -> None:
     json_path, markdown_path = paths
     report["reportFiles"] = {
-        "json": json_path.relative_to(report["repoRoot"]).as_posix(),
-        "markdown": markdown_path.relative_to(report["repoRoot"]).as_posix(),
+        "json": relative_to_root(json_path, report["repoRoot"]).as_posix(),
+        "markdown": relative_to_root(markdown_path, report["repoRoot"]).as_posix(),
     }
     json_text = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     markdown_text = _markdown_report(report)
@@ -865,7 +866,7 @@ def _write_confirmation_evidence(
     evidence = {
         "schemaVersion": 1,
         "status": "confirmed",
-        "manifestPath": manifest.path.relative_to(manifest.repo_root).as_posix(),
+        "manifestPath": relative_to_root(manifest.path, manifest.repo_root).as_posix(),
         "manifestSha256": manifest.sha256,
         "environment": environment,
         "confirmedAt": _utc_now(),
@@ -973,7 +974,7 @@ def _verify_receipt(root: Path, manifest: RolloutManifest, environment: str, pla
     path = _receipt_path(root, manifest.sha256, environment, plan_item["number"])
     _assert_no_symlink(path, root)
     if path.is_symlink() or not path.is_file():
-        raise RolloutError(f"step {plan_item['number']} has no matching successful receipt: {path.relative_to(root)}")
+        raise RolloutError(f"step {plan_item['number']} has no matching successful receipt: {relative_to_root(path, root)}")
     receipt = _read_json(path, f"step {plan_item['number']} receipt")
     if isinstance(receipt, dict) and receipt.get("schemaVersion") == 1:
         raise RolloutError(
@@ -1072,7 +1073,7 @@ def _relative_paths(paths: Sequence[Path | str], root: Path) -> tuple[str, ...]:
         if not path.is_absolute():
             path = root / path
         try:
-            result.append(path.resolve(strict=False).relative_to(root).as_posix())
+            result.append(relative_to_root(path.resolve(strict=False), root).as_posix())
         except ValueError:
             result.append(str(item))
     return tuple(result)
@@ -1490,7 +1491,7 @@ def execute_step(
                 )
 
         status, output = _capture_call(log_path, action)
-        evidence = [log_path.relative_to(repo_root).as_posix()]
+        evidence = [relative_to_root(log_path, repo_root).as_posix()]
         if kind == "verify":
             verifier_report = _json_report_from_output(output)
             if verifier_report and verifier_report.get("evidenceDir"):
@@ -1618,17 +1619,17 @@ def _report_outputs_do_not_overlap(
             source_roots.append(app_dir)
     for output in output_paths:
         if any(state_root == output or state_root in output.parents for state_root in reserved_state_roots):
-            raise RolloutError(f"report output overlaps rollout recovery state: {output.relative_to(root)}")
+            raise RolloutError(f"report output overlaps rollout recovery state: {relative_to_root(output, root)}")
         try:
-            scratch_relative = output.relative_to(root / "scratch")
+            scratch_relative = relative_to_root(output, root / "scratch")
         except ValueError:
             scratch_relative = None
         if scratch_relative and scratch_relative.parts and any(
             scratch_relative.parts[0].startswith(prefix) for prefix in reserved_scratch_prefixes
         ):
-            raise RolloutError(f"report output overlaps command recovery evidence: {output.relative_to(root)}")
+            raise RolloutError(f"report output overlaps command recovery evidence: {relative_to_root(output, root)}")
         if output in input_paths or any(source_root == output or source_root in output.parents for source_root in source_roots):
-            raise RolloutError(f"report output overlaps a rollout input: {output.relative_to(root)}")
+            raise RolloutError(f"report output overlaps a rollout input: {relative_to_root(output, root)}")
 
 
 def _finish_report(report: dict, started: float, status: str, exit_code: int) -> None:
@@ -1642,7 +1643,7 @@ def _announce_report_paths(paths: tuple[Path, Path], root: Path) -> None:
     json_path, markdown_path = paths
     print(
         "Rollout report: JSON "
-        f"{json_path.relative_to(root).as_posix()}; Markdown {markdown_path.relative_to(root).as_posix()}"
+        f"{relative_to_root(json_path, root).as_posix()}; Markdown {relative_to_root(markdown_path, root).as_posix()}"
     )
 
 
@@ -1679,7 +1680,7 @@ def run_rollout(
         report = {
             "schemaVersion": REPORT_SCHEMA_VERSION,
             "repoRoot": str(root),
-            "manifestPath": manifest.path.relative_to(root).as_posix(),
+            "manifestPath": relative_to_root(manifest.path, root).as_posix(),
             "manifestSha256": manifest.sha256,
             "environment": environment,
             "status": "running",
@@ -1704,7 +1705,7 @@ def run_rollout(
                     "endedAt": receipt["endedAt"],
                     "durationSeconds": receipt["durationSeconds"],
                     "evidencePaths": receipt["evidencePaths"],
-                    "receiptPath": receipt_path.relative_to(root).as_posix(),
+                    "receiptPath": relative_to_root(receipt_path, root).as_posix(),
                     "targetBinding": receipt["targetBinding"],
                     "observedIdentity": receipt["observedIdentity"],
                     "message": "receipt matches; live target identity pending",
@@ -1746,11 +1747,11 @@ def run_rollout(
             run_evidence.chmod(0o700)
         except OSError as error:
             raise RolloutError(f"could not secure rollout directory: {error}") from error
-        report["evidenceDir"] = run_evidence.relative_to(root).as_posix()
+        report["evidenceDir"] = relative_to_root(run_evidence, root).as_posix()
         if environment in {"staging", "prod"}:
             confirmation_path = run_evidence / "rollout-confirmation.json"
             _write_confirmation_evidence(confirmation_path, manifest, plan, environment)
-            report["confirmationPath"] = confirmation_path.relative_to(root).as_posix()
+            report["confirmationPath"] = relative_to_root(confirmation_path, root).as_posix()
 
         if prior_receipts:
             _snapshot(manifest, plan, "before resuming receipted steps", environment)
@@ -1767,7 +1768,7 @@ def run_rollout(
                     _verify_migration_receipts(root, item["step"], binding, current_identity)
                     step_report["evidencePaths"] = [
                         *step_report["evidencePaths"],
-                        identity_dir.relative_to(root).as_posix(),
+                        relative_to_root(identity_dir, root).as_posix(),
                     ]
                 step_report["status"] = "resumed"
                 step_report["message"] = "verified prior receipt and live target identity"
@@ -1789,7 +1790,7 @@ def run_rollout(
                 if binding is not None:
                     before_dir = evidence_dir / "target-before"
                     before_identity = _observe_target_identity(_target_from_binding(binding), before_dir)
-                    identity_evidence.append(before_dir.relative_to(root).as_posix())
+                    identity_evidence.append(relative_to_root(before_dir, root).as_posix())
                 result = execute_step(
                     item["step"],
                     environment=environment,
@@ -1809,7 +1810,7 @@ def run_rollout(
                     if binding is not None:
                         after_dir = evidence_dir / "target-after"
                         after_identity = _observe_target_identity(_target_from_binding(binding), after_dir)
-                        identity_evidence.append(after_dir.relative_to(root).as_posix())
+                        identity_evidence.append(relative_to_root(after_dir, root).as_posix())
                         if after_identity != before_identity:
                             raise RolloutError(
                                 f"step {item['number']} database identity changed during execution; "
@@ -1825,7 +1826,7 @@ def run_rollout(
                     receipt_path = _write_receipt(root, environment, manifest, item, {
                         **step_report,
                     })
-                    step_report["receiptPath"] = receipt_path.relative_to(root).as_posix()
+                    step_report["receiptPath"] = relative_to_root(receipt_path, root).as_posix()
                     step_report["status"] = "succeeded"
                 else:
                     step_report["status"] = "failed"

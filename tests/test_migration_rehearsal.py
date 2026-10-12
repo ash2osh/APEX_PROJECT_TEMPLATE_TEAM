@@ -258,7 +258,8 @@ class MigrationRehearsalTests(unittest.TestCase):
         self.assertTrue(self.check_drivers)
         self.assertTrue(all("SET TRANSACTION READ ONLY" not in check for check in self.check_drivers))
         self.assertTrue(all("EXIT SUCCESS ROLLBACK" not in check for check in self.check_drivers))
-        self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
         report = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(report["rollbackProof"]["status"], "true")
         self.assertEqual(report["folders"][0]["rollbackProof"]["checks"][0]["startingValue"], 1)

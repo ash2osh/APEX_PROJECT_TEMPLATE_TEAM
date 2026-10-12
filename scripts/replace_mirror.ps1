@@ -16,6 +16,33 @@ $scratchPath = Join-Path $repoRoot "scratch"
 [System.IO.Directory]::CreateDirectory($scratchPath) | Out-Null
 $scratchRoot = (Resolve-Path -LiteralPath $scratchPath).Path
 
+function ConvertTo-LongPath([string]$Path) {
+  # Resolve-Path and GetFullPath preserve Windows 8.3 aliases. Expand those
+  # aliases before comparing a temp path with the resolved checkout path.
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) { return $fullPath }
+  if (-not ("TeamPath.NativePath" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.Text;
+using System.Runtime.InteropServices;
+namespace TeamPath {
+  public static class NativePath {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetLongPathNameW", SetLastError = true)]
+    public static extern uint GetLongPathName(string shortPath, StringBuilder longPath, uint bufferLength);
+  }
+}
+'@
+  }
+  $capacity = 512
+  while ($true) {
+    $buffer = New-Object System.Text.StringBuilder($capacity)
+    $length = [TeamPath.NativePath]::GetLongPathName($fullPath, $buffer, [uint32]$capacity)
+    if ($length -eq 0) { return $fullPath }
+    if ($length -lt $capacity) { return $buffer.ToString() }
+    $capacity = [int]$length + 1
+  }
+}
+
 function Assert-VerifiedSource([string]$Relative) {
   . (Join-Path $PSScriptRoot 'resolve_python.ps1')
   $python = Resolve-TeamPython
@@ -49,7 +76,7 @@ function Assert-NoIgnoredMirrorFiles([string]$RepoRoot, [string]$Relative) {
 function Assert-NoReparsePointsBelowRepository {
   param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
 
-  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  $fullPath = ConvertTo-LongPath $Path
   $rootPath = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd([char[]]@('/', '\'))
   $rootPrefix = $rootPath + [System.IO.Path]::DirectorySeparatorChar
   if (-not $fullPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -74,7 +101,7 @@ function Test-MirrorPair {
 if (-not (Test-Path -LiteralPath $StagedDir -PathType Container)) {
   throw "staging directory does not exist or is not a directory: $StagedDir"
 }
-$stagedPath = (Resolve-Path -LiteralPath $StagedDir).Path
+$stagedPath = ConvertTo-LongPath (Resolve-Path -LiteralPath $StagedDir).Path
 Assert-NoReparsePointsBelowRepository -Path $stagedPath -Label "staging directory"
 
 if (-not $stagedPath.StartsWith($scratchRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {

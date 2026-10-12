@@ -31,7 +31,7 @@ class ApplicationLockTests(unittest.TestCase):
             raise RuntimeError('connection lost after write')
         if phase == 'acquire':
             # The result carries what the database read back after COMMIT.
-            intent = json.loads((self.directory / 'recovery.json').read_text())
+            intent = json.loads((self.directory / 'recovery.json').read_text(encoding='utf-8'))
             self.observed = dict(intent['evidence'], locked_on='2026-10-08T11:00:00.000000')
         elif phase == 'release':
             self.observed = None

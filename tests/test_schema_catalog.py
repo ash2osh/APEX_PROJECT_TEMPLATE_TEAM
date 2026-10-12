@@ -490,10 +490,10 @@ class SqlclTransportTests(unittest.TestCase):
             result = run_sqlcl(target(), driver, driver.parent, environment=environment)
             observation = json.loads(record.read_text(encoding="utf-8"))
 
-            self.assertEqual(Path(observation["cwd"]), driver.parent)
+            self.assertEqual(Path(observation["cwd"]), driver.parent.resolve())
             # Windows: the launcher passes C:/... (cygpath -m); Path compares separators-insensitively.
-            self.assertEqual(Path(observation["sqlpath"]), driver.parent / ".sqlcl-path")
-            self.assertEqual(Path(observation["oracle_path"]), driver.parent / ".sqlcl-path")
+            self.assertEqual(Path(observation["sqlpath"]), (driver.parent / ".sqlcl-path").resolve())
+            self.assertEqual(Path(observation["oracle_path"]), (driver.parent / ".sqlcl-path").resolve())
             self.assertFalse(observation["login_loaded"])
             self.assertEqual(observation["stdin"], "")
             self.assertEqual(result.returncode, 0)
@@ -564,7 +564,7 @@ class SqlclTransportTests(unittest.TestCase):
             result = run_sqlcl(target(), driver, run_dir, environment=environment)
 
             observation = json.loads(record.read_text(encoding="utf-8"))
-            self.assertIn(driver, [Path(argument[1:]) for argument in observation["args"] if argument.startswith("@")])
+            self.assertIn(driver.resolve(), [Path(argument[1:]).resolve() for argument in observation["args"] if argument.startswith("@")])
             self.assertFalse((root / "INJECTED").exists())
             self.assertEqual(result.returncode, 0)
 

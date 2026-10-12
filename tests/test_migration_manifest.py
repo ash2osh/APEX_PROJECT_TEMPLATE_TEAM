@@ -58,9 +58,9 @@ class MigrationManifestTests(unittest.TestCase):
         listed = api.list_migration_folders(self.root)
         batch = api.load_batch(self.root, ["migrations/2026-09-27_create-customers-r001", "migrations/2026-09-28_add-customer-status-r001"])
 
-        self.assertEqual(listed[0], newer)
-        self.assertEqual(listed[1:], tuple(sorted((older, same_day), key=lambda path: path.name, reverse=True)))
-        self.assertEqual(tuple(migration.folder for migration in batch), (older, newer))
+        self.assertEqual(listed[0], newer.resolve())
+        self.assertEqual(listed[1:], tuple(sorted((older.resolve(), same_day.resolve()), key=lambda path: path.name, reverse=True)))
+        self.assertEqual(tuple(migration.folder for migration in batch), (older.resolve(), newer.resolve()))
 
     def test_sequences_are_contiguous_and_named(self) -> None:
         api = self.require_manifest()

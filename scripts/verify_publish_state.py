@@ -15,6 +15,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.record_export_state import AppState, marker_payload, read_apex_release, read_state
+from scripts.path_utils import relative_to_root
 from scripts.source_provenance import (
     VersionPair,
     describe_version_pair,
@@ -188,7 +189,7 @@ def _write_publish_summary(path: Path, repo_root: Path, payload: dict) -> None:
     root = repo_root.resolve(strict=True)
     output = Path(os.path.abspath(path if path.is_absolute() else root / path))
     try:
-        relative = output.relative_to(root)
+        relative = relative_to_root(output, root)
     except (OSError, ValueError) as error:
         raise ValueError("publish verification summary must remain inside the repository") from error
     current = root

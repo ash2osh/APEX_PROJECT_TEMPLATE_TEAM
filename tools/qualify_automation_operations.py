@@ -19,6 +19,7 @@ from scripts.apex_compatibility import require_sqlcl_version
 from scripts.application_lifecycle import capture_lifecycle, validate_snapshot
 from scripts.automation_operations import execute_automation_action, list_automations
 from scripts.db_targets import Target
+from scripts.path_utils import relative_to_root
 from scripts.validate_app_source import validate_import_effects
 from tools.probe_apex_26_2 import (
     Probe,
@@ -45,7 +46,7 @@ def _output_path(output: Path, repo_root: Path) -> Path:
     scratch = root / "scratch"
     candidate = Path(os.path.abspath(output if output.is_absolute() else root / output))
     try:
-        candidate.relative_to(scratch)
+        relative_to_root(candidate, scratch)
     except ValueError as error:
         raise ValueError("--report-dir must be a fresh directory under this checkout's scratch/") from error
     if candidate == scratch or candidate.exists() or candidate.is_symlink():
@@ -55,7 +56,7 @@ def _output_path(output: Path, repo_root: Path) -> Path:
             break
         if path.is_symlink():
             raise ValueError("qualification output cannot contain symlinked parents")
-    if not candidate.resolve().is_relative_to(scratch):
+    if not relative_to_root(candidate.resolve(), scratch):
         raise ValueError("qualification output escaped scratch/")
     return candidate
 
