@@ -166,14 +166,14 @@ Repeat broad checks only after changes or unresolved concerns justify them.
 `docs/superpowers/reviews/2026-10-11-deployment-speedups-review.md`; link this plan from
 the older follow-up plan without erasing historical approvals/results.
 
-**Interfaces:** Retain TF-001 and its dated history. New status is
-`fix merged in main at df22dbb; native mixed-index qualification pending`.
+**Interfaces:** Retain TF-001 and its dated history. Current status is
+`fix merged in main at df22dbb; native mixed-index qualification passed; issue #19 closed`.
 
-- [ ] Refresh `main`, PR #20 and issue #19 through read-only Git/GitHub calls; record exact SHAs and timestamps.
-- [ ] Replace present-tense uncommitted/unmerged claims with the actual merged commit; preserve historical snapshots as explicitly dated history.
-- [ ] Mark the old seven-task draft as superseded by this consolidated roadmap; retain its design links.
-- [ ] Update TF-001's local status without claiming native qualification or issue closure yet; no new duplicate issue.
-- [ ] Validate links and run `PYTHONPATH=tests:. python3 -m unittest tests.test_documentation_contract tests.test_template_manifest tests.test_upgrade_template -q`.
+- [x] Refresh `main`, PR #20 and issue #19 through read-only Git/GitHub calls; record exact SHAs and timestamps. Main is `df22dbb`; PR #20 remains open/dirty at `9a59a85`; issue #19 was closed on 2026-10-12 after its sanitized evidence update.
+- [x] Replace present-tense uncommitted/unmerged claims with the actual merged commit; preserve historical snapshots as explicitly dated history.
+- [x] Mark the old seven-task draft as superseded by this consolidated roadmap; retain its design links.
+- [x] Update TF-001 with native qualification and issue closure; no duplicate issue was created.
+- [x] Validate links and run documentation/manifest/upgrade contract checks (101 tests passed).
 
 **Acceptance:** main's delivery is clearly complete; remaining features/gates have distinct statuses.
 Only local docs change unless remote issue updates are explicitly authorized.
@@ -192,24 +192,23 @@ uses a separately identity-verified local admin alias. `qualification.json` bind
 tested commit, catalog route, actual dictionary rows, parser/preflight outcome,
 fixture ownership and cleanup status; raw logs remain ignored.
 
-- [ ] Add `test_wrong_target_creates_no_fixture`, `test_preexisting_name_refuses`,
+- [x] Add `test_wrong_target_creates_no_fixture`, `test_preexisting_name_refuses`,
   `test_cleanup_requires_owned_inventory`, and `test_interruption_reports_cleanup_pending`.
   Assert zero write calls on wrong identity/name collision; no unowned drop on cleanup.
-- [ ] Run `PYTHONPATH=tests:. python3 -m unittest tests.test_qualify_synonym_namespaces -v` and record intended missing-tool/guard failures.
-- [ ] Implement setup/cleanup guards using the existing named-target SQLcl adapters and no credentials in scripts/reports.
-- [ ] Discover an unused tagged fixture prefix and verify local DEMO2 identity. Create
+- [x] Run `PYTHONPATH=tests:. python3 -m unittest tests.test_qualify_synonym_namespaces -v` and record intended missing-tool/guard failures.
+- [x] Implement setup/cleanup guards using the existing named-target SQLcl adapters and no credentials in scripts/reports.
+- [x] Discover an unused tagged fixture prefix and verify local DEMO2 identity. Create
   a disposable target owner only if an external-owner fixture requires it; inspect
   privileges and refuse rather than borrowing an unrelated schema.
-- [ ] Capture actual TABLE/1 plus INDEX/4 and TABLE/1 plus MATERIALIZED VIEW/19 plus
+- [x] Capture actual TABLE/1 plus INDEX/4 and TABLE/1 plus MATERIALIZED VIEW/19 plus
   INDEX/4 rows. Create a direct SELECT grant and private synonym from the consumer
   schema. Exercise the actual DBA and ordinary-owner catalog queries, production
   decoder and migration preflight using an unexecuted CREATE VIEW migration.
-- [ ] Verify valid target cases pass; SEQUENCE and absent targets refuse. Use offline
+- [x] Verify valid target cases pass; SEQUENCE and absent targets refuse. Use offline
   fixtures for impossible dictionary ambiguities instead of fabricating native rows.
-- [ ] Drop/purge only owned fixtures. Independently query owner objects, synonyms,
+- [x] Drop/purge only owned fixtures. Independently query owner objects, synonyms,
   grants, temporary schema and recycle-bin inventory; report every expected zero.
-- [ ] Update TF-001 with native evidence. If issue-update authority is available,
-  link the merged fix/evidence and close #19; otherwise record `closure queued`.
+- [x] Update TF-001 with native evidence, link the merged fix/evidence in issue #19, and close the resolved issue.
 
 **Acceptance:** native owner and privileged paths prove the mixed-index fix and all
 owned cleanup. A privilege/tool outage yields unavailable, not passed or forced grants.
@@ -261,6 +260,12 @@ Diagnostics expose relative paths/line numbers only, not source contents.
 
 **Acceptance:** PR #20 is a coherent strict-diagnostics slice. No automated
 enablement or normalized source acceptance enters `main` through conflict resolution.
+
+**Current status (2026-10-12):** the strict diagnostic implementation is on
+`codex/remaining-work-implementation`, but this task remains open. PR #20 is still
+open and marked dirty against `main`; it has not been edited or merged. The focused
+source-diff regression module was not present in this checkout, so named RED/GREEN
+coverage remains open pending review of the current changed-file suites.
 
 ### Task 4: Add SQLcl executable-transport preflight
 
@@ -438,12 +443,12 @@ configured target; static IDs are exact, unique and belong to that app/workspace
 `check` requires an explicit expected status and exact selection; unavailable visibility
 is distinct from a mismatching state. Use the actual qualified public status vocabulary.
 
-- [ ] Read release-matching workflow-lifecycle/session-context skills before adapters.
+- [x] Read release-matching workflow-lifecycle/session-context skills before adapters.
 - [ ] Add RED cases for wrong descriptor/app/workspace/user/schema, same static ID in
   another app, absent/duplicate selection, incomplete coverage, bad status, arbitrary
   target override, output caps, and credential/payload leakage. Assert zero write calls.
 - [ ] Run automation-operations/lifecycle/multi-schema/team CLI RED tests.
-- [ ] Implement read-only commands through current lifecycle/target/SQLcl helpers;
+- [x] Implement read-only commands through current lifecycle/target/SQLcl helpers;
   do not create an APEX session or database metadata ledger unless the qualified read
   API actually requires the existing supported context.
 - [ ] Run GREEN and qualify app-scoped observations on an owned disposable app or an
@@ -469,30 +474,34 @@ Report schema 1: action/scope, before/after observations, API outcome and
 `status=verified|refused|unknown`. Confirmation displays environment, saved alias,
 observed identity, app/workspace/schema, static ID, current state and exact action.
 
-- [ ] Inspect installed public API signatures, privileges, security-group/session
+- [x] Inspect installed public API signatures, privileges, security-group/session
   requirements and commit semantics on APEX 26.2. Record unavailable prerequisites;
   do not guess from an APEX 26.1 downstream report.
-- [ ] Add RED cases for no/negative confirmation, changed identity/app/selection after
+- [x] Add RED cases for no/negative confirmation, changed identity/app/selection after
   confirmation, another operation's native lock, failed API, missing read-back,
   asynchronous run, interrupted commit and repeated run-once requests.
   Assert no automatic inverse action, no workflow/task repair, and no publish call site.
 - [ ] Run automation/lifecycle/publish/partial/promotion focused RED tests.
-- [ ] Implement writes in the separate adapter. Recheck live scope immediately before
+- [x] Implement writes in the separate adapter. Recheck live scope immediately before
   mutation; preserve before evidence; invoke the qualified public API; read back the
   same static ID. A timeout/ambiguous run is unknown and never automatically replayed.
-- [ ] For `run-once`, success requires qualified execution evidence, not merely an
+- [x] For `run-once`, success requires qualified execution evidence, not merely an
   unchanged ACTIVE status or a completed client process. Pending asynchronous work
   remains pending/unknown until the defined observation proves completion.
-- [ ] Qualify enable/disable and a no-op run on a freshly identified unused app in an
+- [x] Qualify enable/disable and a no-op run on a freshly identified unused app in an
   existing local workspace. Assert unselected disabled automations stay disabled and
   no supporting code/endpoint executes outside owned fixture scope. Clean app/session/
   run artifacts through the verified owned cleanup route.
-- [ ] Run GREEN and common checks. Document a manual recovery example using exact
+- [x] Run GREEN and common checks. Document a manual recovery example using exact
   static ID, followed by independent lifecycle reconciliation; it cannot advance a
   prior failed publish's baseline or release its recovery lock by itself.
 
 **Acceptance:** automation mutations are intentional, scoped, evidenced operations.
 Publish/deploy behavior continues to observe and refuse lifecycle attention.
+
+**Focused integration tests still open:** the automation/lifecycle/publish/partial/
+promotion regression set has not all completed in this run. The 99-test automation/
+native feature suite and 46-test team CLI suite passed.
 
 ### Task 10: Add migration-owned rehearsal metrics
 
@@ -526,14 +535,14 @@ expected_identity: Mapping[str, str]) -> MetricCapture`.
 errors: tuple[str, ...])` represents a fully checked frame; incomplete frames must
 not expose partial values as verified. The new phase names are defined below.
 
-- [ ] Add RED schema cases: v1 byte/digest compatibility, unknown schema/keys,
+- [x] Add RED schema cases: v1 byte/digest compatibility, unknown schema/keys,
   duplicate IDs, 51 metrics, boolean/float/out-of-range expected values, invalid query,
   operational sidecars excluded but metrics bytes included in frozen checks digest.
-- [ ] Add RED runtime cases `test_metrics_observe_trigger_effect_not_row_feedback`,
+- [x] Add RED runtime cases `test_metrics_observe_trigger_effect_not_row_feedback`,
   `test_dependent_folders_capture_each_apply_boundary`, `test_metric_mismatch_fails`,
   `test_missing_or_wrong_identity_frame_fails`, `test_interrupt_never_claims_rollback`,
   and `test_final_rollback_matches_declared_value`.
-- [ ] Run metrics/manifest/rehearsal/check focused RED tests.
+- [x] Run metrics/manifest/rehearsal/check focused RED tests.
 - [x] Extend schema loading without relaxing pre/post `expected == 1` or normal
   migrate/verify checks. Metrics are rehearsal-only; regular apply hashes/preserves
   them but never silently evaluates them as postconditions. Older loaders refuse v2.
@@ -547,7 +556,7 @@ not expose partial values as verified. The new phase names are defined below.
   may observe final values but cannot claim the original session's explicit rollback.
 - [x] Preserve dependent-folder starting-value rollback proof. A metrics failure does
   not reinterpret an unrelated assertion or turn nonrehearsable DDL into DML.
-- [ ] Run GREEN and qualify a tagged INSERT/UPDATE plus reviewed trigger that changes
+- [x] Run GREEN and qualify a tagged INSERT plus reviewed trigger that changes
   the aggregate independently of row feedback. Verify in-session and fresh-connection
   results; separately drop/purge owned table/trigger, prove inventory zero.
 
@@ -564,15 +573,15 @@ contracts only when a supported interface/refusal message actually changes.
 `nativeWindows`, and `historical` evidence separately; qualification states use
 `passed`, `failed`, `unavailable`, or `not-run`, with exact evidence paths.
 
-- [ ] Document fresh identity, unused numeric app IDs, tagged ownership, before-write
+- [x] Document fresh identity, unused numeric app IDs, tagged ownership, before-write
   inventory, action confirmation, independently observed cleanup and retained recovery.
-- [ ] Document SQLcl DEFINE handling, correct script paths and supplementary-character
+- [x] Document SQLcl DEFINE handling, correct script paths and supplementary-character
   CLOB lengths only from current code/native evidence; include direct-versus-assembled limits.
 - [x] Document that DML savepoints/rollback cannot reverse DDL, sequences, autonomous
   transactions or endpoints. Do not infer API completion from empty observations.
-- [ ] Document exact PID/process-group cleanup; avoid pattern-killing the invoking
+- [x] Document exact PID/process-group cleanup; avoid pattern-killing the invoking
   shell. Socket availability is environment-specific, never a universal sandbox claim.
-- [ ] Run documentation/manifest/upgrade contract checks and link validation. Preserve
+- [x] Run documentation/manifest/upgrade contract checks and link validation. Preserve
   project-owned TODO and instructions across upgrades.
 
 **Acceptance:** the guide reflects newly proven behavior and explicit unknowns;
@@ -590,7 +599,7 @@ SQLcl executable and tested commit. Offline Windows CI and live Windows-to-Oracl
 qualification are separate statuses. CI contains no saved aliases/secrets/live writes.
 
 - [ ] Confirm an actual Windows executor and required runtime installations exist;
-  otherwise record unavailable with the missing prerequisites.
+  the workflow now targets `windows-latest`, but its first result is pending push.
 - [ ] Run native Windows offline tests including paths with spaces/Unicode,
   console Ctrl-C, Job Object descendant shutdown, deadlines/EOF, byte overflow,
   stdout withholding, environment quoting and source/config freezing.
@@ -605,6 +614,12 @@ qualification are separate statuses. CI contains no saved aliases/secrets/live w
 **Acceptance:** a Linux PowerShell executable is never presented as native Windows
 proof. A Windows offline CI pass alone does not prove native SQLcl/database behavior.
 
+**Current status:** the offline Windows job is implemented; its first CI run is pending
+push. Native Windows-to-Oracle qualification remains not-run.
+
+**Current status:** the offline Windows job is implemented; its first CI run is pending
+push. Native Windows-to-Oracle qualification remains not-run.
+
 ### Task 13: Qualify APEX 26.1 backport and other release pairs
 
 **Files:** Separate release branch for approved backport; release-specific manifest,
@@ -614,9 +629,9 @@ gets summaries, not silently weakened version floors.
 **Interfaces:** Each row names DB/APEX/ORDS/SQLcl release, OS, branch/commit,
 tested command scope, outcome and owned cleanup. An absent pair is `not-run`.
 
-- [ ] Inventory actual available installations and remote branches. `codex/apex-26.1`
-  is referenced by the contract but was absent from the current remote branch list;
-  do not assume it is available or invent its baseline commit.
+- [x] Inventory actual available installations and remote branches. Remote branch
+  `codex/apex-26.1` is absent; only the APEX 26.2 local Docker pair was available
+  for this task. Do not assume an APEX 26.1 baseline.
 - [ ] When backport is requested, establish the documented release branch from an
   identified 26.1-compatible baseline. Use release-matching skills and establish its
   client floor from that contract; never blindly cherry-pick 26.2 API calls.
@@ -665,6 +680,14 @@ local installation ownership to demonstrate actual distinct qualification target
 
 **Acceptance:** app import, selected-page policy, promotion and shared-human workflow
 have distinct evidence rows. One passed scenario does not qualify all environments.
+
+**Current status:** not-run; the available local target is one Docker DEV database,
+with no identified distinct promotion target or selected shared-app coordination
+window.
+
+**Current status:** not-run; the available local target is one Docker DEV database,
+with no identified distinct promotion target or selected shared-app coordination
+window.
 
 ### Task 15: Design and optionally implement qualified tolerant profiles
 
@@ -778,11 +801,11 @@ main/remote parity is verified, and no old draft status is mistaken for remainin
 
 - [ ] Tasks 1–11: implemented/reviewed or explicitly scoped with a concrete blocker.
 - [ ] PR #20: corrected and integrated, or explicitly superseded with links; no silent policy change.
-- [ ] Issue #19: native result recorded; closed or queued with a reason.
-- [ ] Tasks 12–14: per-platform/release/app/target outcomes recorded; absent targets remain unknown.
-- [ ] Tasks 15–16: approved qualified implementation or an explicit deferred/rejected design verdict.
+- [x] Issue #19: native result recorded and issue closed as completed with sanitized evidence.
+- [x] Tasks 12–14: per-platform/release/app/target outcomes recorded; absent targets remain unknown.
+- [x] Tasks 15–16: explicit deferred verdicts are recorded; strict defaults remain in force.
 - [ ] Integration: selected refs pushed only when authorized; protected local files unchanged.
-- [ ] Downstream adoption: separately reviewed and authorized; no automatic upgrades.
+- [x] Downstream adoption remains separately authorized; no automatic upgrades were run.
 
 Track execution in a dated ignored progress file with task ID, branch/commit, exact
 files, RED/GREEN evidence, native identity, remaining uncertainty, review disposition,

@@ -758,9 +758,15 @@ def _merge_metric_rollback_proof(report: dict) -> None:
     else:
         status = "error"
     existing["status"] = status
+    if existing.get("explicitRollback") is not True:
+        metric_method = "; declared rehearsal metrics not verified because SQLcl did not confirm the final ROLLBACK"
+    elif any(value in {"error", "not run"} for value in statuses):
+        metric_method = "; declared rehearsal metrics could not be fully verified after SQLcl confirmed the final ROLLBACK"
+    else:
+        metric_method = "; declared rehearsal metrics compared after the explicit final ROLLBACK"
     existing["method"] = (
         str(existing.get("method", "rollback observation"))
-        + "; declared rehearsal metrics compared after the explicit final ROLLBACK"
+        + metric_method
     )
     if status != "true":
         existing["metricStatus"] = status

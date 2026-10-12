@@ -54,6 +54,8 @@
     "tools/chrome_mcp_daemon.py",
     "tools/graphify/**",
     "tools/probe_apex_26_2.py",
+    "tools/qualify_automation_operations.py",
+    "tools/qualify_synonym_namespaces.py",
     "tools/qualify_template_readonly.py"
   ],
   "projectOwned": [

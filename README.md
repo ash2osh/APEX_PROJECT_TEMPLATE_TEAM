@@ -750,6 +750,31 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh template-status --upstream --ref <ref>` | Explicitly compare local files with a branch, tag or commit from the manifest's upstream repository. |
 | `scripts/team.sh automations list <id> --env <env> --schema <schema>` | Read one application's automation status in its descriptor workspace. |
 | `scripts/team.sh automations check <id> --env <env> --schema <schema> --automation <static-id> --expected-status ACTIVE` | Check an exact selected automation against APEX 26.2's `ACTIVE`, `DISABLED`, or `ERROR` schedule states. |
+| `scripts/team.sh automations enable|disable|run-once <id> --env <env> --schema <schema> --automation <static-id>` | Explicitly change one automation's schedule or run it once after typed target/action confirmation; no publish path invokes these operations. |
+
+Each write accepts one exact static ID, rechecks target/app/status and native
+application lock before calling the public APEX API, then reads the same app
+state back. `run-once` runs synchronously and is verified only by a completed
+successful APEX execution log plus an independent lifecycle read. A timeout or
+missing log is `unknown`; reconcile the automation and execution log before any
+repeat. Session creation/deletion may run the application's configured session
+initialization and cleanup code, which the command displays before confirmation.
+The command does not advance a failed publish baseline or release a recovery lock.
+
+For an `unknown` action result, do not replay `run-once`. First inspect the exact
+automation and its APEX execution log, then reconcile its state independently:
+
+```bash
+scripts/team.sh automations list "$APP_ID" --env dev --schema "$SCHEMA"
+scripts/team.sh automations check "$APP_ID" --env dev --schema "$SCHEMA" \
+  --automation "$AUTOMATION_STATIC_ID" --expected-status DISABLED
+```
+
+Set `APP_ID`, `SCHEMA`, and `AUTOMATION_STATIC_ID` from the verified deployment
+descriptor and the selected app's exact static ID; choose the expected status
+from the observed recovery decision. If the execution log or lifecycle read is
+inconclusive, leave the result unknown and investigate manually. This check does
+not change a publish baseline or release a recovery lock.
 
 ## Read-only ad-hoc queries
 

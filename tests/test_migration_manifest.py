@@ -190,7 +190,6 @@ class MigrationManifestTests(unittest.TestCase):
 
         for checks in (
             {"schemaVersion": 1, "preconditions": [], "postconditions": []},
-            {"schemaVersion": 2, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]},
             {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "same", "sql": "SELECT 1 FROM dual", "expected": 0}, {"id": "same", "sql": "SELECT 1 FROM dual", "expected": 1}]},
         ):
             with self.subTest(checks=checks), tempfile.TemporaryDirectory() as temporary:
@@ -201,6 +200,19 @@ class MigrationManifestTests(unittest.TestCase):
                 (folder / "checks.json").write_text(json.dumps(checks))
                 with self.assertRaises(api.MigrationManifestError):
                     api.load_migration(root, "migrations/2026-09-27_create-customers-r001")
+
+        schema_two_without_metrics = self.add_folder(
+            "2026-09-27_schema-two-without-metrics-r001",
+            checks={
+                "schemaVersion": 2,
+                "preconditions": [],
+                "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}],
+            },
+        )
+        self.assertEqual(
+            api.load_migration(self.root, schema_two_without_metrics.relative_to(self.root).as_posix()).rehearsal_metrics,
+            (),
+        )
 
     def test_deterministic_builtin_helpers_are_allowed_but_qualified_calls_remain_blocked(self) -> None:
         api = self.require_manifest()
@@ -458,6 +470,124 @@ class MigrationManifestTests(unittest.TestCase):
         migration = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
         self.assertEqual(migration.family, "create-customers")
         self.assertEqual(migration.revision, 1)
+
+    def _metric(self, metric_id="tagged-total", **overrides):
+        value = {
+            "id": metric_id,
+            "sql": "SELECT COALESCE(SUM(AMOUNT), 0) FROM QUALIFIED_ROWS WHERE ID = 1",
+            "expectedBefore": 0,
+            "expectedAfter": 25,
+            "expectedRollback": 0,
+        }
+        value.update(overrides)
+        return value
+
+    def _checks_v2(self, metrics):
+        return {
+            "schemaVersion": 2,
+            "preconditions": [],
+            "postconditions": [{"id": "row-present", "sql": "SELECT 1 FROM dual", "expected": 1}],
+            "rehearsalMetrics": metrics,
+        }
+
+    def test_schema_one_keeps_its_exact_checks_bytes_and_payload_digest(self):
+        api = self.require_manifest()
+        folder = self.add_folder("2026-09-27_schema-one-r001")
+        migration = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
+        checks_source = (folder / "checks.json").read_bytes()
+        checks_sha256 = hashlib.sha256(checks_source).hexdigest()
+        canonical_payload = json.dumps(
+            {
+                "files": [
+                    {"name": item.name, "sequence": item.sequence, "sha256": item.sha256}
+                    for item in migration.files
+                ],
+                "checksSha256": checks_sha256,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertEqual(migration.checks_source, checks_source)
+        self.assertEqual(migration.checks_sha256, checks_sha256)
+        self.assertEqual(migration.payload_digest, hashlib.sha256(canonical_payload).hexdigest())
+        self.assertEqual(migration.rehearsal_metrics, ())
+
+    def test_schema_two_metrics_are_validated_and_only_checks_bytes_change_the_digest(self):
+        api = self.require_manifest()
+        folder = self.add_folder(
+            "2026-09-27_schema-two-r001",
+            checks=self._checks_v2([self._metric()]),
+        )
+        initial = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
+
+        self.assertEqual(len(initial.rehearsal_metrics), 1)
+        self.assertEqual(initial.rehearsal_metrics[0].id, "tagged-total")
+        self.assertEqual(initial.rehearsal_metrics[0].expected_after, 25)
+        (folder / "README.md").write_text("local notes\n", encoding="utf-8")
+        (folder / "status.dev.json").write_text('{"schemaVersion":1,"state":"verified"}\n', encoding="utf-8")
+        with_operational_sidecars = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
+        self.assertEqual(with_operational_sidecars.checks_sha256, initial.checks_sha256)
+        self.assertEqual(with_operational_sidecars.payload_digest, initial.payload_digest)
+
+        changed = self._checks_v2([self._metric(expectedAfter=26)])
+        (folder / "checks.json").write_text(json.dumps(changed) + "\n", encoding="utf-8")
+        changed_metrics = api.load_migration(self.root, folder.relative_to(self.root).as_posix())
+        self.assertNotEqual(changed_metrics.checks_sha256, initial.checks_sha256)
+        self.assertNotEqual(changed_metrics.payload_digest, initial.payload_digest)
+
+    def test_schema_two_rejects_unknown_versions_and_fields(self):
+        api = self.require_manifest()
+        invalid = (
+            {**self._checks_v2([]), "schemaVersion": 3},
+            {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}], "rehearsalMetrics": []},
+            {**self._checks_v2([]), "unknown": True},
+        )
+        for checks in invalid:
+            with self.subTest(checks=checks):
+                folder = self.add_folder("2026-09-27_invalid-version-r001", checks=checks)
+                with self.assertRaises(api.MigrationManifestError):
+                    api.load_migration(self.root, folder.relative_to(self.root).as_posix())
+                for child in folder.iterdir():
+                    child.unlink()
+                folder.rmdir()
+
+    def test_schema_two_rejects_duplicate_and_excessive_metrics(self):
+        api = self.require_manifest()
+        duplicate = [self._metric("same"), self._metric("same")]
+        excessive = [self._metric(f"metric-{index}") for index in range(51)]
+        for metrics in (duplicate, excessive):
+            with self.subTest(count=len(metrics)):
+                folder = self.add_folder("2026-09-27_invalid-metrics-r001", checks=self._checks_v2(metrics))
+                with self.assertRaises(api.MigrationManifestError):
+                    api.load_migration(self.root, folder.relative_to(self.root).as_posix())
+                for child in folder.iterdir():
+                    child.unlink()
+                folder.rmdir()
+
+    def test_schema_two_rejects_boolean_fractional_and_out_of_range_expectations(self):
+        api = self.require_manifest()
+        for bad_value in (True, 1.5, 9007199254740992, -9007199254740992):
+            with self.subTest(value=bad_value):
+                folder = self.add_folder(
+                    "2026-09-27_invalid-value-r001",
+                    checks=self._checks_v2([self._metric(expectedAfter=bad_value)]),
+                )
+                with self.assertRaisesRegex(api.MigrationManifestError, "safe JSON integers"):
+                    api.load_migration(self.root, folder.relative_to(self.root).as_posix())
+                for child in folder.iterdir():
+                    child.unlink()
+                folder.rmdir()
+
+    def test_schema_two_rejects_non_read_only_metric_sql(self):
+        api = self.require_manifest()
+        folder = self.add_folder(
+            "2026-09-27_invalid-query-r001",
+            checks=self._checks_v2([self._metric(sql="SELECT dangerous_function() FROM dual")]),
+        )
+        with self.assertRaises(api.MigrationManifestError):
+            api.load_migration(self.root, folder.relative_to(self.root).as_posix())
 
 
 if __name__ == "__main__":

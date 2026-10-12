@@ -1055,7 +1055,7 @@ class TeamCliTests(unittest.TestCase):
             "export_apps.sql", "verify_deployment_state.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
-            "record_export_state.py", "source_evidence.py",
+            "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "verify_publish_state.py",
             "stamp_publish_version.py",
             "validate_app_source.py",
@@ -1091,6 +1091,7 @@ class TeamCliTests(unittest.TestCase):
             "for arg in \"$@\"; do case \"$arg\" in *@*publish_app.sql) mode=import ;; *@*export_apps.sql) mode=export ;; esac; done\n"
             "if [[ $mode == export ]]; then found_script=0; for arg in \"$@\"; do if [[ $found_script == 1 ]]; then export_schema=$arg; break; fi; case \"$arg\" in *@*export_apps.sql) found_script=1 ;; esac; done; fi\n"
             "if [[ $mode == import ]]; then printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"; printf '%s\\n' 'Import successful.' 'APEX_IMPORT_VERIFIED:100'; fi\n"
+            "printf '26.2.0|2026-10-12T03:00:00.000Z\\n' > .apex-release-before.txt; printf '26.2.0|2026-10-12T03:00:01.000Z\\n' > .apex-release-after.txt\n"
             "if [[ $mode == export ]]; then exported=\"$PWD/apps/$export_schema/100\"; mkdir -p \"$exported/.apex\"; cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"; cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"; printf '%s\\n' '2026-09-26T09:30:00|2026-09-26T09:30:02|Release 1.0' > \"$PWD/.apex-export-before.txt\"; cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"; fi\n",
             encoding="utf-8",
         )

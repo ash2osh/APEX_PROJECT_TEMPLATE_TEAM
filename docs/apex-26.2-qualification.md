@@ -274,3 +274,24 @@ This was schema/migration qualification, not an APEX application import or
 publish. It does not add evidence for shared-app writes, promotion to a distinct
 target, native Windows, an APEX 26.1 runtime/backport, or APEX patch-pair
 tolerant source comparison. Those remain separate qualification gates.
+
+## Native synonym and automation qualification on 2026-10-12
+
+The same local Docker release pair separately qualified mixed TABLE/INDEX and
+materialized-view/INDEX synonym targets through both ordinary and privileged
+catalog paths. Valid TABLE/MV view preflights passed; sequence and absent-target
+preflights refused. APEX 26.2 automation enable, one run-once action and disable
+were observed by readback; the owned app was removed while its single retained
+automation execution-log row remained under APEX retention. Exact target scope,
+cleanup evidence and limitations are recorded in
+[local qualification](local-qualification.md#mixed-index-synonym-qualification-on-2026-10-12)
+and [automation action qualification](local-qualification.md#automation-action-qualification-on-2026-10-12).
+
+## Native rehearsal-metric qualification on 2026-10-12
+
+A trigger-driven rehearsal observed an aggregate change of `0 → 25 → 0` across
+before, after and rollback frames. A fresh connection confirmed the rollback;
+the fixture trigger/tables/index were removed and independently inventoried as
+absent. Scope and transaction limits are documented in
+[local qualification](local-qualification.md#rehearsal-metric-qualification-on-2026-10-12)
+and the ignored report is `scratch/native-rehearsal-metrics-a10c4312/qualification.json`.

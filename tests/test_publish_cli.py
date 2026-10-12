@@ -150,7 +150,7 @@ class PublishAppCliTests(unittest.TestCase):
             "lookup_app_schema.sql",
             "verify_db_access.sql",
             "normalize_apx.sh",
-            "record_export_state.py", "source_evidence.py",
+            "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "verify_publish_state.py",
             "validate_app_source.py",
             "stamp_publish_version.py",
@@ -244,6 +244,8 @@ class PublishAppCliTests(unittest.TestCase):
             "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then live=$(cat \"$FAKE_STATE_DIR/live.txt\"); db=$(cat \"$FAKE_STATE_DIR/database.txt\"); version=$(cat \"$FAKE_STATE_DIR/version.txt\"); else live=${FAKE_REVISION:-2026-09-26T09:30:00}; db=${FAKE_DATABASE_TIME:-2026-09-26T09:30:02}; version=${FAKE_VERSION:-Release 1.0}; fi\n"
             "    printf '%s|%s|%s\\n' \"$live\" \"$db\" \"$version\" > \"$PWD/.apex-export-before.txt\"\n"
             "    cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"\n"
+            "printf '26.2.0|2026-10-12T03:00:00.000Z\\n' > .apex-release-before.txt\n"
+            "printf '26.2.0|2026-10-12T03:00:01.000Z\\n' > .apex-release-after.txt\n"
             "    ;;\n"
             "  *) : ;;\n"
             "esac\n",
@@ -271,7 +273,7 @@ class PublishAppCliTests(unittest.TestCase):
             "verify_db_access.sql",
             "normalize_apx.sh",
             "normalize_apx.ps1",
-            "record_export_state.py", "source_evidence.py",
+            "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "preserve_deployments.py",
             "verify_publish_state.py",
             "publish_app.ps1",
@@ -1246,7 +1248,7 @@ class PublishAppCliTests(unittest.TestCase):
                     "export_apps.sql", "verify_deployment_state.sql",
                     "verify_db_access.sql",
                     "normalize_apx.ps1",
-                    "record_export_state.py", "source_evidence.py",
+                    "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
                     "verify_publish_state.py",
                     "validate_app_source.py",
                     "stamp_publish_version.py",
@@ -1289,6 +1291,8 @@ class PublishAppCliTests(unittest.TestCase):
                     "  cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"\n"
                     "  printf '%s\\n' '2026-09-26T09:30:00|2026-09-26T09:30:02|Release 1.0' > \"$PWD/.apex-export-before.txt\"\n"
                     "  cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"\n"
+            "printf '26.2.0|2026-10-12T03:00:00.000Z\\n' > .apex-release-before.txt\n"
+            "printf '26.2.0|2026-10-12T03:00:01.000Z\\n' > .apex-release-after.txt\n"
                     "fi\n",
                     encoding="utf-8",
                 )

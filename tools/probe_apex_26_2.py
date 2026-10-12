@@ -418,6 +418,12 @@ end;
         identity=self.identify()
         if identity.get('appCount')!=0:
             raise ProbeError('requested disposable app ID already exists; nothing imported')
+        log_output=self.execute('runtime-log-baseline',f"select 'APEX_AUTOMATION_LOG_COUNT:'||count(*) from apex_automation_log where application_id={self.target.app_id};\n")
+        log_counts=[line.strip().split(':',1)[1] for line in log_output.splitlines() if line.strip().startswith('APEX_AUTOMATION_LOG_COUNT:')]
+        if log_counts!=['0']:
+            raise ProbeError('requested disposable app ID has retained automation history; choose another unused ID')
+        self.report.update(automationLogBaseline=0,expectedAutomationLogs=[])
+        self.save_report()
         metadata=json.loads((source / '.apex/apexlang.json').read_text(encoding='utf-8'))
         application=(source / 'application.apx').read_text(encoding='utf-8')
         if not str(metadata.get('mmdVersion','')).startswith('26.2.') or re.search(r'(?i)initializ',application):
@@ -543,21 +549,47 @@ end;
                     "service": t.service, "workspace": t.workspace}
         run_id = saved.get("runId", "")
         developers = saved.get("developers", [])
+        expected_logs = saved.get("expectedAutomationLogs", [])
+        workspace_id = str(saved.get("identity", {}).get("workspaceId", ""))
         if (saved.get("schemaVersion") != 1 or saved.get("appId") != t.app_id
                 or not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{32}", run_id) is None
                 or saved.get("fixtureAlias") != f"APEX262-PROBE-{t.app_id}-{run_id[:12].upper()}"
                 or any(saved.get("identity", {}).get(key) != value for key, value in expected.items())
+                or saved.get("cleanupRequired") is not True
                 or not isinstance(developers, list) or len(developers) != (1 if saved.get('scenario')=='lifecycle' else 2)
-                or (saved.get('scenario')=='lifecycle' and saved.get('fixtures')!=[{'kind':'application','id':t.app_id,'alias':saved.get('fixtureAlias')}] )):
+                or (saved.get('scenario')=='lifecycle' and saved.get('fixtures')!=[{'kind':'application','id':t.app_id,'alias':saved.get('fixtureAlias')}] )
+                or not isinstance(expected_logs, list)
+                or (expected_logs and saved.get("automationLogBaseline") != 0)
+                or re.fullmatch(r"[1-9][0-9]{0,17}", workspace_id, re.ASCII) is None):
             raise ProbeError("cleanup report does not identify this exact disposable target")
+        expected_by_id = {}
+        for entry in expected_logs:
+            if (not isinstance(entry, dict) or set(entry) != {"id", "workspaceId", "staticId", "statusCode"}
+                    or not isinstance(entry.get("id"), str)
+                    or re.fullmatch(r"[1-9][0-9]{0,17}", entry["id"], re.ASCII) is None
+                    or entry.get("workspaceId") != workspace_id
+                    or not isinstance(entry.get("staticId"), str)
+                    or not entry["staticId"] or ":" in entry["staticId"]
+                    or not isinstance(entry.get("statusCode"), str)
+                    or not entry["statusCode"] or ":" in entry["statusCode"]
+                    or entry["id"] in expected_by_id):
+                raise ProbeError("cleanup report has invalid owned automation-log evidence")
+            expected_by_id[entry["id"]] = entry
         self.alias = saved["fixtureAlias"]
         self.report["fixtureAlias"] = self.alias
         self.report["allowWrites"] = True
         self.report["cleanupOfRunId"] = run_id
+        self.report["expectedAutomationLogs"] = expected_logs
         require_sqlcl_version(self.version_reader(self.directory / "version"))
         self.identify()
         accepted_users = ",".join("upper(" + literal(user) + ")" for user in developers)
-        self.execute("explicit-cleanup", self.owned_guard() + f'''declare
+        expected_match = " OR ".join(
+            f"(l_row.id={entry['id']} AND l_row.workspace_id={workspace_id} "
+            f"AND l_row.automation_static_id={literal(entry['staticId'])} "
+            f"AND l_row.status_code={literal(entry['statusCode'])})"
+            for entry in expected_logs
+        ) or "1=0"
+        output = self.execute("explicit-cleanup", self.owned_guard() + f'''declare
  v_owner varchar2(255); v_comment varchar2(4000); n number;
 begin
  select locked_by,lock_comment into v_owner,v_comment from apex_applications where application_id={t.app_id};
@@ -574,9 +606,34 @@ begin
  if n<>0 then raise_application_error(-20090,'Fixture workflows remain after cleanup'); end if;
  select count(*) into n from apex_tasks where application_id={t.app_id};
  if n<>0 then raise_application_error(-20090,'Fixture tasks remain after cleanup'); end if;
+ for l_row in (select l.id,l.workspace_id,l.application_id,l.automation_static_id,l.status_code
+                 from apex_automation_log l where l.application_id={t.app_id}) loop
+  if not ({expected_match}) then
+   raise_application_error(-20090,'Unexpected automation log remains after fixture cleanup');
+  end if;
+  dbms_output.put_line('APEX_PROBE_RETAINED_AUTOMATION_LOG:'||l_row.id||':'||l_row.automation_static_id||':'||l_row.status_code);
+ end loop;
 end;
 /
 ''')
+        retained_logs = []
+        marker = "APEX_PROBE_RETAINED_AUTOMATION_LOG:"
+        for line in output.splitlines():
+            value = line.strip()
+            if not value.startswith(marker):
+                continue
+            parts = value[len(marker):].split(":", 2)
+            if len(parts) != 3:
+                raise ProbeError("retained APEX automation-log evidence is malformed")
+            log_id, static_id, status_code = parts
+            expected_log = expected_by_id.get(log_id)
+            if (expected_log is None or expected_log["staticId"] != static_id
+                    or expected_log["statusCode"] != status_code
+                    or any(row["id"] == log_id for row in retained_logs)):
+                raise ProbeError("retained APEX automation log does not match the fixture report")
+            retained_logs.append({"id": log_id, "staticId": static_id, "statusCode": status_code})
+        self.report["retainedAutomationLogs"] = retained_logs
+        self.report["cleanupStatus"] = "pass-with-apex-retained-history" if retained_logs else "pass"
         self.report["cleanupRequired"] = False
         self.save_report()
         return self.report

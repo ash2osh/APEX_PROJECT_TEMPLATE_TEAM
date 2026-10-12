@@ -96,6 +96,13 @@ python3 tools/probe_apex_26_2.py \
 Cleanup verifies the exact saved inventory and live alias, and refuses a lock
 owned by another operation. Public app removal must leave no application,
 workflow or task rows for that ID before `cleanupRequired` becomes false.
+APEX can retain automation execution history after its application is removed.
+The probe accepts only log IDs recorded by that fixture after a verified empty
+log baseline, and records them as `retainedAutomationLogs` with
+`cleanupStatus=pass-with-apex-retained-history`; it does not delete APEX-owned
+history. Oracle's default retention is 14 days, and administrators can purge
+automation logs through the APEX UI ([workspace execution log](https://docs.oracle.com/en/database/oracle/apex/26.2/htmdb/managing-the-automation-execution-log.html),
+[instance administration](https://docs.oracle.com/en/database/oracle/apex/26.2/aeadm/)).
 Keep the original report and cleanup report together. The existing two-developer
 conversion/lock scenario remains available through `--source-26-1` and
 `--developers`; those arguments do not qualify a live APEX 26.1 installation.
@@ -196,12 +203,60 @@ tolerant APEX patch-pair profile. It performed no APEX application publish or
 import. Treat these as unknown until a separate exact-target qualification is
 authorized and recorded.
 
-## Rehearsal metric qualification status on 2026-10-12
+## Mixed-index synonym qualification on 2026-10-12
 
-The new `checks.json` schema-2 `rehearsalMetrics` path has source-level
-implementation and static syntax/lint checks only. It has not been exercised by
-the offline behavior suite or against SQLcl/Oracle in this worktree. Earlier
-native rehearsal results above used the preexisting scalar-check path and do
-not qualify metric frames, trigger-driven aggregates, mismatches, interrupted
-captures, or metric-fixture cleanup. Keep those runtime cases unavailable until
-they are run against a freshly identified owned disposable fixture.
+The reusable `tools/qualify_synonym_namespaces.py` runner passed against the
+local disposable Docker target with SQLcl 26.3.0.0, Oracle 23.26.3.0.0,
+APEX 26.2.0, target session/schema DEMO2, host `b72393fa20fa`, service
+`freepdb1`, and a separately verified SYS alias. The run created a uniquely
+tagged owner, TABLE/INDEX and materialized-view/INDEX collisions, a sequence,
+direct grants, and target synonyms. It exercised both the ordinary
+`ALL_OBJECTS` route and privileged `DBA_OBJECTS` route, then ran the production
+decoder and CREATE VIEW migration preflight over each captured snapshot.
+
+The owner route observed TABLE/namespace 1 plus INDEX/namespace 4 for both
+targets. For the MV, `ALL_OBJECTS` exposed the backing TABLE row and INDEX row;
+the privileged route also exposed MATERIALIZED VIEW/namespace 19. Both routes
+decoded the table and MV synonyms to selectable targets and passed their view
+preflights. Both refused a SELECT-granted sequence and a synonym to an absent
+target with `MISSING_PREREQUISITE`. Independent cleanup found zero fixture
+users, objects, synonyms, grants and recycle-bin rows; its temporary
+`CREATE ANY INDEX` and `CREATE ANY MATERIALIZED VIEW` grants were revoked.
+The ignored report is `scratch/synonym-namespace-qualification-20261012-r6/qualification.json`.
+
+This qualifies those dictionary routes on this one Oracle release and target;
+offline fixtures remain necessary for impossible catalog combinations. Sanitized
+native evidence was added to [issue #19](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/issues/19#issuecomment-6118260901),
+which is now closed as completed.
+
+## Automation action qualification on 2026-10-12
+
+On the same verified local Docker service, the automation action runner enabled
+the selected automation, completed one run-once action with APEX log status
+`Successful`, then disabled it. Independent lifecycle reads showed the
+unselected automation stayed disabled and the selected automation ended
+disabled. App 940269 was removed through the owned cleanup route, with no
+remaining automations, workflows or tasks. APEX retained the one run-once row
+in `APEX_AUTOMATION_LOG` after app removal; it was preserved under the normal
+retention policy and was not deleted with direct table DML or a global purge.
+The exact reconciled evidence is
+`scratch/automation-operations-qualification-success-20261012/reconciled-qualification-summary.json`.
+
+## Rehearsal metric qualification on 2026-10-12
+
+The schema-2 `rehearsalMetrics` path passed its offline regression suite and a
+native trigger-driven DML rehearsal on the verified DEMO2 Docker target. The
+INSERT affected one event row; the separately stored aggregate changed from 0
+to 25 through the trigger, then returned to 0 after rollback. A fresh SQLcl
+connection observed zero event rows and aggregate 0 while the fixture trigger
+was still enabled. Exact cleanup removed the trigger, two fixture tables and
+the primary-key index; independent verification found zero fixture objects and
+recycle-bin rows. The final report is
+`scratch/native-rehearsal-metrics-a10c4312/qualification.json`; its input
+rehearsal report is `scratch/native-rehearsal-metrics-a10c4312/rehearsal-r2.json`.
+The temporary migration source was removed after the fixture report was retained.
+
+These observations establish the declared metrics for this DML transaction.
+They do not prove rollback of sequences, autonomous transactions, DDL or
+external effects, and an interrupted rehearsal still cannot claim an explicit
+rollback without independent evidence.

@@ -160,7 +160,14 @@ refresh below and report its status to the developer in the current chat.
   `--upstream --ref <ref>` performs a read-only upstream fetch/comparison.
   `scripts/team.sh automations list|check <app-id> --env <env> --schema <schema>`
   reads app-scoped automation states through the lifecycle adapter; `check`
-  requires an explicit status and exact static-ID selection.
+  requires an explicit status and exact static-ID selection. Explicit
+  `enable|disable|run-once` actions require one static ID and exact typed
+  confirmation, recheck native application locks and target/status, and read
+  the result back. `run-once` is synchronous and requires a completed success
+  log; an ambiguous action is `unknown` and must not be replayed automatically.
+  These commands never repair workflow/task state or advance a failed publish
+  baseline. Session creation/deletion may run configured app session
+  initialization/cleanup code; the command states this before confirmation.
   Migration, rehearsal and rollout script delivery also runs the SQLcl
   transport preflight; an error refuses before the payload starts, while a
   warning keeps the exact source bytes and requires review of the emitted SQL.

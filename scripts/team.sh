@@ -55,8 +55,8 @@ Commands:
                                               Validate local environment, lock, apps and skills read-only
   template-status [--format text|json] [--upstream --ref <ref>]
                                               Inspect local template drift; fetch upstream only when requested
-  automations list|check <app_id> --env <env> --schema <schema> [--automation <static_id> ...]
-                                              Read or check scoped APEX automation schedule states
+  automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
+                                              Observe, check or explicitly operate on one scoped automation
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
   --help                                      Show this help

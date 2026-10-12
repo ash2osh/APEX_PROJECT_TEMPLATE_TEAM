@@ -381,6 +381,20 @@ def _verification_failure_details(
     return ". ".join(parts)
 
 
+def _verify_durable_folder_locks(
+    repo_root: Path,
+    migrations: Sequence[Migration],
+) -> None:
+    for migration in migrations:
+        relative = migration.folder.relative_to(repo_root).as_posix()
+        lock = inspect_migration_lock(repo_root, relative)
+        if lock.status != "unlocked":
+            raise MigrationApplyError(
+                f"migration folder is {lock.status} from durable receipt/attempt evidence; reconcile before applying "
+                f"{migration.folder.name}: {'; '.join(lock.states)}"
+            )
+
+
 def _verify_receipts_and_attempts(
     repo_root: Path,
     migrations: Sequence[Migration],
@@ -397,16 +411,10 @@ def _verify_receipts_and_attempts(
             except MigrationManifestError as error:
                 raise MigrationApplyError(f"existing receipt is malformed or does not match; reconcile before applying {migration.folder.name}: {error}") from error
             raise MigrationApplyError(f"{migration.folder.name} already has a verified {environment} receipt; run read-only checks instead of reapplying")
-        relative = migration.folder.relative_to(repo_root).as_posix()
-        lock = inspect_migration_lock(repo_root, relative)
-        if lock.status != "unlocked":
-            raise MigrationApplyError(
-                f"migration folder is {lock.status} from durable receipt/attempt evidence; reconcile before applying "
-                f"{migration.folder.name}: {'; '.join(lock.states)}"
-            )
 
     scratch = repo_root / "scratch"
     if not scratch.exists():
+        _verify_durable_folder_locks(repo_root, migrations)
         return
     if scratch.is_symlink():
         raise MigrationApplyError("scratch must not be a symbolic link")
@@ -452,6 +460,7 @@ def _verify_receipts_and_attempts(
             if record.get("payloadDigest") != selected[record["folder"]].payload_digest:
                 raise MigrationApplyError(f"a prior write attempt has different bytes for {record['folder']}; reconcile before applying")
             raise MigrationApplyError(f"a prior {environment} write attempt for {record['folder']} has no current verified receipt; inspect {run_dir} and reconcile")
+    _verify_durable_folder_locks(repo_root, migrations)
 
 
 def _migration_operations(migration: Migration, target_schema: str) -> tuple[dict, ...]:
@@ -948,9 +957,6 @@ def apply_batch(
         )
         initial_target_identity = _identity_for_receipt(initial_inventory, target)
         _assert_check_identity(initial_target_identity, initial_checks)
-        if initial_preflight.exit_code != 0:
-            print(json.dumps(initial_preflight.to_dict(), ensure_ascii=False, sort_keys=True, indent=2), file=sys.stderr)
-            return initial_preflight.exit_code
         run_manifest = {
             "schemaVersion": 2,
             "state": "preflight-passed",
@@ -961,6 +967,9 @@ def apply_batch(
         manifest_path = run_dir / RUN_MANIFEST_NAME
         _atomic_write_json(manifest_path, run_manifest)
         _verify_receipts_and_attempts(repo_root, migrations, initial_target_identity)
+        if initial_preflight.exit_code != 0:
+            print(json.dumps(initial_preflight.to_dict(), ensure_ascii=False, sort_keys=True, indent=2), file=sys.stderr)
+            return initial_preflight.exit_code
         if target.environment in {"staging", "prod"}:
             _print_target_summary(target, initial_target_identity, frozen)
             prompt = f"Migrating to {target.environment.upper()}. Proceed? [y/N]"
