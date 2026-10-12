@@ -14,32 +14,17 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.record_export_state import AppState, marker_payload, read_state
+from scripts.record_export_state import AppState, marker_payload, read_apex_release, read_state
+from scripts.source_provenance import (
+    VersionPair,
+    describe_version_pair,
+    preserve_source_provenance,
+    read_source_provenance,
+)
 from scripts.stamp_publish_version import PUBLISH_TAG, VERSION_LINE, parse_version
 from scripts.validate_app_source import validate_app_source
-from scripts.deployment_descriptor import observe_deployment, read_descriptor, source_projection, remap_subscription_source
-
-
-IGNORED_SOURCE_PATHS = {"apex-team-export.json"}
-# SQLcl's starter application (`apex generate`) ships this script with no content, and APEX
-# leaves an empty script out of an export, so the re-export of a correct import lacks it. Only
-# the empty file may be missing: one with content must still come back byte for byte.
-EMPTY_MAY_BE_MISSING = {Path("supporting-objects/deinstall-script.sql")}
-
-
-def source_files(root: Path) -> dict[Path, Path]:
-    if not root.is_dir():
-        raise ValueError(f"APEXlang directory does not exist: {root}")
-    files: dict[Path, Path] = {}
-    for path in root.rglob("*"):
-        relative = path.relative_to(root)
-        if relative.parts[0] == "deployments" or relative.as_posix() in IGNORED_SOURCE_PATHS:
-            continue
-        if path.is_symlink():
-            raise ValueError(f"symbolic links are not supported in an APEXlang export: {path}")
-        if path.is_file():
-            files[relative] = path
-    return files
+from scripts.deployment_descriptor import observe_deployment, read_descriptor
+from scripts.apexlang_diff import collect_source_mismatches, display_path
 
 
 def publish_tag(application: Path) -> str | None:
@@ -69,37 +54,38 @@ def replaced_import_hint(source_dir: Path, exported_dir: Path) -> str:
 
 
 def verify_source_bytes(source_dir: Path, exported_dir: Path, deployment: dict | None = None) -> None:
-    source_files_by_path = source_files(source_dir)
-    exported_files_by_path = source_files(exported_dir)
-    missing = sorted(
-        path
-        for path in source_files_by_path.keys() - exported_files_by_path.keys()
-        if not (path in EMPTY_MAY_BE_MISSING and source_files_by_path[path].stat().st_size == 0)
-    )
-    unexpected = sorted(exported_files_by_path.keys() - source_files_by_path.keys())
+    mismatches = collect_source_mismatches(source_dir, exported_dir, deployment)
+    if not mismatches:
+        return
+
+    required = [item for item in mismatches if item.kind == "required-missing"]
+    missing = [item.path for item in mismatches if item.kind == "missing"]
+    unexpected = [item.path for item in mismatches if item.kind == "unexpected"]
+    changed = [item for item in mismatches if item.kind == "bytes"]
+    details = []
+    if missing:
+        details.append("missing from re-export: " + ", ".join(display_path(path) for path in missing))
+    if unexpected:
+        details.append("unexpected in re-export: " + ", ".join(display_path(path) for path in unexpected))
+    if required:
+        details.append("required source missing: " + ", ".join(display_path(item.path) for item in required))
+    if changed:
+        details.append(
+            "byte differences: "
+            + ", ".join(
+                display_path(item.path)
+                + (f" (first differing line {item.first_differing_line})" if item.first_differing_line else "")
+                for item in changed
+            )
+        )
+
     if missing or unexpected:
-        details = []
-        if missing:
-            details.append("missing from re-export: " + ", ".join(path.as_posix() for path in missing))
-        if unexpected:
-            details.append("unexpected in re-export: " + ", ".join(path.as_posix() for path in unexpected))
-        raise ValueError("APEXlang source file set does not match the post-import re-export (" + "; ".join(details) + ")")
-
-    for relative, source_path in source_files_by_path.items():
-        if relative not in exported_files_by_path:
-            continue  # an empty script the export leaves out, accepted above
-        expected_bytes, observed_bytes = source_path.read_bytes(), exported_files_by_path[relative].read_bytes()
-        if deployment is not None and relative == Path("application.apx"):
-            expected_bytes = source_projection(expected_bytes, deployment)
-            observed_bytes = source_projection(observed_bytes, deployment)
-        if deployment is not None and relative.suffix == '.apx':
-            expected_bytes = remap_subscription_source(expected_bytes, deployment)
-        if expected_bytes != observed_bytes:
-            raise ValueError(f"APEXlang source bytes do not match the post-import re-export: {relative.as_posix()}")
-
-    for required in (Path("application.apx"), Path(".apex/apexlang.json")):
-        if required not in source_files_by_path:
-            raise ValueError(f"required APEXlang source file is missing: {required.as_posix()}")
+        prefix = "APEXlang source file set does not match the post-import re-export"
+    elif required:
+        prefix = "required APEXlang source file is missing"
+    else:
+        prefix = "APEXlang source bytes do not match the post-import re-export"
+    raise ValueError(prefix + ": " + "; ".join(details))
 
 
 def read_verified_revision(app_id: int, before_file: Path, after_file: Path) -> AppState:
@@ -142,7 +128,15 @@ def advance_baseline(app_id: int, source_dir: Path, revision: AppState) -> None:
     # source additionally records raw content evidence required by partial mode.
     metadata = json.loads((source_dir / ".apex/apexlang.json").read_text(encoding="utf-8"))
     canonical_source = source_dir if isinstance(metadata, dict) and "mmdVersion" in metadata else None
-    payload = json.dumps(marker_payload(app_id, revision, canonical_source), indent=2) + "\n"
+    payload = json.dumps(
+        marker_payload(
+            app_id,
+            revision,
+            canonical_source,
+            source_provenance=preserve_source_provenance(source_dir),
+        ),
+        indent=2,
+    ) + "\n"
     descriptor, temporary_name = tempfile.mkstemp(prefix=".apex-team-export.", suffix=".tmp", dir=source_dir)
     temporary_path = Path(temporary_name)
     try:
@@ -159,6 +153,69 @@ def advance_baseline(app_id: int, source_dir: Path, revision: AppState) -> None:
         raise
 
 
+def _target_apex_release(before_file: Path | None, after_file: Path | None) -> str | None:
+    if before_file is None and after_file is None:
+        return None
+    if before_file is None or after_file is None:
+        raise ValueError("both target APEX release observations are required")
+    before_release, before_time = read_apex_release(before_file)
+    after_release, after_time = read_apex_release(after_file)
+    if before_release != after_release:
+        raise ValueError("target APEX release changed during post-import export; rerun verification")
+    if datetime.fromisoformat(before_time.replace("Z", "+00:00")) > datetime.fromisoformat(after_time.replace("Z", "+00:00")):
+        raise ValueError("database UTC time moved backwards during post-import export")
+    return after_release
+
+
+def _publish_summary(source_dir: Path, target_release: str | None, source_verified: bool) -> dict:
+    provenance = read_source_provenance(source_dir)
+    pair = VersionPair(
+        provenance.source_release if provenance.status == "verified" else None,
+        target_release,
+    )
+    return {
+        "schemaVersion": 1,
+        "sourceVerified": source_verified,
+        "lifecycleStatus": "unavailable",
+        "sourceProvenanceStatus": provenance.status,
+        "sourceApexRelease": provenance.source_release if provenance.status == "verified" else None,
+        "targetApexRelease": target_release,
+        "versionPair": describe_version_pair(pair),
+    }
+
+
+def _write_publish_summary(path: Path, repo_root: Path, payload: dict) -> None:
+    root = repo_root.resolve(strict=True)
+    output = Path(os.path.abspath(path if path.is_absolute() else root / path))
+    try:
+        relative = output.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise ValueError("publish verification summary must remain inside the repository") from error
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("publish verification summary path contains a symbolic link")
+    if output.exists() and output.is_symlink():
+        raise ValueError("publish verification summary must not be a symbolic link")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app_id", type=int)
@@ -170,11 +227,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--record-baseline", action="store_true")
     parser.add_argument("--deployment-file", type=Path)
     parser.add_argument("--deployment-state", type=Path)
+    parser.add_argument("--target-apex-release-before", type=Path)
+    parser.add_argument("--target-apex-release-after", type=Path)
+    parser.add_argument("--summary-path", type=Path)
     args = parser.parse_args(argv)
     if args.app_id < 1:
         parser.error("app_id must be a positive integer")
 
+    source_dir: Path | None = None
+    target_release: str | None = None
+    summary: dict | None = None
     try:
+        target_release = _target_apex_release(args.target_apex_release_before, args.target_apex_release_after)
         source_dir = validate_app_source(args.repo_root, args.source_dir)
         exported_dir = args.exported_dir.resolve(strict=True)
         deployment = None
@@ -186,15 +250,36 @@ def main(argv: list[str] | None = None) -> int:
         try:
             verify_source_bytes(source_dir, exported_dir, deployment)
         except ValueError as mismatch:
-            raise ValueError(f"{mismatch}{replaced_import_hint(source_dir, exported_dir)}") from mismatch
+            source_provenance = read_source_provenance(source_dir)
+            pair = VersionPair(
+                source_provenance.source_release if source_provenance.status == "verified" else None,
+                target_release,
+            )
+            raise ValueError(
+                f"{mismatch}{replaced_import_hint(source_dir, exported_dir)}; "
+                f"version context: {describe_version_pair(pair)} "
+                f"(source provenance {source_provenance.status})"
+            ) from mismatch
         revision = read_verified_revision(args.app_id, args.before_file, args.after_file)
+        summary = _publish_summary(source_dir, target_release, True)
+        if args.summary_path is not None:
+            _write_publish_summary(args.summary_path, args.repo_root, summary)
         if args.record_baseline:
             advance_baseline(args.app_id, source_dir, revision)
     except (OSError, ValueError) as exc:
+        if args.summary_path is not None and source_dir is not None:
+            try:
+                _write_publish_summary(args.summary_path, args.repo_root, _publish_summary(source_dir, target_release, False))
+            except (OSError, ValueError):
+                pass
         print(f"publish verification error: {exc}", file=sys.stderr)
         return 1
 
+    if summary is None:
+        print("publish verification error: source verification summary is unavailable", file=sys.stderr)
+        return 1
     print(f"APEX_PUBLISH_SOURCE_VERIFIED:{args.app_id}")
+    print(f"APEX_VERSION_PAIR:{summary['versionPair']} (source provenance {summary['sourceProvenanceStatus']})")
     return 0
 
 

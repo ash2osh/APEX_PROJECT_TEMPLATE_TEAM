@@ -77,6 +77,10 @@ Commands:
                                               Update template-owned files from the template
   verify-local [--format text|json] [--skills-root <path>] [...] [--live]
                                               Validate local environment, lock, apps and skills read-only
+  template-status [--format text|json] [--upstream --ref <ref>]
+                                              Inspect local template drift; fetch upstream only when requested
+  automations list|check <app_id> --env <env> --schema <schema> [--automation <static_id> ...]
+                                              Read or check scoped APEX automation schedule states
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
   --help                                      Show this help
@@ -202,7 +206,7 @@ if ([string]::IsNullOrWhiteSpace($Command) -or $Command -in @("--help", "-h")) {
 
 # --schema NAME is the one selection channel: strip it and set PROJECT_SCHEMA so
 # every child script's loader narrows to that schema.
-if ($Command -notin @("upgrade-template", "verify-local")) {
+if ($Command -notin @("upgrade-template", "verify-local", "template-status")) {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
@@ -479,6 +483,22 @@ try {
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to verify local readiness (python3, python or py -3)" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "verify_local.py") --repo-root $repoRoot @Arguments
+      Exit-Team $LASTEXITCODE
+    }
+    "template-status" {
+      . (Join-Path $PSScriptRoot "resolve_python.ps1")
+      $python = Resolve-TeamPython
+      if ($null -eq $python) { Fail "Python 3.10 or newer is required to inspect template status" }
+      $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "template_drift.py") --repo-root $repoRoot @Arguments
+      Exit-Team $LASTEXITCODE
+    }
+    "automations" {
+      . (Join-Path $PSScriptRoot "resolve_python.ps1")
+      $python = Resolve-TeamPython
+      if ($null -eq $python) { Fail "Python 3.10 or newer is required to inspect APEX automations" }
+      $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "automation_operations.py") --repo-root $repoRoot @Arguments
       Exit-Team $LASTEXITCODE
     }
     "upgrade-template" {

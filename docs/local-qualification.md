@@ -27,6 +27,27 @@ means a refusal or unavailable check. Inspect `qualification.json` for individua
 durations, coverage and limitations; empty arrays do not establish positive
 runtime qualification.
 
+For app-scoped automation observations, use the read-only commands:
+
+```bash
+scripts/team.sh automations list 100 --env dev --schema DEMO
+scripts/team.sh automations check 100 --env dev --schema DEMO \
+  --automation <static-id> --expected-status ACTIVE
+```
+
+The descriptor supplies the workspace, and the command uses the configured
+APEX parsing-schema connection for DEV or the selected environment profile for
+staging/production. It reuses the lifecycle adapter's APEX release, identity,
+workspace-context and application-ownership guards. `check` requires exact
+static-ID selection and one expected schedule status. APEX 26.2 documents the
+schedule states as Active, Disabled and Error in [Managing Automations](https://docs.oracle.com/en/database/oracle/apex/26.2/htmdb/editing-an-existing-automation.html).
+
+On 2026-10-12, an existing local Docker target was observed as DEMO/DEMO,
+workspace DEMO, app 100, APEX 26.2.0. The lifecycle read and all
+visibility coverage flags passed, but the app had zero automations. This
+confirms the scoped read path only; it does not provide a live status-row or
+automation-write qualification.
+
 The catalog check uses the production gzip/base64 decoder against the real owner
 inventory. Large synthetic Unicode transport is separate evidence, not proof
 that this owner has a large inventory. See [qualification results](apex-26.2-qualification.md).
@@ -174,3 +195,13 @@ runtime/backport, a shared-app import, a promotion to a distinct target, or a
 tolerant APEX patch-pair profile. It performed no APEX application publish or
 import. Treat these as unknown until a separate exact-target qualification is
 authorized and recorded.
+
+## Rehearsal metric qualification status on 2026-10-12
+
+The new `checks.json` schema-2 `rehearsalMetrics` path has source-level
+implementation and static syntax/lint checks only. It has not been exercised by
+the offline behavior suite or against SQLcl/Oracle in this worktree. Earlier
+native rehearsal results above used the preexisting scalar-check path and do
+not qualify metric frames, trigger-driven aggregates, mismatches, interrupted
+captures, or metric-fixture cleanup. Keep those runtime cases unavailable until
+they are run against a freshly identified owned disposable fixture.

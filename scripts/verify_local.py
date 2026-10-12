@@ -38,6 +38,7 @@ from scripts.deployment_descriptor import DescriptorError, read_descriptor
 from scripts.local_config import ConfigError, read_project_env
 from scripts.oracle_skills_status import inspect_oracle_skills
 from scripts.graphify_project import inspect_graphify
+from scripts.template_drift import inspect_template_drift
 from scripts.upgrade_template import UpgradeError, load_manifest, read_lock_with_hash
 from scripts.validate_app_source import validate_app_source
 
@@ -275,6 +276,33 @@ def build_report(
                 "path": str(lock_path),
                 "message": f"template lock invalid: {exc}",
             })
+
+    drift = inspect_template_drift(repo_root)
+    drift_status = drift.get("status")
+    local_rows = drift.get("localFiles", [])
+    counts = {
+        state: sum(row.get("status") == state for row in local_rows)
+        for state in ("matches-lock", "customized", "missing", "unsafe")
+    }
+    if drift_status == "unsafe":
+        status = "fail"
+    elif drift.get("lockStatus") == "unknown":
+        status = "attention"
+    else:
+        # Safe local customization is expected and remains upgradeable; it is
+        # reported as a count rather than treated as upstream obsolescence.
+        status = "pass"
+    checks.append({
+        "check": "template_drift",
+        "status": status,
+        "path": str(lock_path),
+        "message": (
+            f"local lock comparison: {counts['matches-lock']} matches, "
+            f"{counts['customized']} customized, {counts['missing']} missing; "
+            "upstream not checked"
+            + (f"; reason: {drift['reason']}" if drift.get("reason") else "")
+        ),
+    })
 
     # 5. Application and Deployment Descriptors check
     selected_env = values.get("DB_ENVIRONMENT", "development")

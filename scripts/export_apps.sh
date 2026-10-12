@@ -176,7 +176,9 @@ for app_id in "${APP_IDS[@]}"; do
     "$RUN_DIR/.apex-export-before.txt" "$RUN_DIR/.apex-export-after.txt" \
     "$APP_STAGE/apex-team-export.json" --source-dir "$APP_STAGE" \
     --page-locks-before "$RUN_DIR/.apex-page-locks-before.json" \
-    --page-locks-after "$RUN_DIR/.apex-page-locks-after.json"
+    --page-locks-after "$RUN_DIR/.apex-page-locks-after.json" \
+    --apex-release-before "$RUN_DIR/.apex-release-before.txt" \
+    --apex-release-after "$RUN_DIR/.apex-release-after.txt"
 
 done
 

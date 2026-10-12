@@ -21,6 +21,7 @@ from scripts.db_targets import Target
 from scripts.sqlcl_session import run_sqlcl, bash_command
 from scripts.application_lock import acquire_lock, check_lock, release_lock, assertion_sql, require_client
 from scripts.record_export_state import read_state, marker_payload
+from scripts.source_provenance import preserve_source_provenance
 from scripts.deployment_descriptor import read_descriptor, observe_deployment
 from scripts.validate_app_source import validate_app_source, validate_import_effects
 
@@ -315,7 +316,13 @@ def main(argv=None):
         source = validate_app_source(args.repo_root, args.source_dir)
         backend = NativeBackend(target, args.app_id, source, args.workspace, base, args.developer, args.repo_root)
         stage = upgrade_source(target, args.app_id, source, args.workspace, args.mode, base / "conversion", backend=backend)
-        marker = marker_payload(args.app_id, backend.last_revision, stage, backend.last_page_locks)
+        marker = marker_payload(
+            args.app_id,
+            backend.last_revision,
+            stage,
+            backend.last_page_locks,
+            preserve_source_provenance(source),
+        )
         (stage / "apex-team-export.json").write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
         relative = source.relative_to(args.repo_root.resolve()).as_posix()
         if os.name == "nt":

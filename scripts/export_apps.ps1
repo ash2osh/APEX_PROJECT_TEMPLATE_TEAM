@@ -151,7 +151,9 @@ try {
         (Join-Path $appStage "apex-team-export.json"),
         "--source-dir", $appStage,
         '--page-locks-before', (Join-Path $runPath '.apex-page-locks-before.json'),
-        '--page-locks-after', (Join-Path $runPath '.apex-page-locks-after.json')
+        '--page-locks-after', (Join-Path $runPath '.apex-page-locks-after.json'),
+        '--apex-release-before', (Join-Path $runPath '.apex-release-before.txt'),
+        '--apex-release-after', (Join-Path $runPath '.apex-release-after.txt')
       )
   }
 

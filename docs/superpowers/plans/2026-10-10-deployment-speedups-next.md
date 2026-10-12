@@ -1,4 +1,14 @@
-# Deployment speedups: status and remaining work
+# Deployment speedups: historical status and remaining work
+
+## Current status — 2026-10-12
+
+The phase 1–10 delivery and the final review fixes were merged into `main` at
+`df22dbbfc5a53bac6dc28f2b4f4910fec6604c6e`. This file preserves the prior
+2026-10-11 handoff and its evidence as history. Its seven-item follow-up list is
+superseded by the [consolidated remaining-work plan](2026-10-12-remaining-work-and-pr20.md),
+which also tracks PR #20 and the open native qualification for TF-001.
+
+## Historical snapshot — 2026-10-11
 
 The original phases 1–8 implementation was merged in PR #18 before the current
 branch. This checkout is based on `9aed8a2` on

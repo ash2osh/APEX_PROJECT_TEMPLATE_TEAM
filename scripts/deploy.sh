@@ -146,7 +146,7 @@ if [ "$manual" = true ]; then
   printf '%s\n' '   test "${#export_dirs[@]}" -eq 1 || { echo "expected exactly one APEX export" >&2; exit 1; }'
   printf '%s\n' '   exported_dir="${export_dirs[0]%/}"'
   printf '   %q "$exported_dir"\n' "$runbook_root/scripts/normalize_apx.sh"
-  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json\n' \
+  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json --target-apex-release-before .apex-release-before.txt --target-apex-release-after .apex-release-after.txt\n' \
     "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root" "$app_dir/deployments/$app_environment.json"
   printf '   # Source check must print APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
   printf '5. Verify lifecycle independently; failures retain recovery diagnostics:\n'

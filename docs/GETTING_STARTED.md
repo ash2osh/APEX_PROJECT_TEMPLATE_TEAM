@@ -432,6 +432,10 @@ The precondition below fails when the table is missing, which is what you want.
 `checks.json` (each check is a query that must return exactly one row containing
 the number `1`; `expected` is always `1`):
 
+This example uses the original schema version 1. Optional schema version 2 can
+add rehearsal-only scalar metrics; those use separate expected values and run
+only with `migrate --rehearse`. See [migration rules](migration-rules.md#folder-and-file-names).
+
 ```json
 {
   "schemaVersion": 1,
@@ -480,6 +484,7 @@ revision folder instead (`...-r002`). Commit the folder.
 | see how two environments differ | `scripts/team.sh compare-schema --from dev --to staging --object <NAME>` |
 | release to staging or production | `scripts/team.sh deploy <app-id> --env staging` |
 | get the latest template scripts | `scripts/team.sh upgrade-template --dry-run` |
+| see local template-file changes | `scripts/team.sh template-status` |
 
 ## Next steps
 

@@ -12,6 +12,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +48,12 @@ from .migration_manifest import (
     validate_receipt,
     verify_loaded_input_hashes,
 )
-from .migration_revision import attempt_record_is_locked, not_started_reason, RUN_ID_RE, RUN_MANIFEST_NAME
+from .migration_attempts import (
+    MigrationAttemptError,
+    not_started_reason,
+    write_attempt_event,
+)
+from .migration_revision import attempt_record_is_locked, RUN_ID_RE, RUN_MANIFEST_NAME, inspect_migration_lock
 from .schema_catalog import (
     CatalogError,
     InventoryRetriesExhaustedError,
@@ -61,6 +67,7 @@ from .schema_catalog import (
 )
 from .schema_normalization import normalization_coverage
 from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
+from .sqlcl_transport import generated_clob_assembly, lint_sqlcl_transport
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +91,19 @@ class _FrozenMigration:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _preflight_transport(files: Sequence[MigrationFile], *, announce: bool) -> None:
+    """Refuse known direct-script corruption before recording a write attempt."""
+    for file in files:
+        source = file.source.decode("utf-8")
+        mode = "assembled" if generated_clob_assembly(source) else "direct"
+        for finding in lint_sqlcl_transport(source, mode):
+            message = f"{file.name}:{finding.line} ({finding.code}): {finding.message}"
+            if finding.severity == "error":
+                raise MigrationApplyError(f"SQLcl transport preflight refused: {message}")
+            if announce:
+                print(f"migration warning: SQLcl transport review: {message}", file=sys.stderr)
 
 
 def _safe_scratch_root(repo_root: Path) -> Path:
@@ -377,6 +397,13 @@ def _verify_receipts_and_attempts(
             except MigrationManifestError as error:
                 raise MigrationApplyError(f"existing receipt is malformed or does not match; reconcile before applying {migration.folder.name}: {error}") from error
             raise MigrationApplyError(f"{migration.folder.name} already has a verified {environment} receipt; run read-only checks instead of reapplying")
+        relative = migration.folder.relative_to(repo_root).as_posix()
+        lock = inspect_migration_lock(repo_root, relative)
+        if lock.status != "unlocked":
+            raise MigrationApplyError(
+                f"migration folder is {lock.status} from durable receipt/attempt evidence; reconcile before applying "
+                f"{migration.folder.name}: {'; '.join(lock.states)}"
+            )
 
     scratch = repo_root / "scratch"
     if not scratch.exists():
@@ -398,7 +425,12 @@ def _verify_receipts_and_attempts(
             manifest = decode_json(manifest_path.read_bytes(), str(manifest_path))
         except (OSError, MigrationManifestError) as error:
             raise MigrationApplyError(f"retained migration evidence cannot be read; reconcile before applying: {manifest_path} ({error})") from error
-        if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or not isinstance(manifest.get("migrations"), list):
+        if (
+            not isinstance(manifest, dict)
+            or type(manifest.get("schemaVersion")) is not int
+            or manifest.get("schemaVersion") not in {1, 2}
+            or not isinstance(manifest.get("migrations"), list)
+        ):
             raise MigrationApplyError(f"retained migration evidence is malformed; reconcile before applying: {manifest_path}")
         target_record = manifest.get("target")
         if not isinstance(target_record, dict):
@@ -673,6 +705,18 @@ def apply_folder(
     driver = run_dir / "migration-driver.sql"
     driver.write_text("\n".join(driver_lines), encoding="utf-8", newline="\n")
     driver.chmod(0o600)
+    _preflight_transport(migration.files, announce=False)
+    for finding in lint_sqlcl_transport(driver.read_text(encoding="utf-8"), "direct"):
+        if finding.severity == "error":
+            raise MigrationApplyError(
+                f"SQLcl transport preflight refused: {driver.name}:{finding.line} "
+                f"({finding.code}): {finding.message}"
+            )
+        print(
+            f"migration warning: SQLcl transport review: {driver.name}:{finding.line} "
+            f"({finding.code}): {finding.message}",
+            file=sys.stderr,
+        )
     started = _utc_now()
     try:
         result = run_sqlcl(target, driver, run_dir, phase="apply")
@@ -819,6 +863,46 @@ def _receipt_record(migration: Migration, run_manifest: dict) -> dict:
     return next(item for item in run_manifest["migrations"] if item["folder"] == migration.folder.name)
 
 
+def _attempt_event(
+    repo_root: Path,
+    migration: Migration,
+    target_identity: Mapping[str, str],
+    run_id: str,
+    attempt_id: str,
+    *,
+    state: str,
+    write_attempted: bool,
+    predecessor_event_id: str | None = None,
+    evidence: Sequence[Mapping] = (),
+) -> dict:
+    return {
+        "schemaVersion": 1,
+        "eventId": str(uuid.uuid4()),
+        "attemptId": attempt_id,
+        "runId": run_id,
+        "predecessorEventId": predecessor_event_id,
+        "recordedAt": _utc_now(),
+        "migrationPath": migration.folder.relative_to(repo_root).as_posix(),
+        "environment": str(target_identity["environment"]),
+        "target": {
+            "environment": str(target_identity["environment"]),
+            "connection": str(target_identity["connection"]),
+            "expected_user": str(target_identity["expected_user"]),
+            "current_schema": str(target_identity["current_schema"]),
+        },
+        "identity": {field: str(target_identity[field]) for field in IDENTITY_FIELDS},
+        "files": [
+            {"name": file.name, "sequence": file.sequence, "sha256": file.sha256}
+            for file in migration.files
+        ],
+        "checksSha256": migration.checks_sha256,
+        "payloadDigest": migration.payload_digest,
+        "state": state,
+        "writeAttempted": write_attempted,
+        "evidence": [dict(item) for item in evidence],
+    }
+
+
 def apply_batch(
     repo_root: Path,
     migrations: Sequence[Migration],
@@ -852,6 +936,7 @@ def apply_batch(
                 "payloadDigest": item.staged.payload_digest,
                 "files": [{"name": file.name, "sequence": file.sequence, "sha256": file.sha256} for file in item.staged.files],
                 "checksSha256": item.staged.checks_sha256,
+                "attemptEventIds": [],
                 "writeAttempted": False,
                 "state": "frozen",
                 "createdAt": _utc_now(),
@@ -863,12 +948,11 @@ def apply_batch(
         )
         initial_target_identity = _identity_for_receipt(initial_inventory, target)
         _assert_check_identity(initial_target_identity, initial_checks)
-        _verify_receipts_and_attempts(repo_root, migrations, initial_target_identity)
         if initial_preflight.exit_code != 0:
             print(json.dumps(initial_preflight.to_dict(), ensure_ascii=False, sort_keys=True, indent=2), file=sys.stderr)
             return initial_preflight.exit_code
         run_manifest = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "state": "preflight-passed",
             "createdAt": _utc_now(),
             "target": dict(initial_target_identity),
@@ -876,6 +960,7 @@ def apply_batch(
         }
         manifest_path = run_dir / RUN_MANIFEST_NAME
         _atomic_write_json(manifest_path, run_manifest)
+        _verify_receipts_and_attempts(repo_root, migrations, initial_target_identity)
         if target.environment in {"staging", "prod"}:
             _print_target_summary(target, initial_target_identity, frozen)
             prompt = f"Migrating to {target.environment.upper()}. Proceed? [y/N]"
@@ -912,13 +997,26 @@ def apply_batch(
                     f"live preflight refused {original.folder.name} at its apply boundary: "
                     + json.dumps(current_preflight.to_dict(), ensure_ascii=False, sort_keys=True)
                 )
+            _preflight_transport(staged.files, announce=True)
             record = _receipt_record(original, {"migrations": records})
+            attempt_id = str(uuid.uuid4())
+            pending_event = _attempt_event(
+                repo_root,
+                original,
+                current_identity,
+                run_dir.name,
+                attempt_id,
+                state="pending",
+                write_attempted=True,
+            )
+            write_attempt_event(original.folder, pending_event)
+            record["attemptEventIds"] = [pending_event["eventId"]]
             record["writeAttempted"] = True
             record["state"] = "write-attempted"
             record["writeStartedAt"] = _utc_now()
             attempted = True
             run_manifest = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "state": "write-attempted",
                 "createdAt": run_manifest["createdAt"],
                 "target": dict(initial_target_identity),
@@ -944,15 +1042,47 @@ def apply_batch(
                     output = ""
                 not_started = not_started_reason(output)
                 if not_started is not None:
-                    record["writeAttempted"] = False
                     record["state"] = "apply-not-started"
                     record["applyStartClassification"] = not_started
                     record["error"] = str(error)
+                    no_write_event_installed = False
+                    try:
+                        output_digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
+                        no_write_event = _attempt_event(
+                            repo_root,
+                            original,
+                            current_identity,
+                            run_dir.name,
+                            attempt_id,
+                            state="apply-not-started",
+                            write_attempted=False,
+                            predecessor_event_id=pending_event["eventId"],
+                            evidence=({
+                                "kind": "no-write-sqlcl-output",
+                                "path": output_path.relative_to(repo_root).as_posix(),
+                                "sha256": output_digest,
+                                "classification": not_started,
+                            },),
+                        )
+                        write_attempt_event(original.folder, no_write_event)
+                        record["attemptEventIds"].append(no_write_event["eventId"])
+                        no_write_event_installed = True
+                    except (MigrationAttemptError, OSError, ValueError):
+                        # Keep the pending event as the durable lock when proof cannot
+                        # be installed or its output file is unavailable.
+                        no_write_event_installed = False
+                    if no_write_event_installed:
+                        record["writeAttempted"] = False
                     run_manifest["state"] = "apply-not-started"
                     _atomic_write_json(manifest_path, run_manifest)
+                    if no_write_event_installed:
+                        raise MigrationApplyError(
+                            f"{original.folder.name} did not start applying: no payload statement started "
+                            f"({not_started}); retry is permitted. {error}. Evidence: {run_dir}"
+                        ) from error
                     raise MigrationApplyError(
-                        f"{original.folder.name} did not start applying: no payload statement started "
-                        f"({not_started}); retry is permitted. {error}. Evidence: {run_dir}"
+                        f"{original.folder.name} has no durable no-write proof; the pending event keeps it locked. "
+                        f"Reconcile before retrying. {error}. Evidence: {run_dir}"
                     ) from error
                 record["state"] = "apply-failed-or-unknown"
                 record["error"] = str(error)
@@ -1037,6 +1167,18 @@ def apply_batch(
                 run_manifest["state"] = record["state"]
                 _atomic_write_json(manifest_path, run_manifest)
                 raise MigrationApplyError(f"{original.folder.name} committed and verified, but receipt installation failed; reconcile. Evidence: {run_dir}") from error
+            verified_event = _attempt_event(
+                repo_root,
+                original,
+                current_identity,
+                run_dir.name,
+                attempt_id,
+                state="verified",
+                write_attempted=True,
+                predecessor_event_id=pending_event["eventId"],
+            )
+            write_attempt_event(original.folder, verified_event)
+            record["attemptEventIds"].append(verified_event["eventId"])
             record["state"] = "verified"
             record["verifiedAt"] = receipt["verifiedAt"]
             record["receipt"] = receipt_path.name

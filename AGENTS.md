@@ -115,6 +115,10 @@ refresh below and report its status to the developer in the current chat.
   path. Keep source immutable after a write attempt; a follow-up uses the next
   revision folder. Run `scripts/team.sh check-conflicts <folder> --env dev`
   before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
+  Keep `checks.json` schema 1 unchanged unless a reviewed rehearsal needs
+  schema-2 `rehearsalMetrics`; those metrics run only under `--rehearse`, never
+  as apply postconditions. Follow [docs/migration-rules.md](docs/migration-rules.md)
+  for their bounds and rollback limits.
   Checks cover only selected local migrations and observed live state; they
   cannot see another independent repository's pending files. Staging and
   production migrations require `STAGING_SCHEMA` or `PROD_SCHEMA` in addition
@@ -151,6 +155,15 @@ refresh below and report its status to the developer in the current chat.
   conservative read-only query flow described in [README.md](README.md#read-only-ad-hoc-queries).
   `scripts/team.sh verify-local` validates local
   configuration, lock, app descriptors and native Oracle skills offline.
+  `scripts/team.sh template-status` reports local template-owned file hashes
+  against `.template-lock.json` without network access; only an explicit
+  `--upstream --ref <ref>` performs a read-only upstream fetch/comparison.
+  `scripts/team.sh automations list|check <app-id> --env <env> --schema <schema>`
+  reads app-scoped automation states through the lifecycle adapter; `check`
+  requires an explicit status and exact static-ID selection.
+  Migration, rehearsal and rollout script delivery also runs the SQLcl
+  transport preflight; an error refuses before the payload starts, while a
+  warning keeps the exact source bytes and requires review of the emitted SQL.
   `scripts/team.sh backup-db` refreshes the local table and code mirrors, and the
   ORDS mirror when the ORDS profile exists. `scripts/team.sh backup-ords`
   exports ORDS metadata only: it never enables REST, imports, changes ORDS

@@ -773,8 +773,11 @@ def _render_check_driver(
     fail_on_false: bool = False,
     fail_on_error: bool = False,
 ) -> str:
-    if phase not in {"preconditions", "postconditions", "rollback-start"}:
-        raise ValueError("check phase must be preconditions, postconditions, or rollback-start")
+    if phase not in {
+        "preconditions", "postconditions", "rollback-start",
+        "metric-before", "metric-after", "metric-rollback",
+    }:
+        raise ValueError("unsupported check/capture phase")
     if IDENTIFIER_RE.fullmatch(target.schema) is None:
         raise ValueError("target schema must be an uppercase Oracle identifier")
     sql_lines = [
