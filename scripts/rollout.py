@@ -336,7 +336,7 @@ def _directory_input_paths(
             continue
         if not entry.is_file():
             raise RolloutError(f"rollout input is not a regular file: {entry}")
-        relative = entry.relative_to(path)
+        relative = relative_to_root(entry, path)
         if migration_folder and len(relative.parts) == 1 and relative.name == f"status.{environment}.json":
             # This is a local apply receipt, not migration source.
             continue

@@ -360,9 +360,9 @@ class PublishAppCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("docker-demo", args)
-            self.assertIn("@" + fake_sqlcl.native(runner.parent / "publish_app.sql"), args)
-            self.assertIn(fake_sqlcl.native(root / "apps/DEMO/100"), args)
-            self.assertIn(fake_sqlcl.native(root / "apps/DEMO/100" / "deployments/dev.json"), args)
+            self.assertIn("@" + fake_sqlcl.native((runner.parent / "publish_app.sql").resolve()), args)
+            self.assertIn(fake_sqlcl.native((root / "apps/DEMO/100").resolve()), args)
+            self.assertIn(fake_sqlcl.native((root / "apps/DEMO/100" / "deployments/dev.json").resolve()), args)
             self.assertNotEqual(sql_cwd.read_text(encoding="utf-8").strip(), str(root / "apps/DEMO/100"))
 
     def test_publish_does_not_start_sqlcl_in_application_source(self) -> None:

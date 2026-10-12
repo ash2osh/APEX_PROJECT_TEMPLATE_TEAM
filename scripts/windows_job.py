@@ -166,6 +166,15 @@ def run(
     """
     if os.name != "nt":
         raise OSError("windows_job.run is for Windows")
+    # Git Bash can mark Ctrl-C as ignored for itself and its children. A Python
+    # helper launched beneath that shell must clear the inherited ignore state
+    # before it waits, otherwise KeyboardInterrupt never reaches the job cleanup.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetConsoleCtrlHandler.argtypes = (wintypes.LPVOID, wintypes.BOOL)
+    kernel32.SetConsoleCtrlHandler.restype = wintypes.BOOL
+    # A process without a console cannot receive CTRL_C_EVENT; in that case the
+    # API call fails and there is no console state to restore.
+    kernel32.SetConsoleCtrlHandler(None, False)
     if output_limit_bytes is not None:
         return _run_bounded(
             command,

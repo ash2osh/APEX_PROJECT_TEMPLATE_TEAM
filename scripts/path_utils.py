@@ -7,6 +7,10 @@ import stat
 from pathlib import Path
 
 
+class PathReparseError(ValueError):
+    """A path under the matched root contains a symbolic link or reparse point."""
+
+
 def _reject_reparse_points_under(path: Path, matched_root: Path) -> None:
     """Fail closed on reparse points at or below the matched repository root."""
     current = matched_root
@@ -23,7 +27,7 @@ def _reject_reparse_points_under(path: Path, matched_root: Path) -> None:
             raise ValueError(f"cannot inspect path component: {current}") from error
         reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
         if current.is_symlink() or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag):
-            raise ValueError(f"path contains a symbolic link or reparse point: {current}")
+            raise PathReparseError(f"path contains a symbolic link or reparse point: {current}")
 
 
 def relative_to_root(path: Path | str, root: Path | str) -> Path:

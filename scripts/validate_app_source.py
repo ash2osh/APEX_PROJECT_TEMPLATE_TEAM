@@ -12,7 +12,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.path_utils import relative_to_root
+from scripts.path_utils import PathReparseError, relative_to_root
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -37,6 +37,10 @@ def validate_app_source(repo_root: Path, source_dir: Path) -> Path:
     candidate = Path(os.path.abspath(candidate))
     try:
         relative = relative_to_root(candidate, root)
+    except PathReparseError as exc:
+        raise ValueError(
+            f"symbolic links or reparse points are not supported in an APEXlang source tree: {candidate}"
+        ) from exc
     except ValueError as exc:
         raise ValueError(f"application source is outside the repository: {candidate}") from exc
 

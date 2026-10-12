@@ -24,7 +24,7 @@ class ApplicationLockTests(unittest.TestCase):
         self.addCleanup(self.runner_patch.stop)
 
     def runner(self, target, driver, directory):
-        sql = driver.read_text()
+        sql = driver.read_text(encoding="utf-8")
         phase = directory.name.split('-', 1)[0]
         self.calls.append((phase, sql))
         if phase == self.fail_phase:

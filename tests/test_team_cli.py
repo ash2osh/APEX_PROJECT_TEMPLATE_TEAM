@@ -724,7 +724,7 @@ class TeamCliTests(unittest.TestCase):
             if os.name == "nt":
                 # team.ps1 also looks for Git for Windows under Program Files and LOCALAPPDATA\Programs.
                 for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"):
-                    environment[name] = empty
+                    environment[name] = str(empty)
             result = subprocess.run(
                 [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
                 cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
@@ -1219,7 +1219,7 @@ class TeamCliTests(unittest.TestCase):
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("prod-db", args)
-            self.assertIn(fake_sqlcl.native(script.parents[1] / "apps/DEMO/100/deployments/prod.json"), args)
+            self.assertIn(fake_sqlcl.native((script.parents[1] / "apps/DEMO/100/deployments/prod.json").resolve()), args)
 
     def make_upgrade_fixture(self, root: Path) -> tuple[Path, Path]:
         template = root / "template"

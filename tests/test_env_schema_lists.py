@@ -61,6 +61,9 @@ def load(env_path: Path, probe: str = PROBE, project_schema: str | None = None) 
 
 
 RETIRED_UC_ERROR = "project environment error: uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env"
+GREEK_USERNAME = "".join(
+    chr(codepoint) for codepoint in (0x0394, 0x0397, 0x039C, 0x0397, 0x03A4, 0x03A1, 0x0397, 0x03A3)
+)
 
 
 def write_without_uc(directory: Path, extra: str = "") -> Path:
@@ -85,7 +88,7 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
 
     def test_workspace_developer_is_independent_literal_optional_text(self) -> None:
-        for username in ("dev@example.com", "o'neil", "ΔΗΜΗΤΡΗΣ", "demo"):
+        for username in ("dev@example.com", "o'neil", GREEK_USERNAME, "demo"):
             with self.subTest(username=username):
                 path = write_without_workspace_username(self.directory, 'APEX_WORKSPACE_USERNAME="' + username + '"\n')
                 result = load(path, 'printf "%s|%s|%s" "$APEX_WORKSPACE_USERNAME" "$DEVELOPER_NAME" "$APEX_EXPECTED_USER"')
@@ -279,7 +282,7 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
 
     def test_workspace_developer_matches_bash_literal_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            for username in ("dev@example.com", "o'neil", "ΔΗΜΗΤΡΗΣ", "demo"):
+            for username in ("dev@example.com", "o'neil", GREEK_USERNAME, "demo"):
                 with self.subTest(username=username):
                     path = write_without_workspace_username(Path(temporary), 'APEX_WORKSPACE_USERNAME="' + username + '"\n')
                     result = self.run_probe(path, '"$($env:APEX_WORKSPACE_USERNAME)|$($env:DEVELOPER_NAME)|$($env:APEX_EXPECTED_USER)"')
