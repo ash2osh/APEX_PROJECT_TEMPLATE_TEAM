@@ -22,15 +22,16 @@ template upgrades.
   - History: 2026-10-11: confirmed in final review; sanitized upstream issue #19 opened; local SQL correction and regression added and passed offline checks.
   - History: 2026-10-12: native owner/privileged qualification passed on Oracle 23.26.3.0.0 with SQLcl 26.3.0.0 and APEX 26.2.0; sanitized results were added to [issue #19](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/issues/19#issuecomment-6118260901), then the issue was closed as completed.
 
-- [ ] **Read-only qualification wrapper drops SQLcl runner options**
+- [x] **Read-only qualification wrapper drops SQLcl runner options**
   - Feedback ID: TF-002
   - Component: `tools/qualify_template_readonly.py`
   - Kind: inherited-template issue
-  - Local fix/workaround: fixed on `codex/remaining-work-implementation` at `861b499`; pending upstream integration
-  - Upstream report: reported
+  - Local fix/workaround: fixed at `861b499` and integrated into `main` by PR #22
+  - Upstream report: issue #21 closed as integrated by PR #22
   - Upstream URL: https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/issues/21
-  - Template release/ref/commit: 26.2 / `main` / `df22dbb`
-  - Sanitized reproduction/evidence: the read-only qualification wrapper passed its guard to catalog and lifecycle adapters without accepting their `phase` keyword, raising `TypeError` before those adapter calls. The wrapper now forwards supported runner options. The catalog read completed after the local fix; the DEMO2 lifecycle read remains unavailable for its separate app-ownership reason.
+  - Template release/ref/commit: 26.2 / `main` / `861b499` (integrated by PR #22)
+  - Sanitized reproduction/evidence: the read-only qualification wrapper passed its guard to catalog and lifecycle adapters without accepting their `phase` keyword, raising `TypeError` before those adapter calls. The wrapper now forwards supported runner options. The local Docker DEMO read completed; app 100 had no automation, workflow, or task rows, so positive lifecycle runtime coverage remains unavailable.
   - History: 2026-10-12: reproduced in the read-only local qualification, checked known limitations and searched upstream issues/PRs; no matching report found. Opened sanitized upstream issue #21. Local fix forwards runner options; catalog read passed after the fix. DEMO2 lifecycle read remains unavailable because its existing app 100 belongs to DEMO. No APEX writes were involved.
   - History: 2026-10-12: added a sanitized branch-status update to [issue #21](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/issues/21#issuecomment-6118264020); issue remains open pending integration.
   - History: 2026-10-12: reran the read-only wrapper against the correctly scoped local Docker DEMO target. SQLcl 26.3.0.0, Oracle 23.26.3.0.0 and APEX 26.2.0 identity checks passed; the owner catalog returned 81 objects and the app 100 lifecycle read passed. Automation, workflow and task arrays were empty, so positive runtime coverage remains unavailable. No APEX writes occurred. Local report: `scratch/template-readonly-qualification-20261012-pr22/qualification.json`.
+  - History: 2026-10-12: integrated the fix through PR #22; issue #21 closes with the merge.
