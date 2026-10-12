@@ -84,7 +84,6 @@ def lint_sqlcl_transport(sql: str, delivery_mode: str) -> tuple[TransportFinding
         if nonspace_end > start and sql[nonspace_end - 1] == "-":
             tail = nonspace_end - 1
             in_literal = _inside(tail, quoted_spans)
-            in_comment = not masked[start:content_end].strip()
             if in_literal and end > content_end and index + 1 < len(ranges):
                 next_start = ranges[index + 1][1]
                 next_end = ranges[index + 1][3]
@@ -98,7 +97,7 @@ def lint_sqlcl_transport(sql: str, delivery_mode: str) -> tuple[TransportFinding
                         "assemble the value with explicit CLOB chunks or character expressions",
                     ))
                     continue
-            if not in_literal and not in_comment:
+            if not in_literal and masked[tail] == "-":
                 findings.append(TransportFinding(
                     "code-trailing-hyphen",
                     line_number,
