@@ -265,7 +265,7 @@ class RolloutManifestTests(unittest.TestCase):
             calls.append(number)
             evidence = context["evidence_dir"] / f"step-{number:03d}.log"
             evidence.write_text("verified\n", encoding="utf-8")
-            return rollout.StepResult(0, (evidence.relative_to(self.root).as_posix(),), "simulated")
+            return rollout.StepResult(0, (relative_to_root(evidence, self.root).as_posix(),), "simulated")
 
         def observer(identity):
             def observe(_target, run_dir):
@@ -623,7 +623,7 @@ class RolloutManifestTests(unittest.TestCase):
         def fake_migrate_main(arguments, *, environ, repo_root, confirm, expected_input_hashes):
             self.assertEqual(arguments, [folder, "--env", "staging"])
             self.assertIs(environ, os.environ)
-            self.assertEqual(repo_root, self.root)
+            self.assertEqual(relative_to_root(repo_root, self.root), Path("."))
             self.assertEqual(
                 expected_input_hashes[f"{folder}/001-create-table.sql"],
                 hashlib.sha256((self.root / folder / "001-create-table.sql").read_bytes()).hexdigest(),
