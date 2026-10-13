@@ -120,6 +120,10 @@ refresh below and report its status to the developer in the current chat.
   path. Keep source immutable after a write attempt; a follow-up uses the next
   revision folder. Run `scripts/team.sh check-conflicts <folder> --env dev`
   before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
+  Keep `checks.json` schema 1 unchanged unless a reviewed rehearsal needs
+  schema-2 `rehearsalMetrics`; those metrics run only under `--rehearse`, never
+  as apply postconditions. Follow [docs/migration-rules.md](docs/migration-rules.md)
+  for their bounds and rollback limits.
   Checks cover only selected local migrations and observed live state; they
   cannot see another independent repository's pending files. Staging and
   production migrations require `STAGING_SCHEMA` or `PROD_SCHEMA` in addition
@@ -136,10 +140,42 @@ refresh below and report its status to the developer in the current chat.
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
   each direct import requires the displayed `[y/N]` confirmation. Add
   `--manual` to print a DBA runbook without connecting. A deployment writes
-  to the selected APEX workspace and parsing schema.
+  to the selected APEX workspace and parsing schema. For an ordered release
+  manifest and recovery packet, follow
+  [the production deployment runbook](docs/production-deployment.md).
+- **Checks and shared-target reads:** Use `scripts/team.sh verify` to evaluate
+  declared migration checks read-only. For ad-hoc shared-target reads, use
+  `scripts/team.sh query` with a named configured profile and identity guards;
+  do not improvise a raw SQLcl read. `migrate --rehearse` runs eligible DML on
+  the selected real target and rolls back its transaction, so use it only when
+  that exact target and DML have been authorized. Its scalar checks do not
+  prove that sequence/identity advancement, autonomous work, external effects,
+  or DDL were undone. Do not lower or remove a reviewed assertion just to make a
+  command pass. The explicitly approved disposable-fixture route in
+  [local qualification](docs/local-qualification.md) remains scoped to its
+  named local target and cleanup.
 - **Other commands:** `scripts/team.sh doctor` validates `.env` and performs a
-  read-only SQLcl identity check. `scripts/team.sh verify-local` validates local
+  read-only SQLcl identity check. `scripts/team.sh query --env <env>
+  --connection <profile> [--schema NAME] [--file PATH | SQL]` runs the bounded,
+  conservative read-only query flow described in [README.md](README.md#read-only-ad-hoc-queries).
+  `scripts/team.sh verify-local` validates local
   configuration, lock, app descriptors and native Oracle skills offline.
+  `scripts/team.sh template-status` reports local template-owned file hashes
+  against `.template-lock.json` without network access; only an explicit
+  `--upstream --ref <ref>` performs a read-only upstream fetch/comparison.
+  `scripts/team.sh automations list|check <app-id> --env <env> --schema <schema>`
+  reads app-scoped automation states through the lifecycle adapter; `check`
+  requires an explicit status and exact static-ID selection. Explicit
+  `enable|disable|run-once` actions require one static ID and exact typed
+  confirmation, recheck native application locks and target/status, and read
+  the result back. `run-once` is synchronous and requires a completed success
+  log; an ambiguous action is `unknown` and must not be replayed automatically.
+  These commands never repair workflow/task state or advance a failed publish
+  baseline. Session creation/deletion may run configured app session
+  initialization/cleanup code; the command states this before confirmation.
+  Migration, rehearsal and rollout script delivery also runs the SQLcl
+  transport preflight; an error refuses before the payload starts, while a
+  warning keeps the exact source bytes and requires review of the emitted SQL.
   `scripts/team.sh backup-db` refreshes the local table and code mirrors, and the
   ORDS mirror when the ORDS profile exists. `scripts/team.sh backup-ords`
   exports ORDS metadata only: it never enables REST, imports, changes ORDS
@@ -228,6 +264,19 @@ files, not shared Builder state.
   When they conflict with this file, ask the user which applies.
 
 ## Rules for coding agents
+
+- **Upstream template feedback:** For a confirmed inherited-template issue,
+  check [known limitations](docs/known-limitations.md), record sanitized
+  evidence and local status in project-owned [TODO.md](TODO.md), and follow
+  [the feedback guide](docs/template-feedback.md). Resolve the repository from
+  `.template-lock.json`, then `template-manifest.json`; never use the downstream
+  `origin`. Search existing upstream issues/PRs first and link a match, or open
+  a concise sanitized issue in the verified upstream by default. A focused PR
+  requires current-task authorization for its upstream-only commit and push.
+  If provenance, access or safe disclosure is unclear, keep the entry queued
+  with the reason and continue the safe local work. Never disclose credentials,
+  project source/data or full logs; never auto-merge, deploy, or upgrade from a
+  report.
 
 - Before reporting a defect or changing behaviour in a review or test run,
   check [docs/known-limitations.md](docs/known-limitations.md). The behaviour

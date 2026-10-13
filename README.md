@@ -47,17 +47,18 @@ operational scripts, `.env`, manifest and lock.
 | Safety built in | Every connection is identity-checked, production-looking names are caught, production is read-only, file installs are all-or-nothing, and your uncommitted work is never overwritten. |
 | Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
 | Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
-| AI-assistant support | Repository rules, workflows, 24 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
+| AI-assistant support | Repository rules, workflows, 25 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
 | Bash and PowerShell | `scripts/team.sh` and `scripts/team.ps1` expose the same commands. |
 
 ## Skills and agent support
 
 AI coding assistants read [AGENTS.md](AGENTS.md) (Claude Code loads it through
 `CLAUDE.md`) for the rules and load a skill on their own when a task matches
-its description. The same 24 skills are listed in `.agents/skills/` (for agents
+its description. The same 25 skills are listed in `.agents/skills/` (for agents
 that follow the `AGENTS.md` convention) and `.claude/skills/` (for Claude Code).
-Three Claude Code entries (`chrome-devtools-mcp`, `safeguarding-apexlang-text-messages`
-and `sqlcl-mcp-r0`) are short pointers to the full `.agents/skills/` copy.
+Four Claude Code entries (`building-apex-template-components`, `chrome-devtools-mcp`,
+`safeguarding-apexlang-text-messages` and `sqlcl-mcp-r0`) are short pointers to the full
+`.agents/skills/` copy.
 You do not have to call them by name.
 
 At the start of every task, agents read SQLcl's own
@@ -100,6 +101,7 @@ startup. Agents preserve project-authored skills and use release-matched APEXlan
 | `sqlcl-mcp-r0` | An assistant operates SQLcl through MCP at restriction level 0. |
 | `sqlcl-script-path-debugging` | Nested SQLcl scripts load the wrong file, or relative `SPOOL` and include paths misbehave. |
 | `chrome-devtools-mcp` | Inspecting or driving your running web app in Chrome through the project's persistent DevTools daemon. |
+| `building-apex-template-components` | Creating, translating or debugging an APEX template component (report type) for cards or lists: files, placeholders, region mapping, mobile and Arabic layout, optional Alpine.js, import and browser testing. |
 
 **Workflow skills** (from the Superpowers collection): `brainstorming`,
 `writing-plans`, `executing-plans`, `subagent-driven-development`,
@@ -398,6 +400,16 @@ line.
 Publish preflight also requires the selected application tree to be physically
 inside the checkout and rejects symbolic links and reparse points.
 
+The export marker includes `sourceProvenance` only when the guarded export
+observed the same exact APEX release before and after reading source. It binds
+that release and the database UTC observation time to the canonical source file
+set used by strict comparison. `sourceFormat.apexRelease` still identifies the
+26.2 format family. Local edits make provenance stale; legacy or manually
+staged source remains unknown. Publish reports an observed source/target APEX
+version pair when available, but the pair never relaxes byte verification.
+Stored database-code exports record their independently observed database
+release in `source-manifest.json`; they do not infer an APEX release.
+
 When publish refuses, see [docs/publish-rules.md](docs/publish-rules.md) for
 every rule, what each message means, and what to do.
 
@@ -479,7 +491,11 @@ before either writes; preflight runs again before apply, though a concurrent
 change can still race it. See [docs/migration-rules.md](docs/migration-rules.md)
 for coverage and recovery limits.
 
-`checks.json` requires read-only preconditions and postconditions.
+`checks.json` requires read-only preconditions and postconditions. Its original
+schema version 1 stays unchanged; optional schema version 2 can add
+rehearsal-only scalar metrics for before, after, and rollback values. See
+[`docs/migration-rules.md`](docs/migration-rules.md#folder-and-file-names) for
+the exact fields and limits.
 `status.<env>.json` appears only after the committed result has been verified
 through a fresh connection. It is local evidence, not a shared deployment
 ledger. Migration SQL can use standalone slash terminators for PL/SQL blocks,
@@ -580,13 +596,26 @@ check. A human DBA executes it using an approved saved connection. App
 promotion uses deployment descriptors; schema migrations use the separate
 `migrate --env` command and explicit target-schema settings.
 
+For a one-window release manifest, pre-window comparison and rehearsal,
+post-window checks, recovery ownership, and the release packet checklist, use
+the [production deployment runbook](docs/production-deployment.md). A reviewed
+manifest can run in one command:
+
+```bash
+scripts/team.sh rollout release/rollout.json --env prod --dry-run
+scripts/team.sh rollout release/rollout.json --env prod
+```
+
+The dry run prints the local manifest and input hashes. The production run
+shows its target and requires the manifest confirmation.
+
 ## Upgrading from the template
 
 Projects created from this template do not share its Git history, so updates
 are copied file by file. `template-manifest.json` decides which repository
 files the upgrade may touch: template scripts, tests, CI, and agent guidance
 are upgraded; project files such as `AGENTS.project.md`,
-`.agents/rules/project.md`, and `PROJECT.md` are created once and never
+`.agents/rules/project.md`, `PROJECT.md`, and `TODO.md` are created once and never
 overwritten; application source, database mirrors, migrations,
 `app_context/<id>/`, and `.env` are never touched, even when `.env` is tracked
 in Git. Put project-specific
@@ -613,6 +642,13 @@ upgrade reports that `.env` needs attention, compare it with `.env.example`.
 A differing `.env.example` on the first upgrade also leaves an
 `.env.example.template-new` review copy; merge it into the example before
 reviewing any corresponding changes to your own `.env`.
+
+Run `scripts/team.sh template-status` to compare template-owned files with the
+local lock. It never fetches by default. For a read-only upstream comparison,
+pass both `--upstream` and an explicit `--ref`; the command reports the fetched
+commit and file statuses without installing or changing files. A missing lock
+in a downstream project is reported as unknown, while the original template
+repository does not require a downstream lock.
 
 The lock also records the selected `templateRef` and `apexRelease`. Later runs
 reuse the recorded ref when `--ref` is omitted. Keep a 26.1 project pinned with
@@ -699,6 +735,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh app-unlock <id> --env dev` | Release only the configured developer's application lock after reconciliation. |
 | `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
 | `scripts/team.sh doctor` | Validate `.env` and check the DEV SQLcl identity. |
+| `scripts/team.sh query --env <dev\|staging\|prod> --connection <tables\|code\|apex\|ords\|migration> [--schema NAME] [--file PATH \| SQL]` | Run one conservative, bounded SELECT in a read-only SQLcl transaction; see [read-only ad-hoc queries](#read-only-ad-hoc-queries). |
 | `scripts/team.sh export <id>` | Export one numeric app from shared DEV Builder. |
 | `scripts/team.sh publish <id> --env dev [--strict-bytes] [--no-restore-automations]` | Drift-check and import one app to DEV; by default restores automations that were active before import. |
 | `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice] [--no-restore-automations]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
@@ -721,6 +758,79 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual] [--strict-bytes] [--no-restore-automations]` | Confirm a promotion or print a DBA runbook with the automation restore step. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
+| `scripts/team.sh template-status [--format text\|json]` | Compare template-owned files with the local lock; no network access by default. |
+| `scripts/team.sh template-status --upstream --ref <ref>` | Explicitly compare local files with a branch, tag or commit from the manifest's upstream repository. |
+| `scripts/team.sh automations list <id> --env <env> --schema <schema>` | Read one application's automation status in its descriptor workspace. |
+| `scripts/team.sh automations check <id> --env <env> --schema <schema> --automation <static-id> --expected-status ACTIVE` | Check an exact selected automation against APEX 26.2's `ACTIVE`, `DISABLED`, or `ERROR` schedule states. |
+| `scripts/team.sh automations enable|disable|run-once <id> --env <env> --schema <schema> --automation <static-id>` | Explicitly change one automation's schedule or run it once after typed target/action confirmation; no publish path invokes these operations. |
+
+Each write accepts one exact static ID, rechecks target/app/status and native
+application lock before calling the public APEX API, then reads the same app
+state back. `run-once` runs synchronously and is verified only by a completed
+successful APEX execution log plus an independent lifecycle read. A timeout or
+missing log is `unknown`; reconcile the automation and execution log before any
+repeat. Session creation/deletion may run the application's configured session
+initialization and cleanup code, which the command displays before confirmation.
+The command does not advance a failed publish baseline or release a recovery lock.
+
+For an `unknown` action result, do not replay `run-once`. First inspect the exact
+automation and its APEX execution log, then reconcile its state independently:
+
+```bash
+scripts/team.sh automations list "$APP_ID" --env dev --schema "$SCHEMA"
+scripts/team.sh automations check "$APP_ID" --env dev --schema "$SCHEMA" \
+  --automation "$AUTOMATION_STATIC_ID" --expected-status DISABLED
+```
+
+Set `APP_ID`, `SCHEMA`, and `AUTOMATION_STATIC_ID` from the verified deployment
+descriptor and the selected app's exact static ID; choose the expected status
+from the observed recovery decision. If the execution log or lifecycle read is
+inconclusive, leave the result unknown and investigate manually. This check does
+not change a publish baseline or release a recovery lock.
+
+## Read-only ad-hoc queries
+
+Use `query` for a one-off inspection without adding a script or migration:
+
+```bash
+scripts/team.sh query --env dev --connection tables --schema DEMO "SELECT table_name FROM user_tables ORDER BY table_name"
+scripts/team.sh query --env dev --connection code --file scratch/query.sql
+```
+
+`--connection` names a configured profile, never an arbitrary SQLcl alias or
+connection string. In DEV, `tables`, `code`, `apex` and `ords` use their own
+aligned schema, SQLcl connection and expected-user settings. `migration` uses
+the configured migration-owner triple when present, otherwise the existing DEV
+code profile. In staging or production, non-migration profiles use that
+environment's aligned schema/connection/expected-user triple; `migration` uses
+its environment-specific migration triple when configured and otherwise that
+same environment profile. ORDS is DEV-only. Missing or incomplete settings,
+an unlisted schema, or a multi-schema profile without `--schema` refuses before
+SQLcl starts.
+
+The input must be one statement beginning with `SELECT` or a SELECT-producing
+`WITH`. The gate handles quoted strings/identifiers and comments, permits only
+a conservative set of built-ins, and refuses DML, DDL, PL/SQL, SQLcl commands,
+remote links, sequence reads, package/member calls and unknown functions.
+SQLcl substitution is disabled; the session changes to the configured schema,
+disables commits in stored procedures, checks login/schema and observed
+database/service identity before the query, starts a read-only transaction,
+and exits with rollback. A production-marked live identity refuses a DEV or
+staging target even when the selected saved connection is named for that
+environment. Results are CSV without headings. Defaults are a
+32 KiB SQL input limit, 60-second timeout, 500-row result limit and 1 MiB
+captured-output limit. Crossing a row or byte cap, timing out, a SQLcl error,
+or incomplete identity/framing refuses the result rather than displaying a
+partial success. The result is withheld on errors.
+
+The read-only transaction and syntax gate reduce risk; they do not provide
+database privilege isolation or prove that every object selected is side-effect
+free. The lexical gate cannot distinguish a bare zero-argument stored function
+from a column reference. Disabling commits in stored procedures blocks their
+database commits, including autonomous-transaction commits, but cannot prevent
+nontransactional external effects. A view, virtual column or other database
+object can hide behavior outside the query text. Use a suitably read-only
+account and review the selected objects.
 
 `rollout` validates and hashes every referenced source file before it starts,
 stops on the first failed step and writes JSON and Markdown timing/evidence
@@ -803,7 +913,9 @@ for the full repository contract, [migrations/README.md](migrations/README.md),
 and [docs/migration-rules.md](docs/migration-rules.md) for migration naming,
 verification, and comparison limits. For browser runtime checks, see
 [Chrome DevTools MCP](docs/CHROME_DEVTOOLS_MCP.md) and use the project browser
-[skill](.agents/skills/chrome-devtools-mcp/SKILL.md).
+[skill](.agents/skills/chrome-devtools-mcp/SKILL.md). For confirmed inherited-
+template issues, keep a sanitized local record in [TODO.md](TODO.md) and follow
+the [upstream feedback guide](docs/template-feedback.md).
 
 
 Optional migration profiles let a project mirror code from `CODE` while applying

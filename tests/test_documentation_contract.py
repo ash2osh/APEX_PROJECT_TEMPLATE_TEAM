@@ -24,6 +24,8 @@ DOCS = (
     ROOT / "docs" / "EXAMPLES.md",
     ROOT / "docs" / "TROUBLESHOOTING.md",
     ROOT / "docs" / "known-limitations.md",
+    ROOT / "docs" / "production-deployment.md",
+    ROOT / "docs" / "template-feedback.md",
 )
 # Each refusal the publish guide explains, and the script that prints it. The
 # guide quotes these verbatim, so rewording a message must update the guide.
@@ -163,7 +165,7 @@ class DocumentationContractTests(unittest.TestCase):
             "AUTOCOMMIT OFF",
             "SAFE_FUNCTIONS",
             "not rehearsable",
-            "preconditions re-run after `ROLLBACK`",
+            "folder's captured starting value",
             "--report <file>",
             "scratch/migration-rehearsal-*",
         ):
@@ -406,7 +408,7 @@ class GuideContractTests(unittest.TestCase):
         bash_loader = (ROOT / "scripts" / "load_env.sh").read_text(encoding="utf-8")
         powershell_loader = (ROOT / "scripts" / "load_env.ps1").read_text(encoding="utf-8")
         help_result = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
+            [BASH, str(ROOT / "scripts" / "team.sh"), "--help"],
             capture_output=True,
             text=True,
             check=False,

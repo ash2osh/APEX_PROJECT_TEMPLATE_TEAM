@@ -19,28 +19,35 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import migrate, verify_checks
-from scripts.db_targets import Target, looks_like_production_identity
+from scripts.db_targets import (
+    Target,
+    TargetResolutionError,
+    batch_schema,
+    looks_like_production_identity,
+    resolve_target,
+)
 from scripts.deployment_descriptor import read_descriptor
-from scripts.migration_manifest import MigrationManifestError, load_batch
+from scripts.migration_manifest import MigrationManifestError, load_batch, validate_receipt as validate_migration_receipt
+from scripts.local_config import ALLOWED_KEYS, ConfigError, read_project_env
+from scripts.path_utils import relative_to_root
 from scripts.ords_export import OrdsExportError, check_no_oauth, check_structure, mask_sql
 from scripts.sqlcl_session import ALIAS_RE, SqlclError, run_sqlcl
+from scripts.sqlcl_transport import generated_clob_assembly, lint_sqlcl_transport
 from scripts.validate_app_source import validate_app_source
+from scripts.validate_migration import validate_sql_only
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ORACLE_IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 MANIFEST_SCHEMA_VERSION = 1
 REPORT_SCHEMA_VERSION = 1
-RECEIPT_SCHEMA_VERSION = 1
-FORBIDDEN_SQLCL_COMMAND = re.compile(
-    r"(?im)^[ \t]*(?:@@?[^\r\n]*|![^\r\n]*|(?:START|CONNECT|DISCONNECT|EXIT|QUIT|HOST|WHENEVER|SPOOL|STORE|PASSWORD|ACCEPT|SET|PROMPT|UNDEFINE|VARIABLE|PRINT|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE|CLEAR|SHOW|DESCRIBE|INFO|PAUSE)(?:[ \t]|$))"
-)
+RECEIPT_SCHEMA_VERSION = 2
 ROLLOUT_MARKER_LITERAL = re.compile(r"(?i)ROLLOUT_(?:IDENTITY|TARGET|SCRIPT_COMPLETED)")
 CURRENT_SCHEMA_CHANGE = re.compile(r"(?is)\bALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\b")
 ORDS_CALL = re.compile(r"(?im)\b(?:ORDS(?:_ADMIN)?|ORDS_METADATA)\.[A-Z][A-Z0-9_]*[ \t]*\(")
@@ -93,7 +100,7 @@ def _read_json(path: Path, label: str) -> object:
 
 def _assert_no_symlink(path: Path, root: Path) -> None:
     try:
-        relative = path.relative_to(root)
+        relative = relative_to_root(path, root)
     except ValueError as error:
         raise RolloutError(f"path is outside the repository: {path}") from error
     current = root
@@ -125,14 +132,14 @@ def _repo_file(value: object, root: Path, label: str, *, kind: str | None = None
     except OSError as error:
         raise RolloutError(f"{label} does not exist: {value}") from error
     try:
-        resolved.relative_to(root)
+        relative_to_root(resolved, root)
     except ValueError as error:
         raise RolloutError(f"{label} resolves outside the repository: {value}") from error
     if kind == "file" and not resolved.is_file():
         raise RolloutError(f"{label} must name a regular file: {value}")
     if kind == "directory" and not resolved.is_dir():
         raise RolloutError(f"{label} must name a directory: {value}")
-    return resolved.relative_to(root).as_posix(), resolved
+    return relative_to_root(resolved, root).as_posix(), resolved
 
 
 def _exact_keys(value: dict, required: set[str], optional: set[str], label: str) -> None:
@@ -234,7 +241,7 @@ def load_manifest(path: Path | str, repo_root: Path = ROOT) -> RolloutManifest:
     try:
         _assert_no_symlink(candidate, root)
         manifest_path = candidate.resolve(strict=True)
-        manifest_path.relative_to(root)
+        relative_to_root(manifest_path, root)
     except (OSError, ValueError) as error:
         raise RolloutError(f"rollout manifest must be a regular file inside the repository: {path}") from error
     if not manifest_path.is_file():
@@ -300,13 +307,13 @@ def _read_app_inputs(repo_root: Path, app_id: int, environment: str) -> tuple[st
         descriptor = app_dir / "deployments" / f"{environment}.json"
         _assert_no_symlink(descriptor, repo_root)
         if not descriptor.is_file():
-            raise RolloutError(f"deployment descriptor not found: {descriptor.relative_to(repo_root).as_posix()}")
+            raise RolloutError(f"deployment descriptor not found: {relative_to_root(descriptor, repo_root).as_posix()}")
         read_descriptor(descriptor, app_id)
     except (OSError, ValueError) as error:
         if isinstance(error, RolloutError):
             raise
         raise RolloutError(f"application {app_id} failed local deployment preflight: {error}") from error
-    return validated.relative_to(repo_root).as_posix(), validated
+    return relative_to_root(validated, repo_root).as_posix(), validated
 
 
 def _directory_input_paths(
@@ -329,7 +336,7 @@ def _directory_input_paths(
             continue
         if not entry.is_file():
             raise RolloutError(f"rollout input is not a regular file: {entry}")
-        relative = entry.relative_to(path)
+        relative = relative_to_root(entry, path)
         if migration_folder and len(relative.parts) == 1 and relative.name == f"status.{environment}.json":
             # This is a local apply receipt, not migration source.
             continue
@@ -367,7 +374,7 @@ def _input_hashes(paths: Sequence[Path], root: Path) -> list[dict[str, str]]:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as error:
             raise RolloutError(f"cannot hash rollout input {path}: {error}") from error
-        result.append({"path": path.relative_to(root).as_posix(), "sha256": digest})
+        result.append({"path": relative_to_root(path, root).as_posix(), "sha256": digest})
     return result
 
 
@@ -392,6 +399,97 @@ def _app_target_details(schema: str, environment: str) -> tuple[str, str]:
         return "<not configured>"
 
     return configured_value("SQLCL_CONNECTION"), configured_value("EXPECTED_USER")
+
+
+def _app_deploy_configuration(repo_root: Path) -> dict[str, str]:
+    configured_path = os.environ.get("PROJECT_ENV_FILE")
+    path = Path(configured_path) if configured_path else repo_root / ".env"
+    if not path.is_absolute() and not path.is_file() and (repo_root / path).is_file():
+        path = repo_root / path
+    try:
+        return read_project_env(path)
+    except ConfigError as error:
+        raise RolloutError(f"app-deploy child configuration is invalid: {error}") from error
+
+
+def _binding_for_target(target: Target) -> dict[str, str]:
+    return {
+        "environment": target.environment,
+        "connection": target.connection,
+        "expectedUser": target.expected_user,
+        "schema": target.schema,
+        "classification": target.classification,
+    }
+
+
+def _frozen_env_text(values: Mapping[str, str]) -> str:
+    if set(values) - ALLOWED_KEYS:
+        raise RolloutError("app-deploy child configuration contains unsupported settings")
+    lines = []
+    for key in sorted(values):
+        value = values[key]
+        if not isinstance(value, str) or any(character in value for character in ("\x00", "\r", "\n")):
+            raise RolloutError(f"app-deploy child configuration contains an unsafe value for {key}")
+        # The project env parser strips only the matching outer quotes and does
+        # not evaluate shell syntax, so this preserves literal values safely.
+        lines.append(f'{key}="{value}"')
+    return "\n".join(lines) + "\n"
+
+
+def _target_for_step(step: dict, repo_root: Path, environment: str) -> Target | None:
+    """Resolve the configured Oracle target represented by one rollout step."""
+    kind = step["type"]
+    if kind == "pause":
+        return None
+    if kind in {"migrate", "verify"}:
+        migrations = load_batch(repo_root, step["folders"])
+        requested = os.environ.get("PROJECT_SCHEMA") or None
+        schema = batch_schema([migration.schema for migration in migrations], requested, os.environ, environment)
+        return resolve_target(os.environ, environment, "migration", schema=schema)
+    if kind in {"sql-script", "ords-import"}:
+        classification = {
+            "dev": str(os.environ.get("DB_ENVIRONMENT", "development")).casefold(),
+            "staging": "staging",
+            "prod": "production",
+        }[environment]
+        if classification not in {"development", "test", "staging", "production"}:
+            raise TargetResolutionError("DB_ENVIRONMENT must be development, test, staging, or production")
+        if environment == "dev" and classification not in {"development", "test"}:
+            raise TargetResolutionError("DEV SQL-script steps require DB_ENVIRONMENT=development or test")
+        if environment != "prod" and looks_like_production_identity(step["connection"], step["schema"]):
+            raise TargetResolutionError("SQL-script target looks like production but --env is not prod")
+        return Target(environment, step["connection"], step["expectedUser"], step["schema"], classification)
+    if kind == "app-deploy":
+        _relative, app_dir = _read_app_inputs(repo_root, step["appId"], environment)
+        descriptor = read_descriptor(app_dir / "deployments" / f"{environment}.json", step["appId"])
+        schema = descriptor["app"]["databaseSession"]["parsingSchema"]
+        return resolve_target(os.environ, environment, "read", schema=schema)
+    raise RolloutError(f"unsupported rollout step type {kind!r}")
+
+
+def _target_binding(step: dict, repo_root: Path, environment: str) -> dict | None:
+    try:
+        target = _target_for_step(step, repo_root, environment)
+    except (TargetResolutionError, MigrationManifestError, OSError, ValueError) as error:
+        if isinstance(error, RolloutError):
+            raise
+        raise RolloutError(f"step target cannot be resolved: {error}") from error
+    if target is None:
+        return None
+    return {
+        "environment": target.environment,
+        "connection": target.connection,
+        "expectedUser": target.expected_user,
+        "schema": target.schema,
+        "classification": target.classification,
+    }
+
+
+def _target_from_binding(binding: dict) -> Target:
+    return Target(
+        binding["environment"], binding["connection"], binding["expectedUser"],
+        binding["schema"], binding["classification"],
+    )
 
 
 def _describe_step(step: dict, repo_root: Path, environment: str) -> str:
@@ -428,6 +526,28 @@ def _prepare_plan(manifest: RolloutManifest, environment: str) -> list[dict]:
                 raise RolloutError(f"step {number} migration batch is invalid: {error}") from error
         paths = _step_input_paths(step, manifest.repo_root, environment)
         hashes = _input_hashes(paths, manifest.repo_root)
+        binding = _target_binding(step, manifest.repo_root, environment)
+        app_deploy_config = None
+        app_deploy_config_sha256 = None
+        app_deploy_source_schema_selector = None
+        if step["type"] == "app-deploy":
+            app_deploy_config = _app_deploy_configuration(manifest.repo_root)
+            _relative, app_dir = _read_app_inputs(manifest.repo_root, step["appId"], environment)
+            descriptor = read_descriptor(app_dir / "deployments" / f"{environment}.json", step["appId"])
+            schema = descriptor["app"]["databaseSession"]["parsingSchema"]
+            try:
+                child_target = resolve_target(app_deploy_config, environment, "read", schema=schema)
+            except TargetResolutionError as error:
+                raise RolloutError(f"app-deploy child configuration target cannot be resolved: {error}") from error
+            if _binding_for_target(child_target) != binding:
+                raise RolloutError("app-deploy child configuration target does not match the rollout target binding")
+            app_deploy_source_schema_selector = os.environ.get("PROJECT_SCHEMA")
+            if (
+                app_deploy_source_schema_selector not in {None, ""}
+                and not ORACLE_IDENTIFIER.fullmatch(app_deploy_source_schema_selector)
+            ):
+                raise RolloutError("app-deploy PROJECT_SCHEMA must be an uppercase Oracle identifier")
+            app_deploy_config_sha256 = _canonical_hash(app_deploy_config)
         if step["type"] in {"sql-script", "ords-import"}:
             script = _read_script(manifest.repo_root / step["file"], f"step {number} script")
             if step["type"] == "sql-script":
@@ -436,14 +556,32 @@ def _prepare_plan(manifest: RolloutManifest, environment: str) -> list[dict]:
                 validate_ords_script(script, step["schema"], number)
                 if step.get("excludeModules"):
                     exclude_ords_modules(script, step["excludeModules"], step["schema"])
-        step_hash = _canonical_hash({"step": step, "inputHashes": hashes})
+        hash_payload = {
+            "step": step,
+            "inputHashes": hashes,
+            "targetBinding": binding,
+        }
+        if app_deploy_config_sha256 is not None:
+            hash_payload["appDeployConfigSha256"] = app_deploy_config_sha256
+            hash_payload["sourceSchemaSelector"] = app_deploy_source_schema_selector
+        step_hash = _canonical_hash(hash_payload)
+        description = _describe_step(step, manifest.repo_root, environment)
+        if binding is not None:
+            description += (
+                f" to {binding['environment'].upper()} target {binding['schema']} via {binding['connection']} "
+                f"as {binding['expectedUser']} ({binding['classification']})"
+            )
         plan.append({
             "number": number,
             "type": step["type"],
             "step": step,
-            "description": _describe_step(step, manifest.repo_root, environment),
+            "description": description,
             "sha256": step_hash,
             "inputHashes": hashes,
+            "targetBinding": binding,
+            "appDeployConfig": app_deploy_config,
+            "appDeployConfigSha256": app_deploy_config_sha256,
+            "appDeploySourceSchemaSelector": app_deploy_source_schema_selector,
         })
     return plan
 
@@ -465,14 +603,10 @@ def _read_script(path: Path, label: str, *, expected_sha256: str | None = None) 
 def validate_sql_script(source: str, number: int = 1) -> None:
     if not source.strip():
         raise RolloutError(f"step {number} SQL script is empty")
-    masked = mask_sql(source)
-    match = FORBIDDEN_SQLCL_COMMAND.search(masked)
-    if match:
-        directive = match.group(0).strip().split()[0]
-        raise RolloutError(
-            f"step {number} SQL script contains unsupported SQLcl directive {directive}; "
-            "connection changes, nested files, client exits and guard overrides are refused"
-        )
+    try:
+        validate_sql_only(source)
+    except ValueError as error:
+        raise RolloutError(f"step {number} SQL script is not safe SQL-only source: {error}") from error
     if ROLLOUT_MARKER_LITERAL.search(source):
         raise RolloutError(f"step {number} SQL script cannot emit reserved ROLLOUT_ verification markers")
     if CURRENT_SCHEMA_CHANGE.search(source):
@@ -583,6 +717,12 @@ def _snapshot(manifest: RolloutManifest, plan: Sequence[dict], boundary: str, en
     for item in plan:
         step = item["step"]
         try:
+            current_binding = _target_binding(step, manifest.repo_root, environment)
+        except RolloutError as error:
+            raise RolloutError(f"rollout target binding changed after rollout started {boundary}: {error}") from error
+        if current_binding != item["targetBinding"]:
+            raise RolloutError(f"rollout target binding changed after rollout started {boundary} (step {item['number']})")
+        try:
             current_paths = _step_input_paths(step, manifest.repo_root, environment)
             current_hashes = _input_hashes(current_paths, manifest.repo_root)
         except (OSError, RolloutError, MigrationManifestError) as error:
@@ -610,7 +750,7 @@ def _report_paths(root: Path, report_path: str | Path | None) -> tuple[Path, Pat
     for path in (json_path, markdown_path):
         try:
             resolved = path.resolve(strict=False)
-            resolved.relative_to(root)
+            relative_to_root(resolved, root)
         except (OSError, ValueError) as error:
             raise RolloutError("report files must be written inside the repository") from error
         _assert_no_symlink(path.parent, root)
@@ -696,8 +836,8 @@ def _markdown_report(report: dict) -> str:
 def _write_reports(report: dict, paths: tuple[Path, Path]) -> None:
     json_path, markdown_path = paths
     report["reportFiles"] = {
-        "json": json_path.relative_to(report["repoRoot"]).as_posix(),
-        "markdown": markdown_path.relative_to(report["repoRoot"]).as_posix(),
+        "json": relative_to_root(json_path, report["repoRoot"]).as_posix(),
+        "markdown": relative_to_root(markdown_path, report["repoRoot"]).as_posix(),
     }
     json_text = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     markdown_text = _markdown_report(report)
@@ -711,21 +851,26 @@ def _write_confirmation_evidence(
     plan: Sequence[dict],
     environment: str,
 ) -> None:
+    confirmed_steps = []
+    for item in plan:
+        confirmed = {
+            "number": item["number"],
+            "sha256": item["sha256"],
+            "inputHashes": item["inputHashes"],
+            "targetBinding": item["targetBinding"],
+        }
+        if item["appDeployConfigSha256"] is not None:
+            confirmed["childConfigurationSha256"] = item["appDeployConfigSha256"]
+            confirmed["sourceSchemaSelector"] = item["appDeploySourceSchemaSelector"]
+        confirmed_steps.append(confirmed)
     evidence = {
         "schemaVersion": 1,
         "status": "confirmed",
-        "manifestPath": manifest.path.relative_to(manifest.repo_root).as_posix(),
+        "manifestPath": relative_to_root(manifest.path, manifest.repo_root).as_posix(),
         "manifestSha256": manifest.sha256,
         "environment": environment,
         "confirmedAt": _utc_now(),
-        "steps": [
-            {
-                "number": item["number"],
-                "sha256": item["sha256"],
-                "inputHashes": item["inputHashes"],
-            }
-            for item in plan
-        ],
+        "steps": confirmed_steps,
     }
     _write_atomic(path, json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
 
@@ -734,8 +879,26 @@ def _receipt_path(root: Path, manifest_sha256: str, environment: str, number: in
     return root / "scratch" / "rollout-receipts" / manifest_sha256 / environment / f"step-{number:03d}.json"
 
 
+def _validate_evidence_paths(paths: object, root: Path, step_number: int) -> list[str]:
+    if not isinstance(paths, list) or any(not isinstance(item, str) for item in paths):
+        raise RolloutError(f"step {step_number} receipt has invalid evidence paths")
+    for item in paths:
+        components = item.split("/")
+        if not item or "\\" in item or any(part in {"", ".", ".."} for part in components) or PurePosixPath(item).is_absolute():
+            raise RolloutError(f"step {step_number} receipt has invalid evidence paths")
+        evidence_path = root.joinpath(*components)
+        try:
+            _assert_no_symlink(evidence_path, root)
+        except RolloutError as error:
+            raise RolloutError(f"step {step_number} receipt evidence path is unsafe: {item}") from error
+        if not evidence_path.exists():
+            raise RolloutError(f"step {step_number} receipt evidence path is missing: {item}")
+    return paths
+
+
 def _write_receipt(root: Path, environment: str, manifest: RolloutManifest, plan_item: dict, step_report: dict) -> Path:
     path = _receipt_path(root, manifest.sha256, environment, plan_item["number"])
+    _validate_evidence_paths(step_report["evidencePaths"], root, plan_item["number"])
     _safe_scratch_root(root)
     _safe_directory(path.parent, root)
     receipt = {
@@ -747,6 +910,8 @@ def _write_receipt(root: Path, environment: str, manifest: RolloutManifest, plan
         "stepType": plan_item["type"],
         "stepSha256": plan_item["sha256"],
         "inputHashes": plan_item["inputHashes"],
+        "targetBinding": plan_item["targetBinding"],
+        "observedIdentity": step_report["observedIdentity"],
         "startedAt": step_report["startedAt"],
         "endedAt": step_report["endedAt"],
         "durationSeconds": step_report["durationSeconds"],
@@ -756,12 +921,66 @@ def _write_receipt(root: Path, environment: str, manifest: RolloutManifest, plan
     return path
 
 
+OBSERVED_IDENTITY_FIELDS = (
+    "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
+    "container_id", "container_name", "edition", "database_version",
+)
+
+
+def _observe_target_identity(target: Target, run_dir: Path) -> dict[str, str]:
+    """Read target identity independently through the existing schema catalog path."""
+    from scripts.schema_catalog import capture_inventory
+
+    inventory = capture_inventory(target, run_dir)
+    receipt_identity = migrate._identity_for_receipt(inventory, target)
+    return {field: receipt_identity[field] for field in OBSERVED_IDENTITY_FIELDS}
+
+
+def _verify_migration_receipts(
+    root: Path,
+    step: dict,
+    binding: dict,
+    observed_identity: dict[str, str],
+) -> None:
+    if step["type"] != "migrate":
+        return
+    migrations = load_batch(root, step["folders"])
+    target_identity = {
+        "environment": binding["environment"],
+        "connection": binding["connection"],
+        "expected_user": binding["expectedUser"],
+        **observed_identity,
+    }
+    for migration in migrations:
+        receipt = migration.folder / f"status.{binding['environment']}.json"
+        try:
+            _assert_no_symlink(receipt, root)
+        except RolloutError as error:
+            raise RolloutError(f"migration receipt needs reconciliation: {error}") from error
+        if not receipt.is_file():
+            raise RolloutError(
+                f"migration step {migration.folder.name} has no verified receipt; reconcile before resuming rollout"
+            )
+        try:
+            validate_migration_receipt(receipt, migration, target_identity)
+        except MigrationManifestError as error:
+            raise RolloutError(
+                f"migration receipt for {migration.folder.name} does not match the exact source and observed target; "
+                f"reconcile before resuming rollout: {error}"
+            ) from error
+
+
 def _verify_receipt(root: Path, manifest: RolloutManifest, environment: str, plan_item: dict) -> tuple[dict, Path]:
     path = _receipt_path(root, manifest.sha256, environment, plan_item["number"])
     _assert_no_symlink(path, root)
     if path.is_symlink() or not path.is_file():
-        raise RolloutError(f"step {plan_item['number']} has no matching successful receipt: {path.relative_to(root)}")
+        raise RolloutError(f"step {plan_item['number']} has no matching successful receipt: {relative_to_root(path, root)}")
     receipt = _read_json(path, f"step {plan_item['number']} receipt")
+    if isinstance(receipt, dict) and receipt.get("schemaVersion") == 1:
+        raise RolloutError(
+            f"step {plan_item['number']} has a legacy receipt without independently observed target identity; "
+            "inspect the completed step and reconcile before retrying"
+        )
     expected = {
         "schemaVersion": RECEIPT_SCHEMA_VERSION,
         "status": "succeeded",
@@ -771,8 +990,11 @@ def _verify_receipt(root: Path, manifest: RolloutManifest, environment: str, pla
         "stepType": plan_item["type"],
         "stepSha256": plan_item["sha256"],
         "inputHashes": plan_item["inputHashes"],
+        "targetBinding": plan_item["targetBinding"],
     }
-    required_fields = set(expected) | {"startedAt", "endedAt", "durationSeconds", "evidencePaths"}
+    required_fields = set(expected) | {
+        "observedIdentity", "startedAt", "endedAt", "durationSeconds", "evidencePaths",
+    }
     if (
         not isinstance(receipt, dict)
         or set(receipt) != required_fields
@@ -789,13 +1011,25 @@ def _verify_receipt(root: Path, manifest: RolloutManifest, environment: str, pla
     duration = receipt["durationSeconds"]
     if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
         raise RolloutError(f"step {plan_item['number']} receipt has an invalid duration")
-    evidence_paths = receipt["evidencePaths"]
-    if not isinstance(evidence_paths, list) or any(not isinstance(item, str) for item in evidence_paths):
-        raise RolloutError(f"step {plan_item['number']} receipt has invalid evidence paths")
-    for item in evidence_paths:
-        components = item.split("/")
-        if not item or "\\" in item or any(part in {"", ".", ".."} for part in components) or PurePosixPath(item).is_absolute():
-            raise RolloutError(f"step {plan_item['number']} receipt has invalid evidence paths")
+    _validate_evidence_paths(receipt["evidencePaths"], root, plan_item["number"])
+    observed = receipt["observedIdentity"]
+    if plan_item["targetBinding"] is None:
+        if observed is not None:
+            raise RolloutError(f"step {plan_item['number']} pause receipt must not claim a database identity")
+    elif (
+        not isinstance(observed, dict)
+        or set(observed) != set(OBSERVED_IDENTITY_FIELDS)
+        or any(not isinstance(observed.get(field), str) or not observed[field].strip() for field in OBSERVED_IDENTITY_FIELDS)
+        or observed["session_user"].upper() != plan_item["targetBinding"]["expectedUser"]
+        or observed["current_schema"].upper() != plan_item["targetBinding"]["schema"]
+    ):
+        raise RolloutError(f"step {plan_item['number']} receipt has invalid observed database identity")
+    if (
+        plan_item["targetBinding"] is not None
+        and plan_item["targetBinding"]["environment"] != "prod"
+        and looks_like_production_identity(observed["db_name"], observed["db_unique_name"], observed["service_name"])
+    ):
+        raise RolloutError(f"step {plan_item['number']} receipt records production identity for a non-production target")
     return receipt, path
 
 
@@ -808,6 +1042,12 @@ def _confirmation_text(manifest: RolloutManifest, plan: Sequence[dict], environm
     for item in plan:
         state = "already receipted" if item["number"] < from_step else "to run"
         lines.append(f"Step {item['number']:02d} [{state}] {item['description']} — SHA-256 {item['sha256']}")
+        if item["targetBinding"] is not None:
+            lines.append("  Target binding: " + json.dumps(item["targetBinding"], sort_keys=True))
+        if item["appDeployConfigSha256"] is not None:
+            lines.append("  child configuration SHA-256: " + item["appDeployConfigSha256"])
+            selector = item["appDeploySourceSchemaSelector"]
+            lines.append(f"  source PROJECT_SCHEMA selector: {selector if selector else '<unset>'}")
         for file in item["inputHashes"]:
             lines.append(f"  {file['path']} — SHA-256 {file['sha256']}")
     lines.append("Continue with this rollout? [y/N]")
@@ -833,7 +1073,7 @@ def _relative_paths(paths: Sequence[Path | str], root: Path) -> tuple[str, ...]:
         if not path.is_absolute():
             path = root / path
         try:
-            result.append(path.resolve(strict=False).relative_to(root).as_posix())
+            result.append(relative_to_root(path.resolve(strict=False), root).as_posix())
         except ValueError:
             result.append(str(item))
     return tuple(result)
@@ -1048,6 +1288,17 @@ def _execute_sql_payload(
         expected_user=step["expectedUser"],
         step_number=step_number,
     )
+    mode = "assembled" if generated_clob_assembly(source) else "direct"
+    for finding in lint_sqlcl_transport(source, mode):
+        message = f"payload.sql:{finding.line} ({finding.code}): {finding.message}"
+        if finding.severity == "error":
+            return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql"), repo_root), f"SQLcl transport preflight refused: {message}")
+        print(f"rollout warning: SQLcl transport review: {message}", file=sys.stderr)
+    for finding in lint_sqlcl_transport(driver.read_text(encoding="utf-8"), "direct"):
+        message = f"rollout.sql:{finding.line} ({finding.code}): {finding.message}"
+        if finding.severity == "error":
+            return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql"), repo_root), f"SQLcl transport preflight refused: {message}")
+        print(f"rollout warning: SQLcl transport review: {message}", file=sys.stderr)
     target = Target(environment, step["connection"], step["expectedUser"], step["schema"], env_classification)
     try:
         result = run_sqlcl(target, driver, evidence_dir, phase="apply")
@@ -1079,13 +1330,47 @@ def _execute_app_deploy(
     evidence_dir: Path,
     manifest_confirmed: bool,
     expected_input_hashes: dict[str, str],
+    frozen_config: Mapping[str, str],
+    config_sha256: str,
+    source_schema_selector: str | None,
+    expected_target_binding: dict[str, str],
 ) -> StepResult:
     if environment not in {"staging", "prod"}:
         raise RolloutError("app-deploy is supported only for staging and production")
     if not manifest_confirmed:
         raise RolloutError("app-deploy requires the staging or production manifest confirmation")
     evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    app_relative, _app_dir = _read_app_inputs(repo_root, step["appId"], environment)
+    app_relative, app_dir = _read_app_inputs(repo_root, step["appId"], environment)
+    descriptor = read_descriptor(app_dir / "deployments" / f"{environment}.json", step["appId"])
+    parsing_schema = descriptor["app"]["databaseSession"]["parsingSchema"]
+    if _canonical_hash(dict(frozen_config)) != config_sha256:
+        raise RolloutError("app-deploy child configuration changed after confirmation")
+    try:
+        planned_child_binding = _binding_for_target(
+            resolve_target(frozen_config, environment, "read", schema=parsing_schema)
+        )
+    except TargetResolutionError as error:
+        raise RolloutError(f"app-deploy child configuration target cannot be resolved: {error}") from error
+    if planned_child_binding != expected_target_binding:
+        raise RolloutError("app-deploy child configuration target does not match the confirmed target binding")
+
+    frozen_env_path = evidence_dir / "app-deploy.env"
+    try:
+        _write_atomic(frozen_env_path, _frozen_env_text(frozen_config))
+        frozen_config_from_disk = read_project_env(frozen_env_path)
+    except (OSError, ConfigError) as error:
+        raise RolloutError(f"could not secure frozen app-deploy child configuration: {error}") from error
+    if frozen_config_from_disk != dict(frozen_config):
+        raise RolloutError("frozen app-deploy child configuration did not retain the confirmed values")
+    try:
+        frozen_child_binding = _binding_for_target(
+            resolve_target(frozen_config_from_disk, environment, "read", schema=parsing_schema)
+        )
+    except TargetResolutionError as error:
+        raise RolloutError(f"frozen app-deploy child target cannot be resolved: {error}") from error
+    if frozen_child_binding != expected_target_binding:
+        raise RolloutError("frozen app-deploy child target does not match the confirmed target binding")
+
     staged_app_dir = evidence_dir / "app-source" / Path(app_relative)
     staged_app_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     app_prefix = app_relative + "/"
@@ -1115,6 +1400,14 @@ def _execute_app_deploy(
         raise RolloutError("app-deploy has no frozen application source files")
 
     child_env = dict(os.environ)
+    for key in ALLOWED_KEYS:
+        child_env.pop(key, None)
+    child_env.update(frozen_config_from_disk)
+    child_env["PROJECT_ENV_FILE"] = frozen_env_path.resolve().as_posix()
+    if source_schema_selector is None:
+        child_env.pop("PROJECT_SCHEMA", None)
+    else:
+        child_env["PROJECT_SCHEMA"] = source_schema_selector
     log_path = evidence_dir / "deploy-output.log"
     # deploy.sh is a Bash entry point. On Windows, `sys.executable` is Python, so
     # launch Git Bash by its resolved path through the project's shared helper.
@@ -1144,7 +1437,7 @@ def _execute_app_deploy(
     _write_atomic(log_path, completed.stdout or "")
     return StepResult(
         completed.returncode,
-        _relative_paths((staged_app_dir, log_path), repo_root),
+        _relative_paths((staged_app_dir, frozen_env_path, log_path), repo_root),
         "existing deployment path completed" if completed.returncode == 0 else (
             f"deploy.sh exited with status {completed.returncode}"
             + (f": {_output_summary(completed.stdout or '')}" if _output_summary(completed.stdout or "") else "")
@@ -1198,7 +1491,7 @@ def execute_step(
                 )
 
         status, output = _capture_call(log_path, action)
-        evidence = [log_path.relative_to(repo_root).as_posix()]
+        evidence = [relative_to_root(log_path, repo_root).as_posix()]
         if kind == "verify":
             verifier_report = _json_report_from_output(output)
             if verifier_report and verifier_report.get("evidenceDir"):
@@ -1240,6 +1533,9 @@ def execute_step(
             return StepResult(result.exit_code, result.evidence_paths, f"excluded ORDS modules {', '.join(removed)}; {result.message}")
         return result
     if kind == "app-deploy":
+        plan_item = next((item for item in plan if item["number"] == step_number), None)
+        if plan_item is None or not isinstance(plan_item.get("appDeployConfig"), dict):
+            raise RolloutError("app-deploy has no frozen child configuration in the rollout plan")
         return _execute_app_deploy(
             step,
             environment=environment,
@@ -1247,6 +1543,10 @@ def execute_step(
             evidence_dir=evidence_dir,
             manifest_confirmed=manifest_confirmed,
             expected_input_hashes=_planned_input_hashes(plan, step_number),
+            frozen_config=plan_item["appDeployConfig"],
+            config_sha256=plan_item["appDeployConfigSha256"],
+            source_schema_selector=plan_item["appDeploySourceSchemaSelector"],
+            expected_target_binding=plan_item["targetBinding"],
         )
     if kind == "pause":
         print(step["message"])
@@ -1259,12 +1559,14 @@ def execute_step(
 
 
 def _report_step(plan_item: dict) -> dict:
-    return {
+    result = {
         "number": plan_item["number"],
         "type": plan_item["type"],
         "description": plan_item["description"],
         "sha256": plan_item["sha256"],
         "inputHashes": plan_item["inputHashes"],
+        "targetBinding": plan_item["targetBinding"],
+        "observedIdentity": None,
         "status": "not-run",
         "startedAt": None,
         "endedAt": None,
@@ -1273,6 +1575,10 @@ def _report_step(plan_item: dict) -> dict:
         "receiptPath": None,
         "message": None,
     }
+    if plan_item["appDeployConfigSha256"] is not None:
+        result["childConfigurationSha256"] = plan_item["appDeployConfigSha256"]
+        result["sourceSchemaSelector"] = plan_item["appDeploySourceSchemaSelector"]
+    return result
 
 
 def _append_unique_inputs(plan: Sequence[dict]) -> list[dict]:
@@ -1313,17 +1619,17 @@ def _report_outputs_do_not_overlap(
             source_roots.append(app_dir)
     for output in output_paths:
         if any(state_root == output or state_root in output.parents for state_root in reserved_state_roots):
-            raise RolloutError(f"report output overlaps rollout recovery state: {output.relative_to(root)}")
+            raise RolloutError(f"report output overlaps rollout recovery state: {relative_to_root(output, root)}")
         try:
-            scratch_relative = output.relative_to(root / "scratch")
+            scratch_relative = relative_to_root(output, root / "scratch")
         except ValueError:
             scratch_relative = None
         if scratch_relative and scratch_relative.parts and any(
             scratch_relative.parts[0].startswith(prefix) for prefix in reserved_scratch_prefixes
         ):
-            raise RolloutError(f"report output overlaps command recovery evidence: {output.relative_to(root)}")
+            raise RolloutError(f"report output overlaps command recovery evidence: {relative_to_root(output, root)}")
         if output in input_paths or any(source_root == output or source_root in output.parents for source_root in source_roots):
-            raise RolloutError(f"report output overlaps a rollout input: {output.relative_to(root)}")
+            raise RolloutError(f"report output overlaps a rollout input: {relative_to_root(output, root)}")
 
 
 def _finish_report(report: dict, started: float, status: str, exit_code: int) -> None:
@@ -1337,7 +1643,7 @@ def _announce_report_paths(paths: tuple[Path, Path], root: Path) -> None:
     json_path, markdown_path = paths
     print(
         "Rollout report: JSON "
-        f"{json_path.relative_to(root).as_posix()}; Markdown {markdown_path.relative_to(root).as_posix()}"
+        f"{relative_to_root(json_path, root).as_posix()}; Markdown {relative_to_root(markdown_path, root).as_posix()}"
     )
 
 
@@ -1359,6 +1665,7 @@ def run_rollout(
     plan: list[dict] = []
     report_paths: tuple[Path, Path] | None = None
     report: dict | None = None
+    prior_receipts: list[tuple[dict, dict, dict, Path]] = []
     try:
         if environment not in {"dev", "staging", "prod"}:
             raise RolloutError("--env must be dev, staging, or prod")
@@ -1373,7 +1680,7 @@ def run_rollout(
         report = {
             "schemaVersion": REPORT_SCHEMA_VERSION,
             "repoRoot": str(root),
-            "manifestPath": manifest.path.relative_to(root).as_posix(),
+            "manifestPath": relative_to_root(manifest.path, root).as_posix(),
             "manifestSha256": manifest.sha256,
             "environment": environment,
             "status": "running",
@@ -1391,14 +1698,17 @@ def run_rollout(
             _safe_scratch_root(root)
             for item, step_report in zip(plan[: from_step - 1], report["steps"][: from_step - 1], strict=False):
                 receipt, receipt_path = _verify_receipt(root, manifest, environment, item)
+                prior_receipts.append((item, step_report, receipt, receipt_path))
                 step_report.update({
-                    "status": "resumed",
+                    "status": "pending-resume-verification",
                     "startedAt": receipt["startedAt"],
                     "endedAt": receipt["endedAt"],
                     "durationSeconds": receipt["durationSeconds"],
                     "evidencePaths": receipt["evidencePaths"],
-                    "receiptPath": receipt_path.relative_to(root).as_posix(),
-                    "message": "verified prior rollout receipt",
+                    "receiptPath": relative_to_root(receipt_path, root).as_posix(),
+                    "targetBinding": receipt["targetBinding"],
+                    "observedIdentity": receipt["observedIdentity"],
+                    "message": "receipt matches; live target identity pending",
                 })
 
         if dry_run:
@@ -1437,11 +1747,31 @@ def run_rollout(
             run_evidence.chmod(0o700)
         except OSError as error:
             raise RolloutError(f"could not secure rollout directory: {error}") from error
-        report["evidenceDir"] = run_evidence.relative_to(root).as_posix()
+        report["evidenceDir"] = relative_to_root(run_evidence, root).as_posix()
         if environment in {"staging", "prod"}:
             confirmation_path = run_evidence / "rollout-confirmation.json"
             _write_confirmation_evidence(confirmation_path, manifest, plan, environment)
-            report["confirmationPath"] = confirmation_path.relative_to(root).as_posix()
+            report["confirmationPath"] = relative_to_root(confirmation_path, root).as_posix()
+
+        if prior_receipts:
+            _snapshot(manifest, plan, "before resuming receipted steps", environment)
+            for item, step_report, receipt, _receipt_path_value in prior_receipts:
+                binding = item["targetBinding"]
+                if binding is not None:
+                    identity_dir = run_evidence / "resume-checks" / f"step-{item['number']:03d}"
+                    current_identity = _observe_target_identity(_target_from_binding(binding), identity_dir)
+                    if current_identity != receipt["observedIdentity"]:
+                        raise RolloutError(
+                            f"step {item['number']} live database identity differs from its successful receipt; "
+                            "inspect the completed step and reconcile before retrying"
+                        )
+                    _verify_migration_receipts(root, item["step"], binding, current_identity)
+                    step_report["evidencePaths"] = [
+                        *step_report["evidencePaths"],
+                        relative_to_root(identity_dir, root).as_posix(),
+                    ]
+                step_report["status"] = "resumed"
+                step_report["message"] = "verified prior receipt and live target identity"
 
         _write_reports(report, report_paths)
         for index in range(from_step - 1, len(plan)):
@@ -1454,6 +1784,13 @@ def run_rollout(
                 evidence_dir = run_evidence / f"step-{item['number']:03d}"
                 _snapshot(manifest, plan, f"before step {item['number']}", environment)
                 evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+                binding = item["targetBinding"]
+                before_identity = None
+                identity_evidence: list[str] = []
+                if binding is not None:
+                    before_dir = evidence_dir / "target-before"
+                    before_identity = _observe_target_identity(_target_from_binding(binding), before_dir)
+                    identity_evidence.append(relative_to_root(before_dir, root).as_posix())
                 result = execute_step(
                     item["step"],
                     environment=environment,
@@ -1470,12 +1807,26 @@ def run_rollout(
                 step_report["message"] = result.message
                 if result.exit_code == 0:
                     _snapshot(manifest, plan, f"after step {item['number']}", environment)
+                    if binding is not None:
+                        after_dir = evidence_dir / "target-after"
+                        after_identity = _observe_target_identity(_target_from_binding(binding), after_dir)
+                        identity_evidence.append(relative_to_root(after_dir, root).as_posix())
+                        if after_identity != before_identity:
+                            raise RolloutError(
+                                f"step {item['number']} database identity changed during execution; "
+                                "the step cannot receive a successful rollout receipt"
+                            )
+                        _verify_migration_receipts(root, item["step"], binding, after_identity)
+                        step_report["observedIdentity"] = after_identity
+                    step_report["evidencePaths"] = list(dict.fromkeys([
+                        *step_report["evidencePaths"], *identity_evidence,
+                    ]))
                     step_report["endedAt"] = _utc_now()
                     step_report["durationSeconds"] = round(time.perf_counter() - step_started, 3)
                     receipt_path = _write_receipt(root, environment, manifest, item, {
                         **step_report,
                     })
-                    step_report["receiptPath"] = receipt_path.relative_to(root).as_posix()
+                    step_report["receiptPath"] = relative_to_root(receipt_path, root).as_posix()
                     step_report["status"] = "succeeded"
                 else:
                     step_report["status"] = "failed"

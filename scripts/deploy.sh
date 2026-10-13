@@ -8,6 +8,8 @@ Usage: scripts/deploy.sh <app_id> --env <staging|prod> [--manual] [--strict-byte
 
 Direct deployment shows the selected workspace and schema, then requires
 interactive confirmation. --manual prints SQLcl instructions without connecting.
+--strict-bytes disables APEXlang formatting normalization. --no-restore-automations
+skips restoring automations that were active before import.
 USAGE
 }
 
@@ -37,11 +39,6 @@ while [ "$#" -gt 0 ]; do
       manual=true
       shift
       ;;
-    --app-source-dir)
-      [ "$#" -ge 2 ] || fail "--app-source-dir requires a directory"
-      app_source_dir="$2"
-      shift 2
-      ;;
     --strict-bytes)
       strict_bytes=true
       shift
@@ -49,6 +46,11 @@ while [ "$#" -gt 0 ]; do
     --no-restore-automations)
       restore_automations=false
       shift
+      ;;
+    --app-source-dir)
+      [ "$#" -ge 2 ] || fail "--app-source-dir requires a directory"
+      app_source_dir="$2"
+      shift 2
       ;;
     --help|-h)
       usage
@@ -166,7 +168,7 @@ if [ "$manual" = true ]; then
   printf '%s\n' '   test "${#export_dirs[@]}" -eq 1 || { echo "expected exactly one APEX export" >&2; exit 1; }'
   printf '%s\n' '   exported_dir="${export_dirs[0]%/}"'
   printf '   %q "$exported_dir"\n' "$runbook_root/scripts/normalize_apx.sh"
-  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json' \
+  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json --target-apex-release-before .apex-release-before.txt --target-apex-release-after .apex-release-after.txt' \
     "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root" "$app_dir/deployments/$app_environment.json"
   [ "$strict_bytes" = false ] || printf ' --strict-bytes'
   printf '\n'

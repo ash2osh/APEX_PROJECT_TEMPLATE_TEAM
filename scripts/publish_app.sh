@@ -529,6 +529,9 @@ verify_args=(
   "$verify_run_dir/.apex-export-before.txt" "$verify_run_dir/.apex-export-after.txt"
   --repo-root "$REPO_ROOT"
   --deployment-file "$deployment_file" --deployment-state "$verify_run_dir/.apex-deployment-state.json"
+  --summary-path "$staging_dir/publish-verification.json"
+  --target-apex-release-before "$verify_run_dir/.apex-release-before.txt"
+  --target-apex-release-after "$verify_run_dir/.apex-release-after.txt"
 )
 if [ "$strict_bytes" = true ]; then verify_args+=(--strict-bytes); fi
 stability_args=()
@@ -571,10 +574,11 @@ if [ "$app_environment" = dev ]; then
     --stability-before-file "$stability_run_dir/.apex-export-before.txt"
     --stability-after-file "$stability_run_dir/.apex-export-after.txt"
     --stability-deployment-state "$stability_run_dir/.apex-deployment-state.json"
+    --stability-target-apex-release-before "$stability_run_dir/.apex-release-before.txt"
+    --stability-target-apex-release-after "$stability_run_dir/.apex-release-after.txt"
   )
 fi
 python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}" "${stability_args[@]}"
-printf '%s\n' '{"schemaVersion":1,"sourceVerified":true,"lifecycleStatus":"unavailable"}' > "$staging_dir/publish-verification.json"
 python3 "$REPO_ROOT/scripts/application_lifecycle.py" verify "${lifecycle_args[@]}" \
   --before "$staging_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$staging_dir/lifecycle-after" \
   --summary-path "$staging_dir/publish-verification.json"

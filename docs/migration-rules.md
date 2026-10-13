@@ -98,6 +98,15 @@ Blank lines inside a statement are accepted: the apply session sets
 `SQLBLANKLINES ON`, so an `UPDATE` with a blank line before its `WHERE` runs as
 written.
 
+Before a migration or rollout script reaches SQLcl, the runner also checks the
+exact direct-delivery source for known script-reader hazards. A quoted physical
+line ending in `-` immediately before another line is refused because SQLcl may
+join the lines and change the value. Whitespace-only lines inside quoted values
+and code lines ending in `-` produce review warnings; those warnings do not
+rewrite or reject the SQL. Source generated through explicit CLOB/character
+assembly is not treated as direct payload text. This check does not replace the
+normal source verification or prove transport behavior on another SQLcl release.
+
 Every folder requires a `checks.json` with read-only preconditions and
 postconditions. These checks validate the expected starting state and verify
 the committed result. The runner also performs structural catalog checks for
@@ -105,6 +114,44 @@ SQL forms it can analyze. Unsupported or data-changing operations need explicit
 reviewed checks; incomplete verification blocks automated apply. When such an
 operation has its checks, preflight passes but lists it as `REVIEW:`: the
 analyzer cannot see what that SQL does, so only the checks stand for it.
+
+The original `checks.json` format is `schemaVersion: 1` and keeps its exact
+three root keys: `schemaVersion`, `preconditions`, and `postconditions`. Use
+`schemaVersion: 2` only when you also need optional rehearsal-only metrics; it
+adds `rehearsalMetrics` without changing how normal migration checks or apply
+receipts work. Each metric has a unique kebab-case `id`, one guarded scalar
+`SELECT`, and integer `expectedBefore`, `expectedAfter`, and `expectedRollback`
+values in the safe JSON range `-9007199254740991..9007199254740991`. A folder
+may declare at most 50 metrics. Metric queries use the same conservative
+function, bind, and one-query validation as regular checks, but are evaluated
+only by `migrate --rehearse`.
+
+For example, a reviewed migration can declare a metric for rows intentionally
+tagged to that migration:
+
+```json
+{
+  "schemaVersion": 2,
+  "preconditions": [],
+  "postconditions": [
+    {"id": "row-present", "sql": "SELECT COUNT(*) FROM QUALIFIED_ROWS WHERE ID = 1", "expected": 1}
+  ],
+  "rehearsalMetrics": [
+    {
+      "id": "tagged-total",
+      "sql": "SELECT COALESCE(SUM(AMOUNT), 0) FROM QUALIFIED_ROWS WHERE ID = 1",
+      "expectedBefore": 0,
+      "expectedAfter": 25,
+      "expectedRollback": 0
+    }
+  ]
+}
+```
+
+The example is schema guidance, not permission to execute that table or query.
+Choose a predicate that keeps the metric scoped to this migration; later
+folders in the same rehearsal can change shared data. A metric observes a
+folder boundary, not per-row changes or SQLcl affected-row feedback.
 
 Each check is one `SELECT` (or `WITH ... SELECT`) that returns the number `1`.
 It may use ordinary query syntax, including parenthesized conditions and
@@ -257,14 +304,38 @@ from earlier folders in the same rehearsal. SQLcl feedback is associated with
 each statement where it prints a row count; otherwise that statement's
 `rowsAffected` is null.
 
-After all selected folders, the driver issues `ROLLBACK`. The rollback proof
-includes the preconditions re-run after `ROLLBACK`: each folder's own checks,
-evaluated in that same session. When the data session exits early on an SQL error or failed
-precondition, the command uses fresh read-only check sessions to re-run those
-preconditions after SQLcl's rollback. The report marks rollback proof true only
-when the preconditions are complete and still true.
+When `rehearsalMetrics` are present, the same session captures each folder's
+metrics immediately before and after that folder's eligible payload, then
+captures them again after the explicit final `ROLLBACK`. Each frame carries the
+full database identity and exact metric IDs/order. Missing, malformed, nonnumeric,
+nonintegral, or wrong-target frames are errors and expose no partial values as
+verified. Before/after/rollback mismatches make rehearsal incomplete; an
+unavailable rollback frame cannot be replaced by a fresh connection and cannot
+claim that the original session explicitly rolled back. The JSON report records
+the expected and observed metric values by phase. Regular `migrate` and `verify`
+hash and preserve the schema-2 `checks.json` bytes but do not evaluate metrics.
+
+Before any payload runs, the driver captures each folder's rollback-check
+precondition values in the data session. After all selected folders, it issues
+`ROLLBACK` and reruns those checks in that session. The preconditions are
+re-run after `ROLLBACK`; rollback proof compares each final value with that
+folder's captured starting value, not with a later folder's apply-boundary
+expectation. If the data session exits
+early on an SQL error or failed precondition, or SQLcl does not confirm the final
+`ROLLBACK`, the command uses fresh read-only check sessions after SQLcl exits and
+compares their results with the captured values. The report marks rollback proof
+true only when every check is complete and its final value equals its starting
+value.
 An SQL error still returns 2 even when the fresh preconditions prove rollback;
 inspect the error and report before deciding what to change.
+
+This proof compares only the scalar values returned by the declared checks; it
+does not establish that every effect was undone. Oracle sequence and identity
+advancement may remain after a successful rollback, and autonomous trigger or
+external effects are outside these checks. Review such effects separately.
+Metrics have the same limit: matching a tagged aggregate before, after, and
+after rollback does not prove reversal of sequence advancement, autonomous
+transactions, DDL, or external effects.
 
 `--report <file>` writes schema-version 1 JSON with each folder's files,
 statements, rows affected, postcondition status, and rollback proof. It is
@@ -280,6 +351,9 @@ could not complete. Rehearsal evidence is kept under
 `rollout` runs a reviewed release as an ordered manifest. It uses the existing
 migration, read-only verification and app deployment paths; standalone DBA
 scripts get a private SQLcl driver with an identity check before the payload.
+For the pre-window checklist, DML rehearsal, one-window execution, browser
+checks, and DBA-owned recovery plan, see the
+[production deployment runbook](production-deployment.md).
 The [example manifest](rollout-manifest.example.json) shows every supported
 step type. Replace its example folders, schema, connection alias, ORDS source
 and application ID with files and descriptors in the project before running
@@ -347,7 +421,15 @@ matching successful receipt for every earlier step: manifest digest,
 environment, step digest, input hashes, timing and evidence fields must match.
 It then starts at step N. Receipts are local recovery evidence, not a shared
 database ledger; inspect the target state before resuming after an ambiguous
-write.
+write. They bind the configured target and record an independently observed
+database/service/container/schema/user tuple. That tuple is scoped evidence,
+not proof of a globally unique physical database or clone. Resume refuses a
+legacy receipt without independently observed target identity. Preserve the
+original receipt, report, SQLcl evidence, and immutable migration folders;
+inspect the live target independently and obtain a reviewed continuation plan
+before any further writes. Never edit or fabricate receipt identity, delete
+evidence to bypass the refusal, or replay completed writes merely to create a
+fresh receipt.
 
 `--dry-run` validates the manifest and local step inputs, prints all hashes,
 and writes the report pair without running the steps. `--report <file>` writes
@@ -401,11 +483,15 @@ and exits 2, because the result is unknown; interrupted anywhere else it exits
 130 and says whether a write was attempted ("no writes were attempted", or
 "interrupted after a write was attempted; stop and reconcile").
 
-Every `migrate` that reaches the apply boundary leaves its record in
-`scratch/migration-attempt-*` (SQL, SQLcl log and outcome). For each folder, the
-runner writes `write-attempted` before starting SQLcl. Before each payload file
-it prints `MIGRATION_PAYLOAD_STARTED:<filename>`; successful completion prints
-`MIGRATION_APPLY_COMPLETED`.
+Every `migrate` that reaches the apply boundary leaves private SQLcl logs and a
+run manifest in `scratch/migration-attempt-*`. It also installs immutable
+`attempt-event.<UUID>.json` sidecars in the migration folder. Those sidecars are
+operational evidence, not SQL payload: they do not enter the migration digest,
+frozen SQL copy, or a new revision. The runner installs a `pending` event before
+starting SQLcl. Before each payload file it prints
+`MIGRATION_PAYLOAD_STARTED:<filename>`; successful completion prints
+`MIGRATION_APPLY_COMPLETED` and verified receipt installation adds a terminal
+`verified` event.
 
 A failed apply becomes `apply-not-started` and is not locked only when the
 retained SQLcl output proves a pre-payload refusal: a migration identity guard
@@ -416,11 +502,15 @@ the first `MIGRATION_PAYLOAD_STARTED` marker (`ORA-01017`,
 `ORA-12154`, `ORA-12514`, `ORA-12537`, `ORA-12541`, `ORA-12545`, `ORA-12547`,
 `ORA-12560`, `ORA-12637`, or `SP2-0640`), or a local SQLcl start failure. The
 output must not contain `MIGRATION_PAYLOAD_STARTED` or
-`MIGRATION_APPLY_COMPLETED`. The record sets `writeAttempted` to false and the
-folder can be retried or revised.
+`MIGRATION_APPLY_COMPLETED`. A terminal `apply-not-started` event records the
+classification and a digest-bound reference to the retained SQLcl output. The
+folder can be retried only while that no-write evidence remains readable and
+matches its digest. If the output is missing or changed, the durable pending
+event keeps the folder locked.
 
 Any payload-start marker, a missing or unreadable log, an unrecognized error,
-an interrupt, or a timeout remains locked as `apply-failed-or-unknown`.
+an interrupt, or a timeout remains locked by its `pending` event as
+`apply-failed-or-unknown`.
 `write-attempted`, `committed-unverified`, `committed-verification-failed`,
 `committed-receipt-failed`, `committed-source-or-payload-changed`, and
 `verified` attempt/receipt states are locked too. Only `frozen` and
@@ -432,8 +522,12 @@ ORA errors after a payload marker also stay locked because earlier statements
 may have run. A verified receipt locks the folder as well. Use
 `scripts/team.sh revise --check <folder>` to see the local attempt and receipt
 states; exit 0 means unlocked, 1 means locked, and 2 means evidence is unknown
-or unreadable. An attempt directory without `run-manifest.json` is incomplete
-evidence and returns 2 because its target folder cannot be established.
+or unreadable. A `pending` or `verified` sidecar remains a lock even if scratch
+is deleted. If scratch is deleted after a no-write outcome, the event remains
+but its required evidence is gone, so the result is unknown and locked. A
+`run-manifest.json` reference to a missing event also makes the result unknown.
+An attempt directory without `run-manifest.json` is incomplete evidence and
+returns 2 because its target folder cannot be established.
 
 This rule is intentionally narrow. It recognizes the identity refusal and
 connection/start errors above only when no payload marker was printed; a
@@ -443,8 +537,9 @@ execution ledger, so a truncated, missing, or ambiguous output cannot prove
 that the database was untouched and stays locked. A connection loss after
 SQLcl prints a payload marker is also ambiguous and stays locked, even if the
 first statement may not have reached Oracle. The local check sees only this
-checkout's receipts and ignored `scratch/` evidence; it does not see another
-developer's repository or prove current live schema state. `scratch/` is
+checkout's receipts, migration-folder attempt events and ignored `scratch/`
+evidence; it does not see another developer's repository or prove current live
+schema state. `scratch/` is
 ignored by Git and is not shared with teammates.
 
 The runner creates `status.dev.json`, `status.staging.json`, or
@@ -478,10 +573,11 @@ the selected owner and PUBLIC synonyms, plus direct `SELECT` grants to that
 owner or `PUBLIC`. An owner synonym takes precedence over a PUBLIC synonym. A
 reference through either synonym is satisfied only when its direct target is a
 live table, view or materialized view, an earlier-staged table or view, or a
-matching direct `SELECT` grant proves the owner can read the external target.
-A missing target, missing grant, synonym chain or database-link target remains
-a missing prerequisite. These catalog reads are read-only; local-only analysis
-cannot establish synonym or grant reachability.
+matching direct `SELECT` grant and catalog evidence proves that an external
+target exists as a table, view or materialized view. A missing target, missing
+target-type evidence, missing grant, sequence target, synonym chain or
+database-link target remains a missing prerequisite. These catalog reads are
+read-only; local-only analysis cannot establish synonym or grant reachability.
 
 Live preflight compares the owner inventory by object owner, object name,
 subobject name and type. Status, `LAST_DDL_TIME`, object IDs and other volatile

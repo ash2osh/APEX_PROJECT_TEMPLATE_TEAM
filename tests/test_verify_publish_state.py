@@ -353,6 +353,55 @@ class VerifyPublishStateTests(unittest.TestCase):
             self.assertIn("second post-import re-export", result.stderr)
             self.assertEqual(marker_path.read_bytes(), original_marker)
 
+    def test_verified_summary_keeps_target_release_and_rejects_a_release_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            stable_export = exported.parent / "stable-export"
+            shutil.copytree(exported, stable_export)
+            stable_before = exported.parent / "stable-before.txt"
+            stable_after = exported.parent / "stable-after.txt"
+            stable_before.write_text("2026-09-26T09:30:00|2026-09-26T09:30:06|Release 1.0\n", encoding="utf-8")
+            stable_after.write_text("2026-09-26T09:30:00|2026-09-26T09:30:07|Release 1.0\n", encoding="utf-8")
+            release_files = {
+                "before": exported.parent / "release-before.txt",
+                "after": exported.parent / "release-after.txt",
+                "stable_before": exported.parent / "stable-release-before.txt",
+                "stable_after": exported.parent / "stable-release-after.txt",
+            }
+            release_files["before"].write_text("26.2.0|2026-09-26T09:30:00Z\n", encoding="utf-8")
+            release_files["after"].write_text("26.2.0|2026-09-26T09:30:01Z\n", encoding="utf-8")
+            release_files["stable_before"].write_text("26.2.0|2026-09-26T09:30:06Z\n", encoding="utf-8")
+            release_files["stable_after"].write_text("26.2.0|2026-09-26T09:30:07Z\n", encoding="utf-8")
+            summary_path = exported.parent / "summary.json"
+            command = [
+                sys.executable, str(VERIFIER), "100", str(source), str(exported), str(before), str(after),
+                "--repo-root", str(source.parent), "--record-baseline",
+                "--stability-export-dir", str(stable_export),
+                "--stability-before-file", str(stable_before), "--stability-after-file", str(stable_after),
+                "--target-apex-release-before", str(release_files["before"]),
+                "--target-apex-release-after", str(release_files["after"]),
+                "--stability-target-apex-release-before", str(release_files["stable_before"]),
+                "--stability-target-apex-release-after", str(release_files["stable_after"]),
+                "--summary-path", str(summary_path),
+            ]
+
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertIs(summary["sourceVerified"], True)
+            self.assertEqual(summary["sourceProvenanceStatus"], "unknown")
+            self.assertIsNone(summary["sourceApexRelease"])
+            self.assertEqual(summary["targetApexRelease"], "26.2.0")
+
+            marker = marker_path.read_bytes()
+            release_files["stable_before"].write_text("26.2.1|2026-09-26T09:30:06Z\n", encoding="utf-8")
+            release_files["stable_after"].write_text("26.2.1|2026-09-26T09:30:07Z\n", encoding="utf-8")
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("target APEX release changed", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), marker)
+
 
 if __name__ == "__main__":
     unittest.main()

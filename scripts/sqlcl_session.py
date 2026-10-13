@@ -10,6 +10,8 @@ import signal
 import shutil
 import subprocess
 import time
+import selectors
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
@@ -117,7 +119,129 @@ class SqlclTimeout(SqlclError):
         )
 
 
-def _run_bridge(command: list[str], *, cwd: Path, env: Mapping[str, str], timeout_seconds: float) -> subprocess.CompletedProcess:
+class SqlclCancelled(SqlclError):
+    """The caller cancelled SQLcl and its isolated process tree was stopped."""
+
+
+class _BridgeOutputLimitExceeded(Exception):
+    def __init__(self, output: str) -> None:
+        self.output = output
+
+
+class _BridgeCancelled(Exception):
+    def __init__(self, output: str) -> None:
+        self.output = output
+
+
+def _run_bridge_bounded_posix(
+    command: list[str], *, cwd: Path, env: Mapping[str, str], timeout_seconds: float,
+    output_limit_bytes: int, cancel_event: threading.Event | None = None,
+) -> subprocess.CompletedProcess:
+    """Stream at most the requested bytes and kill the isolated SQLcl process tree on overflow."""
+    deadline = time.monotonic() + timeout_seconds
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    process.stdin.close()
+    captured = bytearray()
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    previous_handlers: dict[int, object] = {}
+
+    def stop_tree() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def terminate(signum, frame) -> None:
+        stop_tree()
+        previous = previous_handlers[signum]
+        if callable(previous):
+            previous(signum, frame)
+        else:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+    try:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous = signal.getsignal(signum)
+            if previous == signal.SIG_IGN:
+                continue
+            previous_handlers[signum] = previous
+            try:
+                signal.signal(signum, terminate)
+            except ValueError:
+                del previous_handlers[signum]
+                break
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                stop_tree()
+                process.wait()
+                remainder = process.stdout.read()
+                if remainder:
+                    remaining_capacity = output_limit_bytes - len(captured)
+                    captured.extend(remainder[:remaining_capacity])
+                raise _BridgeCancelled(bytes(captured).decode("utf-8", errors="replace"))
+            if process.poll() is not None and not selector.get_map():
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stop_tree()
+                process.wait()
+                partial = bytes(captured).decode("utf-8", errors="replace")
+                raise subprocess.TimeoutExpired(command, timeout_seconds, output=partial)
+            if not selector.get_map():
+                time.sleep(min(remaining, 0.01))
+                continue
+            events = selector.select(min(remaining, 0.1))
+            for key, _ in events:
+                remaining_capacity = output_limit_bytes - len(captured)
+                chunk = os.read(key.fileobj.fileno(), max(1, min(65536, remaining_capacity + 1)))
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                accepted = min(len(chunk), remaining_capacity)
+                captured.extend(chunk[:accepted])
+                if len(chunk) > accepted:
+                    stop_tree()
+                    process.wait()
+                    raise _BridgeOutputLimitExceeded(bytes(captured).decode("utf-8", errors="replace"))
+        if time.monotonic() >= deadline:
+            stop_tree()
+            process.wait()
+            partial = bytes(captured).decode("utf-8", errors="replace")
+            raise subprocess.TimeoutExpired(command, timeout_seconds, output=partial)
+        returncode = process.wait()
+    except BaseException:
+        stop_tree()
+        process.wait()
+        raise
+    finally:
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
+        selector.close()
+        process.stdout.close()
+    output = bytes(captured).decode("utf-8", errors="replace")
+    return subprocess.CompletedProcess(command, returncode, output, None)
+
+
+def _run_bridge(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout_seconds: float,
+    output_limit_bytes: int | None = None,
+    cancel_event: threading.Event | None = None,
+) -> subprocess.CompletedProcess:
     """Run the SQLcl bridge with its output (stderr included) as text and nothing on stdin."""
     options = {
         "cwd": cwd,
@@ -130,7 +254,28 @@ def _run_bridge(command: list[str], *, cwd: Path, env: Mapping[str, str], timeou
     }
     if os.name == "nt":
         # Ctrl-C must end the wait and the SQLcl under the bridge; see windows_job.
-        return windows_job.run(command, input_text="", timeout=timeout_seconds, **options)
+        try:
+            return windows_job.run(
+                command,
+                input_text="",
+                timeout=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                cancel_event=cancel_event,
+                **options,
+            )
+        except windows_job.OutputLimitExceeded as error:
+            raise _BridgeOutputLimitExceeded(error.output) from None
+        except windows_job.Cancelled as error:
+            raise _BridgeCancelled(error.output) from None
+    if output_limit_bytes is not None:
+        return _run_bridge_bounded_posix(
+            command,
+            cwd=cwd,
+            env=env,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+            cancel_event=cancel_event,
+        )
     # Killing only the Bash bridge leaves its SQLcl/JVM descendants running.
     # Give this invocation its own process group so timeout/interrupt cleanup
     # cannot terminate the caller or another developer's SQLcl session.
@@ -167,7 +312,21 @@ def _run_bridge(command: list[str], *, cwd: Path, env: Mapping[str, str], timeou
                 except ValueError:
                     del previous_handlers[signum]
                     break
-            output, _ = process.communicate("", timeout=timeout_seconds)
+            pending: str | None = ""
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    stop_tree()
+                    output, _ = process.communicate()
+                    raise _BridgeCancelled(output)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout_seconds)
+                try:
+                    output, _ = process.communicate(pending, timeout=min(remaining, 0.1))
+                    break
+                except subprocess.TimeoutExpired:
+                    pending = None
         except BaseException as error:
             stop_tree()
             output, _ = process.communicate()
@@ -188,6 +347,8 @@ def run_sqlcl(
     environment: Mapping[str, str] | None = None,
     phase: str | None = None,
     timeout_seconds: float | None = None,
+    output_limit_bytes: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> SqlclResult:
     """Run SQLcl by argv in a private CWD; preserve output for every attempt."""
     run_dir = Path(run_dir)
@@ -195,6 +356,12 @@ def run_sqlcl(
         raise SqlclError("configured SQLcl alias contains unsupported characters", run_dir)
     if phase not in {None, "apply", "preconditions", "postconditions", "inventory"}:
         raise SqlclError("SQLcl phase must be apply, preconditions, postconditions, or inventory", run_dir)
+    if output_limit_bytes is not None and (
+        isinstance(output_limit_bytes, bool) or not isinstance(output_limit_bytes, int) or output_limit_bytes <= 0
+    ):
+        raise SqlclError("SQLcl output limit must be a positive integer byte count", run_dir)
+    if cancel_event is not None and not callable(getattr(cancel_event, "is_set", None)):
+        raise SqlclError("SQLcl cancellation must be a threading event", run_dir)
 
     child_environment = dict(os.environ if environment is None else environment)
     timeout_key = "MIGRATION_APPLY_TIMEOUT_SECONDS" if phase == "apply" else "MIGRATION_CHECK_TIMEOUT_SECONDS"
@@ -233,6 +400,7 @@ def run_sqlcl(
     bridge = Path(__file__).with_name("sqlcl_session.sh").resolve(strict=True)
     started = time.monotonic()
     timeout_elapsed: float | None = None
+    cancelled = False
     try:
         completed = _run_bridge(
             # as_posix: the bridge compares the driver path with the run directory
@@ -242,6 +410,8 @@ def run_sqlcl(
             cwd=resolved_run,
             env=child_environment,
             timeout_seconds=effective_timeout,
+            output_limit_bytes=output_limit_bytes,
+            cancel_event=cancel_event,
         )
         output = completed.stdout or ""
         reason = None
@@ -250,6 +420,10 @@ def run_sqlcl(
         elif SQLCL_ERROR_RE.search(output):
             reason = "SQLcl reported a database or client error"
         result = SqlclResult(completed.returncode, output, resolved_run)
+    except _BridgeOutputLimitExceeded as error:
+        output = error.output
+        reason = "SQLcl output exceeded the configured byte limit"
+        result = None
     except subprocess.TimeoutExpired as error:
         timeout_elapsed = time.monotonic() - started
         partial = error.stdout or ""
@@ -257,6 +431,11 @@ def run_sqlcl(
             partial = partial.decode("utf-8", errors="replace")
         output = str(partial)
         reason = "SQLcl timed out"
+        result = None
+    except _BridgeCancelled as error:
+        output = error.output
+        reason = "SQLcl session cancelled"
+        cancelled = True
         result = None
     except OSError as error:
         output = f"unable to start SQLcl: {error}\n"
@@ -279,6 +458,8 @@ def run_sqlcl(
             elapsed_seconds=timeout_elapsed,
             output=output,
         )
+    if cancelled:
+        raise SqlclCancelled(reason or "SQLcl session cancelled", resolved_run, output)
     if reason is not None:
         raise SqlclError(reason, resolved_run, output)
     assert result is not None

@@ -12,6 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Sequence
 
+from .migration_attempts import (
+    MigrationAttemptError,
+    not_started_reason as not_started_reason,
+    read_attempt_events,
+    reduce_attempt_events,
+    validate_no_write_evidence,
+)
+
 from .migration_manifest import (
     FOLDER_RE,
     MigrationManifestError,
@@ -26,8 +34,6 @@ from .migration_manifest import (
 DEFAULT_REASON = "follow-up revision"
 RUN_MANIFEST_NAME = "run-manifest.json"
 RUN_ID_RE = re.compile(r"migration-attempt-[A-Za-z0-9_-]+\Z", re.ASCII)
-NOT_STARTED_CONNECTION_ERRORS = re.compile(r"(?m)^ORA-(?:01017|12154|12514|12537|12541|12545|12547|12560|12637)\b")
-IDENTITY_GUARD_ERRORS = re.compile(r"(?m)^ORA-2098[0-5]\b")
 
 
 class MigrationRevisionError(ValueError):
@@ -48,30 +54,6 @@ class LockReport:
     @property
     def exit_code(self) -> int:
         return {"unlocked": 0, "locked": 1, "unknown": 2}[self.status]
-
-
-def not_started_reason(output: str) -> str | None:
-    """Return a reason only for explicit pre-payload failures; missing output locks."""
-    if not isinstance(output, str):
-        return None
-    lines = {line.strip() for line in output.splitlines()}
-    if "MIGRATION_APPLY_COMPLETED" in lines:
-        return None
-    if any(line.startswith("MIGRATION_PAYLOAD_STARTED:") for line in lines):
-        return None
-    if (
-        "MIGRATION_IDENTITY_VERIFIED" in lines
-        and "MIGRATION_IDENTITY_GUARD_REFUSED" in output
-        and re.search(r"(?m)^ORA-20987\b", output)
-    ):
-        return "identity-guard-refused"
-    if "MIGRATION_IDENTITY_VERIFIED" not in lines and IDENTITY_GUARD_ERRORS.search(output):
-        return "migration-identity-guard-refused"
-    if NOT_STARTED_CONNECTION_ERRORS.search(output) or re.search(r"(?m)^SP2-0640\b", output):
-        return "connection-failed-before-payload"
-    if "unable to start sqlcl:" in output.casefold():
-        return "sqlcl-start-failed"
-    return None
 
 
 def attempt_record_is_locked(record: dict) -> bool:
@@ -232,6 +214,20 @@ def inspect_migration_lock(repo_root: Path, relative_folder: str) -> LockReport:
         locked = True
         states.append(f"receipt:verified:{environment}")
 
+    event_by_id: dict[str, dict] = {}
+    try:
+        events = read_attempt_events(folder)
+        event_by_id = {event["eventId"]: event for event in events}
+        event_state = reduce_attempt_events(events)
+        if event_state.status == "locked":
+            locked = True
+        states.extend(event_state.states)
+        for event in events:
+            if event["state"] == "apply-not-started" and not validate_no_write_evidence(root, event):
+                problems.append(f"attempt-event-no-write-evidence-unavailable:{event['eventId']}")
+    except (MigrationAttemptError, OSError, ValueError) as error:
+        problems.append(f"attempt-events-invalid:{_safe_label(str(error))}")
+
     scratch = root / "scratch"
     if scratch.is_symlink():
         problems.append("scratch-is-a-symbolic-link")
@@ -259,12 +255,18 @@ def inspect_migration_lock(repo_root: Path, relative_folder: str) -> LockReport:
             except (OSError, MigrationManifestError) as error:
                 problems.append(f"attempt-manifest-unreadable:{_safe_label(str(error))}")
                 continue
-            if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or not isinstance(manifest.get("migrations"), list):
+            if (
+                not isinstance(manifest, dict)
+                or type(manifest.get("schemaVersion")) is not int
+                or manifest.get("schemaVersion") not in {1, 2}
+                or not isinstance(manifest.get("migrations"), list)
+            ):
                 problems.append(f"attempt-manifest-invalid:{_safe_label(attempt_dir.name)}")
                 continue
             target = manifest.get("target")
             if (
                 not isinstance(target, dict)
+                or not isinstance(target.get("environment"), str)
                 or target.get("environment") not in STATUS_ENVIRONMENTS
                 or not isinstance(target.get("current_schema"), str)
             ):
@@ -281,6 +283,23 @@ def inspect_migration_lock(repo_root: Path, relative_folder: str) -> LockReport:
                     continue
                 state = _safe_label(record.get("state"))
                 environment = _safe_label(target.get("environment"))
+                if type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 2:
+                    event_ids = record.get("attemptEventIds")
+                    if not isinstance(event_ids, list) or any(not isinstance(event_id, str) for event_id in event_ids):
+                        problems.append(f"attempt-event-references-invalid:{_safe_label(attempt_dir.name)}:{state}")
+                        continue
+                    if (record.get("writeAttempted") is True or record.get("state") != "frozen") and not event_ids:
+                        problems.append(f"attempt-event-reference-missing:{_safe_label(attempt_dir.name)}:{state}")
+                    for event_id in event_ids:
+                        event = event_by_id.get(event_id)
+                        if (
+                            event is None
+                            or event.get("runId") != attempt_dir.name
+                            or event.get("migrationPath") != folder.relative_to(root).as_posix()
+                            or event.get("environment") != target.get("environment")
+                            or event.get("target", {}).get("current_schema") != target.get("current_schema")
+                        ):
+                            problems.append(f"attempt-event-reference-unverified:{_safe_label(attempt_dir.name)}:{_safe_label(event_id)}")
                 if record.get("writeAttempted") is False and record.get("state") not in {"frozen", "apply-not-started"}:
                     problems.append(f"attempt-state-uncertain:{state}:{environment}")
                     continue

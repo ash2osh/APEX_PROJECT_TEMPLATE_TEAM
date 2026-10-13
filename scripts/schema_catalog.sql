@@ -102,7 +102,9 @@ DECLARE
     p_name VARCHAR2,
     p_table_owner VARCHAR2,
     p_table_name VARCHAR2,
-    p_db_link VARCHAR2
+    p_db_link VARCHAR2,
+    p_target_exists VARCHAR2,
+    p_target_type VARCHAR2
   ) IS
     row_value JSON_OBJECT_T := JSON_OBJECT_T();
   BEGIN
@@ -111,6 +113,12 @@ DECLARE
     row_value.put('table_owner', p_table_owner);
     row_value.put('table_name', p_table_name);
     IF p_db_link IS NOT NULL THEN row_value.put('db_link', p_db_link); END IF;
+    row_value.put('target_exists', p_target_exists = 'Y');
+    IF p_target_type IS NULL THEN
+      row_value.put_null('target_type');
+    ELSE
+      row_value.put('target_type', p_target_type);
+    END IF;
     l_synonyms.append(row_value);
   END;
 
@@ -130,65 +138,146 @@ DECLARE
   END;
 
   PROCEDURE add_dependency_catalogs IS
+    dependency_cursor SYS_REFCURSOR;
+    synonym_owner VARCHAR2(128);
+    synonym_name VARCHAR2(128);
+    target_owner VARCHAR2(128);
+    target_name VARCHAR2(128);
+    synonym_db_link VARCHAR2(128);
+    target_exists VARCHAR2(1);
+    target_type VARCHAR2(128);
+    grant_owner VARCHAR2(128);
+    grant_name VARCHAR2(128);
+    grant_grantee VARCHAR2(128);
+    grant_privilege VARCHAR2(40);
   BEGIN
-    -- Owner sessions can see their own private synonyms and PUBLIC synonyms
-    -- through ALL_* views. A validated dictionary reader uses DBA_* so that
-    -- CURRENT_SCHEMA does not accidentally limit evidence to SESSION_USER.
+    -- Use a dynamic cursor for the optional dictionary path so an ordinary
+    -- owner can compile and run this same block without dictionary grants.
     IF l_path = 'METADATA_PRIVILEGE' THEN
-      FOR item IN (
-        SELECT owner, synonym_name, table_owner, table_name, db_link
-          FROM dba_synonyms
-         WHERE owner IN (c_target_schema, 'PUBLIC')
-           AND table_owner IS NOT NULL
-           AND table_name IS NOT NULL
-         ORDER BY owner, synonym_name
-      ) LOOP
-        append_synonym(item.owner, item.synonym_name, item.table_owner, item.table_name, item.db_link);
-      END LOOP;
-      FOR item IN (
-        SELECT DISTINCT privilege_row.owner, privilege_row.table_name, privilege_row.grantee, privilege_row.privilege
-          FROM dba_tab_privs privilege_row
-         WHERE privilege_row.grantee IN (c_target_schema, 'PUBLIC')
-           AND privilege_row.privilege = 'SELECT'
-           AND EXISTS (
-             SELECT 1
-               FROM dba_synonyms synonym_row
-              WHERE synonym_row.owner IN (c_target_schema, 'PUBLIC')
-                AND synonym_row.table_owner = privilege_row.owner
-                AND synonym_row.table_name = privilege_row.table_name
-           )
-         ORDER BY privilege_row.owner, privilege_row.table_name, privilege_row.grantee
-      ) LOOP
-        append_select_grant(item.owner, item.table_name, item.grantee, item.privilege);
-      END LOOP;
+      OPEN dependency_cursor FOR q'~
+        SELECT s.owner, s.synonym_name, s.table_owner, s.table_name, s.db_link,
+               CASE WHEN EXISTS (
+                 SELECT 1 FROM dba_objects e
+                  WHERE e.owner = s.table_owner AND e.object_name = s.table_name
+               ) THEN 'Y' ELSE 'N' END target_exists,
+               CASE
+                 WHEN o.object_count = 1 AND o.object_type_count = 1 AND o.namespace_count = 1
+                      AND (
+                        (o.object_type IN ('TABLE', 'VIEW') AND o.target_namespace = 1)
+                        OR (o.object_type = 'MATERIALIZED VIEW' AND o.target_namespace = 19)
+                        OR o.object_type NOT IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW')
+                      )
+                   THEN o.object_type
+                 WHEN o.object_count = 2 AND o.object_type_count = 2
+                      AND o.materialized_view_count = 1 AND o.table_count = 1
+                      AND o.table_namespace = 1 AND o.materialized_view_namespace = 19
+                   THEN 'MATERIALIZED VIEW'
+                 ELSE NULL
+               END target_type
+          FROM dba_synonyms s
+          LEFT JOIN (
+            SELECT owner, object_name, COUNT(*) object_count,
+                   COUNT(DISTINCT object_type) object_type_count,
+                   COUNT(DISTINCT namespace) namespace_count, MAX(object_type) object_type,
+                   SUM(CASE WHEN object_type = 'MATERIALIZED VIEW' THEN 1 ELSE 0 END) materialized_view_count,
+                   SUM(CASE WHEN object_type = 'TABLE' THEN 1 ELSE 0 END) table_count,
+                   MAX(CASE WHEN object_type = 'MATERIALIZED VIEW' THEN namespace END) materialized_view_namespace,
+                   MAX(CASE WHEN object_type = 'TABLE' THEN namespace END) table_namespace,
+                   MAX(namespace) target_namespace
+              FROM dba_objects
+             WHERE NOT (namespace = 4 AND object_type = 'INDEX')
+             GROUP BY owner, object_name
+          ) o ON o.owner = s.table_owner AND o.object_name = s.table_name
+         WHERE s.owner IN (:target_schema, :public_owner)
+           AND s.table_owner IS NOT NULL AND s.table_name IS NOT NULL
+         ORDER BY s.owner, s.synonym_name~'
+        USING c_target_schema, 'PUBLIC';
     ELSE
-      FOR item IN (
-        SELECT owner, synonym_name, table_owner, table_name, db_link
-          FROM all_synonyms
-         WHERE owner IN (c_target_schema, 'PUBLIC')
-           AND table_owner IS NOT NULL
-           AND table_name IS NOT NULL
-         ORDER BY owner, synonym_name
-      ) LOOP
-        append_synonym(item.owner, item.synonym_name, item.table_owner, item.table_name, item.db_link);
-      END LOOP;
-      FOR item IN (
-        SELECT DISTINCT privilege_row.table_schema owner, privilege_row.table_name, privilege_row.grantee, privilege_row.privilege
-          FROM all_tab_privs privilege_row
-         WHERE privilege_row.grantee IN (c_target_schema, 'PUBLIC')
-           AND privilege_row.privilege = 'SELECT'
-           AND EXISTS (
-             SELECT 1
-               FROM all_synonyms synonym_row
-              WHERE synonym_row.owner IN (c_target_schema, 'PUBLIC')
-                AND synonym_row.table_owner = privilege_row.table_schema
-                AND synonym_row.table_name = privilege_row.table_name
-           )
-         ORDER BY privilege_row.table_schema, privilege_row.table_name, privilege_row.grantee
-      ) LOOP
-        append_select_grant(item.owner, item.table_name, item.grantee, item.privilege);
-      END LOOP;
+      OPEN dependency_cursor FOR q'~
+        SELECT s.owner, s.synonym_name, s.table_owner, s.table_name, s.db_link,
+               CASE WHEN EXISTS (
+                 SELECT 1 FROM all_objects e
+                  WHERE e.owner = s.table_owner AND e.object_name = s.table_name
+               ) THEN 'Y' ELSE 'N' END target_exists,
+               CASE
+                 WHEN o.object_count = 1 AND o.object_type_count = 1 AND o.namespace_count = 1
+                      AND (
+                        (o.object_type IN ('TABLE', 'VIEW') AND o.target_namespace = 1)
+                        OR (o.object_type = 'MATERIALIZED VIEW' AND o.target_namespace = 19)
+                        OR o.object_type NOT IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW')
+                      )
+                   THEN o.object_type
+                 WHEN o.object_count = 2 AND o.object_type_count = 2
+                      AND o.materialized_view_count = 1 AND o.table_count = 1
+                      AND o.table_namespace = 1 AND o.materialized_view_namespace = 19
+                   THEN 'MATERIALIZED VIEW'
+                 ELSE NULL
+               END target_type
+          FROM all_synonyms s
+          LEFT JOIN (
+            SELECT owner, object_name, COUNT(*) object_count,
+                   COUNT(DISTINCT object_type) object_type_count,
+                   COUNT(DISTINCT namespace) namespace_count, MAX(object_type) object_type,
+                   SUM(CASE WHEN object_type = 'MATERIALIZED VIEW' THEN 1 ELSE 0 END) materialized_view_count,
+                   SUM(CASE WHEN object_type = 'TABLE' THEN 1 ELSE 0 END) table_count,
+                   MAX(CASE WHEN object_type = 'MATERIALIZED VIEW' THEN namespace END) materialized_view_namespace,
+                   MAX(CASE WHEN object_type = 'TABLE' THEN namespace END) table_namespace,
+                   MAX(namespace) target_namespace
+              FROM all_objects
+             WHERE NOT (namespace = 4 AND object_type = 'INDEX')
+             GROUP BY owner, object_name
+          ) o ON o.owner = s.table_owner AND o.object_name = s.table_name
+         WHERE s.owner IN (:target_schema, :public_owner)
+           AND s.table_owner IS NOT NULL AND s.table_name IS NOT NULL
+         ORDER BY s.owner, s.synonym_name~'
+        USING c_target_schema, 'PUBLIC';
     END IF;
+    LOOP
+      FETCH dependency_cursor INTO synonym_owner, synonym_name, target_owner, target_name,
+        synonym_db_link, target_exists, target_type;
+      EXIT WHEN dependency_cursor%NOTFOUND;
+      append_synonym(synonym_owner, synonym_name, target_owner, target_name, synonym_db_link,
+        target_exists, target_type);
+    END LOOP;
+    CLOSE dependency_cursor;
+
+    IF l_path = 'METADATA_PRIVILEGE' THEN
+      OPEN dependency_cursor FOR q'~
+        SELECT DISTINCT p.owner, p.table_name, p.grantee, p.privilege
+          FROM dba_tab_privs p
+         WHERE p.grantee IN (:target_schema, :public_owner)
+           AND p.privilege = 'SELECT'
+           AND EXISTS (
+             SELECT 1 FROM dba_synonyms s
+              WHERE s.owner IN (:target_schema, :public_owner)
+                AND s.table_owner = p.owner AND s.table_name = p.table_name
+           )
+         ORDER BY p.owner, p.table_name, p.grantee~'
+        USING c_target_schema, 'PUBLIC', c_target_schema, 'PUBLIC';
+    ELSE
+      OPEN dependency_cursor FOR q'~
+        SELECT DISTINCT p.table_schema owner, p.table_name, p.grantee, p.privilege
+          FROM all_tab_privs p
+         WHERE p.grantee IN (:target_schema, :public_owner)
+           AND p.privilege = 'SELECT'
+           AND EXISTS (
+             SELECT 1 FROM all_synonyms s
+              WHERE s.owner IN (:target_schema, :public_owner)
+                AND s.table_owner = p.table_schema AND s.table_name = p.table_name
+           )
+         ORDER BY p.table_schema, p.table_name, p.grantee~'
+        USING c_target_schema, 'PUBLIC', c_target_schema, 'PUBLIC';
+    END IF;
+    LOOP
+      FETCH dependency_cursor INTO grant_owner, grant_name, grant_grantee, grant_privilege;
+      EXIT WHEN dependency_cursor%NOTFOUND;
+      append_select_grant(grant_owner, grant_name, grant_grantee, grant_privilege);
+    END LOOP;
+    CLOSE dependency_cursor;
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF dependency_cursor%ISOPEN THEN CLOSE dependency_cursor; END IF;
+      RAISE;
   END;
 
   PROCEDURE add_definition(p_owner VARCHAR2, p_name VARCHAR2, p_type VARCHAR2) IS

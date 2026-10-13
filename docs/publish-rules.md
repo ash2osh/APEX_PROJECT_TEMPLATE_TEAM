@@ -21,6 +21,24 @@ what the live app looked like at that moment:
   `application.apx` before importing, so the version shows which import is
   live.
 
+A full guarded APEX export also records an optional `sourceProvenance` object
+with the exact observed APEX release, database UTC export time, and a digest of
+the canonical source file set. This is separate from `sourceFormat.apexRelease`,
+which identifies the template's APEXlang format family. Older, manually staged,
+or edited source has unknown or stale provenance. Release pairs appear in
+verification and recovery summaries when available; they are diagnostic only.
+Full publish and deployment accept normalized `.apx` source after the existing
+documented deployment projections. Normalization removes standalone `//`
+comments, trailing whitespace and blank lines at EOF, and sorts only adjacent
+`textMessage`, `column` and `displayColumn` blocks with the same parent, kind
+and indentation. Every other source byte and the complete file set remain
+strict; `--strict-bytes` disables the `.apx` normalization. DEV baseline
+advancement also requires a second export with the same normalized source,
+application revision and APEX release. A missing target export observation,
+such as before a manual runbook connects, is reported as an unknown target
+release; source release provenance remains diagnostic and does not widen the
+normalization rules.
+
 Before importing, publish reads the same two values from the live app and
 compares them with your baseline. The import session then reads them once more,
 immediately before `apex import`, and refuses if they changed after the drift
@@ -38,9 +56,7 @@ copies are deferred. `--force` skips drift checking but never breaks a lock.
 The wrapper commits acquisition, verifies the canonical owner, unique run
 comment and lock timestamp in fresh sessions, and asserts them immediately
 before and after import. It verifies the whole re-export before releasing its
-exact lock and advancing the baseline. A DEV baseline advances only after the
-normalized source matches and a second export has the same normalized form and
-live revision. Failures before import release only a
+exact lock and advancing the baseline. Failures before import release only a
 proven run-owned lock. An attempted but unverified import retains the old
 baseline, lock and diagnostics. Review the live app, reconcile source, then
 use `scripts/team.sh app-unlock <id> --env dev` to release only your own lock;
@@ -62,15 +78,8 @@ or falls back to a full import.
 
 ## Runtime verification after import
 
-Full publish, selected-page publish and deployment capture scoped public
-automation, workflow and task state before import. After a successful import,
-the default flow calls `APEX_AUTOMATION.ENABLE` for each static ID whose captured
-status was `ACTIVE`, after setting the target workspace security group. It reads
-the automations back and prints a before/after table. It never calls `ENABLE`
-for an automation that was not `ACTIVE` before import. A previously active
-automation that is absent or not `ACTIVE` after restore fails the command.
-`--no-restore-automations` opts out and leaves the old lifecycle behavior in
-place; the post-import lifecycle check can still report disabled automations.
+Full and selected-page publish capture scoped public automation, workflow and
+task state before import, then observe it again after exact source verification.
 Staging/production deployment uses the same gate on its explicit descriptor
 target. A new target may be verified absent before initial promotion; it must be
 visible after import. Missing context or incomplete reads are unavailable, never
@@ -92,13 +101,18 @@ records the same fields in `partial.json`. Promotion retains its diagnostics
 and does not claim a verified deployment. Manual DBA runbooks also contain the
 capture/verify gate and retain temporary evidence on failure.
 
-Inspect the live automation/workflow/task state with the responsible developer,
-resolve the condition and reconcile source before owner-filtered unlocking or
-retrying. Planned removal of an existing automation still requires that review.
-The wrapper does not resume workflows or repair tasks. `--force` does not bypass
-runtime verification. Docker APEX 26.2 qualification observed a previously
-enabled automation becoming disabled during a full import; the restore step now
-re-enables that captured set and verifies the result. See
+Full publish, selected-page publish and deployment restore exactly the
+automation static IDs observed as `ACTIVE` before import, unless
+`--no-restore-automations` is supplied. The restore step enables only those
+IDs, then reads their state back; a missing or still-disabled ID fails runtime
+verification and retains recovery evidence. It does not enable new or
+previously disabled automations, resume workflows or repair tasks. Inspect the
+live automation/workflow/task state with the responsible developer, resolve
+the condition and reconcile source before owner-filtered unlocking or retrying.
+Planned removal of an existing automation still requires that review. `--force`
+does not bypass runtime verification. Docker APEX 26.2 qualification observed
+an enabled automation becoming disabled during a full import; source matching
+alone cannot establish runtime readiness. See
 [local qualification](local-qualification.md) and
 [measured results](apex-26.2-qualification.md).
 
@@ -235,26 +249,28 @@ commit. Publish prints these steps when it stops here.
 | Message | Meaning |
 | --- | --- |
 | `post-import APEX export failed` | The verification export failed. |
-| `second post-import APEX export failed` | The DEV stability export failed; the baseline was not advanced. |
-| `automation restore did not verify` | A restore call or read-back did not verify every automation that was ACTIVE before import. Inspect the retained `automation-restore-report.json` and private SQLcl evidence, then check the live automation state before recovery. |
+| `second post-import APEX export failed` | The second DEV export failed, so normalized source and revision stability could not be established. The old baseline and recovery evidence are retained. |
+| `automation restore did not verify` | At least one previously active automation could not be restored and read back as `ACTIVE`. Review its saved restore report and the live state before retrying. |
+| `post-import APEXlang source was not stable across the second post-import re-export` | Source, file set, APEX release, or observed app revision changed between the two DEV exports. Reconcile the live app and retry. |
 | `APEXlang source file set does not match the post-import re-export` | APEX wrote a different set of files than you committed. The one exception is an empty `supporting-objects/deinstall-script.sql`, which SQLcl's starter application (`apex generate`) ships and APEX leaves out of an export: it is accepted as missing, and any content in it is not. |
-| `APEXlang source bytes do not match the post-import re-export` | A real source difference remains after normalization, or `--strict-bytes` found a byte-only difference. The message lists every changed file and first differing line. Export and reconcile each real difference. A teammate publish tag still identifies a replacement import. |
-| `post-import APEXlang source was not stable across the second post-import re-export` | The normalized source or live application revision changed between DEV exports. Keep the old baseline and diagnostics; check for concurrent edits/imports, then export and reconcile before retrying. |
+| `APEXlang source bytes do not match the post-import re-export` | A non-cosmetic `.apx` difference or any non-`.apx` source bytes differ after the existing deployment projections. The verifier lists relative paths and differing lines without printing source text. Export and reconcile the live app; use `--strict-bytes` only when byte-exact APEXlang text is required. |
 | `is not visible in the post-import state` | The app is missing after import. |
 | `changed while its post-import source was being verified` | Someone edited or imported during the verification. |
 | `same database second` / `later than the database-time observation` | The revision is ambiguous; export and retry. |
 
-**Full publish and deployment source comparison.** By default the verifier drops `//` comment
-lines, sorts `textMessage` blocks by key and language, report `column` blocks by
-name and `displayColumn` blocks by column, and strips trailing whitespace and
-blank lines. It compares every file and reports each real mismatch with its
-first differing line, without printing source content. Cosmetic-only file
-differences are listed together on one summary line and pass. Use
-`--strict-bytes` on full `publish` or `deploy` to require raw byte equality.
-The DEV baseline still requires the normalized result to match twice and both
-exports to observe the same application revision. Selected-page publishing
-continues to require exact whole-app source equality after its documented
-deployment projection.
+The source verifier reports every relative path that is missing, unexpected,
+missing from the required local input set, or different after the documented
+deployment projections. Full publish normalizes the supported `.apx` comments,
+trailing whitespace/EOF blank lines, and adjacent component ordering; every
+other byte remains strict. `--strict-bytes` disables those `.apx` allowances.
+DEV baseline advancement requires a second normalized export with the same file
+set, APEX release and observed app revision. Diagnostics name paths and line
+numbers without printing source text. Review any real difference, export and
+reconcile the live app, then retry through the normal drift and lifecycle gates.
+
+The verification report preserves `sourceProvenanceStatus`, `sourceApexRelease`,
+`targetApexRelease`, and a sanitized `versionPair`. A `stale` or `unknown`
+source release never changes source comparison or selects a tolerant profile.
 
 **A new app from `apex generate`.** DEV publish requires an existing app to
 acquire its native lock. Coordinate initial creation in Builder, or a separately
@@ -262,10 +278,8 @@ requested bootstrap import, before the normal publish workflow. Export the live
 app through the template to obtain its canonical source and database baseline,
 then merge your authored changes. SQLcl starter files can contain an extra blank line
 at the end and an empty deinstall reference that a canonical export removes;
-the normalizer accepts trailing blank lines but requires every other difference
-to match its documented rules. Any remaining generated-source difference needs
-canonical export and review. Generate using the matching connected APEX 26.2
-context rather than mixing release-specific syntax.
+exact byte verification intentionally refuses differences. Generate using the
+matching connected APEX 26.2 context rather than mixing release-specific syntax.
 
 ## Example
 

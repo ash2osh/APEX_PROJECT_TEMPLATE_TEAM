@@ -19,8 +19,11 @@ class ProbeTests(unittest.TestCase):
                          "apexVersion": "26.2.0", "databaseVersion": "23.26.3.0.0", "appCount": 0}
 
     def runner(self, target, driver, run_dir):
-        self.calls.append(driver.read_text())
-        text = 'APEX_PROBE_IDENTITY:' + json.dumps(self.identity) + '\nAPEX_PROBE_VERIFIED:identity\n'
+        script=driver.read_text(); self.calls.append(script)
+        phase=re.search(r'prompt APEX_PROBE_VERIFIED:([^\n]+)',script)[1]
+        text = 'APEX_PROBE_IDENTITY:' + json.dumps(self.identity) + '\n' if phase=='identity' else ''
+        if phase=='runtime-log-baseline': text += 'APEX_AUTOMATION_LOG_COUNT:0\n'
+        text += 'APEX_PROBE_VERIFIED:'+phase+'\n'
         return SimpleNamespace(output=text)
 
     def probe(self):
@@ -140,6 +143,30 @@ class ProbeTests(unittest.TestCase):
         self.assertIn('apex_workflows',script)
         self.assertIn('apex_tasks',script)
 
+    def test_lifecycle_cleanup_reports_exact_apex_retained_automation_log(self):
+        probe=self.probe(); path,saved=self.lifecycle_cleanup_report(probe)
+        saved['automationLogBaseline']=0
+        saved['expectedAutomationLogs']=[{
+            'id':'501','workspaceId':'123','staticId':'template-automation-selected','statusCode':'SUCCESS'
+        }]
+        path.write_text(json.dumps(saved))
+        def runner(target,driver,directory):
+            script=driver.read_text(); self.calls.append(script)
+            phase=re.search(r'prompt APEX_PROBE_VERIFIED:([^\n]+)',script)[1]
+            identity='APEX_PROBE_IDENTITY:'+json.dumps(self.identity)+'\n' if phase=='identity' else ''
+            retained='APEX_PROBE_RETAINED_AUTOMATION_LOG:501:template-automation-selected:SUCCESS\n' if phase=='explicit-cleanup' else ''
+            return SimpleNamespace(output=identity+retained+'APEX_PROBE_VERIFIED:'+phase+'\n')
+        probe.runner=runner
+        report=probe.cleanup(path)
+        self.assertFalse(report['cleanupRequired'])
+        self.assertEqual(report['cleanupStatus'],'pass-with-apex-retained-history')
+        self.assertEqual(report['retainedAutomationLogs'],[{
+            'id':'501','staticId':'template-automation-selected','statusCode':'SUCCESS'
+        }])
+        script=self.calls[-1]
+        self.assertIn('apex_automation_log',script.lower())
+        self.assertIn('501',script)
+
     def test_interrupted_or_ambiguous_import_keeps_owned_inventory_for_recovery(self):
         source=Path(__file__).parent/'fixtures/apex_26_2/canonical_26_2'
         for failure in (KeyboardInterrupt(),ProbeError('ambiguous import')):
@@ -149,7 +176,9 @@ class ProbeTests(unittest.TestCase):
                     script=driver.read_text()
                     phase=re.search(r'prompt APEX_PROBE_VERIFIED:([^\n]+)',script)[1]
                     if phase=='runtime-fixture-import': raise failure
-                    output='APEX_PROBE_IDENTITY:'+json.dumps(self.identity)+'\n' if phase=='identity' else 'Validation successful.\n'
+                    if phase=='identity': output='APEX_PROBE_IDENTITY:'+json.dumps(self.identity)+'\n'
+                    elif phase=='runtime-log-baseline': output='APEX_AUTOMATION_LOG_COUNT:0\n'
+                    else: output='Validation successful.\n'
                     return SimpleNamespace(output=output+'APEX_PROBE_VERIFIED:'+phase+'\n')
                 probe.runner=runner
                 with self.assertRaises(type(failure)): probe.run_lifecycle(source,'DEMO',allow_writes=True)

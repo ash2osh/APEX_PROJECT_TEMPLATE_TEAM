@@ -8,8 +8,14 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
+
+if __package__:
+    from .source_provenance import make_source_provenance
+else:
+    from source_provenance import make_source_provenance
 
 
 DB_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
@@ -60,7 +66,13 @@ def read_state(path: Path) -> tuple[AppState, datetime]:
     return parsed
 
 
-def marker_payload(app_id: int, state: AppState, source_dir: Path | None = None, page_locks: list[dict] | None = None) -> dict[str, object]:
+def marker_payload(
+    app_id: int,
+    state: AppState,
+    source_dir: Path | None = None,
+    page_locks: list[dict] | None = None,
+    source_provenance: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     payload = {
         "applicationId": app_id,
         "applicationPresent": state.present,
@@ -73,9 +85,34 @@ def marker_payload(app_id: int, state: AppState, source_dir: Path | None = None,
         else:
             from source_evidence import content_evidence
         payload.update(content_evidence(source_dir))
+        if source_provenance is not None:
+            payload["sourceProvenance"] = dict(source_provenance)
         if page_locks is not None:
             payload['pageLocks'] = page_locks
     return payload
+
+
+def read_apex_release(path: Path) -> tuple[str, str]:
+    """Read one guarded SQLcl release/time observation from a private spool file."""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"could not read guarded APEX release observation {path}") from error
+    line = content.strip()
+    fields = line.split("|")
+    if (
+        len(fields) != 2
+        or re.fullmatch(r"[0-9]{1,2}(?:\.[0-9]{1,3}){1,4}", fields[0], re.ASCII) is None
+        or not fields[1]
+    ):
+        raise ValueError("guarded APEX release observation has an invalid format")
+    try:
+        captured = datetime.fromisoformat(fields[1].replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("guarded APEX release observation has an invalid timestamp") from error
+    if captured.tzinfo is None or captured.utcoffset() != timezone.utc.utcoffset(captured):
+        raise ValueError("guarded APEX release observation timestamp is not UTC")
+    return fields[0], fields[1]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument('--page-locks-before', type=Path)
     parser.add_argument('--page-locks-after', type=Path)
+    parser.add_argument('--apex-release-before', type=Path)
+    parser.add_argument('--apex-release-after', type=Path)
     args = parser.parse_args(argv)
     if args.app_id < 1:
         parser.error("app_id must be a positive integer")
@@ -127,7 +166,20 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 from source_evidence import read_page_lock_evidence
             page_locks = read_page_lock_evidence(args.page_locks_before, args.page_locks_after, args.app_id)
-        marker = marker_payload(args.app_id, before, args.source_dir, page_locks)
+        provenance = None
+        if args.apex_release_before is not None or args.apex_release_after is not None:
+            if args.apex_release_before is None or args.apex_release_after is None or args.source_dir is None:
+                raise ValueError("both guarded APEX release observations and --source-dir are required")
+            release_before, time_before = read_apex_release(args.apex_release_before)
+            release_after, time_after = read_apex_release(args.apex_release_after)
+            if release_before != release_after:
+                raise ValueError("APEX release changed during export; rerun after confirming the target release")
+            observed_before = datetime.fromisoformat(time_before.replace("Z", "+00:00"))
+            observed_after = datetime.fromisoformat(time_after.replace("Z", "+00:00"))
+            if observed_before > observed_after:
+                raise ValueError("database UTC time moved backwards during the guarded APEX export")
+            provenance = make_source_provenance(args.source_dir, release_after, time_after)
+        marker = marker_payload(args.app_id, before, args.source_dir, page_locks, provenance)
     except (OSError, ValueError) as exc:
         print(f"export error: could not verify canonical source evidence: {exc}", file=sys.stderr)
         return 1

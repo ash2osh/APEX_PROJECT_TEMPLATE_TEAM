@@ -69,6 +69,8 @@ class SynonymDefinition:
     table_owner: str
     table_name: str
     db_link: str = ""
+    target_exists: bool | None = None
+    target_type: str | None = None
 
 
 @dataclass(frozen=True, order=True)
@@ -166,6 +168,8 @@ def _synonym_rows(rows: object, owner: str) -> tuple[SynonymDefinition, ...]:
         synonym_owner, name = row.get("owner"), row.get("name")
         table_owner, table_name = row.get("table_owner"), row.get("table_name")
         db_link = row.get("db_link", "")
+        target_exists = row.get("target_exists")
+        target_type = row.get("target_type")
         if db_link is None:
             db_link = ""
         if not all(isinstance(value, str) and value for value in (synonym_owner, name, table_owner, table_name)):
@@ -174,10 +178,19 @@ def _synonym_rows(rows: object, owner: str) -> tuple[SynonymDefinition, ...]:
             raise CatalogError("catalog synonym escaped the selected owner and PUBLIC scope")
         if not isinstance(db_link, str):
             raise CatalogError("catalog synonym database link is malformed")
+        if target_exists is not None and not isinstance(target_exists, bool):
+            raise CatalogError("catalog synonym target-existence evidence is malformed")
+        if target_type is not None and not isinstance(target_type, str):
+            raise CatalogError("catalog synonym target-type evidence is malformed")
+        if target_exists is False and target_type is not None:
+            raise CatalogError("catalog synonym target-type evidence conflicts with an absent target")
         key = (synonym_owner, name)
         if key in synonyms:
             raise CatalogError(f"catalog repeats synonym {synonym_owner}.{name}")
-        synonyms[key] = SynonymDefinition(synonym_owner, name, table_owner, table_name, db_link)
+        synonyms[key] = SynonymDefinition(
+            synonym_owner, name, table_owner, table_name, db_link,
+            target_exists, target_type.upper() if target_type is not None else None,
+        )
     return tuple(sorted(synonyms.values()))
 
 

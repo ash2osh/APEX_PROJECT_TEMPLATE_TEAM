@@ -26,6 +26,8 @@ Commands:
   revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
+  query --env <env> --connection <profile> [--file <path> | SQL]
+                                              Run one bounded, conservative SELECT read-only
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]
                                               Run an ordered, hash-checked deployment manifest
   compare-schema [--from <env>] (--to <env>|--env <env>)
@@ -52,6 +54,10 @@ Commands:
                                               Update template-owned files from the template
   verify-local [--format text|json] [--skills-root <path>] [...] [--live]
                                               Validate local environment, lock, apps and skills read-only
+  template-status [--format text|json] [--upstream --ref <ref>]
+                                              Inspect local template drift; fetch upstream only when requested
+  automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
+                                              Observe, check or explicitly operate on one scoped automation
 Options:
   --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
   --help                                      Show this help
@@ -72,7 +78,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -265,6 +271,12 @@ case "$command_name" in
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/migrate.sh" "$@"
     ;;
+  query)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh query --env dev|staging|prod --connection tables|code|apex|ords|migration [--file <path> | SQL]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.read_only_query "$@"
+    ;;
   revise)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh revise <folder> [--reason TEXT] | revise --check <folder>"
     cd "$REPO_ROOT"
@@ -336,6 +348,34 @@ case "$command_name" in
     esac
 
     exec python3 "$verify_script" --repo-root "$verify_root" "$@"
+    ;;
+
+  template-status)
+    drift_script="$REPO_ROOT/scripts/template_drift.py"
+    drift_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          drift_script="$(cygpath -m "$drift_script")"
+          drift_root="$(cygpath -m "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+    exec python3 "$drift_script" --repo-root "$drift_root" "$@"
+    ;;
+
+  automations)
+    automation_script="$REPO_ROOT/scripts/automation_operations.py"
+    automation_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          automation_script="$(cygpath -m "$automation_script")"
+          automation_root="$(cygpath -m "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+    exec python3 "$automation_script" --repo-root "$automation_root" "$@"
     ;;
 
 

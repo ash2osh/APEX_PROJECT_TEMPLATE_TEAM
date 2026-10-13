@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fake_sqlcl import environment as fake_environment, install
+from fake_sqlcl import BASH, environment as fake_environment, install
 from scripts import verify_checks
 
 
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class VerifyCommandHelpTests(unittest.TestCase):
     def test_team_help_lists_read_only_verify(self):
         result = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "team.sh"), "--help"],
+            [BASH, str(ROOT / "scripts" / "team.sh"), "--help"],
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -30,7 +30,7 @@ class VerifyCommandHelpTests(unittest.TestCase):
 
     def test_verify_help_is_available_without_loading_database_configuration(self):
         result = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "team.sh"), "verify", "--help"],
+            [BASH, str(ROOT / "scripts" / "team.sh"), "verify", "--help"],
             cwd=ROOT,
             capture_output=True,
             text=True,

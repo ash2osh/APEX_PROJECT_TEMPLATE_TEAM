@@ -258,3 +258,73 @@ Python 3.12+; the core workflow remains Python 3.10+.
 See [local qualification](local-qualification.md) for reproducible modes and
 cleanup rules. Native Windows, live APEX 26.1, and staging/production database
 imports remain unqualified by these Linux Docker tests.
+
+## Separate deployment-tool qualification on 2026-10-11
+
+The root task qualified schema and migration tooling on local disposable
+`DEMO2` using Oracle Database 23.26.3.0.0, APEX 26.2.0, and SQLcl 26.3.0.0.
+It observed read-only owner verification, same-schema comparison and source
+capture; dependent DML rehearsal with successful scalar rollback checks; a
+committed INSERT/UPDATE rollout; receipt-based resume without payload replay;
+and a separate post-run verify. Independent cleanup reported zero owned
+fixtures. The detailed scope and ignored evidence paths are in
+[local qualification](local-qualification.md#deployment-speedup-qualification-on-2026-10-11).
+
+This was schema/migration qualification, not an APEX application import or
+publish. It does not add evidence for shared-app writes, promotion to a distinct
+target, native Windows, an APEX 26.1 runtime/backport, or APEX patch-pair
+tolerant source comparison. Those remain separate qualification gates.
+
+## Native synonym and automation qualification on 2026-10-12
+
+The same local Docker release pair separately qualified mixed TABLE/INDEX and
+materialized-view/INDEX synonym targets through both ordinary and privileged
+catalog paths. Valid TABLE/MV view preflights passed; sequence and absent-target
+preflights refused. APEX 26.2 automation enable, one run-once action and disable
+were observed by readback; the owned app was removed while its single retained
+automation execution-log row remained under APEX retention. Exact target scope,
+cleanup evidence and limitations are recorded in
+[local qualification](local-qualification.md#mixed-index-synonym-qualification-on-2026-10-12)
+and [automation action qualification](local-qualification.md#automation-action-qualification-on-2026-10-12).
+
+## Native rehearsal-metric qualification on 2026-10-12
+
+A trigger-driven rehearsal observed an aggregate change of `0 → 25 → 0` across
+before, after and rollback frames. A fresh connection confirmed the rollback;
+the fixture trigger/tables/index were removed and independently inventoried as
+absent. Scope and transaction limits are documented in
+[local qualification](local-qualification.md#rehearsal-metric-qualification-on-2026-10-12)
+and the ignored report is `scratch/native-rehearsal-metrics-a10c4312/qualification.json`.
+
+## Native Windows and isolated Docker qualification on 2026-10-12
+
+The Windows run used `main` at `78f7451` and completed the full offline suite:
+`py -3 -m unittest discover -s tests -v` ran 1,555 tests in 1,598.365 seconds,
+with 53 platform-specific skips and no failures. The tests used their fake
+SQLcl/database fixtures; they did not connect to the Docker database.
+
+| Runtime | Version |
+| --- | --- |
+| Windows | 10.0.26300.9457 |
+| Python | 3.14.5 |
+| Windows PowerShell / PowerShell 7 | 5.1.26100.9444 / 7.6.5 |
+| Git for Windows | 2.54.0.windows.1 |
+| SQLcl | 26.3.0.0 (build 26.3.0.260.1620) |
+| Docker / Compose | 29.6.1 / v5.3.0 |
+
+Separately, a fresh United Codes `26-4` local stack at commit `c7e8770` was
+installed under Compose project `uc-local-apex-dev-262` with its own
+`oradata-26ai-262` volume. Read-only checks verified Oracle AI Database 26ai
+Free `23.26.3.0.0` (healthy), APEX `26.2.0` (`/i/apex_version.js`), and ORDS
+`26.3.0` (CLI release `26.3.0.r2721811`); `GET /ords/` returned HTTP 302.
+
+Only one local stack runs at a time. The prior 26.1 containers are stopped and
+retained as `local-26ai-261` and `local-26ai-ords-261`; their `oradata-26ai`
+volume and image tags remain available. The 26.2 stack uses the standard ports
+while active. No template application was imported or published, and no shared
+DEV database was used.
+
+During first-time ADMIN setup, SQLcl printed a nonfatal `JLine Mask Thread`
+`IllegalStateException: Terminal has been closed` after reporting that ADMIN
+was created. The installer continued to exit 0, and the database, APEX, ORDS,
+and HTTP checks above passed.

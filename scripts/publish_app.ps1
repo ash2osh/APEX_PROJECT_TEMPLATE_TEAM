@@ -496,7 +496,10 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     (Join-Path $verifyRunDir ".apex-export-before.txt"),
     (Join-Path $verifyRunDir ".apex-export-after.txt"),
     "--repo-root", $repoRoot,
-    "--deployment-file", $deploymentFile, "--deployment-state", (Join-Path $verifyRunDir ".apex-deployment-state.json")
+    "--deployment-file", $deploymentFile, "--deployment-state", (Join-Path $verifyRunDir ".apex-deployment-state.json"),
+    "--summary-path", (Join-Path $publishWorkDir "publish-verification.json"),
+    "--target-apex-release-before", (Join-Path $verifyRunDir ".apex-release-before.txt"),
+    "--target-apex-release-after", (Join-Path $verifyRunDir ".apex-release-after.txt")
   )
   if ($strictBytes) { $verifyArgs += '--strict-bytes' }
   $stabilityArgs = @()
@@ -531,7 +534,9 @@ if ($appEnvironment -eq "dev" -and -not $force) {
       '--stability-export-dir', $stabilityExportedDir,
       '--stability-before-file', (Join-Path $stabilityRunDir '.apex-export-before.txt'),
       '--stability-after-file', (Join-Path $stabilityRunDir '.apex-export-after.txt'),
-      '--stability-deployment-state', (Join-Path $stabilityRunDir '.apex-deployment-state.json')
+      '--stability-deployment-state', (Join-Path $stabilityRunDir '.apex-deployment-state.json'),
+      '--stability-target-apex-release-before', (Join-Path $stabilityRunDir '.apex-release-before.txt'),
+      '--stability-target-apex-release-after', (Join-Path $stabilityRunDir '.apex-release-after.txt')
     )
   }
   $allVerifyArgs = @($verifyArgs) + @($stabilityArgs)
@@ -539,7 +544,6 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   if ($LASTEXITCODE -ne 0) {
     throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
   }
-  [System.IO.File]::WriteAllText((Join-Path $publishWorkDir 'publish-verification.json'), '{"schemaVersion":1,"sourceVerified":true,"lifecycleStatus":"unavailable"}')
   & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') verify @lifecycleArguments --before (Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json') --run-dir (Join-Path $publishWorkDir 'lifecycle-after') --summary-path (Join-Path $publishWorkDir 'publish-verification.json')
   if ($LASTEXITCODE -ne 0) { throw 'publish error: application lifecycle verification failed; baseline and recovery evidence retained' }
   if ($appEnvironment -eq 'dev') {

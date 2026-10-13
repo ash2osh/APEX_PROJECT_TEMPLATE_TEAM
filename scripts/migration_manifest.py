@@ -15,6 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 
+from .migration_attempts import EVENT_FILENAME_RE, MigrationAttemptError, read_attempt_events
 from .validate_migration import validate_sql_only
 
 
@@ -139,6 +140,15 @@ class QueryCheck:
 
 
 @dataclass(frozen=True)
+class RehearsalMetric:
+    id: str
+    sql: str
+    expected_before: int
+    expected_after: int
+    expected_rollback: int
+
+
+@dataclass(frozen=True)
 class Migration:
     folder: Path
     date: str
@@ -151,6 +161,7 @@ class Migration:
     checks_sha256: str
     payload_digest: str
     schema: str | None = None
+    rehearsal_metrics: tuple[RehearsalMetric, ...] = ()
 
 
 def decode_json(source: bytes, label: str) -> object:
@@ -413,16 +424,28 @@ def _validate_relative_folder(relative_folder: str) -> tuple[str, ...]:
     return parts
 
 
-def _load_check_file(path: Path) -> tuple[tuple[QueryCheck, ...], tuple[QueryCheck, ...], bytes]:
+def _load_check_file(
+    path: Path,
+) -> tuple[tuple[QueryCheck, ...], tuple[QueryCheck, ...], tuple[RehearsalMetric, ...], bytes]:
     try:
         source = path.read_bytes()
     except OSError as exc:
         raise MigrationManifestError(f"required checks.json could not be read: {exc}") from exc
     raw = decode_json(source, str(path))
-    if not isinstance(raw, dict) or set(raw) != {"schemaVersion", "preconditions", "postconditions"}:
-        raise MigrationManifestError("checks.json must contain exactly schemaVersion, preconditions, and postconditions")
-    if type(raw["schemaVersion"]) is not int or raw["schemaVersion"] != 1:
-        raise MigrationManifestError("checks.json schemaVersion must be integer 1")
+    base_fields = {"schemaVersion", "preconditions", "postconditions"}
+    schema_version = raw.get("schemaVersion") if isinstance(raw, dict) else None
+    allowed_fields = (base_fields, base_fields | {"rehearsalMetrics"})
+    if not isinstance(raw, dict) or set(raw) not in allowed_fields:
+        raise MigrationManifestError(
+            "checks.json must contain exactly schemaVersion, preconditions, and postconditions, "
+            "with optional rehearsalMetrics"
+        )
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise MigrationManifestError("checks.json schemaVersion must be integer 1 or 2")
+    if schema_version == 1 and set(raw) != base_fields:
+        raise MigrationManifestError("checks.json schemaVersion 1 must retain its exact original fields")
+    if schema_version == 2 and set(raw) - base_fields - {"rehearsalMetrics"}:
+        raise MigrationManifestError("checks.json schemaVersion 2 contains unsupported fields")
     parsed: dict[str, tuple[QueryCheck, ...]] = {}
     for field in ("preconditions", "postconditions"):
         values = raw[field]
@@ -446,12 +469,47 @@ def _load_check_file(path: Path) -> tuple[tuple[QueryCheck, ...], tuple[QueryChe
             identifiers.add(check_id)
             checks.append(QueryCheck(check_id, sql, expected))
         parsed[field] = tuple(checks)
-    return parsed["preconditions"], parsed["postconditions"], source
+    metrics: list[RehearsalMetric] = []
+    if "rehearsalMetrics" in raw:
+        values = raw["rehearsalMetrics"]
+        if schema_version != 2 or not isinstance(values, list):
+            raise MigrationManifestError("checks.json rehearsalMetrics must be an array in schemaVersion 2")
+        if len(values) > 50:
+            raise MigrationManifestError("checks.json may contain at most 50 rehearsal metrics")
+        identifiers: set[str] = set()
+        safe_integer = 9007199254740991
+        expected_fields = {"id", "sql", "expectedBefore", "expectedAfter", "expectedRollback"}
+        for index, value in enumerate(values, start=1):
+            if not isinstance(value, dict) or set(value) != expected_fields:
+                raise MigrationManifestError(
+                    f"checks.json rehearsalMetrics[{index}] must contain exactly "
+                    "id, sql, expectedBefore, expectedAfter, and expectedRollback"
+                )
+            metric_id, sql = value["id"], value["sql"]
+            if not isinstance(metric_id, str) or CHECK_ID_RE.fullmatch(metric_id) is None:
+                raise MigrationManifestError(f"checks.json rehearsalMetrics[{index}] has an invalid metric id")
+            if metric_id in identifiers:
+                raise MigrationManifestError(f"checks.json rehearsalMetrics contains duplicate id {metric_id!r}")
+            if not isinstance(sql, str):
+                raise MigrationManifestError(f"checks.json metric {metric_id} SQL must be a string")
+            expected_values = tuple(value[key] for key in ("expectedBefore", "expectedAfter", "expectedRollback"))
+            if any(type(expected) is not int or abs(expected) > safe_integer for expected in expected_values):
+                raise MigrationManifestError(
+                    f"checks.json metric {metric_id} expected values must be safe JSON integers"
+                )
+            validate_check_query(sql)
+            identifiers.add(metric_id)
+            metrics.append(RehearsalMetric(metric_id, sql, *expected_values))
+    return parsed["preconditions"], parsed["postconditions"], tuple(metrics), source
 
 
 def _validate_folder_entries(folder: Path) -> tuple[MigrationFile, ...]:
     files: list[MigrationFile] = []
     found_sequences: dict[int, str] = {}
+    try:
+        read_attempt_events(folder)
+    except MigrationAttemptError as exc:
+        raise MigrationManifestError(f"migration attempt evidence is invalid: {exc}") from exc
     for path in folder.iterdir():
         if path.is_symlink():
             raise MigrationManifestError(f"symbolic links are not allowed in migration folders: {path.name}")
@@ -465,6 +523,10 @@ def _validate_folder_entries(folder: Path) -> tuple[MigrationFile, ...]:
             environment = path.name[len("status.") : -len(".json")]
             if environment not in STATUS_ENVIRONMENTS:
                 raise MigrationManifestError(f"unsupported migration status environment: {path.name}")
+            continue
+        if path.name.startswith("attempt-event."):
+            if EVENT_FILENAME_RE.fullmatch(path.name) is None:
+                raise MigrationManifestError(f"unsupported migration attempt event filename: {path.name}")
             continue
         match = SQL_FILE_RE.fullmatch(path.name)
         if match is None:
@@ -522,7 +584,7 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
     if not schemas:
         raise MigrationManifestError(f"migration folder is not directly under migrations/ or migrations/<SCHEMA>/: {_printable(relative_folder)}")
     files = _validate_folder_entries(folder)
-    preconditions, postconditions, checks_source = _load_check_file(folder / "checks.json")
+    preconditions, postconditions, rehearsal_metrics, checks_source = _load_check_file(folder / "checks.json")
     checks_sha256 = hashlib.sha256(checks_source).hexdigest()
     payload = {
         "files": [{"name": file.name, "sequence": file.sequence, "sha256": file.sha256} for file in files],
@@ -542,6 +604,7 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
         checks_sha256=checks_sha256,
         payload_digest=digest,
         schema=schemas[0],
+        rehearsal_metrics=rehearsal_metrics,
     )
 
 

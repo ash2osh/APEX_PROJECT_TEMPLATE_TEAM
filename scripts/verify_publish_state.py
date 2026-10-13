@@ -14,39 +14,18 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.record_export_state import AppState, marker_payload, read_state
+from scripts.record_export_state import AppState, marker_payload, read_apex_release, read_state
+from scripts.path_utils import relative_to_root
+from scripts.source_provenance import (
+    VersionPair,
+    describe_version_pair,
+    preserve_source_provenance,
+    read_source_provenance,
+)
 from scripts.stamp_publish_version import PUBLISH_TAG, VERSION_LINE, parse_version
 from scripts.validate_app_source import validate_app_source
-from scripts.deployment_descriptor import observe_deployment, read_descriptor, source_projection, remap_subscription_source
-from scripts.apexlang_normalization import normalize_apexlang
-
-
-IGNORED_SOURCE_PATHS = {"apex-team-export.json"}
-# SQLcl's starter application (`apex generate`) ships this script with no content, and APEX
-# leaves an empty script out of an export, so the re-export of a correct import lacks it. Only
-# the empty file may be missing: one with content must still come back byte for byte.
-EMPTY_MAY_BE_MISSING = {Path("supporting-objects/deinstall-script.sql")}
-
-
-class VerificationError(ValueError):
-    def __init__(self, message: str, cosmetic_files: list[str] | None = None):
-        super().__init__(message)
-        self.cosmetic_files = cosmetic_files or []
-
-
-def source_files(root: Path) -> dict[Path, Path]:
-    if not root.is_dir():
-        raise ValueError(f"APEXlang directory does not exist: {root}")
-    files: dict[Path, Path] = {}
-    for path in root.rglob("*"):
-        relative = path.relative_to(root)
-        if relative.parts[0] == "deployments" or relative.as_posix() in IGNORED_SOURCE_PATHS:
-            continue
-        if path.is_symlink():
-            raise ValueError(f"symbolic links are not supported in an APEXlang export: {path}")
-        if path.is_file():
-            files[relative] = path
-    return files
+from scripts.deployment_descriptor import observe_deployment, read_descriptor
+from scripts.apexlang_diff import compare_source_files, display_path
 
 
 def publish_tag(application: Path) -> str | None:
@@ -75,38 +54,18 @@ def replaced_import_hint(source_dir: Path, exported_dir: Path) -> str:
     )
 
 
-def first_differing_line(left: bytes, right: bytes) -> int:
-    left_lines, right_lines = left.splitlines(), right.splitlines()
-    for index, (left_line, right_line) in enumerate(zip(left_lines, right_lines, strict=False), start=1):
-        if left_line != right_line:
-            return index
-    if len(left_lines) != len(right_lines):
-        return min(len(left_lines), len(right_lines)) + 1
-    return 1
+class VerificationError(ValueError):
+    def __init__(self, message: str, cosmetic_files: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.cosmetic_files = cosmetic_files
 
 
-def normalized_content(relative: Path, content: bytes) -> bytes:
-    if relative.suffix != ".apx":
-        return content
-    try:
-        return normalize_apexlang(content)
-    except UnicodeDecodeError:
-        return content
-
-
-def _file_set_mismatch(source_files_by_path: dict[Path, Path], exported_files_by_path: dict[Path, Path]) -> list[str]:
-    details = []
-    missing = sorted(
-        path
-        for path in source_files_by_path.keys() - exported_files_by_path.keys()
-        if not (path in EMPTY_MAY_BE_MISSING and source_files_by_path[path].stat().st_size == 0)
+def _describe_mismatches(mismatches) -> str:
+    return ", ".join(
+        display_path(item.path)
+        + (f" (line {item.first_differing_line})" if item.first_differing_line else "")
+        for item in mismatches
     )
-    unexpected = sorted(exported_files_by_path.keys() - source_files_by_path.keys())
-    if missing:
-        details.append("missing from re-export: " + ", ".join(path.as_posix() for path in missing))
-    if unexpected:
-        details.append("unexpected in re-export: " + ", ".join(path.as_posix() for path in unexpected))
-    return details
 
 
 def verify_source_bytes(
@@ -115,46 +74,37 @@ def verify_source_bytes(
     deployment: dict | None = None,
     *,
     strict_bytes: bool = False,
-) -> list[str]:
-    source_files_by_path = source_files(source_dir)
-    exported_files_by_path = source_files(exported_dir)
-    file_set_details = _file_set_mismatch(source_files_by_path, exported_files_by_path)
-    cosmetic: list[str] = []
-    differences: list[str] = []
-    for relative in sorted(source_files_by_path):
-        source_path = source_files_by_path[relative]
-        if relative not in exported_files_by_path:
-            continue  # an empty script the export leaves out, accepted above
-        expected_bytes, observed_bytes = source_path.read_bytes(), exported_files_by_path[relative].read_bytes()
-        if deployment is not None and relative == Path("application.apx"):
-            expected_bytes = source_projection(expected_bytes, deployment)
-            observed_bytes = source_projection(observed_bytes, deployment)
-        if deployment is not None and relative.suffix == '.apx':
-            expected_bytes = remap_subscription_source(expected_bytes, deployment)
-        if expected_bytes == observed_bytes:
-            continue
-        expected_normalized = normalized_content(relative, expected_bytes)
-        observed_normalized = normalized_content(relative, observed_bytes)
-        name = relative.as_posix()
-        if expected_normalized == observed_normalized:
-            cosmetic.append(name)
-            if strict_bytes:
-                differences.append(f"{name} (line {first_differing_line(expected_bytes, observed_bytes)}, normalized equivalent)")
-        else:
-            differences.append(f"{name} (line {first_differing_line(expected_normalized, observed_normalized)})")
+) -> tuple[str, ...]:
+    mismatches, cosmetic = compare_source_files(
+        source_dir,
+        exported_dir,
+        deployment,
+        normalize_apx=not strict_bytes,
+    )
+    if not mismatches:
+        return cosmetic
 
-    for required in (Path("application.apx"), Path(".apex/apexlang.json")):
-        if required not in source_files_by_path:
-            raise ValueError(f"required APEXlang source file is missing: {required.as_posix()}")
+    required = [item for item in mismatches if item.kind == "required-missing"]
+    missing = [item.path for item in mismatches if item.kind == "missing"]
+    unexpected = [item.path for item in mismatches if item.kind == "unexpected"]
+    changed = [item for item in mismatches if item.kind == "bytes"]
+    details = []
+    if missing:
+        details.append("missing from re-export: " + ", ".join(display_path(path) for path in missing))
+    if unexpected:
+        details.append("unexpected in re-export: " + ", ".join(display_path(path) for path in unexpected))
+    if required:
+        details.append("required source missing: " + ", ".join(display_path(item.path) for item in required))
+    if changed:
+        details.append("byte differences: " + _describe_mismatches(changed))
 
-    if file_set_details or differences:
-        parts = []
-        if file_set_details:
-            parts.append("APEXlang source file set does not match the post-import re-export (" + "; ".join(file_set_details) + ")")
-        if differences:
-            parts.append("APEXlang source bytes do not match the post-import re-export: " + ", ".join(differences))
-        raise VerificationError("; ".join(parts), cosmetic)
-    return cosmetic
+    if missing or unexpected:
+        prefix = "APEXlang source file set does not match the post-import re-export"
+    elif required:
+        prefix = "required APEXlang source file is missing"
+    else:
+        prefix = "APEXlang source bytes do not match the post-import re-export"
+    raise VerificationError(prefix + ": " + "; ".join(details), cosmetic)
 
 
 def verify_stable_reexport(
@@ -166,45 +116,40 @@ def verify_stable_reexport(
     second_before: Path,
     second_after: Path,
     deployment: dict | None = None,
-) -> list[str]:
-    first_files, second_files = source_files(first_dir), source_files(second_dir)
-    file_set_details = _file_set_mismatch(first_files, second_files)
-    differences: list[str] = []
-    cosmetic: list[str] = []
-    for relative in sorted(first_files.keys() & second_files.keys()):
-        left, right = first_files[relative].read_bytes(), second_files[relative].read_bytes()
-        if deployment is not None and relative == Path("application.apx"):
-            left, right = source_projection(left, deployment), source_projection(right, deployment)
-        if deployment is not None and relative.suffix == ".apx":
-            left = remap_subscription_source(left, deployment)
-            right = remap_subscription_source(right, deployment)
-        if left == right:
-            continue
-        left_normalized, right_normalized = normalized_content(relative, left), normalized_content(relative, right)
-        if left_normalized == right_normalized:
-            cosmetic.append(relative.as_posix())
-        else:
-            differences.append(f"{relative.as_posix()} (line {first_differing_line(left_normalized, right_normalized)})")
+    *,
+    strict_bytes: bool = False,
+) -> tuple[str, ...]:
+    mismatches, cosmetic = compare_source_files(
+        first_dir,
+        second_dir,
+        deployment,
+        normalize_apx=not strict_bytes,
+        remap_observed_subscription=True,
+    )
+    problems = []
+    if mismatches:
+        file_set = [item for item in mismatches if item.kind in {"missing", "unexpected"}]
+        changed = [item for item in mismatches if item.kind in {"bytes", "required-missing"}]
+        if file_set:
+            problems.append("file set changed: " + _describe_mismatches(file_set))
+        if changed:
+            problems.append("source changed: " + _describe_mismatches(changed))
 
     first_revision = read_verified_revision(app_id, first_before, first_after)
     second_revision = read_verified_revision(app_id, second_before, second_after)
     _, first_end = read_state(first_after)
     second_start_state, second_start = read_state(second_before)
     if first_revision != second_revision:
-        differences.append("application revision changed between re-exports")
+        problems.append("application revision changed between re-exports")
     if second_start < first_end:
-        differences.append("database time moved backwards between post-import re-exports")
+        problems.append("database time moved backwards between post-import re-exports")
     if second_start_state != second_revision:
-        differences.append("second re-export revision does not match its initial observation")
+        problems.append("second re-export revision does not match its initial observation")
 
-    if file_set_details or differences:
-        detail = []
-        if file_set_details:
-            detail.append("file set changed: " + "; ".join(file_set_details))
-        if differences:
-            detail.extend(differences)
+    if problems:
         raise VerificationError(
-            f"post-import APEXlang source was not stable across the second post-import re-export: {', '.join(detail)}",
+            "post-import APEXlang source was not stable across the second post-import re-export: "
+            + "; ".join(problems),
             cosmetic,
         )
     return cosmetic
@@ -250,7 +195,15 @@ def advance_baseline(app_id: int, source_dir: Path, revision: AppState) -> None:
     # source additionally records raw content evidence required by partial mode.
     metadata = json.loads((source_dir / ".apex/apexlang.json").read_text(encoding="utf-8"))
     canonical_source = source_dir if isinstance(metadata, dict) and "mmdVersion" in metadata else None
-    payload = json.dumps(marker_payload(app_id, revision, canonical_source), indent=2) + "\n"
+    payload = json.dumps(
+        marker_payload(
+            app_id,
+            revision,
+            canonical_source,
+            source_provenance=preserve_source_provenance(source_dir),
+        ),
+        indent=2,
+    ) + "\n"
     descriptor, temporary_name = tempfile.mkstemp(prefix=".apex-team-export.", suffix=".tmp", dir=source_dir)
     temporary_path = Path(temporary_name)
     try:
@@ -267,6 +220,69 @@ def advance_baseline(app_id: int, source_dir: Path, revision: AppState) -> None:
         raise
 
 
+def _target_apex_release(before_file: Path | None, after_file: Path | None) -> str | None:
+    if before_file is None and after_file is None:
+        return None
+    if before_file is None or after_file is None:
+        raise ValueError("both target APEX release observations are required")
+    before_release, before_time = read_apex_release(before_file)
+    after_release, after_time = read_apex_release(after_file)
+    if before_release != after_release:
+        raise ValueError("target APEX release changed during post-import export; rerun verification")
+    if datetime.fromisoformat(before_time.replace("Z", "+00:00")) > datetime.fromisoformat(after_time.replace("Z", "+00:00")):
+        raise ValueError("database UTC time moved backwards during post-import export")
+    return after_release
+
+
+def _publish_summary(source_dir: Path, target_release: str | None, source_verified: bool) -> dict:
+    provenance = read_source_provenance(source_dir)
+    pair = VersionPair(
+        provenance.source_release if provenance.status == "verified" else None,
+        target_release,
+    )
+    return {
+        "schemaVersion": 1,
+        "sourceVerified": source_verified,
+        "lifecycleStatus": "unavailable",
+        "sourceProvenanceStatus": provenance.status,
+        "sourceApexRelease": provenance.source_release if provenance.status == "verified" else None,
+        "targetApexRelease": target_release,
+        "versionPair": describe_version_pair(pair),
+    }
+
+
+def _write_publish_summary(path: Path, repo_root: Path, payload: dict) -> None:
+    root = repo_root.resolve(strict=True)
+    output = Path(os.path.abspath(path if path.is_absolute() else root / path))
+    try:
+        relative = relative_to_root(output, root)
+    except (OSError, ValueError) as error:
+        raise ValueError("publish verification summary must remain inside the repository") from error
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("publish verification summary path contains a symbolic link")
+    if output.exists() and output.is_symlink():
+        raise ValueError("publish verification summary must not be a symbolic link")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app_id", type=int)
@@ -276,18 +292,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("after_file", type=Path)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--record-baseline", action="store_true")
-    parser.add_argument("--strict-bytes", action="store_true", help="require byte-for-byte APEXlang content equality")
     parser.add_argument("--deployment-file", type=Path)
     parser.add_argument("--deployment-state", type=Path)
+    parser.add_argument("--strict-bytes", action="store_true", help="require byte-for-byte APEXlang content equality")
     parser.add_argument("--stability-export-dir", type=Path)
     parser.add_argument("--stability-before-file", type=Path)
     parser.add_argument("--stability-after-file", type=Path)
     parser.add_argument("--stability-deployment-state", type=Path)
+    parser.add_argument("--target-apex-release-before", type=Path)
+    parser.add_argument("--target-apex-release-after", type=Path)
+    parser.add_argument("--stability-target-apex-release-before", type=Path)
+    parser.add_argument("--stability-target-apex-release-after", type=Path)
+    parser.add_argument("--summary-path", type=Path)
     args = parser.parse_args(argv)
     if args.app_id < 1:
         parser.error("app_id must be a positive integer")
 
+    source_dir: Path | None = None
+    target_release: str | None = None
+    summary: dict | None = None
+    cosmetic_files: list[str] = []
     try:
+        target_release = _target_apex_release(args.target_apex_release_before, args.target_apex_release_after)
         source_dir = validate_app_source(args.repo_root, args.source_dir)
         exported_dir = args.exported_dir.resolve(strict=True)
         stability_args = (args.stability_export_dir, args.stability_before_file, args.stability_after_file)
@@ -295,15 +321,32 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("all second post-import re-export paths are required together")
         if args.record_baseline and args.stability_export_dir is None:
             raise ValueError("baseline recording requires a stable second post-import re-export")
+        first_release_files = (args.target_apex_release_before, args.target_apex_release_after)
+        stable_release_files = (
+            args.stability_target_apex_release_before,
+            args.stability_target_apex_release_after,
+        )
+        has_stability_export = args.stability_export_dir is not None
+        has_first_release = any(value is not None for value in first_release_files)
+        has_stable_release = any(value is not None for value in stable_release_files)
+        if has_stability_export and has_first_release != has_stable_release:
+            raise ValueError("both post-import exports require APEX release observations")
+        if not has_stability_export and has_stable_release:
+            raise ValueError("second APEX release observations require a second post-import export")
+        stable_target_release = _target_apex_release(*stable_release_files)
+        if has_stability_export and target_release is not None and stable_target_release != target_release:
+            raise ValueError("target APEX release changed between post-import exports")
+
         deployment = None
         if args.deployment_file is not None:
             deployment = read_descriptor(args.deployment_file, args.app_id)
             if args.deployment_state is None:
                 raise ValueError("effective deployment observation is required")
             observe_deployment(args.deployment_state, exported_dir / "deployments/default.json", deployment)
-        cosmetic_files = []
         try:
-            cosmetic_files.extend(verify_source_bytes(source_dir, exported_dir, deployment, strict_bytes=args.strict_bytes))
+            cosmetic_files.extend(
+                verify_source_bytes(source_dir, exported_dir, deployment, strict_bytes=args.strict_bytes)
+            )
             if args.stability_export_dir is not None:
                 stability_dir = args.stability_export_dir.resolve(strict=True)
                 if deployment is not None:
@@ -324,23 +367,46 @@ def main(argv: list[str] | None = None) -> int:
                         args.stability_before_file,
                         args.stability_after_file,
                         deployment,
+                        strict_bytes=args.strict_bytes,
                     )
                 )
-        except ValueError as mismatch:
-            hint = replaced_import_hint(source_dir, exported_dir)
-            raise VerificationError(f"{mismatch}{hint}", getattr(mismatch, "cosmetic_files", cosmetic_files)) from mismatch
+        except VerificationError as mismatch:
+            cosmetic_files.extend(mismatch.cosmetic_files)
+            source_provenance = read_source_provenance(source_dir)
+            pair = VersionPair(
+                source_provenance.source_release if source_provenance.status == "verified" else None,
+                target_release,
+            )
+            raise VerificationError(
+                f"{mismatch}{replaced_import_hint(source_dir, exported_dir)}; "
+                f"version context: {describe_version_pair(pair)} "
+                f"(source provenance {source_provenance.status})",
+                tuple(cosmetic_files),
+            ) from mismatch
         revision = read_verified_revision(args.app_id, args.before_file, args.after_file)
+        summary = _publish_summary(source_dir, target_release, True)
+        if args.summary_path is not None:
+            _write_publish_summary(args.summary_path, args.repo_root, summary)
         if args.record_baseline:
             advance_baseline(args.app_id, source_dir, revision)
     except (OSError, ValueError) as exc:
         if isinstance(exc, VerificationError) and exc.cosmetic_files:
             print("APEXlang cosmetic-only differences: " + ", ".join(sorted(set(exc.cosmetic_files))))
+        if args.summary_path is not None and source_dir is not None:
+            try:
+                _write_publish_summary(args.summary_path, args.repo_root, _publish_summary(source_dir, target_release, False))
+            except (OSError, ValueError):
+                pass
         print(f"publish verification error: {exc}", file=sys.stderr)
         return 1
 
+    if summary is None:
+        print("publish verification error: source verification summary is unavailable", file=sys.stderr)
+        return 1
     if cosmetic_files:
         print("APEXlang cosmetic-only differences: " + ", ".join(sorted(set(cosmetic_files))))
     print(f"APEX_PUBLISH_SOURCE_VERIFIED:{args.app_id}")
+    print(f"APEX_VERSION_PAIR:{summary['versionPair']} (source provenance {summary['sourceProvenanceStatus']})")
     return 0
 
 

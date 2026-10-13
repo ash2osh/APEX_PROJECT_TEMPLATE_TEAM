@@ -270,7 +270,19 @@ def main(argv=None):
         print('lifecycle: '+str(exc),file=sys.stderr); return 2
     finally:
         if args.summary_path:
-            args.summary_path.write_text(json.dumps({'schemaVersion':1,'sourceVerified':True,'lifecycleStatus':report['status']})+'\n',encoding='utf-8')
+            summary={'schemaVersion':1,'sourceVerified':False,'lifecycleStatus':report['status']}
+            try:
+                if args.summary_path.is_file() and not args.summary_path.is_symlink():
+                    previous=json.loads(args.summary_path.read_text(encoding='utf-8'))
+                    if isinstance(previous,dict) and previous.get('schemaVersion')==1:
+                        summary['sourceVerified']=previous.get('sourceVerified') is True
+                        for key in ('sourceProvenanceStatus','sourceApexRelease','targetApexRelease','versionPair'):
+                            value=previous.get(key)
+                            if (value is None and key in ('sourceApexRelease','targetApexRelease')) or isinstance(value,str):
+                                summary[key]=value
+            except (OSError,ValueError,UnicodeError):
+                pass
+            args.summary_path.write_text(json.dumps(summary,sort_keys=True)+'\n',encoding='utf-8')
 
 
 if __name__=='__main__': raise SystemExit(main())

@@ -46,6 +46,7 @@ What each folder is for:
 | `migrations/` | Dated SQL changes you write, one folder each | you |
 | `app_context/` | Notes about each app, for AI assistants | you |
 | `.env` | Literal configuration and SQLcl saved connection names (no credentials) | you; review and keep it in your own Git repository |
+| `TODO.md` | Project tasks and sanitized inherited-template feedback history | you; template upgrades preserve it |
 | `scripts/`, operational `docs/`, `.agents/` | Command implementations and guidance | template upgrades |
 | Inherited `tests/` and `.github/` | Original-template maintenance and CI | remove from a new downstream clone after recording the upgrade baseline |
 
@@ -177,6 +178,8 @@ Explicitly preserve:
 - Project-owned plans and specs in `docs/superpowers/plans/` and `docs/superpowers/specs/`
 - Durable project documentation (`PROJECT.md`, `docs/`)
 - Project-specific agent instructions and rules (`AGENTS.project.md`, `.agents/rules/project.md`)
+- Project task and upstream-feedback history (`TODO.md`); use the
+  [template feedback guide](template-feedback.md) for inherited defects
 - Operational configuration (`.env`), application source (`apps/`), and migrations (`migrations/`)
 - Migration receipts and recovery evidence
 
@@ -429,6 +432,10 @@ The precondition below fails when the table is missing, which is what you want.
 `checks.json` (each check is a query that must return exactly one row containing
 the number `1`; `expected` is always `1`):
 
+This example uses the original schema version 1. Optional schema version 2 can
+add rehearsal-only scalar metrics; those use separate expected values and run
+only with `migrate --rehearse`. See [migration rules](migration-rules.md#folder-and-file-names).
+
 ```json
 {
   "schemaVersion": 1,
@@ -477,6 +484,7 @@ revision folder instead (`...-r002`). Commit the folder.
 | see how two environments differ | `scripts/team.sh compare-schema --from dev --to staging --object <NAME>` |
 | release to staging or production | `scripts/team.sh deploy <app-id> --env staging` |
 | get the latest template scripts | `scripts/team.sh upgrade-template --dry-run` |
+| see local template-file changes | `scripts/team.sh template-status` |
 
 ## Next steps
 

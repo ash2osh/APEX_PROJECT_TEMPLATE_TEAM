@@ -88,6 +88,12 @@ release only the reconciled owner's lock with `app-unlock`. A verified database
 write followed by a local replacement refusal retains its canonical staging
 and receipt for recovery; it does not restore the database.
 
+Whole-app post-import comparison remains byte-exact after the existing
+deployment projections. A mismatch reports all relative file paths and the
+first differing line where available, without echoing source contents. Selected
+page success does not bypass mismatches in unrelated files from the fresh live
+snapshot.
+
 Matching source bytes includes binary static files and
 `generated-artifacts/translations.sql`. Do not edit generated artifacts. Page
 alias changes refuse before import because they can rename the canonical file;

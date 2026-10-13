@@ -63,6 +63,8 @@ COMPARE_ENV_NOT_COMPARED = (
     "Sequence runtime position, identity values, table data, comments, storage placement, optimizer statistics, and exact source bytes are not compared.",
     "Column default expressions, function-based index expressions, and nested role grants are not compared.",
     "Stored source and view hashes ignore line 1; Oracle ORA_HASH collisions are possible.",
+    "ORDS metadata beyond schema mapping/status/auth, module status/prefix/page size, template URI/priority, and handler method/source/MIME/page size is not compared.",
+    "In the inspected ORDS 26.3 dictionaries, module type and handler format columns are absent; other ORDS releases with different metadata require separate qualification.",
 )
 COMPARE_ENV_FIELDS = {
     "tables": ("temporary", "partitioned", "iot_type", "nested", "secondary", "compression", "logging"),
@@ -80,7 +82,12 @@ COMPARE_ENV_FIELDS = {
     "system-privileges": ("admin_option",),
     "roles": ("admin_option", "default_role"),
     "network-aces": ("grant_type", "inverted_principal", "ace_order", "start_date", "end_date"),
-    "ords": ("uri_prefix", "module_type", "uri_template", "method", "source_type", "source_hash", "line_count", "status", "enabled", "url_mapping_type", "url_mapping_pattern", "auto_rest_auth", "priority", "items_per_page", "mime_type", "format"),
+    "ords": (
+        "url_mapping_type", "url_mapping_pattern", "mapping_complete",
+        "uri_prefix", "items_per_page", "status", "uri_template", "priority",
+        "method", "source_type", "source_hash", "line_count", "source_length", "mimes_allowed",
+        "auto_rest_auth",
+    ),
     "java-mle": ("status", "language"),
     "installed-options": ("value", "status"),
     "versions": ("version",),
@@ -517,6 +524,23 @@ def render_report(report: ComparisonReport, output_format: str) -> str:
     return "\n".join(lines)
 
 
+def _validate_page_counts(label: str, pages: object, row_count: int, page_size: int, max_rows: int) -> None:
+    if not isinstance(pages, list) or not pages:
+        raise CatalogError(f"{label} has no page-completion evidence")
+    if any(type(count) is not int or count < 0 or count > page_size for count in pages):
+        raise CatalogError(f"{label} contains an invalid page size")
+    if any(count != page_size for count in pages[:-1]):
+        raise CatalogError(f"{label} has a gap or short page before the final page")
+    if pages[-1] == page_size:
+        raise CatalogError(f"{label} has no short final page to prove end of results")
+    if sum(pages) != row_count:
+        raise CatalogError(f"{label} page counts do not match its rows")
+    if row_count > max_rows:
+        raise CatalogError(f"{label} exceeds its {max_rows}-row cap")
+    if row_count == max_rows and pages[-1] != 0:
+        raise CatalogError(f"{label} reached its {max_rows}-row cap without proving end of results")
+
+
 def parse_environment_catalog_output(
     output: str,
     *,
@@ -586,20 +610,19 @@ def parse_environment_catalog_output(
             raise CatalogError(f"compare-env {section} catalog reached its {max_rows}-row cap")
         if state.get("complete") is True:
             pages = state.get("pages")
-            if not isinstance(pages, list) or not pages:
-                raise CatalogError(f"compare-env {section} has no page-completion evidence")
-            if any(type(count) is not int or count < 0 or count > page_size for count in pages):
-                raise CatalogError(f"compare-env {section} contains an invalid page size")
-            if any(count != page_size for count in pages[:-1]):
-                raise CatalogError(f"compare-env {section} has a gap or short page before the final page")
-            if pages[-1] == page_size:
-                raise CatalogError(f"compare-env {section} has no short final page to prove end of results")
-            if sum(pages) != len(rows):
-                raise CatalogError(f"compare-env {section} page counts do not match its rows")
-            if len(rows) > max_rows:
-                raise CatalogError(f"compare-env {section} exceeds its {max_rows}-row cap")
-            if len(rows) == max_rows and pages[-1] != 0:
-                raise CatalogError(f"compare-env {section} reached its {max_rows}-row cap without proving end of results")
+            _validate_page_counts(f"compare-env {section}", pages, len(rows), page_size, max_rows)
+            if section == "ords":
+                expected_kinds = {"schema", "module", "template", "handler"}
+                kind_pages = state.get("kindPages")
+                if not isinstance(kind_pages, dict) or set(kind_pages) != expected_kinds:
+                    raise CatalogError("compare-env ords is missing per-kind pagination evidence")
+                if any(row.get("kind") not in expected_kinds for row in rows):
+                    raise CatalogError("compare-env ords contains a row with an unsupported kind")
+                for kind in sorted(expected_kinds):
+                    kind_rows = [row for row in rows if row.get("kind") == kind]
+                    _validate_page_counts(
+                        f"compare-env ords {kind}", kind_pages[kind], len(kind_rows), page_size, max_rows,
+                    )
         elif section not in unavailable:
             raise CatalogError(f"compare-env {section} capture is incomplete")
         rows_by_section[section] = rows
@@ -869,6 +892,50 @@ def compare_environment_catalogs(
             continue
         left = list(source_sections.get(section, []))
         right = list(target_sections.get(section, []))
+        if section == "ords":
+            source_fingerprint_blockers = []
+            for side, rows in (("source", left), ("target", right)):
+                for row in rows:
+                    if row.get("kind") == "schema" and row.get("mapping_complete") is not True:
+                        source_fingerprint_blockers.append({
+                            "section": section,
+                            "side": side,
+                            "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
+                            "message": "ORDS schema URL mapping evidence is incomplete",
+                        })
+                    if row.get("kind") != "handler":
+                        continue
+                    source_hash = row.get("source_hash")
+                    line_count = row.get("line_count")
+                    source_length = row.get("source_length")
+                    numeric_values = (source_hash, line_count, source_length)
+                    valid_integers = all(
+                        not isinstance(value, bool)
+                        and isinstance(value, (int, Decimal))
+                        and value >= 0
+                        and (not isinstance(value, Decimal) or value.is_finite() and value == value.to_integral_value())
+                        for value in numeric_values
+                    )
+                    if (
+                        row.get("source_complete") is not True
+                        or not valid_integers
+                        or source_hash > 4_294_967_295
+                        or (source_length == 0) != (line_count == 0)
+                        or (source_length == 0 and source_hash != 0)
+                    ):
+                        source_fingerprint_blockers.append({
+                            "section": section,
+                            "side": side,
+                            "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
+                            "message": "ORDS handler source fingerprint is missing or incomplete",
+                        })
+            if source_fingerprint_blockers:
+                blockers.extend(source_fingerprint_blockers)
+                section_status[section] = {
+                    "status": "incomplete", "sourceRows": len(left), "targetRows": len(right),
+                }
+                not_compared.append("ORDS rows with incomplete schema mapping or handler source evidence were not compared.")
+                continue
         if section == "object-grants" and prefixes and not any(prefix in {"*", "%"} for prefix in prefixes):
             normalized_prefixes = tuple(prefix.upper() for prefix in prefixes)
             left = [row for row in left if str(row.get("object_name", "")).upper().startswith(normalized_prefixes)]
@@ -980,7 +1047,10 @@ def emit_dba_script(report: Mapping) -> str:
             and str(row.get("admin_option", "NO")).upper() == "YES"
             and str((difference.get("target") or {}).get("admin_option", "NO")).upper() != "YES"
         )
-        ords_enable = section == "ords" and row.get("kind") == "schema" and row.get("enabled") is True
+        ords_enable = (
+            section == "ords" and row.get("kind") == "schema"
+            and str(row.get("status", "")).upper() == "ENABLED"
+        )
         if not missing and not grant_upgrade and not admin_upgrade and not ords_enable:
             continue
         if section == "object-grants" and (missing or grant_upgrade):
@@ -1036,14 +1106,24 @@ def emit_dba_script(report: Mapping) -> str:
                 "/",
             ))
         elif ords_enable:
+            mapping_type = row.get("url_mapping_type")
+            mapping_pattern = row.get("url_mapping_pattern")
+            auto_rest_auth = str(row.get("auto_rest_auth", "")).upper()
+            auto_rest_auth_enabled = {
+                "Y": True, "YES": True, "ENABLED": True,
+                "N": False, "NO": False, "DISABLED": False,
+            }.get(auto_rest_auth)
+            if not row.get("mapping_complete") or not mapping_type or not mapping_pattern or auto_rest_auth_enabled is None:
+                statements.append("-- Manual review required: incomplete ORDS URL mapping or authentication metadata was not emitted.")
+                continue
             statements.extend((
                 "BEGIN",
                 "  ORDS.ENABLE_SCHEMA(",
                 "    p_enabled => TRUE,",
                 f"    p_schema => {_sql_literal(target_schema)},",
-                f"    p_url_mapping_type => {_sql_literal(str(row.get('url_mapping_type', 'BASE_PATH')))},",
-                f"    p_url_mapping_pattern => {_sql_literal(str(row.get('url_mapping_pattern', target_schema.lower())))},",
-                f"    p_auto_rest_auth => {'TRUE' if row.get('auto_rest_auth') is True else 'FALSE'});",
+                f"    p_url_mapping_type => {_sql_literal(str(mapping_type))},",
+                f"    p_url_mapping_pattern => {_sql_literal(str(mapping_pattern))},",
+                f"    p_auto_rest_auth => {'TRUE' if auto_rest_auth_enabled else 'FALSE'});",
                 "END;",
                 "/",
             ))
@@ -1093,7 +1173,7 @@ def _environment_driver(
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
         "SET TRANSACTION READ ONLY;",
-        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user if not dba_capture else '')} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)} {_environment_hex(data_tables_json)}",
+        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user)} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)} {_environment_hex(data_tables_json)}",
         "SET DEFINE OFF",
         "EXIT SUCCESS ROLLBACK",
         "",

@@ -21,6 +21,11 @@ schema may map to a differently named single staging or production schema.
 Object grants are limited to names matching `TABLES_PREFIXES` or
 `CODE_PREFIXES`; `*` includes every object grant in the selected schema.
 
+View DDL capture calls `DBMS_METADATA.GET_DDL` through a helper that briefly
+allows commit-in-procedure only for that metadata call and restores the
+disabled setting on success or error. The view definition is captured as text
+and is never executed.
+
 ## Sections
 
 | Section | Compared fields |
@@ -40,7 +45,7 @@ Object grants are limited to names matching `TABLES_PREFIXES` or
 | `system-privileges` | Direct system privilege and admin option for the selected schema. |
 | `roles` | Direct role grants, admin option and default-role status for the selected schema. |
 | `network-aces` | Host, ports, principal, principal type, privilege, grant/deny, order and time bounds for the schema, `PUBLIC`, and roles directly granted to the schema. |
-| `ords` | ORDS schema enablement/mapping, module names and metadata, template URI/priority, and handler method/source type/format metadata. |
+| `ords` | Schema parsing name, status, authentication setting and joined URL mapping type/pattern; module name, prefix, status and page size; template URI/priority; handler method, source type, allowed MIME values, page size and full CLOB source fingerprint. Handler source hashes include line 1. |
 | `java-mle` | Java and MLE object names, types and status. |
 | `installed-options` | JVM and Spatial option values and installed component status. |
 | `versions` | Database and APEX versions. |
@@ -49,6 +54,26 @@ Each record is matched by its section key and then compared field by field.
 Reports classify records as `missing on target`, `different`, or `only on
 target`. A `different` item includes the field names that changed in JSON and
 text/Markdown output. An identical record appears under `identical`.
+
+## ORDS dictionary coverage
+
+The ORDS adapter targets the inspected ORDS 26.3 dictionary columns: schema
+mapping values come from `ORDS_URL_MAPPINGS.TYPE/PATTERN`,
+handlers use `SOURCE CLOB` and `MIMES_ALLOWED`, and modules use `NAME`,
+`URI_PREFIX`, `ITEMS_PER_PAGE` and `STATUS`. The schema's numeric mapping ID is
+used only to join the mapping row. The capture does not compare comments,
+hooks, origins, operation settings, ETag metadata, or handler MLE environment.
+`MODULE_TYPE` and handler `FORMAT` are absent from the inspected 26.3
+dictionary, so they are not synthesized. Other ORDS releases need separate
+column and runtime qualification; an unavailable query blocks readiness.
+
+Handler source is never included in the captured JSON. The adapter hashes
+bounded CLOB chunks using Oracle's UCS2 offset units (`LENGTH2`) and checks the
+consumed-unit count plus the encoded-byte bound. `source_length` records
+`DBMS_LOB.GETLENGTH` units, while line count is tracked separately; a null or
+incompletely read CLOB blocks comparison. Empty source is explicit evidence
+with zero length, zero lines, and hash zero. ORA_HASH collisions remain
+possible.
 
 ## Optional DBA connections
 

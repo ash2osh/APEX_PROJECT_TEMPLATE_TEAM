@@ -177,3 +177,40 @@ class LifecycleTests(unittest.TestCase):
                 ])
         self.assertEqual(result, 2)
         self.assertIn('missed restore', output.getvalue())
+
+    def test_lifecycle_summary_preserves_source_verification_and_release_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before_path = root / 'before.json'
+            before_path.write_text(json.dumps(snapshot()), encoding='utf-8')
+            summary_path = root / 'publish-verification.json'
+            source_summary = {
+                'schemaVersion': 1,
+                'sourceVerified': True,
+                'lifecycleStatus': 'unavailable',
+                'sourceProvenanceStatus': 'verified',
+                'sourceApexRelease': '26.2.0',
+                'targetApexRelease': '26.2.0',
+                'versionPair': 'source APEX 26.2.0; target APEX 26.2.0',
+            }
+            summary_path.write_text(json.dumps(source_summary), encoding='utf-8')
+            args = [
+                'verify', '--connection', 'docker-demo', '--expected-user', 'DEMO',
+                '--schema', 'DEMO', '--workspace', 'DEMO', '--environment', 'dev',
+                '--run-dir', str(root / 'after'), '--app-id', '150', '--before', str(before_path),
+                '--summary-path', str(summary_path),
+            ]
+
+            with patch.object(lifecycle, 'verify_after_import', return_value={'status': 'pass'}), \
+                 patch.object(lifecycle, 'require_verified_lifecycle'), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                result = lifecycle.main(args)
+
+            self.assertEqual(result, 0)
+            summary = json.loads(summary_path.read_text(encoding='utf-8'))
+            self.assertEqual(summary['lifecycleStatus'], 'pass')
+            self.assertIs(summary['sourceVerified'], True)
+            self.assertEqual(summary['sourceProvenanceStatus'], 'verified')
+            self.assertEqual(summary['sourceApexRelease'], '26.2.0')
+            self.assertEqual(summary['targetApexRelease'], '26.2.0')
+            self.assertEqual(summary['versionPair'], source_summary['versionPair'])

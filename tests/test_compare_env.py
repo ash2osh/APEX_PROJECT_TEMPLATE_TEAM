@@ -14,8 +14,10 @@ from unittest.mock import patch
 
 import _no_real_sqlcl  # noqa: F401
 from tests import fake_sqlcl
+from scripts.db_targets import Target
 from scripts.compare_schema import (
     COMPARE_ENV_SECTIONS,
+    _environment_driver,
     compare_environment_catalogs,
     emit_dba_script,
     parse_environment_catalog_output,
@@ -44,7 +46,58 @@ def framed(payload: dict) -> str:
     ))
 
 
+def _without_sql_literals(source: str) -> str:
+    """Remove standard and Oracle alternative-quoted SQL literals."""
+    result = []
+    index = 0
+    while index < len(source):
+        if source[index:index + 2].lower() == "q'" and index + 2 < len(source):
+            opening = source[index + 2]
+            closing = {"[": "]", "{": "}", "(": ")", "<": ">"}.get(opening, opening)
+            end = source.find(closing + "'", index + 3)
+            if end < 0:
+                raise AssertionError("unterminated Oracle alternative-quoted literal in test input")
+            result.append(" ")
+            index = end + 2
+            continue
+        if source[index] == "'":
+            index += 1
+            while index < len(source):
+                if source[index] == "'":
+                    if index + 1 < len(source) and source[index + 1] == "'":
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            result.append(" ")
+            continue
+        result.append(source[index])
+        index += 1
+    return "".join(result)
+
+
 class EnvironmentComparisonTests(unittest.TestCase):
+    def test_environment_driver_always_supplies_all_nine_sqlcl_arguments(self) -> None:
+        target = Target("dev", "docker-demo2", "APP_OWNER", "APP_OWNER", "development")
+        with tempfile.TemporaryDirectory() as temporary:
+            for dba_capture in (False, True):
+                with self.subTest(dba_capture=dba_capture):
+                    driver = _environment_driver(
+                        Path(temporary), target, "dev", ("ords",), dba_capture=dba_capture,
+                    )
+                    invocation = next(
+                        line for line in driver.read_text(encoding="utf-8").splitlines()
+                        if line.startswith("@@compare_env_catalog.sql ")
+                    )
+                    arguments = invocation.split()[1:]
+
+                    self.assertEqual(len(arguments), 9, invocation)
+                    self.assertEqual(arguments[0], "4150505F4F574E4552")
+                    self.assertEqual(arguments[1], "4150505F4F574E4552")
+                    self.assertEqual(arguments[2], "646576")
+                    self.assertTrue(all(arguments), invocation)
+
     def test_catalog_fixture_covers_every_documented_section(self) -> None:
         self.assertEqual(
             COMPARE_ENV_SECTIONS,
@@ -97,6 +150,180 @@ class EnvironmentComparisonTests(unittest.TestCase):
         report = compare_environment_catalogs(source, target, sections=("triggers",))
         self.assertEqual(report["differences"], [])
         self.assertEqual(report["identical"][0]["name"], "TRG_AUDIT")
+
+    def test_ords_handler_source_hash_distinguishes_first_line_and_late_body_changes(self) -> None:
+        cases = (
+            ("first line", 101, 102, 4, 4, 45, 45),
+            ("late body", 201, 202, 4, 4, 45, 45),
+        )
+        for label, left_hash, right_hash, left_lines, right_lines, left_length, right_length in cases:
+            with self.subTest(change=label):
+                source = catalog("dev")
+                target = catalog("staging")
+                for payload, fingerprint in (
+                    (source, (left_hash, left_lines, left_length)),
+                    (target, (right_hash, right_lines, right_length)),
+                ):
+                    source_hash, line_count, source_length = fingerprint
+                    payload["sections"]["ords"] = [{
+                        "kind": "handler", "module_name": "app.api", "uri_template": "items/:id",
+                        "method": "GET", "source_type": "plsql/block", "items_per_page": 0,
+                        "mime_type": None, "format": "json", "status": "PUBLISHED",
+                        "source_hash": source_hash, "line_count": line_count,
+                        "source_length": source_length, "source_complete": True,
+                    }]
+                    payload["coverage"]["sections"]["ords"] = {"complete": True, "pages": [1]}
+
+                report = compare_environment_catalogs(source, target, sections=("ords",))
+
+                self.assertEqual(report["exit_code"], 1, report)
+                self.assertEqual(report["differences"][0]["name"], "handler/app.api/items/:id/GET")
+                self.assertIn("source_hash", report["differences"][0]["fields"])
+
+    def test_ords_handler_without_a_complete_source_fingerprint_blocks_readiness(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        handler = {
+            "kind": "handler", "module_name": "app.api", "uri_template": "items/:id",
+            "method": "GET", "source_type": "plsql/block", "items_per_page": 0,
+            "mime_type": None, "format": "json", "status": "PUBLISHED",
+            "source_hash": None, "line_count": None, "source_length": None,
+            "source_complete": False,
+        }
+        for payload in (source, target):
+            payload["sections"]["ords"] = [dict(handler)]
+            payload["coverage"]["sections"]["ords"] = {"complete": True, "pages": [1]}
+
+        report = compare_environment_catalogs(source, target, sections=("ords",))
+
+        self.assertEqual(report["exit_code"], 2, report)
+        self.assertEqual(report["sections"]["ords"]["status"], "incomplete")
+        self.assertTrue(any("source fingerprint" in blocker["message"] for blocker in report["blockers"]))
+
+    def test_ords_all_newline_and_empty_sources_have_distinct_complete_metadata(self) -> None:
+        cases = (
+            ("newline-only", 3_731_211_719, 20_000, 20_000),
+            ("empty", 0, 0, 0),
+        )
+        for label, source_hash, line_count, source_length in cases:
+            with self.subTest(source=label):
+                source = catalog("dev")
+                target = catalog("staging")
+                handler = {
+                    "kind": "handler", "module_name": "app.api", "uri_template": "items/:id",
+                    "method": "GET", "source_type": "plsql/block", "items_per_page": 0,
+                    "mimes_allowed": None, "status": "PUBLISHED",
+                    "source_hash": source_hash, "line_count": line_count,
+                    "source_length": source_length, "source_complete": True,
+                }
+                for payload in (source, target):
+                    payload["sections"]["ords"] = [dict(handler)]
+                    payload["coverage"]["sections"]["ords"] = {"complete": True, "pages": [1]}
+
+                report = compare_environment_catalogs(source, target, sections=("ords",))
+
+                self.assertEqual(report["exit_code"], 0, report)
+                self.assertEqual(report["identical"][0]["name"], "handler/app.api/items/:id/GET")
+
+    def test_ords_handler_cannot_be_complete_with_a_missing_line_count(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        handler = {
+            "kind": "handler", "module_name": "app.api", "uri_template": "items/:id",
+            "method": "GET", "source_type": "plsql/block", "items_per_page": 0,
+            "mimes_allowed": None, "status": "PUBLISHED",
+            "source_hash": 3_731_211_719, "line_count": None,
+            "source_length": 20_000, "source_complete": True,
+        }
+        for payload in (source, target):
+            payload["sections"]["ords"] = [dict(handler)]
+            payload["coverage"]["sections"]["ords"] = {"complete": True, "pages": [1]}
+
+        report = compare_environment_catalogs(source, target, sections=("ords",))
+
+        self.assertEqual(report["exit_code"], 2, report)
+        self.assertEqual(report["sections"]["ords"]["status"], "incomplete")
+        self.assertTrue(any("source fingerprint" in blocker["message"] for blocker in report["blockers"]))
+
+    def test_compare_env_hash_adapter_uses_sql_and_bounds_complete_unicode_clob_reads(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        executable = _without_sql_literals(sql).upper()
+        upper_sql = sql.upper()
+        self.assertIn("PROCEDURE HASH_TEXT_CLOB(", upper_sql)
+        self.assertIn("PROCEDURE ADD_ORDS IS", upper_sql)
+        fingerprint_start = upper_sql.index("PROCEDURE FINGERPRINT(")
+        fingerprint_end = upper_sql.index("PROCEDURE FINGERPRINT_SOURCE(", fingerprint_start)
+        fingerprint = upper_sql[fingerprint_start:fingerprint_end]
+        clob_start = upper_sql.index("PROCEDURE HASH_TEXT_CLOB(")
+        clob_end = upper_sql.index("PROCEDURE APPEND_ROWS(", clob_start)
+        clob_hash = upper_sql[clob_start:clob_end]
+        handler_start = upper_sql.index("PROCEDURE ADD_ORDS IS")
+        handler_end = upper_sql.index("PROCEDURE ADD_BASELINE_DATA IS", handler_start)
+        handler_capture = upper_sql[handler_start:handler_end]
+
+        self.assertNotRegex(fingerprint, r"P_HASH_SUM\s*:=\s*P_HASH_SUM\s*\+\s*ORA_HASH\s*\(")
+        self.assertRegex(fingerprint, r"SELECT\s+ORA_HASH\s*\(.*?\)\s+INTO\s+LINE_HASH\s+FROM\s+DUAL")
+        self.assertNotRegex(executable, r"\bFROM\s+DBA_OBJECTS\b")
+        self.assertIn("DBMS_LOB.SUBSTR(P_SOURCE, C_CHUNK_UNITS, OFFSET_VALUE)", clob_hash)
+        self.assertIn("CONSUMED_UNITS := LENGTH2(CHUNK_VALUE)", clob_hash)
+        self.assertIn("CONSUMED_BYTES := LENGTHB(CHUNK_VALUE)", clob_hash)
+        self.assertIn("OFFSET_VALUE := OFFSET_VALUE + CONSUMED_UNITS", clob_hash)
+        self.assertIn("FINAL_CHARACTER := SUBSTR(CHUNK_VALUE, -1, 1)", clob_hash)
+        self.assertIn("NVL(LENGTH2(REPLACE(CHUNK_VALUE, CHR(10), '')), 0)", clob_hash)
+        self.assertIn(
+            "IF P_SOURCE_HASH IS NULL OR P_LINE_COUNT IS NULL OR P_SOURCE_LENGTH IS NULL THEN",
+            clob_hash,
+        )
+        self.assertNotIn("DBMS_LOB.SUBSTR(P_SOURCE, 1, TEXT_LENGTH)", clob_hash)
+        self.assertIn("SELECT ORA_HASH(CHUNK_VALUE", clob_hash)
+        self.assertIn("DBMS_LOB.GETLENGTH(P_SOURCE)", clob_hash)
+        self.assertIn("HASH_TEXT_CLOB(ORDS_SOURCE", handler_capture)
+        self.assertIn("SOURCE_COMPLETE", handler_capture)
+        self.assertIn("SOURCE_LENGTH", handler_capture)
+        self.assertIn("S.PARSING_SCHEMA", handler_capture)
+        self.assertIn("U.TYPE", handler_capture)
+        self.assertIn("U.PATTERN", handler_capture)
+        self.assertIn("H.MIMES_ALLOWED", handler_capture)
+        self.assertNotIn("M.MODULE_TYPE", handler_capture)
+        self.assertNotIn("H.MIMETYPE", handler_capture)
+        self.assertNotIn("H.FORMAT", handler_capture)
+        self.assertNotIn("S.SCHEMA", handler_capture)
+        self.assertIn("KIND_PAGES.APPEND(ORDS_PAGE_COUNT)", handler_capture)
+        self.assertIn("ORDS_KIND_PAGES.PUT(P_KIND, KIND_PAGES)", handler_capture)
+        self.assertIn("MOD(ORDS_TOTAL, C_PAGE_SIZE) = 0", handler_capture)
+        self.assertIn("L_PAGE.PUT('KINDPAGES', ORDS_KIND_PAGES)", handler_capture)
+
+    def test_oracle_clob_offset_contract_counts_supplementary_characters_as_two_units(self) -> None:
+        emoji = "\U0001F600"
+        self.assertEqual(len(emoji), 1)
+        self.assertEqual(len(emoji.encode("utf-16-le")) // 2, 2)
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
+
+        self.assertIn("CONSUMED_UNITS := LENGTH2(CHUNK_VALUE)", sql)
+        self.assertIn("OFFSET_VALUE := OFFSET_VALUE + CONSUMED_UNITS", sql)
+
+    def test_compare_env_view_ddl_session_toggle_is_scoped_and_restored(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
+        helper_start = sql.index("FUNCTION READ_VIEW_DDL(")
+        helper_end = sql.index("PROCEDURE FINGERPRINT(", helper_start)
+        helper = sql[helper_start:helper_end]
+        enable = "EXECUTE IMMEDIATE 'ALTER SESSION ENABLE COMMIT IN PROCEDURE'"
+        disable = "EXECUTE IMMEDIATE 'ALTER SESSION DISABLE COMMIT IN PROCEDURE'"
+        exception_start = helper.index("EXCEPTION")
+        exception_end = helper.index("END;", exception_start)
+
+        self.assertEqual(sql.count("DBMS_METADATA.GET_DDL("), 1)
+        self.assertIn("DBMS_METADATA.GET_DDL('VIEW', P_VIEW_NAME, C_SCHEMA)", helper)
+        self.assertEqual(helper.count(enable), 1)
+        self.assertEqual(helper[exception_start:exception_end].count(disable), 1)
+        self.assertEqual(helper[exception_end:].count(disable), 1)
+        self.assertIn("RAISE;", helper[exception_start:])
+
+    def test_ords_nonhandler_rows_use_supported_null_clob_expression(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
+
+        self.assertNotIn("CAST(NULL AS CLOB)", sql)
+        self.assertEqual(sql.count("TO_CLOB(NULL)"), 3)
 
     def test_unselected_prefix_grants_are_not_reported(self) -> None:
         source = catalog("dev")
@@ -159,6 +386,53 @@ class EnvironmentComparisonTests(unittest.TestCase):
         report = compare_environment_catalogs(parsed, parsed, sections=("tables",))
         self.assertEqual(len(report["identical"]), 501)
         self.assertEqual(report["exit_code"], 0)
+
+    def test_ords_capture_validates_combined_and_per_kind_page_boundaries(self) -> None:
+        kinds = ("schema", "module", "template", "handler")
+
+        def payload_with(rows: list[dict], pages: list[int], kind_pages: dict[str, list[int]]) -> dict:
+            payload = catalog("dev")
+            payload["sections"]["ords"] = rows
+            payload["coverage"]["sections"]["ords"] = {
+                "complete": True, "pages": pages, "kindPages": kind_pages,
+            }
+            return payload
+
+        four_rows = [
+            {"kind": "schema", "name": "APP"},
+            {"kind": "module", "name": "app.api"},
+            {"kind": "template", "name": "items"},
+            {"kind": "handler", "name": "GET items"},
+        ]
+        small_kind_pages = {kind: [1] for kind in kinds}
+        parsed = parse_environment_catalog_output(
+            framed(payload_with(four_rows, [4], small_kind_pages)), sections=("ords",),
+        )
+        self.assertEqual(len(parsed["sections"]["ords"]), 4)
+
+        mismatched_kind_pages = dict(small_kind_pages, handler=[0])
+        with self.assertRaisesRegex(CatalogError, "ords handler page counts"):
+            parse_environment_catalog_output(
+                framed(payload_with(four_rows, [4], mismatched_kind_pages)), sections=("ords",),
+            )
+
+        multi_page_rows = [{"kind": "module", "name": f"M{index}"} for index in range(501)] + [
+            {"kind": kind, "name": kind} for kind in ("schema", "template", "handler")
+        ]
+        multi_page_kind_pages = {"schema": [1], "module": [500, 1], "template": [1], "handler": [1]}
+        parse_environment_catalog_output(
+            framed(payload_with(multi_page_rows, [500, 4], multi_page_kind_pages)), sections=("ords",),
+        )
+
+        exact_page_rows = [{"kind": "module", "name": f"M{index}"} for index in range(500)]
+        exact_page_kind_pages = {"schema": [0], "module": [500, 0], "template": [0], "handler": [0]}
+        parse_environment_catalog_output(
+            framed(payload_with(exact_page_rows, [500, 0], exact_page_kind_pages)), sections=("ords",),
+        )
+        empty_kind_pages = {kind: [0] for kind in kinds}
+        parse_environment_catalog_output(
+            framed(payload_with([], [0], empty_kind_pages)), sections=("ords",),
+        )
 
     def test_baseline_data_capture_preserves_oracle_number_precision(self) -> None:
         payload = catalog("dev")
@@ -269,6 +543,47 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertIn("ORDS.ENABLE_SCHEMA", script)
         self.assertNotIn("REVOKE", script)
         self.assertNotIn("DROP ", script)
+
+    def test_dba_script_maps_native_ords_auth_states_and_refuses_unknown_values(self) -> None:
+        for native_value, expected_flag in (("ENABLED", "TRUE"), ("DISABLED", "FALSE")):
+            with self.subTest(auto_rest_auth=native_value):
+                report = {
+                    "source": {"schema": "APP_DEV"},
+                    "target": {"schema": "APP_STAGE"},
+                    "differences": [{
+                        "section": "ords",
+                        "classification": "missing on target",
+                        "source": {
+                            "kind": "schema", "name": "APP_DEV", "status": "ENABLED",
+                            "mapping_complete": True, "url_mapping_type": "BASE_PATH",
+                            "url_mapping_pattern": "app", "auto_rest_auth": native_value,
+                        },
+                    }],
+                }
+
+                script = emit_dba_script(report)
+
+                self.assertIn("ORDS.ENABLE_SCHEMA", script)
+                self.assertIn(f"p_auto_rest_auth => {expected_flag}", script)
+                self.assertNotIn("Manual review required: incomplete ORDS URL mapping", script)
+
+        unknown_report = {
+            "source": {"schema": "APP_DEV"},
+            "target": {"schema": "APP_STAGE"},
+            "differences": [{
+                "section": "ords", "classification": "missing on target",
+                "source": {
+                    "kind": "schema", "name": "APP_DEV", "status": "ENABLED",
+                    "mapping_complete": True, "url_mapping_type": "BASE_PATH",
+                    "url_mapping_pattern": "app", "auto_rest_auth": "UNKNOWN",
+                },
+            }],
+        }
+
+        refused_script = emit_dba_script(unknown_report)
+
+        self.assertNotIn("ORDS.ENABLE_SCHEMA", refused_script)
+        self.assertIn("Manual review required: incomplete ORDS URL mapping", refused_script)
 
 
 class CompareEnvironmentSqlclTests(unittest.TestCase):

@@ -24,14 +24,14 @@ class ApplicationLockTests(unittest.TestCase):
         self.addCleanup(self.runner_patch.stop)
 
     def runner(self, target, driver, directory):
-        sql = driver.read_text()
+        sql = driver.read_text(encoding="utf-8")
         phase = directory.name.split('-', 1)[0]
         self.calls.append((phase, sql))
         if phase == self.fail_phase:
             raise RuntimeError('connection lost after write')
         if phase == 'acquire':
             # The result carries what the database read back after COMMIT.
-            intent = json.loads((self.directory / 'recovery.json').read_text())
+            intent = json.loads((self.directory / 'recovery.json').read_text(encoding='utf-8'))
             self.observed = dict(intent['evidence'], locked_on='2026-10-08T11:00:00.000000')
         elif phase == 'release':
             self.observed = None

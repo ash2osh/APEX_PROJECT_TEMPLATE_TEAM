@@ -13,11 +13,13 @@ sequence mappings, and reference tables. Keep `baseline.json` with the project
 configuration; do not put credentials in it. Commands resolve connection
 aliases and expected users from the existing `.env` profiles.
 
-`schemas` lists the schema owners to process. `prefixes` selects matching
-object names; an empty list selects every name. `excludedObjects` omits exact
-object names after the prefix match. Both filters apply to source, settings,
-views, structure, and object grants. The optional `--schema` wrapper option
-selects one configured schema.
+`schemas` lists the schema owners to process. `PROJECT_SCHEMA`, when set,
+selects one of those schemas; otherwise export commands use the full configured
+list. `export-source`, `export-grants`, and `export-data` do not accept
+`--schema`. `baseline build` accepts `--schema` to select one configured
+schema. `prefixes` selects matching object names; an empty list selects every
+name. `excludedObjects` omits exact object names after the prefix match. Both
+filters apply to source, settings, views, structure, and object grants.
 
 `grants.skipGrantees` removes grantees, `grants.includeGrantees` optionally
 limits output to that list, and `grants.keepGrantOptions` controls whether
@@ -55,7 +57,6 @@ Each `referenceData.tables` entry must declare:
 scripts/team.sh baseline export-source --from dev
 scripts/team.sh baseline export-grants --from dev
 scripts/team.sh baseline export-data --from dev
-scripts/team.sh baseline export-source --from staging --schema APP_STAGE
 ```
 
 By default, source and grant output goes under
@@ -66,7 +67,10 @@ JSON files under `stored-source/`; each stores the configured owner's
 Each view JSON preserves the exact `ALL_VIEWS.TEXT` value and also carries
 `DBMS_METADATA.GET_DDL` output for later executable view migrations. Grant
 output is under `grants/` and keeps object grantable flags and system privilege
-admin-option flags.
+admin-option flags. The per-schema `source-manifest.json` records the database
+release observed in the same guarded catalog session. It does not infer or
+record an APEX release; application exports capture APEX release provenance
+through their own guarded APEX session.
 
 Catalog sections are captured in sorted pages of 500 rows, with a 100,000-row
 cap and completeness evidence. Reference rows use the same read-only
@@ -111,15 +115,22 @@ a line ending in `-` is assembled as a CLOB to preserve the text SQLcl would
 otherwise trim or continue. CLOB source chunks are at most 32 characters. The
 final source line check accepts either Oracle's stored final newline or its
 absence. Source checks use line counts and name-based text equality; they do
-not use `IS NULL` or `NVL` on source text. `ALL_SOURCE` is filtered by the
-configured owner so it works when the saved login differs from that owner.
+not use `IS NULL` or `NVL` on source text. Every source line, including an
+empty line, is checked at its original line number. The predicate appends
+`CHR(1)` before equality so Oracle's empty-string-is-NULL rule does not turn a
+blank-line check into an `IS NULL` or `NVL` test. `ALL_SOURCE` is filtered by
+the configured owner so it works when the saved login differs from that owner.
 
-The generator skips a same-named target object, except a named check constraint
-with a different condition is replaced. An index is skipped when a target
-index on the same table has the same ordered column list. Not-null changes
-handle ORA-01442 by enabling the existing not-null check. Sequence mappings
-move ordinary sequences beyond seeded IDs; identity generators use
-`START WITH LIMIT VALUE`. Generated SQL does not use
+The generator skips a same-named target object. For constraints, it replaces a
+named CHECK constraint only when its complete condition is the sole difference
+and all other captured constraint attributes match. A same-name difference in
+constraint type, columns, foreign-key target, status, validation, or another
+captured attribute refuses generation and requires a reviewed migration; the
+generator does not claim general constraint reconciliation. An index is
+skipped when a target index on the same table has the same ordered column
+list. Not-null changes handle ORA-01442 by enabling the existing not-null
+check. Sequence mappings move ordinary sequences beyond seeded IDs; identity
+generators use `START WITH LIMIT VALUE`. Generated SQL does not use
 `OVERRIDING SYSTEM VALUE`.
 
 ### Reference data: never copy foreign keys by id

@@ -1330,6 +1330,7 @@ class ConservativeOwnershipUpgradeTests(unittest.TestCase):
                 "AGENTS.project.md",
                 ".agents/rules/project.md",
                 "PROJECT.md",
+                "TODO.md",
             ],
             "templateOnly": [
                 "docs/superpowers/**",
@@ -1344,6 +1345,7 @@ class ConservativeOwnershipUpgradeTests(unittest.TestCase):
                 "AGENTS.project.md": "<!-- placeholder -->\n",
                 ".agents/rules/project.md": "<!-- project rule placeholder -->\n",
                 "PROJECT.md": "<!-- project overview placeholder -->\n",
+                "TODO.md": "# Project feedback\n\nStart with the template feedback guide.\n",
                 "scripts/tool.sh": "echo v1\n",
                 "tools/graphify/requirements.txt": "graphifyy==0.9.75\n",
                 "docs/superpowers/plans/template-plan.md": "historical template plan\n",
@@ -1362,6 +1364,7 @@ class ConservativeOwnershipUpgradeTests(unittest.TestCase):
                 ".agents/rules/project.md": "our project rules doc\n",
                 ".agents/rules/custom_workflow.md": "custom workflow\n",
                 "PROJECT.md": "Our Custom Project Overview\n",
+                "TODO.md": "# Project feedback\n\nStart with the template feedback guide.\n",
                 "scripts/tool.sh": "echo v1\n",
                 "tools/graphify/requirements.txt": "graphifyy==0.9.75\n",
                 ".env": "DEVELOPER_NAME=ALICE\n",
@@ -1443,6 +1446,37 @@ class ConservativeOwnershipUpgradeTests(unittest.TestCase):
         self.assertNotIn(".venv-graphify/pyvenv.cfg", lock_data["files"])
         self.assertNotIn("graphify-out/cache/ast/old.json", lock_data["files"])
         self.assertNotIn(".env", lock_data["files"])
+
+    def test_project_owned_feedback_history_survives_template_upgrade(self) -> None:
+        manifest = json.loads((ROOT / "template-manifest.json").read_text(encoding="utf-8"))
+        self.assertIn("TODO.md", manifest["projectOwned"])
+
+        adopted = self.upgrade("--apex-release", "26.2", "--ref", "main")
+        self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
+        commit_all(self.project, "lock adopted")
+
+        feedback = (
+            b"# Project feedback\n\n"
+            b"- [ ] **TF-004: baseline export parser rejects a documented flag**\n"
+            b"  - Feedback ID: TF-004\n"
+            b"  - Component: `scripts/baseline.py`\n"
+            b"  - Kind: inherited-template issue\n"
+            b"  - Local fix/workaround: documented supported interface\n"
+            b"  - Upstream report: queued pending a network-enabled reporting session\n"
+            b"  - Upstream URL: <none>\n"
+            b"  - Template release/ref/commit: 26.2 / main / abc1234\n"
+            b"  - Sanitized reproduction/evidence: parser-only reproduction retained\n"
+            b"  - History: 2026-10-11 queued after local documentation correction\n"
+        )
+        (self.project / "TODO.md").write_bytes(feedback)
+        commit_all(self.project, "record local feedback")
+
+        write(self.template, {"TODO.md": "# New upstream scaffold\n\nUpdated guide link.\n"})
+        commit_all(self.template, "update upstream scaffold")
+
+        upgraded = self.upgrade()
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        self.assertEqual((self.project / "TODO.md").read_bytes(), feedback)
 
     def test_edited_inherited_file_produces_conflict_candidate_without_overwriting(self) -> None:
         # First adopt lock

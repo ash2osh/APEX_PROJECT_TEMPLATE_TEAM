@@ -20,6 +20,14 @@ WHENEVER OSERROR EXIT FAILURE ROLLBACK
 @@verify_db_access.sql
 @@verify_apex_release.sql
 
+-- Bind the canonical source marker to the exact APEX release observed before
+-- export, using database UTC time from this guarded session.
+SPOOL .apex-release-before.txt
+SELECT TRIM(version_no) || '|' ||
+       TO_CHAR(SYS_EXTRACT_UTC(SYSTIMESTAMP), 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"')
+FROM apex_release;
+SPOOL OFF
+
 -- The app must be parsed by the schema whose folder receives it. With one schema
 -- configured the wrappers do not look this up, so check it here.
 DECLARE
@@ -56,6 +64,13 @@ apex export -applicationid &&app_id -exptype APEXLANG -exptranslations -overwrit
 
 @@verify_deployment_state.sql
 @@page_lock_state.sql .apex-page-locks-after.json
+
+-- A release transition while the export ran invalidates its provenance.
+SPOOL .apex-release-after.txt
+SELECT TRIM(version_no) || '|' ||
+       TO_CHAR(SYS_EXTRACT_UTC(SYSTIMESTAMP), 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"')
+FROM apex_release;
+SPOOL OFF
 
 -- Refuse to publish a local export marker if Builder changed during the export.
 SPOOL .apex-export-after.txt

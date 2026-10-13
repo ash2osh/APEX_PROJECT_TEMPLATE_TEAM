@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fake_sqlcl import BASH
 from scripts.partial_publish import select_page_files, require_selected_pages_unchanged, stage_partial_source, verify_partial_source
 from scripts.source_evidence import tree_hashes
 
@@ -150,7 +151,7 @@ class VerifiedSourceReplacementTests(unittest.TestCase):
                 with self.subTest(engine=engine, stale=stale), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     scripts = root / 'scripts'; scripts.mkdir()
-                    for name in ('replace_mirror.sh', 'replace_mirror.ps1', 'resolve_python.ps1', 'check_mirror_source.py', 'source_evidence.py', 'validate_app_source.py'):
+                    for name in ('replace_mirror.sh', 'replace_mirror.ps1', 'resolve_python.ps1', 'check_mirror_source.py', 'source_evidence.py', 'validate_app_source.py', 'path_utils.py'):
                         if (ROOT / 'scripts' / name).exists(): shutil.copyfile(ROOT / 'scripts' / name, scripts / name)
                     source = root / 'apps/DEMO/100'; source.mkdir(parents=True)
                     (source / 'application.apx').write_text('original\n')
@@ -163,7 +164,7 @@ class VerifiedSourceReplacementTests(unittest.TestCase):
                     receipt = root / 'scratch/source.json'
                     receipt.write_text(json.dumps({'schemaVersion': 1, 'relativeDirectory': 'apps/DEMO/100', 'sourceFiles': tree_hashes(source), 'baselineHash': None}))
                     if stale: (source / 'application.apx').write_text('new unpublished edit\n')
-                    command = ['bash', str(scripts / 'replace_mirror.sh'), '--verified-source', str(receipt), str(stage), 'apps/DEMO/100'] if engine == 'bash' else ['pwsh', '-NoProfile', '-File', str(scripts / 'replace_mirror.ps1'), '-VerifiedSource', str(receipt), str(stage), 'apps/DEMO/100']
+                    command = [BASH, str(scripts / 'replace_mirror.sh'), '--verified-source', str(receipt), str(stage), 'apps/DEMO/100'] if engine == 'bash' else ['pwsh', '-NoProfile', '-File', str(scripts / 'replace_mirror.ps1'), '-VerifiedSource', str(receipt), str(stage), 'apps/DEMO/100']
                     result = subprocess.run(command, cwd=root, capture_output=True, text=True)
                     if stale:
                         self.assertNotEqual(result.returncode, 0)
@@ -359,7 +360,7 @@ class PartialCliTests(unittest.TestCase):
     def test_partial_options_refuse_non_dev_force_or_missing_selection_before_config(self):
         import os
         import subprocess
-        for suffix, launcher in [('sh', ['bash']), ('ps1', ['pwsh', '-NoProfile', '-File'])]:
+        for suffix, launcher in [('sh', [BASH]), ('ps1', ['pwsh', '-NoProfile', '-File'])]:
             if not shutil.which(launcher[0]): continue
             for args, message in [(['--file', 'pages/p00001-home.apx', '--env', 'staging'], 'partial publishing targets DEV only'), (['--file', 'pages/p00001-home.apx', '--force'], 'partial publishing does not accept --force'), (['--no-team-notice'], '--no-team-notice requires --file')]:
                 with self.subTest(wrapper=suffix, args=args):

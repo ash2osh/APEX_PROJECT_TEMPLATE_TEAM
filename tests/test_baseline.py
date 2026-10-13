@@ -6,6 +6,7 @@ import os
 import io
 import json
 import re
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -115,7 +116,7 @@ class BaselineExportTests(unittest.TestCase):
             "environment = next(line.split(':', 1)[1].strip() for line in text.splitlines() if line.startswith('-- COMPARE_ENVIRONMENT:'))\n"
             "dba = next(line.split(':', 1)[1].strip() for line in text.splitlines() if line.startswith('-- COMPARE_ENV_DBA:')) == 'true'\n"
             "call = next(line for line in text.splitlines() if line.startswith('@@compare_env_catalog.sql ')).split()\n"
-            "sections = json.loads(bytes.fromhex(call[4] if dba else call[5]).decode('utf-8'))\n"
+            "sections = json.loads(bytes.fromhex(call[5]).decode('utf-8'))\n"
             "kind = 'data' if 'baseline-data' in sections else ('source' if 'baseline-source' in sections else ('system' if dba else 'grants'))\n"
             "payload = json.loads(pathlib.Path(os.environ['BASELINE_FIXTURE_DIR'], f'{kind}_{environment}.json').read_text(encoding='utf-8'))\n"
             "filter_values = call[-3:-1] if len(call) > 9 else call[-2:]\n"
@@ -263,12 +264,38 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         checks = baseline._source_check_queries(unit, "APP_STAGE")
         sql = checks[0]["sql"].upper()
 
-        self.assertIn("S.TEXT =", sql)
-        self.assertIn("S.TEXT IN (", sql)
+        self.assertIn("(S.TEXT || CHR(1)) =", sql)
+        self.assertIn("OR (S.TEXT || CHR(1)) =", sql)
         self.assertNotIn("S.TEXT IS NULL", sql)
         self.assertNotIn("NVL(S.TEXT", sql)
         self.assertIn("ALL_SOURCE", sql)
         self.assertIn("S.OWNER = 'APP_STAGE'", sql)
+
+    def test_source_checks_detect_a_nonempty_replacement_on_an_expected_blank_line(self) -> None:
+        unit = {
+            "name": "PKG_TEST", "type": "PACKAGE",
+            "lines": ["PACKAGE PKG_TEST AS\n", "\n", "END PKG_TEST;\n"],
+        }
+        checks = baseline._source_check_queries(unit, "APP")
+        connection = sqlite3.connect(":memory:")
+        connection.create_function("CHR", 1, chr)
+        connection.execute("CREATE TABLE ALL_SOURCE (OWNER TEXT, NAME TEXT, TYPE TEXT, LINE INTEGER, TEXT TEXT)")
+        connection.execute("CREATE TABLE DUAL (X INTEGER)")
+        connection.execute("INSERT INTO DUAL VALUES (1)")
+        for line_number, text in enumerate(unit["lines"], 1):
+            connection.execute(
+                "INSERT INTO ALL_SOURCE VALUES (?, ?, ?, ?, ?)",
+                ("APP", "PKG_TEST", "PACKAGE", line_number, text),
+            )
+
+        self.assertTrue(all(connection.execute(check["sql"]).fetchone()[0] == 1 for check in checks))
+
+        connection.execute("UPDATE ALL_SOURCE SET TEXT = ? WHERE LINE = 3", ("END PKG_TEST;",))
+        self.assertTrue(all(connection.execute(check["sql"]).fetchone()[0] == 1 for check in checks))
+
+        connection.execute("UPDATE ALL_SOURCE SET TEXT = ? WHERE LINE = 2", ("g_extra NUMBER;\n",))
+
+        self.assertTrue(all(connection.execute(check["sql"]).fetchone()[0] == 0 for check in checks))
 
     def test_q_quote_delimiter_collision_selects_a_safe_delimiter(self) -> None:
         literal = baseline._q_literal("value~'quoted")
@@ -392,6 +419,51 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         self.assertIn("STATUS IN ('A', 'B')", sql)
         self.assertIn("FUNCTION normalized", sql)
         self.assertTrue(checks["postconditions"])
+
+    def test_unsupported_same_name_constraint_differences_are_refused(self) -> None:
+        config = {"schemas": ["APP_DEV"], "prefixes": ["APP_"], "excludedObjects": [], "sequenceMappings": []}
+        cases = (
+            (
+                "primary-key columns",
+                {"name": "APP_ITEMS_PK", "table_name": "APP_ITEMS", "constraint_type": "P", "columns": ["ITEM_ID"]},
+                {"name": "APP_ITEMS_PK", "table_name": "APP_ITEMS", "constraint_type": "P", "columns": ["ALT_ID"]},
+                "columns",
+            ),
+            (
+                "foreign-key target",
+                {"name": "APP_ITEMS_FK", "table_name": "APP_ITEMS", "constraint_type": "R", "columns": ["TYPE_ID"], "referenced_table": "APP_TYPES", "referenced_columns": ["ID"], "delete_rule": "NO ACTION"},
+                {"name": "APP_ITEMS_FK", "table_name": "APP_ITEMS", "constraint_type": "R", "columns": ["TYPE_ID"], "referenced_table": "APP_OLD_TYPES", "referenced_columns": ["ID"], "delete_rule": "NO ACTION"},
+                "referenced_table",
+            ),
+            (
+                "constraint status",
+                {"name": "APP_ITEMS_UK", "table_name": "APP_ITEMS", "constraint_type": "U", "columns": ["ITEM_ID"], "status": "ENABLED", "validated": "VALIDATED"},
+                {"name": "APP_ITEMS_UK", "table_name": "APP_ITEMS", "constraint_type": "U", "columns": ["ITEM_ID"], "status": "DISABLED", "validated": "VALIDATED"},
+                "status",
+            ),
+            (
+                "constraint validation",
+                {"name": "APP_ITEMS_UK", "table_name": "APP_ITEMS", "constraint_type": "U", "columns": ["ITEM_ID"], "status": "ENABLED", "validated": "VALIDATED"},
+                {"name": "APP_ITEMS_UK", "table_name": "APP_ITEMS", "constraint_type": "U", "columns": ["ITEM_ID"], "status": "ENABLED", "validated": "NOT VALIDATED"},
+                "validated",
+            ),
+        )
+
+        for label, source_constraint, target_constraint, field in cases:
+            with self.subTest(difference=label):
+                source = {"sections": {
+                    "tables": [{"name": "APP_ITEMS"}], "columns": [], "indexes": [], "sequences": [], "identity-columns": [],
+                    "constraints": [source_constraint],
+                }}
+                target = {"sections": {
+                    "tables": [{"name": "APP_ITEMS"}], "columns": [], "indexes": [], "sequences": [], "identity-columns": [],
+                    "constraints": [target_constraint],
+                }}
+                key = ObjectKey("APP_DEV", source_constraint["name"], "CONSTRAINT")
+                snapshot = SchemaSnapshot({}, {}, {key: ObjectDefinition(key, {}, "ALTER TABLE APP_DEV.APP_ITEMS ADD CONSTRAINT", (), True)}, {}, "", "")
+
+                with self.assertRaisesRegex(baseline.BaselineError, rf"{source_constraint['name']}.*{field}"):
+                    baseline._structure_bundle(config, "APP_DEV", "APP_STAGE", source, target, snapshot)
 
     def test_existing_non_identity_column_requires_a_reviewed_conversion(self) -> None:
         config = {"schemas": ["APP_DEV"], "prefixes": ["APP_"], "excludedObjects": [], "sequenceMappings": []}

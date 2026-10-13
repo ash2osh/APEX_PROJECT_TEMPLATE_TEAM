@@ -52,7 +52,7 @@ class ExportCliTests(unittest.TestCase):
                 "normalize_apx.sh",
                 "replace_mirror.sh",
             )
-        names += ("record_export_state.py", "source_evidence.py", "preserve_deployments.py", "apex_compatibility.py", "verify_apex_release.sql")
+        names += ("record_export_state.py", "source_provenance.py", "apexlang_diff.py", "apexlang_normalization.py", "deployment_descriptor.py", "source_evidence.py", "preserve_deployments.py", "apex_compatibility.py", "verify_apex_release.sql")
         for name in names:
             source = ROOT / "scripts" / name
             if source.exists():
@@ -88,6 +88,8 @@ class ExportCliTests(unittest.TestCase):
             "printf 'new app source\\n' > apps/DEMO/exported/application.apx\n"
             "printf '{\\\"mmdVersion\\\":\\\"26.2.0+3479\\\"}\\n' > apps/DEMO/exported/.apex/apexlang.json\n"
             "printf '{\\\"default\\\":true}\\n' > apps/DEMO/exported/deployments/default.json\n"
+            "printf '26.2.0|2026-10-12T03:00:00.000Z\\n' > .apex-release-before.txt\n"
+            "printf '26.2.0|2026-10-12T03:00:01.000Z\\n' > .apex-release-after.txt\n"
             "printf '%s\\n' \"$FAKE_DB_BEFORE\" > .apex-export-before.txt\n"
             "printf '%s\\n' \"$FAKE_DB_AFTER\" > .apex-export-after.txt\n",
         )

@@ -73,6 +73,14 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
+    def test_read_only_query_files_are_covered_by_template_ownership(self) -> None:
+        for path in (
+            "scripts/read_only_query.py",
+            "tests/test_read_only_query.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+
     def test_rollout_files_are_covered_by_template_ownership(self) -> None:
         for path in (
             "scripts/rollout.py",
@@ -196,11 +204,17 @@ class TemplateManifestTests(unittest.TestCase):
     def test_project_placeholders_exist_and_are_not_template_owned(self) -> None:
         for path in self.manifest["projectOwned"]:
             with self.subTest(path=path):
-                self.assertIn(path, self.tracked)
+                self.assertTrue((ROOT / path).is_file())
                 self.assertEqual(self.classify(path), ["projectOwned"])
 
     def test_migration_guide_is_template_owned_and_migration_payload_is_not(self) -> None:
-        self.assertEqual(self.classify("docs/migration-rules.md"), ["templateOwned"])
+        for path in (
+            "docs/migration-rules.md",
+            "docs/production-deployment.md",
+            "docs/template-feedback.md",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
         for path in (
             "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
             "migrations/2026-09-27_create-customers-r001/checks.json",
