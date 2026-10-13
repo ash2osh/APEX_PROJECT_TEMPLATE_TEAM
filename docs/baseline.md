@@ -125,7 +125,10 @@ Identical builds preserve existing bytes and evidence, while changed inputs
 create the next revision. Unknown evidence, revision gaps, or a flat/schema
 layout conflict refuses generation. Staging is private and outside
 `migrations/`; validation completes before exclusive installation of a final
-folder.
+folder. On macOS, installation uses `renamex_np` with `RENAME_EXCL` and
+requires that operation to be supported by the destination filesystem. If the
+native symbol or filesystem support is unavailable, generation refuses without
+falling back to a replacing rename or copy.
 
 Add `--data` to read a prior `export-data` capture and capture the configured
 target tables read-only. `--data-dir` selects a different export root; by

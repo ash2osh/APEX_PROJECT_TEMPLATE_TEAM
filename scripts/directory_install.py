@@ -16,6 +16,7 @@ class DirectoryInstallError(ValueError):
 
 
 _RENAME_NOREPLACE = 1
+_DARWIN_RENAME_EXCL = 0x00000004
 _AT_FDCWD = -100
 _RENAME_UNAVAILABLE_ERRNOS = {errno.EINVAL, errno.ENOSYS}
 for _error_name in ("ENOTSUP", "EOPNOTSUPP"):
@@ -96,6 +97,26 @@ def _rename_linux_noreplace(stage: Path, destination: Path) -> None:
         raise OSError(error_number, os.strerror(error_number), os.fspath(destination))
 
 
+def _rename_darwin_noreplace(stage: Path, destination: Path) -> None:
+    """Use Darwin renamex_np(RENAME_EXCL), with no emulated fallback."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renamex_np = libc.renamex_np
+    except (AttributeError, OSError) as exc:
+        raise DirectoryInstallError("Darwin renamex_np(RENAME_EXCL) is unavailable") from exc
+
+    renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    renamex_np.restype = ctypes.c_int
+    result = renamex_np(
+        os.fsencode(stage),
+        os.fsencode(destination),
+        _DARWIN_RENAME_EXCL,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), os.fspath(destination))
+
+
 def _rename_windows_noreplace(stage: Path, destination: Path) -> None:
     """Use Python's Windows os.rename, which refuses an existing destination."""
     os.rename(stage, destination)
@@ -104,10 +125,11 @@ def _rename_windows_noreplace(stage: Path, destination: Path) -> None:
 def install_directory_exclusive(stage: Path, destination: Path) -> None:
     """Atomically rename ``stage`` to an absent ``destination`` on one filesystem.
 
-    Linux uses ``renameat2(RENAME_NOREPLACE)`` and Windows uses ``os.rename``;
-    other platforms refuse rather than emulate exclusivity with a racy check.
-    The destination parent must already exist. Neither the stage nor the final
-    path may contain a symbolic link or Windows reparse point.
+    Linux uses ``renameat2(RENAME_NOREPLACE)``, Darwin uses
+    ``renamex_np(RENAME_EXCL)``, and Windows uses ``os.rename``. Unsupported
+    platforms or filesystems refuse rather than emulate exclusivity with a
+    racy check. The destination parent must already exist. Neither the stage
+    nor the final path may contain a symbolic link or Windows reparse point.
     """
     stage_path = _validated_path(Path(stage), allow_missing_leaf=False, label="stage")
     destination_path = _validated_path(Path(destination), allow_missing_leaf=True, label="destination")
@@ -125,6 +147,8 @@ def install_directory_exclusive(stage: Path, destination: Path) -> None:
     try:
         if sys.platform == "linux":
             _rename_linux_noreplace(stage_path, destination_path)
+        elif sys.platform == "darwin":
+            _rename_darwin_noreplace(stage_path, destination_path)
         elif sys.platform == "win32":
             _rename_windows_noreplace(stage_path, destination_path)
         else:

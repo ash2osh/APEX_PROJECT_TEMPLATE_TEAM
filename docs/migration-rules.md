@@ -793,6 +793,10 @@ revision. Unknown evidence, revision gaps, and flat/schema layout conflicts
 refuse generation. Existing attempted or applied folders remain immutable; a
 later generation error may leave earlier fully validated folders in place, and
 the command reports their paths rather than claiming multi-schema atomicity.
+On macOS, final installation uses `renamex_np(RENAME_EXCL)` and requires
+filesystem support for exclusive renaming; if unavailable, generation refuses
+without a replacing-rename fallback. See [baseline export and migration
+generation](baseline.md#folder-safety-and-limits) for platform details.
 Oracle DDL can commit implicitly, so a DDL step or later check can fail after
 earlier DDL took effect. Inspect the target and use a reviewed recovery
 migration; never edit or replay an attempted or applied folder.

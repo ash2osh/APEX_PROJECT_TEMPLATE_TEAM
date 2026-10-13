@@ -1,10 +1,11 @@
 import errno
+import os
 import stat
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 try:
     from scripts import directory_install as installer
@@ -15,7 +16,7 @@ except ImportError:
 class DirectoryInstallTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.scratch = self.root / "scratch"
         self.scratch.mkdir()
         self.destination_parent = self.root / "migrations" / "DEMO"
@@ -131,6 +132,109 @@ class DirectoryInstallTests(unittest.TestCase):
         rename.assert_called_once_with(stage.resolve(), destination.resolve())
         self.assertTrue(destination.is_dir())
 
+    def test_darwin_dispatch_uses_renamex_np_with_exclusive_flag(self) -> None:
+        api = self.require_installer()
+        stage = self.make_stage()
+        destination = self.destination()
+        native_rename = Mock()
+
+        def rename_exclusively(source: bytes, target: bytes, flags: int) -> int:
+            self.assertEqual(flags, 0x00000004)
+            os.rename(os.fsdecode(source), os.fsdecode(target))
+            return 0
+
+        native_rename.side_effect = rename_exclusively
+        libc = Mock()
+        libc.renamex_np = native_rename
+
+        with patch.object(api.sys, "platform", "darwin"), patch.object(
+            api.ctypes, "CDLL", return_value=libc
+        ) as load_library:
+            api.install_directory_exclusive(stage, destination)
+
+        load_library.assert_called_once_with(None, use_errno=True)
+        native_rename.assert_called_once_with(
+            os.fsencode(stage.resolve()), os.fsencode(destination.resolve()), 0x00000004
+        )
+        self.assertFalse(stage.exists())
+        self.assertTrue(destination.is_dir())
+        self.assertEqual((destination / "001-create-table.sql").read_bytes(), b"CREATE TABLE T (ID NUMBER);\n")
+
+    def test_darwin_refuses_when_renamex_np_is_unavailable(self) -> None:
+        api = self.require_installer()
+        stage = self.make_stage()
+        destination = self.destination()
+        before_stage = self.snapshot_tree(stage)
+
+        with patch.object(api.sys, "platform", "darwin"), patch.object(
+            api.ctypes, "CDLL", return_value=object()
+        ) as load_library:
+            with self.assertRaisesRegex(api.DirectoryInstallError, "unavailable"):
+                api.install_directory_exclusive(stage, destination)
+
+        load_library.assert_called_once_with(None, use_errno=True)
+        self.assertTrue(stage.is_dir())
+        self.assertEqual(self.snapshot_tree(stage), before_stage)
+        self.assertFalse(destination.exists())
+
+    def test_darwin_refuses_when_volume_lacks_exclusive_rename_support(self) -> None:
+        api = self.require_installer()
+        stage = self.make_stage()
+        destination = self.destination()
+        before_stage = self.snapshot_tree(stage)
+        native_rename = Mock()
+
+        def reject_unsupported_volume(*_arguments: object) -> int:
+            api.ctypes.set_errno(errno.ENOTSUP)
+            return -1
+
+        native_rename.side_effect = reject_unsupported_volume
+        libc = Mock()
+        libc.renamex_np = native_rename
+
+        with patch.object(api.sys, "platform", "darwin"), patch.object(
+            api.ctypes, "CDLL", return_value=libc
+        ):
+            with self.assertRaisesRegex(api.DirectoryInstallError, "unavailable"):
+                api.install_directory_exclusive(stage, destination)
+
+        native_rename.assert_called_once_with(
+            os.fsencode(stage.resolve()), os.fsencode(destination.resolve()), 0x00000004
+        )
+        self.assertTrue(stage.is_dir())
+        self.assertEqual(self.snapshot_tree(stage), before_stage)
+        self.assertFalse(destination.exists())
+
+    def test_darwin_refuses_existing_destination_without_mutating_either_tree(self) -> None:
+        api = self.require_installer()
+        stage = self.make_stage()
+        destination = self.destination()
+        before_stage = self.snapshot_tree(stage)
+        native_rename = Mock()
+
+        def reject_existing_destination(*_arguments: object) -> int:
+            api.ctypes.set_errno(errno.EEXIST)
+            return -1
+
+        native_rename.side_effect = reject_existing_destination
+        libc = Mock()
+        libc.renamex_np = native_rename
+
+        def create_destination_during_preflight(path: Path) -> int:
+            if path == destination.parent and not destination.exists():
+                destination.mkdir()
+                (destination / "keep.txt").write_bytes(b"keep existing bytes")
+            return path.stat().st_dev
+
+        with patch.object(api.sys, "platform", "darwin"), patch.object(
+            api.ctypes, "CDLL", return_value=libc
+        ), patch.object(api, "_filesystem_id", side_effect=create_destination_during_preflight):
+            with self.assertRaisesRegex(api.DirectoryInstallError, "occupied"):
+                api.install_directory_exclusive(stage, destination)
+
+        self.assertEqual(self.snapshot_tree(stage), before_stage)
+        self.assertEqual(self.snapshot_tree(destination), {"keep.txt": b"keep existing bytes"})
+
     @unittest.skipUnless(sys.platform == "linux", "Linux renameat2 refusal injection")
     def test_refuses_when_linux_no_replace_primitive_is_unavailable(self) -> None:
         api = self.require_installer()
@@ -166,6 +270,40 @@ class DirectoryInstallTests(unittest.TestCase):
         self.assertEqual((destination / "keep.txt").read_bytes(), b"native-race-proof")
         self.assertTrue(stage.is_dir())
         self.assertEqual(self.snapshot_tree(stage), before_stage)
+
+    @unittest.skipUnless(sys.platform == "darwin", "native Darwin renamex_np no-overwrite qualification")
+    def test_darwin_native_rename_does_not_replace_a_destination_created_after_precheck(self) -> None:
+        api = self.require_installer()
+
+        for empty_destination in (True, False):
+            with self.subTest(empty_destination=empty_destination):
+                suffix = "empty" if empty_destination else "populated"
+                stage = self.make_stage(f"stage-{suffix}")
+                destination = self.destination(f"destination-{suffix}")
+                before_stage = self.snapshot_tree(stage)
+
+                def create_destination_during_preflight(
+                    path: Path,
+                    destination_path: Path = destination,
+                    is_empty: bool = empty_destination,
+                ) -> int:
+                    if path == destination_path.parent and not destination_path.exists():
+                        destination_path.mkdir()
+                        if not is_empty:
+                            (destination_path / "keep.txt").write_bytes(b"native-race-proof")
+                    return path.stat().st_dev
+
+                with patch.object(api, "_filesystem_id", side_effect=create_destination_during_preflight):
+                    with self.assertRaisesRegex(api.DirectoryInstallError, "occupied"):
+                        api.install_directory_exclusive(stage, destination)
+
+                self.assertTrue(destination.is_dir())
+                if empty_destination:
+                    self.assertEqual(self.snapshot_tree(destination), {})
+                else:
+                    self.assertEqual((destination / "keep.txt").read_bytes(), b"native-race-proof")
+                self.assertTrue(stage.is_dir())
+                self.assertEqual(self.snapshot_tree(stage), before_stage)
 
     def test_refuses_symlink_stage_destination_and_parent(self) -> None:
         api = self.require_installer()
