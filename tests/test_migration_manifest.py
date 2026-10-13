@@ -33,6 +33,14 @@ class MigrationManifestTests(unittest.TestCase):
         self.assertIsNotNone(manifest, "dated migration manifest handling is not implemented")
         return manifest
 
+    def require_stage_validator(self):
+        api = self.require_manifest()
+        self.assertTrue(
+            hasattr(api, "validate_staged_migration"),
+            "staged migration validation is not implemented",
+        )
+        return api.validate_staged_migration
+
     def add_folder(self, name: str, sql_files: dict[str, str] | None = None, checks: dict | None = None) -> Path:
         folder = self.root / "migrations" / name
         folder.mkdir(parents=True)
@@ -48,6 +56,169 @@ class MigrationManifestTests(unittest.TestCase):
             }
         (folder / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8")
         return folder
+
+    def add_stage(
+        self,
+        name: str = "stage",
+        sql_files: dict[str, str] | None = None,
+        checks: dict | None = None,
+    ) -> Path:
+        scratch = self.root / "scratch"
+        scratch.mkdir(exist_ok=True)
+        stage = scratch / name
+        stage.mkdir()
+        for filename, source in (sql_files or {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"}).items():
+            (stage / filename).write_text(source, encoding="utf-8", newline="\n")
+        if checks is None:
+            checks = {
+                "schemaVersion": 1,
+                "preconditions": [],
+                "postconditions": [{"id": "table-exists", "sql": "SELECT COUNT(*) FROM user_tables", "expected": 1}],
+            }
+        (stage / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8", newline="\n")
+        return stage
+
+    @staticmethod
+    def snapshot_tree(folder: Path) -> dict[str, bytes | None]:
+        return {
+            path.relative_to(folder).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in sorted(folder.rglob("*"))
+        }
+
+    def add_existing_migration(self, relative: str) -> Path:
+        folder = self.root / relative
+        folder.mkdir(parents=True)
+        (folder / "001-create-table.sql").write_text("CREATE TABLE T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        (folder / "checks.json").write_text(
+            '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        return folder
+
+    def test_staged_validator_accepts_missing_destination_without_writing(self) -> None:
+        validate = self.require_stage_validator()
+        stage = self.add_stage()
+        before = self.snapshot_tree(stage)
+        destination = "migrations/DEMO/2026-10-13_customer-status-r001"
+
+        validate(self.root, stage, destination)
+
+        self.assertFalse((self.root / destination).exists())
+        self.assertEqual(self.snapshot_tree(stage), before)
+
+    def test_staged_validator_reuses_schema_two_metric_bounds(self) -> None:
+        validate = self.require_stage_validator()
+        stage = self.add_stage(
+            checks={
+                "schemaVersion": 2,
+                "preconditions": [],
+                "postconditions": [{"id": "ready", "sql": "SELECT 1 FROM dual", "expected": 1}],
+                "rehearsalMetrics": [
+                    {
+                        "id": "row-count",
+                        "sql": "SELECT COUNT(*) FROM user_tables",
+                        "expectedBefore": 0,
+                        "expectedAfter": 1,
+                        "expectedRollback": 0,
+                    }
+                ],
+            },
+        )
+
+        validate(self.root, stage, "migrations/DEMO/2026-10-13_customer-status-r001")
+
+    def test_staged_validator_rejects_invalid_logical_destinations(self) -> None:
+        api = self.require_manifest()
+        validate = self.require_stage_validator()
+        stage = self.add_stage()
+        invalid = (
+            "migrations/2026-02-30_customer-status-r001",
+            "migrations/2026-10-13_customer-status-r000",
+            "migrations/2026-10-13_Customer-status-r001",
+            "migrations/demo/2026-10-13_customer-status-r001",
+            "migrations/DEMO/2026-10-13_customer_status-r001",
+            "migrations/DEMO/2026-10-13_customer-status-r001/extra",
+            "migrations/../2026-10-13_customer-status-r001",
+        )
+
+        for destination in invalid:
+            with self.subTest(destination=destination), self.assertRaises(api.MigrationManifestError):
+                validate(self.root, stage, destination)
+
+    def test_staged_validator_scopes_revision_history_by_schema(self) -> None:
+        api = self.require_manifest()
+        validate = self.require_stage_validator()
+        self.add_existing_migration("migrations/APP1/2026-10-12_customer-status-r001")
+        stage = self.add_stage()
+
+        validate(self.root, stage, "migrations/APP1/2026-10-13_customer-status-r002")
+        validate(self.root, stage, "migrations/APP2/2026-10-13_customer-status-r001")
+        with self.assertRaises(api.MigrationManifestError):
+            validate(self.root, stage, "migrations/APP1/2026-10-13_customer-status-r003")
+        with self.assertRaises(api.MigrationManifestError):
+            validate(self.root, stage, "migrations/APP1/2026-10-13_customer-status-r001")
+
+    def test_staged_validator_refuses_flat_and_schema_specific_family_mixing(self) -> None:
+        api = self.require_manifest()
+        validate = self.require_stage_validator()
+        self.add_existing_migration("migrations/2026-10-12_customer-status-r001")
+        stage = self.add_stage()
+
+        with self.assertRaises(api.MigrationManifestError):
+            validate(self.root, stage, "migrations/APP1/2026-10-13_customer-status-r001")
+
+        self.add_existing_migration("migrations/APP2/2026-10-12_other-family-r001")
+        with self.assertRaises(api.MigrationManifestError):
+            validate(self.root, stage, "migrations/2026-10-13_other-family-r002")
+
+    def test_staged_validator_rejects_occupied_destination_and_stage_inside_migrations(self) -> None:
+        api = self.require_manifest()
+        validate = self.require_stage_validator()
+        stage = self.add_stage()
+        occupied = "migrations/DEMO/2026-10-13_customer-status-r001"
+        (self.root / occupied).mkdir(parents=True)
+        with self.assertRaises(api.MigrationManifestError):
+            validate(self.root, stage, occupied)
+
+        nested_stage = self.root / "migrations" / "scratch"
+        nested_stage.mkdir()
+        (nested_stage / "001-create-table.sql").write_text("CREATE TABLE T (ID NUMBER);\n", encoding="utf-8")
+        (nested_stage / "checks.json").write_text(
+            '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
+            encoding="utf-8",
+        )
+        with self.assertRaises(api.MigrationManifestError):
+            validate(self.root, nested_stage, "migrations/DEMO/2026-10-13_other-family-r001")
+
+    def test_staged_validator_reuses_sql_sequence_and_check_validation(self) -> None:
+        api = self.require_manifest()
+        validate = self.require_stage_validator()
+        invalid_cases = (
+            (
+                {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n", "003-create-index.sql": "CREATE INDEX T_I ON T(ID);\n"},
+                None,
+            ),
+            ({"000-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"}, None),
+            ({"001-create-table.sql": "SELECT 1 FROM dual;\n@hidden.sql\n"}, None),
+            (
+                {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"},
+                {"schemaVersion": 3, "preconditions": [], "postconditions": [{"id": "ready", "sql": "SELECT 1 FROM dual", "expected": 1}]},
+            ),
+            (
+                {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"},
+                {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "Bad_ID", "sql": "SELECT 1 FROM dual", "expected": 1}]},
+            ),
+            (
+                {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"},
+                {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ready", "sql": "DELETE FROM user_tables", "expected": 1}]},
+            ),
+        )
+
+        for index, (sql_files, checks) in enumerate(invalid_cases):
+            stage = self.add_stage(f"invalid-{index}", sql_files=sql_files, checks=checks)
+            with self.subTest(case=index), self.assertRaises(api.MigrationManifestError):
+                validate(self.root, stage, f"migrations/DEMO/2026-10-13_bad-stage-{index}-r001")
 
     def test_iso_dates_sort_newest_first_without_reordering_batch(self) -> None:
         api = self.require_manifest()
