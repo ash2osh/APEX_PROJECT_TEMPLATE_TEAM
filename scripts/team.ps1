@@ -68,8 +68,8 @@ Commands:
                                               Export configured object and system grants
   baseline export-data --from <env> [--scratch <dir>]
                                               Export allow-listed reference rows without excluded columns
-  baseline build --to <env> [--from <env>] [--data]
-                                              Build structure, grants, source, and optional reference-data migrations
+  baseline build --to <env> [--from <env>] [--data] [--bundle <name>]
+                                              Build baseline migrations, optionally bundling structure, grants, and source
   baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
                                               Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)

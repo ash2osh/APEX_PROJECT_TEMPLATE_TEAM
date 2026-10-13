@@ -291,6 +291,30 @@ report.
 - `SELF_COMPARISON`: both sides resolve to the same database and schema, so
   there is nothing to compare. Check your staging settings.
 
+### Generate a compact environment baseline
+
+**When:** the configured DEV and staging schemas differ and you want new,
+reviewable migration folders for supported structure, grant and code changes.
+
+```bash
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status
+scripts/team.sh baseline export-data --from dev
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status --data
+```
+
+The bundle is built from complete source and target observations and keeps
+structure, grants and code in that order. When all three categories have
+changes, bundling reduces the usual three folders to one (3-to-1). With the
+allow-listed reference data export, `--data` adds a separate `baseline-data`
+folder after the bundle, so the usual four folders become two (4-to-2). Each schema has its
+own output folder. Review the bundle's SQL-to-source SHA-256 map and checks;
+the generator never applies these migrations.
+
+Oracle DDL can commit implicitly. If a bundle step or later check fails,
+inspect the target and use a reviewed recovery migration; keep attempted or
+applied folders immutable. A local build sees only configured schemas and this
+repository's files, not another independent repository's pending migrations.
+
 ## 9. Update the template
 
 **When:** the template gained fixes or features and you want them.

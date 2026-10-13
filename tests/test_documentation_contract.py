@@ -117,6 +117,8 @@ class DocumentationContractTests(unittest.TestCase):
             "baseline export-data --from dev",
             "baseline build --from dev --to staging",
             "baseline build --from dev --to staging --data",
+            "baseline build --from dev --to staging --bundle customer-status",
+            "baseline build --from dev --to staging --bundle customer-status --data",
             "baseline filter-ords --exclude-module",
             "--emit-dba-script",
             "status.<env>.json",
@@ -184,6 +186,47 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(compare_env=phrase):
                 self.assertIn(phrase, compare_guide)
+
+    def test_baseline_bundle_documentation_covers_counts_order_and_recovery(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        baseline = (ROOT / "docs" / "baseline.md").read_text(encoding="utf-8")
+        rules = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
+        examples = (ROOT / "docs" / "EXAMPLES.md").read_text(encoding="utf-8")
+
+        for document, path in ((readme, "README.md"), (baseline, "docs/baseline.md"),
+                               (rules, "docs/migration-rules.md"), (examples, "docs/EXAMPLES.md")):
+            with self.subTest(path=path):
+                self.assertIn("--bundle customer-status", document)
+
+        for phrase in (
+            "--bundle <name>",
+            "baseline-bundle-<name>",
+            "3-to-1",
+            "4-to-2",
+            "data migration remains separate",
+        ):
+            with self.subTest(readme=phrase):
+                self.assertIn(phrase, readme)
+
+        for phrase in (
+            "64 characters",
+            "ASCII lowercase slug",
+            "structure, grants, and code in that order",
+            "same observed database/container/schema/edition scope",
+            "ordered original-to-generated filename mapping",
+            "SHA-256",
+            "baseline-data folder is installed separately after the DDL bundle",
+            "Oracle DDL can commit implicitly",
+            "one folder per target schema",
+            "other independent repositories",
+            "attempted or applied folder",
+        ):
+            with self.subTest(baseline=phrase):
+                self.assertIn(phrase, baseline)
+                self.assertIn(phrase, rules)
+
+        self.assertIn("4-to-2", examples)
+        self.assertIn("baseline-data", examples)
 
     def test_publish_guide_explains_every_refusal_and_is_linked(self) -> None:
         guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")

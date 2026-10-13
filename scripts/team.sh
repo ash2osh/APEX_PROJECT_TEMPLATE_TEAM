@@ -44,8 +44,8 @@ Commands:
                                               Export configured object and system grants
   baseline export-data --from <env> [--scratch <dir>]
                                               Export allow-listed reference rows without excluded columns
-  baseline build --to <env> [--from <env>] [--data]
-                                              Build structure, grants, source, and optional reference-data migrations
+  baseline build --to <env> [--from <env>] [--data] [--bundle <name>]
+                                              Build baseline migrations, optionally bundling structure, grants, and source
   baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
                                               Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
@@ -316,6 +316,13 @@ case "$command_name" in
       cd "$REPO_ROOT"
       exec python3 -m scripts.baseline "$@"
     fi
+    # Subcommand help is argparse-only and must work without a configured .env.
+    for baseline_argument in "$@"; do
+      if [ "$baseline_argument" = "--help" ] || [ "$baseline_argument" = "-h" ]; then
+        cd "$REPO_ROOT"
+        exec python3 -m scripts.baseline "$@"
+      fi
+    done
     if [ "$1" = "filter-ords" ]; then
       cd "$REPO_ROOT"
       exec python3 -m scripts.baseline "$@"
