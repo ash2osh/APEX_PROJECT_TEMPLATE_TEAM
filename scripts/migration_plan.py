@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a local-only inventory and summary for migration folders."""
+"""Build local inventory and explicit live preflight reports without applying SQL."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import migration_manifest as manifest
+from .migration_runtime import MigrationRuntimeError, require_migration_sqlcl_version
 from .migration_revision import LockReport, MigrationRevisionError, inspect_migration_lock
 
 
@@ -30,7 +31,12 @@ LIMITATIONS = (
     "No dependency or execution order is inferred from folder display order.",
     "A verified local receipt is historical evidence, not a read of current database shape.",
 )
-__all__ = ["build_migration_plan", "render_migration_plan"]
+__all__ = [
+    "build_live_migration_plan",
+    "build_migration_plan",
+    "render_migration_plan",
+    "require_migration_sqlcl_version",
+]
 
 
 def _safe_text(value: object, *, limit: int = 500) -> str:
@@ -436,6 +442,189 @@ def build_migration_plan(repo_root: Path, folders: Sequence[str] = (), *, schema
         "limitations": list(LIMITATIONS),
         "exitCode": exit_code,
     }
+
+
+def _live_report_from_offline(report: Mapping[str, Any], environment: str | None) -> dict[str, Any]:
+    """Copy the stable offline inventory envelope for a live refusal."""
+    result = dict(report)
+    result.update({"mode": "live", "environment": environment, "target": None, "preflight": None})
+    result["diagnostics"] = list(report.get("diagnostics", []))
+    result["limitations"] = list(report.get("limitations", []))
+    result["exitCode"] = 2
+    return result
+
+
+def _input_hashes_from_report(records: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for record in records:
+        folder = record.get("path")
+        if not isinstance(folder, str):
+            continue
+        for source_file in record.get("files", []):
+            if isinstance(source_file, Mapping) and isinstance(source_file.get("name"), str) and isinstance(source_file.get("sha256"), str):
+                expected[f"{folder}/{source_file['name']}"] = source_file["sha256"]
+        checks_sha256 = record.get("checksSha256")
+        if isinstance(checks_sha256, str):
+            expected[f"{folder}/checks.json"] = checks_sha256
+    return expected
+
+
+def _changed_input_path(
+    repo_root: Path,
+    folders: Sequence[str],
+    expected_hashes: Mapping[str, str],
+) -> str | None:
+    """Compare the current selected bytes with an earlier inventory, without exposing them."""
+    root = Path(repo_root).resolve()
+    try:
+        current = manifest.load_batch(root, folders)
+    except (manifest.MigrationManifestError, OSError, ValueError):
+        return _first_selected_folder_path(root, folders)
+
+    observed_hashes: dict[str, str] = {}
+    for migration in current:
+        folder = migration.folder.resolve().relative_to(root).as_posix()
+        observed_hashes.update({f"{folder}/{source_file.name}": source_file.sha256 for source_file in migration.files})
+        observed_hashes[f"{folder}/checks.json"] = migration.checks_sha256
+
+    for relative_path in sorted(expected_hashes.keys() | observed_hashes.keys()):
+        if expected_hashes.get(relative_path) != observed_hashes.get(relative_path):
+            return relative_path
+    return None
+
+
+def _first_selected_folder_path(repo_root: Path, folders: Sequence[str]) -> str:
+    if not folders:
+        return "migrations"
+    try:
+        selected = Path(folders[0])
+        candidate = selected if selected.is_absolute() else repo_root / selected
+        return candidate.resolve().relative_to(repo_root).as_posix()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return "migrations"
+
+
+def build_live_migration_plan(
+    repo_root: Path,
+    folders: Sequence[str],
+    *,
+    environment: str,
+    schema: str | None,
+    values: Mapping[str, str],
+) -> dict:
+    """Build an explicitly selected live preflight report without applying SQL."""
+    root = Path(repo_root).resolve()
+    offline = build_migration_plan(root, folders, schema=schema)
+    report = _live_report_from_offline(offline, environment)
+
+    if not folders:
+        report["diagnostics"].append(
+            _diagnostic("live-selection-required", None, "Live reporting requires explicitly selected migration folders.")
+        )
+        report["selection"] = offline["selection"]
+        return report
+    if environment not in {"dev", "staging", "prod"}:
+        report["diagnostics"].append(
+            _diagnostic("live-environment-required", None, "Select dev, staging, or prod for live migration preflight.")
+        )
+        return report
+    if offline["exitCode"] != 0 or offline["selection"] != "explicit":
+        report["diagnostics"].append(
+            _diagnostic("live-selection-invalid", None, "Live preflight requires a valid explicit selection with known local evidence.")
+        )
+        return report
+    if not isinstance(values, Mapping):
+        report["diagnostics"].append(
+            _diagnostic("live-target-unavailable", None, "A validated file mapping is required to resolve the live migration target.")
+        )
+        return report
+
+    # Snapshot the caller's validated mapping so a mutable mapping cannot change
+    # between target validation and the read-only adapter.
+    effective_values = dict(values)
+    selected_paths = [record["path"] for record in offline["migrations"]]
+    from .db_targets import TargetResolutionError, batch_schema, flat_migrations_apply, resolve_target
+
+    try:
+        selected = manifest.load_batch(root, selected_paths)
+
+        requested_schema = schema or effective_values.get("PROJECT_SCHEMA") or None
+        owner = batch_schema([migration.schema for migration in selected], requested_schema, effective_values, environment)
+        target = resolve_target(effective_values, environment, "migration", schema=owner)
+        manifest.assert_single_layout(
+            root,
+            selected,
+            target.schema,
+            flat_folders_apply=flat_migrations_apply(effective_values, environment),
+        )
+    except (manifest.MigrationManifestError, TargetResolutionError, OSError, ValueError):
+        # Configuration and connection names stay out of report diagnostics.
+        report["diagnostics"].append(
+            _diagnostic("live-target-unavailable", None, "The selected owner and supplied profile do not resolve to one safe migration target.")
+        )
+        return report
+
+    expected_hashes = _input_hashes_from_report(offline["migrations"])
+    if not expected_hashes:
+        report["diagnostics"].append(
+            _diagnostic("live-selection-invalid", None, "Selected migration SQL/check hashes are incomplete.")
+        )
+        return report
+
+    from . import migration_checks
+
+    try:
+        require_migration_sqlcl_version()
+    except MigrationRuntimeError as error:
+        report["diagnostics"].append(_diagnostic("sqlcl-version-unavailable", None, str(error)))
+        return report
+
+    preflight = migration_checks.preflight_selected(
+        root,
+        selected_paths,
+        environment=environment,
+        schema=target.schema,
+        values=effective_values,
+    )
+    preflight_payload = preflight.to_dict()
+    coverage = dict(preflight.coverage)
+    preflight_payload["coverage"] = coverage
+    report["preflight"] = preflight_payload
+    report["limitations"].append(preflight.limitation)
+
+    changed_path = _changed_input_path(root, selected_paths, expected_hashes)
+    if changed_path is not None:
+        message = "selected SQL/check inputs changed or became unreadable during live preflight; source omitted"
+        report["diagnostics"].append(_diagnostic("selected-input-changed", changed_path, message))
+        coverage["complete"] = False
+        coverage["selectedInputHashesVerified"] = False
+        errors = list(preflight_payload.get("errors", []))
+        if not any(error.get("code") == "SELECTED_INPUT_CHANGED" for error in errors):
+            errors.append({"code": "SELECTED_INPUT_CHANGED", "path": changed_path, "message": message})
+        preflight_payload["errors"] = errors
+        preflight_payload["exit_code"] = 2
+        report["preflight"] = preflight_payload
+        return report
+
+    coverage.setdefault("selectedInputHashesVerified", True)
+    locked = any(record["localEvidence"]["status"] == "locked" for record in offline["migrations"])
+    if preflight.exit_code == 2:
+        report["exitCode"] = 2
+    elif preflight.exit_code == 1 or locked:
+        report["exitCode"] = 1
+    else:
+        report["exitCode"] = 0
+
+    observed_identity = coverage.get("observedIdentity")
+    if (
+        report["exitCode"] in (0, 1)
+        and preflight.exit_code in (0, 1)
+        and coverage.get("complete") is True
+        and not preflight.errors
+        and isinstance(observed_identity, Mapping)
+    ):
+        report["target"] = dict(observed_identity)
+    return report
 
 
 def _markdown_cell(value: object) -> str:

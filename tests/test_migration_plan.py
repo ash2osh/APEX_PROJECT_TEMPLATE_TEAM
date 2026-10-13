@@ -455,6 +455,418 @@ class MigrationPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             api.render_migration_plan(report, "html")
 
+    def test_live_requires_explicit_one_owner_selection(self) -> None:
+        from scripts import migration_checks
+
+        alpha = self.add_folder("migrations/ALPHA/2026-10-13_first-owner-r001")
+        bravo = self.add_folder("migrations/BRAVO/2026-10-13_second-owner-r001")
+        incomplete_folder = self.add_folder("migrations/2026-10-14_missing-profile-r001")
+        api = self.require_plan()
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "ALPHA,BRAVO",
+            "CODE_SQLCL_CONNECTION": "dev-alpha,dev-bravo",
+            "CODE_EXPECTED_USER": "ALPHA,BRAVO",
+        }
+        preflight_patch = patch.object(migration_checks, "preflight_selected", create=True)
+
+        with patch.object(api, "require_migration_sqlcl_version") as runtime_guard, preflight_patch as selected:
+            discovered = api.build_live_migration_plan(
+                self.root, (), environment="dev", schema=None, values=values
+            )
+            no_environment = api.build_live_migration_plan(
+                self.root, [alpha.relative_to(self.root).as_posix()], environment=None, schema=None, values=values
+            )
+            mixed = api.build_live_migration_plan(
+                self.root,
+                [alpha.relative_to(self.root).as_posix(), bravo.relative_to(self.root).as_posix()],
+                environment="dev",
+                schema=None,
+                values=values,
+            )
+            incomplete = api.build_live_migration_plan(
+                self.root,
+                [incomplete_folder.relative_to(self.root).as_posix()],
+                environment="dev",
+                schema=None,
+                values={"DB_ENVIRONMENT": "development"},
+            )
+
+        for report in (discovered, no_environment, mixed, incomplete):
+            self.assertEqual(2, report["exitCode"], report)
+            self.assertIsNone(report["target"])
+        self.assertEqual("discovered", discovered["selection"])
+        self.assertTrue(discovered["diagnostics"])
+        self.assertFalse(runtime_guard.called, "invalid live selections must refuse before probing SQLcl")
+        self.assertFalse(selected.called, "invalid live selections must refuse before database preflight")
+
+    def test_runtime_floor_refuses_before_capture(self) -> None:
+        from types import SimpleNamespace
+
+        from scripts import migration_checks, migration_runtime
+        from scripts.sqlcl_session import bash_command
+
+        runtime_folder = self.add_folder("migrations/2026-10-13_runtime-floor-r001")
+        (runtime_folder / "001-step-1.sql").write_text(
+            "CREATE TABLE zz_new (id NUMBER);\n", encoding="utf-8", newline="\n"
+        )
+        api = self.require_plan()
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "APP",
+        }
+        preflight_patch = patch.object(migration_checks, "preflight_selected", create=True)
+        cases = (
+            ("old", "SQLcl: Release 26.2.2.0 Production\n"),
+            ("unreadable", "SQLcl is unavailable\n"),
+        )
+
+        for label, output in cases:
+            with self.subTest(version=label):
+                calls = []
+
+                def runner(arguments, _calls=calls, _output=output, **kwargs):
+                    _calls.append((arguments, kwargs))
+                    return SimpleNamespace(returncode=0, stdout=_output, stderr="")
+
+                def refuse_for_this_version():
+                    return migration_runtime.require_migration_sqlcl_version(runner=runner)
+
+                with patch.object(api, "require_migration_sqlcl_version", side_effect=refuse_for_this_version), preflight_patch as selected:
+                    report = api.build_live_migration_plan(
+                        self.root,
+                        ["migrations/2026-10-13_runtime-floor-r001"],
+                        environment="dev",
+                        schema=None,
+                        values=values,
+                    )
+
+                self.assertEqual(2, report["exitCode"], report)
+                self.assertIsNone(report["target"])
+                self.assertIsNone(report["preflight"])
+                self.assertTrue(report["diagnostics"])
+                self.assertEqual(1, len(calls))
+                arguments = calls[0][0]
+                self.assertEqual(bash_command(), arguments[0])
+                self.assertEqual("-c", arguments[1])
+                self.assertIn('source "$1/scripts/sqlcl_safe.sh"', arguments[2])
+                self.assertIn('invoke_sqlcl_safe "$2" -V', arguments[2])
+                self.assertEqual("migration-runtime", arguments[3])
+                self.assertNotIn("-name", arguments)
+                self.assertFalse(selected.called, "version refusal must happen before database preflight")
+
+    def test_live_hashes_remain_bound_if_selected_files_change_during_capture(self) -> None:
+        import json as json_module
+
+        from scripts import migration_plan, schema_catalog
+        from scripts.migration_checks import CheckReport
+        from scripts.schema_catalog import SchemaSnapshot
+
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "APP",
+        }
+        identity = {
+            "session_user": "APP",
+            "current_schema": "APP",
+            "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_id": "3",
+            "container_name": "APP_PDB",
+            "edition": "ORA$BASE",
+            "database_version": "23.26.3.0.0",
+        }
+        snapshot = SchemaSnapshot(
+            identity, {}, {}, {"ownerComplete": True, "catalogs": ["ALL_OBJECTS"]},
+            "2026-10-13T10:00:00Z", "2026-10-13T10:00:01Z",
+        )
+        checks = CheckReport(True, True, (), (), {"complete": True})
+        api = self.require_plan()
+
+        for changed_file in ("sql", "checks"):
+            with self.subTest(changed_file=changed_file):
+                folder = self.add_folder(f"migrations/2026-10-13_hash-binding-{changed_file}-r001")
+                sql_path = folder / "001-step-1.sql"
+                checks_path = folder / "checks.json"
+                sql_path.write_text("CREATE TABLE zz_original (id NUMBER);\n", encoding="utf-8", newline="\n")
+
+                def capture(
+                    target,
+                    _keys,
+                    _run_dir,
+                    _changed_file=changed_file,
+                    _sql_path=sql_path,
+                    _checks_path=checks_path,
+                    **_kwargs,
+                ):
+                    schema_catalog._target_identity(snapshot.identity, target)
+                    if _changed_file == "sql":
+                        _sql_path.write_text("CREATE TABLE zz_changed (id NUMBER);\n", encoding="utf-8", newline="\n")
+                    else:
+                        payload = json_module.loads(_checks_path.read_text(encoding="utf-8"))
+                        _checks_path.write_text(
+                            json_module.dumps(payload, separators=(",", ":")) + "\n",
+                            encoding="utf-8",
+                            newline="\n",
+                        )
+                    return None, snapshot
+
+                with patch.object(migration_plan, "require_migration_sqlcl_version"), patch(
+                    "scripts.schema_catalog.capture_inventory_snapshot_with_retries", side_effect=capture
+                ), patch("scripts.migration_checks.run_checks", return_value=checks):
+                    report = api.build_live_migration_plan(
+                        self.root,
+                        [folder.relative_to(self.root).as_posix()],
+                        environment="dev",
+                        schema=None,
+                        values=values,
+                    )
+
+                self.assertEqual(2, report["exitCode"], report)
+                changed_path = (
+                    f"{folder.relative_to(self.root).as_posix()}/"
+                    f"{'001-step-1.sql' if changed_file == 'sql' else 'checks.json'}"
+                )
+                self.assertTrue(
+                    any(
+                        item["code"] == "selected-input-changed" and item["path"] == changed_path
+                        for item in report["diagnostics"]
+                    ),
+                    report,
+                )
+                self.assertNotIn("CREATE TABLE zz_changed", json_module.dumps(report))
+                self.assertNotIn('"expected":1', json_module.dumps(report))
+
+    def test_live_hashes_detect_deleted_last_step_during_capture(self) -> None:
+        import json as json_module
+
+        from scripts import schema_catalog
+        from scripts.migration_checks import CheckReport
+        from scripts.schema_catalog import SchemaSnapshot
+
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "APP",
+        }
+        identity = {
+            "session_user": "APP",
+            "current_schema": "APP",
+            "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_id": "3",
+            "container_name": "APP_PDB",
+            "edition": "ORA$BASE",
+            "database_version": "23.26.3.0.0",
+        }
+        snapshot = SchemaSnapshot(
+            identity, {}, {}, {"ownerComplete": True, "catalogs": ["ALL_OBJECTS"]},
+            "2026-10-13T10:00:00Z", "2026-10-13T10:00:01Z",
+        )
+        checks = CheckReport(True, True, (), (), {"complete": True})
+        api = self.require_plan()
+        folder = self.add_folder("migrations/2026-10-13_hash-deletion-r001", sql_files=2)
+        first_step = folder / "001-step-1.sql"
+        last_step = folder / "002-step-2.sql"
+        first_step.write_text("CREATE TABLE zz_kept (id NUMBER);\n", encoding="utf-8", newline="\n")
+        last_step.write_text("CREATE TABLE zz_deleted_private (id NUMBER);\n", encoding="utf-8", newline="\n")
+        selected_path = folder.relative_to(self.root).as_posix()
+        original_record = api.build_migration_plan(self.root, [selected_path])["migrations"][0]
+
+        def capture(target, _keys, _run_dir, **_kwargs):
+            schema_catalog._target_identity(snapshot.identity, target)
+            last_step.unlink()
+            return None, snapshot
+
+        with patch.object(api, "require_migration_sqlcl_version"), patch(
+            "scripts.schema_catalog.capture_inventory_snapshot_with_retries", side_effect=capture
+        ), patch("scripts.migration_checks.run_checks", return_value=checks):
+            report = api.build_live_migration_plan(
+                self.root,
+                [selected_path],
+                environment="dev",
+                schema=None,
+                values=values,
+            )
+
+        missing_path = f"{selected_path}/002-step-2.sql"
+        self.assertEqual(2, report["exitCode"], report)
+        self.assertFalse(report["preflight"]["coverage"]["selectedInputHashesVerified"])
+        self.assertTrue(
+            any(
+                error.get("code") == "SELECTED_INPUT_CHANGED" and error.get("path") == missing_path
+                for error in report["preflight"]["errors"]
+            ),
+            report["preflight"],
+        )
+        self.assertTrue(
+            any(
+                item["code"] == "selected-input-changed" and item["path"] == missing_path
+                for item in report["diagnostics"]
+            ),
+            report["diagnostics"],
+        )
+        current_record = report["migrations"][0]
+        self.assertEqual(original_record["files"], current_record["files"])
+        self.assertEqual(original_record["payloadDigest"], current_record["payloadDigest"])
+        self.assertEqual(original_record["checksSha256"], current_record["checksSha256"])
+        self.assertEqual(2, report["summary"]["sqlFileCount"])
+        serialized = json_module.dumps(report)
+        self.assertNotIn("CREATE TABLE zz_kept", serialized)
+        self.assertNotIn("CREATE TABLE zz_deleted_private", serialized)
+
+    def test_live_retains_guarded_preflight_diagnostics(self) -> None:
+        from scripts import migration_checks, migration_plan, schema_catalog
+        from scripts.migration_checks import CheckReport
+        from scripts.schema_catalog import CatalogError, ObjectKey, SchemaSnapshot
+
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "APP",
+        }
+        identity = {
+            "session_user": "APP",
+            "current_schema": "APP",
+            "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_id": "3",
+            "container_name": "APP_PDB",
+            "edition": "ORA$BASE",
+            "database_version": "23.26.3.0.0",
+        }
+        coverage = {"ownerComplete": True, "catalogs": ["ALL_OBJECTS"]}
+        api = self.require_plan()
+
+        def add_live_folder(name: str, sql: str) -> Path:
+            folder = self.add_folder(name, sql_files=1)
+            (folder / "001-step-1.sql").write_text(sql, encoding="utf-8", newline="\n")
+            return folder
+
+        def snapshot_for(*, objects=(), observed_identity=identity):
+            inventory = {
+                ObjectKey("APP", name, object_type): {"owner": "APP", "name": name, "type": object_type, "status": "VALID"}
+                for name, object_type in objects
+            }
+            return SchemaSnapshot(
+                dict(observed_identity), inventory, {}, dict(coverage),
+                "2026-10-13T10:00:00Z", "2026-10-13T10:00:01Z",
+            )
+
+        def capture(snapshot):
+            def selected(target, _keys, _run_dir, **_kwargs):
+                schema_catalog._target_identity(snapshot.identity, target)
+                return None, snapshot
+            return selected
+
+        checks = CheckReport(True, True, (), (), {"complete": True})
+        success_folder = add_live_folder(
+            "migrations/2026-10-13_live-success-r001", "CREATE TABLE zz_fresh (id NUMBER);\n"
+        )
+        with patch.object(migration_plan, "require_migration_sqlcl_version"), patch(
+            "scripts.schema_catalog.capture_inventory_snapshot_with_retries",
+            side_effect=capture(snapshot_for()),
+        ), patch("scripts.migration_checks.run_checks", return_value=checks):
+            success = api.build_live_migration_plan(
+                self.root, [success_folder.relative_to(self.root).as_posix()],
+                environment="dev", schema=None, values=values,
+            )
+        self.assertEqual(0, success["exitCode"], success)
+        self.assertEqual(identity, success["target"])
+        self.assertEqual(identity, success["preflight"]["coverage"]["observedIdentity"])
+        self.assertEqual([], success["preflight"]["coverage"]["deferredPreconditionFolders"])
+        self.assertIn(migration_checks.LIMITATION, success["preflight"]["limitation"])
+
+        production_folder = add_live_folder(
+            "migrations/2026-10-13_live-production-identity-r001", "CREATE TABLE zz_new (id NUMBER);\n"
+        )
+        production_identity = {**identity, "db_unique_name": "PRODDB1"}
+        with patch.object(migration_plan, "require_migration_sqlcl_version"), patch(
+            "scripts.schema_catalog.capture_inventory_snapshot_with_retries",
+            side_effect=capture(snapshot_for(observed_identity=production_identity)),
+        ) as production_capture, patch("scripts.migration_checks.run_checks", return_value=checks) as run_checks:
+            production = api.build_live_migration_plan(
+                self.root, [production_folder.relative_to(self.root).as_posix()],
+                environment="dev", schema=None, values=values,
+            )
+        self.assertEqual(2, production["exitCode"], production)
+        self.assertIsNone(production["target"])
+        self.assertTrue(production["preflight"]["errors"])
+        self.assertFalse(run_checks.called)
+        self.assertTrue(production_capture.called)
+
+        incomplete_folder = add_live_folder(
+            "migrations/2026-10-13_live-incomplete-r001", "CREATE TABLE zz_new (id NUMBER);\n"
+        )
+        with patch.object(migration_plan, "require_migration_sqlcl_version"), patch(
+            "scripts.schema_catalog.capture_inventory_snapshot_with_retries",
+            side_effect=CatalogError("catalog capture is incomplete"),
+        ):
+            incomplete = api.build_live_migration_plan(
+                self.root, [incomplete_folder.relative_to(self.root).as_posix()],
+                environment="dev", schema=None, values=values,
+            )
+        self.assertEqual(2, incomplete["exitCode"], incomplete)
+        self.assertIsNone(incomplete["target"])
+        self.assertTrue(incomplete["preflight"]["errors"])
+
+        conflict_folder = add_live_folder(
+            "migrations/2026-10-13_live-conflict-r001", "CREATE TABLE zz_occupied (id NUMBER);\n"
+        )
+        with patch.object(migration_plan, "require_migration_sqlcl_version"), patch(
+            "scripts.schema_catalog.capture_inventory_snapshot_with_retries",
+            side_effect=capture(snapshot_for(objects=(("ZZ_OCCUPIED", "TABLE"),))),
+        ), patch("scripts.migration_checks.run_checks", return_value=checks):
+            conflict = api.build_live_migration_plan(
+                self.root, [conflict_folder.relative_to(self.root).as_posix()],
+                environment="dev", schema=None, values=values,
+            )
+        self.assertEqual(1, conflict["exitCode"], conflict)
+        self.assertEqual(identity, conflict["target"])
+        self.assertTrue(conflict["preflight"]["conflicts"])
+
+        locked_folder = add_live_folder(
+            "migrations/2026-10-13_live-locked-r001", "CREATE TABLE zz_locked (id NUMBER);\n"
+        )
+        self.add_receipt(locked_folder)
+        with patch.object(migration_plan, "require_migration_sqlcl_version"), patch(
+            "scripts.schema_catalog.capture_inventory_snapshot_with_retries",
+            side_effect=capture(snapshot_for()),
+        ), patch("scripts.migration_checks.run_checks", return_value=checks):
+            locked = api.build_live_migration_plan(
+                self.root, [locked_folder.relative_to(self.root).as_posix()],
+                environment="dev", schema=None, values=values,
+            )
+        self.assertEqual(1, locked["exitCode"], locked)
+        self.assertEqual("locked", locked["migrations"][0]["localEvidence"]["status"])
+        self.assertNotIn("ready", json.dumps(locked["migrations"][0]["localEvidence"]).casefold())
+
+        unknown_folder = add_live_folder(
+            "migrations/2026-10-13_live-unknown-r001", "CREATE TABLE zz_unknown (id NUMBER);\n"
+        )
+        (unknown_folder / "status.dev.json").write_text("not json\n", encoding="utf-8")
+        with patch.object(migration_plan, "require_migration_sqlcl_version") as runtime_guard, patch.object(
+            migration_checks, "preflight_selected", create=True
+        ) as selected:
+            unknown = api.build_live_migration_plan(
+                self.root, [unknown_folder.relative_to(self.root).as_posix()],
+                environment="dev", schema=None, values=values,
+            )
+        self.assertEqual(2, unknown["exitCode"], unknown)
+        self.assertEqual("unknown", unknown["migrations"][0]["localEvidence"]["status"])
+        self.assertIsNone(unknown["target"])
+        self.assertFalse(runtime_guard.called)
+        self.assertFalse(selected.called)
+
 
 if __name__ == "__main__":
     unittest.main()
