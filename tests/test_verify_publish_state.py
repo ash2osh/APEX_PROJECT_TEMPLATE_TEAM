@@ -329,6 +329,40 @@ class VerifyPublishStateTests(unittest.TestCase):
             self.assertIn("APEXlang source bytes do not match the post-import re-export", result.stderr)
             self.assertEqual(marker_path.read_bytes(), original_marker)
 
+    def test_literal_difference_does_not_advance_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            (source / "application.apx").write_bytes(
+                b"application (\n    code: ```plsql\nvalue := 'first   \nsecond';\n```\n)\n"
+            )
+            (exported / "application.apx").write_bytes(
+                b"application (\n    code: ```plsql\nvalue := 'first\nsecond';\n```\n)\n"
+            )
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("application.apx", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
+
+    def test_unquoted_array_payload_difference_does_not_advance_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source, exported, before, after, marker_path = self.make_fixture(Path(temporary))
+            original_marker = marker_path.read_bytes()
+            (source / "application.apx").write_bytes(
+                b"application (\n    values: [\n        // local payload\n    ]\n)\n"
+            )
+            (exported / "application.apx").write_bytes(
+                b"application (\n    values: [\n        // exported payload\n    ]\n)\n"
+            )
+
+            result = self.run_verifier(source, exported, before, after)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("APEXlang source bytes do not match the post-import re-export", result.stderr)
+            self.assertEqual(marker_path.read_bytes(), original_marker)
+
     def test_baseline_requires_second_export_to_have_a_stable_normalized_form(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source, exported, before, after, marker_path = self.make_fixture(Path(temporary))

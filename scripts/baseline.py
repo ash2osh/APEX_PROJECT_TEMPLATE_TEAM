@@ -567,6 +567,21 @@ _ISO_TIMESTAMP_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\Z",
     re.ASCII,
 )
+_REFERENCE_TIMESTAMP_TYPE_RE = re.compile(
+    r"TIMESTAMP(?:\(([0-9])\))?( WITH(?: LOCAL)? TIME ZONE)?\Z",
+    re.ASCII,
+)
+
+
+def _reference_temporal_type(data_type: str) -> str | None:
+    """Return a canonical supported DATE/TIMESTAMP spelling, or None."""
+    normalized = str(data_type).upper()
+    if normalized == "DATE":
+        return "DATE"
+    match = _REFERENCE_TIMESTAMP_TYPE_RE.fullmatch(normalized)
+    if match is None:
+        return None
+    return "TIMESTAMP" + (match.group(2) or "")
 
 
 def _text_sql_literal(value: str) -> str:
@@ -610,6 +625,7 @@ def format_sql_value(value: object, column: Mapping) -> str:
     if value is None:
         return "NULL"
     data_type = str(column.get("data_type", "")).upper()
+    temporal_type = _reference_temporal_type(data_type)
     if isinstance(value, bool):
         raise BaselineError(f"Oracle reference-data column {column.get('name', '?')} returned a JSON boolean")
     if data_type in {"NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "DECIMAL", "INTEGER"}:
@@ -622,7 +638,7 @@ def format_sql_value(value: object, column: Mapping) -> str:
         if not number.is_finite():
             raise BaselineError(f"numeric reference-data column {column.get('name', '?')} returned a non-finite number")
         return format(number, "f")
-    if data_type == "DATE" or data_type.startswith("TIMESTAMP"):
+    if temporal_type is not None:
         if not isinstance(value, str):
             raise BaselineError(f"date reference-data column {column.get('name', '?')} returned non-text data")
         if _ISO_DATE_RE.fullmatch(value):
@@ -630,8 +646,10 @@ def format_sql_value(value: object, column: Mapping) -> str:
                 dt.date.fromisoformat(value)
             except ValueError as error:
                 raise BaselineError(f"invalid ISO date in reference-data column {column.get('name', '?')}: {value}") from error
-            if data_type == "DATE":
+            if temporal_type == "DATE":
                 return f"TO_DATE({_sql_literal(value)}, 'YYYY-MM-DD')"
+            if temporal_type == "TIMESTAMP WITH TIME ZONE":
+                raise BaselineError(f"timestamp-with-time-zone column {column.get('name', '?')} has no timezone")
             timestamp_text = value + "T00:00:00"
             model = 'YYYY-MM-DD"T"HH24:MI:SS'
         elif _ISO_TIMESTAMP_RE.fullmatch(value):
@@ -641,16 +659,18 @@ def format_sql_value(value: object, column: Mapping) -> str:
             except ValueError as error:
                 raise BaselineError(f"invalid ISO timestamp in reference-data column {column.get('name', '?')}: {value}") from error
             has_zone = parsed.tzinfo is not None
-            if data_type == "DATE":
+            if temporal_type == "DATE":
                 if has_zone or "." in value:
                     raise BaselineError(f"Oracle DATE column {column.get('name', '?')} cannot preserve timezone or fractional seconds")
                 return f"TO_DATE({_sql_literal(value)}, 'YYYY-MM-DD\"T\"HH24:MI:SS')"
-            if data_type.startswith("TIMESTAMP WITH TIME ZONE"):
+            if temporal_type == "TIMESTAMP WITH TIME ZONE":
                 if not has_zone:
                     raise BaselineError(f"timestamp-with-time-zone column {column.get('name', '?')} has no timezone")
                 timestamp_text = normalized
                 model = 'YYYY-MM-DD"T"HH24:MI:SS' + (".FF" if "." in normalized else "") + "TZH:TZM"
                 return f"TO_TIMESTAMP_TZ({_sql_literal(timestamp_text)}, {_sql_literal(model)})"
+            # Keep the existing plain TIMESTAMP behavior for WITH LOCAL TIME ZONE;
+            # transfer semantics still depend on the live serialization/session timezone.
             if has_zone:
                 raise BaselineError(f"timestamp column {column.get('name', '?')} cannot preserve a timezone")
             timestamp_text = value
@@ -668,7 +688,7 @@ def format_sql_value(value: object, column: Mapping) -> str:
 def _check_sql_value(value: object, column: Mapping) -> str:
     """Format check literals without q-quotes, which the migration checker forbids."""
     data_type = str(column.get("data_type", "")).upper()
-    if data_type == "DATE" or data_type.startswith("TIMESTAMP"):
+    if data_type.startswith(("DATE", "TIMESTAMP")):
         return format_sql_value(value, column)
     if not isinstance(value, str):
         return format_sql_value(value, column)

@@ -313,21 +313,33 @@ could not be run.
 **When:** you want to know which pages read a table, or what calls a package.
 
 Graphify builds a knowledge graph that links each app's pages, regions and
-processes to the tables and packages they use.
+processes to the tables and packages they use. It is optional and indexes this
+repository's local files; it does not read the shared database or Builder.
+The optional setup creates the ignored `.venv-graphify/` and installs pinned
+project dependencies. Before a full extraction, configure a supported semantic
+backend if you want `app_context/` indexed; backend access may have separate
+availability and cost terms. Then run the project helper commands below.
 
 ```bash
-uv tool install graphifyy --with tree-sitter-sql
-python3 scripts/setup_graphify_apx.py
-scripts/team.sh backup-db                  # so the database objects exist locally
-graphify extract . --force
-graphify query "which pages read the HR_USERS table?"
+python3 scripts/graphify_project.py setup
+python3 scripts/graphify_project.py verify
+# Configure a supported semantic backend before this full extraction.
+python3 scripts/graphify_project.py extract -- --force
+
+# macOS/Linux query
+.venv-graphify/bin/graphify query "which pages read the HR_USERS table?"
+
+# Windows PowerShell query
+.venv-graphify/Scripts/graphify.exe query "which pages read the HR_USERS table?"
 ```
 
-The first build may ask you to configure a semantic backend (it summarizes the
-notes in `app_context/`); follow Graphify's own setup for that. After later
-changes run `graphify update .`, which runs locally at no cost. After `backup-db` or when tables
-or packages change, run `python3 scripts/setup_graphify_apx.py` first, so pages
-link to the real table nodes instead of stale cached ones. The graph reflects
-your repository's files, not the live database; export and back up first when
-you need it current. More in
+Later source changes can be indexed with
+`python3 scripts/graphify_project.py extract`. Run `setup` again after a
+Graphify upgrade or an approved database mirror refresh to clear stale cached
+extractions, then run `verify` and `extract`.
+
+Graphify reads the repository mirror, not live database state. If you need
+current shared database metadata, request and authorize
+`scripts/team.sh backup-db` as a separate source refresh, review the resulting
+`database/` changes, then refresh Graphify. More in
 [`.agents/workflows/graphify.md`](../.agents/workflows/graphify.md).

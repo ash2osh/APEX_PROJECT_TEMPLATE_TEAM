@@ -146,16 +146,77 @@ def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path
     return data
 
 
-def _automation_restore_driver(target: Target, workspace: str, app_id: int, static_ids: list[str], run_dir: Path) -> Path:
+def _automation_restore_driver(
+    target: Target,
+    workspace: str,
+    app_id: int,
+    static_ids: list[str],
+    run_dir: Path,
+    *,
+    before: Mapping,
+) -> Path:
     if not ORACLE_IDENTIFIER.fullmatch(target.schema) or not ORACLE_IDENTIFIER.fullmatch(target.expected_user) or not SQLCL_ALIAS.fullmatch(target.connection) or target.environment not in ('dev','staging','prod'):
         raise ValueError('invalid lifecycle database target')
     if type(app_id) is not int or not 0<app_id<10**18 or not isinstance(workspace,str) or not workspace or len(workspace.encode('utf-8'))>255 or any(ord(c)<32 for c in workspace):
         raise ValueError('invalid lifecycle application scope')
+    validate_snapshot(before)
+    if before['workspace'] != workspace or before['appId'] != app_id or len(before['workspaceId']) > 38:
+        raise ValueError('captured lifecycle application/workspace scope is invalid')
     adapter=Path(__file__).with_suffix('.sql').resolve()
     if any(c in str(adapter) for c in ('"','\n','\r')): raise ValueError('unsupported SQL driver path')
     driver=run_dir/'automation-restore-driver.sql'
-    lines=['SET DEFINE ON','SET VERIFY OFF','SET ECHO OFF','SET FEEDBACK OFF','SET HEADING OFF','SET LINESIZE 32767','SET SERVEROUTPUT ON SIZE UNLIMITED','WHENEVER SQLERROR EXIT FAILURE ROLLBACK','WHENEVER OSERROR EXIT FAILURE ROLLBACK',f'ALTER SESSION SET CURRENT_SCHEMA = {target.schema};',f'DEFINE lifecycle_user_hex = {target.expected_user.encode().hex().upper()}',f'DEFINE lifecycle_schema_hex = {target.schema.encode().hex().upper()}',f'@"{adapter}" {workspace.encode("utf-8").hex().upper()} {app_id} RESTORE_CONTEXT','SET DEFINE OFF']
-    lines.append('BEGIN')
+    workspace_hex=workspace.encode('utf-8').hex().upper()
+    lines=[
+        'SET DEFINE ON',
+        'SET VERIFY OFF',
+        'SET ECHO OFF',
+        'SET FEEDBACK OFF',
+        'SET HEADING OFF',
+        'SET LINESIZE 32767',
+        'SET SERVEROUTPUT ON SIZE UNLIMITED',
+        'WHENEVER SQLERROR EXIT FAILURE ROLLBACK',
+        'WHENEVER OSERROR EXIT FAILURE ROLLBACK',
+        f'ALTER SESSION SET CURRENT_SCHEMA = {target.schema};',
+        f'DEFINE lifecycle_user_hex = {target.expected_user.encode().hex().upper()}',
+        f'DEFINE lifecycle_schema_hex = {target.schema.encode().hex().upper()}',
+        f'@"{adapter}" {workspace_hex} {app_id} RESTORE_CONTEXT',
+        'SET DEFINE OFF',
+        'DECLARE',
+        '  v_observed_workspace_id NUMBER;',
+        'BEGIN',
+    ]
+    context_names=(
+        'SESSION_USER',
+        'CURRENT_SCHEMA',
+        'DB_UNIQUE_NAME',
+        'CON_ID',
+        'CON_NAME',
+        'CURRENT_EDITION_NAME',
+        'SERVER_HOST',
+        'SERVICE_NAME',
+    )
+    comparisons=[]
+    for key, context_name in zip(IDENTITY, context_names, strict=True):
+        expected_hex=before['identity'][key].encode('utf-8').hex().upper()
+        comparisons.append(
+            f"NVL(SYS_CONTEXT('USERENV','{context_name}'),CHR(0)) <> "
+            f"UTL_I18N.RAW_TO_CHAR(HEXTORAW('{expected_hex}'),'AL32UTF8')"
+        )
+    lines.extend([
+        '  IF '+'\n     OR '.join(comparisons)+' THEN',
+        "    RAISE_APPLICATION_ERROR(-20001,'Lifecycle restore identity changed');",
+        '  END IF;',
+        f"  v_observed_workspace_id := APEX_UTIL.FIND_SECURITY_GROUP_ID(UTL_I18N.RAW_TO_CHAR(HEXTORAW('{workspace_hex}'),'AL32UTF8'));",
+        '  IF v_observed_workspace_id IS NULL',
+        f"     OR NVL(TO_CHAR(v_observed_workspace_id,'TM9'),CHR(0)) <> '{before['workspaceId']}'",
+        f"     OR NVL(TO_CHAR(NV('FLOW_SECURITY_GROUP_ID'),'TM9'),CHR(0)) <> '{before['workspaceId']}' THEN",
+        "    RAISE_APPLICATION_ERROR(-20073,'Lifecycle restore workspace ID changed');",
+        '  END IF;',
+        "  DBMS_OUTPUT.PUT_LINE('LIFECYCLE_RESTORE_IDENTITY_VERIFIED');",
+        'END;',
+        '/',
+        'BEGIN',
+    ])
     for static_id in static_ids:
         identifier_hex=static_id.encode('utf-8').hex().upper()
         lines.extend([
@@ -192,31 +253,45 @@ def restore_automations(target: Target, workspace: str, app_id: int, before: Map
     restore_error=None
     if active_ids:
         try:
-            driver=_automation_restore_driver(target,workspace,app_id,active_ids,run_dir)
+            driver=_automation_restore_driver(target,workspace,app_id,active_ids,run_dir,before=before)
             result=_runner(target,driver,run_dir)
             lines=result.output.splitlines()
             expected={static_id.encode('utf-8').hex().upper() for static_id in active_ids}
             succeeded={line.split(':',1)[1] for line in lines if line.startswith('AUTOMATION_RESTORE_OK:')}
             failed={line.split(':',1)[1].split(':',1)[0] for line in lines if line.startswith('AUTOMATION_RESTORE_FAILED:')}
             context_count=lines.count('LIFECYCLE_CONTEXT_VERIFIED')
+            identity_count=lines.count('LIFECYCLE_RESTORE_IDENTITY_VERIFIED')
             completion_count=lines.count('AUTOMATION_RESTORE_COMPLETE')
-            if result.returncode or context_count != 1 or completion_count != 1 or succeeded != expected or failed:
+            if result.returncode or context_count != 1 or identity_count != 1 or completion_count != 1 or succeeded != expected or failed:
                 restore_error='APEX automation enable call did not verify for every pre-import active static ID'
         except (OSError,ValueError,SqlclError):
             restore_error='APEX automation enable session failed; inspect private SQLcl diagnostics'
 
+    post_read_error=None
     try:
         after=capture_lifecycle(target,workspace,app_id,run_dir/'observation-after-restore',_runner=_runner)
-    except (ValueError,OSError,SqlclError):
+    except (ValueError,OSError,SqlclError) as exc:
         after=None
+        post_read_error=type(exc).__name__
     before_status=_automation_statuses(before)
     after_status={} if after is None else _automation_statuses(after)
     all_ids=sorted(before_status.keys() | after_status.keys())
     rows=[{'staticId':identifier,'before':before_status.get(identifier,'ABSENT'),'after':after_status.get(identifier,'UNKNOWN' if after is None else 'ABSENT')} for identifier in all_ids]
     reasons=[]
     if restore_error: reasons.append(restore_error)
-    if after is None: reasons.append('post-restore automation read-back is unavailable')
+    if after is None:
+        reasons.append('post-restore automation read-back is unavailable')
+        if post_read_error:
+            reasons.append('post-restore lifecycle observation failed ('+post_read_error+'); inspect private SQLcl diagnostics')
     else:
+        if not after['applicationPresent']:
+            reasons.append('application is absent after automation restore')
+        for key in IDENTITY:
+            if before['identity'][key] != after['identity'][key]:
+                reasons.append('post-restore target identity changed: '+key)
+        for key in ('release','workspace','workspaceId','appId'):
+            if before[key] != after[key]:
+                reasons.append('post-restore lifecycle scope changed: '+key)
         for static_id in active_ids:
             if after_status.get(static_id) != 'ACTIVE':
                 reasons.append('previously active automation is not active after restore: '+static_id)

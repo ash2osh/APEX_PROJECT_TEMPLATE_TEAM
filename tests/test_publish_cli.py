@@ -24,7 +24,7 @@ class PublishAppCliTests(unittest.TestCase):
     def test_lifecycle_failure_before_or_after_import_preserves_baseline(self):
         launchers=[('bash',[BASH])] + ([('pwsh',[shutil.which('pwsh'),'-NoProfile','-File'])] if shutil.which('pwsh') else [])
         for name,launcher in launchers:
-            for mode in ('pre-unavailable','post-unavailable','automation-restore-fail','lost-instance'):
+            for mode in ('pre-unavailable','post-unavailable','automation-restore-fail','automation-restore-identity-guard-fail','lost-instance'):
                 with self.subTest(wrapper=name,mode=mode),tempfile.TemporaryDirectory() as temporary:
                     root=Path(temporary); runner,_,_,environment,app,state=self.make_stateful_dev_fixture(root)
                     environment['PROJECT_ENV_FILE']=str(root/'.env'); environment['FAKE_LIFECYCLE_MODE']=mode
@@ -38,8 +38,27 @@ class PublishAppCliTests(unittest.TestCase):
                         self.assertNotIn('release',Path(environment['FAKE_LOCK_CALLS']).read_text().splitlines())
                         reports=list((root/'scratch').rglob('publish-verification.json'))
                         report=json.loads(reports[0].read_text())
-                        self.assertEqual(report['sourceVerified'],mode not in ('post-unavailable','automation-restore-fail'))
+                        self.assertEqual(report['sourceVerified'],mode not in ('post-unavailable','automation-restore-fail','automation-restore-identity-guard-fail'))
                         self.assertIn(report['lifecycleStatus'],('attention','unavailable'))
+
+    def test_restore_identity_guard_refusal_keeps_publish_baseline_and_never_enables(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            runner,_,_,environment,app,state=self.make_stateful_dev_fixture(root)
+            environment['PROJECT_ENV_FILE']=str(root/'.env')
+            environment['FAKE_LIFECYCLE_MODE']='automation-restore-identity-guard-fail'
+            baseline=(app/'apex-team-export.json').read_bytes()
+
+            result=subprocess.run([BASH,str(runner),'100'],cwd=root,env=environment,capture_output=True,text=True)
+
+            self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertEqual((app/'apex-team-export.json').read_bytes(),baseline)
+            self.assertEqual((state/'import-count.txt').read_text().strip(),'1')
+            self.assertNotIn('AUTOMATION_RESTORE_OK:',result.stdout)
+            calls=Path(environment['FAKE_AUTOMATION_CALLS'])
+            self.assertFalse(calls.exists())
+            reports=list((root/'scratch').rglob('automation-restore-report.json'))
+            self.assertEqual(json.loads(reports[0].read_text())['status'],'attention')
 
     def test_full_publish_restores_only_the_pre_import_active_automation(self):
         with tempfile.TemporaryDirectory() as temporary:

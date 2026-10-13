@@ -104,12 +104,17 @@ capture/verify gate and retain temporary evidence on failure.
 Full publish, selected-page publish and deployment restore exactly the
 automation static IDs observed as `ACTIVE` before import, unless
 `--no-restore-automations` is supplied. The restore step enables only those
-IDs, then reads their state back; a missing or still-disabled ID fails runtime
+IDs after its writer session confirms every captured database identity
+field, APEX release, workspace name and ID, application ID, and owner. It then
+reads the same target scope and automation state back; any identity drift,
+unavailable observation, missing ID, or still-disabled ID fails runtime
 verification and retains recovery evidence. It does not enable new or
-previously disabled automations, resume workflows or repair tasks. Inspect the
-live automation/workflow/task state with the responsible developer, resolve
-the condition and reconcile source before owner-filtered unlocking or retrying.
-Planned removal of an existing automation still requires that review. `--force`
+previously disabled automations, resume workflows or repair tasks. On refusal,
+inspect the saved report and private SQLcl evidence, confirm the live target and
+automation/workflow/task state with the responsible developer, then reconcile
+source before owner-filtered unlocking or any separately reviewed retry. Do not
+blindly rerun a restore whose writer or read-back result is uncertain. Planned
+removal of an existing automation still requires that review. `--force`
 does not bypass runtime verification. Docker APEX 26.2 qualification observed
 an enabled automation becoming disabled during a full import; source matching
 alone cannot establish runtime readiness. See
@@ -250,7 +255,7 @@ commit. Publish prints these steps when it stops here.
 | --- | --- |
 | `post-import APEX export failed` | The verification export failed. |
 | `second post-import APEX export failed` | The second DEV export failed, so normalized source and revision stability could not be established. The old baseline and recovery evidence are retained. |
-| `automation restore did not verify` | At least one previously active automation could not be restored and read back as `ACTIVE`. Review its saved restore report and the live state before retrying. |
+| `automation restore did not verify` | The writer-session identity guard, automation enable, or same-target read-back did not verify. Review the saved restore report and private SQLcl evidence, confirm the live target and automation state, and reconcile source before any separately reviewed retry. |
 | `post-import APEXlang source was not stable across the second post-import re-export` | Source, file set, APEX release, or observed app revision changed between the two DEV exports. Reconcile the live app and retry. |
 | `APEXlang source file set does not match the post-import re-export` | APEX wrote a different set of files than you committed. The one exception is an empty `supporting-objects/deinstall-script.sql`, which SQLcl's starter application (`apex generate`) ships and APEX leaves out of an export: it is accepted as missing, and any content in it is not. |
 | `APEXlang source bytes do not match the post-import re-export` | A non-cosmetic `.apx` difference or any non-`.apx` source bytes differ after the existing deployment projections. The verifier lists relative paths and differing lines without printing source text. Export and reconcile the live app; use `--strict-bytes` only when byte-exact APEXlang text is required. |

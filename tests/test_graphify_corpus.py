@@ -174,6 +174,34 @@ print(json.dumps({path: _is_ignored(root / path, root, patterns) for path in pat
         self.assertIn(".venv-graphify", rules)
         self.assertIn("python3 scripts/graphify_project.py verify", rules)
 
+    def test_operator_graphify_guidance_uses_project_environment(self) -> None:
+        examples = (REPO_ROOT / "docs" / "EXAMPLES.md").read_text(encoding="utf-8")
+        troubleshooting = (REPO_ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        canonical_skill_path = REPO_ROOT / ".agents" / "skills" / "safeguarding-apexlang-text-messages" / "SKILL.md"
+        canonical_skill = canonical_skill_path.read_text(encoding="utf-8")
+        mirror_path = REPO_ROOT / ".claude" / "skills" / "safeguarding-apexlang-text-messages" / "SKILL.md"
+        mirror = mirror_path.read_text(encoding="utf-8")
+
+        for path, document in (
+            ("docs/EXAMPLES.md", examples),
+            ("docs/TROUBLESHOOTING.md", troubleshooting),
+            (".agents/skills/safeguarding-apexlang-text-messages/SKILL.md", canonical_skill),
+        ):
+            with self.subTest(path=path):
+                for command in (
+                    "python3 scripts/graphify_project.py setup",
+                    "python3 scripts/graphify_project.py verify",
+                    "python3 scripts/graphify_project.py extract",
+                ):
+                    self.assertIn(command, document)
+                self.assertNotIn("uv tool install graphifyy", document.casefold())
+                self.assertNotRegex(document, r"(?im)^\s*(?:\$\s*)?graphify\s+(?:extract|update)\b")
+
+        self.assertIn("python3 scripts/graphify_project.py extract -- --force", examples)
+        self.assertIn(".venv-graphify/bin/graphify query", examples)
+        self.assertIn(".venv-graphify/Scripts/graphify.exe query", examples)
+        self.assertIn("../../../.agents/skills/safeguarding-apexlang-text-messages/SKILL.md", mirror)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,35 +36,57 @@ function Test-ScopeComplete {
   )
   $spoolSchema = Get-SqlclSpoolSchemaName -Schema $Schema
   $manifestPath = Join-Path $StagingPath "database/$spoolSchema/manifest-$Scope.txt"
-  $expected = 0
-  $counted = 0
-  $manifestTypes = @()
-  foreach ($line in (Get-Content -LiteralPath $manifestPath)) {
-    $separator = $line.LastIndexOf('=')
-    if ($separator -lt 0) { continue }
-    $manifestTypes += $line.Substring(0, $separator)
-    $count = $line.Substring($separator + 1).Trim()
-    $parsed = 0
-    if ([int]::TryParse($count, [ref] $parsed)) {
-      $expected += $parsed
-      $counted += 1
-    }
-  }
-
-  # No parsable counts at all means the manifest itself is unusable. Fail
-  # closed rather than approving whatever happens to be staged.
-  if ($counted -eq 0) {
-    throw ("database backup manifest for $Schema ($Scope) has no readable " +
-      "object counts; the mirror was not replaced")
-  }
-
+  [long] $expected = 0
+  $manifestTypes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  [char[]] $asciiWhitespace = @([char] 32, [char] 9, [char] 13, [char] 11, [char] 12)
   if ($Scope -eq "tables") {
     $requiredTypes = @("TABLE")
   } else {
     $requiredTypes = @("VIEW", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "SYNONYM", "TRIGGER")
   }
+
+  foreach ($rawLine in (Get-Content -LiteralPath $manifestPath)) {
+    $line = ([string] $rawLine).Trim($asciiWhitespace)
+    if ([string]::IsNullOrEmpty($line)) { continue }
+
+    $separator = $line.IndexOf('=')
+    if ($separator -lt 0 -or $separator -ne $line.LastIndexOf('=')) {
+      throw "database backup manifest for $Schema ($Scope) contains a malformed row; the mirror was not replaced"
+    }
+    $objectType = $line.Substring(0, $separator).Trim($asciiWhitespace)
+    $countText = $line.Substring($separator + 1).Trim($asciiWhitespace)
+    if ([string]::IsNullOrEmpty($objectType) -or [string]::IsNullOrEmpty($countText)) {
+      throw "database backup manifest for $Schema ($Scope) contains an empty type or count; the mirror was not replaced"
+    }
+    if (-not ($requiredTypes -ccontains $objectType)) {
+      throw "database backup manifest for $Schema ($Scope) contains an unsupported object type; the mirror was not replaced"
+    }
+    if ($manifestTypes.Contains($objectType)) {
+      throw "database backup manifest for $Schema ($Scope) contains a duplicate $objectType row; the mirror was not replaced"
+    }
+    if ($countText -cnotmatch '\A[0-9]+\z') {
+      throw "database backup manifest for $Schema ($Scope) contains an invalid count for $objectType; the mirror was not replaced"
+    }
+
+    [long] $parsed = 0
+    if (-not [long]::TryParse(
+        $countText,
+        [System.Globalization.NumberStyles]::None,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref] $parsed
+      )) {
+      throw "database backup manifest for $Schema ($Scope) contains a count outside the signed 64-bit range; the mirror was not replaced"
+    }
+    if ($expected -gt ([long]::MaxValue - $parsed)) {
+      throw "database backup manifest for $Schema ($Scope) count total overflows the signed 64-bit range; the mirror was not replaced"
+    }
+
+    $expected += $parsed
+    [void] $manifestTypes.Add($objectType)
+  }
+
   foreach ($requiredType in $requiredTypes) {
-    if ($manifestTypes -cnotcontains $requiredType) {
+    if (-not $manifestTypes.Contains($requiredType)) {
       throw "database backup manifest for $Schema ($Scope) is missing the $requiredType row; the mirror was not replaced"
     }
   }

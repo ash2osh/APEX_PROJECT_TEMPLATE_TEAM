@@ -879,6 +879,83 @@ def _receipt_path(root: Path, manifest_sha256: str, environment: str, number: in
     return root / "scratch" / "rollout-receipts" / manifest_sha256 / environment / f"step-{number:03d}.json"
 
 
+def _assert_unreceipted_execution_range(
+    root: Path,
+    manifest: RolloutManifest,
+    environment: str,
+    plan: Sequence[dict],
+    from_step: int,
+) -> None:
+    """Refuse to execute any step whose canonical receipt path is already occupied."""
+    for item in plan[from_step - 1 :]:
+        path = _receipt_path(root, manifest.sha256, environment, item["number"])
+        try:
+            _assert_no_symlink(path, root)
+        except RolloutError as error:
+            raise RolloutError(
+                f"step {item['number']} receipt path is unsafe or occupied; preserve existing receipts and evidence, "
+                f"inspect the target and use a separately reviewed continuation manifest before further writes: {error}"
+            ) from error
+        if path.exists() or path.is_symlink():
+            raise RolloutError(
+                f"step {item['number']} receipt path is already occupied and will not be replaced: "
+                f"{relative_to_root(path, root)}. Preserve its bytes and evidence, inspect the target, and use a "
+                "separately reviewed continuation manifest before further writes"
+            )
+
+
+def _install_rollout_receipt(path: Path, receipt: dict) -> None:
+    """Durably install a rollout receipt without replacing an existing path."""
+    current = Path(path.anchor)
+    for part in path.parent.absolute().parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise RolloutError(f"rollout receipt parent path contains a symbolic link: {current}")
+    try:
+        path.parent.resolve(strict=True)
+    except OSError as error:
+        raise RolloutError(f"rollout receipt directory is missing or unsafe: {error}") from error
+    if not path.parent.is_dir():
+        raise RolloutError("rollout receipt directory is missing or unsafe")
+    if path.is_symlink() or path.exists():
+        raise RolloutError(f"rollout receipt path is already occupied and will not be replaced: {path}")
+    data = (json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise RolloutError(f"rollout receipt path is already occupied and will not be replaced: {path}") from error
+        except OSError as error:
+            raise RolloutError(f"atomic no-overwrite rollout receipt installation is unavailable: {error}") from error
+        try:
+            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError:
+            # Some supported filesystems do not allow directory fsync after the atomic link.
+            pass
+    except RolloutError:
+        raise
+    except OSError as error:
+        raise RolloutError(f"atomic no-overwrite rollout receipt installation is unavailable: {error}") from error
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _validate_evidence_paths(paths: object, root: Path, step_number: int) -> list[str]:
     if not isinstance(paths, list) or any(not isinstance(item, str) for item in paths):
         raise RolloutError(f"step {step_number} receipt has invalid evidence paths")
@@ -898,26 +975,34 @@ def _validate_evidence_paths(paths: object, root: Path, step_number: int) -> lis
 
 def _write_receipt(root: Path, environment: str, manifest: RolloutManifest, plan_item: dict, step_report: dict) -> Path:
     path = _receipt_path(root, manifest.sha256, environment, plan_item["number"])
-    _validate_evidence_paths(step_report["evidencePaths"], root, plan_item["number"])
-    _safe_scratch_root(root)
-    _safe_directory(path.parent, root)
-    receipt = {
-        "schemaVersion": RECEIPT_SCHEMA_VERSION,
-        "status": "succeeded",
-        "environment": environment,
-        "manifestSha256": manifest.sha256,
-        "stepNumber": plan_item["number"],
-        "stepType": plan_item["type"],
-        "stepSha256": plan_item["sha256"],
-        "inputHashes": plan_item["inputHashes"],
-        "targetBinding": plan_item["targetBinding"],
-        "observedIdentity": step_report["observedIdentity"],
-        "startedAt": step_report["startedAt"],
-        "endedAt": step_report["endedAt"],
-        "durationSeconds": step_report["durationSeconds"],
-        "evidencePaths": step_report["evidencePaths"],
-    }
-    _write_atomic(path, json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    try:
+        _validate_evidence_paths(step_report["evidencePaths"], root, plan_item["number"])
+        _safe_scratch_root(root)
+        _safe_directory(path.parent, root)
+        receipt = {
+            "schemaVersion": RECEIPT_SCHEMA_VERSION,
+            "status": "succeeded",
+            "environment": environment,
+            "manifestSha256": manifest.sha256,
+            "stepNumber": plan_item["number"],
+            "stepType": plan_item["type"],
+            "stepSha256": plan_item["sha256"],
+            "inputHashes": plan_item["inputHashes"],
+            "targetBinding": plan_item["targetBinding"],
+            "observedIdentity": step_report["observedIdentity"],
+            "startedAt": step_report["startedAt"],
+            "endedAt": step_report["endedAt"],
+            "durationSeconds": step_report["durationSeconds"],
+            "evidencePaths": step_report["evidencePaths"],
+        }
+        _install_rollout_receipt(path, receipt)
+    except (OSError, RolloutError) as error:
+        raise RolloutError(
+            f"step {plan_item['number']} may have completed, but its rollout receipt was not installed. "
+            "Preserve this report, SQLcl evidence and any existing receipt; inspect the target independently and "
+            "use only a separately reviewed continuation manifest for further writes. This does not serialize "
+            f"cross-process or database writes. Cause: {error}"
+        ) from error
     return path
 
 
@@ -1710,6 +1795,8 @@ def run_rollout(
                     "observedIdentity": receipt["observedIdentity"],
                     "message": "receipt matches; live target identity pending",
                 })
+
+        _assert_unreceipted_execution_range(root, manifest, environment, plan, from_step)
 
         if dry_run:
             report["steps"] = [dict(step, status="planned") for step in report["steps"]]

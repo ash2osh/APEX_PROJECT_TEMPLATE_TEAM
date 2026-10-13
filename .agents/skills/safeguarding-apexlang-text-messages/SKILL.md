@@ -59,7 +59,16 @@ After editing, compare the property inventory with the baseline. Check for dupli
 
    Confirm the SQLcl command reports `Validation successful.` and exits 0; this is source validation, not a live runtime translation check.
 
-   Run `graphify update .` only when this repository has Graphify configured, to refresh its local AST graph. Finish with `git diff --check`, `git diff --stat`, and a full diff review. Do not claim an unavailable optional validator passed.
+   Graphify is optional. If configured, use the project-local helper: run
+   `python3 scripts/graphify_project.py setup` for first setup or after a
+   Graphify upgrade, `python3 scripts/graphify_project.py verify` to check the
+   pinned environment, and `python3 scripts/graphify_project.py extract` to
+   refresh the graph after source changes. Full indexing of `app_context/` may
+   require a configured semantic backend; check its access and cost terms.
+   Refresh a missing database mirror only through a separately requested and
+   authorized `scripts/team.sh backup-db`. Finish with `git diff --check`,
+   `git diff --stat`, and a full diff review. Do not claim an unavailable
+   optional validator passed.
 4. Source validation cannot prove runtime translation. Without live message setup, target-language entries, and authorization to exercise the app, report candidates only. Export, import, publish, or edit shared Builder state only when explicitly authorized under the project workflow.
 
 ## Live evidence: app 150 (`workflow-showcase`)

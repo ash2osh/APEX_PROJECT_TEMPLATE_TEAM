@@ -153,12 +153,18 @@ parent label; they do not compare whole-row text. Inserts are grouped into
 steps of at most 100 statements and 50,000 SQL bytes.
 
 Text values use collision-safe q-quotes in 32-character chunks, represent
-embedded newlines with `CHR(10)`, and use `NULL` for empty strings. Dates become
-date literals only for valid ISO values in DATE/TIMESTAMP columns; a
-date-looking value in a text column remains text. `GENERATED ALWAYS` identity
-columns are omitted and assigned by Oracle. `BY DEFAULT` identities retain
-seeded IDs, then get an `ALTER TABLE ... START WITH LIMIT VALUE` step to move
-the generator beyond them.
+embedded newlines with `CHR(10)`, and use `NULL` for empty strings. DATE values
+use `TO_DATE`; plain TIMESTAMP values use `TO_TIMESTAMP`. Dictionary spellings
+with no precision or precision `(0)` through `(9)` are supported. TIMESTAMP
+WITH TIME ZONE values require an ISO timestamp with `Z` or a numeric UTC offset
+and use `TO_TIMESTAMP_TZ`, preserving the offset and fractional seconds. A
+date-only or offset-free value for that type is refused. A date-looking value
+in a text column remains text. TIMESTAMP WITH LOCAL TIME ZONE remains a distinct
+type and keeps the formatter's existing behavior; live transfer semantics
+depend on Oracle serialization and session timezone and are not qualified here.
+`GENERATED ALWAYS` identity columns are omitted and assigned by Oracle. `BY DEFAULT`
+identities retain seeded IDs, then get an `ALTER TABLE ... START WITH LIMIT VALUE`
+step to move the generator beyond them.
 
 Rehearse generated data DML with the rollback mode:
 

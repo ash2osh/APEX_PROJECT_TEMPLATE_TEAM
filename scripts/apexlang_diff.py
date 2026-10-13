@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.apexlang_normalization import normalize_apexlang
+from scripts.apexlang_normalization import NormalizationError, normalize_apexlang
 from scripts.deployment_descriptor import remap_subscription_source, source_projection
 
 
@@ -118,8 +118,8 @@ def compare_source_files(
                 try:
                     compared_expected = normalize_apexlang(expected)
                     compared_observed = normalize_apexlang(observed)
-                except UnicodeDecodeError:
-                    # Invalid text cannot receive a formatting exemption.
+                except (NormalizationError, UnicodeDecodeError):
+                    # Ambiguous strings and invalid text cannot receive an exemption.
                     compared_expected, compared_observed = expected, observed
                 if compared_expected == compared_observed:
                     cosmetic.append(relative.as_posix())

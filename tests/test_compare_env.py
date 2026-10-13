@@ -9,6 +9,8 @@ import os
 import tempfile
 import unittest
 from decimal import Decimal
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -587,6 +589,129 @@ class EnvironmentComparisonTests(unittest.TestCase):
 
 
 class CompareEnvironmentSqlclTests(unittest.TestCase):
+    def run_compare_env_for_catalogs(
+        self,
+        source_payload: dict,
+        target_payload: dict,
+        *,
+        output_format: str = "json",
+        emit_dba_script: bool = False,
+    ) -> tuple[int, str, str, bool]:
+        from scripts.compare_schema import main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_dir = root / "fixtures"
+            fixture_dir.mkdir()
+            (fixture_dir / "dev.json").write_text(json.dumps(source_payload), encoding="utf-8")
+            (fixture_dir / "staging.json").write_text(json.dumps(target_payload), encoding="utf-8")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_program = root / "fake_sql.py"
+            fake_program.write_text(
+                "import base64, gzip, json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "driver = pathlib.Path(next(arg[1:] for arg in args if arg.startswith('@')))\n"
+                "environment = next(line.split(':', 1)[1].strip() for line in driver.read_text().splitlines() if line.startswith('-- COMPARE_ENVIRONMENT:'))\n"
+                "payload = json.loads(pathlib.Path(os.environ['COMPARE_ENV_FIXTURE_DIR'], environment + '.json').read_text())\n"
+                "encoded = base64.b64encode(gzip.compress(json.dumps(payload, separators=(',', ':')).encode())).decode()\n"
+                "print('CATALOG_PAYLOAD_BEGIN:compare-env')\nprint('CATALOG_ENCODING:gzip-base64-v1')\n"
+                "[print(encoded[index:index + 120]) for index in range(0, len(encoded), 120)]\n"
+                "print('CATALOG_PAYLOAD_END:compare-env')\nprint('CATALOG_VERIFIED:compare-env')\n",
+                encoding="utf-8",
+            )
+            fake_sqlcl.install(
+                fake_bin,
+                f'#!/usr/bin/env bash\nexec "{Path(os.sys.executable).as_posix()}" "{fake_program.as_posix()}" "$@"\n',
+            )
+            source_schema = source_payload["schema"]
+            target_schema = target_payload["schema"]
+            source_user = source_payload["identity"]["session_user"]
+            target_user = target_payload["identity"]["session_user"]
+            values = {
+                "DB_ENVIRONMENT": "development",
+                "CODE_SCHEMA": source_schema, "CODE_SQLCL_CONNECTION": "SOURCE_ALIAS", "CODE_EXPECTED_USER": source_user,
+                "STAGING_SCHEMA": target_schema, "STAGING_SQLCL_CONNECTION": "TARGET_ALIAS", "STAGING_EXPECTED_USER": target_user,
+                "TABLES_PREFIXES": "HR_", "CODE_PREFIXES": "HR_",
+            }
+            output_file = root / "reviewed-dba.sql"
+            args = [
+                "compare-env", "--from", "dev", "--to", "staging",
+                "--section", "constraints", "--format", output_format,
+            ]
+            if emit_dba_script:
+                args.extend(("--emit-dba-script", str(output_file)))
+            stdout = StringIO()
+            stderr = StringIO()
+            with patch.dict(os.environ, {
+                "PATH": fake_sqlcl.environment(fake_bin)["PATH"],
+                "COMPARE_ENV_FIXTURE_DIR": str(fixture_dir),
+            }, clear=False):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = main(args, environ=values, run_dir=root / "scratch")
+            return result, stdout.getvalue(), stderr.getvalue(), output_file.exists()
+
+    def test_compare_env_refuses_same_observed_scope(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        target["schema"] = source["schema"]
+        for field in ("session_user", "current_schema", "db_name", "db_unique_name", "container_id", "container_name", "edition", "database_version"):
+            target["identity"][field] = source["identity"][field]
+        source["identity"]["service_name"] = "SOURCE_SERVICE"
+        target["identity"]["service_name"] = "TARGET_SERVICE"
+
+        for output_format in ("json", "text", "markdown"):
+            with self.subTest(format=output_format):
+                result, stdout, stderr, script_installed = self.run_compare_env_for_catalogs(
+                    source, target, output_format=output_format, emit_dba_script=True,
+                )
+                self.assertEqual(result, 2, stdout + stderr)
+                self.assertFalse(script_installed)
+                if output_format == "json":
+                    report = json.loads(stdout)
+                    self.assertEqual(report["readiness"], "blocked")
+                    identity_blockers = [item for item in report["blockers"] if item["section"] == "identity"]
+                    self.assertTrue(identity_blockers, report)
+                    self.assertEqual(identity_blockers[0]["side"], "both")
+                    self.assertIn("same observed", identity_blockers[0]["message"])
+                else:
+                    self.assertIn("same observed", stdout)
+
+    def test_compare_env_allows_same_database_different_schema_or_edition(self) -> None:
+        for variant in ("different-schema", "different-edition"):
+            with self.subTest(variant=variant):
+                source = catalog("dev")
+                target = catalog("staging")
+                for field in ("db_name", "db_unique_name", "container_id", "container_name"):
+                    target["identity"][field] = source["identity"][field]
+                if variant == "different-edition":
+                    target["schema"] = source["schema"]
+                    target["identity"]["session_user"] = source["identity"]["session_user"]
+                    target["identity"]["current_schema"] = source["identity"]["current_schema"]
+                    target["identity"]["edition"] = "APP_PATCH_EDITION"
+
+                result, stdout, stderr, _ = self.run_compare_env_for_catalogs(source, target)
+
+                report = json.loads(stdout)
+                self.assertIn(result, (0, 1), stderr + stdout)
+                self.assertIn(report["readiness"], ("ready", "differences"), report)
+                self.assertFalse(any(item["section"] == "identity" for item in report["blockers"]), report)
+
+    def test_compare_env_capture_errors_remain_blocked(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        target["identity"].pop("db_unique_name")
+
+        result, stdout, stderr, script_installed = self.run_compare_env_for_catalogs(
+            source, target, emit_dba_script=True,
+        )
+
+        report = json.loads(stdout)
+        self.assertEqual(result, 2, stderr + stdout)
+        self.assertEqual(report["readiness"], "blocked", report)
+        self.assertTrue(report["blockers"], report)
+        self.assertFalse(script_installed)
+
     def test_command_uses_fake_sqlcl_and_recorded_catalogs(self) -> None:
         from scripts.compare_schema import main
 

@@ -13,10 +13,25 @@ def main():
         sql=drivers[0].read_text(encoding='utf-8')
         identifiers=re.findall(r"APEX_AUTOMATION\.ENABLE\(p_application_id => [0-9]+, p_static_id => UTL_I18N\.RAW_TO_CHAR\(HEXTORAW\('([0-9A-F]+)'\)",sql)
         mode=os.environ.get('FAKE_LIFECYCLE_MODE','')
+        contexts=('SESSION_USER','CURRENT_SCHEMA','DB_UNIQUE_NAME','CON_ID','CON_NAME','CURRENT_EDITION_NAME','SERVER_HOST','SERVICE_NAME')
+        enable_at=sql.find('APEX_AUTOMATION.ENABLE')
+        identity_guard_ok=enable_at>=0 and all(
+            f"NVL(SYS_CONTEXT('USERENV','{context}'),CHR(0))" in sql[:enable_at]
+            and re.search(r"UTL_I18N\.RAW_TO_CHAR\(HEXTORAW\('[0-9A-F]+'\),'AL32UTF8'\)",sql[:enable_at])
+            for context in contexts
+        )
+        workspace_at=sql.find('v_observed_workspace_id')
+        if (not identity_guard_ok or 'RESTORE_CONTEXT' not in sql or workspace_at <= sql.find('RESTORE_CONTEXT') or workspace_at >= enable_at):
+            print('ORA-20001: lifecycle restore identity guard is missing or out of order')
+            return 1
+        print('LIFECYCLE_CONTEXT_VERIFIED')
+        if mode=='automation-restore-identity-guard-fail':
+            print('ORA-20001: lifecycle restore identity changed')
+            return 1
+        print('LIFECYCLE_RESTORE_IDENTITY_VERIFIED')
         if mode!='automation-restore-fail':
             calls=Path(os.environ.get('FAKE_AUTOMATION_CALLS',str(drivers[0].parent/'automation-calls.txt')))
             calls.write_text(''.join(identifier+'\n' for identifier in identifiers),encoding='utf-8')
-        print('LIFECYCLE_CONTEXT_VERIFIED')
         for identifier in identifiers:
             if mode=='automation-restore-fail': print('AUTOMATION_RESTORE_FAILED:'+identifier+':-20001')
             else: print('AUTOMATION_RESTORE_OK:'+identifier)

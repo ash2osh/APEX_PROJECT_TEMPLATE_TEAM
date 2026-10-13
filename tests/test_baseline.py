@@ -335,6 +335,59 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(baseline.BaselineError, "invalid ISO date"):
             baseline.format_sql_value("2026-02-30", {"name": "EFFECTIVE_ON", "data_type": "DATE"})
 
+    def test_precision_qualified_tstz_preserves_offset_fraction_and_format_mask(self) -> None:
+        value = "2026-10-13T12:34:56.123456+02:00"
+        for data_type in (
+            "TIMESTAMP WITH TIME ZONE",
+            "TIMESTAMP(0) WITH TIME ZONE",
+            "TIMESTAMP(6) WITH TIME ZONE",
+            "TIMESTAMP(9) WITH TIME ZONE",
+        ):
+            with self.subTest(data_type=data_type):
+                expression = baseline.format_sql_value(value, {"name": "CREATED_AT", "data_type": data_type})
+                self.assertTrue(expression.startswith("TO_TIMESTAMP_TZ("), expression)
+                self.assertIn(value, expression)
+                self.assertIn(".FFTZH:TZM", expression)
+
+        utc = baseline.format_sql_value(
+            "2026-10-13T12:34:56Z", {"name": "CREATED_AT", "data_type": "TIMESTAMP(6) WITH TIME ZONE"},
+        )
+        negative_offset = baseline.format_sql_value(
+            "2026-10-13T12:34:56.1-05:30", {"name": "CREATED_AT", "data_type": "TIMESTAMP(6) WITH TIME ZONE"},
+        )
+        self.assertIn("2026-10-13T12:34:56+00:00", utc)
+        self.assertIn("2026-10-13T12:34:56.1-05:30", negative_offset)
+        self.assertIn("TZH:TZM", utc)
+        self.assertIn(".FFTZH:TZM", negative_offset)
+
+    def test_tstz_requires_a_timezone_even_for_date_only_values(self) -> None:
+        column = {"name": "CREATED_AT", "data_type": "TIMESTAMP(6) WITH TIME ZONE"}
+        for value in ("2026-10-13", "2026-10-13T12:34:56"):
+            with self.subTest(value=value), self.assertRaisesRegex(baseline.BaselineError, "has no timezone"):
+                baseline.format_sql_value(value, column)
+
+    def test_precision_plain_timestamp_and_local_timezone_remain_separate(self) -> None:
+        plain = baseline.format_sql_value(
+            "2026-10-13T12:34:56.123456", {"name": "UPDATED_AT", "data_type": "TIMESTAMP(6)"},
+        )
+        local = baseline.format_sql_value(
+            "2026-10-13T12:34:56", {"name": "LOCAL_AT", "data_type": "TIMESTAMP(6) WITH LOCAL TIME ZONE"},
+        )
+        self.assertTrue(plain.startswith("TO_TIMESTAMP("), plain)
+        self.assertNotIn("TO_TIMESTAMP_TZ", plain)
+        self.assertIn(".FF", plain)
+        self.assertTrue(local.startswith("TO_TIMESTAMP("), local)
+        self.assertNotIn("TO_TIMESTAMP_TZ", local)
+
+    def test_malformed_timestamp_type_does_not_get_a_timestamp_fallback(self) -> None:
+        for data_type in (
+            "TIMESTAMP(10) WITH TIME ZONE",
+            "TIMESTAMP(6.0) WITH TIME ZONE",
+            "TIMESTAMP(6) WITH TIME ZONE ",
+        ):
+            with self.subTest(data_type=data_type), self.assertRaisesRegex(baseline.BaselineError, "unsupported reference-data column type"):
+                baseline.format_sql_value("2026-10-13", {"name": "CREATED_AT", "data_type": data_type})
+
     def test_not_null_guard_handles_ora_01442_without_source_text_null_checks(self) -> None:
         sql = baseline._wrap_not_null("APP_STAGE", "ITEMS", "ITEM_ID")
 
@@ -831,11 +884,17 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
         }
         (self.root / "baseline.json").write_text(json.dumps(config) + "\n", encoding="utf-8")
         source_data = json.loads((self.fixtures / "reference_data_source.json").read_text(encoding="utf-8"))
+        timestamp_column = {
+            "name": "CREATED_AT", "data_type": "TIMESTAMP(6) WITH TIME ZONE", "nullable": "N", "position": 8,
+        }
+        source_data["APP_CANCEL_POLICY"]["columns"].append(dict(timestamp_column))
+        source_data["APP_CANCEL_POLICY"]["rows"][0]["CREATED_AT"] = "2026-10-13T12:34:56.123456+02:00"
         data_root = self.root / "scratch" / "baseline" / "dev" / "data" / "APP_DEV"
         for name, table in source_data.items():
             (data_root / f"{name}.json").parent.mkdir(parents=True, exist_ok=True)
             (data_root / f"{name}.json").write_text(json.dumps(table) + "\n", encoding="utf-8")
         target_data = json.loads((self.fixtures / "reference_data_target.json").read_text(encoding="utf-8"))
+        target_data["APP_CANCEL_POLICY"]["columns"].append(dict(timestamp_column))
         constraints = json.loads((self.fixtures / "reference_data_constraints.json").read_text(encoding="utf-8"))
         source_catalog = json.loads(json.dumps(self.source))
         target_catalog = json.loads(json.dumps(self.target))
@@ -866,6 +925,8 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
         folder = next((self.root / "migrations" / "APP_STAGE").glob("*_baseline-data-r001"))
         sql = "\n".join(path.read_text(encoding="utf-8") for path in folder.glob("*.sql"))
         self.assertIn('SELECT P."REASON_ID" FROM "APP_STAGE"."APP_CANCEL_REASON" P', sql)
+        self.assertIn("TO_TIMESTAMP_TZ('2026-10-13T12:34:56.123456+02:00'", sql)
+        self.assertIn(".FFTZH:TZM", sql)
         self.assertNotIn('"REASON_ID" = 5', sql)
         self.assertNotIn("API_TOKEN", sql)
 

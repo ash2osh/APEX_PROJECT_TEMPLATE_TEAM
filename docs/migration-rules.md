@@ -431,6 +431,16 @@ before any further writes. Never edit or fabricate receipt identity, delete
 evidence to bypass the refusal, or replay completed writes merely to create a
 fresh receipt.
 
+Before execution, the rollout checks every selected step's canonical receipt
+path and refuses any existing file, directory, malformed receipt, or symbolic
+link. Successful receipts are installed with an atomic no-overwrite link. If a
+receipt appears after preflight or the filesystem cannot install it, the step
+may have completed without a receipt: preserve the report and SQLcl evidence,
+inspect the target independently, and use only a separately reviewed
+continuation manifest for further writes. This receipt check does not serialize
+cross-process runs or database writes; two processes can both pass preflight
+before either installs its receipt.
+
 `--dry-run` validates the manifest and local step inputs, prints all hashes,
 and writes the report pair without running the steps. `--report <file>` writes
 JSON and Markdown siblings; a `.json` or `.md` suffix is replaced to select the

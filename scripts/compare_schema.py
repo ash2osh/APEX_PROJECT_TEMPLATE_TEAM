@@ -1373,9 +1373,26 @@ def main_compare_env(
             dba_connections=dba_available,
             prefixes=tuple(dict.fromkeys(prefixes)),
         )
+        source_identity = catalogs[args.source].get("identity", {})
+        target_identity = catalogs[args.target].get("identity", {})
+        if (
+            isinstance(source_identity, Mapping)
+            and isinstance(target_identity, Mapping)
+            and same_database_scope(source_identity, target_identity)
+        ):
+            report["blockers"].append({
+                "section": "identity",
+                "side": "both",
+                "message": "source and target resolve to the same observed database, container, schema, and edition scope",
+            })
+            report["blockers"].sort(
+                key=lambda item: (item.get("section", ""), item.get("side", ""), item.get("name", ""), item.get("message", "")),
+            )
+            report["readiness"] = "blocked"
+            report["exit_code"] = 2
         if args.emit_dba_script:
             if report["exit_code"] == 2:
-                print("compare-env error: cannot emit a DBA script from incomplete catalog evidence", file=sys.stderr)
+                print("compare-env error: cannot emit a DBA script from a blocked comparison", file=sys.stderr)
                 print(render_environment_report(report, args.format))
                 return 2
             try:

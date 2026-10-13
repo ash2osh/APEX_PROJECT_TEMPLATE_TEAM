@@ -119,7 +119,7 @@ class LifecycleTests(unittest.TestCase):
             text = driver.read_text(encoding='utf-8')
             if 'automation-restore-driver.sql' in str(driver):
                 calls.append(text)
-                return SqlclResult(0, 'LIFECYCLE_CONTEXT_VERIFIED\nAUTOMATION_RESTORE_OK:4143544956455F4155544F\nAUTOMATION_RESTORE_COMPLETE\n', directory)
+                return SqlclResult(0, 'LIFECYCLE_CONTEXT_VERIFIED\nLIFECYCLE_RESTORE_IDENTITY_VERIFIED\nAUTOMATION_RESTORE_OK:4143544956455F4155544F\nAUTOMATION_RESTORE_COMPLETE\n', directory)
             if 'observation-before-enable' in str(driver):
                 data = imported
             else:
@@ -132,9 +132,30 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(report['status'], 'pass')
         self.assertEqual(report['enabledStaticIds'], ['ACTIVE_AUTO'])
         driver = calls[0]
+        identity_context = {
+            'session_user': 'SESSION_USER',
+            'current_schema': 'CURRENT_SCHEMA',
+            'db_unique_name': 'DB_UNIQUE_NAME',
+            'container_id': 'CON_ID',
+            'container_name': 'CON_NAME',
+            'edition': 'CURRENT_EDITION_NAME',
+            'server_host': 'SERVER_HOST',
+            'service_name': 'SERVICE_NAME',
+        }
+        first_enable = driver.index('APEX_AUTOMATION.ENABLE')
+        for key, context_name in identity_context.items():
+            with self.subTest(identity=key):
+                self.assertIn(f"NVL(SYS_CONTEXT('USERENV','{context_name}'),CHR(0))", driver)
+                self.assertIn(before['identity'][key].encode().hex().upper(), driver)
+                self.assertLess(driver.index(f"SYS_CONTEXT('USERENV','{context_name}')"), first_enable)
         self.assertEqual(driver.count('APEX_AUTOMATION.ENABLE'), 1)
         self.assertIn("APEX_AUTOMATION.ENABLE(p_application_id => 150, p_static_id => UTL_I18N.RAW_TO_CHAR(HEXTORAW('4143544956455F4155544F'),'AL32UTF8'))", driver)
         self.assertLess(driver.index('RESTORE_CONTEXT'), driver.index('APEX_AUTOMATION.ENABLE'))
+        self.assertIn('workspace_id', driver)
+        self.assertLess(driver.index('RESTORE_CONTEXT'), driver.index('workspace_id'))
+        self.assertLess(driver.index('workspace_id'), driver.index('APEX_AUTOMATION.ENABLE'))
+        self.assertIn(before['workspaceId'], driver)
+        self.assertIn('LIFECYCLE_RESTORE_IDENTITY_VERIFIED', driver)
         self.assertNotIn('DISABLED_AUTO', driver)
         self.assertNotIn('NEW_AUTO', driver)
         self.assertIn('ACTIVE_AUTO | ACTIVE | ACTIVE', output.getvalue())
@@ -151,7 +172,7 @@ class LifecycleTests(unittest.TestCase):
 
         def runner(target, driver, directory):
             if 'automation-restore-driver.sql' in str(driver):
-                return SqlclResult(0, 'LIFECYCLE_CONTEXT_VERIFIED\nAUTOMATION_RESTORE_OK:4143544956455F4155544F\nAUTOMATION_RESTORE_COMPLETE\n', directory)
+                return SqlclResult(0, 'LIFECYCLE_CONTEXT_VERIFIED\nLIFECYCLE_RESTORE_IDENTITY_VERIFIED\nAUTOMATION_RESTORE_OK:4143544956455F4155544F\nAUTOMATION_RESTORE_COMPLETE\n', directory)
             data = imported if 'observation-before-enable' in str(driver) else final
             return SqlclResult(0, 'LIFECYCLE_PAYLOAD_BEGIN\n' + json.dumps(data) + '\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED\n', directory)
 
@@ -160,6 +181,108 @@ class LifecycleTests(unittest.TestCase):
 
         self.assertEqual(report['status'], 'attention')
         self.assertEqual(report['reasons'], ['previously active automation is not active after restore: ACTIVE_AUTO'])
+
+    def test_restore_identity_drift_never_passes(self):
+        from scripts.sqlcl_session import SqlclResult
+
+        before = snapshot()
+        before['automations'] = [{'staticId': 'ACTIVE_AUTO', 'status': 'ACTIVE'}]
+        successful_writer = (
+            'LIFECYCLE_CONTEXT_VERIFIED\nLIFECYCLE_RESTORE_IDENTITY_VERIFIED\n'
+            'AUTOMATION_RESTORE_OK:4143544956455F4155544F\nAUTOMATION_RESTORE_COMPLETE\n'
+        )
+        changes = {
+            'session_user': lambda data: data['identity'].update(session_user='OTHER'),
+            'current_schema': lambda data: data['identity'].update(current_schema='OTHER'),
+            'db_unique_name': lambda data: data['identity'].update(db_unique_name='OTHER'),
+            'container_id': lambda data: data['identity'].update(container_id='4'),
+            'container_name': lambda data: data['identity'].update(container_name='OTHER'),
+            'edition': lambda data: data['identity'].update(edition='OTHER'),
+            'server_host': lambda data: data['identity'].update(server_host='OTHER'),
+            'service_name': lambda data: data['identity'].update(service_name='OTHER'),
+            'release': lambda data: data.update(release='26.2.1'),
+            'workspace': lambda data: data.update(workspace='OTHER'),
+            'workspaceId': lambda data: data.update(workspaceId='124'),
+            'appId': lambda data: data.update(appId=151),
+        }
+        for field, change in changes.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                after = copy.deepcopy(before)
+                change(after)
+
+                def runner(target, driver, run_dir, after=after):
+                    if driver.name == 'automation-restore-driver.sql':
+                        return SqlclResult(0, successful_writer, run_dir)
+                    return SqlclResult(
+                        0,
+                        'LIFECYCLE_PAYLOAD_BEGIN\n' + json.dumps(after) +
+                        '\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED\n',
+                        run_dir,
+                    )
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    report = lifecycle.restore_automations(
+                        TARGET, 'DEMO', 150, before, Path(directory), _runner=runner
+                    )
+                self.assertEqual(report['status'], 'attention')
+                self.assertTrue(report['reasons'])
+                self.assertEqual(
+                    json.loads((Path(directory) / 'automation-restore-report.json').read_text()),
+                    report,
+                )
+
+    def test_restore_scope_drift_blocks_even_without_active_automations(self):
+        from scripts.sqlcl_session import SqlclResult
+
+        before = snapshot()
+        after = copy.deepcopy(before)
+        after['identity']['db_unique_name'] = 'OTHER'
+
+        def runner(target, driver, directory):
+            return SqlclResult(
+                0,
+                'LIFECYCLE_PAYLOAD_BEGIN\n' + json.dumps(after) +
+                '\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED\n',
+                directory,
+            )
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            report = lifecycle.restore_automations(
+                TARGET, 'DEMO', 150, before, Path(directory), _runner=runner
+            )
+        self.assertEqual(report['status'], 'attention')
+        self.assertTrue(report['reasons'])
+
+    def test_restore_failed_identity_guard_and_unavailable_post_read_need_attention(self):
+        from scripts.sqlcl_session import SqlclResult
+
+        before = snapshot()
+        before['automations'] = [{'staticId': 'ACTIVE_AUTO', 'status': 'ACTIVE'}]
+        restored = copy.deepcopy(before)
+        for writer_result, readback in (
+            (SqlclResult(1, 'LIFECYCLE_CONTEXT_VERIFIED\n', Path('.')), restored),
+            (SqlclResult(0, 'LIFECYCLE_CONTEXT_VERIFIED\n', Path('.')), None),
+        ):
+            with self.subTest(readback=readback is not None), tempfile.TemporaryDirectory() as directory:
+                def runner(target, driver, run_dir, writer_result=writer_result, readback=readback):
+                    if driver.name == 'automation-restore-driver.sql':
+                        return SqlclResult(writer_result.returncode, writer_result.output, run_dir)
+                    if readback is None:
+                        return SqlclResult(0, 'LIFECYCLE_VERIFIED\n', run_dir)
+                    return SqlclResult(
+                        0,
+                        'LIFECYCLE_PAYLOAD_BEGIN\n' + json.dumps(readback) +
+                        '\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED\n',
+                        run_dir,
+                    )
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    report = lifecycle.restore_automations(
+                        TARGET, 'DEMO', 150, before, Path(directory), _runner=runner
+                    )
+                self.assertEqual(report['status'], 'attention')
+                self.assertTrue(report['reasons'])
+                self.assertTrue((Path(directory) / 'automation-restore-report.json').is_file())
 
     def test_restore_action_exits_nonzero_on_attention(self):
         before = snapshot()

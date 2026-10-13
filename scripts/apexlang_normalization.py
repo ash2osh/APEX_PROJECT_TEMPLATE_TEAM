@@ -12,7 +12,10 @@ PROPERTY = {
     "displayColumn": re.compile(r"^[ \t]*column[ \t]*:[ \t]*(?P<value>[^\s]+)"),
     "textMessage": re.compile(r"^[ \t]*language[ \t]*:[ \t]*(?P<value>[^\s]+)"),
 }
-BACKTICK = "`"
+
+
+class NormalizationError(ValueError):
+    """The source has ambiguous string boundaries and cannot be normalized safely."""
 
 
 @dataclass(frozen=True)
@@ -25,50 +28,148 @@ class Block:
     key: tuple[str, ...]
 
 
-def _toggle_backticks(line: str, in_backtick: bool) -> bool:
-    escaped = False
-    for character in line:
-        if character == BACKTICK and not escaped:
-            in_backtick = not in_backtick
-        if character == "\\" and not escaped:
-            escaped = True
-        else:
-            escaped = False
-    return in_backtick
-
-
-def _without_comment_lines(lines: list[str]) -> list[str]:
-    result = []
-    in_backtick = False
-    for line in lines:
-        if not in_backtick and line.lstrip().startswith("//"):
+def _literal_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Return half-open spans for quoted and multiline values in APEXlang."""
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            line_start = text.rfind("\n", 0, index) + 1
+            if not text[line_start:index].strip(" \t"):
+                newline = text.find("\n", index)
+                index = len(text) if newline < 0 else newline + 1
+                continue
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline + 1
             continue
-        result.append(line)
-        in_backtick = _toggle_backticks(line, in_backtick)
-    return result
+
+        if text.startswith("```", index):
+            end = index + 3
+            while end < len(text):
+                if text.startswith("\\```", end):
+                    end += 4
+                elif text.startswith("```", end):
+                    end += 3
+                    spans.append((index, end))
+                    index = end
+                    break
+                else:
+                    end += 1
+            else:
+                raise NormalizationError("unterminated APEXlang multiline string")
+            continue
+
+        if text[index] in {'"', "`"}:
+            quote = text[index]
+            end = index + 1
+            while end < len(text):
+                character = text[end]
+                if character == "\\":
+                    if end + 1 >= len(text) or text[end + 1] == "\n":
+                        raise NormalizationError("unterminated escape in APEXlang quoted value")
+                    end += 2
+                    continue
+                if character == quote:
+                    spans.append((index, end + 1))
+                    index = end + 1
+                    break
+                if character == "\n":
+                    raise NormalizationError("unterminated APEXlang quoted value")
+                end += 1
+            else:
+                raise NormalizationError("unterminated APEXlang quoted value")
+            continue
+
+        index += 1
+    return tuple(spans)
 
 
-def _parenthesis_delta(line: str, in_backtick: bool) -> tuple[int, bool]:
+def _mask_literals(text: str, spans: tuple[tuple[int, int], ...]) -> str:
+    """Mask literal code points while retaining positions and physical LFs."""
+    characters = list(text)
+    for start, end in spans:
+        for index in range(start, end):
+            if characters[index] != "\n":
+                characters[index] = " "
+    return "".join(characters)
+
+
+def _property_value_suffix(line: str, offset: int, literal_mask: list[bool]) -> str | None:
+    """Return a property's first value character, skipping its identifier and separator."""
+    for index, character in enumerate(line):
+        if character != ":" or literal_mask[offset + index]:
+            continue
+        identifier = line[:index].strip(" \t")
+        if not identifier:
+            continue
+        value_start = index + 1
+        while value_start < len(line) and line[value_start] in " \t":
+            value_start += 1
+        return line[value_start:]
+    return None
+
+
+def _without_outer_formatting(text: str) -> str:
+    spans = _literal_spans(text)
+    literal_mask = [False] * len(text)
+    for start, end in spans:
+        literal_mask[start:end] = [True] * (end - start)
+    masked = _mask_literals(text, spans)
+
+    result: list[tuple[str, bool]] = []
+    offset = 0
+    in_array = False
+    for line in text.split("\n"):
+        line_length = len(line)
+        masked_line = masked[offset:offset + len(line)]
+        was_in_array = in_array
+        unquoted_payload = False
+        if in_array:
+            content = line[:-1] if line.endswith("\r") and not literal_mask[offset + line_length - 1] else line
+            if content.strip(" \t") == "]":
+                in_array = False
+            else:
+                unquoted_payload = bool(content.strip(" \t"))
+        elif not masked_line.lstrip(" \t").startswith("//"):
+            value = _property_value_suffix(line, offset, literal_mask)
+            if value is not None:
+                if value.strip(" \t") == "[":
+                    in_array = True
+                elif value and not value.startswith(('"', "```", "{")):
+                    unquoted_payload = True
+        is_comment = not was_in_array and masked_line.lstrip(" \t").startswith("//")
+        if line.endswith("\r") and not literal_mask[offset + line_length - 1]:
+            line = line[:-1]
+        overlaps_literal = any(literal_mask[offset:offset + len(line)])
+        if not is_comment:
+            end = len(line)
+            if not unquoted_payload:
+                while end and line[end - 1] in " \t":
+                    if literal_mask[offset + end - 1]:
+                        break
+                    end -= 1
+            result.append((line[:end], overlaps_literal))
+        offset += line_length + 1
+
+    while result and not result[-1][0].strip(" \t\r") and not result[-1][1]:
+        del result[-1]
+
+    return "\n".join(line for line, _ in result) + ("\n" if result else "")
+
+
+def _parenthesis_delta(line: str) -> int:
     delta = 0
-    escaped = False
     index = 0
     while index < len(line):
         character = line[index]
-        if character == BACKTICK and not escaped:
-            in_backtick = not in_backtick
-        elif not in_backtick:
-            if character == "/" and index + 1 < len(line) and line[index + 1] == "/":
-                break
-            if character == "(":
-                delta += 1
-            elif character == ")":
-                delta -= 1
-        if character == "\\" and not escaped:
-            escaped = True
-        else:
-            escaped = False
+        if character == "/" and index + 1 < len(line) and line[index + 1] == "/":
+            break
+        if character == "(":
+            delta += 1
+        elif character == ")":
+            delta -= 1
         index += 1
-    return delta, in_backtick
+    return delta
 
 
 def _property_value(kind: str, identifier: str, lines: list[str]) -> str:
@@ -84,23 +185,21 @@ def _property_value(kind: str, identifier: str, lines: list[str]) -> str:
     return identifier
 
 
-def _blocks(lines: list[str]) -> list[Block]:
+def _blocks(lines: list[str], masked_lines: list[str]) -> list[Block]:
     result = []
     depth = 0
-    in_backtick = False
     index = 0
     while index < len(lines):
         match = DECLARATION.match(lines[index])
-        candidate = match is not None and not in_backtick
+        candidate = match is not None and DECLARATION.match(masked_lines[index]) is not None
         parent_depth = depth
-        delta, next_backtick = _parenthesis_delta(lines[index], in_backtick)
+        delta = _parenthesis_delta(masked_lines[index])
         if candidate and delta > 0:
             current_depth = depth + delta
             end = index
-            state = next_backtick
             while end + 1 < len(lines) and current_depth > parent_depth:
                 end += 1
-                line_delta, state = _parenthesis_delta(lines[end], state)
+                line_delta = _parenthesis_delta(masked_lines[end])
                 current_depth += line_delta
             if current_depth == parent_depth:
                 kind = match.group("kind")
@@ -111,11 +210,9 @@ def _blocks(lines: list[str]) -> list[Block]:
                 key = (primary, language) if kind == "textMessage" else (primary,)
                 result.append(Block(index, end, parent_depth, match.group("indent"), kind, key))
                 depth = current_depth
-                in_backtick = state
                 index = end + 1
                 continue
         depth += delta
-        in_backtick = next_backtick
         index += 1
     return result
 
@@ -147,7 +244,10 @@ def _sortable_groups(lines: list[str], blocks: list[Block]) -> list[list[Block]]
 
 
 def _sort_blocks(lines: list[str]) -> list[str]:
-    blocks = _blocks(lines)
+    text = "\n".join(lines)
+    spans = _literal_spans(text)
+    masked_lines = _mask_literals(text, spans).split("\n")
+    blocks = _blocks(lines, masked_lines)
     for group in reversed(_sortable_groups(lines, blocks)):
         gaps = [lines[left.end + 1:right.start] for left, right in zip(group, group[1:], strict=False)]
         sorted_blocks = sorted(group, key=lambda block: block.key)
@@ -161,14 +261,12 @@ def _sort_blocks(lines: list[str]) -> list[str]:
 
 
 def normalize_apexlang(content: bytes) -> bytes:
-    """Return normalized UTF-8 APEXlang bytes, preserving meaningful content."""
-    text = content.decode("utf-8")
-    lines = text.splitlines()
-    lines = _without_comment_lines(lines)
-    lines = [line.rstrip() for line in lines]
-    lines = _sort_blocks(lines)
-    while lines and not lines[-1].strip():
+    """Normalize only outer serialization formatting, preserving literal values."""
+    text = _without_outer_formatting(content.decode("utf-8"))
+    lines = text.split("\n")
+    if lines and not lines[-1]:
         lines.pop()
+    lines = _sort_blocks(lines)
     if not lines:
         return b""
     return ("\n".join(lines) + "\n").encode("utf-8")
