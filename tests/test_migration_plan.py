@@ -6,11 +6,13 @@ import os
 import socket
 import stat
 import subprocess
+import io
 import tempfile
 import unittest
 import urllib.request
 import uuid
 from contextlib import ExitStack
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -430,6 +432,242 @@ class MigrationPlanTests(unittest.TestCase):
         self.assertIn("# Migration plan", markdown)
         self.assertIn("render-r001", markdown)
         self.assertIn("no dependency or execution order is inferred", markdown.casefold())
+
+    def test_live_renderers_show_observed_target_and_preflight_statuses(self) -> None:
+        self.add_folder("migrations/2026-10-13_render-live-r001")
+        api = self.require_plan()
+        report = api.build_migration_plan(self.root)
+        report.update({"mode": "live", "environment": "dev", "target": {
+            "session_user": "APP", "current_schema": "APP", "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1", "service_name": "dev", "container_id": "3",
+            "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "23.26.3.0.0",
+        }})
+        report["preflight"] = {
+            "exit_code": 1,
+            "conflicts": [{"code": "LIVE_NAMESPACE_OCCUPIED", "name": "CUSTOMERS", "path": "migrations/2026-10-13_render-live-r001/001-step-1.sql"}],
+            "errors": [],
+            "coverage": {"deferredPreconditionFolders": ["2026-10-14_render-live-r002"]},
+            "limitation": "The catalog observation is point-in-time.",
+        }
+        report["exitCode"] = 1
+
+        text = api.render_migration_plan(report, "text")
+        markdown = api.render_migration_plan(report, "markdown")
+
+        for rendered in (text, markdown):
+            with self.subTest(rendered=rendered[:40]):
+                self.assertIn("Mode: live", rendered)
+                self.assertIn("Target:", rendered)
+                self.assertIn("APP", rendered)
+                self.assertIn("Preflight exit: 1", rendered)
+                self.assertIn("LIVE_NAMESPACE_OCCUPIED", rendered)
+                self.assertIn("render-live-r001/001-step-1.sql", rendered)
+                self.assertIn("render-live-r002", rendered)
+
+        incomplete = dict(report)
+        incomplete["preflight"] = {
+            "exit_code": 2,
+            "conflicts": [],
+            "errors": [{"code": "INCOMPLETE_VISIBILITY", "message": "safe status"}],
+            "coverage": {"deferredPreconditionFolders": ["2026-10-14_render-live-r002"]},
+            "limitation": "The catalog observation is point-in-time.",
+        }
+        incomplete["exitCode"] = 2
+        for rendered in (
+            api.render_migration_plan(incomplete, "text"),
+            api.render_migration_plan(incomplete, "markdown"),
+        ):
+            with self.subTest(incomplete=rendered[:40]):
+                self.assertIn("Preflight exit: 2", rendered)
+                self.assertIn("INCOMPLETE_VISIBILITY", rendered)
+                self.assertIn("1 error", rendered)
+
+    def test_preflight_raw_messages_are_sanitized_in_all_renderers(self) -> None:
+        self.add_folder("migrations/2026-10-13_sanitize-live-r001")
+        api = self.require_plan()
+        report = api.build_migration_plan(self.root)
+        report.update({"mode": "live", "environment": "dev"})
+        dangerous = "ORA-20001: SELECT private_value FROM secret_table; password=SECRET_MARKER_9K"
+        report["preflight"] = {
+            "exit_code": 2,
+            "conflicts": [],
+            "errors": [{
+                "code": "CHECK_FAILED", "check": "precheck-orders",
+                "path": "migrations/2026-10-13_sanitize-live-r001/001-step-1.sql",
+                "errorCode": "ORA-20001", "message": dangerous,
+                "observed": {"error": dangerous, "sql": dangerous},
+            }],
+            "coverage": {
+                "deferredPreconditionFolders": ["2026-10-14_sanitize-live-r002"],
+                "manual_review_required": [{
+                    "migration": "2026-10-13_sanitize-live-r001", "file": "001-step-1.sql",
+                    "reason": dangerous,
+                }],
+                "operations": [{"file": "001-step-1.sql", "sql": dangerous}],
+            },
+            "limitation": dangerous,
+            "results": [{"sql": dangerous, "error": dangerous}],
+        }
+        report["exitCode"] = 2
+
+        for output_format in ("json", "text", "markdown"):
+            rendered = api.render_migration_plan(report, output_format)
+            with self.subTest(output_format=output_format):
+                self.assertIn("CHECK_FAILED", rendered)
+                self.assertIn("precheck-orders", rendered)
+                self.assertIn("ORA-20001", rendered)
+                self.assertIn("sanitize-live-r001/001-step-1.sql", rendered)
+                self.assertIn("manual review", rendered.casefold())
+                self.assertNotIn("SELECT private_value", rendered)
+                self.assertNotIn("secret_table", rendered)
+                self.assertNotIn("SECRET_MARKER_9K", rendered)
+
+    def test_main_offline_schema_report_never_reads_environment_or_sqlcl(self) -> None:
+        self.add_folder("migrations/ALPHA/2026-10-13_cli-first-r001")
+        self.add_folder("migrations/BRAVO/2026-10-13_cli-second-r001")
+        api = self.require_plan()
+        output = io.StringIO()
+        errors = io.StringIO()
+        with patch("scripts.local_config.read_project_env", side_effect=AssertionError("offline command read .env")), patch.object(
+            api, "require_migration_sqlcl_version", side_effect=AssertionError("offline command started SQLcl")
+        ), redirect_stdout(output), redirect_stderr(errors):
+            status = api.main(["migrations/ALPHA/2026-10-13_cli-first-r001", "--schema", "ALPHA", "--format", "json"], repo_root=self.root)
+
+        report = json.loads(output.getvalue())
+        self.assertEqual(0, status)
+        self.assertEqual("offline", report["mode"])
+        self.assertEqual(["migrations/ALPHA/2026-10-13_cli-first-r001"], [row["path"] for row in report["migrations"]])
+        self.assertEqual("ALPHA", report["migrations"][0]["schema"])
+        self.assertEqual("", errors.getvalue())
+
+    def test_main_rejects_ambiguous_live_flags_before_environment_or_sqlcl(self) -> None:
+        api = self.require_plan()
+        for arguments in (
+            ["--env", "dev", "--format", "json"],
+            ["--live", "--format", "json"],
+            ["--live", "--env", "dev", "--format", "json"],
+        ):
+            output = io.StringIO()
+            errors = io.StringIO()
+            with self.subTest(arguments=arguments), patch(
+                "scripts.local_config.read_project_env", side_effect=AssertionError("invalid request read .env")
+            ) as read_env, patch.object(
+                api, "require_migration_sqlcl_version", side_effect=AssertionError("invalid request started SQLcl")
+            ) as sqlcl_guard, redirect_stdout(output), redirect_stderr(errors):
+                status = api.main(arguments, repo_root=self.root)
+            report = json.loads(output.getvalue())
+            self.assertEqual(2, status)
+            self.assertTrue(report["diagnostics"])
+            self.assertIsNone(report["target"])
+            read_env.assert_not_called()
+            sqlcl_guard.assert_not_called()
+            self.assertEqual("", errors.getvalue())
+
+    def test_main_invalid_live_environment_is_canonical_and_secret_free(self) -> None:
+        self.add_folder("migrations/2026-10-13_invalid-env-r001")
+        api = self.require_plan()
+        marker = "staging/SELECT password FROM private_table; password=SECRET_ENV_MARKER_4X/"
+
+        for output_format in ("json", "text", "markdown"):
+            output = io.StringIO()
+            errors = io.StringIO()
+            with self.subTest(output_format=output_format), patch(
+                "scripts.local_config.read_project_env", side_effect=AssertionError("invalid env read .env")
+            ) as read_env, patch.object(
+                api, "require_migration_sqlcl_version", side_effect=AssertionError("invalid env started SQLcl")
+            ) as sqlcl_guard, redirect_stdout(output), redirect_stderr(errors):
+                status = api.main(
+                    ["migrations/2026-10-13_invalid-env-r001", "--live", "--env", marker, "--format", output_format],
+                    repo_root=self.root,
+                )
+
+            self.assertEqual(2, status)
+            self.assertNotIn(marker, output.getvalue())
+            self.assertNotIn("SECRET_ENV_MARKER_4X", output.getvalue())
+            self.assertNotIn("SELECT password FROM private_table", output.getvalue())
+            self.assertNotIn("password=", output.getvalue())
+            if output_format == "json":
+                self.assertTrue(output.getvalue().lstrip().startswith("{"), output.getvalue())
+                self.assertIsNone(json.loads(output.getvalue())["environment"])
+            read_env.assert_not_called()
+            sqlcl_guard.assert_not_called()
+            self.assertEqual("", errors.getvalue())
+
+    def test_main_syntax_error_keeps_final_json_format_and_sanitizes_environment(self) -> None:
+        self.add_folder("migrations/2026-10-13_syntax-env-r001")
+        api = self.require_plan()
+        marker = "SECRET_ENV_MARKER_8M/SELECT password FROM secrets"
+        output = io.StringIO()
+        errors = io.StringIO()
+        with patch("scripts.local_config.read_project_env", side_effect=AssertionError("syntax error read .env")) as read_env, patch.object(
+            api, "require_migration_sqlcl_version", side_effect=AssertionError("syntax error started SQLcl")
+        ) as sqlcl_guard, redirect_stdout(output), redirect_stderr(errors):
+            status = api.main(
+                [
+                    "migrations/2026-10-13_syntax-env-r001",
+                    "--live",
+                    "--env",
+                    marker,
+                    "--unknown-option",
+                    "--format=json",
+                ],
+                repo_root=self.root,
+            )
+
+        self.assertEqual(2, status)
+        self.assertTrue(output.getvalue().lstrip().startswith("{"), output.getvalue())
+        report = json.loads(output.getvalue())
+        self.assertEqual(1, report["schemaVersion"])
+        self.assertIsNone(report["environment"])
+        self.assertNotIn(marker, output.getvalue())
+        self.assertNotIn("SECRET_ENV_MARKER_8M", output.getvalue())
+        self.assertNotIn("SELECT password FROM secrets", output.getvalue())
+        read_env.assert_not_called()
+        sqlcl_guard.assert_not_called()
+        self.assertEqual("", errors.getvalue())
+
+    def test_main_rejects_abbreviated_live_option_before_environment_or_sqlcl(self) -> None:
+        self.add_folder("migrations/2026-10-13_abbreviated-option-r001")
+        api = self.require_plan()
+        output = io.StringIO()
+        errors = io.StringIO()
+        with patch("scripts.local_config.read_project_env", side_effect=AssertionError("abbreviated option read .env")) as read_env, patch.object(
+            api, "require_migration_sqlcl_version", side_effect=AssertionError("abbreviated option started SQLcl")
+        ) as sqlcl_guard, redirect_stdout(output), redirect_stderr(errors):
+            status = api.main(
+                ["migrations/2026-10-13_abbreviated-option-r001", "--live", "--en", "dev", "--format=json"],
+                repo_root=self.root,
+            )
+
+        self.assertEqual(2, status)
+        report = json.loads(output.getvalue())
+        self.assertIsNone(report["environment"])
+        self.assertIn("invalid-arguments", [item["code"] for item in report["diagnostics"]])
+        read_env.assert_not_called()
+        sqlcl_guard.assert_not_called()
+        self.assertEqual("", errors.getvalue())
+
+    def test_main_missing_option_value_does_not_hide_trailing_json_format(self) -> None:
+        self.add_folder("migrations/2026-10-13_missing-option-value-r001")
+        api = self.require_plan()
+        output = io.StringIO()
+        errors = io.StringIO()
+        with patch("scripts.local_config.read_project_env", side_effect=AssertionError("syntax error read .env")) as read_env, patch.object(
+            api, "require_migration_sqlcl_version", side_effect=AssertionError("syntax error started SQLcl")
+        ) as sqlcl_guard, redirect_stdout(output), redirect_stderr(errors):
+            status = api.main(
+                ["migrations/2026-10-13_missing-option-value-r001", "--live", "--env", "--format=json"],
+                repo_root=self.root,
+            )
+
+        self.assertEqual(2, status)
+        self.assertTrue(output.getvalue().lstrip().startswith("{"), output.getvalue())
+        report = json.loads(output.getvalue())
+        self.assertIsNone(report["environment"])
+        self.assertIn("invalid-arguments", [item["code"] for item in report["diagnostics"]])
+        read_env.assert_not_called()
+        sqlcl_guard.assert_not_called()
+        self.assertEqual("", errors.getvalue())
 
     def test_markdown_diagnostics_cannot_create_links(self) -> None:
         self.add_folder("migrations/2026-09-26_markdown-link-r001")

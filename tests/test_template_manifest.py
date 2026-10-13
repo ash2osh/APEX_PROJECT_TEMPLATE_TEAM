@@ -210,6 +210,7 @@ class TemplateManifestTests(unittest.TestCase):
     def test_migration_guide_is_template_owned_and_migration_payload_is_not(self) -> None:
         for path in (
             "docs/migration-rules.md",
+            "docs/migration-planning.md",
             "docs/production-deployment.md",
             "docs/template-feedback.md",
         ):

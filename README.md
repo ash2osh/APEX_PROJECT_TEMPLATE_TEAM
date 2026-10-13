@@ -164,7 +164,7 @@ up there:
   A copy downloaded as a ZIP carries a "from the internet" mark that
   `RemoteSigned` still blocks; clone with Git, or run
   `Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File` once.
-- **Python.** The Bash helpers behind `check-conflicts`, `migrate`,
+- **Python.** The Bash helpers behind `check-conflicts`, `migration-plan`, `migrate`,
   `compare-schema` and `deploy` call `python3`, which a python.org or winget
   install does not provide (the Microsoft Store `python3.exe` is a stub when
   Python came from elsewhere). `team.ps1` finds a working Python (`python3`,
@@ -447,6 +447,12 @@ Use `revise --check` to inspect local attempt and receipt evidence without
 connecting. It exits 0 for unlocked, 1 for locked, and 2 when evidence is
 unknown or unreadable. See the [migration rules](docs/migration-rules.md) for
 the exact `apply-not-started` classification and its limits.
+
+Use `scripts/team.sh migration-plan --format text` for a local inventory, or
+pass folders in intended order. Add `--live --env dev|staging|prod` for the
+guarded read-only preflight. The [migration planning guide](docs/migration-planning.md)
+explains the evidence boundary, deferred preconditions, report formats and
+immutable-folder rule.
 
 Run a selected live preflight and apply with an explicit environment:
 
@@ -741,6 +747,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice] [--no-restore-automations]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
+| `scripts/team.sh migration-plan [<folder> ...] [--live --env <env>] [--schema NAME] [--format text\|json\|markdown]` | Inventory local migrations or report an explicitly selected guarded live preflight; see [migration planning](docs/migration-planning.md). |
 | `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. |
 | `scripts/team.sh revise <folder> [--reason TEXT]` | Copy a migration to its next revision; the old folder stays unchanged. |
 | `scripts/team.sh revise --check <folder>` | Report whether local receipt or attempt evidence locks a migration folder; exit 0/1/2 for unlocked/locked/unknown. |

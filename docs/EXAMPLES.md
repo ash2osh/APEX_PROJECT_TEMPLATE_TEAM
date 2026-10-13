@@ -216,6 +216,27 @@ migrations.
 - `schema X is not listed in STAGING_SCHEMA`: a schema you deploy to staging
   must appear, with the same name, in the staging settings.
 
+### Plan an ordered migration batch
+
+Inspect the local inventory without loading `.env` or starting SQLcl, then pass
+the intended order explicitly. Discovered rows are sorted for display only:
+
+```bash
+scripts/team.sh migration-plan --schema SALES --format markdown
+scripts/team.sh migration-plan \
+  migrations/SALES/2026-10-12_create-orders-r001 \
+  migrations/SALES/2026-10-13_add-order-state-r001 --format json
+scripts/team.sh migration-plan \
+  migrations/SALES/2026-10-12_create-orders-r001 \
+  migrations/SALES/2026-10-13_add-order-state-r001 \
+  --live --env dev --format text
+```
+
+The live report is read-only and marks later-folder preconditions as deferred.
+Its single-SQL-file-folder count is a review metric, not a request to squash
+folders. Attempted or applied folders stay immutable. See
+[migration planning](migration-planning.md) for evidence and limits.
+
 ## 7. Release to staging and production
 
 **When:** the app works in DEV and you want to promote it.

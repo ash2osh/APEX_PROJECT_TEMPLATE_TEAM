@@ -20,6 +20,8 @@ Commands:
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
+  migration-plan [<folder> ...] [--live --env <env>] [--schema NAME] [--format text|json|markdown]
+                                              Inventory selected migrations or run a guarded read-only preflight
   migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
                                               Apply, or rehearse DML in one transaction and roll it back
   revise <folder> [--reason TEXT]             Copy to the next migration revision
@@ -59,7 +61,7 @@ Commands:
   automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
                                               Observe, check or explicitly operate on one scoped automation
 Options:
-  --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
+  --schema <NAME>                             Run one configured schema (except upgrade-template, verify-local and migration-plan)
   --help                                      Show this help
 Environment:
   MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
@@ -78,7 +80,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -265,6 +267,10 @@ case "$command_name" in
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/check_conflicts.sh" "$@"
+    ;;
+  migration-plan)
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.migration_plan --repo-root "$REPO_ROOT" "$@"
     ;;
   migrate)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]"

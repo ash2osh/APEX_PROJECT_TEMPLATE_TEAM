@@ -17,6 +17,7 @@ DOCS = (
     ROOT / "app_context" / "README.md",
     ROOT / "migrations" / "README.md",
     ROOT / "docs" / "migration-rules.md",
+    ROOT / "docs" / "migration-planning.md",
     ROOT / "docs" / "baseline.md",
     ROOT / "docs" / "compare-env.md",
     ROOT / "docs" / "publish-rules.md",
@@ -251,6 +252,27 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, guide)
         self.assertNotIn("migrations/<developer>/", guide)
+
+    def test_migration_planning_guide_documents_evidence_and_selection_rules(self) -> None:
+        planning = (ROOT / "docs" / "migration-planning.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        migration_readme = (ROOT / "migrations" / "README.md").read_text(encoding="utf-8")
+        rules = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
+        examples = (ROOT / "docs" / "EXAMPLES.md").read_text(encoding="utf-8")
+        limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+
+        self.assertIn("docs/migration-planning.md", readme)
+        self.assertIn("migration-plan", migration_readme)
+        for phrase in (
+            "local inventory", "live preflight", "caller-supplied", "sorted display order",
+            "deferred", "Single-SQL-file folders", "No other repository", "immutable",
+            "never applies SQL", "no automatic draft squasher",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase.casefold(), planning.casefold())
+        self.assertIn("migration-plan", rules)
+        self.assertIn("migration-plan", examples)
+        self.assertIn("another repository", limitations)
 
     def test_ci_runs_behavioral_unittest_suite(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")

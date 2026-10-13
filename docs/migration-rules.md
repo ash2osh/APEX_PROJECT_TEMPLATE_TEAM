@@ -75,6 +75,15 @@ earlier one creates. A
 cross-schema change such as a grant or a synonym is two coordinated migrations,
 one per schema.
 
+Use [`migration-plan`](migration-planning.md) for a local inventory or an
+explicitly selected live preflight. Discovered folder order is for display;
+only a caller-supplied batch order is preserved as a proposed sequence. The
+report counts single-SQL-file folders but does not propose combining them.
+Live reporting checks only the first selected folder's preconditions before
+any write and labels later preconditions as deferred until their apply
+boundary. It does not apply or rehearse SQL. Attempted and applied folders
+remain immutable; a correction belongs in a later revision.
+
 SQL files hold only SQL: statements ended by `;` and PL/SQL blocks, types,
 libraries, Java sources and MLE modules ended by a standalone `/`. SQLcl reads
 some text as something other than part of the statement, so the validator

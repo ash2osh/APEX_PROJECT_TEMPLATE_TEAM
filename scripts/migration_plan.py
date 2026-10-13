@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import argparse
 import html
 import json
+import math
 import os
+import re
 import stat
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -34,9 +38,34 @@ LIMITATIONS = (
 __all__ = [
     "build_live_migration_plan",
     "build_migration_plan",
+    "main",
     "render_migration_plan",
     "require_migration_sqlcl_version",
 ]
+
+_ORACLE_ERROR_RE = re.compile(r"\b(?:ORA|SP2)-\d{4,5}\b", re.IGNORECASE)
+_SAFE_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z", re.ASCII)
+_SAFE_IDENTIFIER_RE = re.compile(r"[A-Za-z][A-Za-z0-9_$#]{0,127}\Z", re.ASCII)
+_SAFE_COMPONENT_RE = re.compile(r"[A-Za-z0-9_.-]{1,255}\Z", re.ASCII)
+_IDENTITY_FIELDS = (
+    "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
+    "container_id", "container_name", "edition", "database_version",
+)
+_SAFE_PREFLIGHT_MESSAGES = {
+    "CHECK_FAILED": "Live migration check failed; database details omitted.",
+    "INCOMPLETE_VISIBILITY": "Live catalog observation is incomplete.",
+    "LIVE_PREFLIGHT_UNAVAILABLE": "Live preflight could not complete; raw details omitted.",
+    "UNSUPPORTED_OPERATION": "SQL operation needs explicit review; source text omitted.",
+    "CHECK_TOO_LARGE": "A check exceeds the configured single-query byte limit.",
+    "SQLCL_TIMEOUT": "SQLcl timed out while evaluating the preflight check.",
+    "CHECK_UNAVAILABLE": "A live migration check could not complete; raw details omitted.",
+}
+_LIVE_ENVIRONMENTS = frozenset({"dev", "staging", "prod"})
+
+
+def _canonical_environment(value: object) -> str | None:
+    """Keep refusal envelopes to the three public environment labels."""
+    return value if isinstance(value, str) and value in _LIVE_ENVIRONMENTS else None
 
 
 def _safe_text(value: object, *, limit: int = 500) -> str:
@@ -447,7 +476,7 @@ def build_migration_plan(repo_root: Path, folders: Sequence[str] = (), *, schema
 def _live_report_from_offline(report: Mapping[str, Any], environment: str | None) -> dict[str, Any]:
     """Copy the stable offline inventory envelope for a live refusal."""
     result = dict(report)
-    result.update({"mode": "live", "environment": environment, "target": None, "preflight": None})
+    result.update({"mode": "live", "environment": _canonical_environment(environment), "target": None, "preflight": None})
     result["diagnostics"] = list(report.get("diagnostics", []))
     result["limitations"] = list(report.get("limitations", []))
     result["exitCode"] = 2
@@ -575,8 +604,10 @@ def build_live_migration_plan(
 
     try:
         require_migration_sqlcl_version()
-    except MigrationRuntimeError as error:
-        report["diagnostics"].append(_diagnostic("sqlcl-version-unavailable", None, str(error)))
+    except MigrationRuntimeError:
+        report["diagnostics"].append(
+            _diagnostic("sqlcl-version-unavailable", None, "SQLcl 26.3.0.0 or newer is required for a live report.")
+        )
         return report
 
     preflight = migration_checks.preflight_selected(
@@ -642,6 +673,210 @@ def _markdown_cell(value: object) -> str:
     )
 
 
+def _safe_report_path(value: object) -> str | None:
+    """Keep useful relative paths while excluding controls and traversal."""
+    if not isinstance(value, str) or not value or len(value) > 1000:
+        return None
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("/") or any(part in {"", ".", ".."} for part in normalized.split("/")):
+        return None
+    return _safe_text(normalized, limit=1000)
+
+
+def _safe_identifier(value: object, *, component: bool = False) -> str | None:
+    if not isinstance(value, str):
+        return None
+    pattern = _SAFE_COMPONENT_RE if component else _SAFE_IDENTIFIER_RE
+    return value if pattern.fullmatch(value) else None
+
+
+def _safe_oracle_code(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = _ORACLE_ERROR_RE.fullmatch(value)
+    return match.group(0).upper() if match else None
+
+
+def _safe_preflight_message(code: str, error_code: str | None) -> str:
+    if error_code:
+        return f"Oracle returned {error_code}; raw details omitted."
+    return _SAFE_PREFLIGHT_MESSAGES.get(code, "Preflight condition needs review; raw details omitted.")
+
+
+def _safe_preflight_item(item: object, *, conflict: bool) -> dict[str, Any]:
+    """Project one untrusted preflight row onto fields safe for public reports."""
+    source = item if isinstance(item, Mapping) else {}
+    raw_code = source.get("code")
+    code = raw_code if isinstance(raw_code, str) and _SAFE_CODE_RE.fullmatch(raw_code) else "UNKNOWN_CONDITION"
+    safe: dict[str, Any] = {"code": code}
+
+    path = _safe_report_path(source.get("path"))
+    if path is not None:
+        safe["path"] = path
+    for field in ("migration", "file", "check"):
+        value = _safe_identifier(source.get(field), component=True)
+        if value is not None:
+            safe[field] = value
+    for field in ("name", "table", "column", "view", "required_by", "namespace"):
+        value = _safe_identifier(source.get(field))
+        if value is not None:
+            safe[field] = value
+    existing_types = source.get("existing_types")
+    if isinstance(existing_types, (list, tuple)):
+        safe["existing_types"] = [
+            value for value in existing_types
+            if isinstance(value, str) and _SAFE_IDENTIFIER_RE.fullmatch(value)
+        ][:16]
+    columns = source.get("columns")
+    if isinstance(columns, (list, tuple)):
+        safe["columns"] = [
+            value for value in columns
+            if isinstance(value, str) and _SAFE_IDENTIFIER_RE.fullmatch(value)
+        ][:64]
+    for field in ("statement_index", "sequence"):
+        value = source.get(field)
+        if type(value) is int and value >= 0:
+            safe[field] = value
+    for field in ("expected", "observedValue"):
+        value = source.get(field)
+        if type(value) in {int, float} and (type(value) is int or math.isfinite(value)):
+            safe[field] = value
+
+    error_code = _safe_oracle_code(source.get("errorCode"))
+    if error_code is None:
+        raw_message = source.get("message")
+        if isinstance(raw_message, str):
+            match = _ORACLE_ERROR_RE.search(raw_message)
+            error_code = match.group(0).upper() if match else None
+    if error_code is not None:
+        safe["errorCode"] = error_code
+    safe["message"] = _safe_preflight_message(code, error_code)
+    if not conflict and isinstance(source.get("reason"), str):
+        safe["reason"] = _safe_preflight_message(code, error_code)
+    return safe
+
+
+def _safe_identity(value: object) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    identity: dict[str, str] = {}
+    for field in _IDENTITY_FIELDS:
+        item = value.get(field)
+        if isinstance(item, (str, int)) and str(item).strip():
+            identity[field] = _safe_text(item, limit=255)
+    return identity or None
+
+
+def _safe_folder_names(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [
+        item for item in value
+        if isinstance(item, str) and _SAFE_COMPONENT_RE.fullmatch(item)
+    ][:256]
+
+
+def _safe_preflight(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    safe: dict[str, Any] = {}
+    exit_code = value.get("exit_code")
+    if type(exit_code) is int and exit_code in {0, 1, 2}:
+        safe["exit_code"] = exit_code
+    for field in ("passed", "complete"):
+        if type(value.get(field)) is bool:
+            safe[field] = value[field]
+    conflicts = value.get("conflicts", [])
+    errors = value.get("errors", [])
+    safe["conflicts"] = [
+        _safe_preflight_item(item, conflict=True)
+        for item in conflicts[:1000]
+    ] if isinstance(conflicts, (list, tuple)) else []
+    safe["errors"] = [
+        _safe_preflight_item(item, conflict=False)
+        for item in errors[:1000]
+    ] if isinstance(errors, (list, tuple)) else []
+
+    raw_coverage = value.get("coverage")
+    coverage: dict[str, Any] = {}
+    if isinstance(raw_coverage, Mapping):
+        for field in ("complete", "live_state_checked", "selectedInputHashesVerified", "ownerComplete"):
+            if type(raw_coverage.get(field)) is bool:
+                coverage[field] = raw_coverage[field]
+        for field in ("structural_operations", "opaque_operations"):
+            count = raw_coverage.get(field)
+            if type(count) is int and count >= 0:
+                coverage[field] = count
+        for field in ("mode", "analysis", "environment"):
+            item = raw_coverage.get(field)
+            if isinstance(item, str) and _SAFE_COMPONENT_RE.fullmatch(item):
+                coverage[field] = item
+        selected = _safe_folder_names(raw_coverage.get("selected_migrations"))
+        if selected:
+            coverage["selected_migrations"] = selected
+        failed = _safe_folder_names(raw_coverage.get("failedCheckIds"))
+        if failed:
+            coverage["failedCheckIds"] = failed
+        deferred = _safe_folder_names(raw_coverage.get("deferredPreconditionFolders"))
+        deferred_info = raw_coverage.get("deferred_preconditions")
+        if not deferred and isinstance(deferred_info, Mapping):
+            deferred = _safe_folder_names(deferred_info.get("folders"))
+        if deferred:
+            coverage["deferredPreconditionFolders"] = deferred
+            coverage["deferred_preconditions"] = {
+                "folders": deferred,
+                "reason": "Checked when each folder reaches its own apply boundary.",
+            }
+        identity = _safe_identity(raw_coverage.get("observedIdentity"))
+        if identity is not None:
+            coverage["observedIdentity"] = identity
+        reviews = raw_coverage.get("manual_review_required")
+        if isinstance(reviews, (list, tuple)):
+            safe_reviews = []
+            for review in reviews[:256]:
+                if not isinstance(review, Mapping):
+                    continue
+                raw_reason = review.get("reason")
+                reason = (
+                    "CREATE OR REPLACE VIEW requires review of its declared precondition."
+                    if isinstance(raw_reason, str) and "create or replace view" in raw_reason.casefold()
+                    else "Opaque SQL requires manual review; source text omitted."
+                )
+                row: dict[str, str] = {"reason": reason}
+                migration = _safe_identifier(review.get("migration"), component=True)
+                filename = _safe_identifier(review.get("file"), component=True)
+                if migration is not None:
+                    row["migration"] = migration
+                if filename is not None:
+                    row["file"] = filename
+                safe_reviews.append(row)
+            if safe_reviews:
+                coverage["manual_review_required"] = safe_reviews
+        inventory = raw_coverage.get("live_inventory")
+        if isinstance(inventory, Mapping):
+            safe_inventory: dict[str, Any] = {}
+            owner_complete = inventory.get("ownerComplete")
+            if type(owner_complete) is bool:
+                safe_inventory["ownerComplete"] = owner_complete
+            catalogs = _safe_folder_names(inventory.get("catalogs"))
+            if catalogs:
+                safe_inventory["catalogs"] = catalogs
+            if safe_inventory:
+                coverage["live_inventory"] = safe_inventory
+    safe["coverage"] = coverage
+
+    safe["limitation"] = "Live preflight is a point-in-time read-only observation; other repositories are not included."
+    return safe
+
+
+def _safe_report_for_render(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove raw preflight details at the report's public serialization boundary."""
+    safe = dict(report)
+    safe["target"] = _safe_identity(report.get("target"))
+    safe["preflight"] = _safe_preflight(report.get("preflight"))
+    return safe
+
+
 def _group_records(records: Sequence[Mapping[str, Any]]) -> list[tuple[str, list[Mapping[str, Any]]]]:
     groups: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
@@ -654,7 +889,8 @@ def _group_records(records: Sequence[Mapping[str, Any]]) -> list[tuple[str, list
 def _text_report(report: Mapping[str, Any]) -> str:
     summary = report["summary"]
     lines = [
-        "Migration plan (offline)",
+        f"Migration plan ({report['mode']})",
+        f"Mode: {report['mode']}",
         f"Selection: {report['selection']}",
         f"Order: {report['orderStatus']}",
         f"Folders: {summary['folderCount']}",
@@ -666,6 +902,11 @@ def _text_report(report: Mapping[str, Any]) -> str:
         f"Unknown-evidence folders: {summary['unknownEvidenceFolderCount']}",
         "Migrations by schema:",
     ]
+    if report.get("environment"):
+        lines.insert(2, f"Environment: {report['environment']}")
+    target = report.get("target")
+    if target:
+        lines.insert(3, "Target: " + ", ".join(f"{key}={value}" for key, value in target.items()))
     for schema, group in _group_records(report["migrations"]):
         lines.append(f"  {schema}:")
         for record in group:
@@ -674,6 +915,32 @@ def _text_report(report: Mapping[str, Any]) -> str:
             revision = f"r{record['revision']:03d}" if isinstance(record["revision"], int) else "unknown revision"
             reasons = "; ".join(record["localEvidence"]["reasons"])
             lines.append(f"    {record['path']} — {family} {revision}, {files} SQL file(s), evidence {record['localEvidence']['status']} ({reasons})")
+    preflight = report.get("preflight")
+    if report["mode"] == "live":
+        lines.append("Live preflight:")
+        if preflight is None:
+            lines.append("  Preflight: unavailable")
+        else:
+            conflicts = preflight.get("conflicts", [])
+            errors = preflight.get("errors", [])
+            lines.append(f"  Preflight exit: {preflight.get('exit_code', 'unknown')} ({len(conflicts)} conflict(s), {len(errors)} error(s))")
+            for heading, items in (("Conflicts", conflicts), ("Errors", errors)):
+                if items:
+                    lines.append(f"  Preflight {heading.lower()}:")
+                    lines.extend(
+                        "    [" + item["code"] + "] " + "; ".join(
+                            f"{key}={item[key]}" for key in ("path", "migration", "file", "check", "name", "table", "column", "namespace", "errorCode") if key in item
+                        ) + (": " if any(key in item for key in ("path", "migration", "file", "check", "name", "table", "column", "namespace", "errorCode")) else " ") + item["message"]
+                        for item in items
+                    )
+            coverage = preflight.get("coverage", {})
+            deferred = coverage.get("deferredPreconditionFolders", [])
+            if deferred:
+                lines.append("  Deferred preconditions: " + ", ".join(deferred) + " (checked when each folder reaches its apply boundary).")
+            reviews = coverage.get("manual_review_required", [])
+            for review in reviews:
+                where = "/".join(value for value in (review.get("migration"), review.get("file")) if value)
+                lines.append(f"  Manual review: {where}: {review['reason']}")
     if report["diagnostics"]:
         lines.append("Diagnostics:")
         lines.extend(
@@ -690,7 +957,7 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
     lines = [
         "# Migration plan",
         "",
-        f"- Mode: `{_markdown_cell(report['mode'])}`",
+        f"- Mode: {_markdown_cell(report['mode'])}",
         f"- Selection: `{_markdown_cell(report['selection'])}`",
         f"- Order: `{_markdown_cell(report['orderStatus'])}`",
         "",
@@ -699,6 +966,13 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         "| Measure | Count |",
         "| --- | ---: |",
     ]
+    if report.get("environment"):
+        lines.insert(4, f"- Environment: `{_markdown_cell(report['environment'])}`")
+    target = report.get("target")
+    if target:
+        lines.insert(5 if report.get("environment") else 4, "- Target: " + ", ".join(
+            f"`{_markdown_cell(key)}={_markdown_cell(value)}`" for key, value in target.items()
+        ))
     for key in SUMMARY_FIELDS:
         lines.append(f"| {_markdown_cell(key)} | {summary[key]} |")
     lines.extend(("", "## Migrations by schema"))
@@ -719,6 +993,30 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
                     )
                 ) + " |"
             )
+    preflight = report.get("preflight")
+    if report["mode"] == "live":
+        lines.extend(("", "## Live preflight", ""))
+        if preflight is None:
+            lines.append("Preflight: unavailable.")
+        else:
+            conflicts = preflight.get("conflicts", [])
+            errors = preflight.get("errors", [])
+            lines.append(f"Preflight exit: {preflight.get('exit_code', 'unknown')} ({len(conflicts)} conflict(s), {len(errors)} error(s)).")
+            for heading, items in (("Conflicts", conflicts), ("Errors", errors)):
+                if items:
+                    lines.extend(("", f"### {heading}", ""))
+                    for item in items:
+                        details = "; ".join(
+                            f"{key}={item[key]}" for key in ("path", "migration", "file", "check", "name", "table", "column", "namespace", "errorCode") if key in item
+                        )
+                        lines.append(f"- `{_markdown_cell(item['code'])}` — {_markdown_cell(details)}: {_markdown_cell(item['message'])}")
+            coverage = preflight.get("coverage", {})
+            deferred = coverage.get("deferredPreconditionFolders", [])
+            if deferred:
+                lines.extend(("", "Deferred preconditions: " + ", ".join(f"`{_markdown_cell(item)}`" for item in deferred) + " (checked when each folder reaches its apply boundary)."))
+            for review in coverage.get("manual_review_required", []):
+                where = "/".join(value for value in (review.get("migration"), review.get("file")) if value)
+                lines.append(f"- Manual review: `{_markdown_cell(where)}` — {_markdown_cell(review['reason'])}")
     if report["diagnostics"]:
         lines.extend(("", "## Diagnostics", "", "| Code | Path | Message |", "| --- | --- | --- |"))
         for item in report["diagnostics"]:
@@ -730,11 +1028,141 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
 
 def render_migration_plan(report: Mapping, output_format: str) -> str:
     """Render a report as plain text, JSON or Markdown; JSON omits the internal exit code."""
+    safe_report = _safe_report_for_render(report)
     if output_format == "json":
-        payload = {key: value for key, value in report.items() if key != "exitCode"}
+        payload = {key: value for key, value in safe_report.items() if key != "exitCode"}
         return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if output_format == "text":
-        return _text_report(report)
+        return _text_report(safe_report)
     if output_format == "markdown":
-        return _markdown_report(report)
+        return _markdown_report(safe_report)
     raise ValueError("output format must be text, json, or markdown")
+
+
+class _ReportArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        del message
+        raise ValueError("invalid migration-plan arguments")
+
+
+def _error_report(*, mode: str, environment: str | None, message: str, code: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "mode": mode,
+        "selection": "explicit",
+        "orderStatus": "caller-supplied",
+        "environment": _canonical_environment(environment),
+        "target": None,
+        "summary": _summary([]),
+        "migrations": [],
+        "preflight": None,
+        "diagnostics": [_diagnostic(code, None, message)],
+        "limitations": list(LIMITATIONS),
+        "exitCode": 2,
+    }
+
+
+def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) -> int:
+    """Run the local report CLI; environment and SQLcl are touched only for valid live input."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    parser = _ReportArgumentParser(
+        prog="scripts/team.sh migration-plan",
+        description="Inventory migrations or run an explicitly selected read-only live preflight.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("folders", nargs="*", help="migration folders, in caller-supplied order")
+    parser.add_argument("--repo-root", type=Path, default=repo_root, help=argparse.SUPPRESS)
+    parser.add_argument("--schema", help="filter migration owner or assert the owner of flat folders")
+    parser.add_argument("--format", choices=("text", "json", "markdown"), default="text")
+    parser.add_argument("--live", action="store_true", help="run the guarded read-only preflight")
+    parser.add_argument("--env", help="live target environment: dev, staging, or prod")
+
+    if "--help" in arguments or "-h" in arguments:
+        print(parser.format_help(), end="")
+        return 0
+    selected_format = "text"
+    mode = "offline"
+    requested_environment = None
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            break
+        if argument == "--live":
+            mode = "live"
+        elif argument in {"--env", "--schema", "--repo-root"}:
+            if index + 1 < len(arguments) and not arguments[index + 1].startswith("-"):
+                if argument == "--env":
+                    requested_environment = arguments[index + 1]
+                index += 2
+            else:
+                index += 1
+            continue
+        elif argument.startswith("--env="):
+            requested_environment = argument.split("=", 1)[1]
+        elif argument == "--format":
+            if index + 1 < len(arguments) and not arguments[index + 1].startswith("-"):
+                candidate = arguments[index + 1]
+                if candidate in {"text", "json", "markdown"}:
+                    selected_format = candidate
+                index += 2
+            else:
+                index += 1
+            continue
+        elif argument.startswith("--format="):
+            candidate = argument.split("=", 1)[1]
+            if candidate in {"text", "json", "markdown"}:
+                selected_format = candidate
+        index += 1
+    try:
+        args = parser.parse_args(arguments)
+    except (ValueError, argparse.ArgumentError):
+        report = _error_report(
+            mode=mode,
+            environment=requested_environment if mode == "live" else None,
+            message="Invalid migration-plan arguments; see --help.",
+            code="invalid-arguments",
+        )
+        print(render_migration_plan(report, selected_format), end="")
+        return 2
+
+    root = Path(args.repo_root if args.repo_root is not None else Path(__file__).resolve().parents[1]).resolve()
+    if args.env is not None and not args.live:
+        report = build_migration_plan(root, args.folders, schema=args.schema)
+        report["diagnostics"].append(_diagnostic("environment-requires-live", None, "--env requires --live."))
+        report["exitCode"] = 2
+    elif args.live and (args.env not in {"dev", "staging", "prod"} or not args.folders):
+        offline = build_migration_plan(root, args.folders, schema=args.schema)
+        report = _live_report_from_offline(offline, args.env)
+        if args.env not in {"dev", "staging", "prod"}:
+            report["diagnostics"].append(_diagnostic("live-environment-required", None, "Live reporting requires --env dev, staging, or prod."))
+        if not args.folders:
+            report["diagnostics"].append(_diagnostic("live-selection-required", None, "Live reporting requires explicitly selected migration folders."))
+        report["exitCode"] = 2
+    elif args.live:
+        offline = build_migration_plan(root, args.folders, schema=args.schema)
+        if offline["exitCode"] != 0:
+            report = _live_report_from_offline(offline, args.env)
+            report["diagnostics"].append(_diagnostic("live-selection-invalid", None, "Live preflight requires valid selected folders with known local evidence."))
+        else:
+            from .local_config import ConfigError, read_project_env
+
+            env_path = Path(os.environ.get("PROJECT_ENV_FILE", root / ".env"))
+            try:
+                values = read_project_env(env_path)
+            except (ConfigError, OSError, ValueError):
+                report = _live_report_from_offline(offline, args.env)
+                report["diagnostics"].append(
+                    _diagnostic("live-configuration-unavailable", None, "Live migration configuration is unavailable or invalid; values omitted.")
+                )
+            else:
+                report = build_live_migration_plan(root, args.folders, environment=args.env, schema=args.schema, values=values)
+    else:
+        report = build_migration_plan(root, args.folders, schema=args.schema)
+
+    print(render_migration_plan(report, args.format), end="")
+    return report["exitCode"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

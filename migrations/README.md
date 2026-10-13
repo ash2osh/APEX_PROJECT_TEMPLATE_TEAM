@@ -33,6 +33,9 @@ SQL and checks immutable after any apply attempt; put a correction in the next
 revision. Environment status JSON is written only after a successful apply and
 fresh verification. See [the migration guide](../docs/migration-rules.md) for
 the full contract, target configuration, comparison, and recovery limits.
+Use [`migration-plan`](../docs/migration-planning.md) to inventory local
+folders or review an explicitly ordered live preflight before choosing the
+folders for `migrate`.
 
 Migration SQL runs with SQLcl substitution disabled. SQLcl client commands
 such as `SET`, `PROMPT`, `HOST`, `WHENEVER`, `SPOOL`, and `CONNECT` are rejected
