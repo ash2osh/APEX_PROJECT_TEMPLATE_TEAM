@@ -1,0 +1,48 @@
+plugin ticketCard (
+    name: TICKET_CARD
+    staticId: TICKET_CARD
+    templateComponent {
+        availableAs: report
+        partial:
+            ```html
+            {if APEX$IS_LAZY_LOADING/}
+            <article class="tc-card tc-card--skeleton" aria-busy="true"><span class="tc-skeleton"></span></article>
+            {else/}
+            <article class="tc-card" data-ticket-id="#TICKET_ID#" data-status="#STATUS_CODE#">
+              <header class="tc-card__head">
+                <h3 class="tc-card__title">#TITLE#</h3>
+                <span class="tc-badge tc-badge--#STATUS_CODE#">#STATUS_TEXT#</span>
+              </header>
+              <dl class="tc-facts">
+                <div class="tc-fact"><dt>&{TC_ASSIGNEE}.</dt><dd>#ASSIGNEE#</dd></div>
+                <div class="tc-fact"><dt>&{TC_DUE}.</dt><dd>#DUE_TEXT#</dd></div>
+              </dl>
+              <footer class="tc-card__actions">
+                <button type="button" class="tc-btn" data-action="OPEN">&{TC_OPEN}.</button>
+              </footer>
+            </article>
+            {endif/}
+            ```
+        reportBody:
+            ```html
+            <div class="tc-list">#APEX$ROWS#</div>
+            ```
+        reportRow:
+            ```html
+            <div class="tc-list__row" #APEX$ROW_IDENTIFICATION#>#APEX$PARTIAL#</div>
+            ```
+        numberOfLazyLoadingSkeletons: 1
+    }
+    component {
+        standardAttributes: regionTemplateAttr
+    }
+    css {
+        fileUrls: #APP_FILES#ticket-card.css
+    }
+    javaScript {
+        fileUrls: #APP_FILES#ticket-card.js
+    }
+    information {
+        version: 1.0
+    }
+)

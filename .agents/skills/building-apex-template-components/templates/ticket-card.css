@@ -1,0 +1,29 @@
+/* Mobile first: one column on a phone, two from 600px, three from 1000px. Logical properties and flex keep it right for RTL (Arabic). */
+:root { --tc-accent: #6c21ad; --tc-line: #e6e1ef; --tc-radius: 16px; }
+
+.tc-list { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 12px 0 24px; }
+.tc-list__row { min-width: 0; }
+.tc-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: #fff; border-radius: var(--tc-radius); box-shadow: 0 6px 14px rgba(18, 27, 53, .09); }
+.tc-card__head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.tc-card__title { margin: 0; font-size: 1.05rem; font-weight: 700; overflow-wrap: anywhere; }
+
+.tc-badge { padding: 4px 12px; border-radius: 999px; border: 2px solid #ccc; background: #f0f0f0; font-size: .8rem; font-weight: 700; }
+.tc-badge--OPEN   { background: #fff8e1; border-color: #ffe0b2; color: #ff9800; }
+.tc-badge--DONE   { background: #e6ffe6; border-color: #b3e6b3; color: #40a245; }
+
+.tc-facts { display: grid; grid-template-columns: 1fr; gap: 10px; margin: 0; }
+.tc-fact dt { font-size: .75rem; color: #6b7280; }
+.tc-fact dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+
+.tc-card__actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.tc-btn { flex: 1 1 140px; min-height: 46px; padding: 0 16px; border: 0; border-radius: 12px; background: var(--tc-accent); color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
+.tc-btn:disabled { opacity: .55; cursor: wait; }
+
+/* the theme's .fa rule overrides display/line-height of an element that carries it: put a glyph in an inner span, never on the box itself */
+
+@media (min-width: 600px)  { .tc-list { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tc-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tc-btn { flex: 0 1 auto; min-width: 130px; } }
+@media (min-width: 1000px) { .tc-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+.tc-card--skeleton { min-height: 140px; }
+.tc-skeleton { display: block; min-height: 108px; border-radius: 12px; background: linear-gradient(90deg, #f0edf6 25%, #e6e1ef 37%, #f0edf6 63%); background-size: 400% 100%; animation: tc-shimmer 1.4s ease infinite; }
+@keyframes tc-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
