@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -16,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class MigrationRuntimeTests(unittest.TestCase):
+    def test_version_bridge_uses_posix_repo_path_for_git_bash(self) -> None:
+        calls = []
+
+        def runner(arguments, **_kwargs):
+            calls.append(arguments)
+            return SimpleNamespace(returncode=0, stdout="SQLcl: Release 26.3 Production\n", stderr="")
+
+        with patch("scripts.migration_runtime._REPO_ROOT", PureWindowsPath(r"C:\team\repo")):
+            require_migration_sqlcl_version(runner=runner)
+
+        self.assertEqual("C:/team/repo", calls[0][4])
+        self.assertEqual(Path(calls[0][5]).as_posix(), calls[0][5])
+
     def test_runtime_floor_accepts_minimum_and_newer_sqlcl(self) -> None:
         for output in (
             "SQLcl: Release 26.3 Production\nBuild: 26.3.0.260.1620\n",

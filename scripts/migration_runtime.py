@@ -34,8 +34,8 @@ def require_migration_sqlcl_version(*, runner: Callable = subprocess.run) -> Non
                 "-c",
                 _VERSION_BRIDGE,
                 "migration-runtime",
-                str(_REPO_ROOT),
-                str(work_dir),
+                _REPO_ROOT.as_posix(),
+                work_dir.as_posix(),
             ]
             result = runner(command, capture_output=True, text=True, check=False, timeout=30)
     except (OSError, subprocess.SubprocessError):

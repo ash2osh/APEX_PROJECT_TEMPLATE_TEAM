@@ -31,7 +31,7 @@ FAKE = Path(__file__).resolve().parent / "fake_ords_sql.py"
 
 SQL_FILES = (
     "backup_db.sql", "doctor.sql", "doctor_ords.sql", "verify_db_access.sql", "verify_ords_access.sql",
-    "ords_export.sql", "ords_export_run.sql", "ords_export_skip.sql", "ords_inventory.sql", "ords_export.py", "apex_compatibility.py",
+    "ords_export.sql", "ords_export_run.sql", "ords_export_skip.sql", "ords_inventory.sql", "ords_export.py", "apex_compatibility.py", "sqlcl_version.py",
 )
 BASH_FILES = ("team.sh", "backup_db.sh", "load_env.sh", "check_db_target.sh", "sqlcl_safe.sh", "replace_mirror.sh")
 POWERSHELL_FILES = (
