@@ -62,9 +62,10 @@ refresh below and report its status to the developer in the current chat.
   stamped `application.apx` after publish; `deploy` ships the tag unchanged.
   The guard refuses to overwrite newer Builder work. Export and reconcile
   before retrying. After import, publish re-exports the app and requires
-  exact APEXlang file and byte equality before it advances the DEV baseline.
-  A failed or ambiguous verification leaves the old baseline in place, so the
-  next publish still refuses newer Builder state. Use `--force` only when the
+  normalized APEXlang equality and a matching normalized second re-export
+  before it advances the DEV baseline. `--strict-bytes` requests byte-exact
+  source comparison. A failed or ambiguous verification leaves the old baseline
+  in place, so the next publish still refuses newer Builder state. Use `--force` only when the
   user explicitly directs an override after review. When publish refuses,
   follow [docs/publish-rules.md](docs/publish-rules.md), which lists every
   refusal, its meaning, and the fix.
@@ -97,10 +98,14 @@ refresh below and report its status to the developer in the current chat.
   import. Review all synchronized source, including unrelated live changes.
 - **Runtime verification:** Full/partial publish and promotion require scoped
   automation/workflow/task observations before and after import, independently
-  of exact source verification. Lifecycle attention or an unavailable post-read
-  retains the old DEV baseline, run-owned lock and recovery evidence. Inspect
+  of source verification. After import, it re-enables exactly the
+  automations that were ACTIVE before import with `APEX_AUTOMATION.ENABLE`,
+  then prints and verifies their read-back state. `--no-restore-automations`
+  opts out while keeping lifecycle verification active. Lifecycle attention or
+  an unavailable post-read retains the old DEV baseline, run-owned lock and
+  recovery evidence. Inspect
   `sourceVerified`, `lifecycleStatus` and the lifecycle report before recovery.
-  Never automatically enable an automation, resume a workflow or repair a task;
+  Never resume a workflow or repair a task automatically;
   `--force` does not bypass this gate. Follow
   [docs/publish-rules.md](docs/publish-rules.md#runtime-verification-after-import).
 - **Migrations:** Put each migration in

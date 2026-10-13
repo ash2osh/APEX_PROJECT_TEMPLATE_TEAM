@@ -8,12 +8,14 @@ $ErrorActionPreference = "Stop"
 
 function Show-Usage {
   @"
-Usage: scripts/publish_app.ps1 <app_id> [--env <dev|staging|prod>] [--force]
-       scripts/publish_app.ps1 <app_id> --env dev --file <pages/file.apx> [--file ...] [--no-team-notice]
+Usage: scripts/publish_app.ps1 <app_id> [--env <dev|staging|prod>] [--force] [--strict-bytes] [--no-restore-automations]
+       scripts/publish_app.ps1 <app_id> --env dev --file <pages/file.apx> [--file ...] [--no-team-notice] [--no-restore-automations]
 
 Imports one APEXlang application with deployments/<env>.json. Staging and
 production imports require interactive confirmation. --force skips only the
 Builder drift check; it does not skip target confirmation or identity checks.
+--strict-bytes keeps byte-exact source comparison. --no-restore-automations
+preserves pre-change behavior by leaving post-import automation state untouched.
 "@ | Write-Output
 }
 
@@ -31,6 +33,8 @@ $force = $false
 $describe = $false
 $selectedFiles = @()
 $noTeamNotice = $false
+$noRestoreAutomations = $false
+$strictBytes = $false
 for ($index = 0; $index -lt $RemainingArguments.Count;) {
   switch ($RemainingArguments[$index]) {
     "--env" {
@@ -50,6 +54,8 @@ for ($index = 0; $index -lt $RemainingArguments.Count;) {
       $index += 2
     }
     '--no-team-notice' { $noTeamNotice = $true; $index += 1 }
+    '--no-restore-automations' { $noRestoreAutomations = $true; $index += 1 }
+    '--strict-bytes' { $strictBytes = $true; $index += 1 }
     "--describe" {
       $describe = $true
       $index += 1
@@ -66,6 +72,7 @@ if ($selectedFiles.Count -gt 0) {
   if ($appEnvironment -cne 'dev') { throw 'partial publishing targets DEV only' }
   if ($force) { throw 'partial publishing does not accept --force' }
   if ($describe) { throw '--describe cannot be combined with --file' }
+  if ($strictBytes) { throw '--strict-bytes is not supported for selected-page publishing' }
 } elseif ($noTeamNotice) { throw '--no-team-notice requires --file' }
 
 # An & script call has its own variables but shares the caller's process
@@ -231,6 +238,7 @@ if ($selectedFiles.Count -gt 0) {
   $partialArguments = @()
   foreach ($selectedFile in $selectedFiles) { $partialArguments += @('--file', $selectedFile) }
   if ($noTeamNotice) { $partialArguments += '--no-team-notice' }
+  if ($noRestoreAutomations) { $partialArguments += '--no-restore-automations' }
   & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot 'partial_publish.py') $AppId @partialArguments `
     --source-dir $appDir --repo-root $repoRoot --workspace $deployment.workspace.name `
     --schema $parsingSchema --connection $sqlclConnection --expected-user $expectedUser `
@@ -273,6 +281,7 @@ $expectedLiveState = "-"
 $stdinFile = [System.IO.Path]::GetTempFileName()
 $transcriptFile = [System.IO.Path]::GetTempFileName()
 $verifyTranscriptFile = [System.IO.Path]::GetTempFileName()
+$stabilityTranscriptFile = [System.IO.Path]::GetTempFileName()
 $publishWorkDir = Join-Path $repoRoot ("scratch/apex-publish-" + [Guid]::NewGuid().ToString("N"))
 [System.IO.Directory]::CreateDirectory($publishWorkDir) | Out-Null
 $applicationSource = Join-Path $appDir "application.apx"
@@ -442,8 +451,14 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   $restoreUnstamped = $false
   $importUnverified = $true
 
-  # Re-export the selected target and compare exact APEXlang bytes before
-  # reporting success. Only a DEV publish updates the local DEV drift marker.
+  if (-not $noRestoreAutomations) {
+    & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') restore-automations @lifecycleArguments `
+      --before (Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json') --run-dir (Join-Path $publishWorkDir 'automation-restore')
+    if ($LASTEXITCODE -ne 0) { throw 'publish error: automation restore did not verify; baseline and recovery evidence retained' }
+  }
+
+  # Re-export the selected target and compare normalized APEXlang source before
+  # reporting success. DEV requires a second stable snapshot before baseline advance.
   $verifyRunDir = Join-Path $publishWorkDir "post-import/runs/$AppId"
   $verifyParent = Join-Path $verifyRunDir "apps/$parsingSchema"
   [System.IO.Directory]::CreateDirectory($verifyParent) | Out-Null
@@ -486,11 +501,49 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     "--target-apex-release-before", (Join-Path $verifyRunDir ".apex-release-before.txt"),
     "--target-apex-release-after", (Join-Path $verifyRunDir ".apex-release-after.txt")
   )
-  & $python.Path @($python.Prefix) @verifyArgs
+  if ($strictBytes) { $verifyArgs += '--strict-bytes' }
+  $stabilityArgs = @()
+  if ($appEnvironment -eq 'dev') {
+    $stabilityRunDir = Join-Path $publishWorkDir "post-import-stability/runs/$AppId"
+    $stabilityParent = Join-Path $stabilityRunDir "apps/$parsingSchema"
+    [System.IO.Directory]::CreateDirectory($stabilityParent) | Out-Null
+    $stabilityExit = Invoke-Sqlcl -WorkingDirectory $stabilityRunDir -StdInFile $stdinFile `
+      -Arguments @(
+        "-S", "-noupdates", "-name", $sqlclConnection,
+        "@$(Join-Path $PSScriptRoot 'export_apps.sql')",
+        $parsingSchema, $AppId, $targetEnvironment, $expectedUser
+      ) -TranscriptFile $stabilityTranscriptFile
+    $stabilityOutput = [System.IO.File]::ReadAllText($stabilityTranscriptFile)
+    if (-not [string]::IsNullOrEmpty($stabilityOutput)) { Write-Output $stabilityOutput }
+    if ($stabilityExit -ne 0) { throw "second post-import APEX export failed with exit code $stabilityExit; baseline was not advanced" }
+    if ([regex]::IsMatch($stabilityOutput, '(?i)\b(?:SP2|TNS|ORA|PLS|SQL)-[0-9]{4,5}:')) {
+      throw 'SQLcl reported an error during the second post-import APEX export'
+    }
+    $stabilityExportParent = Join-Path $stabilityRunDir "apps/$parsingSchema"
+    $stabilityExportDirs = @(Get-ChildItem -LiteralPath $stabilityExportParent -Directory)
+    if ($stabilityExportDirs.Count -ne 1) {
+      throw "expected exactly one second post-import export for application $AppId, found $($stabilityExportDirs.Count)"
+    }
+    $stabilityExportedDir = $stabilityExportDirs[0].FullName
+    if (-not (Test-Path -LiteralPath (Join-Path $stabilityExportedDir 'application.apx') -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $stabilityExportedDir '.apex/apexlang.json') -PathType Leaf)) {
+      throw "second post-import export for application $AppId is missing required APEXlang source files"
+    }
+    & (Join-Path $PSScriptRoot 'normalize_apx.ps1') $stabilityExportedDir
+    $stabilityArgs = @(
+      '--stability-export-dir', $stabilityExportedDir,
+      '--stability-before-file', (Join-Path $stabilityRunDir '.apex-export-before.txt'),
+      '--stability-after-file', (Join-Path $stabilityRunDir '.apex-export-after.txt'),
+      '--stability-deployment-state', (Join-Path $stabilityRunDir '.apex-deployment-state.json'),
+      '--stability-target-apex-release-before', (Join-Path $stabilityRunDir '.apex-release-before.txt'),
+      '--stability-target-apex-release-after', (Join-Path $stabilityRunDir '.apex-release-after.txt')
+    )
+  }
+  $allVerifyArgs = @($verifyArgs) + @($stabilityArgs)
+  & $python.Path @($python.Prefix) @allVerifyArgs
   if ($LASTEXITCODE -ne 0) {
     throw "post-import APEX source verification failed with exit code $LASTEXITCODE"
   }
-  [System.IO.File]::WriteAllText((Join-Path $publishWorkDir 'publish-verification.json'), '{"schemaVersion":1,"sourceVerified":true,"lifecycleStatus":"unavailable"}')
   & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') verify @lifecycleArguments --before (Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json') --run-dir (Join-Path $publishWorkDir 'lifecycle-after') --summary-path (Join-Path $publishWorkDir 'publish-verification.json')
   if ($LASTEXITCODE -ne 0) { throw 'publish error: application lifecycle verification failed; baseline and recovery evidence retained' }
   if ($appEnvironment -eq 'dev') {
@@ -500,7 +553,7 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     if ($LASTEXITCODE -ne 0) { throw 'publish error: application unlock result unknown; baseline retained' }
     $lockHeld = $false
     $importAttempted = $false
-    & $python.Path @($python.Prefix) @verifyArgs --record-baseline
+    & $python.Path @($python.Prefix) @allVerifyArgs --record-baseline
     if ($LASTEXITCODE -ne 0) { throw 'publish error: could not record the verified DEV baseline' }
   }
   $importUnverified = $false
@@ -561,7 +614,7 @@ if ($appEnvironment -eq "dev" -and -not $force) {
       }
     }
   }
-  Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile, $stabilityTranscriptFile -Force -ErrorAction SilentlyContinue
   if (-not $keepPublishWorkDir -and (Test-Path -LiteralPath $publishWorkDir)) {
     Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $publishWorkDir) {

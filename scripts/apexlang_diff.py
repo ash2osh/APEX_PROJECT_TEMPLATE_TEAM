@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Collect sanitized, strict APEXlang source mismatches."""
+"""Collect sanitized APEXlang source mismatches."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.apexlang_normalization import normalize_apexlang
 from scripts.deployment_descriptor import remap_subscription_source, source_projection
 
 
@@ -21,7 +22,7 @@ class SourceMismatch:
 
 
 def source_files(root: Path) -> dict[Path, Path]:
-    """List the same canonical files used by strict publish verification."""
+    """List the same canonical files used by publish source verification."""
     if not root.is_dir():
         raise ValueError(f"APEXlang directory does not exist: {root}")
     files: dict[Path, Path] = {}
@@ -63,11 +64,31 @@ def collect_source_mismatches(
 
     The same narrow deployment projections as the existing verifier are applied:
     the top-level application name projection and the explicit subscription map.
-    The exported bytes are never normalized or reordered.
+    This collector keeps strict byte equality; publish may separately opt into
+    the narrowly defined APEXlang formatting normalization.
+    """
+    mismatches, _ = compare_source_files(source_dir, exported_dir, deployment)
+    return mismatches
+
+
+def compare_source_files(
+    source_dir: Path,
+    exported_dir: Path,
+    deployment: dict | None = None,
+    *,
+    normalize_apx: bool = False,
+    remap_observed_subscription: bool = False,
+) -> tuple[tuple[SourceMismatch, ...], tuple[str, ...]]:
+    """Compare source trees and report paths whose differences normalize away.
+
+    File-set checks stay exact. By default content checks also stay byte-exact;
+    callers may accept only the known APEXlang formatting changes. Deployment
+    overrides remain narrowly projected before normalization.
     """
     source = source_files(source_dir)
     exported = source_files(exported_dir)
     mismatches: list[SourceMismatch] = []
+    cosmetic: list[str] = []
 
     for required in REQUIRED_SOURCE_PATHS:
         if required not in source:
@@ -89,13 +110,29 @@ def collect_source_mismatches(
             observed = source_projection(observed, deployment)
         if deployment is not None and relative.suffix == ".apx":
             expected = remap_subscription_source(expected, deployment)
+            if remap_observed_subscription:
+                observed = remap_subscription_source(observed, deployment)
         if expected != observed:
+            compared_expected, compared_observed = expected, observed
+            if normalize_apx and relative.suffix == ".apx":
+                try:
+                    compared_expected = normalize_apexlang(expected)
+                    compared_observed = normalize_apexlang(observed)
+                except UnicodeDecodeError:
+                    # Invalid text cannot receive a formatting exemption.
+                    compared_expected, compared_observed = expected, observed
+                if compared_expected == compared_observed:
+                    cosmetic.append(relative.as_posix())
+                    continue
             mismatches.append(
                 SourceMismatch(
                     relative.as_posix(),
                     "bytes",
-                    first_differing_line(expected, observed),
+                    first_differing_line(compared_expected, compared_observed),
                 )
             )
 
-    return tuple(sorted(mismatches, key=lambda item: (item.path, item.kind)))
+    return (
+        tuple(sorted(mismatches, key=lambda item: (item.path, item.kind))),
+        tuple(sorted(cosmetic)),
+    )

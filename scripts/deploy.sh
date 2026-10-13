@@ -4,10 +4,12 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/deploy.sh <app_id> --env <staging|prod> [--manual] [--app-source-dir <dir>]
+Usage: scripts/deploy.sh <app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations] [--app-source-dir <dir>]
 
 Direct deployment shows the selected workspace and schema, then requires
 interactive confirmation. --manual prints SQLcl instructions without connecting.
+--strict-bytes disables APEXlang formatting normalization. --no-restore-automations
+skips restoring automations that were active before import.
 USAGE
 }
 
@@ -24,6 +26,8 @@ shift
 app_environment=""
 manual=false
 app_source_dir=""
+strict_bytes=false
+restore_automations=true
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env)
@@ -33,6 +37,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --manual)
       manual=true
+      shift
+      ;;
+    --strict-bytes)
+      strict_bytes=true
+      shift
+      ;;
+    --no-restore-automations)
+      restore_automations=false
       shift
       ;;
     --app-source-dir)
@@ -61,6 +73,9 @@ app_source_args=()
 if [ -n "$app_source_dir" ]; then
   app_source_args=(--app-source-dir "$app_source_dir")
 fi
+publish_option_args=()
+[ "$strict_bytes" = false ] || publish_option_args+=(--strict-bytes)
+[ "$restore_automations" = true ] || publish_option_args+=(--no-restore-automations)
 
 description_file="$(mktemp "${TMPDIR:-/tmp}/apex-deploy-description.XXXXXX")"
 cleanup() { rm -f -- "$description_file"; }
@@ -134,7 +149,14 @@ if [ "$manual" = true ]; then
     "$app_dir/deployments/$app_environment.json" "$app_id" - "$runbook_root/scripts/no_application_lock.sql"
   verify_parent="apps/$parsing_schema"
   printf '3. Check that import completed without SQLcl errors and printed "Import successful." and APEX_IMPORT_VERIFIED:%s.\n' "$app_id"
-  printf '4. Re-export from the same target to a fresh temporary directory and verify exact APEXlang source bytes:\n'
+  if [ "$restore_automations" = true ]; then
+    printf '4. Restore exactly the automations that were ACTIVE before import, then read back and review their states:\n'
+    printf '   python3 %q restore-automations --connection %q --expected-user %q --schema %q --workspace %q --app-id %q --environment %q --before "$sqlcl_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$sqlcl_dir/automation-restore"\n' \
+      "$runbook_root/scripts/application_lifecycle.py" "$sqlcl_connection" "$expected_user" "$parsing_schema" "$workspace_name" "$app_id" "$app_environment"
+  else
+    printf '%s\n' '4. Automation restoration is disabled by --no-restore-automations; the lifecycle check can still report disabled automations.'
+  fi
+  printf '5. Re-export from the same target to a fresh temporary directory and verify normalized APEXlang source:\n'
   printf '   verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/apex-manual-verify.XXXXXX")\n'
   printf '%s\n' '   trap '\''if [ "$deployment_verified" = true ]; then rm -rf -- "$sqlcl_dir" "$verify_dir"; else echo "Retained recovery: $sqlcl_dir $verify_dir" >&2; fi'\'' EXIT'
   printf '   cd "$verify_dir"\n'
@@ -146,10 +168,12 @@ if [ "$manual" = true ]; then
   printf '%s\n' '   test "${#export_dirs[@]}" -eq 1 || { echo "expected exactly one APEX export" >&2; exit 1; }'
   printf '%s\n' '   exported_dir="${export_dirs[0]%/}"'
   printf '   %q "$exported_dir"\n' "$runbook_root/scripts/normalize_apx.sh"
-  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json --target-apex-release-before .apex-release-before.txt --target-apex-release-after .apex-release-after.txt\n' \
+  printf '   python3 %q %q %q "$exported_dir" .apex-export-before.txt .apex-export-after.txt --repo-root %q --deployment-file %q --deployment-state .apex-deployment-state.json --target-apex-release-before .apex-release-before.txt --target-apex-release-after .apex-release-after.txt' \
     "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root" "$app_dir/deployments/$app_environment.json"
+  [ "$strict_bytes" = false ] || printf ' --strict-bytes'
+  printf '\n'
   printf '   # Source check must print APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
-  printf '5. Verify lifecycle independently; failures retain recovery diagnostics:\n'
+  printf '6. Verify lifecycle independently; failures retain recovery diagnostics:\n'
   printf '   python3 %q verify --connection %q --expected-user %q --schema %q --workspace %q --app-id %q --environment %q --before "$sqlcl_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$sqlcl_dir/lifecycle-after" --summary-path "$sqlcl_dir/publish-verification.json"\n' \
     "$runbook_root/scripts/application_lifecycle.py" "$sqlcl_connection" "$expected_user" "$parsing_schema" "$workspace_name" "$app_id" "$app_environment"
   printf '   deployment_verified=true\n'
@@ -159,4 +183,4 @@ if [ "$manual" = true ]; then
 fi
 
 PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/publish_app.sh" \
-  "$app_id" --env "$app_environment" "${app_source_args[@]}"
+  "$app_id" --env "$app_environment" "${app_source_args[@]}" "${publish_option_args[@]}"

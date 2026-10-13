@@ -63,7 +63,7 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `ORA-20016: Live application changed after the Builder drift check` | Someone saved or imported the app in the moments between the drift check and the import. Nothing was imported. | `scripts/team.sh export <id>`, review and merge, publish again. |
 | `the application path contains characters SQLcl cannot pass` | The repository path contains `'`, `"` or `&`. | Move the checkout to a path without them. |
 | `SQLcl did not report a successful APEX import` | SQLcl exited without importing, for example because the workspace name in the descriptor is wrong. | Check `workspace.name` in the descriptor. |
-| `APEXlang source bytes do not match the post-import re-export` | One or more files differ after the existing deployment projections; the message lists every relative path and first differing line without printing source text. | Review each named file, export and reconcile the live app, then retry. A stable second export or a version guess does not relax exact-byte verification. |
+| `APEXlang source bytes do not match the post-import re-export` | One or more files differ after the documented deployment projections and `.apx` normalization; the message lists relative paths and differing lines without printing source text. | Review each named file, export and reconcile the live app, then retry. A stable second export does not relax a real source difference. Use `--strict-bytes` only when byte-exact `.apx` text is required. |
 
 ## Migrations
 

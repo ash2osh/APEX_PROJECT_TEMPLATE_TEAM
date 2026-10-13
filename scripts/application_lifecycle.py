@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Observe APEX 26.2 runtime state without changing application state."""
+"""Observe APEX 26.2 runtime state and restore captured active automations."""
 from __future__ import annotations
 
 import argparse
@@ -130,7 +130,7 @@ def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path
     driver=run_dir/'lifecycle-driver.sql'
     adapter=Path(__file__).with_suffix('.sql').resolve()
     if any(c in str(adapter) for c in ('"','\n','\r')): raise ValueError('unsupported SQL driver path')
-    driver.write_text('\n'.join(['SET DEFINE ON','SET VERIFY OFF','SET ECHO OFF','SET FEEDBACK OFF','SET HEADING OFF','SET LINESIZE 32767','SET SERVEROUTPUT ON SIZE UNLIMITED','WHENEVER SQLERROR EXIT FAILURE ROLLBACK','WHENEVER OSERROR EXIT FAILURE ROLLBACK',f'ALTER SESSION SET CURRENT_SCHEMA = {target.schema};','SET TRANSACTION READ ONLY;',f'DEFINE lifecycle_user_hex = {target.expected_user.encode().hex().upper()}',f'DEFINE lifecycle_schema_hex = {target.schema.encode().hex().upper()}',f'@"{adapter}" {workspace.encode("utf-8").hex().upper()} {app_id}','EXIT SUCCESS ROLLBACK','']),encoding='utf-8')
+    driver.write_text('\n'.join(['SET DEFINE ON','SET VERIFY OFF','SET ECHO OFF','SET FEEDBACK OFF','SET HEADING OFF','SET LINESIZE 32767','SET SERVEROUTPUT ON SIZE UNLIMITED','WHENEVER SQLERROR EXIT FAILURE ROLLBACK','WHENEVER OSERROR EXIT FAILURE ROLLBACK',f'ALTER SESSION SET CURRENT_SCHEMA = {target.schema};','SET TRANSACTION READ ONLY;',f'DEFINE lifecycle_user_hex = {target.expected_user.encode().hex().upper()}',f'DEFINE lifecycle_schema_hex = {target.schema.encode().hex().upper()}',f'@"{adapter}" {workspace.encode("utf-8").hex().upper()} {app_id} CAPTURE','EXIT SUCCESS ROLLBACK','']),encoding='utf-8')
     result=_runner(target,driver,run_dir)
     lines=result.output.splitlines()
     if result.returncode or lines.count('LIFECYCLE_PAYLOAD_BEGIN')!=1 or lines.count('LIFECYCLE_PAYLOAD_END')!=1 or lines.count('LIFECYCLE_VERIFIED')!=1: raise ValueError('lifecycle SQLcl observation is unavailable or incomplete')
@@ -144,6 +144,90 @@ def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path
     if target.environment!='prod' and looks_like_production_identity(data['identity']['db_unique_name'],data['identity']['service_name']): raise ValueError('lifecycle observed production identity for a non-production target')
     (run_dir/'lifecycle-snapshot.json').write_text(json.dumps(data,indent=2)+'\n',encoding='utf-8')
     return data
+
+
+def _automation_restore_driver(target: Target, workspace: str, app_id: int, static_ids: list[str], run_dir: Path) -> Path:
+    if not ORACLE_IDENTIFIER.fullmatch(target.schema) or not ORACLE_IDENTIFIER.fullmatch(target.expected_user) or not SQLCL_ALIAS.fullmatch(target.connection) or target.environment not in ('dev','staging','prod'):
+        raise ValueError('invalid lifecycle database target')
+    if type(app_id) is not int or not 0<app_id<10**18 or not isinstance(workspace,str) or not workspace or len(workspace.encode('utf-8'))>255 or any(ord(c)<32 for c in workspace):
+        raise ValueError('invalid lifecycle application scope')
+    adapter=Path(__file__).with_suffix('.sql').resolve()
+    if any(c in str(adapter) for c in ('"','\n','\r')): raise ValueError('unsupported SQL driver path')
+    driver=run_dir/'automation-restore-driver.sql'
+    lines=['SET DEFINE ON','SET VERIFY OFF','SET ECHO OFF','SET FEEDBACK OFF','SET HEADING OFF','SET LINESIZE 32767','SET SERVEROUTPUT ON SIZE UNLIMITED','WHENEVER SQLERROR EXIT FAILURE ROLLBACK','WHENEVER OSERROR EXIT FAILURE ROLLBACK',f'ALTER SESSION SET CURRENT_SCHEMA = {target.schema};',f'DEFINE lifecycle_user_hex = {target.expected_user.encode().hex().upper()}',f'DEFINE lifecycle_schema_hex = {target.schema.encode().hex().upper()}',f'@"{adapter}" {workspace.encode("utf-8").hex().upper()} {app_id} RESTORE_CONTEXT','SET DEFINE OFF']
+    lines.append('BEGIN')
+    for static_id in static_ids:
+        identifier_hex=static_id.encode('utf-8').hex().upper()
+        lines.extend([
+            '  BEGIN',
+            f"    APEX_AUTOMATION.ENABLE(p_application_id => {app_id}, p_static_id => UTL_I18N.RAW_TO_CHAR(HEXTORAW('{identifier_hex}'),'AL32UTF8'));",
+            f"    DBMS_OUTPUT.PUT_LINE('AUTOMATION_RESTORE_OK:{identifier_hex}');",
+            '  EXCEPTION WHEN OTHERS THEN',
+            f"    DBMS_OUTPUT.PUT_LINE('AUTOMATION_RESTORE_FAILED:{identifier_hex}:' || TO_CHAR(SQLCODE));",
+            '  END;',
+        ])
+    lines.extend(['END;','/','PROMPT AUTOMATION_RESTORE_COMPLETE','EXIT SUCCESS COMMIT',''])
+    driver.write_text('\n'.join(lines),encoding='utf-8')
+    return driver
+
+
+def _automation_statuses(snapshot: Mapping) -> dict[str, str]:
+    return {row['staticId']: row['status'] for row in snapshot.get('automations', [])}
+
+
+def _table_cell(value: str) -> str:
+    return value.replace('|', '\\|').replace('\r', ' ').replace('\n', ' ')
+
+
+def restore_automations(target: Target, workspace: str, app_id: int, before: Mapping, run_dir: Path, *, _runner=run_sqlcl) -> dict:
+    validate_snapshot(before)
+    if before['workspace'] != workspace or before['appId'] != app_id:
+        raise ValueError('pre-import lifecycle snapshot does not match the target application')
+    if before['identity']['session_user'] != target.expected_user or before['identity']['current_schema'] != target.schema:
+        raise ValueError('pre-import lifecycle snapshot does not match the target identity')
+    if target.environment != 'prod' and looks_like_production_identity(before['identity']['db_unique_name'], before['identity']['service_name']):
+        raise ValueError('lifecycle observed production identity for a non-production target')
+    run_dir=Path(run_dir); run_dir.mkdir(parents=True,exist_ok=True)
+    active_ids=sorted(row['staticId'] for row in before['automations'] if row['status'].upper()=='ACTIVE')
+    restore_error=None
+    if active_ids:
+        try:
+            driver=_automation_restore_driver(target,workspace,app_id,active_ids,run_dir)
+            result=_runner(target,driver,run_dir)
+            lines=result.output.splitlines()
+            expected={static_id.encode('utf-8').hex().upper() for static_id in active_ids}
+            succeeded={line.split(':',1)[1] for line in lines if line.startswith('AUTOMATION_RESTORE_OK:')}
+            failed={line.split(':',1)[1].split(':',1)[0] for line in lines if line.startswith('AUTOMATION_RESTORE_FAILED:')}
+            context_count=lines.count('LIFECYCLE_CONTEXT_VERIFIED')
+            completion_count=lines.count('AUTOMATION_RESTORE_COMPLETE')
+            if result.returncode or context_count != 1 or completion_count != 1 or succeeded != expected or failed:
+                restore_error='APEX automation enable call did not verify for every pre-import active static ID'
+        except (OSError,ValueError,SqlclError):
+            restore_error='APEX automation enable session failed; inspect private SQLcl diagnostics'
+
+    try:
+        after=capture_lifecycle(target,workspace,app_id,run_dir/'observation-after-restore',_runner=_runner)
+    except (ValueError,OSError,SqlclError):
+        after=None
+    before_status=_automation_statuses(before)
+    after_status={} if after is None else _automation_statuses(after)
+    all_ids=sorted(before_status.keys() | after_status.keys())
+    rows=[{'staticId':identifier,'before':before_status.get(identifier,'ABSENT'),'after':after_status.get(identifier,'UNKNOWN' if after is None else 'ABSENT')} for identifier in all_ids]
+    reasons=[]
+    if restore_error: reasons.append(restore_error)
+    if after is None: reasons.append('post-restore automation read-back is unavailable')
+    else:
+        for static_id in active_ids:
+            if after_status.get(static_id) != 'ACTIVE':
+                reasons.append('previously active automation is not active after restore: '+static_id)
+    report={'schemaVersion':1,'status':'pass' if not reasons else 'attention','enabledStaticIds':active_ids,'beforeAfter':rows,'reasons':reasons}
+    (run_dir/'automation-restore-report.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+    print('Automation status before import | after restore')
+    print('Static ID | Before | After')
+    for row in rows:
+        print(_table_cell(row['staticId'])+' | '+_table_cell(row['before'])+' | '+_table_cell(row['after']))
+    if not rows: print('(no automations observed)')
+    return report
 
 
 def verify_after_import(target: Target, workspace: str, app_id: int, before: Mapping, run_dir: Path) -> dict:
@@ -163,7 +247,7 @@ def verify_after_import(target: Target, workspace: str, app_id: int, before: Map
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('capture','verify'))
+    parser.add_argument('action',choices=('capture','verify','restore-automations'))
     for key in ('connection','expected-user','schema','workspace','environment','run-dir'): parser.add_argument('--'+key,required=True)
     parser.add_argument('--app-id',required=True,type=int); parser.add_argument('--before',type=Path)
     parser.add_argument('--summary-path',type=Path)
@@ -171,11 +255,16 @@ def main(argv=None):
     report={'status':'unavailable'}
     try:
         target=Target(args.environment,args.connection,args.expected_user,args.schema,'lifecycle')
-        if args.action=='capture': capture_lifecycle(target,args.workspace,args.app_id,Path(args.run_dir))
-        else:
+        if args.action=='capture':
+            capture_lifecycle(target,args.workspace,args.app_id,Path(args.run_dir)); report={'status':'pass'}
+        elif args.action=='verify':
             if args.before is None: raise ValueError('--before is required')
             report=verify_after_import(target,args.workspace,args.app_id,read_snapshot(args.before),Path(args.run_dir))
             require_verified_lifecycle(report)
+        else:
+            if args.before is None: raise ValueError('--before is required')
+            report=restore_automations(target,args.workspace,args.app_id,read_snapshot(args.before),Path(args.run_dir))
+            if report['status']!='pass': raise ValueError('automation restore did not verify: '+'; '.join(report['reasons']))
         print('Application lifecycle '+args.action+' verified.'); return 0
     except (ValueError,OSError,SqlclError) as exc:
         print('lifecycle: '+str(exc),file=sys.stderr); return 2

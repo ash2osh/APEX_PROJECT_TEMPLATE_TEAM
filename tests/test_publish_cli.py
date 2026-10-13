@@ -24,7 +24,7 @@ class PublishAppCliTests(unittest.TestCase):
     def test_lifecycle_failure_before_or_after_import_preserves_baseline(self):
         launchers=[('bash',[BASH])] + ([('pwsh',[shutil.which('pwsh'),'-NoProfile','-File'])] if shutil.which('pwsh') else [])
         for name,launcher in launchers:
-            for mode in ('pre-unavailable','post-unavailable','automation-disabled','lost-instance'):
+            for mode in ('pre-unavailable','post-unavailable','automation-restore-fail','lost-instance'):
                 with self.subTest(wrapper=name,mode=mode),tempfile.TemporaryDirectory() as temporary:
                     root=Path(temporary); runner,_,_,environment,app,state=self.make_stateful_dev_fixture(root)
                     environment['PROJECT_ENV_FILE']=str(root/'.env'); environment['FAKE_LIFECYCLE_MODE']=mode
@@ -38,8 +38,35 @@ class PublishAppCliTests(unittest.TestCase):
                         self.assertNotIn('release',Path(environment['FAKE_LOCK_CALLS']).read_text().splitlines())
                         reports=list((root/'scratch').rglob('publish-verification.json'))
                         report=json.loads(reports[0].read_text())
-                        self.assertTrue(report['sourceVerified'])
+                        self.assertEqual(report['sourceVerified'],mode not in ('post-unavailable','automation-restore-fail'))
                         self.assertIn(report['lifecycleStatus'],('attention','unavailable'))
+
+    def test_full_publish_restores_only_the_pre_import_active_automation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); runner,_,_,environment,app,state=self.make_stateful_dev_fixture(root)
+            environment['PROJECT_ENV_FILE']=str(root/'.env')
+            environment['FAKE_LIFECYCLE_MODE']='automation-disabled'
+
+            result=subprocess.run([BASH,str(runner),'100'],cwd=root,env=environment,capture_output=True,text=True)
+
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertIn('AUTO | ACTIVE | ACTIVE',result.stdout)
+            self.assertEqual(Path(environment['FAKE_AUTOMATION_CALLS']).read_text().splitlines(),['4155544F'])
+            self.assertEqual((state/'import-count.txt').read_text().strip(),'1')
+
+    def test_no_restore_automations_opt_out_keeps_the_old_disabled_state_behavior(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); runner,_,_,environment,app,state=self.make_stateful_dev_fixture(root)
+            environment['PROJECT_ENV_FILE']=str(root/'.env')
+            environment['FAKE_LIFECYCLE_MODE']='automation-disabled'
+
+            result=subprocess.run([BASH,str(runner),'100','--no-restore-automations'],cwd=root,env=environment,capture_output=True,text=True)
+
+            self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertFalse(Path(environment['FAKE_AUTOMATION_CALLS']).exists())
+            self.assertEqual((state/'import-count.txt').read_text().strip(),'1')
+            reports=list((root/'scratch').rglob('publish-verification.json'))
+            self.assertEqual(json.loads(reports[0].read_text())['lifecycleStatus'],'attention')
 
     def test_automatic_supporting_objects_refuse_before_native_lock_or_import(self):
         launchers = [('bash', [BASH])] + ([('pwsh', [shutil.which('pwsh'), '-NoProfile', '-File'])] if shutil.which('pwsh') else [])
@@ -143,7 +170,7 @@ class PublishAppCliTests(unittest.TestCase):
             "publish_app.sh",
             "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
             "apex_compatibility.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql",
-            "application_lifecycle.py", "application_lifecycle.sql",
+            "apexlang_normalization.py",
             "load_env.sh",
             "check_db_target.sh",
             "export_apps.sql", "verify_deployment_state.sql",
@@ -241,7 +268,8 @@ class PublishAppCliTests(unittest.TestCase):
             "    cp \"$FAKE_SOURCE_DIR/application.apx\" \"$exported/application.apx\"\n"
             "    cp \"$FAKE_SOURCE_DIR/.apex/apexlang.json\" \"$exported/.apex/apexlang.json\"\n"
             "    if [[ -f \"$FAKE_SOURCE_DIR/login.sql\" ]]; then cp \"$FAKE_SOURCE_DIR/login.sql\" \"$exported/login.sql\"; fi\n"
-            "    if [[ \"${FAKE_EXPORT_MISMATCH:-0}\" == 1 ]]; then printf '%s\\n' '// race' >> \"$exported/application.apx\"; fi\n"
+            "    if [[ \"${FAKE_EXPORT_MISMATCH:-0}\" == 1 ]]; then sed -i 's/name: Sample/name: Raced/' \"$exported/application.apx\"; fi\n"
+            "    if [[ \"${FAKE_EXPORT_COMMENT_MISMATCH:-0}\" == 1 ]]; then printf '%s\\n' '// export note' >> \"$exported/application.apx\"; fi\n"
             "    if [[ -n \"${FAKE_STATE_DIR:-}\" ]]; then live=$(cat \"$FAKE_STATE_DIR/live.txt\"); db=$(cat \"$FAKE_STATE_DIR/database.txt\"); version=$(cat \"$FAKE_STATE_DIR/version.txt\"); else live=${FAKE_REVISION:-2026-09-26T09:30:00}; db=${FAKE_DATABASE_TIME:-2026-09-26T09:30:02}; version=${FAKE_VERSION:-Release 1.0}; fi\n"
             "    printf '%s|%s|%s\\n' \"$live\" \"$db\" \"$version\" > \"$PWD/.apex-export-before.txt\"\n"
             "    cp \"$PWD/.apex-export-before.txt\" \"$PWD/.apex-export-after.txt\"\n"
@@ -262,6 +290,7 @@ class PublishAppCliTests(unittest.TestCase):
         environment["FAKE_SOURCE_DIR"] = str(app)
         environment["FAKE_LOCK_HANDLER"] = str(ROOT/"tests/fake_application_lock_sql.py")
         environment["FAKE_LOCK_CALLS"] = str(root/"lock-calls.txt")
+        environment["FAKE_AUTOMATION_CALLS"] = str(root/"automation-calls.txt")
         return scripts / "publish_app.sh", sql_log, sql_cwd, environment
 
     def make_stateful_dev_fixture(self, root: Path):
@@ -277,6 +306,7 @@ class PublishAppCliTests(unittest.TestCase):
             "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "preserve_deployments.py",
             "verify_publish_state.py",
+            "apexlang_normalization.py",
             "publish_app.ps1",
             "load_env.ps1",
             "invoke_sqlcl.ps1", "resolve_python.ps1",
@@ -311,6 +341,27 @@ class PublishAppCliTests(unittest.TestCase):
         self.assertIn("<app_id>", result.stdout)
         self.assertIn("--env", result.stdout)
         self.assertIn("--force", result.stdout)
+        self.assertIn("--strict-bytes", result.stdout)
+        self.assertIn("--no-restore-automations", result.stdout)
+
+    def test_strict_bytes_flag_preserves_the_byte_exact_escape_hatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); runner,_,_,environment,_,_=self.make_stateful_dev_fixture(root)
+            environment['PROJECT_ENV_FILE']=str(root/'.env')
+            environment['FAKE_EXPORT_COMMENT_MISMATCH']='1'
+
+            normal=subprocess.run([BASH,str(runner),'100'],cwd=root,env=environment,capture_output=True,text=True)
+            self.assertEqual(normal.returncode,0,normal.stdout+normal.stderr)
+            self.assertIn('cosmetic-only differences: application.apx',normal.stdout)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); runner,_,_,environment,_,_=self.make_stateful_dev_fixture(root)
+            environment['PROJECT_ENV_FILE']=str(root/'.env')
+            environment['FAKE_EXPORT_COMMENT_MISMATCH']='1'
+
+            strict=subprocess.run([BASH,str(runner),'100','--strict-bytes'],cwd=root,env=environment,capture_output=True,text=True)
+            self.assertNotEqual(strict.returncode,0,strict.stdout+strict.stderr)
+            self.assertIn('APEXlang source bytes do not match',strict.stderr)
 
     def test_rejects_non_numeric_application_id_before_loading_configuration(self) -> None:
         result = self.run_publish("my-app")
@@ -1254,6 +1305,7 @@ class PublishAppCliTests(unittest.TestCase):
                     "normalize_apx.ps1",
                     "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
                     "verify_publish_state.py",
+                    "apexlang_normalization.py",
                     "validate_app_source.py",
                     "path_utils.py",
                     "stamp_publish_version.py",

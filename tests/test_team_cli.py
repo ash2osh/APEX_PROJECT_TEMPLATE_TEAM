@@ -1069,6 +1069,7 @@ class TeamCliTests(unittest.TestCase):
             "normalize_apx.sh",
             "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "source_evidence.py",
             "verify_publish_state.py",
+            "apexlang_normalization.py",
             "stamp_publish_version.py",
             "validate_app_source.py",
             "path_utils.py",
@@ -1117,6 +1118,7 @@ class TeamCliTests(unittest.TestCase):
         environment["PATH"] = f"{script.parents[1] / 'bin'}{os.pathsep}{environment['PATH']}"
         environment["FAKE_SQL_LOG"] = str(sql_log)
         environment["FAKE_SOURCE_DIR"] = (script.parents[1] / "apps/DEMO/100").as_posix()
+        environment["FAKE_AUTOMATION_CALLS"] = str(script.parents[1] / "automation-calls.txt")
         environment["PROJECT_ENV_FILE"] = str(script.parents[1] / ".env")
         return subprocess.run(
             [BASH, str(script), "100", "--env", "prod", *args],
@@ -1178,9 +1180,35 @@ class TeamCliTests(unittest.TestCase):
             )
             self.assertIn("verify_publish_state.py", result.stdout)
             self.assertIn('application_lifecycle.py capture',result.stdout)
+            self.assertIn('application_lifecycle.py restore-automations',result.stdout)
             self.assertIn('application_lifecycle.py verify',result.stdout)
+            self.assertIn('verify normalized APEXlang source',result.stdout)
             self.assertIn("APEX_PUBLISH_SOURCE_VERIFIED:100", result.stdout)
             self.assertFalse(sql_log.exists(), "manual mode must not invoke SQLcl")
+
+    def test_manual_deploy_optout_is_connection_free_and_omits_the_restore_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary))
+
+            result = self.run_deploy(script, sql_log, "--manual", "--no-restore-automations")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--no-restore-automations", result.stdout)
+            self.assertNotIn("restore-automations --connection", result.stdout)
+            self.assertIn("the lifecycle check can still report disabled automations", result.stdout)
+            self.assertFalse(sql_log.exists())
+
+    def test_manual_deploy_strict_bytes_is_carried_into_the_runbook(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary))
+
+            result = self.run_deploy(script, sql_log, "--manual", "--strict-bytes")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            verifier_lines = [line for line in result.stdout.splitlines() if "verify_publish_state.py" in line]
+            self.assertTrue(verifier_lines)
+            self.assertIn("--strict-bytes", verifier_lines[0])
+            self.assertFalse(sql_log.exists())
 
     def test_manual_deploy_runbook_removes_both_of_its_temporary_directories(self) -> None:
         # Step 2 sets an EXIT trap for SQLcl's directory; step 4 makes a second one for the
@@ -1228,6 +1256,29 @@ class TeamCliTests(unittest.TestCase):
             self.assertIn("-name", args)
             self.assertIn("prod-db", args)
             self.assertIn(fake_sqlcl.native((script.parents[1] / "apps/DEMO/100/deployments/prod.json").resolve()), args)
+
+    def test_confirmed_deploy_restores_automations_and_optout_skips_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary))
+            result = self.run_deploy(script, sql_log, input_text="y\n")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("AUTO | ACTIVE | ACTIVE", result.stdout)
+            self.assertEqual((script.parents[1] / "automation-calls.txt").read_text().splitlines(), ["4155544F"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary))
+            result = self.run_deploy(script, sql_log, "--no-restore-automations", input_text="y\n")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((script.parents[1] / "automation-calls.txt").exists())
+
+    def test_confirmed_deploy_accepts_strict_byte_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary))
+
+            result = self.run_deploy(script, sql_log, "--strict-bytes", input_text="y\n")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("APEX_PUBLISH_SOURCE_VERIFIED:100", result.stdout)
 
     def make_upgrade_fixture(self, root: Path) -> tuple[Path, Path]:
         template = root / "template"

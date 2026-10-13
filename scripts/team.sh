@@ -11,8 +11,9 @@ Commands:
   export <app_id>                             Export one numeric APEX app from DEV
   upgrade-apexlang <app_id> --env dev --mode builder|files
                                               Convert source explicitly to canonical APEX 26.2
-  publish <app_id> [--env dev] [--force]      Drift-check and import to DEV
-  publish <app_id> --file pages/<file>.apx [--file ...] [--no-team-notice]
+  publish <app_id> [--env dev] [--force] [--strict-bytes] [--no-restore-automations]
+                                              Drift-check, restore active automations and import to DEV
+  publish <app_id> --file pages/<file>.apx [--file ...] [--no-team-notice] [--no-restore-automations]
                                               Verify selected existing DEV pages and synchronize source
   app-lock <app_id> [--env dev] [--comment <text>]
                                               Acquire a native DEV application lock
@@ -47,7 +48,7 @@ Commands:
                                               Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
-  deploy <app_id> --env <staging|prod> [--manual]
+  deploy <app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations]
                                               Confirm a promotion or print a DBA runbook
   upgrade-template [--source <url|path>] [--ref <ref>] [--apex-release 26.1|26.2] [--dry-run]
                                               Update template-owned files from the template
@@ -330,7 +331,7 @@ case "$command_name" in
       exec "$REPO_ROOT/scripts/backup_db.sh" --ords-only
     ;;
   deploy)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh deploy <numeric_app_id> --env <staging|prod> [--manual]"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh deploy <numeric_app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations]"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/deploy.sh" "$@"
     ;;

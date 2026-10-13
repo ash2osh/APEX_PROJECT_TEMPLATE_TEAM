@@ -9,6 +9,19 @@ from pathlib import Path
 def main():
     drivers=[Path(arg[1:]) for arg in sys.argv[1:] if arg.startswith('@')]
     if not drivers or not drivers[0].is_file(): return 3
+    if drivers[0].name=='automation-restore-driver.sql':
+        sql=drivers[0].read_text(encoding='utf-8')
+        identifiers=re.findall(r"APEX_AUTOMATION\.ENABLE\(p_application_id => [0-9]+, p_static_id => UTL_I18N\.RAW_TO_CHAR\(HEXTORAW\('([0-9A-F]+)'\)",sql)
+        mode=os.environ.get('FAKE_LIFECYCLE_MODE','')
+        if mode!='automation-restore-fail':
+            calls=Path(os.environ.get('FAKE_AUTOMATION_CALLS',str(drivers[0].parent/'automation-calls.txt')))
+            calls.write_text(''.join(identifier+'\n' for identifier in identifiers),encoding='utf-8')
+        print('LIFECYCLE_CONTEXT_VERIFIED')
+        for identifier in identifiers:
+            if mode=='automation-restore-fail': print('AUTOMATION_RESTORE_FAILED:'+identifier+':-20001')
+            else: print('AUTOMATION_RESTORE_OK:'+identifier)
+        print('AUTOMATION_RESTORE_COMPLETE')
+        return 0
     if drivers[0].name=='lifecycle-driver.sql':
         sql=drivers[0].read_text()
         match=re.search(r'application_lifecycle.sql" ([0-9A-F]+) ([0-9]+)',sql)
@@ -21,7 +34,10 @@ def main():
         if (mode=='pre-unavailable' and not after) or (mode=='post-unavailable' and after):
             print('ORA-20073: lifecycle visibility unavailable'); return 1
         instance={'instanceId':'1','definitionId':'9','staticId':'FLOW','state':'ACTIVE','terminal':False}
-        data={'schemaVersion':1,'applicationPresent':True,'identity':dict(session_user=user,current_schema=schema,db_unique_name='TESTDB',container_id='3',container_name='TESTPDB',edition='ORA$BASE',server_host='test',service_name='testpdb'),'release':'26.2.0','workspace':workspace,'workspaceId':'123','appId':app_id,'startedAt':'2026-10-09T10:00:00Z','completedAt':'2026-10-09T10:00:01Z','coverage':dict(application=True,workspace=True,automations=True,workflows=True,tasks=True),'automations':[{'staticId':'AUTO','status':'DISABLED' if after and mode=='automation-disabled' else 'ACTIVE'}],'workflows':[] if after and mode=='lost-instance' else [instance],'tasks':[]}
+        calls=Path(os.environ.get('FAKE_AUTOMATION_CALLS',str(drivers[0].parent/'automation-calls.txt')))
+        restored='4155544F' in calls.read_text(encoding='utf-8').splitlines() if calls.exists() else False
+        automation_status='ACTIVE' if not after or restored else 'DISABLED'
+        data={'schemaVersion':1,'applicationPresent':True,'identity':dict(session_user=user,current_schema=schema,db_unique_name='TESTDB',container_id='3',container_name='TESTPDB',edition='ORA$BASE',server_host='test',service_name='testpdb'),'release':'26.2.0','workspace':workspace,'workspaceId':'123','appId':app_id,'startedAt':'2026-10-09T10:00:00Z','completedAt':'2026-10-09T10:00:01Z','coverage':dict(application=True,workspace=True,automations=True,workflows=True,tasks=True),'automations':[{'staticId':'AUTO','status':automation_status}],'workflows':[] if after and mode=='lost-instance' else [instance],'tasks':[]}
         print('LIFECYCLE_PAYLOAD_BEGIN\n'+json.dumps(data)+'\nLIFECYCLE_PAYLOAD_END\nLIFECYCLE_VERIFIED'); return 0
     if drivers[0].name == 'export_apps.sql':
         args = sys.argv[1:]

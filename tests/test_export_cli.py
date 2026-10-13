@@ -52,7 +52,7 @@ class ExportCliTests(unittest.TestCase):
                 "normalize_apx.sh",
                 "replace_mirror.sh",
             )
-        names += ("record_export_state.py", "source_provenance.py", "apexlang_diff.py", "deployment_descriptor.py", "source_evidence.py", "preserve_deployments.py", "apex_compatibility.py", "verify_apex_release.sql")
+        names += ("record_export_state.py", "source_provenance.py", "apexlang_diff.py", "apexlang_normalization.py", "deployment_descriptor.py", "source_evidence.py", "preserve_deployments.py", "apex_compatibility.py", "verify_apex_release.sql")
         for name in names:
             source = ROOT / "scripts" / name
             if source.exists():
