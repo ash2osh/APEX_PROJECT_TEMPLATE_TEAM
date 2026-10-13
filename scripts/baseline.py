@@ -655,7 +655,16 @@ def format_sql_value(value: object, column: Mapping) -> str:
         elif _ISO_TIMESTAMP_RE.fullmatch(value):
             normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
             try:
-                parsed = dt.datetime.fromisoformat(normalized)
+                # Python 3.10 accepts only 3- or 6-digit fractions in
+                # fromisoformat(), while Oracle timestamp text may use any
+                # fractional width. Validate a six-digit parse copy and keep
+                # the original fractional text for the generated SQL.
+                parseable = re.sub(
+                    r"(?<=:\d{2})\.(\d+)",
+                    lambda match: "." + match.group(1)[:6].ljust(6, "0"),
+                    normalized,
+                )
+                parsed = dt.datetime.fromisoformat(parseable)
             except ValueError as error:
                 raise BaselineError(f"invalid ISO timestamp in reference-data column {column.get('name', '?')}: {value}") from error
             has_zone = parsed.tzinfo is not None
