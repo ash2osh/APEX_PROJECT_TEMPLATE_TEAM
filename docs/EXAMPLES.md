@@ -216,6 +216,27 @@ migrations.
 - `schema X is not listed in STAGING_SCHEMA`: a schema you deploy to staging
   must appear, with the same name, in the staging settings.
 
+### Plan an ordered migration batch
+
+Inspect the local inventory without loading `.env` or starting SQLcl, then pass
+the intended order explicitly. Discovered rows are sorted for display only:
+
+```bash
+scripts/team.sh migration-plan --schema SALES --format markdown
+scripts/team.sh migration-plan \
+  migrations/SALES/2026-10-12_create-orders-r001 \
+  migrations/SALES/2026-10-13_add-order-state-r001 --format json
+scripts/team.sh migration-plan \
+  migrations/SALES/2026-10-12_create-orders-r001 \
+  migrations/SALES/2026-10-13_add-order-state-r001 \
+  --live --env dev --format text
+```
+
+The live report is read-only and marks later-folder preconditions as deferred.
+Its single-SQL-file-folder count is a review metric, not a request to squash
+folders. Attempted or applied folders stay immutable. See
+[migration planning](migration-planning.md) for evidence and limits.
+
 ## 7. Release to staging and production
 
 **When:** the app works in DEV and you want to promote it.
@@ -269,6 +290,30 @@ report.
 - `at least one --object or --pattern selector is required`: name what to compare.
 - `SELF_COMPARISON`: both sides resolve to the same database and schema, so
   there is nothing to compare. Check your staging settings.
+
+### Generate a compact environment baseline
+
+**When:** the configured DEV and staging schemas differ and you want new,
+reviewable migration folders for supported structure, grant and code changes.
+
+```bash
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status
+scripts/team.sh baseline export-data --from dev
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status --data
+```
+
+The bundle is built from complete source and target observations and keeps
+structure, grants and code in that order. When all three categories have
+changes, bundling reduces the usual three folders to one (3-to-1). With the
+allow-listed reference data export, `--data` adds a separate `baseline-data`
+folder after the bundle, so the usual four folders become two (4-to-2). Each schema has its
+own output folder. Review the bundle's SQL-to-source SHA-256 map and checks;
+the generator never applies these migrations.
+
+Oracle DDL can commit implicitly. If a bundle step or later check fails,
+inspect the target and use a reviewed recovery migration; keep attempted or
+applied folders immutable. A local build sees only configured schemas and this
+repository's files, not another independent repository's pending migrations.
 
 ## 9. Update the template
 

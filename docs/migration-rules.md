@@ -75,6 +75,15 @@ earlier one creates. A
 cross-schema change such as a grant or a synonym is two coordinated migrations,
 one per schema.
 
+Use [`migration-plan`](migration-planning.md) for a local inventory or an
+explicitly selected live preflight. Discovered folder order is for display;
+only a caller-supplied batch order is preserved as a proposed sequence. The
+report counts single-SQL-file folders but does not propose combining them.
+Live reporting checks only the first selected folder's preconditions before
+any write and labels later preconditions as deferred until their apply
+boundary. It does not apply or rehearse SQL. Attempted and applied folders
+remain immutable; a correction belongs in a later revision.
+
 SQL files hold only SQL: statements ended by `;` and PL/SQL blocks, types,
 libraries, Java sources and MLE modules ended by a standalone `/`. SQLcl reads
 some text as something other than part of the statement, so the validator
@@ -749,13 +758,48 @@ connection reached the same database scope as the ordinary schema connection.
 Capture is paged at 500 rows and refuses incomplete evidence or sections over
 100,000 rows.
 
-`baseline build --to <env> [--from <env>]` defaults its source to DEV. It
-compares complete environment catalogs and creates new migration families
-under `migrations/<TARGET_SCHEMA>/` for supported structure deltas, grouped
-object grants and changed source units or views. It never applies a migration.
-New folders pass the normal migration loader and SQL/check validators. Existing
-folders remain immutable; a changed build uses the next family revision, and
-receipt or attempt evidence is reported without rewriting the folder.
+`baseline build --to <env> [--from <env>] [--bundle <name>] [--data]` defaults
+its source to DEV. It compares complete environment catalogs and creates new
+migration families under `migrations/<TARGET_SCHEMA>/` for supported structure
+deltas, grouped object grants and changed source units or views. It never
+applies a migration. Source and target identities must be complete, and the
+builder refuses the same observed database/container/schema/edition scope even
+if configured service aliases differ. The local baseline covers only the
+selected repository and observed scopes; it cannot see pending migrations in
+other independent repositories.
+
+By default, structure, grants and code remain separate families. `--bundle
+<name>` combines the generated structure, grants, and code in that order into
+`baseline-bundle-<name>`. The name must be an ASCII lowercase slug matching
+`[a-z][a-z0-9]*(?:-[a-z0-9]+)*`, no longer than 64 characters, and is checked
+before SQLcl starts. Composition uses the same complete source and target
+captures, preserves every eligible SQL step and check, and writes a bundle
+README with the ordered original-to-generated filename mapping and SHA-256
+values. The generator creates one folder per target schema with nonempty output.
+`--data` retains separate preconditions, natural-key and foreign-key handling,
+DML limits, and rehearsal instructions. The baseline-data folder is installed separately after the DDL bundle.
+Empty output categories do not create folders.
+
+For example, this creates the optional bundle without applying it:
+
+```bash
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status
+```
+
+New folders pass the normal migration loader and SQL/check validators before
+exclusive installation from private staging outside `migrations/`. Identical
+builds preserve folder bytes and evidence; changed input creates the next
+revision. Unknown evidence, revision gaps, and flat/schema layout conflicts
+refuse generation. Existing attempted or applied folders remain immutable; a
+later generation error may leave earlier fully validated folders in place, and
+the command reports their paths rather than claiming multi-schema atomicity.
+On macOS, final installation uses `renamex_np(RENAME_EXCL)` and requires
+filesystem support for exclusive renaming; if unavailable, generation refuses
+without a replacing-rename fallback. See [baseline export and migration
+generation](baseline.md#folder-safety-and-limits) for platform details.
+Oracle DDL can commit implicitly, so a DDL step or later check can fail after
+earlier DDL took effect. Inspect the target and use a reviewed recovery
+migration; never edit or replay an attempted or applied folder.
 
 `baseline export-data --from <env>` captures only the tables and columns named
 in `referenceData.tables`, under `scratch/baseline/<env>/data/<schema>/`. Each

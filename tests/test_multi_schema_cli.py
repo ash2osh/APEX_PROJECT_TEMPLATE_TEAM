@@ -56,7 +56,7 @@ def git_init(root: Path) -> None:
 
 
 class DoctorCliTests(unittest.TestCase):
-    NAMES = ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "verify_db_access.sql", "sqlcl_safe.sh", "apex_compatibility.py")
+    NAMES = ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "verify_db_access.sql", "sqlcl_safe.sh", "apex_compatibility.py", "sqlcl_version.py")
 
     def test_doctor_checks_independent_migration_identity_and_narrows_to_it(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -470,7 +470,7 @@ class BackupCliTests(unittest.TestCase):
 
 class ExportCliTests(unittest.TestCase):
     NAMES = (
-        "export_apps.sh", "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "verify_apex_release.sql", "lookup_app_schema.sql", "load_env.sh", "check_db_target.sh",
+        "export_apps.sh", "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "lookup_app_schema.sql", "load_env.sh", "check_db_target.sh",
         "sqlcl_safe.sh", "normalize_apx.sh", "replace_mirror.sh", "verify_db_access.sql",
         "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "apexlang_normalization.py", "deployment_descriptor.py", "source_evidence.py", "preserve_deployments.py",
     )
@@ -642,7 +642,7 @@ class ExportCliTests(unittest.TestCase):
 
 class PublishCliTests(unittest.TestCase):
     NAMES = (
-        "publish_app.sh", "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "apex_compatibility.py", "verify_apex_release.sql", "load_env.sh", "check_db_target.sh", "export_apps.sql", "verify_deployment_state.sql",
+        "publish_app.sh", "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "load_env.sh", "check_db_target.sh", "export_apps.sql", "verify_deployment_state.sql",
         "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.sh", "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "apexlang_normalization.py", "deployment_descriptor.py", "source_evidence.py",
         "verify_publish_state.py", "validate_app_source.py", "path_utils.py", "stamp_publish_version.py",
         "check_builder_drift.py", "check_builder_drift.sql", "sqlcl_safe.sh",
@@ -845,7 +845,7 @@ class PublishCliTests(unittest.TestCase):
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellDoctorCliTests(DoctorCliTests):
-    NAMES = ("team.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "doctor.sql", "verify_db_access.sql", "apex_compatibility.py")
+    NAMES = ("team.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "doctor.sql", "verify_db_access.sql", "apex_compatibility.py", "sqlcl_version.py")
 
     def test_schema_option_requires_a_value(self) -> None:
         # PowerShell reports this usage error with exit code 1; Bash uses 2.
@@ -870,7 +870,7 @@ class PowerShellBackupCliTests(BackupCliTests):
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellExportCliTests(ExportCliTests):
     NAMES = (
-        "export_apps.ps1", "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "verify_apex_release.sql", "lookup_app_schema.sql", "load_env.ps1", "check_db_target.ps1",
+        "export_apps.ps1", "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "lookup_app_schema.sql", "load_env.ps1", "check_db_target.ps1",
         "invoke_sqlcl.ps1", "resolve_python.ps1", "normalize_apx.ps1", "replace_mirror.ps1", "verify_db_access.sql",
         "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "apexlang_normalization.py", "deployment_descriptor.py", "source_evidence.py", "preserve_deployments.py",
     )
@@ -879,7 +879,7 @@ class PowerShellExportCliTests(ExportCliTests):
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellPublishCliTests(PublishCliTests):
     NAMES = (
-        "publish_app.ps1", "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "verify_apex_release.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1",
+        "publish_app.ps1", "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1",
         "export_apps.sql", "verify_deployment_state.sql", "apex_compatibility.py", "verify_apex_release.sql", "lookup_app_schema.sql", "verify_db_access.sql", "normalize_apx.ps1",
         "record_export_state.py", "source_provenance.py", "apexlang_diff.py", "apexlang_normalization.py", "deployment_descriptor.py", "source_evidence.py", "verify_publish_state.py", "validate_app_source.py", "path_utils.py",
         "stamp_publish_version.py", "check_builder_drift.py", "check_builder_drift.sql",

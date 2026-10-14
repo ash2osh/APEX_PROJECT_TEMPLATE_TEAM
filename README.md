@@ -164,7 +164,7 @@ up there:
   A copy downloaded as a ZIP carries a "from the internet" mark that
   `RemoteSigned` still blocks; clone with Git, or run
   `Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File` once.
-- **Python.** The Bash helpers behind `check-conflicts`, `migrate`,
+- **Python.** The Bash helpers behind `check-conflicts`, `migration-plan`, `migrate`,
   `compare-schema` and `deploy` call `python3`, which a python.org or winget
   install does not provide (the Microsoft Store `python3.exe` is a stub when
   Python came from elsewhere). `team.ps1` finds a working Python (`python3`,
@@ -448,6 +448,12 @@ connecting. It exits 0 for unlocked, 1 for locked, and 2 when evidence is
 unknown or unreadable. See the [migration rules](docs/migration-rules.md) for
 the exact `apply-not-started` classification and its limits.
 
+Use `scripts/team.sh migration-plan --format text` for a local inventory, or
+pass folders in intended order. Add `--live --env dev|staging|prod` for the
+guarded read-only preflight. The [migration planning guide](docs/migration-planning.md)
+explains the evidence boundary, deferred preconditions, report formats and
+immutable-folder rule.
+
 Run a selected live preflight and apply with an explicit environment:
 
 ```bash
@@ -556,6 +562,8 @@ scripts/team.sh baseline export-grants --from dev
 scripts/team.sh baseline export-data --from dev
 scripts/team.sh baseline build --from dev --to staging
 scripts/team.sh baseline build --from dev --to staging --data
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status --data
 scripts/team.sh baseline filter-ords --exclude-module legacy.api --input scratch/ords/schema.sql --output scratch/ords/schema-filtered.sql
 ```
 
@@ -572,6 +580,20 @@ separately. `filter-ords` validates the filtered file and can refuse a named
 module that is not present; use the output file in an `ords-import` rollout
 step. These commands never apply migrations or import ORDS metadata. See
 [baseline generation](docs/baseline.md) for configuration, coverage and limits.
+
+Without `--bundle`, the builder keeps the separate structure, grants and code
+families; `--data` adds its own family. `--bundle <name>` combines the generated
+structure, grants and code steps in that order into
+`baseline-bundle-<name>`: a typical three-family output becomes 3-to-1. With
+`--data`, the data migration remains separate and is ordered after the bundle,
+so a typical four-family output becomes 4-to-2. The bundle name is an ASCII
+lowercase migration slug of at most 64 characters. Empty categories create no
+folder, and each selected target schema gets its own migration folder. Bundle
+README files record ordered source filenames and SQL SHA-256 values. The bundle
+is built from the same complete source and target captures; it does not combine
+existing migrations or reveal pending work in other independent repositories.
+Oracle DDL can commit implicitly, so a failed bundle needs target inspection and
+reviewed recovery. Existing attempted or applied folders remain immutable.
 
 ## Staging and production deployments
 
@@ -741,6 +763,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh publish <id> --file pages/<file>.apx [--no-team-notice] [--no-restore-automations]` | Publish selected existing DEV pages, verify and synchronize canonical source. |
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
+| `scripts/team.sh migration-plan [<folder> ...] [--live --env <env>] [--schema NAME] [--format text\|json\|markdown]` | Inventory local migrations or report an explicitly selected guarded live preflight; see [migration planning](docs/migration-planning.md). |
 | `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. |
 | `scripts/team.sh revise <folder> [--reason TEXT]` | Copy a migration to its next revision; the old folder stays unchanged. |
 | `scripts/team.sh revise --check <folder>` | Report whether local receipt or attempt evidence locks a migration folder; exit 0/1/2 for unlocked/locked/unknown. |
@@ -751,7 +774,7 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh baseline export-source --from <env>` | Export configured exact stored source, compiler settings and view text to scratch. |
 | `scripts/team.sh baseline export-grants --from <env>` | Export configured object grants and the schema's direct system privileges. |
 | `scripts/team.sh baseline export-data --from <env>` | Export allow-listed reference rows, excluding configured sensitive columns, to scratch. |
-| `scripts/team.sh baseline build --to <env> [--from <env>] [--data]` | Generate validated structure, grant, exact-source and optional reference-data migration folders; see [baseline generation](docs/baseline.md). |
+| `scripts/team.sh baseline build --to <env> [--from <env>] [--data] [--bundle <name>]` | Generate validated structure, grant, exact-source and optional reference-data migration folders; `--bundle` combines the three generated DDL/code categories, while data stays separate; see [baseline generation](docs/baseline.md). |
 | `scripts/team.sh baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>` | Remove complete named modules from an ORDS export for a rollout import step. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |

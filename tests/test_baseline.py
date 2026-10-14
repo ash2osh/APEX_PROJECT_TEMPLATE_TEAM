@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 import contextlib
+import hashlib
 from decimal import Decimal
 from pathlib import Path
 from contextlib import redirect_stderr
@@ -18,7 +19,7 @@ from unittest.mock import patch
 
 from fake_sqlcl import BASH
 from tests import fake_sqlcl
-from scripts import baseline
+from scripts import baseline, migration_runtime
 from scripts.migration_manifest import load_migration
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
 
@@ -94,7 +95,7 @@ class BaselineExportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "baseline.json").write_text(
             '{"schemaVersion":1,"schemas":["APP_DEV"],"prefixes":["PKG_","V_","APP_"],'
             '"excludedObjects":[],"referenceData":{"tables":[{"name":"APP_REF_ITEMS",'
@@ -155,8 +156,9 @@ class BaselineExportTests(unittest.TestCase):
         error_output = io.StringIO()
         with patch.dict(os.environ, environment, clear=False):
             with patch.object(baseline, "ROOT", self.root), patch.dict(os.environ, values, clear=False):
-                with redirect_stderr(error_output):
-                    result = baseline.main(arguments)
+                with patch.object(baseline.migration_runtime, "require_migration_sqlcl_version"):
+                    with redirect_stderr(error_output):
+                        result = baseline.main(arguments)
         record = self.record.read_text(encoding="utf-8") if self.record.is_file() else ""
         return result, record, error_output.getvalue()
 
@@ -769,7 +771,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "baseline.json").write_text(
             json.dumps({
                 "schemaVersion": 1,
@@ -799,7 +801,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
             "STAGING_SCHEMA": "APP_STAGE", "STAGING_SQLCL_CONNECTION": "STAGE", "STAGING_EXPECTED_USER": "APP_STAGE",
         }
 
-    def run_build(self) -> tuple[int, str, str]:
+    def run_build(self, arguments: list[str] | None = None, *, root: Path | None = None) -> tuple[int, str, str]:
         def capture(_target, environment, _sections, _run_dir, **_kwargs):
             catalog = self.source if environment == "dev" else self.target
             return json.loads(json.dumps(catalog))
@@ -809,14 +811,108 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
 
         stdout, stderr = io.StringIO(), io.StringIO()
         with (
-            patch.object(baseline, "ROOT", self.root),
+            patch.object(baseline, "ROOT", self.root if root is None else root),
             patch.object(baseline, "capture_environment_catalog", side_effect=capture),
             patch.object(baseline, "capture_inventory_snapshot_with_retries", side_effect=snapshot),
+            patch.object(migration_runtime, "require_migration_sqlcl_version"),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = baseline.main(arguments or ["build", "--to", "staging"], environ=self.values)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_build_accepts_noncanonical_repository_root_alias(self) -> None:
+        root_alias = self.root / "migrations" / ".."
+
+        code, output, error = self.run_build(root=root_alias)
+
+        self.assertEqual(code, 0, output + error)
+        self.assertEqual(3, len(list((self.root / "migrations" / "APP_STAGE").iterdir())))
+
+    def test_no_bundle_preserves_existing_generated_bytes(self) -> None:
+        expected = {
+            "baseline-code": {
+                "001-source-pkg-alpha-package-62c56260.sql": "54760bcde770a7c1c44bb2a01dcf08ffec70c4fc4ca53e073cdd73bbd57c08bb",
+                "002-view-v-alpha-c84bc776.sql": "8fa2d6c64ae5ae045a97e66185ac6df772b95ab9a72bd65a0fbe6fa12e05b408",
+                "003-compile-all.sql": "129069e30a63ed90794a92a868333fe69a285bb2b43085bd2fdc83665d2abc9b",
+                "README.md": "e6be64748b36edf32d8b43f0d16421921aadfc0ac668a257783cbc75976693bf",
+                "checks.json": "695eef767efa716e87b36674fa85e3e1ea16373caa2b22240bc43553f522c5c9",
+            },
+            "baseline-grants": {
+                "001-object-grants.sql": "b33b8ba6a46f8214f2348ced90a82d4800bb11964fe891ff23db593ac5b90de4",
+                "README.md": "a9d0fae6e5298896a9833725b9e633181ab3d27e4df5d12d950222d835ba18de",
+                "checks.json": "2562b9261c34b21e98816aefce1d93f1cb19858231e2617029ca606cb9cbeb1b",
+            },
+            "baseline-structure": {
+                "001-structure-delta.sql": "92f814e782896125d3d0ae0114d4bcf54696253091b55f17c0da0cf09ca4af77",
+                "README.md": "9c5d0dc56df15beeb62127357b5ad06989ff5e49daa69da2c131960383de2179",
+                "checks.json": "c95d6be80cce1e6a376f0e7d8de3e6141018e5a2eba66341d7db437cdf41a342",
+            },
+        }
+
+        code, output, error = self.run_build()
+
+        self.assertEqual(code, 0, output + error)
+        observed: dict[str, dict[str, str]] = {}
+        folders = sorted((self.root / "migrations" / "APP_STAGE").iterdir())
+        for folder in folders:
+            family = folder.name.split("_", 1)[1].rsplit("-r", 1)[0]
+            observed[family] = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in folder.iterdir()
+            }
+        self.assertEqual(len(folders), 3, output)
+        self.assertEqual(observed, expected)
+
+    def test_build_refuses_same_observed_scope_even_with_service_aliases(self) -> None:
+        values = dict(self.values, STAGING_SCHEMA="APP_DEV")
+        target = json.loads(json.dumps(self.target))
+        target["identity"].update(self.source["identity"])
+        target["identity"]["service_name"] = "STAGE_ALIAS"
+
+        def capture(_target, environment, _sections, _run_dir, **_kwargs):
+            catalog = self.source if environment == "dev" else target
+            return json.loads(json.dumps(catalog))
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.object(baseline, "ROOT", self.root),
+            patch.object(baseline, "capture_environment_catalog", side_effect=capture),
+            patch.object(baseline, "capture_inventory_snapshot_with_retries", return_value=(None, self.snapshot)) as snapshot,
+            patch.object(migration_runtime, "require_migration_sqlcl_version"),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = baseline.main(["build", "--to", "staging"], environ=values)
+
+        self.assertEqual(code, 2, stdout.getvalue() + stderr.getvalue())
+        self.assertIn("same observed database/container/schema/edition scope", stderr.getvalue())
+        snapshot.assert_not_called()
+        self.assertEqual(list((self.root / "migrations").rglob("*_baseline-*-r???")), [])
+
+    def test_build_refuses_incomplete_identity_before_generation(self) -> None:
+        target = json.loads(json.dumps(self.target))
+        target["identity"].pop("edition")
+
+        def capture(_target, environment, _sections, _run_dir, **_kwargs):
+            catalog = self.source if environment == "dev" else target
+            return json.loads(json.dumps(catalog))
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.object(baseline, "ROOT", self.root),
+            patch.object(baseline, "capture_environment_catalog", side_effect=capture),
+            patch.object(baseline, "capture_inventory_snapshot_with_retries", return_value=(None, self.snapshot)) as snapshot,
+            patch.object(migration_runtime, "require_migration_sqlcl_version"),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
             code = baseline.main(["build", "--to", "staging"], environ=self.values)
-        return code, stdout.getvalue(), stderr.getvalue()
+
+        self.assertEqual(code, 2, stdout.getvalue() + stderr.getvalue())
+        self.assertIn("target identity is incomplete", stderr.getvalue())
+        snapshot.assert_not_called()
+        self.assertEqual(list((self.root / "migrations").rglob("*_baseline-*-r???")), [])
 
     def test_build_generates_valid_structure_grants_and_exact_source_folders_idempotently(self) -> None:
         code, output, error = self.run_build()
@@ -916,6 +1012,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
             patch.object(baseline, "ROOT", self.root),
             patch.object(baseline, "capture_environment_catalog", side_effect=capture),
             patch.object(baseline, "capture_inventory_snapshot_with_retries", side_effect=snapshot),
+            patch.object(migration_runtime, "require_migration_sqlcl_version"),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):

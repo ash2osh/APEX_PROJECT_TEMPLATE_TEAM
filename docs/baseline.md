@@ -89,15 +89,51 @@ number tokens, avoiding binary-float rounding during capture and build.
 scripts/team.sh baseline build --from dev --to staging
 scripts/team.sh baseline build --to prod --schema APP_PROD
 scripts/team.sh baseline build --from dev --to staging --data
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status
+scripts/team.sh baseline build --from dev --to staging --bundle customer-status --data
 ```
 
 `--from` defaults to `dev`. `build` captures complete catalogs, compares the
 selected environments by object name, and writes new folders under
-`migrations/<TARGET_SCHEMA>/`. Add `--data` to read a prior `export-data`
-capture, capture the configured target tables read-only, and create an
-additional data family. `--data-dir` selects a different export root; by
-default the builder reads `scratch/baseline/<from>/data/`. A build can create
-up to four families:
+`migrations/<TARGET_SCHEMA>/`. Source and target must be complete, and the
+builder refuses the same observed database/container/schema/edition scope even
+when two configured service aliases differ. A schema's baseline folders cover
+only that repository's selected observations; generation does not discover
+pending migrations in other independent repositories.
+
+Without `--bundle`, a build creates up to three separate structure, grants and
+code families. Use `--bundle <name>` to put generated structure, grants, and code in that order
+in one `baseline-bundle-<name>` folder. The name must be
+an ASCII lowercase slug matching `[a-z][a-z0-9]*(?:-[a-z0-9]+)*` and at most
+64 characters; it is validated before SQLcl starts. Bundling applies only to
+the current generated components from the same complete source and target
+captures. It never combines schemas, arbitrary SQL, reference data, or existing
+migration folders. It creates one folder per target schema with nonempty output.
+
+The usual three nonempty categories therefore go from 3-to-1 folders. With
+`--data`, the usual four families become 4-to-2. The baseline-data folder is installed separately after the DDL bundle.
+Empty categories create no folder. `--data-dir` selects
+a different reference export root; by default the builder reads
+`scratch/baseline/<from>/data/`.
+
+The bundle README lists its categories, source and target, ordered original-to-generated filename mapping,
+and SQL SHA-256 values. Review every
+step and all checks. Oracle DDL can commit implicitly; a DDL step or later check
+may fail after earlier DDL took effect. Inspect the target and use a reviewed
+recovery migration; do not edit or replay an attempted or applied folder.
+Identical builds preserve existing bytes and evidence, while changed inputs
+create the next revision. Unknown evidence, revision gaps, or a flat/schema
+layout conflict refuses generation. Staging is private and outside
+`migrations/`; validation completes before exclusive installation of a final
+folder. On macOS, installation uses `renamex_np` with `RENAME_EXCL` and
+requires that operation to be supported by the destination filesystem. If the
+native symbol or filesystem support is unavailable, generation refuses without
+falling back to a replacing rename or copy.
+
+Add `--data` to read a prior `export-data` capture and capture the configured
+target tables read-only. `--data-dir` selects a different export root; by
+default the builder reads `scratch/baseline/<from>/data/`. The generated
+families are:
 
 - `baseline-structure`: guarded table and sequence creates, missing columns,
   named constraints, indexes, not-null changes, and generator synchronization.

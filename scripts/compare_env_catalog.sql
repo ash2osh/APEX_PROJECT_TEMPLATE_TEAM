@@ -103,6 +103,7 @@ DECLARE
     line_length PLS_INTEGER;
     current_line VARCHAR2(32767);
     line_hash NUMBER;
+    hash_state NUMBER := 0;
   BEGIN
     p_line_count := 0;
     p_hash_sum := 0;
@@ -122,13 +123,19 @@ DECLARE
         current_line := NULL;
       END IF;
       p_line_count := p_line_count + 1;
-      IF p_line_count > 1 AND line_length > 0 THEN
-        SELECT ORA_HASH(current_line) INTO line_hash FROM dual;
-        p_hash_sum := p_hash_sum + line_hash;
+      IF p_line_count > 1 THEN
+        SELECT ORA_HASH(TO_CHAR(p_line_count, 'FM9999999990'), 4294967295, hash_state)
+          INTO line_hash FROM dual;
+        hash_state := line_hash;
+        IF line_length > 0 THEN
+          SELECT ORA_HASH(current_line, 4294967295, hash_state) INTO line_hash FROM dual;
+          hash_state := line_hash;
+        END IF;
       END IF;
       EXIT WHEN next_line = 0;
       position_value := next_line + 1;
     END LOOP;
+    p_hash_sum := hash_state;
   END;
 
   PROCEDURE hash_text_clob(
@@ -208,6 +215,7 @@ DECLARE
     source_line PLS_INTEGER;
     source_text VARCHAR2(32767);
     line_hash NUMBER;
+    hash_state NUMBER := 0;
   BEGIN
     p_line_count := 0;
     p_hash_sum := 0;
@@ -219,11 +227,17 @@ DECLARE
       EXIT WHEN source_cursor%NOTFOUND;
       p_line_count := p_line_count + 1;
       IF source_line > 1 THEN
-        SELECT ORA_HASH(source_text) INTO line_hash FROM dual;
-        p_hash_sum := p_hash_sum + line_hash;
+        SELECT ORA_HASH(TO_CHAR(source_line, 'FM9999999990'), 4294967295, hash_state)
+          INTO line_hash FROM dual;
+        hash_state := line_hash;
+        IF source_text IS NOT NULL THEN
+          SELECT ORA_HASH(source_text, 4294967295, hash_state) INTO line_hash FROM dual;
+          hash_state := line_hash;
+        END IF;
       END IF;
     END LOOP;
     CLOSE source_cursor;
+    p_hash_sum := hash_state;
   EXCEPTION
     WHEN OTHERS THEN
       IF source_cursor%ISOPEN THEN CLOSE source_cursor; END IF;
@@ -292,6 +306,53 @@ DECLARE
     l_page.put('reason', p_reason);
     l_page.put('pages', JSON_ARRAY_T.parse('[0]'));
     l_coverage_sections.put(p_name, l_page);
+  END;
+
+  PROCEDURE add_java_mle IS
+    mle_module_count PLS_INTEGER;
+    language_row_count PLS_INTEGER;
+  BEGIN
+    IF NOT selected('java-mle') THEN RETURN; END IF;
+    SELECT COUNT(*) INTO mle_module_count
+      FROM all_objects
+     WHERE owner = c_schema AND object_type = 'MLE MODULE';
+
+    IF mle_module_count = 0 THEN
+      add_query_section('java-mle', q'~
+        SELECT JSON_OBJECT('name' VALUE o.object_name, 'type' VALUE o.object_type,
+          'status' VALUE o.status RETURNING CLOB) row_json
+          FROM all_objects o WHERE o.owner = :scope
+           AND o.object_type IN ('JAVA CLASS','JAVA RESOURCE','JAVA SOURCE','MLE MODULE','MLE ENVIRONMENT')
+         ORDER BY o.object_type, o.object_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+      RETURN;
+    END IF;
+
+    BEGIN
+      EXECUTE IMMEDIATE q'~
+        SELECT COUNT(DISTINCT o.object_name)
+          FROM all_objects o
+          JOIN all_mle_modules m ON m.module_owner = o.owner AND m.module_name = o.object_name
+         WHERE o.owner = :scope AND o.object_type = 'MLE MODULE' AND m.language_name IS NOT NULL~'
+        INTO language_row_count USING c_schema;
+      IF language_row_count != mle_module_count THEN
+        add_unavailable('java-mle', 'MLE module language metadata is incomplete or inaccessible');
+        RETURN;
+      END IF;
+      add_query_section('java-mle', q'~
+        SELECT JSON_OBJECT('name' VALUE o.object_name, 'type' VALUE o.object_type,
+          'status' VALUE o.status, 'language' VALUE m.language_name RETURNING CLOB) row_json
+          FROM all_objects o
+          LEFT JOIN all_mle_modules m ON m.module_owner = o.owner AND m.module_name = o.object_name
+         WHERE o.owner = :scope
+           AND o.object_type IN ('JAVA CLASS','JAVA RESOURCE','JAVA SOURCE','MLE MODULE','MLE ENVIRONMENT')
+         ORDER BY o.object_type, o.object_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    EXCEPTION
+      WHEN OTHERS THEN
+        add_unavailable('java-mle', 'MLE module language metadata is unavailable: ' || SQLERRM);
+    END;
+  EXCEPTION
+    WHEN OTHERS THEN
+      add_unavailable('java-mle', 'Java/MLE catalog is unavailable: ' || SQLERRM);
   END;
 
   PROCEDURE add_ords IS
@@ -877,6 +938,7 @@ BEGIN
 
   add_query_section('columns', q'~
     SELECT JSON_OBJECT('table_name' VALUE c.table_name, 'name' VALUE c.column_name,
+      'column_position' VALUE c.column_id, 'user_generated' VALUE c.user_generated,
       'data_type' VALUE c.data_type, 'data_type_mod' VALUE c.data_type_mod,
       'data_type_owner' VALUE c.data_type_owner, 'data_length' VALUE c.data_length,
       'data_precision' VALUE c.data_precision, 'data_scale' VALUE c.data_scale,
@@ -993,11 +1055,7 @@ BEGIN
           WHERE p.table_name = UPPER(x.object_name)))
      ORDER BY p.table_name, p.grantee, p.privilege OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
-  add_query_section('java-mle', q'~
-    SELECT JSON_OBJECT('name' VALUE o.object_name, 'type' VALUE o.object_type, 'status' VALUE o.status RETURNING CLOB) row_json
-      FROM all_objects o WHERE o.owner = :scope
-       AND o.object_type IN ('JAVA CLASS','JAVA RESOURCE','JAVA SOURCE','MLE MODULE','MLE ENVIRONMENT')
-     ORDER BY o.object_type, o.object_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+  add_java_mle;
 
   IF c_dba_mode THEN
     add_query_section('system-privileges', q'~
@@ -1022,8 +1080,10 @@ BEGIN
         'principal' VALUE a.principal, 'principal_type' VALUE a.principal_type, 'privilege' VALUE a.privilege,
         'grant_type' VALUE a.grant_type, 'inverted_principal' VALUE a.inverted_principal,
         'ace_order' VALUE a.ace_order,
-        'start_date' VALUE TO_CHAR(a.start_date, 'YYYY-MM-DD"T"HH24:MI:SS TZH:TZM'),
-        'end_date' VALUE TO_CHAR(a.end_date, 'YYYY-MM-DD"T"HH24:MI:SS TZH:TZM') RETURNING CLOB) row_json
+        'bounds_timezone_qualified' VALUE CASE
+          WHEN a.start_date IS NULL AND a.end_date IS NULL THEN 'true' ELSE 'false' END FORMAT JSON,
+        'start_date' VALUE TO_CHAR(a.start_date, 'YYYY-MM-DD"T"HH24:MI:SS.FF6'),
+        'end_date' VALUE TO_CHAR(a.end_date, 'YYYY-MM-DD"T"HH24:MI:SS.FF6') RETURNING CLOB) row_json
         FROM dba_host_aces a JOIN selected_principals p ON p.principal = a.principal
        ORDER BY a.host, a.lower_port, a.upper_port, a.ace_order OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 

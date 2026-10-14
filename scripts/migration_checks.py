@@ -51,6 +51,33 @@ HEX_CHUNK_SIZE = 3000
 DEFAULT_CHECK_DRIVER_BYTES = 2 * 1024 * 1024
 DEFAULT_PREFLIGHT_INVENTORY_RETRIES = 3
 SELECTABLE_SYNONYM_TARGET_TYPES = {"TABLE", "VIEW", "MATERIALIZED VIEW"}
+OBSERVED_IDENTITY_FIELDS = (
+    "session_user",
+    "current_schema",
+    "db_name",
+    "db_unique_name",
+    "service_name",
+    "container_id",
+    "container_name",
+    "edition",
+    "database_version",
+)
+OBSERVED_IDENTITY_INCOMPLETE_MESSAGE = (
+    "Live target identity is incomplete; the observed database cannot be identified safely."
+)
+
+
+def complete_observed_identity(identity: object) -> dict[str, str] | None:
+    """Return the target identity only when all required observed fields are present."""
+    if not isinstance(identity, Mapping):
+        return None
+    result: dict[str, str] = {}
+    for field in OBSERVED_IDENTITY_FIELDS:
+        value = identity.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        result[field] = value
+    return result
 
 
 def preflight_inventory_retries(values: Mapping[str, str]) -> int:
@@ -1542,7 +1569,14 @@ def _local_report(migrations: Sequence[Migration], repo_root: Path) -> Preflight
     return PreflightReport(2 if errors else (1 if conflicts else 0), conflicts, tuple(errors), coverage, LOCAL_LIMITATION)
 
 
-def _live_report(migrations: Sequence[Migration], environment: str, repo_root: Path, schema: str | None = None) -> PreflightReport:
+def _live_report(
+    migrations: Sequence[Migration],
+    environment: str,
+    repo_root: Path,
+    schema: str | None = None,
+    *,
+    values: Mapping[str, str] | None = None,
+) -> PreflightReport:
     from .db_targets import TargetResolutionError, batch_schema, flat_migrations_apply, resolve_target
     from .schema_catalog import (
         CatalogError,
@@ -1551,7 +1585,7 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
         capture_snapshot,
     )
 
-    values = os.environ
+    values = os.environ if values is None else values
     work_dir: Path | None = None
     # The SQLcl logs in work_dir are diagnostics: a preflight that finished (exit
     # 0 or 1) needs none, so they are kept only when it could not (exit 2).
@@ -1586,6 +1620,26 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
             snapshot = SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
         checks_result = run_checks(target, batch_preconditions(migrations), work_dir, phase="preconditions")
         report = preflight(migrations, snapshot, checks_result)
+        coverage = dict(report.coverage)
+        coverage["deferredPreconditionFolders"] = deferred_precondition_folders(migrations)
+        observed_identity = complete_observed_identity(snapshot.identity)
+        errors = list(report.errors)
+        exit_code = report.exit_code
+        if observed_identity is None:
+            coverage["complete"] = False
+            if not any(error.get("code") == "OBSERVED_IDENTITY_INCOMPLETE" for error in errors):
+                errors.append({
+                    "code": "OBSERVED_IDENTITY_INCOMPLETE",
+                    "message": OBSERVED_IDENTITY_INCOMPLETE_MESSAGE,
+                })
+            exit_code = 2
+        if (
+            snapshot.coverage.get("ownerComplete") is True
+            and "ALL_OBJECTS" in snapshot.coverage.get("catalogs", [])
+            and observed_identity is not None
+        ):
+            coverage["observedIdentity"] = observed_identity
+        report = PreflightReport(exit_code, report.conflicts, tuple(errors), coverage, report.limitation)
         keep_logs = report.exit_code not in (0, 1)
         return report
     except KeyboardInterrupt:
@@ -1598,6 +1652,96 @@ def _live_report(migrations: Sequence[Migration], environment: str, repo_root: P
     finally:
         if work_dir is not None and not keep_logs:
             safe_rmtree(work_dir)
+
+
+def preflight_selected(
+    repo_root: Path,
+    folders: Sequence[str],
+    *,
+    environment: str | None = None,
+    schema: str | None = None,
+    values: Mapping[str, str] | None = None,
+) -> PreflightReport:
+    """Run the existing local or guarded live preflight for an explicit selection."""
+    from .migration_manifest import load_batch
+
+    try:
+        if isinstance(folders, (str, bytes)) or not folders:
+            raise MigrationManifestError("select one or more migration folders")
+        migrations = load_batch(repo_root, folders)
+    except (MigrationManifestError, OSError, ValueError) as error:
+        mode = "local" if environment is None else "live"
+        return PreflightReport(
+            2,
+            (),
+            ({"code": "MIGRATION_SELECTION_INVALID", "message": str(error)},),
+            {"complete": False, "mode": mode, "environment": environment, "deferredPreconditionFolders": [], "limitations": [LIMITATION]},
+        )
+
+    if environment is None:
+        report = _local_report(migrations, repo_root)
+    else:
+        report = _live_report(migrations, environment, repo_root, schema, values=values)
+    coverage = dict(report.coverage)
+    coverage["deferredPreconditionFolders"] = deferred_precondition_folders(migrations)
+    changed_path = _changed_selected_input(repo_root, folders, migrations)
+    if changed_path is not None:
+        coverage["complete"] = False
+        coverage["selectedInputHashesVerified"] = False
+        errors = (*report.errors, {
+            "code": "SELECTED_INPUT_CHANGED",
+            "path": changed_path,
+            "message": "selected SQL/check inputs changed or became unreadable during preflight; source omitted",
+        })
+        return PreflightReport(2, report.conflicts, errors, coverage, report.limitation)
+    coverage["selectedInputHashesVerified"] = True
+    return PreflightReport(report.exit_code, report.conflicts, report.errors, coverage, report.limitation)
+
+
+def _changed_selected_input(
+    repo_root: Path,
+    folders: Sequence[str],
+    migrations: Sequence[Migration],
+) -> str | None:
+    """Return a relative path when selected bytes changed since they were loaded."""
+    from .migration_manifest import load_batch
+
+    root = Path(repo_root).resolve()
+    try:
+        current = load_batch(root, folders)
+    except (MigrationManifestError, OSError, ValueError):
+        return _first_selected_folder_path(root, folders)
+
+    expected = _migration_input_hashes(root, migrations)
+    observed = _migration_input_hashes(root, current)
+    return _first_hash_mismatch(expected, observed)
+
+
+def _migration_input_hashes(repo_root: Path, migrations: Sequence[Migration]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for migration in migrations:
+        folder = migration.folder.resolve().relative_to(repo_root).as_posix()
+        hashes.update({f"{folder}/{source_file.name}": source_file.sha256 for source_file in migration.files})
+        hashes[f"{folder}/checks.json"] = migration.checks_sha256
+    return hashes
+
+
+def _first_hash_mismatch(expected: Mapping[str, str], observed: Mapping[str, str]) -> str | None:
+    for relative_path in sorted(expected.keys() | observed.keys()):
+        if expected.get(relative_path) != observed.get(relative_path):
+            return relative_path
+    return None
+
+
+def _first_selected_folder_path(repo_root: Path, folders: Sequence[str]) -> str:
+    if not folders:
+        return "migrations"
+    try:
+        selected = Path(folders[0])
+        candidate = selected if selected.is_absolute() else repo_root / selected
+        return candidate.resolve().relative_to(repo_root).as_posix()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return "migrations"
 
 
 def _render_preflight(report: PreflightReport, local: bool) -> str:

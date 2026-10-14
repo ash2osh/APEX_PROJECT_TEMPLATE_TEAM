@@ -5,9 +5,12 @@ import subprocess
 import tempfile
 import unittest
 import contextlib
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fake_sqlcl import BASH
+from scripts.migration_attempts import write_attempt_event
 from scripts.migration_revision import inspect_migration_lock, main, not_started_reason, revise_folder
 
 
@@ -32,6 +35,68 @@ class MigrationRevisionTests(unittest.TestCase):
         if status:
             (folder / "status.dev.json").write_text('{"schemaVersion":1,"state":"verified"}\n', encoding="utf-8")
         return folder
+
+    def make_attempt_event(
+        self, folder, *, environment, schema, attempt_id=None, predecessor=None,
+        state="pending", write_attempted=True, evidence=None,
+    ):
+        return {
+            "schemaVersion": 1,
+            "eventId": str(uuid.uuid4()),
+            "attemptId": str(attempt_id or uuid.uuid4()),
+            "runId": "migration-attempt-review-test",
+            "predecessorEventId": str(predecessor) if predecessor else None,
+            "recordedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "migrationPath": folder.relative_to(self.root).as_posix(),
+            "environment": environment,
+            "target": {
+                "environment": environment,
+                "connection": f"{environment}-profile",
+                "expected_user": schema,
+                "current_schema": schema,
+            },
+            "identity": None,
+            "files": [{"name": "001-create-table.sql", "sequence": 1, "sha256": "a" * 64}],
+            "checksSha256": "b" * 64,
+            "payloadDigest": "c" * 64,
+            "state": state,
+            "writeAttempted": write_attempted,
+            "evidence": evidence or [],
+        }
+
+    def add_invalid_no_write_event(self, folder, *, environment, schema):
+        attempt_id = str(uuid.uuid4())
+        pending = self.make_attempt_event(
+            folder, environment=environment, schema=schema, attempt_id=attempt_id,
+        )
+        terminal = self.make_attempt_event(
+            folder, environment=environment, schema=schema, attempt_id=attempt_id,
+            predecessor=pending["eventId"], state="apply-not-started", write_attempted=False,
+            evidence=[{
+                "kind": "no-write-sqlcl-output",
+                "path": "scratch/missing-no-write-output.txt",
+                "sha256": "d" * 64,
+                "classification": "connection-failed-before-payload",
+            }],
+        )
+        write_attempt_event(folder, pending)
+        write_attempt_event(folder, terminal)
+
+    def add_branched_attempt_events(self, folder, *, environment, schema):
+        attempt_id = str(uuid.uuid4())
+        pending = self.make_attempt_event(
+            folder, environment=environment, schema=schema, attempt_id=attempt_id,
+        )
+        first_terminal = self.make_attempt_event(
+            folder, environment=environment, schema=schema, attempt_id=attempt_id,
+            predecessor=pending["eventId"], state="verified",
+        )
+        second_terminal = self.make_attempt_event(
+            folder, environment=environment, schema=schema, attempt_id=attempt_id,
+            predecessor=pending["eventId"], state="verified",
+        )
+        for event in (pending, first_terminal, second_terminal):
+            write_attempt_event(folder, event)
 
     def test_revise_creates_sequential_revisions_and_preserves_old_folder_bytes(self):
         old = self.add_folder("migrations/2026-10-01_create-things-r001", status=True)
@@ -195,6 +260,95 @@ class MigrationRevisionTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unknown")
         self.assertIn("unreadable", " ".join(result.states))
+
+    def test_selected_lock_scopes_receipts_and_attempts_but_default_remains_global(self):
+        folder = self.add_folder("migrations/2026-10-14_scoped-lock-r001")
+        (folder / "status.staging.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "state": "verified",
+            "environment": "staging",
+            "target": {"current_schema": "APP_STAGING"},
+        }) + "\n", encoding="utf-8")
+        dev_dir = self.root / "scratch" / "migration-attempt-dev"
+        staging_dir = self.root / "scratch" / "migration-attempt-staging"
+        dev_dir.mkdir(parents=True)
+        staging_dir.mkdir(parents=True)
+        for directory, environment, schema, attempted, state in (
+            (dev_dir, "dev", "APP_DEV", False, "apply-not-started"),
+            (staging_dir, "staging", "APP_STAGING", True, "write-attempted"),
+        ):
+            manifest = {
+                "schemaVersion": 1,
+                "state": state,
+                "target": {"environment": environment, "current_schema": schema},
+                "migrations": [{"folder": folder.name, "writeAttempted": attempted, "state": state}],
+            }
+            (directory / "run-manifest.json").write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        global_lock = inspect_migration_lock(self.root, f"migrations/{folder.name}")
+        selected_lock = inspect_migration_lock(
+            self.root, f"migrations/{folder.name}", environment="staging", schema="APP_STAGING",
+        )
+        selected_dev = inspect_migration_lock(
+            self.root, f"migrations/{folder.name}", environment="dev", schema="APP_DEV",
+        )
+
+        self.assertEqual("locked", global_lock.status)
+        self.assertIn("receipt:verified:staging", global_lock.states)
+        self.assertIn("attempt:apply-not-started:dev", global_lock.states)
+        self.assertIn("attempt:write-attempted:staging", global_lock.states)
+        self.assertEqual("locked", selected_lock.status)
+        self.assertEqual(("receipt:verified:staging", "attempt:write-attempted:staging"), selected_lock.states)
+        self.assertEqual("unlocked", selected_dev.status)
+        self.assertEqual(("attempt:apply-not-started:dev",), selected_dev.states)
+
+    def test_selected_lock_ignores_unrelated_invalid_no_write_evidence_but_global_stays_fail_closed(self):
+        folder = self.add_folder("migrations/2026-10-14_unrelated-event-evidence-r001")
+        self.add_invalid_no_write_event(folder, environment="dev", schema="APP_DEV")
+
+        selected = inspect_migration_lock(
+            self.root, f"migrations/{folder.name}", environment="staging", schema="APP_STAGE",
+        )
+        global_lock = inspect_migration_lock(self.root, f"migrations/{folder.name}")
+
+        self.assertEqual("unlocked", selected.status, selected)
+        self.assertEqual("unknown", global_lock.status, global_lock)
+        self.assertTrue(any("no-write-evidence-unavailable" in state for state in global_lock.states))
+
+    def test_selected_lock_still_rejects_invalid_no_write_evidence_for_selected_target(self):
+        folder = self.add_folder("migrations/2026-10-14_selected-event-evidence-r001")
+        self.add_invalid_no_write_event(folder, environment="staging", schema="APP_STAGE")
+
+        selected = inspect_migration_lock(
+            self.root, f"migrations/{folder.name}", environment="staging", schema="APP_STAGE",
+        )
+
+        self.assertEqual("unknown", selected.status, selected)
+        self.assertTrue(any("no-write-evidence-unavailable" in state for state in selected.states))
+
+    def test_selected_lock_ignores_unrelated_malformed_chain_but_global_stays_fail_closed(self):
+        folder = self.add_folder("migrations/2026-10-14_unrelated-malformed-chain-r001")
+        self.add_branched_attempt_events(folder, environment="dev", schema="APP_DEV")
+
+        selected = inspect_migration_lock(
+            self.root, f"migrations/{folder.name}", environment="staging", schema="APP_STAGE",
+        )
+        global_lock = inspect_migration_lock(self.root, f"migrations/{folder.name}")
+
+        self.assertEqual("unlocked", selected.status, selected)
+        self.assertEqual("unknown", global_lock.status, global_lock)
+        self.assertTrue(any("attempt-events-invalid" in state for state in global_lock.states))
+
+    def test_selected_lock_still_rejects_malformed_chain_for_selected_target(self):
+        folder = self.add_folder("migrations/2026-10-14_selected-malformed-chain-r001")
+        self.add_branched_attempt_events(folder, environment="staging", schema="APP_STAGE")
+
+        selected = inspect_migration_lock(
+            self.root, f"migrations/{folder.name}", environment="staging", schema="APP_STAGE",
+        )
+
+        self.assertEqual("unknown", selected.status, selected)
+        self.assertTrue(any("attempt-events-invalid" in state for state in selected.states))
 
     def test_check_reports_attempt_directory_without_manifest_as_unknown(self):
         self.add_folder("migrations/2026-10-01_create-things-r001")

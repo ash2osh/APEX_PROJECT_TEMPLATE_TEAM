@@ -608,6 +608,72 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
     )
 
 
+def validate_staged_migration(repo_root: Path, stage: Path, relative_destination: str) -> None:
+    """Validate a staged folder against migration rules and its planned identity.
+
+    ``stage`` must be an existing directory outside ``migrations/``. The
+    logical destination is checked for naming, schema layout, family history,
+    and occupancy without requiring that the final directory already exist.
+    The staged payload uses the same SQL, entry, check, and rehearsal-metric
+    validators as :func:`load_migration`; this function performs no writes.
+    """
+    parts = _validate_relative_folder(relative_destination)
+    _, family, revision = _folder_parts(parts[-1])
+    root = repo_root.resolve()
+    migrations_dir = root / "migrations"
+    if migrations_dir.is_symlink() or not migrations_dir.is_dir():
+        raise MigrationManifestError(f"migrations directory does not exist or is unsafe: {migrations_dir}")
+
+    staged_path = Path(stage)
+    if staged_path.is_symlink():
+        raise MigrationManifestError("staged migration directory cannot be a symbolic link")
+    try:
+        resolved_stage = staged_path.resolve(strict=True)
+        resolved_migrations = migrations_dir.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise MigrationManifestError(f"staged migration directory is missing or unsafe: {exc}") from exc
+    if resolved_stage == resolved_migrations or resolved_stage.is_relative_to(resolved_migrations):
+        raise MigrationManifestError("staged migration directory must be outside migrations/")
+    if not resolved_stage.is_dir():
+        raise MigrationManifestError("staged migration path is not a directory")
+
+    destination = root.joinpath(*parts)
+    if os.path.lexists(destination):
+        raise MigrationManifestError(f"migration destination already exists: {_printable(relative_destination)}")
+    destination_parent = destination.parent
+    if destination_parent.exists() and not destination_parent.is_dir():
+        raise MigrationManifestError("migration destination parent is not a directory")
+
+    directories = _migration_directories(root)
+    destination_schema = parts[1] if len(parts) == 3 else None
+    family_directories = [
+        (schema, existing_revision)
+        for _path, schema, existing_family, existing_revision in directories
+        if existing_family == family
+    ]
+    layouts = {schema for schema, _existing_revision in family_directories}
+    if destination_schema is None and any(schema is not None for schema in layouts):
+        raise MigrationManifestError(f"migration family {family} already uses a schema-specific layout")
+    if destination_schema is not None and None in layouts:
+        raise MigrationManifestError(f"migration family {family} already uses the flat migrations/ layout")
+
+    revisions = {
+        existing_revision
+        for schema, existing_revision in family_directories
+        if schema == destination_schema
+    }
+    if revision in revisions:
+        raise MigrationManifestError(f"duplicate local migration identity {family}-r{revision:03d}")
+    if revisions != set(range(1, revision)):
+        raise MigrationManifestError(
+            f"migration family {family} destination r{revision:03d} would leave a revision gap; "
+            "revisions start at r001 and must be consecutive"
+        )
+
+    _validate_folder_entries(resolved_stage)
+    _load_check_file(resolved_stage / "checks.json")
+
+
 def assert_single_layout(
     repo_root: Path,
     migrations: Sequence[Migration],

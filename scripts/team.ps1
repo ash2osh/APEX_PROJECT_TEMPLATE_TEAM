@@ -44,6 +44,8 @@ Commands:
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
   check-conflicts <folder> [...] (--env <env>|--local)
                                               Preflight selected migrations against local/live scope
+  migration-plan [<folder> ...] [--live --env <env>] [--schema NAME] [--format text|json|markdown]
+                                              Inventory selected migrations or run a guarded read-only preflight
   migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
                                               Apply, or rehearse DML in one transaction and roll it back
   revise <folder> [--reason TEXT]             Copy to the next migration revision
@@ -66,8 +68,8 @@ Commands:
                                               Export configured object and system grants
   baseline export-data --from <env> [--scratch <dir>]
                                               Export allow-listed reference rows without excluded columns
-  baseline build --to <env> [--from <env>] [--data]
-                                              Build structure, grants, source, and optional reference-data migrations
+  baseline build --to <env> [--from <env>] [--data] [--bundle <name>]
+                                              Build baseline migrations, optionally bundling structure, grants, and source
   baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
                                               Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
@@ -83,7 +85,7 @@ Commands:
   automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
                                               Observe, check or explicitly operate on one scoped automation
 Options:
-  --schema <NAME>                             Run one configured schema (any command except upgrade-template, verify-local)
+  --schema <NAME>                             Run one configured schema (except upgrade-template, verify-local and migration-plan)
   --help                                      Show this help
 Environment:
   MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
@@ -207,7 +209,7 @@ if ([string]::IsNullOrWhiteSpace($Command) -or $Command -in @("--help", "-h")) {
 
 # --schema NAME is the one selection channel: strip it and set PROJECT_SCHEMA so
 # every child script's loader narrows to that schema.
-if ($Command -notin @("upgrade-template", "verify-local", "template-status")) {
+if ($Command -notin @("upgrade-template", "verify-local", "template-status", "migration-plan")) {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
@@ -375,6 +377,18 @@ try {
     "check-conflicts" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)" }
       Invoke-TeamBash -ScriptName "check_conflicts.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
+    }
+    "migration-plan" {
+      . (Join-Path $PSScriptRoot "migration_plan_args.ps1")
+      $planArguments = @()
+      foreach ($classifiedArgument in @(Get-MigrationPlanArgumentKinds -Values $Arguments)) {
+        if ($classifiedArgument.kind -ceq "folder") {
+          $planArguments += ConvertTo-MigrationFolderArgument ([string] $classifiedArgument.value)
+        } else {
+          $planArguments += [string] $classifiedArgument.value
+        }
+      }
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("migration-plan") + $planArguments)
     }
     "migrate" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]" }

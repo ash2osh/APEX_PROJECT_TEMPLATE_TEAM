@@ -384,10 +384,16 @@ def _verification_failure_details(
 def _verify_durable_folder_locks(
     repo_root: Path,
     migrations: Sequence[Migration],
+    target_identity: Mapping[str, str],
 ) -> None:
     for migration in migrations:
         relative = migration.folder.relative_to(repo_root).as_posix()
-        lock = inspect_migration_lock(repo_root, relative)
+        lock = inspect_migration_lock(
+            repo_root,
+            relative,
+            environment=str(target_identity["environment"]),
+            schema=str(target_identity["current_schema"]),
+        )
         if lock.status != "unlocked":
             raise MigrationApplyError(
                 f"migration folder is {lock.status} from durable receipt/attempt evidence; reconcile before applying "
@@ -414,7 +420,7 @@ def _verify_receipts_and_attempts(
 
     scratch = repo_root / "scratch"
     if not scratch.exists():
-        _verify_durable_folder_locks(repo_root, migrations)
+        _verify_durable_folder_locks(repo_root, migrations, target_identity)
         return
     if scratch.is_symlink():
         raise MigrationApplyError("scratch must not be a symbolic link")
@@ -460,7 +466,7 @@ def _verify_receipts_and_attempts(
             if record.get("payloadDigest") != selected[record["folder"]].payload_digest:
                 raise MigrationApplyError(f"a prior write attempt has different bytes for {record['folder']}; reconcile before applying")
             raise MigrationApplyError(f"a prior {environment} write attempt for {record['folder']} has no current verified receipt; inspect {run_dir} and reconcile")
-    _verify_durable_folder_locks(repo_root, migrations)
+    _verify_durable_folder_locks(repo_root, migrations, target_identity)
 
 
 def _migration_operations(migration: Migration, target_schema: str) -> tuple[dict, ...]:

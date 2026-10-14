@@ -134,6 +134,258 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual(report.coverage["deferred_preconditions"]["folders"], ["2026-09-30_dep-r002"])
         self.assertIn("preconditions of 2026-09-30_dep-r002 are not checked here", _render_preflight(report, False))
 
+    def test_preflight_selected_uses_explicit_values_and_reports_observed_identity(self):
+        from scripts import migration_checks
+
+        self.add_folder("2026-10-13_public-api-r001", "CREATE TABLE zz_new (id NUMBER);\n")
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "MIGRATOR",
+        }
+        snapshot = self.snapshot()
+        snapshot.identity.update({
+            "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_name": "APP_PDB",
+            "database_version": "23.26.3.0.0",
+        })
+        observed = {}
+
+        def capture(target, _keys, _run_dir, **_kwargs):
+            observed["target"] = target
+            return None, snapshot
+
+        prior_environment = dict(os.environ)
+        with patch.dict(os.environ, {
+            "DB_ENVIRONMENT": "production",
+            "CODE_SCHEMA": "OTHER",
+            "CODE_SQLCL_CONNECTION": "prod-profile",
+            "CODE_EXPECTED_USER": "OTHER",
+        }), patch("scripts.schema_catalog.capture_inventory_snapshot_with_retries", side_effect=capture), patch(
+            "scripts.migration_checks.run_checks", return_value=self.passing_checks()
+        ):
+            report = migration_checks.preflight_selected(
+                self.root,
+                ["migrations/2026-10-13_public-api-r001"],
+                environment="dev",
+                values=values,
+            )
+
+        self.assertEqual(0, report.exit_code, report.to_dict())
+        self.assertEqual("APP", observed["target"].schema)
+        self.assertEqual(snapshot.identity, report.coverage["observedIdentity"])
+        self.assertEqual([], report.coverage["deferredPreconditionFolders"])
+        self.assertEqual(prior_environment, dict(os.environ), "explicit values must not be injected into os.environ")
+
+    def test_preflight_selected_fails_closed_on_incomplete_captured_identity(self):
+        from scripts import migration_checks
+
+        self.add_folder("2026-10-14_captured-identity-r001", "CREATE TABLE zz_existing (id NUMBER);\n")
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "MIGRATOR",
+        }
+        complete_identity = {
+            "session_user": "MIGRATOR",
+            "current_schema": "APP",
+            "db_name": "DB_SECRET_MARKER",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_id": "3",
+            "container_name": "APP_PDB",
+            "edition": "ORA$BASE",
+            "database_version": "23.26.3.0.0",
+        }
+        cases = (
+            ("missing", (), "database_version"),
+            ("partial-with-conflict", (("ZZ_EXISTING", "TABLE", {}),), "service_name"),
+        )
+
+        for label, objects, incomplete_field in cases:
+            with self.subTest(identity=label):
+                snapshot = self.snapshot(objects)
+                snapshot.identity.update(complete_identity)
+                if incomplete_field == "service_name":
+                    snapshot.identity[incomplete_field] = "  "
+                else:
+                    del snapshot.identity[incomplete_field]
+
+                with patch("scripts.schema_catalog.capture_inventory_snapshot_with_retries", return_value=(None, snapshot)), patch(
+                    "scripts.migration_checks.run_checks", return_value=self.passing_checks()
+                ):
+                    report = migration_checks.preflight_selected(
+                        self.root,
+                        ["migrations/2026-10-14_captured-identity-r001"],
+                        environment="dev",
+                        values=values,
+                    )
+
+                self.assertEqual(2, report.exit_code, report.to_dict())
+                self.assertFalse(report.coverage["complete"])
+                self.assertNotIn("observedIdentity", report.coverage)
+                identity_errors = [error for error in report.errors if error.get("code") == "OBSERVED_IDENTITY_INCOMPLETE"]
+                self.assertEqual(1, len(identity_errors), report.to_dict())
+                self.assertEqual(
+                    "Live target identity is incomplete; the observed database cannot be identified safely.",
+                    identity_errors[0]["message"],
+                )
+                if objects:
+                    self.assertTrue(any(conflict.get("code") == "LIVE_NAMESPACE_OCCUPIED" for conflict in report.conflicts))
+                else:
+                    self.assertEqual((), report.conflicts)
+                self.assertNotIn("DB_SECRET_MARKER", json.dumps(report.to_dict()))
+
+    def test_complete_observed_identity_requires_all_nine_nonblank_fields(self):
+        from scripts import migration_checks
+
+        identity = {
+            "session_user": "APP", "current_schema": "APP", "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1", "service_name": "dev", "container_id": "3",
+            "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "23.26.3.0.0",
+        }
+        self.assertEqual(identity, migration_checks.complete_observed_identity(identity))
+        for incomplete in (
+            {key: value for key, value in identity.items() if key != "edition"},
+            {**identity, "service_name": "  "},
+            {**identity, "container_id": None},
+        ):
+            with self.subTest(incomplete=incomplete):
+                self.assertIsNone(migration_checks.complete_observed_identity(incomplete))
+
+    def test_preflight_selected_rejects_incomplete_profile_before_catalog_capture(self):
+        from scripts import migration_checks
+
+        self.add_folder("2026-10-13_incomplete-profile-r001", "CREATE TABLE zz_new (id NUMBER);\n")
+        with patch("scripts.schema_catalog.capture_inventory_snapshot_with_retries") as capture:
+            report = migration_checks.preflight_selected(
+                self.root,
+                ["migrations/2026-10-13_incomplete-profile-r001"],
+                environment="dev",
+                values={"DB_ENVIRONMENT": "development"},
+            )
+
+        self.assertEqual(2, report.exit_code)
+        self.assertFalse(capture.called, "an incomplete target profile must refuse before catalog capture")
+        self.assertFalse(report.coverage["complete"])
+
+    def test_preflight_selected_detects_deleted_last_step_after_capture(self):
+        from scripts import migration_checks
+
+        folder = self.add_folder(
+            "2026-10-13_deleted-final-step-r001",
+            {
+                "001-first.sql": "CREATE TABLE zz_first (id NUMBER);\n",
+                "002-last.sql": "CREATE TABLE zz_deleted_private (id NUMBER);\n",
+            },
+        )
+        second_step = folder / "002-last.sql"
+        snapshot = self.snapshot()
+        snapshot.identity.update({
+            "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_name": "APP_PDB",
+            "database_version": "23.26.3.0.0",
+        })
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "MIGRATOR",
+        }
+
+        def capture(_target, _keys, _run_dir, **_kwargs):
+            second_step.unlink()
+            return None, snapshot
+
+        with patch("scripts.schema_catalog.capture_inventory_snapshot_with_retries", side_effect=capture), patch(
+            "scripts.migration_checks.run_checks", return_value=self.passing_checks()
+        ):
+            report = migration_checks.preflight_selected(
+                self.root,
+                [f"migrations/{folder.name}"],
+                environment="dev",
+                values=values,
+            )
+
+        relative_path = f"migrations/{folder.name}/002-last.sql"
+        self.assertEqual(2, report.exit_code, report.to_dict())
+        self.assertFalse(report.coverage["selectedInputHashesVerified"], report.coverage)
+        self.assertFalse(report.coverage["complete"], report.coverage)
+        self.assertTrue(
+            any(error.get("code") == "SELECTED_INPUT_CHANGED" and error.get("path") == relative_path for error in report.errors),
+            report.errors,
+        )
+        self.assertNotIn("CREATE TABLE zz_deleted_private", json.dumps(report.to_dict()))
+
+    def test_later_preconditions_are_deferred(self):
+        from scripts import migration_checks
+
+        first_precondition = {"id": "before-create", "sql": "SELECT 1 FROM dual", "expected": 1}
+        later_precondition = {
+            "id": "after-create",
+            "sql": "SELECT COUNT(*) FROM zz_created_by_first",
+            "expected": 1,
+        }
+        self.add_folder(
+            "2026-10-13_deferred-r001",
+            "CREATE TABLE zz_created_by_first (id NUMBER);\n",
+            preconditions=(first_precondition,),
+        )
+        self.add_folder(
+            "2026-10-13_deferred-r002",
+            "ALTER SYSTEM SET zz_reviewed_setting = 1 SCOPE=MEMORY;\n",
+            preconditions=(later_precondition,),
+        )
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "MIGRATOR",
+        }
+        snapshot = self.snapshot()
+        snapshot.identity.update({
+            "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_name": "APP_PDB",
+            "database_version": "23.26.3.0.0",
+        })
+        evaluated = {}
+
+        def capture(target, _keys, _run_dir, **_kwargs):
+            return None, snapshot
+
+        def checks(_target, selected, _run_dir, **_kwargs):
+            evaluated["checks"] = tuple(check.sql for check in selected)
+            return self.passing_checks()
+
+        with patch("scripts.schema_catalog.capture_inventory_snapshot_with_retries", side_effect=capture), patch(
+            "scripts.migration_checks.run_checks", side_effect=checks
+        ):
+            report = migration_checks.preflight_selected(
+                self.root,
+                ["migrations/2026-10-13_deferred-r001", "migrations/2026-10-13_deferred-r002"],
+                environment="dev",
+                values=values,
+            )
+
+        self.assertEqual(0, report.exit_code, report.to_dict())
+        self.assertEqual((first_precondition["sql"],), evaluated["checks"])
+        self.assertNotIn(later_precondition["sql"], evaluated["checks"])
+        self.assertEqual(["2026-10-13_deferred-r002"], report.coverage["deferredPreconditionFolders"])
+        self.assertEqual(
+            ["2026-10-13_deferred-r002"],
+            report.coverage["deferred_preconditions"]["folders"],
+        )
+        self.assertEqual("2026-10-13_deferred-r002", report.coverage["manual_review_required"][0]["migration"])
+        self.assertIn(migration_checks.LIMITATION, report.limitation)
+
     def test_text_report_names_the_sql_that_needs_manual_review(self):
         # Opaque SQL with declared checks passes, but only after a person reviewed those
         # checks; the JSON report said so and the text report used to say nothing.
