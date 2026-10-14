@@ -521,8 +521,9 @@ exit 17
             self.assertEqual(stage.parent, fixture.root / "scratch")
             self.assertFalse(stage.is_relative_to(fixture.root / "migrations"))
             self.assertEqual(stage.stat().st_dev, (fixture.root / "migrations" / "APP_STAGE").stat().st_dev)
-            self.assertEqual(stage.stat().st_mode & 0o777, 0o700)
-            self.assertEqual((stage / "001-code-example.sql").stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(stage.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((stage / "001-code-example.sql").stat().st_mode & 0o777, 0o600)
             return validate(root, stage, relative)
 
         with patch.object(baseline, "validate_staged_migration", side_effect=MigrationManifestError("validation sentinel")):
@@ -547,6 +548,47 @@ exit 17
         self.assertEqual(list((fixture.root / "scratch").iterdir()), [])
         self.assertEqual(self.folder_bytes(first), evidence_bytes)
         self.assertFalse((first.parent / f"{first.name.rsplit('-r', 1)[0]}-r002").exists())
+
+    def test_windows_private_stage_acl_removes_inheritance_and_grants_only_the_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary) / "stage"
+            stage.mkdir()
+            sid = "S-1-5-21-1-2-3-1001"
+            result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            with (
+                patch.object(baseline, "_windows_current_user_sid", return_value=sid),
+                patch.object(baseline, "_windows_system_tool", return_value=Path("icacls.exe")),
+                patch.object(baseline.subprocess, "run", return_value=result) as run,
+            ):
+                baseline._secure_windows_private_stage(stage)
+
+            self.assertEqual(
+                run.call_args.args[0],
+                [
+                    "icacls.exe",
+                    str(stage),
+                    "/inheritancelevel:r",
+                    "/grant:r",
+                    f"*{sid}:(OI)(CI)F",
+                ],
+            )
+            self.assertEqual(
+                run.call_args.kwargs,
+                {"capture_output": True, "text": True, "errors": "replace", "check": False},
+            )
+
+    def test_windows_private_stage_acl_failure_refuses_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary) / "stage"
+            stage.mkdir()
+            result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="denied")
+            with (
+                patch.object(baseline, "_windows_current_user_sid", return_value="S-1-5-21-1-2-3-1001"),
+                patch.object(baseline, "_windows_system_tool", return_value=Path("icacls.exe")),
+                patch.object(baseline.subprocess, "run", return_value=result),
+            ):
+                with self.assertRaisesRegex(BaselineError, "could not secure private baseline staging directory"):
+                    baseline._secure_windows_private_stage(stage)
 
     def test_bundle_refuses_revision_exhaustion_before_staging(self) -> None:
         fixture = self.new_fixture()

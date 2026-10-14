@@ -145,11 +145,12 @@ exit 17
             shutil.copy2(ROOT / "scripts" / "team.sh", scripts / "team.sh")
             fake_bin = parent / "fake-bin"
             fake_bin.mkdir()
-            (fake_bin / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT-10.0\\n'\n", encoding="utf-8")
-            (fake_bin / "cygpath").write_text(
-                "#!/bin/sh\n[ \"$1\" = -m ] || exit 3\nprintf 'C:/native/project [repo]\\n'\n",
-                encoding="utf-8",
-            )
+            if os.name != "nt":
+                (fake_bin / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT-10.0\\n'\n", encoding="utf-8")
+                (fake_bin / "cygpath").write_text(
+                    "#!/bin/sh\n[ \"$1\" = -m ] || exit 3\nprintf 'C:/native/project [repo]\\n'\n",
+                    encoding="utf-8",
+                )
             captured = parent / "python-args.txt"
             (fake_bin / "python3").write_text(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TEAM_CAPTURE_ARGS\"\n",
@@ -175,7 +176,8 @@ exit 17
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             arguments = captured.read_text(encoding="utf-8").splitlines()
             repo_index = arguments.index("--repo-root")
-            self.assertEqual("C:/native/project [repo]", arguments[repo_index + 1])
+            expected_root = root.resolve().as_posix() if os.name == "nt" else "C:/native/project [repo]"
+            self.assertEqual(expected_root, arguments[repo_index + 1])
             self.assertEqual(["--schema", "APP", "--format", "json"], arguments[repo_index + 2:])
 
     def test_both_wrappers_forward_schema_and_folder_order(self) -> None:

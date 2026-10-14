@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections import defaultdict
@@ -2098,7 +2099,64 @@ def _write_migration_stage(stage: Path, files: Mapping[str, bytes]) -> None:
         target = stage / name
         with target.open("xb") as stream:
             stream.write(content)
-        os.chmod(target, 0o600)
+        if os.name != "nt":
+            os.chmod(target, 0o600)
+
+
+def _windows_system_tool(name: str) -> Path:
+    system_root = os.environ.get("SystemRoot")
+    if not system_root:
+        raise BaselineError("Windows system directory is unavailable; cannot secure private baseline staging")
+    tool = Path(system_root) / "System32" / name
+    if not tool.is_file():
+        raise BaselineError(f"Windows system tool {name} is unavailable; cannot secure private baseline staging")
+    return tool
+
+
+def _windows_current_user_sid() -> str:
+    command = _windows_system_tool("whoami.exe")
+    try:
+        result = subprocess.run(
+            [str(command), "/user", "/fo", "csv", "/nh"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except OSError as error:
+        raise BaselineError("cannot identify the Windows account for private baseline staging") from error
+    matches = re.findall(r"\bS-1-\d+(?:-\d+)+\b", result.stdout)
+    if result.returncode != 0 or len(matches) != 1:
+        raise BaselineError("cannot identify the Windows account for private baseline staging")
+    return matches[0]
+
+
+def _secure_windows_private_stage(stage: Path) -> None:
+    """Protect a fresh stage before writing payloads; new files inherit its owner-only DACL."""
+    sid = _windows_current_user_sid()
+    command = _windows_system_tool("icacls.exe")
+    try:
+        result = subprocess.run(
+            [str(command), str(stage), "/inheritancelevel:r", "/grant:r", f"*{sid}:(OI)(CI)F"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except OSError as error:
+        raise BaselineError("could not secure private baseline staging directory") from error
+    if result.returncode != 0:
+        raise BaselineError("could not secure private baseline staging directory")
+
+
+def _secure_private_migration_stage(stage: Path) -> None:
+    if os.name == "nt":
+        _secure_windows_private_stage(stage)
+        return
+    try:
+        stage.chmod(0o700)
+    except OSError as error:
+        raise BaselineError("could not secure private baseline staging directory") from error
 
 
 def _build_migration_folder(root: Path, schema: str, family: str, files: Mapping[str, bytes]) -> Path | None:
@@ -2134,6 +2192,7 @@ def _build_migration_folder(root: Path, schema: str, family: str, files: Mapping
     scratch_root.mkdir(mode=0o700, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="baseline-stage-", dir=scratch_root))
     try:
+        _secure_private_migration_stage(stage)
         relative = folder.relative_to(root).as_posix()
         _write_migration_stage(stage, files)
         try:
