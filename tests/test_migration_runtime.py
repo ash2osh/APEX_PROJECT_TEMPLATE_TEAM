@@ -51,7 +51,7 @@ class MigrationRuntimeTests(unittest.TestCase):
                 self.assertIn('source "$1/scripts/sqlcl_safe.sh"', arguments[2])
                 self.assertIn('invoke_sqlcl_safe "$2" -V', arguments[2])
                 self.assertEqual("migration-runtime", arguments[3])
-                self.assertEqual(str(ROOT), arguments[4])
+                self.assertEqual(ROOT.as_posix(), arguments[4])
                 self.assertTrue(calls[0][2])
                 self.assertNotIn("-name", arguments)
                 self.assertNotIn("docker-demo", arguments)

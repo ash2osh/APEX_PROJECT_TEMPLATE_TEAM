@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+import zlib
 from decimal import Decimal
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -353,6 +354,230 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertEqual(len(report["identical"]), len(source["sections"]["tables"]))
         self.assertFalse(any(row["section"] in {"reference-data", "application-data"} for row in report["differences"]))
 
+    def test_column_ordinal_changes_are_reported_and_missing_order_blocks_readiness(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        for payload in (source, target):
+            payload["sections"]["columns"] = [
+                {"table_name": "T_ORDER", "name": "A", "data_type": "NUMBER", "column_position": 1, "user_generated": "YES", "hidden": "N"},
+                {"table_name": "T_ORDER", "name": "B", "data_type": "VARCHAR2", "column_position": 2, "user_generated": "YES", "hidden": "N"},
+            ]
+            payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [2]}
+        target["sections"]["columns"][0]["column_position"] = 2
+        target["sections"]["columns"][1]["column_position"] = 1
+
+        report = compare_environment_catalogs(source, target, sections=("columns",))
+
+        self.assertEqual(1, report["exit_code"], report)
+        self.assertEqual(2, len(report["differences"]))
+        self.assertTrue(all("column_position" in row["fields"] for row in report["differences"]))
+
+        for payload in (source, target):
+            payload["sections"]["columns"] = [{
+                "table_name": "T_ORDER", "name": "A", "data_type": "NUMBER",
+                "hidden": "N", "user_generated": "YES",
+            }]
+            payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+        missing_order = compare_environment_catalogs(source, target, sections=("columns",))
+        self.assertEqual(2, missing_order["exit_code"], missing_order)
+        self.assertEqual("incomplete", missing_order["sections"]["columns"]["status"])
+        self.assertTrue(any("column position" in blocker["message"] for blocker in missing_order["blockers"]))
+
+    def test_capture_parser_rejects_column_rows_without_order_evidence(self) -> None:
+        payload = catalog("dev")
+        payload["sections"]["columns"] = [{
+            "table_name": "T_ORDER", "name": "A", "data_type": "NUMBER", "hidden": "N",
+            "user_generated": "YES",
+        }]
+        payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+
+        with self.assertRaisesRegex(CatalogError, "column position"):
+            parse_environment_catalog_output(framed(payload), sections=("columns",))
+
+    def test_capture_parser_accepts_proven_system_hidden_column_without_ordinal(self) -> None:
+        payload = catalog("dev")
+        payload["sections"]["columns"] = [{
+            "table_name": "T_ORDER", "name": "SYS_NC00001$", "data_type": "NUMBER",
+            "column_position": None, "hidden": "YES", "user_generated": "NO",
+        }]
+        payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+
+        parsed = parse_environment_catalog_output(framed(payload), sections=("columns",))
+
+        self.assertEqual(1, len(parsed["sections"]["columns"]))
+
+    def test_dba_script_refuses_inverted_or_unknown_network_aces(self) -> None:
+        for inverted_principal in ("YES", None, "UNKNOWN"):
+            with self.subTest(inverted_principal=inverted_principal):
+                report = {
+                    "source": {"schema": "APP_DEV"},
+                    "target": {"schema": "APP_STAGE"},
+                    "differences": [{
+                        "section": "network-aces", "classification": "missing on target",
+                        "source": {
+                            "host": "api.example.test", "lower_port": 443, "upper_port": 443,
+                            "principal": "APP_DEV", "principal_type": "DATABASE", "privilege": "connect",
+                            "grant_type": "GRANT", "inverted_principal": inverted_principal,
+                            "start_date": None, "end_date": None,
+                        },
+                    }],
+                }
+
+                script = emit_dba_script(report)
+
+                self.assertNotIn("DBMS_NETWORK_ACL_ADMIN.APPEND_HOST_ACE", script)
+                self.assertIn("Manual review required: inverted or unknown network ACE principal", script)
+
+    def test_ace_fractional_timestamp_is_compared_but_unqualified_bounds_block_readiness(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        ace = {
+            "host": "api.example.test", "lower_port": 443, "upper_port": 443,
+            "principal": "APP_DEV", "principal_type": "DATABASE", "privilege": "connect",
+            "grant_type": "GRANT", "inverted_principal": "NO",
+            "start_date": "2026-10-14T12:30:45.123456", "end_date": None,
+            "bounds_timezone_qualified": False,
+        }
+        source["sections"]["network-aces"] = [dict(ace)]
+        target["sections"]["network-aces"] = [
+            {**ace, "principal": "APP_STAGE", "start_date": "2026-10-14T12:30:45.123457"},
+        ]
+        for payload in (source, target):
+            payload["coverage"]["sections"]["network-aces"] = {"complete": True, "pages": [1]}
+
+        report = compare_environment_catalogs(source, target, sections=("network-aces",))
+
+        self.assertEqual(2, report["exit_code"], report)
+        self.assertEqual("incomplete", report["sections"]["network-aces"]["status"])
+        self.assertIn("start_date", report["differences"][0]["fields"])
+        self.assertTrue(any("timezone" in blocker["message"].lower() for blocker in report["blockers"]))
+
+    def test_timezone_qualified_recorded_ace_bounds_compare_without_blocking(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        ace = {
+            "host": "api.example.test", "lower_port": 443, "upper_port": 443,
+            "principal": "APP_DEV", "principal_type": "DATABASE", "privilege": "connect",
+            "grant_type": "GRANT", "inverted_principal": "NO",
+            "start_date": "2026-10-14T12:30:45.123456+00:00",
+            "end_date": "2026-10-15T12:30:45.654321+00:00",
+            "bounds_timezone_qualified": True,
+        }
+        source["sections"]["network-aces"] = [dict(ace)]
+        target["sections"]["network-aces"] = [{**ace, "principal": "APP_STAGE"}]
+        for payload in (source, target):
+            payload["coverage"]["sections"]["network-aces"] = {"complete": True, "pages": [1]}
+
+        report = compare_environment_catalogs(source, target, sections=("network-aces",))
+
+        self.assertEqual(0, report["exit_code"], report)
+        self.assertEqual(1, len(report["identical"]))
+
+    def test_mle_module_language_is_required_for_readiness_and_capture(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        for payload in (source, target):
+            payload["sections"]["java-mle"] = [{
+                "name": "ORDERS_MODULE", "type": "MLE MODULE", "status": "VALID", "language": None,
+            }]
+            payload["coverage"]["sections"]["java-mle"] = {"complete": True, "pages": [1]}
+
+        report = compare_environment_catalogs(source, target, sections=("java-mle",))
+        self.assertEqual(2, report["exit_code"], report)
+        self.assertEqual("incomplete", report["sections"]["java-mle"]["status"])
+        self.assertTrue(any("MLE module language" in blocker["message"] for blocker in report["blockers"]))
+
+        payload = catalog("dev")
+        payload["sections"]["java-mle"] = [{
+            "name": "ORDERS_MODULE", "type": "MLE MODULE", "status": "VALID", "language": None,
+        }]
+        payload["coverage"]["sections"]["java-mle"] = {"complete": True, "pages": [1]}
+        with self.assertRaisesRegex(CatalogError, "MLE module language"):
+            parse_environment_catalog_output(framed(payload), sections=("java-mle",))
+
+        for payload in (source, target):
+            payload["sections"]["java-mle"] = [{
+                "name": "ORDERS_MODULE", "type": "MLE MODULE", "status": "VALID", "language": "JAVASCRIPT",
+            }]
+            payload["coverage"]["sections"]["java-mle"] = {"complete": True, "pages": [1]}
+        complete_report = compare_environment_catalogs(source, target, sections=("java-mle",))
+        self.assertEqual(0, complete_report["exit_code"], complete_report)
+
+    def test_unavailable_mle_language_catalog_blocks_readiness(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        for payload in (source, target):
+            payload["sections"]["java-mle"] = []
+            payload["coverage"]["sections"]["java-mle"] = {
+                "complete": False, "pages": [0], "reason": "MLE language catalog is unavailable",
+            }
+            payload.setdefault("unavailable", {})["java-mle"] = "MLE language catalog is unavailable"
+
+        report = compare_environment_catalogs(source, target, sections=("java-mle",))
+
+        self.assertEqual(2, report["exit_code"], report)
+        self.assertEqual("incomplete", report["sections"]["java-mle"]["status"])
+
+    def test_view_and_source_hashes_chain_ordered_body_lines(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        upper = sql.upper()
+        view_start = upper.index("PROCEDURE FINGERPRINT(")
+        view_end = upper.index("PROCEDURE HASH_TEXT_CLOB(", view_start)
+        view_fingerprint = upper[view_start:view_end]
+        source_start = upper.index("PROCEDURE FINGERPRINT_SOURCE(")
+        source_end = upper.index("PROCEDURE APPEND_ROWS(", source_start)
+        source_fingerprint = upper[source_start:source_end]
+
+        def roll_body_lines(lines: tuple[str, ...]) -> int:
+            state = 0
+            for line_number, line in enumerate(lines, start=2):
+                state = zlib.crc32(f"{line_number}:{line}".encode(), state)
+            return state
+
+        self.assertNotEqual(
+            roll_body_lines(("first body line", "second body line")),
+            roll_body_lines(("second body line", "first body line")),
+        )
+        for fingerprint in (view_fingerprint, source_fingerprint):
+            with self.subTest(procedure="view" if fingerprint is view_fingerprint else "stored source"):
+                self.assertRegex(fingerprint, r"ORA_HASH\(.*?,\s*4294967295,\s*HASH_STATE\)")
+                self.assertIn("HASH_STATE := LINE_HASH", fingerprint)
+                self.assertNotRegex(fingerprint, r"P_HASH_SUM\s*:=\s*P_HASH_SUM\s*\+\s*LINE_HASH")
+        self.assertIn("TO_CHAR(P_LINE_COUNT", view_fingerprint)
+        self.assertIn("TO_CHAR(SOURCE_LINE", source_fingerprint)
+        self.assertIn("ORA_HASH(CURRENT_LINE, 4294967295, HASH_STATE)", view_fingerprint)
+        self.assertIn("ORA_HASH(SOURCE_TEXT, 4294967295, HASH_STATE)", source_fingerprint)
+        self.assertIn("IF P_LINE_COUNT > 1", view_fingerprint)
+        self.assertIn("IF SOURCE_LINE > 1", source_fingerprint)
+
+    def test_column_capture_emits_ordinal_and_origin_evidence(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
+        self.assertIn("'COLUMN_POSITION' VALUE C.COLUMN_ID", sql)
+        self.assertIn("'USER_GENERATED' VALUE C.USER_GENERATED", sql)
+
+    def test_ace_capture_preserves_timestamp6_without_inventing_timezone(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
+        normalized_sql = " ".join(sql.split())
+        self.assertIn("TO_CHAR(A.START_DATE, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')", sql)
+        self.assertIn("TO_CHAR(A.END_DATE, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')", sql)
+        self.assertIn(
+            "'BOUNDS_TIMEZONE_QUALIFIED' VALUE CASE WHEN A.START_DATE IS NULL AND A.END_DATE IS NULL",
+            normalized_sql,
+        )
+        self.assertNotIn("TZH:TZM", sql)
+
+    def test_mle_capture_reads_language_and_fails_closed_when_it_cannot(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
+        helper_start = sql.index("PROCEDURE ADD_JAVA_MLE IS")
+        helper_end = sql.index("PROCEDURE ADD_ORDS IS", helper_start)
+        helper = sql[helper_start:helper_end]
+        self.assertIn("JOIN ALL_MLE_MODULES", helper)
+        self.assertIn("M.LANGUAGE_NAME", helper)
+        self.assertIn("IF LANGUAGE_ROW_COUNT != MLE_MODULE_COUNT", helper)
+        self.assertIn("IF MLE_MODULE_COUNT = 0", helper)
+        self.assertIn("MLE MODULE LANGUAGE METADATA IS UNAVAILABLE", helper)
+        self.assertIn("ADD_UNAVAILABLE('JAVA-MLE'", helper)
+
     def test_star_prefix_includes_all_object_grants(self) -> None:
         report = compare_environment_catalogs(
             catalog("dev"), catalog("staging"), sections=("object-grants",), prefixes=("*",),
@@ -503,10 +728,12 @@ class EnvironmentComparisonTests(unittest.TestCase):
             _merge_dba_capture(base, privileged)
 
     def test_catalog_sql_hashes_fetched_lines_after_line_one(self) -> None:
-        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
-        self.assertIn("IF source_line > 1 THEN", sql)
-        self.assertIn("SELECT ORA_HASH(source_text) INTO line_hash FROM dual", sql)
-        self.assertNotIn("ORA_HASH(s.text)", sql)
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
+        self.assertIn("IF SOURCE_LINE > 1 THEN", sql)
+        self.assertIn("TO_CHAR(SOURCE_LINE", sql)
+        self.assertIn("ORA_HASH(SOURCE_TEXT, 4294967295, HASH_STATE)", sql)
+        self.assertNotIn("P_HASH_SUM := P_HASH_SUM + LINE_HASH", sql)
+        self.assertNotIn("ORA_HASH(S.TEXT)", sql)
 
     def test_report_renderers_group_readiness_items_and_list_exclusions(self) -> None:
         report = compare_environment_catalogs(catalog("dev"), catalog("staging"), sections=("tables",))

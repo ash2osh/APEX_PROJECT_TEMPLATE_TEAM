@@ -620,6 +620,23 @@ class MigrateCliTests(unittest.TestCase):
         self.assertTrue((first / "status.dev.json").exists())
         self.assertTrue((second / "status.dev.json").exists())
 
+    def test_receipt_for_another_environment_does_not_block_selected_apply(self):
+        name = "2026-10-14_other-environment-r001"
+        folder = self.add_folder(name, {"001-create.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        staging = self.target("staging")
+        (folder / "status.staging.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "state": "verified",
+            "environment": "staging",
+            "target": {"current_schema": staging.schema},
+        }) + "\n", encoding="utf-8")
+
+        result, fake = self.apply(self.load(name), target=self.target("dev"))
+
+        self.assertEqual(0, result)
+        self.assertTrue((folder / "status.dev.json").is_file())
+        self.assertTrue(any(call[0] == "apply" for call in fake.calls))
+
     def test_an_attempt_in_the_same_schema_still_blocks_a_changed_folder_of_that_name(self):
         name = "2026-10-01_multi-r001"
         demo = Target("dev", "dev-profile", "LOGIN_DEV", "DEMO", "development")

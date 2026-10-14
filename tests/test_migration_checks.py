@@ -180,6 +180,83 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual([], report.coverage["deferredPreconditionFolders"])
         self.assertEqual(prior_environment, dict(os.environ), "explicit values must not be injected into os.environ")
 
+    def test_preflight_selected_fails_closed_on_incomplete_captured_identity(self):
+        from scripts import migration_checks
+
+        self.add_folder("2026-10-14_captured-identity-r001", "CREATE TABLE zz_existing (id NUMBER);\n")
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "MIGRATOR",
+        }
+        complete_identity = {
+            "session_user": "MIGRATOR",
+            "current_schema": "APP",
+            "db_name": "DB_SECRET_MARKER",
+            "db_unique_name": "DEVDB1",
+            "service_name": "dev",
+            "container_id": "3",
+            "container_name": "APP_PDB",
+            "edition": "ORA$BASE",
+            "database_version": "23.26.3.0.0",
+        }
+        cases = (
+            ("missing", (), "database_version"),
+            ("partial-with-conflict", (("ZZ_EXISTING", "TABLE", {}),), "service_name"),
+        )
+
+        for label, objects, incomplete_field in cases:
+            with self.subTest(identity=label):
+                snapshot = self.snapshot(objects)
+                snapshot.identity.update(complete_identity)
+                if incomplete_field == "service_name":
+                    snapshot.identity[incomplete_field] = "  "
+                else:
+                    del snapshot.identity[incomplete_field]
+
+                with patch("scripts.schema_catalog.capture_inventory_snapshot_with_retries", return_value=(None, snapshot)), patch(
+                    "scripts.migration_checks.run_checks", return_value=self.passing_checks()
+                ):
+                    report = migration_checks.preflight_selected(
+                        self.root,
+                        ["migrations/2026-10-14_captured-identity-r001"],
+                        environment="dev",
+                        values=values,
+                    )
+
+                self.assertEqual(2, report.exit_code, report.to_dict())
+                self.assertFalse(report.coverage["complete"])
+                self.assertNotIn("observedIdentity", report.coverage)
+                identity_errors = [error for error in report.errors if error.get("code") == "OBSERVED_IDENTITY_INCOMPLETE"]
+                self.assertEqual(1, len(identity_errors), report.to_dict())
+                self.assertEqual(
+                    "Live target identity is incomplete; the observed database cannot be identified safely.",
+                    identity_errors[0]["message"],
+                )
+                if objects:
+                    self.assertTrue(any(conflict.get("code") == "LIVE_NAMESPACE_OCCUPIED" for conflict in report.conflicts))
+                else:
+                    self.assertEqual((), report.conflicts)
+                self.assertNotIn("DB_SECRET_MARKER", json.dumps(report.to_dict()))
+
+    def test_complete_observed_identity_requires_all_nine_nonblank_fields(self):
+        from scripts import migration_checks
+
+        identity = {
+            "session_user": "APP", "current_schema": "APP", "db_name": "DEVDB",
+            "db_unique_name": "DEVDB1", "service_name": "dev", "container_id": "3",
+            "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "23.26.3.0.0",
+        }
+        self.assertEqual(identity, migration_checks.complete_observed_identity(identity))
+        for incomplete in (
+            {key: value for key, value in identity.items() if key != "edition"},
+            {**identity, "service_name": "  "},
+            {**identity, "container_id": None},
+        ):
+            with self.subTest(incomplete=incomplete):
+                self.assertIsNone(migration_checks.complete_observed_identity(incomplete))
+
     def test_preflight_selected_rejects_incomplete_profile_before_catalog_capture(self):
         from scripts import migration_checks
 

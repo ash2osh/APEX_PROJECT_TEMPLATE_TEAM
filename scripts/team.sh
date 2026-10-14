@@ -270,7 +270,15 @@ case "$command_name" in
     ;;
   migration-plan)
     cd "$REPO_ROOT"
-    exec python3 -m scripts.migration_plan --repo-root "$REPO_ROOT" "$@"
+    migration_plan_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          migration_plan_root="$(cygpath -m "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+    exec python3 -m scripts.migration_plan --repo-root "$migration_plan_root" "$@"
     ;;
   migrate)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]"

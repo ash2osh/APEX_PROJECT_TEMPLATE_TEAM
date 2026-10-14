@@ -95,7 +95,7 @@ class BaselineExportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "baseline.json").write_text(
             '{"schemaVersion":1,"schemas":["APP_DEV"],"prefixes":["PKG_","V_","APP_"],'
             '"excludedObjects":[],"referenceData":{"tables":[{"name":"APP_REF_ITEMS",'
@@ -771,7 +771,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "baseline.json").write_text(
             json.dumps({
                 "schemaVersion": 1,
@@ -801,7 +801,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
             "STAGING_SCHEMA": "APP_STAGE", "STAGING_SQLCL_CONNECTION": "STAGE", "STAGING_EXPECTED_USER": "APP_STAGE",
         }
 
-    def run_build(self, arguments: list[str] | None = None) -> tuple[int, str, str]:
+    def run_build(self, arguments: list[str] | None = None, *, root: Path | None = None) -> tuple[int, str, str]:
         def capture(_target, environment, _sections, _run_dir, **_kwargs):
             catalog = self.source if environment == "dev" else self.target
             return json.loads(json.dumps(catalog))
@@ -811,7 +811,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
 
         stdout, stderr = io.StringIO(), io.StringIO()
         with (
-            patch.object(baseline, "ROOT", self.root),
+            patch.object(baseline, "ROOT", self.root if root is None else root),
             patch.object(baseline, "capture_environment_catalog", side_effect=capture),
             patch.object(baseline, "capture_inventory_snapshot_with_retries", side_effect=snapshot),
             patch.object(migration_runtime, "require_migration_sqlcl_version"),
@@ -820,6 +820,14 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
         ):
             code = baseline.main(arguments or ["build", "--to", "staging"], environ=self.values)
         return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_build_accepts_noncanonical_repository_root_alias(self) -> None:
+        root_alias = self.root / "migrations" / ".."
+
+        code, output, error = self.run_build(root=root_alias)
+
+        self.assertEqual(code, 0, output + error)
+        self.assertEqual(3, len(list((self.root / "migrations" / "APP_STAGE").iterdir())))
 
     def test_no_bundle_preserves_existing_generated_bytes(self) -> None:
         expected = {

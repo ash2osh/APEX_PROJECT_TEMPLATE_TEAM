@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 class BaselineBundleCliTests(unittest.TestCase):
     def wrapper_fixture(self, temporary: str, *, version: str = "26.2.0.0"):
-        root = Path(temporary) / "baseline project [bundle]"
+        root = (Path(temporary) / "baseline project [bundle]").resolve()
         root.mkdir()
         shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
         (root / "migrations").mkdir()

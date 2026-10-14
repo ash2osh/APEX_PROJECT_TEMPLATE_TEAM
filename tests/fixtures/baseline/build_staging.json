@@ -15,7 +15,7 @@
   }},
   "sections": {
     "tables": [{"name": "APP_ITEMS", "temporary": "N", "partitioned": "N", "iot_type": null, "nested": "N", "secondary": "N", "compression": "DISABLED", "logging": "YES"}],
-    "columns": [{"table_name": "APP_ITEMS", "name": "STATUS", "data_type": "VARCHAR2", "data_type_mod": null, "data_type_owner": null, "data_length": 1, "data_precision": null, "data_scale": null, "char_used": "B", "char_length": 1, "nullable": "Y", "hidden": "N", "virtual": "N"}],
+    "columns": [{"table_name": "APP_ITEMS", "name": "STATUS", "column_position": 1, "user_generated": "YES", "data_type": "VARCHAR2", "data_type_mod": null, "data_type_owner": null, "data_length": 1, "data_precision": null, "data_scale": null, "char_used": "B", "char_length": 1, "nullable": "Y", "hidden": "N", "virtual": "N"}],
     "constraints": [{"name": "APP_ITEMS_CK", "table_name": "APP_ITEMS", "constraint_type": "C", "columns": ["STATUS"], "referenced_table": null, "referenced_columns": [], "condition": "STATUS = 'A'", "condition_truncated": "N", "status": "ENABLED", "validated": "NOT VALIDATED", "delete_rule": null, "deferrable": "NOT DEFERRABLE", "deferred": "IMMEDIATE", "rely": "N"}],
     "indexes": [{"name": "APP_ITEMS_IX_OLD", "table_name": "APP_ITEMS", "uniqueness": "NONUNIQUE", "columns": [{"name": "ITEM_ID", "position": 1, "descend": "ASC"}], "index_type": "NORMAL", "visibility": "VISIBLE", "status": "VALID"}],
     "sequences": [],

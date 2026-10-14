@@ -31,7 +31,7 @@ except ImportError:
 class MigrationPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "migrations").mkdir()
 
     def tearDown(self) -> None:
@@ -1056,6 +1056,11 @@ class MigrationPlanTests(unittest.TestCase):
         self.assertEqual(2, incomplete["exitCode"], incomplete)
         self.assertIsNone(incomplete["target"])
         self.assertTrue(incomplete["preflight"]["errors"])
+        incomplete_error_codes = {error.get("code") for error in incomplete["preflight"]["errors"]}
+        incomplete_diagnostic_codes = {item["code"] for item in incomplete["diagnostics"]}
+        self.assertIn("LIVE_PREFLIGHT_UNAVAILABLE", incomplete_error_codes)
+        self.assertNotIn("OBSERVED_IDENTITY_INCOMPLETE", incomplete_error_codes)
+        self.assertNotIn("live-target-identity-incomplete", incomplete_diagnostic_codes)
 
         conflict_folder = add_live_folder(
             "migrations/2026-10-13_live-conflict-r001", "CREATE TABLE zz_occupied (id NUMBER);\n"
@@ -1104,6 +1109,56 @@ class MigrationPlanTests(unittest.TestCase):
         self.assertIsNone(unknown["target"])
         self.assertFalse(runtime_guard.called)
         self.assertFalse(selected.called)
+
+    def test_live_report_fails_closed_on_partial_or_missing_external_identity(self) -> None:
+        from scripts import migration_checks, migration_plan
+        from scripts.migration_checks import PreflightReport
+
+        values = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SCHEMA": "APP",
+            "CODE_SQLCL_CONNECTION": "dev-profile",
+            "CODE_EXPECTED_USER": "APP",
+        }
+        folder = self.add_folder("migrations/2026-10-14_external-identity-r001")
+        selected_path = folder.relative_to(self.root).as_posix()
+        cases = (
+            ("missing", {"complete": True}, (), ()),
+            ("partial", {"complete": True, "observedIdentity": {"current_schema": "APP", "db_name": "DB_SECRET_MARKER"}}, (), ()),
+            (
+                "partial-with-existing-diagnostics",
+                {"complete": True, "observedIdentity": {"current_schema": "APP", "db_name": "DB_SECRET_MARKER"}},
+                ({"code": "LIVE_NAMESPACE_OCCUPIED", "name": "ZZ_EXISTING"},),
+                ({"code": "EXISTING_ERROR", "message": "Existing safe diagnostic"},),
+            ),
+        )
+
+        for label, coverage, conflicts, errors in cases:
+            with self.subTest(identity=label):
+                preflight = PreflightReport(
+                    0, conflicts, errors,
+                    coverage,
+                    migration_checks.LIMITATION,
+                )
+                with patch.object(migration_plan, "require_migration_sqlcl_version"), patch.object(
+                    migration_checks, "preflight_selected", return_value=preflight
+                ):
+                    report = self.require_plan().build_live_migration_plan(
+                        self.root, [selected_path], environment="dev", schema=None, values=values,
+                    )
+
+                self.assertEqual(2, report["exitCode"], report)
+                self.assertIsNone(report["target"])
+                self.assertFalse(report["preflight"]["coverage"]["complete"])
+                self.assertEqual(2, report["preflight"]["exit_code"])
+                self.assertNotIn("observedIdentity", report["preflight"]["coverage"])
+                self.assertTrue(any(error.get("code") == "OBSERVED_IDENTITY_INCOMPLETE" for error in report["preflight"]["errors"]))
+                if errors:
+                    self.assertTrue(any(error.get("code") == "EXISTING_ERROR" for error in report["preflight"]["errors"]))
+                if conflicts:
+                    self.assertTrue(any(item.get("code") == "LIVE_NAMESPACE_OCCUPIED" for item in report["preflight"]["conflicts"]))
+                self.assertTrue(any(item["code"] == "live-target-identity-incomplete" for item in report["diagnostics"]))
+                self.assertNotIn("DB_SECRET_MARKER", json.dumps(report))
 
 
 if __name__ == "__main__":

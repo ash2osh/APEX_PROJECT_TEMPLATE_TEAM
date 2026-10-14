@@ -2322,7 +2322,7 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
                             readme += "\n## Target precondition differences\n\n" + "\n".join(f"- {item}" for item in data_differences) + "\n"
                 installed = _build_migration_folder(ROOT, target_target.schema, family, _migration_bytes(steps, checks, readme))
                 if installed is not None:
-                    created.append(installed.relative_to(ROOT).as_posix())
+                    created.append(installed.relative_to(ROOT.resolve()).as_posix())
     except Exception as error:
         if created:
             created_paths = ", ".join(created)

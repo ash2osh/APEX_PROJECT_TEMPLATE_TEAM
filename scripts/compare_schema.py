@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import tempfile
+from datetime import datetime
 from decimal import Decimal
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -68,7 +69,7 @@ COMPARE_ENV_NOT_COMPARED = (
 )
 COMPARE_ENV_FIELDS = {
     "tables": ("temporary", "partitioned", "iot_type", "nested", "secondary", "compression", "logging"),
-    "columns": ("data_type", "data_type_mod", "data_type_owner", "data_length", "data_precision", "data_scale", "char_used", "char_length", "nullable", "hidden", "virtual"),
+    "columns": ("column_position", "data_type", "data_type_mod", "data_type_owner", "data_length", "data_precision", "data_scale", "char_used", "char_length", "nullable", "hidden", "user_generated", "virtual"),
     "constraints": ("constraint_type", "columns", "referenced_table", "referenced_columns", "condition", "condition_truncated", "status", "validated", "delete_rule", "deferrable", "deferred", "rely"),
     "indexes": ("table_name", "uniqueness", "columns", "index_type", "visibility", "status"),
     "triggers": ("table_name", "trigger_type", "triggering_event", "base_object_type", "status", "line_count", "source_hash"),
@@ -541,6 +542,46 @@ def _validate_page_counts(label: str, pages: object, row_count: int, page_size: 
         raise CatalogError(f"{label} reached its {max_rows}-row cap without proving end of results")
 
 
+def _column_order_is_provable(row: Mapping) -> bool:
+    position = row.get("column_position")
+    if type(position) is int and position > 0:
+        return True
+    return (
+        position is None
+        and str(row.get("hidden", "")).upper() in {"Y", "YES", "TRUE"}
+        and str(row.get("user_generated", "")).upper() in {"N", "NO", "FALSE"}
+    )
+
+
+def _mle_language_is_provable(row: Mapping) -> bool:
+    if str(row.get("type", "")).upper() != "MLE MODULE":
+        return True
+    language = row.get("language")
+    return isinstance(language, str) and bool(language.strip())
+
+
+def _ace_bounds_timezone_are_provable(row: Mapping) -> bool:
+    bounds = [value for value in (row.get("start_date"), row.get("end_date")) if value not in (None, "")]
+    if not bounds:
+        return True
+    explicit_qualification = row.get("bounds_timezone_qualified")
+    if explicit_qualification is True:
+        return True
+    if explicit_qualification is not None:
+        return False
+    for value in bounds:
+        if not isinstance(value, str):
+            return False
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return False
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return False
+    return True
+
+
 def parse_environment_catalog_output(
     output: str,
     *,
@@ -603,6 +644,10 @@ def parse_environment_catalog_output(
         rows = all_sections.get(section, [])
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise CatalogError(f"compare-env {section} rows are malformed")
+        if section == "columns" and any(not _column_order_is_provable(row) for row in rows):
+            raise CatalogError("compare-env columns omitted required column position evidence")
+        if section == "java-mle" and any(not _mle_language_is_provable(row) for row in rows):
+            raise CatalogError("compare-env MLE module language metadata is missing")
         state = section_coverage.get(section)
         if not isinstance(state, dict):
             raise CatalogError(f"compare-env {section} has no pagination evidence")
@@ -892,6 +937,32 @@ def compare_environment_catalogs(
             continue
         left = list(source_sections.get(section, []))
         right = list(target_sections.get(section, []))
+        if section == "columns":
+            missing_positions = [
+                {"section": section, "side": side,
+                 "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
+                 "message": "column position evidence is missing or invalid"}
+                for side, rows in (("source", left), ("target", right))
+                for row in rows if not _column_order_is_provable(row)
+            ]
+            if missing_positions:
+                blockers.extend(missing_positions)
+                section_status[section] = {"status": "incomplete", "sourceRows": len(left), "targetRows": len(right)}
+                not_compared.append("Column rows without order evidence were not compared.")
+                continue
+        if section == "java-mle":
+            missing_languages = [
+                {"section": section, "side": side,
+                 "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
+                 "message": "MLE module language metadata is missing"}
+                for side, rows in (("source", left), ("target", right))
+                for row in rows if not _mle_language_is_provable(row)
+            ]
+            if missing_languages:
+                blockers.extend(missing_languages)
+                section_status[section] = {"status": "incomplete", "sourceRows": len(left), "targetRows": len(right)}
+                not_compared.append("MLE modules without language metadata were not compared.")
+                continue
         if section == "ords":
             source_fingerprint_blockers = []
             for side, rows in (("source", left), ("target", right)):
@@ -936,6 +1007,17 @@ def compare_environment_catalogs(
                 }
                 not_compared.append("ORDS rows with incomplete schema mapping or handler source evidence were not compared.")
                 continue
+        unqualified_ace_bounds = []
+        if section == "network-aces":
+            for side, rows in (("source", left), ("target", right)):
+                for row in rows:
+                    if not _ace_bounds_timezone_are_provable(row):
+                        unqualified_ace_bounds.append({
+                            "section": section,
+                            "side": side,
+                            "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
+                            "message": "bounded network ACE timestamp has no qualified timezone evidence; manual review is required",
+                        })
         if section == "object-grants" and prefixes and not any(prefix in {"*", "%"} for prefix in prefixes):
             normalized_prefixes = tuple(prefix.upper() for prefix in prefixes)
             left = [row for row in left if str(row.get("object_name", "")).upper().startswith(normalized_prefixes)]
@@ -944,6 +1026,11 @@ def compare_environment_catalogs(
         differences.extend(found)
         identical.extend(same)
         blockers.extend(invalid_keys)
+        blockers.extend(unqualified_ace_bounds)
+        if unqualified_ace_bounds:
+            not_compared.append(
+                "Bounded network ACE rows without qualified timezone evidence were compared as recorded but require manual review."
+            )
         if section == "constraints":
             for side, rows in (("source", left), ("target", right)):
                 for row in rows:
@@ -958,7 +1045,11 @@ def compare_environment_catalogs(
             for side, rows in (("source", left), ("target", right)):
                 for row in rows:
                     blockers.append({"section": section, "side": side, "name": str(row.get("name", "?")), "message": "invalid database object"})
-        section_status[section] = {"status": "compared", "sourceRows": len(left), "targetRows": len(right)}
+        section_status[section] = {
+            "status": "incomplete" if unqualified_ace_bounds else "compared",
+            "sourceRows": len(left),
+            "targetRows": len(right),
+        }
 
     blockers.sort(key=lambda item: (item.get("section", ""), item.get("side", ""), item.get("name", ""), item.get("message", "")))
     differences.sort(key=lambda item: (item["section"], item["name"], item["classification"]))
@@ -1074,6 +1165,9 @@ def emit_dba_script(report: Mapping) -> str:
         elif section == "network-aces" and missing:
             if row.get("start_date") or row.get("end_date"):
                 statements.append("-- Manual review required: time-bounded network ACE was not emitted.")
+                continue
+            if str(row.get("inverted_principal", "")).upper() != "NO":
+                statements.append("-- Manual review required: inverted or unknown network ACE principal was not emitted.")
                 continue
             principal = str(row.get("principal", ""))
             source_schema = str(report["source"].get("schema", ""))

@@ -51,6 +51,33 @@ HEX_CHUNK_SIZE = 3000
 DEFAULT_CHECK_DRIVER_BYTES = 2 * 1024 * 1024
 DEFAULT_PREFLIGHT_INVENTORY_RETRIES = 3
 SELECTABLE_SYNONYM_TARGET_TYPES = {"TABLE", "VIEW", "MATERIALIZED VIEW"}
+OBSERVED_IDENTITY_FIELDS = (
+    "session_user",
+    "current_schema",
+    "db_name",
+    "db_unique_name",
+    "service_name",
+    "container_id",
+    "container_name",
+    "edition",
+    "database_version",
+)
+OBSERVED_IDENTITY_INCOMPLETE_MESSAGE = (
+    "Live target identity is incomplete; the observed database cannot be identified safely."
+)
+
+
+def complete_observed_identity(identity: object) -> dict[str, str] | None:
+    """Return the target identity only when all required observed fields are present."""
+    if not isinstance(identity, Mapping):
+        return None
+    result: dict[str, str] = {}
+    for field in OBSERVED_IDENTITY_FIELDS:
+        value = identity.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        result[field] = value
+    return result
 
 
 def preflight_inventory_retries(values: Mapping[str, str]) -> int:
@@ -1595,17 +1622,24 @@ def _live_report(
         report = preflight(migrations, snapshot, checks_result)
         coverage = dict(report.coverage)
         coverage["deferredPreconditionFolders"] = deferred_precondition_folders(migrations)
-        required_identity = (
-            "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
-            "container_id", "container_name", "edition", "database_version",
-        )
+        observed_identity = complete_observed_identity(snapshot.identity)
+        errors = list(report.errors)
+        exit_code = report.exit_code
+        if observed_identity is None:
+            coverage["complete"] = False
+            if not any(error.get("code") == "OBSERVED_IDENTITY_INCOMPLETE" for error in errors):
+                errors.append({
+                    "code": "OBSERVED_IDENTITY_INCOMPLETE",
+                    "message": OBSERVED_IDENTITY_INCOMPLETE_MESSAGE,
+                })
+            exit_code = 2
         if (
             snapshot.coverage.get("ownerComplete") is True
             and "ALL_OBJECTS" in snapshot.coverage.get("catalogs", [])
-            and all(str(snapshot.identity.get(field, "")).strip() for field in required_identity)
+            and observed_identity is not None
         ):
-            coverage["observedIdentity"] = {field: str(snapshot.identity[field]) for field in required_identity}
-        report = PreflightReport(report.exit_code, report.conflicts, report.errors, coverage, report.limitation)
+            coverage["observedIdentity"] = observed_identity
+        report = PreflightReport(exit_code, report.conflicts, tuple(errors), coverage, report.limitation)
         keep_logs = report.exit_code not in (0, 1)
         return report
     except KeyboardInterrupt:
