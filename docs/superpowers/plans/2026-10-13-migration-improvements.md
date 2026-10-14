@@ -42,6 +42,8 @@ These review cases have owning tests in the component plans; final phase verifie
 | APEX 26.2 | 6770f5523bf687788b639f20f8d1ab9ad21799ed | codex/migration-improvements-26.2 | main |
 | APEX 26.1 | 0bb72a356aa8b6cb6242e4e20b4653801037679a | codex/migration-improvements-26.1 | codex/apex-26.1 |
 
+**Execution update (2026-10-14):** After planning, the 26.1 delivery was moved to the separate public repository `ash2osh/APEX_PROJECT_TEMPLATE_26_1`. Its `main` is at `297e84f8ea46d4fd124927cc744b909028a27334`, whose history includes the recorded 26.1 source tip. Original-repository PR #26 was closed as superseded, not merged into the 26.2 template. The 26.2 delivery remains PR #25 to this repository's `main`. See [implementation results](results/RESULT_migration-improvements.md).
+
 Re-fetch and reread the target branch contract at execution start; these hashes are planning evidence, not a permanent dependency pin. If either tip changes, review the intervening relevant files and adapt the plan before editing. No worktree is needed under the project's execution skill; execute one branch at a time.
 
 New planning documents belong to templateOnly via docs/superpowers/**. Shipped migration-planning/baseline docs must be added to templateOwned on both branches. Preserve the 26.1 manifest's existing format and branch-specific qualification entry.
@@ -121,23 +123,25 @@ The report plan provides durable 26.1 evidence and the shared SQLcl runtime guar
 
 ## Acceptance checklist
 
-- [ ] Grouping policy and examples available on both branches.
-- [ ] Equivalent offline migration-plan commands/counts/diagnostics, no .env/SQLcl/network/write effects.
-- [ ] Live report guards, partial/deferred verification and unknown evidence preserved.
-- [ ] 26.1 database catalog, durable evidence and granular baseline prerequisites implemented and tested.
-- [ ] Both branches support --bundle NAME with validated per-schema output.
-- [ ] Fixture reduction: 3 eligible folders to 1; --data: 4 category/data folders to 2.
-- [ ] Default granular output, data policies, old migration bytes and existing receipt formats preserved.
-- [ ] Focused/full suites and Linux/Windows CI recorded at each exact delivery tip.
-- [ ] Release-specific app behavior and unrelated local work preserved.
-- [ ] Git integration and any outstanding live qualification reported truthfully.
+- [x] Grouping policy and examples available on both release tracks.
+- [x] Equivalent offline migration-plan commands/counts/diagnostics, with no `.env`/SQLcl/network/write effects.
+- [x] Live report guards, partial/deferred verification and unknown evidence preserved.
+- [x] 26.1 database catalog, durable evidence and granular baseline prerequisites implemented and tested.
+- [x] Both release tracks support `--bundle NAME` with validated per-schema output.
+- [x] Fixture reduction: 3 eligible folders to 1; `--data`: 4 category/data folders to 2.
+- [x] Default granular output, data policies, old migration bytes and existing receipt formats preserved.
+- [x] Focused/full suites and Linux/Windows CI recorded at each exact delivery tip.
+- [x] Release-specific app behavior and unrelated local work preserved.
+- [x] Git integration and outstanding live qualification reported truthfully.
 
 ## Results to record during implementation
 
 | Track | Source tip | Implementation tip / port map | Focused/full tests | Linux/Windows CI | Integration | Live qualification |
 | --- | --- | --- | --- | --- | --- | --- |
-| 26.2 | 6770f5523bf687788b639f20f8d1ab9ad21799ed at planning | Not implemented | Not run for these features | Not run for these features | Planned | Not performed |
-| 26.1 | 0bb72a356aa8b6cb6242e4e20b4653801037679a at planning | Not implemented | Not run for these features | Not run for these features | Planned | Not performed |
+| 26.2 | `6770f5523bf687788b639f20f8d1ab9ad21799ed` at planning | `a74d9a1df7eaac6ddef7c7795ead7a3f80ef8cb9`; implemented on `codex/migration-improvements-26.2` | Full local Python 3.14.4 suite: 1,740 tests, 35 skipped | [PR run](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/actions/runs/38551701449): Linux 1,735/28 skipped; Windows 1,735/60 skipped; macOS installer 17/3 skipped; all jobs passed | PR #25 targets team-template `main` | Not performed |
+| 26.1 | `0bb72a356aa8b6cb6242e4e20b4653801037679a` at planning | `297e84f8ea46d4fd124927cc744b909028a27334` on `ash2osh/APEX_PROJECT_TEMPLATE_26_1:main`; source tip is an ancestor | CI full suites: Linux 1,331 tests, 30 skipped; Windows 1,331 tests, 56 skipped | [Public 26.1 run](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_26_1/actions/runs/38593199104): Linux and Windows suites passed; macOS installer 20/5 skipped; all jobs passed | Public 26.1 repo `main`; original PR #26 closed as superseded | Not performed |
+
+The report records offline evidence only. Neither track was connected to SQLcl/Oracle for this work; no migration was applied and no APEX app was imported or deployed. The 26.1 CI job also ran Ruff successfully.
 
 ## Planning self-review
 
