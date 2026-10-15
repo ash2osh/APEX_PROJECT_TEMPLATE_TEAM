@@ -61,6 +61,7 @@ COMPARE_ENV_NOT_COMPARED = (
     "Reference rows, including ERP and camp data, are outside this structure comparison.",
     "Foreign-key definitions compare referenced table and column names; reference values must be compared by label, not id.",
     "Object grants are scoped by TABLES_PREFIXES and CODE_PREFIXES; '*' includes every object name.",
+    "Structure sections are captured for names matching TABLES_PREFIXES or CODE_PREFIXES, plus the indexes, triggers, constraints, identity sequences and trigger sequences that belong to those tables, whatever their names; '*' captures every object.",
     "Sequence runtime position, identity values, table data, comments, storage placement, optimizer statistics, and exact source bytes are not compared.",
     "Column default expressions, function-based index expressions, and nested role grants are not compared.",
     "Stored source and view hashes ignore line 1; Oracle ORA_HASH collisions are possible.",
@@ -1241,6 +1242,7 @@ def _environment_driver(
     baseline_prefixes: Sequence[str] = (),
     baseline_excluded: Sequence[str] = (),
     baseline_data_tables: Sequence[Mapping] = (),
+    scope_prefixes: Sequence[str] = (),
 ) -> Path:
     selected = _validate_compare_env_sections(sections, allow_baseline_internal=baseline_capture)
     if not baseline_capture and (baseline_prefixes or baseline_excluded or baseline_data_tables):
@@ -1254,6 +1256,7 @@ def _environment_driver(
     prefix_json = json.dumps(list(baseline_prefixes), separators=(",", ":"))
     excluded_json = json.dumps(list(baseline_excluded), separators=(",", ":"))
     data_tables_json = json.dumps(list(baseline_data_tables), separators=(",", ":"))
+    scope_json = json.dumps([str(item).upper() for item in scope_prefixes], separators=(",", ":"))
     driver = run_dir / "compare-env-driver.sql"
     content = "\n".join((
         f"-- COMPARE_ENVIRONMENT:{environment}",
@@ -1267,7 +1270,7 @@ def _environment_driver(
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
         "SET TRANSACTION READ ONLY;",
-        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user)} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)} {_environment_hex(data_tables_json)}",
+        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user)} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)} {_environment_hex(data_tables_json)} {_environment_hex(scope_json)}",
         "SET DEFINE OFF",
         "EXIT SUCCESS ROLLBACK",
         "",
@@ -1288,6 +1291,7 @@ def capture_environment_catalog(
     baseline_prefixes: Sequence[str] = (),
     baseline_excluded: Sequence[str] = (),
     baseline_data_tables: Sequence[Mapping] = (),
+    scope_prefixes: Sequence[str] = (),
     _runner: Callable = run_sqlcl,
 ) -> dict:
     """Capture selected environment catalog sections through read-only SQLcl."""
@@ -1305,7 +1309,7 @@ def capture_environment_catalog(
             private_dir, target, environment, sections,
             dba_capture=dba_capture, baseline_capture=baseline_capture,
             baseline_prefixes=baseline_prefixes, baseline_excluded=baseline_excluded,
-            baseline_data_tables=baseline_data_tables,
+            baseline_data_tables=baseline_data_tables, scope_prefixes=scope_prefixes,
         )
         result = _runner(target, driver, private_dir, phase="inventory")
         return parse_environment_catalog_output(
@@ -1434,10 +1438,20 @@ def main_compare_env(
     catalogs: dict[str, dict] = {}
     dba_available: dict[str, bool] = {}
     keep_logs = True
+    prefixes = []
+    for key in ("TABLES_PREFIXES", "CODE_PREFIXES"):
+        value = values.get(key, "")
+        if value == "*":
+            prefixes = ["*"]
+            break
+        prefixes.extend(item.strip() for item in value.split(",") if item.strip())
+    # The structure sections are captured only for these names and the objects that belong to their tables.
+    scope_prefixes = () if "*" in prefixes else tuple(dict.fromkeys(item.upper() for item in prefixes))
+    capture_options = {"scope_prefixes": scope_prefixes} if scope_prefixes else {}
     try:
         for environment, target in ((args.source, source_target), (args.target, target_target)):
             try:
-                catalog_value = capture_environment_fn(target, environment, normal_sections, run_dir)
+                catalog_value = capture_environment_fn(target, environment, normal_sections, run_dir, **capture_options)
             except (CatalogError, OSError, RuntimeError) as error:
                 catalog_value = _empty_environment_capture(environment, target.schema, error)
             dba_key = f"{environment.upper()}_DBA_SQLCL_CONNECTION"
@@ -1454,13 +1468,6 @@ def main_compare_env(
                     catalog_value["capture_error"] = f"DBA catalog capture failed: {error}"
             catalogs[environment] = catalog_value
 
-        prefixes = []
-        for key in ("TABLES_PREFIXES", "CODE_PREFIXES"):
-            value = values.get(key, "")
-            if value == "*":
-                prefixes = ["*"]
-                break
-            prefixes.extend(item for item in value.split(",") if item)
         report = compare_environment_catalogs(
             catalogs[args.source], catalogs[args.target],
             sections=sections,
