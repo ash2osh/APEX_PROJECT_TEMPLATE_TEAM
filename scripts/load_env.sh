@@ -7,7 +7,7 @@ unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER PROD_SCHEMA
 unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
 unset DEV_DBA_SQLCL_CONNECTION STAGING_DBA_SQLCL_CONNECTION PROD_DBA_SQLCL_CONNECTION
 unset ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER
-unset INSTALL_UC_APX UC_APX_SKILLS_AGENT
+unset INSTALL_UC_APX UC_APX_SKILLS_AGENT AGENT_STYLE AGENT_STYLE_LEARNING
 unset APEX_WORKSPACE_USERNAME
 unset MIGRATION_SCHEMA MIGRATION_SQLCL_CONNECTION MIGRATION_EXPECTED_USER
 unset STAGING_MIGRATION_SCHEMA STAGING_MIGRATION_SQLCL_CONNECTION STAGING_MIGRATION_EXPECTED_USER
@@ -117,6 +117,7 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
       return 1 2>/dev/null || exit 1
       ;;
     PROJECT_NAME|DEVELOPER_NAME|DB_ENVIRONMENT|APEX_APP_ID|APEX_WORKSPACE_USERNAME|\
+    AGENT_STYLE|AGENT_STYLE_LEARNING|\
     TABLES_SCHEMA|TABLES_PREFIXES|TABLES_SQLCL_CONNECTION|TABLES_EXPECTED_USER|\
     CODE_SCHEMA|CODE_PREFIXES|CODE_SQLCL_CONNECTION|CODE_EXPECTED_USER|\
     APEX_PARSING_SCHEMA|APEX_SQLCL_CONNECTION|APEX_EXPECTED_USER|\
@@ -160,6 +161,10 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   export "$project_env_key=$project_env_value"
   project_env_seen_keys+=("$project_env_key")
 done < "$PROJECT_ENV_FILE"
+
+if [ "${AGENT_STYLE+x}" != x ]; then AGENT_STYLE=standard; fi
+if [ "${AGENT_STYLE_LEARNING+x}" != x ]; then AGENT_STYLE_LEARNING=on; fi
+export AGENT_STYLE AGENT_STYLE_LEARNING
 
 project_env_required=(
   PROJECT_NAME DEVELOPER_NAME DB_ENVIRONMENT APEX_APP_ID
@@ -431,6 +436,14 @@ case "$DB_ENVIRONMENT" in
     project_env_fail "DB_ENVIRONMENT must be development, test, staging, or production"
     return 1 2>/dev/null || exit 1
     ;;
+esac
+case "$AGENT_STYLE" in
+  standard|concise|teaching|asharif-style) ;;
+  *) project_env_fail "AGENT_STYLE must be one of: standard, concise, teaching, asharif-style"; return 1 2>/dev/null || exit 1 ;;
+esac
+case "$AGENT_STYLE_LEARNING" in
+  on|off) ;;
+  *) project_env_fail "AGENT_STYLE_LEARNING must be on or off"; return 1 2>/dev/null || exit 1 ;;
 esac
 for project_env_key in TABLES_SCHEMA TABLES_EXPECTED_USER CODE_SCHEMA \
   CODE_EXPECTED_USER APEX_PARSING_SCHEMA APEX_EXPECTED_USER STAGING_SCHEMA PROD_SCHEMA; do
