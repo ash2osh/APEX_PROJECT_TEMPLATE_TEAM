@@ -6,6 +6,7 @@ import base64
 import gzip
 import json
 import os
+import re
 import tempfile
 import unittest
 import zlib
@@ -517,6 +518,39 @@ class EnvironmentComparisonTests(unittest.TestCase):
 
         self.assertEqual(2, report["exit_code"], report)
         self.assertEqual("incomplete", report["sections"]["java-mle"]["status"])
+
+    def test_catalog_sql_dynamic_queries_do_not_name_plsql_constants(self) -> None:
+        """A q'~...~' section query runs as SQL: a PL/SQL constant in it fails with ORA-00904 on a real database."""
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        queries = re.findall(r"q'~(.*?)~'", sql, flags=re.DOTALL)
+        self.assertGreater(len(queries), 10)
+        constants = {name.lower() for name in re.findall(r"^\s*(c_[a-z0-9_]+)\s+CONSTANT\b", sql, flags=re.MULTILINE | re.IGNORECASE)}
+        self.assertIn("c_schema", constants)
+        for query in queries:
+            for constant in constants:
+                self.assertIsNone(
+                    re.search(rf"\b{constant}\b", query, flags=re.IGNORECASE),
+                    f"dynamic SQL names the PL/SQL constant {constant}: {query[:80]!r}",
+                )
+
+    def test_catalog_sql_reads_the_database_version_for_every_oracle_product_name(self) -> None:
+        """Oracle 26ai reports 'Oracle AI Database 26ai ...', which 'Oracle Database%' does not match."""
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        self.assertNotIn("LIKE 'Oracle Database%'", sql)
+        self.assertEqual(sql.count("LIKE 'Oracle%Database%'"), 2)
+
+    def test_catalog_sql_constraints_page_before_correlated_subqueries(self) -> None:
+        """ORA-style paging with OFFSET evaluates select-list subqueries for every row before the offset; page the base rows first."""
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        match = re.search(r"add_query_section\('constraints', q'~(.*?)~'\)", sql, flags=re.DOTALL)
+        self.assertIsNotNone(match)
+        query = match.group(1)
+        self.assertRegex(
+            query,
+            r"FROM \(SELECT[^~]*?FROM all_constraints p WHERE p\.owner = :scope\s+ORDER BY[^~]*?"
+            r"OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY\) c\s+ORDER BY",
+        )
+        self.assertNotIn("FROM all_constraints r", query)
 
     def test_view_and_source_hashes_chain_ordered_body_lines(self) -> None:
         sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
