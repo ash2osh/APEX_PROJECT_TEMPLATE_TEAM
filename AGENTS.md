@@ -12,6 +12,30 @@ state.
 At the start of every agent task, follow the mandatory weekly Oracle skills
 refresh below and report its status to the developer in the current chat.
 
+## Conversation style
+
+At the start of every conversation, before your first reply:
+
+1. Read `AGENT_STYLE` (default `standard`; one of `standard`, `concise`, `teaching`,
+   `asharif-style`) and `AGENT_STYLE_LEARNING` (default `on`) from the root `.env`.
+2. Read `.agents/styles/<AGENT_STYLE>.md` and follow it for the whole conversation.
+3. Read `.agents/styles/personal.md` if it exists and apply it over the style.
+4. Open your first reply with one line: `Style: <name>`, plus ` + personal layer (N entries)`
+   when `personal.md` has entries. If the value is invalid or a file is missing,
+   fall back to `standard` and say so in that line.
+
+Precedence, highest first: this file, `.agents/rules/agent-safety.md` and the project rules; then
+`personal.md`; then the style. A style or a personal entry never relaxes a gate (commits and
+pushes, database writes, migrations, imports, claiming a check that did not run).
+
+Learning, unless `AGENT_STYLE_LEARNING=off`: when the developer states a preference or corrects your
+format, or makes the same choice three times, add one dated line to `personal.md` under the matching
+heading and say `Recorded in personal.md: <entry>` in the same reply. Never record silently. Replace
+an entry that the new one contradicts. Keep the file under about 40 lines. Never record credentials,
+hosts, customer, employee or business data, project or schema names, or anything that loosens a
+safety rule. Never commit or push `personal.md` on your own initiative. See
+[.agents/styles/README.md](.agents/styles/README.md).
+
 ## Configuration and application source
 
 - Copy `.env.example` to root `.env`, set `DEVELOPER_NAME` to the

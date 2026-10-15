@@ -98,5 +98,30 @@ class EnvExampleTests(unittest.TestCase):
         self.assertIn("AGENT_STYLE_LEARNING=on", lines)
 
 
+class AgentInstructionTests(unittest.TestCase):
+    def test_agents_md_enforces_the_style_at_conversation_start(self) -> None:
+        text = read(ROOT / "AGENTS.md")
+        self.assertIn("## Conversation style", text)
+        position = text.index("## Conversation style")
+        self.assertLess(position, text.index("## Configuration and application source"))
+        for needle in (
+            "start of every conversation",
+            "AGENT_STYLE",
+            "AGENT_STYLE_LEARNING",
+            ".agents/styles/",
+            ".agents/styles/personal.md",
+            "Style: ",
+            "fall back to `standard`",
+            "Recorded in personal.md",
+            "never relaxes",
+            "never commit",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text.lower() if needle.islower() else text)
+
+    def test_readme_points_to_the_styles_guide(self) -> None:
+        self.assertIn(".agents/styles/README.md", read(ROOT / "README.md"))
+
+
 if __name__ == "__main__":
     unittest.main()
