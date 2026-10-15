@@ -620,7 +620,7 @@ class EnvironmentComparisonTests(unittest.TestCase):
             with self.subTest(configured=configured):
                 seen: list = []
 
-                def capture(target, environment, sections, run_dir, **kwargs):
+                def capture(target, environment, sections, run_dir, seen=seen, **kwargs):
                     seen.append(kwargs.get("scope_prefixes"))
                     return catalog(environment)
 
