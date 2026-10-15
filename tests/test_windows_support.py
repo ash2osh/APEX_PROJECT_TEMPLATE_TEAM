@@ -528,6 +528,41 @@ class WindowsShellGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "4")
 
+    def test_load_env_defaults_and_validates_agent_style(self) -> None:
+        base = (ROOT / ".env.example").read_text(encoding="utf-8")
+        without = base.replace("AGENT_STYLE=standard\n", "").replace("AGENT_STYLE_LEARNING=on\n", "")
+        cases = (
+            (without, 0, "standard on", ""),
+            (base.replace("AGENT_STYLE=standard\n", "AGENT_STYLE=asharif-style\n")
+                 .replace("AGENT_STYLE_LEARNING=on\n", "AGENT_STYLE_LEARNING=off\n"), 0, "asharif-style off", ""),
+            (base.replace("AGENT_STYLE=standard\n", "AGENT_STYLE=ASHARIF-STYLE\n"), 1, "",
+             "AGENT_STYLE must be one of: standard, concise, teaching, asharif-style"),
+            (base.replace("AGENT_STYLE_LEARNING=on\n", "AGENT_STYLE_LEARNING=ON\n"), 1, "",
+             "AGENT_STYLE_LEARNING must be on or off"),
+        )
+        for content, code, expected_out, expected_err in cases:
+            with self.subTest(expected_out=expected_out, expected_err=expected_err):
+                with tempfile.TemporaryDirectory() as temporary:
+                    directory = Path(temporary)
+                    environment = self.environment(directory, "Linux")
+                    env_file = directory / ".env"
+                    env_file.write_text(content, encoding="utf-8", newline="\n")
+                    result = subprocess.run(
+                        ["bash", "-c", 'source "$1" "$2" && printf "%s %s\\n" "$AGENT_STYLE" "$AGENT_STYLE_LEARNING"',
+                         "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_file)],
+                        capture_output=True, text=True, env=environment, check=False,
+                    )
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected_out)
+                self.assertIn(expected_err, result.stderr)
+
+    def test_powershell_env_loader_knows_the_agent_style_settings(self) -> None:
+        text = (ROOT / "scripts" / "load_env.ps1").read_text(encoding="utf-8")
+        self.assertGreaterEqual(text.count("AGENT_STYLE_LEARNING"), 4)
+        self.assertGreaterEqual(text.count("AGENT_STYLE"), 8)
+        self.assertIn("AGENT_STYLE must be one of: standard, concise, teaching, asharif-style", text)
+        self.assertIn("AGENT_STYLE_LEARNING must be on or off", text)
+
     def test_powershell_env_loader_allows_and_clears_preflight_retry_setting(self) -> None:
         text = (ROOT / "scripts" / "load_env.ps1").read_text(encoding="utf-8")
         self.assertGreaterEqual(text.count("MIGRATION_PREFLIGHT_INVENTORY_RETRIES"), 2)

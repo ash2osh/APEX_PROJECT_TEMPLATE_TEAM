@@ -20,12 +20,15 @@ class ConfigError(ValueError):
     """Configuration error without value disclosure."""
 
 
+AGENT_STYLES = ("standard", "concise", "teaching", "asharif-style")
 ALLOWED_KEYS = frozenset({
     "PROJECT_NAME",
     "DEVELOPER_NAME",
     "DB_ENVIRONMENT",
     "APEX_APP_ID",
     "APEX_WORKSPACE_USERNAME",
+    "AGENT_STYLE",
+    "AGENT_STYLE_LEARNING",
     "TABLES_SCHEMA",
     "TABLES_PREFIXES",
     "TABLES_SQLCL_CONNECTION",
@@ -203,6 +206,11 @@ def read_project_env(path: Path) -> dict[str, str]:
     # DB Environment validation
     if values["DB_ENVIRONMENT"] not in ("development", "test", "staging", "production"):
         raise ConfigError("DB_ENVIRONMENT must be development, test, staging, or production")
+
+    if values.get("AGENT_STYLE", "standard") not in AGENT_STYLES:
+        raise ConfigError("AGENT_STYLE must be one of: " + ", ".join(AGENT_STYLES))
+    if values.get("AGENT_STYLE_LEARNING", "on") not in ("on", "off"):
+        raise ConfigError("AGENT_STYLE_LEARNING must be on or off")
 
     # APEX_APP_ID validation
     if not RE_APP_ID_LIST.fullmatch(values["APEX_APP_ID"]):

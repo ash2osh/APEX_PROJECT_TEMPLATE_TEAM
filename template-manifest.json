@@ -6,6 +6,11 @@
   "templateOwned": [
     ".agents/rules/agent-safety.md",
     ".agents/rules/graphify.md",
+    ".agents/styles/README.md",
+    ".agents/styles/standard.md",
+    ".agents/styles/concise.md",
+    ".agents/styles/teaching.md",
+    ".agents/styles/asharif-style.md",
     ".agents/workflows/**",
     ".agents/skills/**",
     ".claude/skills/**",
@@ -61,6 +66,7 @@
   ],
   "projectOwned": [
     ".agents/rules/project.md",
+    ".agents/styles/personal.md",
     "AGENTS.project.md",
     "PROJECT.md",
     "TODO.md",

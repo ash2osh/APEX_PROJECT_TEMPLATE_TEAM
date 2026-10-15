@@ -192,6 +192,33 @@ class LocalConfigTests(unittest.TestCase):
                         "uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env"
                     )
 
+    def test_agent_style_settings_accept_valid_values(self) -> None:
+        for style in ("standard", "concise", "teaching", "asharif-style"):
+            for learning in ("on", "off"):
+                with self.subTest(style=style, learning=learning):
+                    content = VALID_BASE_CONFIG + f"AGENT_STYLE={style}\nAGENT_STYLE_LEARNING={learning}\n"
+                    values = read_project_env(self.write_env(content))
+                    self.assertEqual(values["AGENT_STYLE"], style)
+                    self.assertEqual(values["AGENT_STYLE_LEARNING"], learning)
+        # Both keys are optional.
+        read_project_env(self.write_env(VALID_BASE_CONFIG))
+
+    def test_agent_style_settings_reject_invalid_values_without_echoing_them(self) -> None:
+        style_message = "AGENT_STYLE must be one of: standard, concise, teaching, asharif-style"
+        learning_message = "AGENT_STYLE_LEARNING must be on or off"
+        for key, value, message in (
+            ("AGENT_STYLE", "ASHARIF-STYLE", style_message),
+            ("AGENT_STYLE", "Standard", style_message),
+            ("AGENT_STYLE", "", style_message),
+            ("AGENT_STYLE", "verbose", style_message),
+            ("AGENT_STYLE_LEARNING", "ON", learning_message),
+            ("AGENT_STYLE_LEARNING", "yes", learning_message),
+        ):
+            with self.subTest(key=key, value=value):
+                with self.assertRaises(ConfigError) as ctx:
+                    read_project_env(self.write_env(VALID_BASE_CONFIG + f"{key}={value}\n"))
+                self.assertEqual(str(ctx.exception), message)
+
     def test_required_key_missing_or_whitespace_only(self) -> None:
         content_missing = "\n".join(line for line in VALID_BASE_CONFIG.splitlines() if not line.startswith("DEVELOPER_NAME="))
         path_missing = self.write_env(content_missing)

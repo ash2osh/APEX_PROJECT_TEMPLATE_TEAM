@@ -17,7 +17,7 @@ Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:STAGING_SCHEMA,
   Env:DEV_DBA_SQLCL_CONNECTION, Env:STAGING_DBA_SQLCL_CONNECTION, Env:PROD_DBA_SQLCL_CONNECTION,
   Env:ORDS_SCHEMA, Env:ORDS_SQLCL_CONNECTION, Env:ORDS_EXPECTED_USER,
-  Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT, Env:APEX_WORKSPACE_USERNAME -ErrorAction SilentlyContinue
+  Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT, Env:AGENT_STYLE, Env:AGENT_STYLE_LEARNING, Env:APEX_WORKSPACE_USERNAME -ErrorAction SilentlyContinue
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
   foreach ($projectEnvSuffix in @("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER")) {
     Remove-Item -LiteralPath "Env:${projectEnvMigrationPrefix}MIGRATION_${projectEnvSuffix}" -ErrorAction SilentlyContinue
@@ -53,6 +53,7 @@ if (($projectEnvHead[0] -eq 0xFF -and $projectEnvHead[1] -eq 0xFE) -or ($project
 $projectEnvSeen = @{}
 $projectEnvAllowed = @(
   "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID", "APEX_WORKSPACE_USERNAME",
+  "AGENT_STYLE", "AGENT_STYLE_LEARNING",
   "TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER",
   "CODE_SCHEMA", "CODE_PREFIXES", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER",
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
@@ -98,6 +99,9 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   Set-Item -LiteralPath "Env:$projectEnvKey" -Value $projectEnvValue
   $projectEnvSeen[$projectEnvKey] = $true
 }
+
+if (-not $projectEnvSeen.ContainsKey("AGENT_STYLE")) { $env:AGENT_STYLE = "standard" }
+if (-not $projectEnvSeen.ContainsKey("AGENT_STYLE_LEARNING")) { $env:AGENT_STYLE_LEARNING = "on" }
 
 $projectEnvRequired = @(
   "PROJECT_NAME", "DEVELOPER_NAME", "DB_ENVIRONMENT", "APEX_APP_ID",
@@ -260,6 +264,12 @@ if ($env:DEVELOPER_NAME -cnotmatch '^[A-Z][A-Z0-9_]{0,29}$') {
 # -cnotin: -notin ignores case, but load_env.sh and the Bash helpers do not.
 if ($env:DB_ENVIRONMENT -cnotin @("development", "test", "staging", "production")) {
   throw "project environment error: DB_ENVIRONMENT must be development, test, staging, or production"
+}
+if ($env:AGENT_STYLE -cnotin @("standard", "concise", "teaching", "asharif-style")) {
+  throw "project environment error: AGENT_STYLE must be one of: standard, concise, teaching, asharif-style"
+}
+if ($env:AGENT_STYLE_LEARNING -cnotin @("on", "off")) {
+  throw "project environment error: AGENT_STYLE_LEARNING must be on or off"
 }
 foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_EXPECTED_USER",
     "APEX_PARSING_SCHEMA", "APEX_EXPECTED_USER", "STAGING_SCHEMA", "PROD_SCHEMA")) {

@@ -87,6 +87,10 @@ no project timestamp file or scheduled automation. Projects sharing this user's
 installed skills reuse SQLcl's native dates; inactive projects check at next task
 startup. Agents preserve project-authored skills and use release-matched APEXlang.
 
+Agents also load a conversation style at the start of each conversation: set `AGENT_STYLE` in
+`.env` (`standard`, `concise`, `teaching` or `asharif-style`). Your own preferences accumulate in
+`.agents/styles/personal.md`; see [.agents/styles/README.md](.agents/styles/README.md).
+
 **APEX and database skills**
 
 | Skill | Use it when |
