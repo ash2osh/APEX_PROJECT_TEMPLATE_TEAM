@@ -11,6 +11,7 @@ DEFINE compare_baseline_internal = '&6'
 DEFINE compare_baseline_prefixes_hex = '&7'
 DEFINE compare_baseline_excluded_hex = '&8'
 DEFINE compare_baseline_data_tables_hex = '&9'
+DEFINE compare_scope_prefixes_hex = '&10'
 SET LONG 2000000000
 SET LONGCHUNKSIZE 32767
 SET SERVEROUTPUT ON SIZE UNLIMITED
@@ -28,6 +29,7 @@ DECLARE
   c_baseline_prefixes_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_prefixes_hex'));
   c_baseline_excluded_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_excluded_hex'));
   c_baseline_data_tables_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_data_tables_hex'));
+  c_scope_prefixes_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_scope_prefixes_hex'));
   c_page_size CONSTANT PLS_INTEGER := 500;
   c_max_rows CONSTANT PLS_INTEGER := 100000;
   l_payload JSON_OBJECT_T := JSON_OBJECT_T();
@@ -244,6 +246,23 @@ DECLARE
       RAISE;
   END;
 
+  -- A section query may use three tokens, expanded here so each query stays one readable SQL text:
+  --   SCOPE_WITH          a leading CTE "sp" holding the upper-cased scope prefixes (one :scope_prefixes bind);
+  --   SCOPE_ALL           true when no scope prefixes were requested (everything is in scope);
+  --   SCOPE_MATCH(expr)   true when expr starts with one of the scope prefixes.
+  -- Dependent objects (indexes, triggers, constraints, columns, identity sequences) are matched through their
+  -- parent table in the query itself, so an object named without the prefix is kept when its table has it.
+  FUNCTION expand_scope(p_query VARCHAR2) RETURN VARCHAR2 IS
+    l_text VARCHAR2(32767) := p_query;
+  BEGIN
+    l_text := REPLACE(l_text, 'SCOPE_WITH',
+      'WITH sp AS (SELECT UPPER(x.prefix) prefix FROM JSON_TABLE(:scope_prefixes, ''$[*]'' COLUMNS (prefix VARCHAR2(128) PATH ''$'')) x)');
+    l_text := REPLACE(l_text, 'SCOPE_ALL', 'NOT EXISTS (SELECT 1 FROM sp)');
+    l_text := REGEXP_REPLACE(l_text, 'SCOPE_MATCH\(([A-Za-z0-9_.]+)\)',
+      'EXISTS (SELECT 1 FROM sp WHERE SUBSTR(\1, 1, LENGTH(sp.prefix)) = sp.prefix)');
+    RETURN l_text;
+  END;
+
   PROCEDURE append_rows(
     p_section VARCHAR2,
     p_query VARCHAR2,
@@ -256,9 +275,17 @@ DECLARE
     LOOP
       l_page_count := 0;
       IF p_section IN ('baseline-source', 'baseline-settings', 'object-grants') THEN
-        OPEN l_cursor FOR p_query USING
-          c_schema, c_baseline_prefixes_json, c_baseline_prefixes_json,
-          c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
+        IF INSTR(p_query, ':scope_prefixes') > 0 THEN
+          OPEN l_cursor FOR p_query USING
+            c_scope_prefixes_json, c_schema, c_baseline_prefixes_json, c_baseline_prefixes_json,
+            c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
+        ELSE
+          OPEN l_cursor FOR p_query USING
+            c_schema, c_baseline_prefixes_json, c_baseline_prefixes_json,
+            c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
+        END IF;
+      ELSIF INSTR(p_query, ':scope_prefixes') > 0 THEN
+        OPEN l_cursor FOR p_query USING c_scope_prefixes_json, c_schema, l_offset, c_page_size;
       ELSE
         OPEN l_cursor FOR p_query USING c_schema, l_offset, c_page_size;
       END IF;
@@ -289,7 +316,7 @@ DECLARE
     IF NOT selected(p_name) THEN RETURN; END IF;
     l_rows := JSON_ARRAY_T();
     l_pages := JSON_ARRAY_T();
-    append_rows(p_name, p_query, l_rows, l_pages);
+    append_rows(p_name, expand_scope(p_query), l_rows, l_pages);
     l_sections.put(p_name, l_rows);
     l_page := JSON_OBJECT_T();
     l_page.put('complete', TRUE);
@@ -702,6 +729,9 @@ DECLARE
           FROM all_views v
           JOIN all_objects o ON o.owner = v.owner AND o.object_name = v.view_name AND o.object_type = 'VIEW'
          WHERE v.owner = c_schema
+           AND (DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 OR EXISTS (
+             SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
+              WHERE SUBSTR(v.view_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
          ORDER BY v.view_name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
       ) LOOP
@@ -826,6 +856,11 @@ DECLARE
         SELECT t.trigger_name, t.table_name, t.trigger_type, t.triggering_event,
             t.base_object_type, t.status
           FROM all_triggers t WHERE t.owner = c_schema
+           AND ((DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 OR EXISTS (
+             SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
+              WHERE SUBSTR(t.trigger_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
+             OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
+              WHERE SUBSTR(t.table_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
          ORDER BY t.trigger_name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
       ) LOOP
@@ -874,6 +909,9 @@ DECLARE
           JOIN all_objects o ON o.owner = s.owner AND o.object_name = s.name AND o.object_type = s.type
          WHERE s.owner = c_schema
            AND s.type IN ('FUNCTION','PROCEDURE','PACKAGE','PACKAGE BODY','TYPE','TYPE BODY')
+           AND (DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 OR EXISTS (
+             SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
+              WHERE SUBSTR(s.name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
          GROUP BY s.name, s.type
          ORDER BY s.type, s.name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
@@ -929,14 +967,16 @@ BEGIN
   l_identity.put('database_version', l_db_version);
 
   add_query_section('tables', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('name' VALUE t.table_name, 'temporary' VALUE t.temporary,
       'partitioned' VALUE t.partitioned, 'iot_type' VALUE t.iot_type,
       'nested' VALUE t.nested, 'secondary' VALUE t.secondary,
       'compression' VALUE t.compression, 'logging' VALUE t.logging RETURNING CLOB) row_json
-      FROM all_tables t WHERE t.owner = :scope
+      FROM all_tables t WHERE t.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(t.table_name))
      ORDER BY t.table_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_query_section('columns', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('table_name' VALUE c.table_name, 'name' VALUE c.column_name,
       'column_position' VALUE c.column_id, 'user_generated' VALUE c.user_generated,
       'data_type' VALUE c.data_type, 'data_type_mod' VALUE c.data_type_mod,
@@ -945,10 +985,11 @@ BEGIN
       'char_used' VALUE c.char_used, 'char_length' VALUE c.char_length,
       'nullable' VALUE c.nullable, 'hidden' VALUE CASE WHEN c.hidden_column = 'YES' THEN 'Y' ELSE 'N' END,
       'virtual' VALUE CASE WHEN c.virtual_column = 'YES' THEN 'Y' ELSE 'N' END RETURNING CLOB) row_json
-      FROM all_tab_cols c WHERE c.owner = :scope
+      FROM all_tab_cols c WHERE c.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(c.table_name))
      ORDER BY c.table_name, c.column_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_query_section('constraints', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('name' VALUE c.constraint_name, 'table_name' VALUE c.table_name,
       'constraint_type' VALUE c.constraint_type,
       'columns' VALUE COALESCE((SELECT JSON_ARRAYAGG(cc.column_name ORDER BY cc.position RETURNING CLOB)
@@ -965,12 +1006,13 @@ BEGIN
       'rely' VALUE c.rely RETURNING CLOB) row_json
       FROM (SELECT p.owner, p.constraint_name, p.table_name, p.constraint_type, p.r_owner, p.r_constraint_name,
                    p.search_condition_vc, p.status, p.validated, p.delete_rule, p.deferrable, p.deferred, p.rely
-              FROM all_constraints p WHERE p.owner = :scope
+              FROM all_constraints p WHERE p.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(p.table_name))
              ORDER BY p.table_name, p.constraint_type, p.constraint_name
             OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY) c
      ORDER BY c.table_name, c.constraint_type, c.constraint_name~');
 
   add_query_section('indexes', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('name' VALUE i.index_name, 'table_name' VALUE i.table_name,
       'uniqueness' VALUE i.uniqueness,
       'columns' VALUE COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('name' VALUE ic.column_name,
@@ -979,21 +1021,38 @@ BEGIN
         WHERE ic.index_owner = i.owner AND ic.index_name = i.index_name), TO_CLOB('[]')) FORMAT JSON,
       'index_type' VALUE i.index_type, 'visibility' VALUE i.visibility, 'status' VALUE i.status RETURNING CLOB) row_json
       FROM all_indexes i WHERE i.owner = :scope
+       AND (SCOPE_ALL OR SCOPE_MATCH(i.index_name) OR SCOPE_MATCH(i.table_name))
      ORDER BY i.index_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_triggers;
 
   add_query_section('sequences', q'~
+    SCOPE_WITH,
+    scoped_sequences AS (
+      SELECT /*+ MATERIALIZE */ ic.sequence_name FROM all_tab_identity_cols ic
+       WHERE ic.owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND SCOPE_MATCH(ic.table_name)
+      UNION
+      SELECT /*+ MATERIALIZE */ d.referenced_name FROM all_dependencies d
+       WHERE d.owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND d.type = 'TRIGGER'
+         AND d.referenced_owner = d.owner AND d.referenced_type = 'SEQUENCE'
+         AND (SCOPE_MATCH(d.name) OR EXISTS (SELECT 1 FROM all_triggers tr
+               WHERE tr.owner = d.owner AND tr.trigger_name = d.name AND SCOPE_MATCH(tr.table_name))))
     SELECT JSON_OBJECT('name' VALUE s.sequence_name, 'increment_by' VALUE s.increment_by,
       'min_value' VALUE s.min_value, 'max_value' VALUE s.max_value, 'cycle_flag' VALUE s.cycle_flag,
       'order_flag' VALUE s.order_flag, 'cache_size' VALUE s.cache_size RETURNING CLOB) row_json
       FROM all_sequences s WHERE s.sequence_owner = :scope
+       AND (SCOPE_ALL OR SCOPE_MATCH(s.sequence_name)
+         OR s.sequence_name IN (SELECT sequence_name FROM scoped_sequences))
      ORDER BY s.sequence_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_query_section('synonyms', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('owner' VALUE s.owner, 'name' VALUE s.synonym_name,
       'table_owner' VALUE s.table_owner, 'table_name' VALUE s.table_name, 'db_link' VALUE s.db_link RETURNING CLOB) row_json
-      FROM all_synonyms s WHERE s.owner = :scope OR s.owner = 'PUBLIC'
+      FROM all_synonyms s
+     WHERE (s.owner = :scope OR s.owner = 'PUBLIC')
+       AND (SCOPE_ALL OR SCOPE_MATCH(s.synonym_name)
+         OR (s.table_owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND SCOPE_MATCH(s.table_name)))
      ORDER BY s.owner, s.synonym_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_views;
@@ -1036,21 +1095,29 @@ BEGIN
   END IF;
 
   add_query_section('invalid-objects', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('name' VALUE o.object_name, 'type' VALUE o.object_type, 'status' VALUE o.status RETURNING CLOB) row_json
       FROM all_objects o WHERE o.owner = :scope AND o.status = 'INVALID' AND o.subobject_name IS NULL
+       AND (SCOPE_ALL OR SCOPE_MATCH(o.object_name)
+         OR (o.object_type = 'TRIGGER' AND EXISTS (SELECT 1 FROM all_triggers tr
+              WHERE tr.owner = o.owner AND tr.trigger_name = o.object_name AND SCOPE_MATCH(tr.table_name)))
+         OR (o.object_type = 'INDEX' AND EXISTS (SELECT 1 FROM all_indexes ix
+              WHERE ix.owner = o.owner AND ix.index_name = o.object_name AND SCOPE_MATCH(ix.table_name))))
      ORDER BY o.object_type, o.object_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_query_section('identity-columns', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('table_name' VALUE i.table_name, 'column_name' VALUE i.column_name,
       'generation_type' VALUE i.generation_type, 'identity_options' VALUE i.identity_options,
       'sequence_name' VALUE i.sequence_name RETURNING CLOB) row_json
-      FROM all_tab_identity_cols i WHERE i.owner = :scope
+      FROM all_tab_identity_cols i WHERE i.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(i.table_name))
      ORDER BY i.table_name, i.column_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_query_section('object-grants', q'~
+    SCOPE_WITH
     SELECT JSON_OBJECT('owner' VALUE p.table_schema, 'object_name' VALUE p.table_name,
       'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
-      FROM all_tab_privs p WHERE p.table_schema = :scope
+      FROM all_tab_privs p WHERE p.table_schema = :scope AND (SCOPE_ALL OR SCOPE_MATCH(p.table_name))
        AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
          SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
           WHERE SUBSTR(p.table_name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))

@@ -18,8 +18,15 @@ command captures every section listed below. The team wrapper's global
 `--schema <NAME>` selects one configured schema when a profile has several.
 Environment profiles must map to the same configured position; a single DEV
 schema may map to a differently named single staging or production schema.
-Object grants are limited to names matching `TABLES_PREFIXES` or
-`CODE_PREFIXES`; `*` includes every object grant in the selected schema.
+`TABLES_PREFIXES` and `CODE_PREFIXES` scope the capture. Tables, columns,
+constraints, indexes, identity columns, sequences, synonyms, views, triggers,
+stored code, invalid objects and object grants are captured only for names
+that start with one of the prefixes, plus the objects that belong to those
+tables whatever their names: their indexes, triggers (also a trigger named
+`XX_TRIGGER` on `ABSH_EXAMPLE`), constraints and columns, identity sequences,
+and sequences their triggers use. Public synonyms are kept when their name or
+their target in the selected schema matches. `*` or an empty list captures
+every object in the selected schema.
 
 View DDL capture calls `DBMS_METADATA.GET_DDL` through a helper that briefly
 allows commit-in-procedure only for that metadata call and restores the

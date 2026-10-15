@@ -82,7 +82,7 @@ def _without_sql_literals(source: str) -> str:
 
 
 class EnvironmentComparisonTests(unittest.TestCase):
-    def test_environment_driver_always_supplies_all_nine_sqlcl_arguments(self) -> None:
+    def test_environment_driver_always_supplies_all_ten_sqlcl_arguments(self) -> None:
         target = Target("dev", "docker-demo2", "APP_OWNER", "APP_OWNER", "development")
         with tempfile.TemporaryDirectory() as temporary:
             for dba_capture in (False, True):
@@ -96,7 +96,7 @@ class EnvironmentComparisonTests(unittest.TestCase):
                     )
                     arguments = invocation.split()[1:]
 
-                    self.assertEqual(len(arguments), 9, invocation)
+                    self.assertEqual(len(arguments), 10, invocation)
                     self.assertEqual(arguments[0], "4150505F4F574E4552")
                     self.assertEqual(arguments[1], "4150505F4F574E4552")
                     self.assertEqual(arguments[2], "646576")
@@ -547,10 +547,97 @@ class EnvironmentComparisonTests(unittest.TestCase):
         query = match.group(1)
         self.assertRegex(
             query,
-            r"FROM \(SELECT[^~]*?FROM all_constraints p WHERE p\.owner = :scope\s+ORDER BY[^~]*?"
+            r"FROM \(SELECT[^~]*?FROM all_constraints p WHERE p\.owner = :scope[^~]*?\s+ORDER BY[^~]*?"
             r"OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY\) c\s+ORDER BY",
         )
         self.assertNotIn("FROM all_constraints r", query)
+
+    def test_environment_driver_passes_the_scope_prefixes_as_the_tenth_argument(self) -> None:
+        target = Target("dev", "docker-demo2", "APP_OWNER", "APP_OWNER", "development")
+        with tempfile.TemporaryDirectory() as temporary:
+            for prefixes, expected in (((), []), (("absh_", "HR_WF"), ["ABSH_", "HR_WF"])):
+                with self.subTest(prefixes=prefixes):
+                    driver = _environment_driver(
+                        Path(temporary), target, "dev", ("tables",), dba_capture=False, scope_prefixes=prefixes,
+                    )
+                    invocation = next(
+                        line for line in driver.read_text(encoding="utf-8").splitlines()
+                        if line.startswith("@@compare_env_catalog.sql ")
+                    )
+                    arguments = invocation.split()[1:]
+                    self.assertEqual(len(arguments), 10, invocation)
+                    self.assertEqual(json.loads(bytes.fromhex(arguments[9]).decode("utf-8")), expected)
+
+    def test_catalog_sql_scope_tokens_are_expanded_with_one_prefix_bind(self) -> None:
+        """Scoped section queries carry SCOPE_* tokens; the expansion adds exactly one :scope_prefixes bind, bound first."""
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        expand = sql[sql.index("FUNCTION expand_scope("):sql.index("PROCEDURE append_rows(")]
+        self.assertEqual(expand.count(":scope_prefixes"), 1)
+        append = sql[sql.index("PROCEDURE append_rows("):sql.index("PROCEDURE add_query_section(")]
+        self.assertIn("USING c_scope_prefixes_json, c_schema, l_offset, c_page_size", append)
+        self.assertIn("c_scope_prefixes_json, c_schema, c_baseline_prefixes_json", append)
+        for name in ("tables", "columns", "constraints", "indexes", "sequences", "synonyms",
+                     "invalid-objects", "identity-columns", "object-grants"):
+            match = re.search(rf"add_query_section\('{name}', q'~(.*?)~'\)", sql, flags=re.DOTALL)
+            self.assertIsNotNone(match, name)
+            query = match.group(1)
+            self.assertTrue(query.lstrip().startswith("SCOPE_WITH"), name)
+            self.assertIn("SCOPE_ALL", query, name)
+
+    def test_catalog_sql_scope_keeps_objects_that_belong_to_a_matching_table(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+
+        def section(name: str) -> str:
+            return re.search(rf"add_query_section\('{name}', q'~(.*?)~'\)", sql, flags=re.DOTALL).group(1)
+
+        self.assertIn("SCOPE_MATCH(i.index_name) OR SCOPE_MATCH(i.table_name)", section("indexes"))
+        self.assertIn("SCOPE_MATCH(p.table_name)", section("constraints"))
+        self.assertIn("SCOPE_MATCH(c.table_name)", section("columns"))
+        self.assertIn("SCOPE_MATCH(i.table_name)", section("identity-columns"))
+        sequences = section("sequences")
+        self.assertIn("all_tab_identity_cols", sequences)
+        self.assertIn("all_dependencies", sequences)
+        self.assertIn("SCOPE_MATCH(tr.table_name)", sequences)
+        self.assertIn("SCOPE_MATCH(tr.table_name)", section("invalid-objects"))
+        self.assertIn("SCOPE_MATCH(ix.table_name)", section("invalid-objects"))
+        triggers = sql[sql.index("PROCEDURE add_triggers IS"):sql.index("PROCEDURE add_stored_code IS")]
+        self.assertIn("SUBSTR(t.trigger_name, 1, LENGTH(sp.prefix))", triggers)
+        self.assertIn("SUBSTR(t.table_name, 1, LENGTH(sp.prefix))", triggers)
+
+    def test_compare_env_cli_scopes_the_capture_to_the_configured_prefixes(self) -> None:
+        from scripts import compare_schema
+
+        base = {
+            "DB_ENVIRONMENT": "development",
+            "CODE_SQLCL_CONNECTION": "DEV", "CODE_EXPECTED_USER": "APP_DEV", "CODE_SCHEMA": "APP_DEV",
+            "STAGING_SQLCL_CONNECTION": "STAGE", "STAGING_EXPECTED_USER": "APP_STAGE", "STAGING_SCHEMA": "APP_STAGE",
+        }
+        for configured, expected in (
+            ({"TABLES_PREFIXES": "abs_, HR_WF", "CODE_PREFIXES": "ABS_,PKG_"}, ("ABS_", "HR_WF", "PKG_")),
+            ({"TABLES_PREFIXES": "*", "CODE_PREFIXES": "ABS_"}, None),
+            ({}, None),
+        ):
+            with self.subTest(configured=configured):
+                seen: list = []
+
+                def capture(target, environment, sections, run_dir, seen=seen, **kwargs):
+                    seen.append(kwargs.get("scope_prefixes"))
+                    return catalog(environment)
+
+                with (
+                    tempfile.TemporaryDirectory() as temporary,
+                    redirect_stdout(StringIO()),
+                    redirect_stderr(StringIO()),
+                ):
+                    result = compare_schema.main(
+                        ["compare-env", "--from", "dev", "--to", "staging", "--section", "tables", "--format", "json"],
+                        environ={**base, **configured},
+                        run_dir=Path(temporary),
+                        capture_environment_fn=capture,
+                    )
+
+                self.assertIn(result, (0, 1))
+                self.assertEqual([expected, expected], seen)
 
     def test_view_and_source_hashes_chain_ordered_body_lines(self) -> None:
         sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
