@@ -290,7 +290,7 @@ class CheckDbTargetTests(unittest.TestCase):
 
 class BackupCliTests(unittest.TestCase):
     NAMES = (
-        "backup_db.sh", "backup_db.sql", "load_env.sh", "check_db_target.sh", "sqlcl_safe.sh", "replace_mirror.sh",
+        "backup_db.sh", "backup_db.sql", "backup_manifest.py", "load_env.sh", "check_db_target.sh", "sqlcl_safe.sh", "replace_mirror.sh",
     )
 
     def make_checkout(self, root: Path, replacements: dict[str, str]) -> tuple[Path, dict[str, str]]:
@@ -859,7 +859,7 @@ class PowerShellDoctorCliTests(DoctorCliTests):
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellBackupCliTests(BackupCliTests):
-    NAMES = ("backup_db.ps1", "backup_db.sql", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "replace_mirror.ps1")
+    NAMES = ("backup_db.ps1", "backup_db.sql", "backup_manifest.py", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "replace_mirror.ps1")
 
     def test_backup_profile_loop_does_not_shadow_automatic_profile_variable(self) -> None:
         source = (ROOT / "scripts" / "backup_db.ps1").read_text(encoding="utf-8")

@@ -21,6 +21,7 @@ class BackupDbCliTests(unittest.TestCase):
             names = (
                 "backup_db.ps1",
                 "backup_db.sql",
+                "backup_manifest.py",
                 "load_env.ps1",
                 "check_db_target.ps1",
                 "invoke_sqlcl.ps1", "resolve_python.ps1",
@@ -30,6 +31,7 @@ class BackupDbCliTests(unittest.TestCase):
             names = (
                 "backup_db.sh",
                 "backup_db.sql",
+                "backup_manifest.py",
                 "load_env.sh",
                 "check_db_target.sh",
                 "sqlcl_safe.sh",
@@ -112,6 +114,8 @@ class BackupDbCliTests(unittest.TestCase):
             '    ascii-padded) printf \'\\v\\f FUNCTION \\f = \\v0 \\f\\v\\r\\nPACKAGE=0\\nPACKAGE BODY=0\\nPROCEDURE=0\\nSYNONYM=0\\nTRIGGER=0\\nVIEW=1\\n\\v\\f\\n\' > "$manifest" ;;\n'
             '    unicode-space) printf \'\\302\\240FUNCTION=0\\nPACKAGE=0\\nPACKAGE BODY=0\\nPROCEDURE=0\\nSYNONYM=0\\nTRIGGER=0\\nVIEW=1\\n\' > "$manifest" ;;\n'
             '    unicode-separator) printf \'FUNCTION=0\\nPACKAGE=0\\nPACKAGE BODY=0\\nPROCEDURE=0\\nSYNONYM=0\\nTRIGGER=0\\nVIEW=1\\342\\200\\250\' > "$manifest" ;;\n'
+            '    bom) printf \'\\357\\273\\277FUNCTION=0\\nPACKAGE=0\\nPACKAGE BODY=0\\nPROCEDURE=0\\nSYNONYM=0\\nTRIGGER=0\\nVIEW=1\\n\' > "$manifest" ;;\n'
+            '    bare-cr) printf \'FUNCTION=0\\rPACKAGE=0\\rPACKAGE BODY=0\\rPROCEDURE=0\\rSYNONYM=0\\rTRIGGER=0\\rVIEW=1\\r\' > "$manifest" ;;\n'
             "    *) printf 'FUNCTION=0\\nPACKAGE=0\\nPACKAGE BODY=0\\nPROCEDURE=0\\nSYNONYM=0\\nTRIGGER=0\\nVIEW=1\\n' > \"$manifest\" ;;\n"
             "  esac\n"
             "fi\n",
@@ -207,6 +211,8 @@ class BackupDbCliTests(unittest.TestCase):
     def test_invalid_manifest_preserves_existing_mirror_in_both_wrappers(self) -> None:
         invalid_manifests = (
             "invalid-trigger",
+            "bom",
+            "bare-cr",
             "unicode-space",
             "unicode-separator",
             "negative",

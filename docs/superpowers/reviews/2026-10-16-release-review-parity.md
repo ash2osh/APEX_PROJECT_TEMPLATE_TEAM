@@ -10,7 +10,7 @@ Changes were adapted inline; release-specific contracts were not copied between 
 | --- | --- | --- |
 | F1: malformed comment conceals SQLcl commands | Already refused by the full SQL-only parser. | Retained that stronger parser and added the rollout/ORDS regression. Valid standalone COMMIT/ROLLBACK were also incorrectly refused; rollout alone now opts into these statements. Migration parsing remains strict by default. |
 | F2: blank-line rollout delivery | Driver omitted SQLBLANKLINES ON. | Enabled before the payload include, covering SQL and ORDS rollout steps. |
-| F3: malformed backup manifests | Both wrappers already enforce the type inventory, duplicates, ASCII counts, range and sum limits before replacing mirrors. | Production code retained. Added form-feed/vertical-tab acceptance and Unicode whitespace/separator refusal cases; both wrappers preserve old mirror bytes on failure. |
+| F3: malformed backup manifests | Count/type validation was present, but PowerShell accepted BOM-prefixed and bare-CR records and replaced the mirror where Bash refused. | Both wrappers now use the proven shared strict byte/record/count validator. Added BOM and bare-CR refusal cases alongside ASCII/Unicode whitespace coverage; old mirror bytes must survive every refusal. |
 | F4: DBA connection aliases rejected | Python, Bash and PowerShell already accept/validate configured aliases. | Existing 26.2 configuration contract retained. |
 | F5: wrong 26.1 upstream | The 26.2 manifest correctly selects TEAM with schemaVersion 2 and apexRelease 26.2. | Not applicable; historical 26.1-lock recovery must not rewrite the 26.2 upstream. |
 | F6: nullable additions lack definition checks | Reproduced. | Every added column receives an owner/table/column-scoped definition postcondition. |
@@ -20,7 +20,7 @@ Changes were adapted inline; release-specific contracts were not copied between 
 | R1: SQL BOOLEAN accidentally rejected | SQL BOOLEAN was already supported. | Preserved; executable scoped column-check regression added. |
 | R2: historical TEAM lock recovery | Specific to the separate 26.1 repository and schema-1 lock. | Not copied into the 26.2 contract. |
 | R3: wrong receipt filename in tests | The new column/view regression tests were absent. | Added tests for the real status.dev.json, pending events, failed-check evidence, locked retry and no extra writes. |
-| R5: incomplete ASCII whitespace | Both 26.2 wrappers already trim the full relevant ASCII set. | Expanded parity coverage passed without changing their implementations. |
+| R5: incomplete ASCII whitespace | Both 26.2 wrappers already trimmed the relevant ASCII set; their byte/record decoding still differed (F3). | Retained ASCII acceptance in the shared validator and expanded wrapper parity coverage. |
 
 ## Additional shared defect
 
@@ -50,3 +50,7 @@ It failed with a SQL syntax error before the fix in both repositories.
 - The existing primary TEAM checkout and its unrelated untracked configuration,
   application source, mirrors and plans were preserved. Work used the clean
   existing 26.2 worktree on `codex/fix-26-2-review-findings`.
+
+## Byte-format follow-up
+
+The initial parity assessment of F3 covered counts/types but missed shell-level decoding differences. A direct probe and new wrapper regressions confirmed that BOM-prefixed and bare-CR manifests were accepted by PowerShell with mirror replacement, while Bash refused and preserved the old mirror. The corrected implementation reuses the 26.1 shared validator, including strict UTF-8/no-BOM reads and LF/CRLF records, and updates all backup fixture checkouts to include it. The focused and full-suite records for this increment are separate under scratch/review-parity-2026-10-16/backup-byte-followup/. The earlier 1,777-test result belongs to the preceding candidate, not this increment.
