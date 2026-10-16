@@ -5,6 +5,8 @@ import unittest
 import sys
 from pathlib import Path
 
+from scripts.validate_migration import statement_spans, validate_sql_only
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "scripts" / "validate_migration.py"
@@ -377,6 +379,25 @@ class ValidateMigrationTests(unittest.TestCase):
                 result = self.run_validator(source)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("SQL-only migration", result.stderr)
+
+    def test_rollout_transaction_opt_in_preserves_statement_spans(self) -> None:
+        source = "COMMIT;\nROLLBACK;\nCOMMIT WORK;\nROLLBACK TO SAVEPOINT review_point;\n"
+        spans = statement_spans(source, allow_transaction_control=True)
+        self.assertEqual([source[start:end] for start, end in spans], [
+            "COMMIT", "ROLLBACK", "COMMIT WORK", "ROLLBACK TO SAVEPOINT review_point",
+        ])
+        validate_sql_only(source, allow_transaction_control=True)
+        with self.assertRaises(ValueError):
+            validate_sql_only(source)
+
+    def test_rollout_transaction_opt_in_still_refuses_client_hazards(self) -> None:
+        for source in (
+            "COMMIT;\nHOST touch marker\n", "ROLLBACK;\n@other.sql\n",
+            "COMMIT;\n/*/\nPROMPT hidden\n*/\nSELECT 1 FROM dual;\n",
+            "COMMIT,~\nHOST touch marker\n", "ROLLBACK/**/;\n",
+        ):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                validate_sql_only(source, allow_transaction_control=True)
 
 
 if __name__ == "__main__":
