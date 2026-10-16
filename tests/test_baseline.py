@@ -554,6 +554,285 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         self.assertEqual(len(checks["postconditions"]), 101)
 
 
+    def test_added_nullable_column_receives_definition_postcondition(self) -> None:
+        config = {"schemas": ["APP_DEV"], "prefixes": [], "excludedObjects": [], "sequenceMappings": []}
+        source = {"sections": {
+            "tables": [{"name": "APP_ITEMS"}],
+            "columns": [
+                {"table_name": "APP_ITEMS", "name": "ID", "data_type": "NUMBER", "data_precision": 10, "data_scale": 0, "nullable": "N"},
+                {"table_name": "APP_ITEMS", "name": "NOTE", "data_type": "VARCHAR2", "data_length": 200, "char_length": 200, "char_used": "C", "nullable": "Y"},
+                {"table_name": "APP_ITEMS", "name": "PRICE", "data_type": "NUMBER", "data_precision": None, "data_scale": 2, "nullable": "Y"},
+                {"table_name": "APP_ITEMS", "name": "WEIGHT", "data_type": "FLOAT", "data_precision": 63, "data_scale": None, "nullable": "Y"},
+            ],
+            "constraints": [], "indexes": [], "sequences": [], "identity-columns": [],
+        }}
+        target = {"sections": {
+            "tables": [{"name": "APP_ITEMS"}],
+            "columns": [
+                {"table_name": "APP_ITEMS", "name": "ID", "data_type": "NUMBER", "data_precision": 10, "data_scale": 0, "nullable": "N"},
+            ],
+            "constraints": [], "indexes": [], "sequences": [], "identity-columns": [],
+        }}
+
+        steps, checks = baseline._structure_bundle(
+            config, "APP_DEV", "APP_STAGE", source, target, SchemaSnapshot({}, {}, {}, {}, "", ""),
+        )
+
+        postconditions = {check["id"]: check for check in checks.get("postconditions", [])}
+        self.assertTrue(len(postconditions) >= 3, f"Expected at least 3 postconditions, got: {postconditions}")
+        for check in postconditions.values():
+            baseline.validate_check_query(check["sql"])
+            self.assertEqual(check["expected"], 1)
+
+        note_check = next(c for c in postconditions.values() if "NOTE" in c["sql"])
+        self.assertIn("ALL_TAB_COLS", note_check["sql"])
+        self.assertIn("VARCHAR2", note_check["sql"])
+        self.assertIn("CHAR_LENGTH = 200", note_check["sql"])
+        self.assertIn("CHAR_USED = 'C'", note_check["sql"])
+
+        price_check = next(c for c in postconditions.values() if "PRICE" in c["sql"])
+        self.assertIn("DATA_PRECISION IS NULL", price_check["sql"])
+        self.assertIn("DATA_SCALE = 2", price_check["sql"])
+
+        weight_check = next(c for c in postconditions.values() if "WEIGHT" in c["sql"])
+        self.assertIn("FLOAT", weight_check["sql"])
+        self.assertIn("DATA_PRECISION = 63", weight_check["sql"])
+
+    def test_added_boolean_column_generates_a_scoped_definition_check(self) -> None:
+        config = {"schemas": ["APP_DEV"], "prefixes": [], "excludedObjects": []}
+        source = {"sections": {
+            "tables": [{"name": "APP_ITEMS"}],
+            "columns": [{"table_name": "APP_ITEMS", "name": "IS_ACTIVE", "data_type": "BOOLEAN", "nullable": "Y"}],
+        }}
+        target = {"sections": {"tables": [{"name": "APP_ITEMS"}], "columns": []}}
+        steps, checks = baseline._structure_bundle(
+            config, "APP_DEV", "APP_STAGE", source, target, SchemaSnapshot({}, {}, {}, {}, "", ""),
+        )
+        self.assertIn('ADD ("IS_ACTIVE" BOOLEAN)', next(iter(steps.values())))
+        self.assertEqual(len(checks["postconditions"]), 1)
+        check = checks["postconditions"][0]
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.executescript("CREATE TABLE DUAL (X); INSERT INTO DUAL VALUES (1); "
+                                 "CREATE TABLE ALL_TAB_COLS (OWNER, TABLE_NAME, COLUMN_NAME, DATA_TYPE);")
+        for owner, table, column, data_type, expected in (
+            ("APP_STAGE", "APP_ITEMS", "IS_ACTIVE", "BOOLEAN", 1),
+            ("OTHER", "APP_ITEMS", "IS_ACTIVE", "BOOLEAN", 0),
+            ("APP_STAGE", "OTHER", "IS_ACTIVE", "BOOLEAN", 0),
+            ("APP_STAGE", "APP_ITEMS", "OTHER", "BOOLEAN", 0),
+            ("APP_STAGE", "APP_ITEMS", "IS_ACTIVE", "NUMBER", 0),
+        ):
+            with self.subTest(owner=owner, table=table, column=column, data_type=data_type):
+                connection.execute("DELETE FROM ALL_TAB_COLS")
+                connection.execute("INSERT INTO ALL_TAB_COLS VALUES (?, ?, ?, ?)", (owner, table, column, data_type))
+                self.assertEqual(connection.execute(check["sql"]).fetchone()[0], expected)
+        connection.execute("DELETE FROM ALL_TAB_COLS")
+        self.assertEqual(connection.execute(check["sql"]).fetchone()[0], 0)
+
+    def test_fractional_and_nonfinite_metadata_is_refused_before_generation(self) -> None:
+        attributes = (
+            ("NUMBER", "data_precision", {}),
+            ("NUMBER", "data_scale", {}),
+            ("FLOAT", "data_precision", {}),
+            ("VARCHAR2", "char_length", {"char_used": "C"}),
+            ("CHAR", "data_length", {"char_used": "B"}),
+            ("NVARCHAR2", "char_length", {}),
+            ("NCHAR", "char_length", {}),
+            ("RAW", "data_length", {}),
+        )
+        for data_type, attribute, extra in attributes:
+            for value in (10.9, -2.9, Decimal("10.9"), float("inf"), float("nan"), Decimal("Infinity"), Decimal("NaN")):
+                row = {"table_name": "T", "name": "C", "data_type": data_type, **extra, attribute: value}
+                for operation in (baseline._table_column_type, lambda row: baseline._column_definition_check("APP_STAGE", row)):
+                    with self.subTest(data_type=data_type, attribute=attribute, value=value, operation=operation):
+                        with self.assertRaises(baseline.BaselineError):
+                            operation(row)
+
+    def test_integral_metadata_keeps_integer_representation_compatibility(self) -> None:
+        for precision in (10, "10", 10.0, Decimal("10.00")):
+            for scale in (-2, "-2", -2.0, Decimal("-2.00")):
+                row = {"table_name": "T", "name": "C", "data_type": "NUMBER", "data_precision": precision, "data_scale": scale}
+                with self.subTest(precision=precision, scale=scale):
+                    self.assertEqual(baseline._table_column_type(row), "NUMBER(10,-2)")
+                    check = baseline._column_definition_check("APP_STAGE", row)
+                    self.assertIn("DATA_PRECISION = 10", check["sql"])
+                    self.assertIn("DATA_SCALE = -2", check["sql"])
+
+    def test_column_definition_check_details(self) -> None:
+        schema = "APP_STAGE"
+        # NUMBER(*,2)
+        chk = baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "NUMBER", "data_precision": None, "data_scale": 2})
+        self.assertIn("DATA_TYPE = 'NUMBER'", chk["sql"])
+        self.assertIn("DATA_PRECISION IS NULL", chk["sql"])
+        self.assertIn("DATA_SCALE = 2", chk["sql"])
+        baseline.validate_check_query(chk["sql"])
+
+        # NUMBER(10,2)
+        chk = baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "NUMBER", "data_precision": 10, "data_scale": 2})
+        self.assertIn("DATA_PRECISION = 10", chk["sql"])
+        self.assertIn("DATA_SCALE = 2", chk["sql"])
+        baseline.validate_check_query(chk["sql"])
+
+        # FLOAT(63)
+        chk = baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "FLOAT", "data_precision": 63, "data_scale": None})
+        self.assertIn("DATA_TYPE = 'FLOAT'", chk["sql"])
+        self.assertIn("DATA_PRECISION = 63", chk["sql"])
+        self.assertIn("DATA_SCALE IS NULL", chk["sql"])
+        baseline.validate_check_query(chk["sql"])
+
+        # RAW(16)
+        chk = baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "RAW", "data_length": 16})
+        self.assertIn("DATA_TYPE = 'RAW'", chk["sql"])
+        self.assertIn("DATA_LENGTH = 16", chk["sql"])
+        baseline.validate_check_query(chk["sql"])
+
+        # VARCHAR2 BYTE
+        chk = baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "VARCHAR2", "data_length": 50, "char_used": "B"})
+        self.assertIn("DATA_TYPE = 'VARCHAR2'", chk["sql"])
+        self.assertIn("DATA_LENGTH = 50", chk["sql"])
+        baseline.validate_check_query(chk["sql"])
+
+        # NVARCHAR2
+        chk = baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "NVARCHAR2", "char_length": 30})
+        self.assertIn("DATA_TYPE = 'NVARCHAR2'", chk["sql"])
+        self.assertIn("CHAR_LENGTH = 30", chk["sql"])
+        baseline.validate_check_query(chk["sql"])
+
+        # Refusal on invalid metadata
+        with self.assertRaises(baseline.BaselineError):
+            baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "NUMBER", "data_precision": True})
+        with self.assertRaises(baseline.BaselineError):
+            baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "FLOAT", "data_precision": 63, "data_scale": 1})
+        with self.assertRaises(baseline.BaselineError):
+            baseline._column_definition_check(schema, {"table_name": "T", "name": "C", "data_type": "RAW"})
+
+    def test_code_bundle_view_only_generates_validity_check(self) -> None:
+        config = {"schemas": ["APP_DEV"], "prefixes": ["V_"], "excludedObjects": [], "sequenceMappings": []}
+        source = {
+            "source-units": {},
+            "settings": {},
+            "sections": {
+                "baseline-views": [
+                    {
+                        "name": "V_ITEMS",
+                        "text": "SELECT 1 ID, 'A' NAME FROM DUAL",
+                        "ddl": 'CREATE OR REPLACE FORCE EDITIONABLE VIEW "APP_DEV"."V_ITEMS" AS SELECT 1 ID, \'A\' NAME FROM DUAL',
+                    }
+                ]
+            },
+        }
+        target = {
+            "source-units": {},
+            "settings": {},
+            "sections": {"baseline-views": []},
+        }
+
+        steps, checks = baseline._code_bundle(config, "APP_DEV", "APP_STAGE", source, target)
+
+        self.assertEqual(len(steps), 1)
+        self.assertIn("001-view-v-items-", list(steps.keys())[0])
+        # compile-all is NOT emitted when only views change (no stored units)
+        self.assertFalse(any("compile-all" in s for s in steps))
+
+        posts = {check["id"]: check for check in checks["postconditions"]}
+        # Must have both existence check (view-v-items-...) and validity check (valid-view-v-items-...)
+        valid_check = next((c for c in posts.values() if c["id"].startswith("valid-view-")), None)
+        self.assertIsNotNone(valid_check, f"Missing valid-view check in postconditions: {posts}")
+        self.assertEqual(valid_check["expected"], 1)
+        baseline.validate_check_query(valid_check["sql"])
+        self.assertIn("ALL_OBJECTS", valid_check["sql"])
+        self.assertIn("STATUS = 'VALID'", valid_check["sql"])
+        self.assertIn("ALL_ERRORS", valid_check["sql"])
+        self.assertIn("ATTRIBUTE = 'ERROR'", valid_check["sql"])
+        self.assertIn("'APP_STAGE'", valid_check["sql"])
+        self.assertIn("'V_ITEMS'", valid_check["sql"])
+
+    def test_view_validity_check_query_scenarios(self) -> None:
+        check = baseline._view_validity_check("APP_STAGE", "V_ITEMS")
+        sql = check["sql"]
+        baseline.validate_check_query(sql)
+
+        # Evaluate against SQLite in-memory database mimicking Oracle catalogs
+        # DUAL table in SQLite:
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE DUAL (DUMMY VARCHAR(1))")
+        cur.execute("INSERT INTO DUAL VALUES ('X')")
+        cur.execute("CREATE TABLE ALL_OBJECTS (OWNER VARCHAR, OBJECT_NAME VARCHAR, OBJECT_TYPE VARCHAR, STATUS VARCHAR)")
+        cur.execute("CREATE TABLE ALL_ERRORS (OWNER VARCHAR, NAME VARCHAR, TYPE VARCHAR, ATTRIBUTE VARCHAR)")
+
+        # 1. Valid view
+        cur.execute("INSERT INTO ALL_OBJECTS VALUES ('APP_STAGE', 'V_ITEMS', 'VIEW', 'VALID')")
+        self.assertEqual(cur.execute(sql).fetchone()[0], 1)
+
+        # 2. View in compilation error
+        cur.execute("INSERT INTO ALL_ERRORS VALUES ('APP_STAGE', 'V_ITEMS', 'VIEW', 'ERROR')")
+        self.assertEqual(cur.execute(sql).fetchone()[0], 0)
+
+        # Clear errors; make view INVALID
+        cur.execute("DELETE FROM ALL_ERRORS")
+        cur.execute("UPDATE ALL_OBJECTS SET STATUS = 'INVALID' WHERE OBJECT_NAME = 'V_ITEMS'")
+        self.assertEqual(cur.execute(sql).fetchone()[0], 0)
+
+        # 3. Missing view
+        cur.execute("DELETE FROM ALL_OBJECTS")
+        self.assertEqual(cur.execute(sql).fetchone()[0], 0)
+
+        # 4. Valid view with unrelated invalid object and unrelated error
+        cur.execute("INSERT INTO ALL_OBJECTS VALUES ('APP_STAGE', 'V_ITEMS', 'VIEW', 'VALID')")
+        cur.execute("INSERT INTO ALL_OBJECTS VALUES ('APP_STAGE', 'OTHER_VIEW', 'VIEW', 'INVALID')")
+        cur.execute("INSERT INTO ALL_ERRORS VALUES ('APP_STAGE', 'OTHER_VIEW', 'VIEW', 'ERROR')")
+        self.assertEqual(cur.execute(sql).fetchone()[0], 1)
+
+    def test_table_column_type_formatting_and_validation(self) -> None:
+        # Formatter positive cases
+        positive_cases = [
+            ({"name": "C1", "data_type": "NUMBER", "data_precision": None, "data_scale": None}, "NUMBER"),
+            ({"name": "C2", "data_type": "NUMBER", "data_precision": 10, "data_scale": 2}, "NUMBER(10,2)"),
+            ({"name": "C3", "data_type": "NUMBER", "data_precision": None, "data_scale": 2}, "NUMBER(*,2)"),
+            ({"name": "C4", "data_type": "NUMBER", "data_precision": None, "data_scale": -2}, "NUMBER(*,-2)"),
+            ({"name": "C5", "data_type": "FLOAT", "data_precision": 63, "data_scale": None}, "FLOAT(63)"),
+            ({"name": "C6", "data_type": "FLOAT", "data_precision": None, "data_scale": None}, "FLOAT"),
+            ({"name": "C7", "data_type": "NUMBER", "data_precision": 1, "data_scale": -84}, "NUMBER(1,-84)"),
+            ({"name": "C8", "data_type": "NUMBER", "data_precision": 38, "data_scale": 127}, "NUMBER(38,127)"),
+            ({"name": "C9", "data_type": "NUMBER", "data_precision": 1, "data_scale": None}, "NUMBER(1)"),
+            ({"name": "C10", "data_type": "NUMBER", "data_precision": 38, "data_scale": None}, "NUMBER(38)"),
+            ({"name": "C11", "data_type": "FLOAT", "data_precision": 1, "data_scale": None}, "FLOAT(1)"),
+            ({"name": "C12", "data_type": "FLOAT", "data_precision": 126, "data_scale": None}, "FLOAT(126)"),
+            ({"name": "C13", "data_type": "VARCHAR2", "data_length": 100, "char_length": 100, "char_used": "C"}, "VARCHAR2(100 CHAR)"),
+            ({"name": "C14", "data_type": "VARCHAR2", "data_length": 100, "char_length": 100, "char_used": "B"}, "VARCHAR2(100 BYTE)"),
+            ({"name": "C15", "data_type": "RAW", "data_length": 16}, "RAW(16)"),
+            ({"name": "C16", "data_type": "TIMESTAMP(6) WITH TIME ZONE"}, "TIMESTAMP(6) WITH TIME ZONE"),
+            ({"name": "C17", "data_type": "DATE"}, "DATE"),
+            ({"name": "C18", "data_type": "BOOLEAN"}, "BOOLEAN"),
+        ]
+        for row, expected in positive_cases:
+            with self.subTest(row=row):
+                self.assertEqual(baseline._table_column_type(row), expected)
+
+        # Refusal cases
+        refusal_cases = [
+            {"name": "C", "data_type": True},
+            {"name": "C", "data_type": "NUMBER", "data_precision": True},
+            {"name": "C", "data_type": "NUMBER", "data_scale": True},
+            {"name": "C", "data_type": "FLOAT", "data_precision": True},
+            {"name": "C", "data_type": "NUMBER", "data_precision": "invalid"},
+            {"name": "C", "data_type": "NUMBER", "data_scale": "invalid"},
+            {"name": "C", "data_type": "FLOAT", "data_precision": "invalid"},
+            {"name": "C", "data_type": "NUMBER", "data_precision": 0},
+            {"name": "C", "data_type": "NUMBER", "data_precision": 39},
+            {"name": "C", "data_type": "NUMBER", "data_scale": -85},
+            {"name": "C", "data_type": "NUMBER", "data_scale": 128},
+            {"name": "C", "data_type": "FLOAT", "data_precision": 0},
+            {"name": "C", "data_type": "FLOAT", "data_precision": 127},
+            {"name": "C", "data_type": "FLOAT", "data_precision": 63, "data_scale": 2},
+        ]
+        for row in refusal_cases:
+            with self.subTest(refuse=row):
+                with self.assertRaises(baseline.BaselineError):
+                    baseline._table_column_type(row)
+
+
 class BaselineReferenceDataTests(unittest.TestCase):
     fixtures = ROOT / "tests" / "fixtures" / "baseline"
 
@@ -836,7 +1115,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
                 "002-view-v-alpha-c84bc776.sql": "8fa2d6c64ae5ae045a97e66185ac6df772b95ab9a72bd65a0fbe6fa12e05b408",
                 "003-compile-all.sql": "129069e30a63ed90794a92a868333fe69a285bb2b43085bd2fdc83665d2abc9b",
                 "README.md": "e6be64748b36edf32d8b43f0d16421921aadfc0ac668a257783cbc75976693bf",
-                "checks.json": "695eef767efa716e87b36674fa85e3e1ea16373caa2b22240bc43553f522c5c9",
+                "checks.json": "f7af1a3345cae5c3e9e2584055b8b3aa9149108474e114c05ee5e077aa4b745b",
             },
             "baseline-grants": {
                 "001-object-grants.sql": "b33b8ba6a46f8214f2348ced90a82d4800bb11964fe891ff23db593ac5b90de4",

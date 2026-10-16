@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
+. (Join-Path $PSScriptRoot "resolve_python.ps1")
 
 # A failed SPOOL inside the generated driver prints an SP2- message that does
 # not stop SQLcl, so an object can go missing without any non-zero exit code.
@@ -36,73 +37,13 @@ function Test-ScopeComplete {
   )
   $spoolSchema = Get-SqlclSpoolSchemaName -Schema $Schema
   $manifestPath = Join-Path $StagingPath "database/$spoolSchema/manifest-$Scope.txt"
-  [long] $expected = 0
-  $manifestTypes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-  [char[]] $asciiWhitespace = @([char] 32, [char] 9, [char] 13, [char] 11, [char] 12)
-  if ($Scope -eq "tables") {
-    $requiredTypes = @("TABLE")
-  } else {
-    $requiredTypes = @("VIEW", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "SYNONYM", "TRIGGER")
-  }
-
-  foreach ($rawLine in (Get-Content -LiteralPath $manifestPath)) {
-    $line = ([string] $rawLine).Trim($asciiWhitespace)
-    if ([string]::IsNullOrEmpty($line)) { continue }
-
-    $separator = $line.IndexOf('=')
-    if ($separator -lt 0 -or $separator -ne $line.LastIndexOf('=')) {
-      throw "database backup manifest for $Schema ($Scope) contains a malformed row; the mirror was not replaced"
-    }
-    $objectType = $line.Substring(0, $separator).Trim($asciiWhitespace)
-    $countText = $line.Substring($separator + 1).Trim($asciiWhitespace)
-    if ([string]::IsNullOrEmpty($objectType) -or [string]::IsNullOrEmpty($countText)) {
-      throw "database backup manifest for $Schema ($Scope) contains an empty type or count; the mirror was not replaced"
-    }
-    if (-not ($requiredTypes -ccontains $objectType)) {
-      throw "database backup manifest for $Schema ($Scope) contains an unsupported object type; the mirror was not replaced"
-    }
-    if ($manifestTypes.Contains($objectType)) {
-      throw "database backup manifest for $Schema ($Scope) contains a duplicate $objectType row; the mirror was not replaced"
-    }
-    if ($countText -cnotmatch '\A[0-9]+\z') {
-      throw "database backup manifest for $Schema ($Scope) contains an invalid count for $objectType; the mirror was not replaced"
-    }
-
-    [long] $parsed = 0
-    if (-not [long]::TryParse(
-        $countText,
-        [System.Globalization.NumberStyles]::None,
-        [System.Globalization.CultureInfo]::InvariantCulture,
-        [ref] $parsed
-      )) {
-      throw "database backup manifest for $Schema ($Scope) contains a count outside the signed 64-bit range; the mirror was not replaced"
-    }
-    if ($expected -gt ([long]::MaxValue - $parsed)) {
-      throw "database backup manifest for $Schema ($Scope) count total overflows the signed 64-bit range; the mirror was not replaced"
-    }
-
-    $expected += $parsed
-    [void] $manifestTypes.Add($objectType)
-  }
-
-  foreach ($requiredType in $requiredTypes) {
-    if (-not $manifestTypes.Contains($requiredType)) {
-      throw "database backup manifest for $Schema ($Scope) is missing the $requiredType row; the mirror was not replaced"
-    }
-  }
-
-  $scopeDirs = Get-ScopeDirectory -Scope $Scope
-  $actual = 0
-  foreach ($scopeDir in $scopeDirs) {
-    $scopePath = Join-Path $StagingPath "database/$spoolSchema/$scopeDir"
-    if (Test-Path -LiteralPath $scopePath) {
-      $actual += @(Get-ChildItem -LiteralPath $scopePath -File -Filter *.sql).Count
-    }
-  }
-
-  if ($expected -ne $actual) {
-    throw ("database backup is incomplete for $Schema ($Scope): manifest expects " +
-      "$expected object file(s) but $actual were written; the mirror was not replaced")
+  $mirrorPath = Join-Path $StagingPath "database/$spoolSchema"
+  $validator = Join-Path $PSScriptRoot "backup_manifest.py"
+  $python = Resolve-TeamPython
+  if ($null -eq $python) { throw "Python 3.10 or newer is required to validate backup manifests (python3, python or py -3)" }
+  & $python.Path @($python.Prefix) $validator --scope $Scope --manifest $manifestPath --mirror $mirrorPath --schema $Schema
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
   }
 }
 

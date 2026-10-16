@@ -267,12 +267,15 @@ def mask_java_quoted_values(source: str) -> str:
     return "".join(characters)
 
 
-def validate_sql_only(source: str) -> None:
-    """Allow terminated SQL statements and PL/SQL blocks, but no SQLcl commands."""
-    statement_spans(source)
+def validate_sql_only(source: str, *, allow_transaction_control: bool = False) -> None:
+    """Allow SQL and PL/SQL, with transaction completion reserved for migration drivers.
+
+    Standalone rollout scripts may explicitly opt into COMMIT and ROLLBACK.
+    """
+    statement_spans(source, allow_transaction_control=allow_transaction_control)
 
 
-def statement_spans(source: str) -> list[tuple[int, int]]:
+def statement_spans(source: str, *, allow_transaction_control: bool = False) -> list[tuple[int, int]]:
     """Validate SQL-only source and return each statement's (start, end) offsets.
 
     The end excludes the ';' or the standalone '/' that terminates it.
@@ -310,14 +313,16 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
         # skip the rest as one block. Judge the source, not the masked text, so
         # a comment glued to the word ('DECLARE/**/') does not count as a gap.
         word_end = first_match.end()
-        if word_end < len(source) and source[word_end] not in " \t\r\n":
+        first = first_match.group().upper()
+        transaction_control = allow_transaction_control and first in {"COMMIT", "ROLLBACK"}
+        transaction_terminator = transaction_control and source[word_end:word_end + 1] == ";"
+        if word_end < len(source) and source[word_end] not in " \t\r\n" and not transaction_terminator:
             raise ValueError(
                 f"SQL-only migration rejects '{source[statement_start:word_end + 1].strip()}' at line "
                 f"{line_at(masked, statement_start)}: SQLcl reads a statement's first word up to the next space, "
                 f"so put a space after '{first_match.group()}'"
             )
         tokens = FIRST_WORD.findall(masked[index:index + 240])
-        first = first_match.group().upper()
 
         is_plsql_block = first in {"BEGIN", "DECLARE"}
         if first == "CREATE":
@@ -345,7 +350,7 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
 
         # Name a client command before asking for a semicolon: HOST, DEFINE, START
         # and the like end at the newline, so "add a semicolon" would be wrong.
-        allowed = first in SQL_STARTERS
+        allowed = first in SQL_STARTERS or transaction_control
         if first == "SET":
             # Only SET CONSTRAINTS and SET TRANSACTION are SQL; read the second word
             # from this statement, not from the one after a ';'.

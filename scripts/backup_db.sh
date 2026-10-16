@@ -161,97 +161,19 @@ scope_directories() {
 # not stop SQLcl, so an object can go missing without any non-zero exit code.
 # The manifest states how many objects each scope should have produced; refuse
 # to install a mirror that does not have exactly that many files.
-trim_ascii_spool_whitespace() {
-  local value="$1"
-  local whitespace=$' \t\r\v\f'
-  value="${value#"${value%%[!$whitespace]*}"}"
-  value="${value%"${value##*[!$whitespace]}"}"
-  printf '%s' "$value"
-}
-
-backup_manifest_error() {
-  printf 'database backup manifest for %s (%s) %s; the mirror was not replaced\n' \
-    "$1" "$2" "$3" >&2
-  exit 2
-}
-
 verify_scope_complete() {
   local scope="$1"
   local schema="$2"
-  local LC_ALL=C
   local spool_schema
   spool_schema="$(schema_stage_directory "$schema")"
   local mirror_stage="$STAGING_DIR/database/$spool_schema"
   local manifest="$mirror_stage/manifest-$scope.txt"
-  local expected=0
-  local manifest_types='|'
-  local line object_type count normalized count_value max_int64=9223372036854775807
-  local required_type type_allowed
-  local -a required_types
-  case "$scope" in
-    tables) required_types=(TABLE) ;;
-    code) required_types=(VIEW PACKAGE 'PACKAGE BODY' PROCEDURE FUNCTION SYNONYM TRIGGER) ;;
-    *) echo "unsupported backup scope: $scope" >&2; exit 2 ;;
-  esac
 
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="$(trim_ascii_spool_whitespace "$line")"
-    [ -z "$line" ] && continue
-    [[ "$line" == *=* ]] || backup_manifest_error "$schema" "$scope" "contains a malformed row"
-    object_type="$(trim_ascii_spool_whitespace "${line%%=*}")"
-    count="${line#*=}"
-    [[ "$count" != *=* ]] || backup_manifest_error "$schema" "$scope" "contains a malformed row"
-    count="$(trim_ascii_spool_whitespace "$count")"
-    [ -n "$object_type" ] || backup_manifest_error "$schema" "$scope" "contains an empty object type"
-    [ -n "$count" ] || backup_manifest_error "$schema" "$scope" "contains an empty object count"
-
-    type_allowed=0
-    for required_type in "${required_types[@]}"; do
-      if [[ "$object_type" == "$required_type" ]]; then
-        type_allowed=1
-        break
-      fi
-    done
-    [ "$type_allowed" -eq 1 ] || backup_manifest_error "$schema" "$scope" "contains an unsupported object type"
-    [[ "$manifest_types" != *"|$object_type|"* ]] || backup_manifest_error "$schema" "$scope" "contains a duplicate $object_type row"
-    [[ "$count" =~ ^[0-9]+$ ]] || backup_manifest_error "$schema" "$scope" "contains an invalid count for $object_type"
-
-    normalized="$count"
-    while [[ "$normalized" == 0* && "${#normalized}" -gt 1 ]]; do
-      normalized="${normalized#0}"
-    done
-    if [[ "${#normalized}" -gt 19 ]] || \
-      { [[ "${#normalized}" -eq 19 ]] && [[ "$normalized" > "$max_int64" ]]; }; then
-      backup_manifest_error "$schema" "$scope" "contains a count outside the signed 64-bit range"
-    fi
-
-    count_value=$((10#$normalized))
-    if (( expected > max_int64 - count_value )); then
-      backup_manifest_error "$schema" "$scope" "count total overflows the signed 64-bit range"
-    fi
-    expected=$((expected + count_value))
-    manifest_types+="$object_type|"
-  done < "$manifest"
-
-  for required_type in "${required_types[@]}"; do
-    if [[ "$manifest_types" != *"|$required_type|"* ]]; then
-      backup_manifest_error "$schema" "$scope" "is missing the $required_type row"
-    fi
-  done
-
-  local actual=0
-  local scope_dir found
-  while IFS= read -r scope_dir; do
-    found="$(find "$mirror_stage/$scope_dir" -maxdepth 1 -type f \
-      -name '*.sql' 2>/dev/null | wc -l)"
-    actual=$((actual + found))
-  done < <(scope_directories "$scope")
-
-  if [ "$expected" -ne "$actual" ]; then
-    echo "database backup is incomplete for $schema ($scope): manifest expects" >&2
-    echo "$expected object file(s) but $actual were written; the mirror was not replaced" >&2
-    exit 2
-  fi
+  python3 "$REPO_ROOT/scripts/backup_manifest.py" \
+    --scope "$scope" \
+    --manifest "$manifest" \
+    --mirror "$mirror_stage" \
+    --schema "$schema" || exit $?
 }
 
 run_backup_scope() {

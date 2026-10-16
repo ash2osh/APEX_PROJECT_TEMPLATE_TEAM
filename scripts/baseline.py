@@ -1226,27 +1226,208 @@ def _replace_create_header(ddl: str, object_type: str, source_schema: str, targe
     return ddl
 
 
+def _metadata_integer(value: object, description: str) -> int:
+    """Read an integer catalog attribute without rounding malformed evidence."""
+    if isinstance(value, bool) or not isinstance(value, (int, str, float, Decimal)):
+        raise BaselineError(f"{description} is not an integer: {value!r}")
+    try:
+        parsed = int(value)
+    except (ValueError, TypeError, OverflowError) as error:
+        raise BaselineError(f"{description} is not an integer: {value!r}") from error
+    if isinstance(value, (float, Decimal)) and value != parsed:
+        raise BaselineError(f"{description} is not an integer: {value!r}")
+    return parsed
+
+
 def _table_column_type(row: Mapping) -> str:
     data_type = row.get("data_type")
-    if not isinstance(data_type, str) or re.fullmatch(r"[A-Z][A-Z0-9_ ]*(?:\([0-9]+(?:,[0-9]+)?\))?(?: WITH (?:LOCAL )?TIME ZONE)?", data_type.upper(), re.ASCII) is None:
+    col_name = row.get("name", "?")
+    if isinstance(data_type, bool) or not isinstance(data_type, str):
         raise BaselineError(f"unsupported column data type in catalog: {data_type!r}")
     value = data_type.upper()
+    if re.fullmatch(r"[A-Z][A-Z0-9_ ]*(?:\([0-9]+(?:,[0-9]+)?\))?(?: WITH (?:LOCAL )?TIME ZONE)?", value, re.ASCII) is None:
+        raise BaselineError(f"unsupported column data type in catalog: {data_type!r}")
+
     if value.startswith("NUMBER"):
-        precision, scale = row.get("data_precision"), row.get("data_scale")
-        if precision is not None:
-            value = f"NUMBER({int(precision)}" + (f",{int(scale)}" if scale is not None else "") + ")"
+        precision_raw = row.get("data_precision")
+        scale_raw = row.get("data_scale")
+        if isinstance(precision_raw, bool) or isinstance(scale_raw, bool):
+            raise BaselineError(f"column {col_name} has invalid boolean numeric attribute")
+
+        parsed_precision: int | None = None
+        if precision_raw is not None:
+            parsed_precision = _metadata_integer(precision_raw, f"column {col_name} NUMBER precision")
+            if parsed_precision < 1 or parsed_precision > 38:
+                raise BaselineError(f"column {col_name} NUMBER precision {parsed_precision} out of range 1..38")
+
+        parsed_scale: int | None = None
+        if scale_raw is not None:
+            parsed_scale = _metadata_integer(scale_raw, f"column {col_name} NUMBER scale")
+            if parsed_scale < -84 or parsed_scale > 127:
+                raise BaselineError(f"column {col_name} NUMBER scale {parsed_scale} out of range -84..127")
+
+        if parsed_precision is not None and parsed_scale is not None:
+            value = f"NUMBER({parsed_precision},{parsed_scale})"
+        elif parsed_precision is not None:
+            value = f"NUMBER({parsed_precision})"
+        elif parsed_scale is not None:
+            value = f"NUMBER(*,{parsed_scale})"
+        else:
+            value = "NUMBER"
+
+    elif value.startswith("FLOAT"):
+        precision_raw = row.get("data_precision")
+        scale_raw = row.get("data_scale")
+        if isinstance(precision_raw, bool) or isinstance(scale_raw, bool):
+            raise BaselineError(f"column {col_name} has invalid boolean FLOAT attribute")
+        if scale_raw is not None:
+            raise BaselineError(f"column {col_name} FLOAT does not support scale: {scale_raw!r}")
+
+        if precision_raw is not None:
+            parsed_precision = _metadata_integer(precision_raw, f"column {col_name} FLOAT precision")
+            if parsed_precision < 1 or parsed_precision > 126:
+                raise BaselineError(f"column {col_name} FLOAT precision {parsed_precision} out of range 1..126")
+            value = f"FLOAT({parsed_precision})"
+        else:
+            value = "FLOAT"
+
     elif value in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR", "RAW"}:
-        length = row.get("char_length") if value in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"} else row.get("data_length")
-        if length is None:
-            length = row.get("data_length")
-        if length is None or int(length) < 1:
-            raise BaselineError(f"column {row.get('name', '?')} has no usable length")
+        length_raw = row.get("char_length") if value in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"} else row.get("data_length")
+        if length_raw is None:
+            length_raw = row.get("data_length")
+        if length_raw is None or isinstance(length_raw, bool):
+            raise BaselineError(f"column {col_name} has no usable length")
+        length = _metadata_integer(length_raw, f"column {col_name} length")
+        if length < 1:
+            raise BaselineError(f"column {col_name} has no usable length")
         if value in {"VARCHAR2", "CHAR"}:
             semantics = "CHAR" if row.get("char_used") == "C" else "BYTE"
-            value = f"{value}({int(length)} {semantics})"
+            value = f"{value}({length} {semantics})"
         else:
-            value = f"{value}({int(length)})"
+            value = f"{value}({length})"
     return value
+
+
+def _column_definition_check(schema: str, row: Mapping) -> dict:
+    table_name = str(row["table_name"])
+    column_name = str(row["name"])
+    data_type_raw = row.get("data_type")
+    if isinstance(data_type_raw, bool) or not isinstance(data_type_raw, str):
+        raise BaselineError(f"column {table_name}.{column_name} has invalid data_type: {data_type_raw!r}")
+    data_type = data_type_raw.upper()
+
+    predicates = [
+        f"OWNER = {_sql_literal(schema)}",
+        f"TABLE_NAME = {_sql_literal(table_name)}",
+        f"COLUMN_NAME = {_sql_literal(column_name)}",
+    ]
+
+    if data_type.startswith("NUMBER"):
+        predicates.append("DATA_TYPE = 'NUMBER'")
+        precision = row.get("data_precision")
+        scale = row.get("data_scale")
+        if isinstance(precision, bool) or isinstance(scale, bool):
+            raise BaselineError(f"column {table_name}.{column_name} has invalid boolean numeric attribute")
+        if precision is not None:
+            p_val = _metadata_integer(precision, f"column {table_name}.{column_name} precision")
+            if p_val < 1 or p_val > 38:
+                raise BaselineError(f"column {table_name}.{column_name} precision {p_val} out of range 1..38")
+            predicates.append(f"DATA_PRECISION = {p_val}")
+        else:
+            predicates.append("DATA_PRECISION IS NULL")
+
+        if scale is not None:
+            s_val = _metadata_integer(scale, f"column {table_name}.{column_name} scale")
+            if s_val < -84 or s_val > 127:
+                raise BaselineError(f"column {table_name}.{column_name} scale {s_val} out of range -84..127")
+            predicates.append(f"DATA_SCALE = {s_val}")
+        else:
+            predicates.append("DATA_SCALE IS NULL")
+
+    elif data_type.startswith("FLOAT"):
+        predicates.append("DATA_TYPE = 'FLOAT'")
+        precision = row.get("data_precision")
+        scale = row.get("data_scale")
+        if isinstance(precision, bool) or isinstance(scale, bool):
+            raise BaselineError(f"column {table_name}.{column_name} has invalid boolean FLOAT attribute")
+        if scale is not None:
+            raise BaselineError(f"column {table_name}.{column_name} FLOAT cannot have scale: {scale!r}")
+        if precision is not None:
+            p_val = _metadata_integer(precision, f"column {table_name}.{column_name} precision")
+            if p_val < 1 or p_val > 126:
+                raise BaselineError(f"column {table_name}.{column_name} FLOAT precision {p_val} out of range 1..126")
+            predicates.append(f"DATA_PRECISION = {p_val}")
+        else:
+            predicates.append("DATA_PRECISION IS NULL")
+        predicates.append("DATA_SCALE IS NULL")
+
+    elif data_type in {"VARCHAR2", "CHAR"}:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+        char_used = row.get("char_used")
+        if char_used == "C":
+            char_length = row.get("char_length")
+            if char_length is None or isinstance(char_length, bool):
+                raise BaselineError(f"column {table_name}.{column_name} has no usable char_length for CHAR semantics")
+            cl_val = _metadata_integer(char_length, f"column {table_name}.{column_name} char_length")
+            if cl_val < 1:
+                raise BaselineError(f"column {table_name}.{column_name} invalid char_length: {char_length!r}")
+            predicates.append("CHAR_USED = 'C'")
+            predicates.append(f"CHAR_LENGTH = {cl_val}")
+        else:
+            data_length = row.get("data_length")
+            if data_length is None:
+                data_length = row.get("char_length")
+            if data_length is None or isinstance(data_length, bool):
+                raise BaselineError(f"column {table_name}.{column_name} has no usable data_length for BYTE semantics")
+            dl_val = _metadata_integer(data_length, f"column {table_name}.{column_name} data_length")
+            if dl_val < 1:
+                raise BaselineError(f"column {table_name}.{column_name} invalid data_length: {data_length!r}")
+            predicates.append("(CHAR_USED = 'B' OR CHAR_USED IS NULL)")
+            predicates.append(f"DATA_LENGTH = {dl_val}")
+
+    elif data_type in {"NVARCHAR2", "NCHAR"}:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+        char_length = row.get("char_length")
+        if char_length is None:
+            char_length = row.get("data_length")
+        if char_length is None or isinstance(char_length, bool):
+            raise BaselineError(f"column {table_name}.{column_name} has no usable char_length")
+        cl_val = _metadata_integer(char_length, f"column {table_name}.{column_name} char_length")
+        if cl_val < 1:
+            raise BaselineError(f"column {table_name}.{column_name} invalid char_length: {char_length!r}")
+        predicates.append(f"CHAR_LENGTH = {cl_val}")
+
+    elif data_type == "RAW":
+        predicates.append("DATA_TYPE = 'RAW'")
+        data_length = row.get("data_length")
+        if data_length is None or isinstance(data_length, bool):
+            raise BaselineError(f"column {table_name}.{column_name} RAW has no usable data_length")
+        dl_val = _metadata_integer(data_length, f"column {table_name}.{column_name} data_length")
+        if dl_val < 1:
+            raise BaselineError(f"column {table_name}.{column_name} invalid data_length: {data_length!r}")
+        predicates.append(f"DATA_LENGTH = {dl_val}")
+
+    else:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+
+    where_clause = " AND ".join(predicates)
+    sql = f"SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_COLS WHERE {where_clause}) THEN 1 ELSE 0 END FROM DUAL"
+    check_id = f"column-def-{_safe_check_slug(table_name + '-' + column_name)}"
+    return _check(check_id, sql)
+
+
+def _view_validity_check(schema: str, name: str) -> dict:
+    sql = (
+        "SELECT CASE WHEN EXISTS ("
+        f"SELECT 1 FROM ALL_OBJECTS WHERE OWNER = {_sql_literal(schema)} "
+        f"AND OBJECT_NAME = {_sql_literal(name)} AND OBJECT_TYPE = 'VIEW' AND STATUS = 'VALID'"
+        ") AND NOT EXISTS ("
+        f"SELECT 1 FROM ALL_ERRORS WHERE OWNER = {_sql_literal(schema)} "
+        f"AND NAME = {_sql_literal(name)} AND TYPE = 'VIEW' AND ATTRIBUTE = 'ERROR'"
+        ") THEN 1 ELSE 0 END FROM DUAL"
+    )
+    check_id = f"valid-view-{_safe_check_slug(name)}"
+    return _check(check_id, sql)
 
 
 def _column_sql(row: Mapping) -> str:
@@ -1466,7 +1647,7 @@ def _exact_settings_check(settings: Mapping, name: str, object_type: str, schema
     clauses.append("S.PLSQL_CCFLAGS IS NULL" if settings["plsql_ccflags"] is None else f"S.PLSQL_CCFLAGS = {_sql_literal(str(settings['plsql_ccflags']))}")
     query = (
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_PLSQL_OBJECT_SETTINGS S "
-        f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} AND S.TYPE = {_sql_literal(object_type)} "
+        f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} AND S.TYPE = {_sql_literal(object_type)} AND "
         + " AND ".join(clauses) + ") THEN 1 ELSE 0 END FROM DUAL"
     )
     return _check(f"settings-{_safe_check_slug(name + '-' + object_type)}", query)
@@ -1766,6 +1947,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             ddl = f"ALTER TABLE {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} ADD ({column_ddl})"
             exists_query = f"ALL_TAB_COLS WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(table_name)} AND COLUMN_NAME = {_sql_literal(column_name)}"
             chunks.append(_wrap_guarded_ddl(exists_query, ddl))
+            posts.append(_column_definition_check(target_schema, row))
             if row.get("nullable") == "N":
                 to_make_not_null.add(key)
         else:
@@ -1982,6 +2164,7 @@ def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source
             f"view-{_safe_check_slug(name)}",
             f"ALL_VIEWS WHERE OWNER = {_sql_literal(target_schema)} AND VIEW_NAME = {_sql_literal(name)}", 1,
         ))
+        postconditions.append(_view_validity_check(target_schema, name))
     if selected:
         steps[f"{sequence:03d}-compile-all.sql"] = _compile_all_step(target_schema, config.get("prefixes", []))
     return steps, {"preconditions": [], "postconditions": postconditions}

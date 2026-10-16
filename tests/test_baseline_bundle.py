@@ -260,6 +260,19 @@ class BaselineBundleTests(unittest.TestCase):
             with self.subTest(name=invalid), self.assertRaises(api.BaselineBundleError):
                 api.validate_bundle_name(invalid)
 
+    def test_bundle_combines_nullable_column_postconditions(self):
+        api = _bundle_api(self)
+        col_check = {"id": "column-def-t-c", "sql": "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_COLS WHERE OWNER = 'S' AND TABLE_NAME = 'T' AND COLUMN_NAME = 'C' AND DATA_TYPE = 'VARCHAR2' AND CHAR_USED = 'C' AND CHAR_LENGTH = 100) THEN 1 ELSE 0 END FROM DUAL", "expected": 1}
+        component = _component(
+            api,
+            "structure",
+            steps=(("001-add-column.sql", "ALTER TABLE S.T ADD (C VARCHAR2(100 CHAR));\n"),),
+            postconditions=(col_check,),
+        )
+        combined = api.combine_baseline_components((component,))
+        self.assertEqual(len(combined.checks["postconditions"]), 1)
+        self.assertEqual(combined.checks["postconditions"][0]["id"], "structure-column-def-t-c")
+
 
 if __name__ == "__main__":
     unittest.main()

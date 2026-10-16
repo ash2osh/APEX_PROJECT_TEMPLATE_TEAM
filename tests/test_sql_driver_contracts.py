@@ -6,6 +6,7 @@ import tempfile
 
 from scripts.db_targets import Target
 from scripts.schema_catalog import _catalog_driver
+from scripts import rollout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +149,21 @@ class SqlDriverContractTests(unittest.TestCase):
                 self.assertEqual(contents.count("WHEN MAX(last_updated_on) IS NULL THEN 'NO_TIMESTAMP'"), queries)
                 self.assertEqual(contents.count("|| '|' || MAX(version)"), queries)
                 self.assertIn("SET LINESIZE 32767", contents)
+
+    def test_rollout_driver_enables_sqlblanklines_before_include(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = rollout._script_driver(
+                Path(temporary),
+                "UPDATE review_table SET flag = 1\n\nWHERE id = 1;\n",
+                environment="dev",
+                schema="APP",
+                expected_user="OPS",
+                step_number=1,
+            )
+            contents = driver.read_text(encoding="utf-8")
+        self.assertIn("SET SQLBLANKLINES ON", contents)
+        self.assertIn("@@payload.sql", contents)
+        self.assertLess(contents.index("SET SQLBLANKLINES ON"), contents.index("@@payload.sql"))
 
 
 if __name__ == "__main__":
