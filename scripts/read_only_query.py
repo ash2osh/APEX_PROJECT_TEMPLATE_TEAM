@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 
+from .dev_test_bindings import validate_bindings
 from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target
 from .local_config import ConfigError, read_project_env
 from .migration_manifest import SAFE_FUNCTIONS, SAFE_SQL_FORMS
@@ -186,7 +187,7 @@ def _scan(sql: str) -> tuple[list[_Token], list[tuple[str, str]]]:
             if two in {"||", ">=", "<=", "!=", "<>", "**"}:
                 index += 2
                 raw = two
-            elif char in "(),.*+-/=<>;":
+            elif char in "(),.*+-/=<>;:":
                 index += 1
                 raw = char
             else:
@@ -367,7 +368,7 @@ def _collect_sources(tokens: Sequence[_Token]) -> tuple[set[str], set[str]]:
     return qualifiers, source_offsets
 
 
-def _validate_tokens(tokens: Sequence[_Token]) -> None:
+def _validate_tokens(tokens: Sequence[_Token], *, allowed_binds: set[str] | None = None) -> None:
     if not tokens:
         raise QueryError("query must be a nonempty SELECT or WITH-SELECT statement")
     semicolons = [index for index, token in enumerate(tokens) if token.kind == "symbol" and token.raw == ";"]
@@ -377,6 +378,25 @@ def _validate_tokens(tokens: Sequence[_Token]) -> None:
         tokens = tokens[:-1]
     if not tokens or tokens[0].kind != "word" or tokens[0].value not in {"select", "with"}:
         raise QueryError("only one SELECT or SELECT-producing WITH query is allowed")
+
+    for index, token in enumerate(tokens):
+        if token.kind == "symbol" and token.raw == ":":
+            if allowed_binds is None:
+                raise QueryError("query contains an unsupported token")
+            if index + 1 >= len(tokens):
+                raise QueryError("bind variable colon must be followed by a name")
+            next_token = tokens[index + 1]
+            if next_token.start != token.end:
+                raise QueryError("bind variable colon must precede name without whitespace")
+            if next_token.kind == "number":
+                raise QueryError("positional bind variables are not allowed")
+            if next_token.kind != "word":
+                raise QueryError(f"invalid bind variable token {next_token.raw!r}")
+            name = next_token.raw.upper()
+            if not name.startswith("DEVTEST_"):
+                raise QueryError(f"bind variable :{name} is not in the allowed DEVTEST_ namespace")
+            if name not in allowed_binds:
+                raise QueryError(f"unbound bind variable :{name}")
 
     words = [token.value for token in tokens if token.kind == "word"]
     if set(words) & _FORBIDDEN_WORDS:
@@ -432,6 +452,9 @@ def _validate_tokens(tokens: Sequence[_Token]) -> None:
     index = 0
     while index < len(tokens):
         token = tokens[index]
+        if index > 0 and tokens[index - 1].kind == "symbol" and tokens[index - 1].raw == ":":
+            index += 1
+            continue
         if _identifier(token) is None or index in source_offsets:
             index += 1
             continue
@@ -529,14 +552,18 @@ def _is_allowed_sql_form(name: str, index: int, tokens: Sequence[_Token]) -> boo
     # Oracle release, while WITHIN GROUP is recognized through its full syntax.
     return False
 
-def validate_query(sql: str) -> None:
+def validate_query(sql: str, *, bindings: Mapping[str, int | str] | None = None) -> None:
+    validated = validate_bindings(bindings) if bindings is not None else None
+    allowed = set(validated.keys()) if validated is not None else None
     tokens, _ = _scan(sql)
-    _validate_tokens(tokens)
+    _validate_tokens(tokens, allowed_binds=allowed)
 
 
-def prepare_query(sql: str) -> str:
+def prepare_query(sql: str, *, bindings: Mapping[str, int | str] | None = None) -> str:
+    validated = validate_bindings(bindings) if bindings is not None else None
+    allowed = set(validated.keys()) if validated is not None else None
     tokens, parts = _scan(sql)
-    _validate_tokens(tokens)
+    _validate_tokens(tokens, allowed_binds=allowed)
     prepared = _build_prepared(parts, tokens)
     if not prepared:
         raise QueryError("query has no executable SQL")
@@ -575,9 +602,17 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def build_driver(target: Target, prepared_query: str, marker: str) -> str:
+def build_driver(
+    target: Target,
+    prepared_query: str,
+    marker: str,
+    *,
+    bindings: Mapping[str, int | str] | None = None,
+    max_rows: int = MAX_RESULT_ROWS,
+) -> str:
     if _MARKER_RE.fullmatch(marker) is None:
         raise QueryError("internal query marker is invalid")
+    validated_bindings = validate_bindings(bindings) if bindings is not None else None
     # Target identifiers come from strict environment/profile validation. The
     # string literal in the identity check is the random per-run marker only.
     identity_attributes = (
@@ -621,7 +656,23 @@ def build_driver(target: Target, prepared_query: str, marker: str) -> str:
         "UPPER(SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')) || '|' || "
         "UPPER(SYS_CONTEXT('USERENV','SERVICE_NAME')) FROM DUAL;"
     )
-    return "\n".join((
+    variable_lines: list[str] = []
+    assignment_lines: list[str] = []
+    if validated_bindings:
+        for name in sorted(validated_bindings.keys()):
+            val = validated_bindings[name]
+            clean_name = name.lstrip(":")
+            if isinstance(val, int):
+                variable_lines.append(f"VARIABLE {clean_name} NUMBER")
+                assignment_lines.append(f"  :{clean_name} := {val};")
+            elif isinstance(val, str):
+                variable_lines.append(f"VARIABLE {clean_name} VARCHAR2(4000)")
+                hex_raw = val.encode("utf-8").hex().upper()
+                assignment_lines.append(
+                    f"  :{clean_name} := UTL_I18N.RAW_TO_CHAR(HEXTORAW('{hex_raw}'), 'AL32UTF8');"
+                )
+
+    lines: list[str] = [
         "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
         "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
         "SET DEFINE OFF",
@@ -643,15 +694,24 @@ def build_driver(target: Target, prepared_query: str, marker: str) -> str:
         f"PROMPT {marker}_IDENTITY_BEGIN",
         identity_query,
         f"PROMPT {marker}_IDENTITY_END",
+    ]
+    if variable_lines:
+        lines.extend(variable_lines)
+        lines.append("BEGIN")
+        lines.extend(assignment_lines)
+        lines.append("END;")
+        lines.append("/")
+    lines.extend([
         f"PROMPT {marker}_DATA_BEGIN",
         "SET SQLFORMAT CSV",
-        f"SELECT * FROM ( {prepared_query} ) WHERE ROWNUM <= {MAX_RESULT_ROWS + 1};",
+        f"SELECT * FROM ( {prepared_query} ) WHERE ROWNUM <= {max_rows + 1};",
         f"PROMPT {marker}_DATA_END",
         "SET SQLFORMAT DEFAULT",
         f"PROMPT {marker}_SUCCESS",
         "EXIT SUCCESS ROLLBACK",
         "",
-    ))
+    ])
+    return "\n".join(lines)
 
 
 def _frame_positions(output: str, marker: str, frame: str) -> list[tuple[int, int]]:
@@ -745,8 +805,17 @@ def read_query_input(*, sql: str | None, file: str | None) -> str:
     return query
 
 
-def run_query(values: Mapping[str, str], environment: str, profile: str, schema: str | None, query: str) -> str:
-    prepared = prepare_query(query)
+def run_query(
+    values: Mapping[str, str],
+    environment: str,
+    profile: str,
+    schema: str | None,
+    query: str,
+    *,
+    bindings: Mapping[str, int | str] | None = None,
+    max_rows: int = MAX_RESULT_ROWS,
+) -> str:
+    prepared = prepare_query(query, bindings=bindings)
     target = resolve_query_target(values, environment, profile, schema)
     marker = "ROQ_" + secrets.token_hex(16)
     root = Path(__file__).resolve().parents[1]
@@ -755,7 +824,11 @@ def run_query(values: Mapping[str, str], environment: str, profile: str, schema:
     with tempfile.TemporaryDirectory(prefix="read-only-query-", dir=scratch) as temporary:
         run_dir = Path(temporary)
         driver = run_dir / "query.sql"
-        driver.write_text(build_driver(target, prepared, marker), encoding="utf-8", newline="\n")
+        driver.write_text(
+            build_driver(target, prepared, marker, bindings=bindings, max_rows=max_rows),
+            encoding="utf-8",
+            newline="\n",
+        )
         try:
             result = run_sqlcl(
                 target,
@@ -767,7 +840,7 @@ def run_query(values: Mapping[str, str], environment: str, profile: str, schema:
             )
         except SqlclError:
             raise QueryError("SQLcl did not complete within the limit; the query result is unknown and withheld") from None
-        return parse_query_output(result.output, marker, target)
+        return parse_query_output(result.output, marker, target, max_rows=max_rows)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -73,6 +73,27 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
+    def test_dev_test_runtime_docs_are_owned_and_project_suites_are_protected(self) -> None:
+        from scripts.upgrade_template import protected_project_path
+
+        for path in (
+            "scripts/dev_test.py",
+            "scripts/dev_test_core.py",
+            "tests/test_dev_test_cli.py",
+            "docs/dev-test.md",
+            "docs/dev-test-examples/example.json",
+            "docs/dev-test-examples/sql/create-and-seed.sql",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+        for path in (
+            "dev-tests/suites/orders.json",
+            "dev-tests/suites/sql/create-orders.sql",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(protected_project_path(path))
+                self.assertEqual(self.classify(path), [])
+
     def test_read_only_query_files_are_covered_by_template_ownership(self) -> None:
         for path in (
             "scripts/read_only_query.py",

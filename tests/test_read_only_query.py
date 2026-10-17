@@ -385,6 +385,54 @@ class ReadOnlyQueryGateTests(unittest.TestCase):
             self.assertIn("exit success rollback", lower)
             self.assertNotIn("\ncommit;", "\n" + lower)
 
+    def test_prepare_query_default_rejects_binds(self) -> None:
+        sql = "SELECT 1 FROM dual WHERE :DEVTEST_ID = 1"
+        with self.assertRaises(QueryError):
+            prepare_query(sql)
+
+    def test_prepare_query_opt_in_binds_accepts_declared_names(self) -> None:
+        sql = "SELECT 1 FROM dual WHERE :DEVTEST_ID = 1 AND :DEVTEST_RUN_ID = 'x'"
+        prepared = prepare_query(
+            sql,
+            bindings={"DEVTEST_ID": 1, "DEVTEST_RUN_ID": "x"},
+        )
+        self.assertIn(":DEVTEST_ID", prepared)
+        self.assertIn(":DEVTEST_RUN_ID", prepared)
+
+    def test_prepare_query_opt_in_rejects_undeclared_or_invalid_binds(self) -> None:
+        # Undeclared bind name
+        with self.assertRaises(QueryError):
+            prepare_query(
+                "SELECT 1 FROM dual WHERE :DEVTEST_UNBOUND = 1",
+                bindings={"DEVTEST_ID": 1},
+            )
+        # Positional bind
+        with self.assertRaises(QueryError):
+            prepare_query(
+                "SELECT 1 FROM dual WHERE :1 = 1",
+                bindings={"DEVTEST_ID": 1},
+            )
+        # Arbitrary namespace
+        with self.assertRaises(QueryError):
+            prepare_query(
+                "SELECT 1 FROM dual WHERE :OTHER_VAR = 1",
+                bindings={"DEVTEST_ID": 1},
+            )
+
+    def test_build_driver_with_opt_in_bindings(self) -> None:
+        target = Target("dev", "code-dev", "APP_DEPLOYER", "APP", "development")
+        driver = build_driver(
+            target,
+            "SELECT 1 FROM dual WHERE :DEVTEST_ID = 1",
+            "ROQ_0123456789abcdef0123456789abcdef",
+            bindings={"DEVTEST_ID": 42, "DEVTEST_NAME": "test_payload"},
+        )
+        self.assertIn("VARIABLE DEVTEST_ID NUMBER", driver)
+        self.assertIn("VARIABLE DEVTEST_NAME VARCHAR2(4000)", driver)
+        self.assertIn(":DEVTEST_ID := 42;", driver)
+        hex_val = b"test_payload".hex().upper()
+        self.assertIn(f"HEXTORAW('{hex_val}')", driver)
+
 
 if __name__ == "__main__":
     unittest.main()

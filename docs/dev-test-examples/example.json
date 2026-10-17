@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "example-dev-fixture",
+  "scenarios": [
+    {
+      "id": "fixture-insert",
+      "description": "Create a small run-owned table and retain two synthetic rows.",
+      "dependsOn": [],
+      "requirements": {
+        "objects": [],
+        "checks": []
+      },
+      "effects": {
+        "writes": true,
+        "transaction": "mixed",
+        "external": "none",
+        "affectedObjects": ["@fixtures"],
+        "backgroundConsumers": []
+      },
+      "fixtures": {
+        "objects": [
+          {
+            "binding": "items",
+            "suffix": "ITEMS",
+            "type": "TABLE"
+          }
+        ],
+        "selectors": []
+      },
+      "steps": [
+        {
+          "id": "create-and-seed",
+          "sqlFile": "sql/create-and-seed.sql",
+          "expected": {
+            "kind": "success"
+          }
+        }
+      ],
+      "checks": [
+        {
+          "id": "two-retained-rows",
+          "sql": "SELECT COUNT(*) FROM ${object.items} WHERE RUN_TAG = :DEVTEST_RUN_ID",
+          "expected": 2
+        }
+      ],
+      "observations": [],
+      "cleanup": null
+    }
+  ]
+}

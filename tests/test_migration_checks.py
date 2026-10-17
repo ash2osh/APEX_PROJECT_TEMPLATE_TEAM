@@ -15,7 +15,7 @@ from fake_sqlcl import environment as fake_environment, install
 from scripts.db_targets import Target
 from scripts.migration_manifest import QueryCheck, load_batch
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot, parse_inventory, parse_snapshot
-from scripts.migration_checks import CheckReport, analyze_batch, compiled_units, preflight, preflight_inventory_retries, run_checks
+from scripts.migration_checks import CheckReport, analyze_batch, compiled_units, preflight, preflight_inventory_retries, render_in_session_check_driver, run_checks
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
 
@@ -1305,6 +1305,81 @@ class MigrationChecksTests(unittest.TestCase):
         for field in ("db_unique_name", "service_name", "container_name", "edition", "database_version"):
             self.assertIn(f"l_result.put('{field}'", observed["driver"])
         self.assertIn("l_payload.put('identity', l_result);", observed["driver"])
+
+    def test_opt_in_binds_do_not_widen_migration_defaults(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("run-check", "SELECT 1 FROM dual WHERE :DEVTEST_RUN_ID = 'x'", 1)
+        observed = {}
+
+        def runner(_target, driver, run_dir, **_kwargs):
+            observed["driver"] = driver.read_text(encoding="utf-8")
+            payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "run-check", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
+            output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        # Without bindings (None): ordinary migration checks refuse :DEVTEST_RUN_ID
+        report_default = run_checks(target, (check,), Path(self.temporary.name), _runner=runner)
+        self.assertFalse(report_default.passed)
+        self.assertFalse(report_default.complete)
+        self.assertEqual(report_default.errors[0]["code"], "CHECK_UNAVAILABLE")
+
+        # With explicit validated bindings map: accepts :DEVTEST_RUN_ID
+        report_opt_in = run_checks(
+            target,
+            (check,),
+            Path(self.temporary.name),
+            bindings={"DEVTEST_RUN_ID": "x"},
+            _runner=runner,
+        )
+        self.assertTrue(report_opt_in.passed)
+        self.assertIn("DBMS_SQL.BIND_VARIABLE(l_cursor, ':DEVTEST_RUN_ID',", observed["driver"])
+
+    def test_unicode_quotes_and_comment_payload_are_values(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        payload = "عربي مع O'Neil \n'); DROP TABLE X; --"
+        check = QueryCheck("bind-test", "SELECT 1 FROM dual WHERE :DEVTEST_PAYLOAD = :DEVTEST_PAYLOAD", 1)
+        observed = {}
+
+        def runner(_target, driver, run_dir, **_kwargs):
+            observed["driver"] = driver.read_text(encoding="utf-8")
+            res_payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "bind-test", "row_count": 1, "column_count": 1, "value": 1, "numeric": True}]}
+            output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(res_payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        report = run_checks(
+            target,
+            (check,),
+            Path(self.temporary.name),
+            bindings={"DEVTEST_PAYLOAD": payload},
+            _runner=runner,
+        )
+        self.assertTrue(report.passed)
+        driver = observed["driver"]
+        # Value is hex-encoded into DBMS_SQL.BIND_VARIABLE, not rendered as raw string literal
+        hex_val = payload.encode("utf-8").hex().upper()
+        self.assertIn(f"HEXTORAW('{hex_val}')", driver)
+        self.assertIn("DBMS_SQL.BIND_VARIABLE(l_cursor, ':DEVTEST_PAYLOAD', UTL_I18N.RAW_TO_CHAR(", driver)
+        # Parsed SQL is unchanged: raw payload with injection attempt does NOT appear in SQL text
+        self.assertNotIn("DROP TABLE X", driver)
+
+    def test_query_check_supports_expected_integer_greater_than_one(self):
+        target = Target("dev", "dev-profile", "MIGRATOR", "APP", "development")
+        check = QueryCheck("count-two", "SELECT 2 FROM dual", 2)
+        observed = {}
+
+        def runner(_target, driver, run_dir, **_kwargs):
+            observed["driver"] = driver.read_text(encoding="utf-8")
+            res_payload = {"schemaVersion": 1, "phase": "preconditions", "complete": True, "results": [{"id": "count-two", "row_count": 1, "column_count": 1, "value": 2, "numeric": True}]}
+            output = "CHECK_PAYLOAD_BEGIN:preconditions\n" + json.dumps(res_payload) + "\nCHECK_PAYLOAD_END:preconditions\nCHECK_VERIFIED:preconditions\n"
+            return type("Result", (), {"returncode": 0, "output": output, "run_dir": run_dir})()
+
+        report = run_checks(target, (check,), Path(self.temporary.name), _runner=runner)
+        self.assertTrue(report.passed)
+        self.assertEqual(report.results[0]["value"], 2)
+
+        # In-session driver with fail_on_false checks expected value in PL/SQL
+        in_session = render_in_session_check_driver(target, (check,), "preconditions", fail_on_false=True)
+        self.assertIn("l_value != 2", in_session)
 
 
 if __name__ == "__main__":

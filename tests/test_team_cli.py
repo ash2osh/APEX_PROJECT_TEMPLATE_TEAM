@@ -94,6 +94,7 @@ exit 17
             "app-unlock",
             "check-conflicts",
             "migration-plan",
+            "dev-test",
             "migrate",
             "query",
             "compare-schema",
@@ -107,6 +108,70 @@ exit 17
             self.assertIn(command, result.stdout)
         self.assertIn("--env dev|staging|prod", result.stdout)
         self.assertIn("--pattern", result.stdout)
+
+    def test_dev_test_help_is_offline_in_both_wrappers(self) -> None:
+        for entry in ("team.sh", "team.ps1"):
+            if entry.endswith("ps1") and not shutil.which("pwsh"):
+                continue
+            launcher = [BASH] if entry.endswith("sh") else [shutil.which("pwsh"), "-NoProfile", "-File"]
+            result = subprocess.run(
+                [*launcher, str(ROOT / "scripts" / entry), "dev-test", "--help"],
+                cwd=ROOT,
+                env=dict(os.environ, PROJECT_ENV_FILE="/no/such/dev-test.env"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            with self.subTest(entry=entry):
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("--plan", result.stdout)
+                self.assertIn("--cleanup", result.stdout)
+                self.assertNotIn("configuration file not found", result.stdout + result.stderr)
+
+    def test_dev_test_forwards_schema_arguments_unchanged_in_both_wrappers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "dev test project [unicode]"
+            scripts = root / "scripts"
+            scripts.mkdir(parents=True)
+            for name in ("team.sh", "team.ps1", "dev_test.sh", "resolve_python.ps1"):
+                shutil.copy2(ROOT / "scripts" / name, scripts / name)
+            fake_bin = parent / "fake python [dev-test]"
+            fake_bin.mkdir()
+            captured = parent / "python arguments.txt"
+            python = fake_bin / "python3"
+            python.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TEAM_CAPTURE_ARGS\"\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            environment = dict(os.environ)
+            environment.update({
+                "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
+                "TEAM_CAPTURE_ARGS": str(captured),
+            })
+            arguments = [
+                "dev-test", "--schema=APP", "--env", "dev", "--suite",
+                "dev-tests/orders été/suite.json", "--scenario", "first", "--plan",
+            ]
+            for entry in ("team.sh", "team.ps1"):
+                if entry.endswith("ps1") and not shutil.which("pwsh"):
+                    continue
+                launcher = [BASH] if entry.endswith("sh") else [shutil.which("pwsh"), "-NoProfile", "-File"]
+                result = subprocess.run(
+                    [*launcher, str(scripts / entry), *arguments],
+                    cwd=parent,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                with self.subTest(entry=entry):
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertEqual(
+                        ["-m", "scripts.dev_test", *arguments[1:]],
+                        captured.read_text(encoding="utf-8").splitlines(),
+                    )
 
     def test_migration_plan_help_and_offline_need_no_env(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

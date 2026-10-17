@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from .migration_attempts import EVENT_FILENAME_RE, MigrationAttemptError, read_attempt_events
 from .validate_migration import validate_sql_only
@@ -254,7 +254,12 @@ def _strip_sql_comments_and_tokenize(source: str) -> list[str]:
     return tokens
 
 
-def validate_check_query(sql: str) -> None:
+def validate_check_query(
+    sql: str,
+    *,
+    allowed_bind_names: Iterable[str] | None = None,
+    allowed_binds: Iterable[str] | None = None,
+) -> None:
     """Allow one read-only SELECT/WITH-SELECT with a restricted function set."""
     if not isinstance(sql, str) or not sql.strip() or len(sql.encode("utf-8")) > 32768:
         raise MigrationManifestError("check SQL must be a nonempty UTF-8 query no longer than 32768 bytes")
@@ -274,9 +279,28 @@ def validate_check_query(sql: str) -> None:
     ):
         raise MigrationManifestError("checks must contain exactly one SQL query and no SQLcl terminator")
 
+    if allowed_bind_names is None and allowed_binds is not None:
+        allowed_bind_names = allowed_binds
+
+    if allowed_bind_names is not None:
+        allowed_set = {"target_schema"} | {
+            b[1:].casefold() if b.startswith(":") else b.casefold()
+            for b in allowed_bind_names
+        }
+    else:
+        allowed_set = {"target_schema"}
+
     for index, token in enumerate(tokens):
-        if token == ":" and (index + 1 >= len(tokens) or tokens[index + 1] != "WORD:target_schema"):
-            raise MigrationManifestError("checks may bind only :target_schema")
+        if token == ":":
+            if index + 1 >= len(tokens) or not tokens[index + 1].startswith("WORD:"):
+                raise MigrationManifestError("checks may bind only :target_schema")
+            bind_name = tokens[index + 1][5:]
+            if bind_name not in allowed_set:
+                if allowed_bind_names is None:
+                    raise MigrationManifestError("checks may bind only :target_schema")
+                raise MigrationManifestError(
+                    f"checks may bind only :target_schema or declared bindings: :{bind_name} is not allowed"
+                )
 
     words = [token[5:] for token in tokens if token.startswith("WORD:")]
     if not words or words[0] not in {"select", "with"} or "select" not in words:

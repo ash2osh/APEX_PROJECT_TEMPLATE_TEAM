@@ -480,6 +480,7 @@ revision folder instead (`...-r002`). Commit the folder.
 | export a schema's ORDS (REST) definition (optional, see [ords-export.md](ords-export.md)) | `scripts/team.sh backup-ords` |
 | test a SQL change without a database | `scripts/team.sh check-conflicts <folder> --local` |
 | test a SQL change against the database | `scripts/team.sh check-conflicts <folder> --env dev` |
+| plan or run the DEV fixture suite | `scripts/team.sh dev-test --env dev --schema <OWNER> --plan` or `--run`; see [dev-test.md](dev-test.md) for retained-fixture and project-suite rules |
 | apply a SQL change | `scripts/team.sh migrate <folder> --env dev` |
 | see how two environments differ | `scripts/team.sh compare-schema --from dev --to staging --object <NAME>` |
 | release to staging or production | `scripts/team.sh deploy <app-id> --env staging` |

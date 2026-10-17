@@ -688,6 +688,46 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read(".template-lock.json"), original_lock)
         self.assertEqual(git(self.project, "status", "--porcelain"), "")
 
+    def test_post_clone_cleanup_can_remove_inherited_tests_and_ci_without_removing_runner(self) -> None:
+        manifest = {
+            **MANIFEST,
+            "upstream": str(self.template),
+            "templateOwned": [*MANIFEST["templateOwned"], "tests/**", ".github/**"],
+        }
+        write(self.template, {
+            "template-manifest.json": json.dumps(manifest),
+            "scripts/dev_test.py": "runner v1\n",
+            "tests/test_dev_test_cli.py": "template maintenance test\n",
+            ".github/workflows/ci.yml": "name: template-ci\n",
+        })
+        write(self.project, {
+            "template-manifest.json": json.dumps(manifest),
+            "scripts/dev_test.py": "runner v1\n",
+            "tests/test_dev_test_cli.py": "template maintenance test\n",
+            ".github/workflows/ci.yml": "name: template-ci\n",
+        })
+        commit_all(self.template, "feature v1")
+        commit_all(self.project, "copied feature v1")
+
+        adopted = self.upgrade()
+        self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
+        commit_all(self.project, "record feature baseline")
+
+        for relative in ("tests/test_dev_test_cli.py", ".github/workflows/ci.yml"):
+            (self.project / relative).unlink()
+        commit_all(self.project, "post-clone cleanup")
+
+        write(self.template, {"scripts/dev_test.py": "runner v2\n"})
+        for relative in ("tests/test_dev_test_cli.py", ".github/workflows/ci.yml"):
+            (self.template / relative).unlink()
+        commit_all(self.template, "feature v2")
+
+        upgraded = self.upgrade()
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        self.assertEqual((self.project / "scripts/dev_test.py").read_text(encoding="utf-8"), "runner v2\n")
+        self.assertFalse((self.project / "tests/test_dev_test_cli.py").exists())
+        self.assertFalse((self.project / ".github/workflows/ci.yml").exists())
+
     def test_interrupt_rolls_back_prior_updates_and_lock_like_a_failure(self) -> None:
         # Ctrl-C is a KeyboardInterrupt, not an OSError. It used to skip the
         # rollback and the cleanup then deleted the backups, leaving a half

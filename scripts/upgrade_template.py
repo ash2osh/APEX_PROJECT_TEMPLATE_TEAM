@@ -36,6 +36,8 @@ PROTECTED_SAMPLES = (
     "database/DEMO/tables/T.sql",
     "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
     "app_context/100/purpose.md",
+    "dev-tests/suites/orders.json",
+    "dev-tests/suites/sql/create-orders.sql",
     ".env",
     LOCK_NAME,
 )
@@ -107,7 +109,9 @@ def protected_project_path(path: str) -> bool:
         return True
     if path == "app_context/README.md":
         return False
-    return path.startswith("app_context/")
+    if path.startswith("app_context/"):
+        return True
+    return path == "dev-tests" or path.startswith("dev-tests/")
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:

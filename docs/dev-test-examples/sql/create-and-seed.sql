@@ -1,0 +1,14 @@
+CREATE TABLE ${object.items} (
+  RUN_TAG VARCHAR2(64) NOT NULL,
+  ITEM_NO NUMBER(10) NOT NULL,
+  LABEL VARCHAR2(30) NOT NULL,
+  PRIMARY KEY (RUN_TAG, ITEM_NO)
+);
+
+INSERT INTO ${object.items} (RUN_TAG, ITEM_NO, LABEL)
+VALUES (:DEVTEST_RUN_ID, 1, 'synthetic-one');
+
+INSERT INTO ${object.items} (RUN_TAG, ITEM_NO, LABEL)
+VALUES (:DEVTEST_RUN_ID, 2, 'synthetic-two');
+
+COMMIT;

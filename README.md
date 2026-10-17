@@ -39,6 +39,7 @@ operational scripts, `.env`, manifest and lock.
 | Two ways to work | **Builder-first** (change it in APEX, export it) or **file-first** (edit the files, publish them). |
 | Safe publish | Refuses newer Builder work, restores only automations that were active before import, then verifies normalized source. |
 | SQL migrations | Dated folders of numbered SQL plus `checks.json`; a live check for conflicts before applying; a verified receipt after. |
+| DEV test runner | Read-only planning and explicit schema-owner fixture runs with durable reports and retained results; see [DEV test runner](docs/dev-test.md). |
 | Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production. |
 | Environment baselines | Read-only source, grant and allow-listed reference-row exports plus reviewed structure, grant, source and optional reference-data migrations from `baseline.json`. |
 | Several schemas per workspace | Comma-separated lists in `.env` and `--schema`; apps, database copies and migrations are kept per schema. |
@@ -761,6 +762,9 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh app-unlock <id> --env dev` | Release only the configured developer's application lock after reconciliation. |
 | `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
 | `scripts/team.sh doctor` | Validate `.env` and check the DEV SQLcl identity. |
+| `scripts/team.sh dev-test --env dev --schema NAME --plan\|--run` | Plan or run the six built-in DEV checks, or an explicitly selected project suite; fixtures are retained by default. See [DEV test runner](docs/dev-test.md). |
+| `scripts/team.sh dev-test --report <run-id> [--format text\|json\|markdown]` | Render saved evidence without connecting to a database. |
+| `scripts/team.sh dev-test --cleanup <run-id>` | Explicitly clean supported recorded artifacts; project suites without a cleanup contract remain manual. |
 | `scripts/team.sh query --env <dev\|staging\|prod> --connection <tables\|code\|apex\|ords\|migration> [--schema NAME] [--file PATH \| SQL]` | Run one conservative, bounded SELECT in a read-only SQLcl transaction; see [read-only ad-hoc queries](#read-only-ad-hoc-queries). |
 | `scripts/team.sh export <id>` | Export one numeric app from shared DEV Builder. |
 | `scripts/team.sh publish <id> --env dev [--strict-bytes] [--no-restore-automations]` | Drift-check and import one app to DEV; by default restores automations that were active before import. |

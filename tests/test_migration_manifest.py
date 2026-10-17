@@ -760,6 +760,43 @@ class MigrationManifestTests(unittest.TestCase):
         with self.assertRaises(api.MigrationManifestError):
             api.load_migration(self.root, folder.relative_to(self.root).as_posix())
 
+    def test_validate_check_query_default_rejects_binds_except_target_schema(self):
+        api = self.require_manifest()
+        # Default: :target_schema is allowed
+        api.validate_check_query("SELECT 1 FROM all_tables WHERE owner = :target_schema")
+        # Default: any other bind is rejected
+        for query in (
+            "SELECT 1 FROM dual WHERE :DEVTEST_RUN_ID = 'test'",
+            "SELECT 1 FROM dual WHERE :other = 1",
+            "SELECT 1 FROM dual WHERE :1 = 1",
+        ):
+            with self.subTest(query=query), self.assertRaises(api.MigrationManifestError):
+                api.validate_check_query(query)
+
+    def test_validate_check_query_opt_in_allowed_binds_accepts_declared_names(self):
+        api = self.require_manifest()
+        query = "SELECT 1 FROM all_tables WHERE owner = :target_schema AND table_name = :DEVTEST_TABLE_NAME"
+        api.validate_check_query(query, allowed_bind_names={"DEVTEST_TABLE_NAME"})
+        api.validate_check_query(
+            "SELECT 1 FROM dual WHERE :DEVTEST_RUN_ID = 'x'",
+            allowed_bind_names={"DEVTEST_RUN_ID"},
+        )
+
+    def test_validate_check_query_opt_in_rejects_undeclared_binds_and_positionals(self):
+        api = self.require_manifest()
+        # Undeclared bind name is rejected even when opt-in is active
+        with self.assertRaises(api.MigrationManifestError):
+            api.validate_check_query(
+                "SELECT 1 FROM dual WHERE :DEVTEST_UNDECLARED = 'x'",
+                allowed_bind_names={"DEVTEST_RUN_ID"},
+            )
+        # Positional bind is rejected
+        with self.assertRaises(api.MigrationManifestError):
+            api.validate_check_query(
+                "SELECT 1 FROM dual WHERE :1 = 'x'",
+                allowed_bind_names={"DEVTEST_RUN_ID"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
