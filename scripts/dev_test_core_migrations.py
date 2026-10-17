@@ -17,6 +17,7 @@ from scripts.dev_test_bindings import RenderContext
 from scripts.dev_test_evidence import RunEvidence, make_object_name
 from scripts.dev_test_runtime import _same_live_target, _target_is_dev, read_rows
 from scripts.migration_checks import QueryCheck
+from scripts.path_utils import relative_to_root
 from scripts.schema_catalog import SchemaInventory, SchemaSnapshot
 from scripts.sqlcl_session import run_sqlcl
 
@@ -28,6 +29,14 @@ _DATABASE_SCOPE_FIELDS = (
 
 def _scenario(scenario_id: str):
     return core_types._get_builtin_scenario(scenario_id)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        relative_to_root(path, root)
+    except ValueError:
+        return False
+    return True
 
 
 def _fixture_name(context: RenderContext, run: RunEvidence, binding: str, suffix: str) -> str:
@@ -267,7 +276,7 @@ def run_sqlcl_delivery(
         steps.append({
             "id": "rollout-alias-preflight", "status": "PASSED",
             "targetBinding": binding,
-            "evidence": (project / "sessions" / "rollout-alias-pre-fixture").relative_to(run.run_dir).as_posix(),
+            "evidence": relative_to_root(project / "sessions" / "rollout-alias-pre-fixture", run.run_dir).as_posix(),
             "writeStarted": False,
         })
 
@@ -297,7 +306,7 @@ def run_sqlcl_delivery(
                 steps.append({
                     "id": "rollout-alias-recheck", "status": "UNKNOWN",
                     "targetBinding": binding,
-                    "evidence": (project / "sessions" / "rollout-alias-before-execute").relative_to(run.run_dir).as_posix(),
+                    "evidence": relative_to_root(project / "sessions" / "rollout-alias-before-execute", run.run_dir).as_posix(),
                     "writeStarted": True,
                 })
                 raise core_types._ScenarioProblem(
@@ -307,7 +316,7 @@ def run_sqlcl_delivery(
                 steps.append({
                     "id": "rollout-alias-recheck", "status": "UNKNOWN",
                     "targetBinding": latest_binding,
-                    "evidence": (project / "sessions" / "rollout-alias-before-execute").relative_to(run.run_dir).as_posix(),
+                    "evidence": relative_to_root(project / "sessions" / "rollout-alias-before-execute", run.run_dir).as_posix(),
                     "writeStarted": True,
                 })
                 raise core_types._ScenarioProblem(
@@ -316,7 +325,7 @@ def run_sqlcl_delivery(
             steps.append({
                 "id": "rollout-alias-recheck", "status": "PASSED",
                 "targetBinding": latest_binding,
-                "evidence": (project / "sessions" / "rollout-alias-before-execute").relative_to(run.run_dir).as_posix(),
+                "evidence": relative_to_root(project / "sessions" / "rollout-alias-before-execute", run.run_dir).as_posix(),
                 "writeStarted": True,
             })
             exit_code = rollout.run_rollout(
@@ -326,7 +335,7 @@ def run_sqlcl_delivery(
                 ),
             )
         report_path = report_base.with_suffix(".json")
-        report_evidence = report_path.relative_to(run.run_dir).as_posix()
+        report_evidence = relative_to_root(report_path, run.run_dir).as_posix()
         if not report_path.is_file() or report_path.is_symlink():
             steps.append({
                 "id": "rollout-update", "status": "UNKNOWN", "report": report_evidence,
@@ -368,7 +377,7 @@ def run_sqlcl_delivery(
         receipt_path = project / receipt_relative
         if (
             receipt_path.is_symlink() or not receipt_path.is_file()
-            or not receipt_path.resolve().is_relative_to(project.resolve())
+            or not _path_is_within(receipt_path, project)
         ):
             raise core_types._ScenarioProblem("UNKNOWN", "successful rollout receipt is missing or outside the private run project")
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -470,9 +479,9 @@ def _migration_folder(
     folder = baseline._build_migration_folder(project, target.schema, family, files)
     if folder is None:
         raise baseline.BaselineError("baseline generator did not create a fresh run-owned migration folder")
-    relative = folder.relative_to(project).as_posix()
+    relative = relative_to_root(folder, project).as_posix()
     migration = migration_manifest.load_migration(project, relative)
-    if not migration.folder.resolve().is_relative_to(project.resolve()):
+    if not _path_is_within(migration.folder, project):
         raise baseline.BaselineError("generated migration escaped the private run project")
     return migration, checks
 
@@ -652,11 +661,11 @@ def run_migration_success(
         note = next((row for row in actual["columns"] if row.get("name") == "NOTE"), None)
         if note is None or note.get("char_length") != 20 or note.get("nullable") != "Y":
             raise core_types._ScenarioProblem("FAILED", "fresh catalog readback did not confirm the nullable VARCHAR2(20 CHAR) column")
-        relative_folder = migration.folder.relative_to(run.run_dir).as_posix()
+        relative_folder = relative_to_root(migration.folder, run.run_dir).as_posix()
         steps.append({
             "id": "migration-apply", "status": "PASSED", "folder": relative_folder,
-            "receipt": receipt_path.relative_to(run.run_dir).as_posix(),
-            "payloadDigest": receipt["payloadDigest"], "applyLog": log_path.relative_to(run.run_dir).as_posix(),
+            "receipt": relative_to_root(receipt_path, run.run_dir).as_posix(),
+            "payloadDigest": receipt["payloadDigest"], "applyLog": relative_to_root(log_path, run.run_dir).as_posix(),
             "applyCalls": apply_count[0],
         })
         checks.append({
@@ -665,7 +674,7 @@ def run_migration_success(
         })
         _save_fixtures(
             target, scenario_context, run, runner, identity, scenario.id, ((table, "TABLE"),),
-            details={"migrationFolder": relative_folder, "receipt": receipt_path.relative_to(run.run_dir).as_posix(), "retained": True},
+            details={"migrationFolder": relative_folder, "receipt": relative_to_root(receipt_path, run.run_dir).as_posix(), "retained": True},
         )
         return _result(scenario, "PASSED", steps, checks)
     except core_types._ScenarioProblem as error:
@@ -730,8 +739,8 @@ def _expected_refusal(
         raise core_types._ScenarioProblem("UNKNOWN", "refused migration did not retain one validated pending lock event")
     step = {
         "id": "migration-refusal", "status": "EXPECTED_REFUSAL",
-        "folder": migration.folder.relative_to(run.run_dir).as_posix(),
-        "applyLog": log_path.relative_to(run.run_dir).as_posix(),
+        "folder": relative_to_root(migration.folder, run.run_dir).as_posix(),
+        "applyLog": relative_to_root(log_path, run.run_dir).as_posix(),
         "receiptAbsent": True,
         "pendingEvent": pending[0]["eventId"],
         "retryLock": reduced.status,
@@ -789,12 +798,12 @@ def run_migration_refusal(
             raise core_types._ScenarioProblem("UNKNOWN", "pending attempt lock was lost during retry refusal")
         steps.append({
             "id": "guarded-retry", "status": "PASSED", "exitCode": retry_status,
-            "applyLog": retry_log.relative_to(run.run_dir).as_posix(),
+            "applyLog": relative_to_root(retry_log, run.run_dir).as_posix(),
             "payloadApplyCount": apply_count[0], "pendingLockRetained": True,
         })
         _save_fixtures(
             target, scenario_context, run, runner, identity, scenario.id, ((table, "TABLE"),),
-            details={"migrationFolder": migration.folder.relative_to(run.run_dir).as_posix(), "receiptAbsent": True, "retained": True},
+            details={"migrationFolder": relative_to_root(migration.folder, run.run_dir).as_posix(), "receiptAbsent": True, "retained": True},
         )
         checks.append({
             "id": "no-success-receipt", "passed": not receipt["receiptPath"].exists(),
@@ -827,8 +836,8 @@ def _build_invalid_view_migration(
     folder = baseline._build_migration_folder(project, target.schema, family, files)
     if folder is None:
         raise baseline.BaselineError("invalid-view migration generator did not create a fresh run-owned folder")
-    migration = migration_manifest.load_migration(project, folder.relative_to(project).as_posix())
-    if not migration.folder.resolve().is_relative_to(project.resolve()):
+    migration = migration_manifest.load_migration(project, relative_to_root(folder, project).as_posix())
+    if not _path_is_within(migration.folder, project):
         raise baseline.BaselineError("invalid-view migration escaped the private run project")
     return migration
 
@@ -954,9 +963,9 @@ def run_invalid_view(
             raise core_types._ScenarioProblem("UNKNOWN", "invalid-view migration refusal did not retain a validated pending attempt")
         steps.append({
             "id": "invalidate-dependent-view", "status": "EXPECTED_REFUSAL",
-            "folder": migration.folder.relative_to(run.run_dir).as_posix(),
+            "folder": relative_to_root(migration.folder, run.run_dir).as_posix(),
             "receiptAbsent": True, "pendingEvent": pending[0]["eventId"],
-            "applyLog": apply_log.relative_to(run.run_dir).as_posix(),
+            "applyLog": relative_to_root(apply_log, run.run_dir).as_posix(),
             "attemptState": attempt_state.status, "applyCalls": apply_count[0],
         })
         _save_fixtures(
@@ -964,7 +973,7 @@ def run_invalid_view(
             ((table, "TABLE"), (view, "VIEW")),
             details={
                 "viewStatus": "INVALID", "allErrorsCount": errors_observation["count"],
-                "migrationFolder": migration.folder.relative_to(run.run_dir).as_posix(),
+                "migrationFolder": relative_to_root(migration.folder, run.run_dir).as_posix(),
                 "receiptAbsent": True, "retained": True,
             },
         )

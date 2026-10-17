@@ -29,6 +29,7 @@ from scripts.schema_catalog import (
     capture_inventory,
     capture_snapshot,
 )
+from scripts.path_utils import relative_to_root
 from scripts.sqlcl_session import run_sqlcl
 
 
@@ -50,6 +51,13 @@ _PROJECT_DROP = re.compile(
     r"(?P<name>[A-Z][A-Z0-9_$#]{0,127})\s*;?\s*\Z",
     re.IGNORECASE | re.ASCII,
 )
+
+
+def _same_root_relative_path(path: str, root: Path, expected: Path) -> bool:
+    try:
+        return relative_to_root(path, root) == expected
+    except ValueError:
+        return False
 
 
 def _now() -> str:
@@ -382,11 +390,31 @@ def _project_program(
             raise ValueError("saved project selector values do not match the declared output bindings")
     if contract["bindings"] != known_bindings:
         raise ValueError("project cleanup bindings contain undeclared or missing selector values")
+    manifest_root = Path(manifest_path).parent
+    if not isinstance(hashes, Mapping):
+        raise ValueError("frozen input manifest hashes are malformed")
     for raw_path, saved_file in zip(raw_sql_files, contract["sqlFiles"], strict=True):
-        if not isinstance(raw_path, str):
+        if not isinstance(raw_path, str) or not isinstance(saved_file, Mapping):
             raise ValueError("frozen cleanup SQL path is malformed")
-        resolved = str((Path(manifest_path).parent / raw_path).resolve())
-        if saved_file.get("path") != resolved or hashes.get(resolved) != saved_file.get("sha256"):
+        resolved = (manifest_root / raw_path).resolve()
+        saved_path = saved_file.get("path")
+        if not isinstance(saved_path, str):
+            raise ValueError("saved project cleanup SQL path is malformed")
+        try:
+            expected_relative = relative_to_root(resolved, manifest_root)
+            saved_relative = relative_to_root(saved_path, manifest_root)
+            matching_hashes = [
+                digest for frozen_path, digest in hashes.items()
+                if isinstance(frozen_path, str)
+                and _same_root_relative_path(frozen_path, manifest_root, expected_relative)
+            ]
+        except ValueError as error:
+            raise ValueError("saved project cleanup SQL file is outside the frozen manifest root") from error
+        if (
+            saved_relative != expected_relative
+            or len(matching_hashes) != 1
+            or matching_hashes[0] != saved_file.get("sha256")
+        ):
             raise ValueError("saved project cleanup SQL file differs from its frozen manifest input")
     from scripts.dev_test_bindings import render_object_tokens
     from scripts.read_only_query import prepare_query
@@ -1126,7 +1154,7 @@ def _save_cleanup_result(run: RunEvidence, report: dict, result: dict) -> dict:
     if report_path.is_symlink():
         raise OSError("saved report is a symbolic link")
     filename = f"{len(list(cleanup_dir.glob('*.json'))):06d}-{uuid.uuid4().hex[:8]}.json"
-    result = {**result, "finishedAt": _now(), "evidence": (cleanup_dir / filename).relative_to(run.run_dir).as_posix()}
+    result = {**result, "finishedAt": _now(), "evidence": relative_to_root(cleanup_dir / filename, run.run_dir).as_posix()}
     encoded = (json.dumps(result, indent=2, sort_keys=True) + "\n").encode("utf-8")
     path = cleanup_dir / filename
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

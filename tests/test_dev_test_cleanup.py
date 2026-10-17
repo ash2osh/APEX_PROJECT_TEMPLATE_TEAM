@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -516,6 +517,27 @@ class TestProjectCleanupContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             run = create_run(Path(temp))
             _report, _contract = _write_project_cleanup_evidence(run)
+            cleanup_path = Path(_contract["sqlFiles"][0]["path"])
+            suite_manifest = next(
+                Path(path) for path in _report["source"]["inputHashes"]
+                if Path(path).name == "suite.json"
+            )
+            suite_root = suite_manifest.parent
+            alias_suite_root = suite_root.parent / "RUNNER~1" / suite_root.name
+            alias_cleanup_path = alias_suite_root / cleanup_path.name
+            original_resolve = Path.resolve
+
+            def resolve_with_windows_alias(path, *args, **kwargs):
+                resolved = original_resolve(path, *args, **kwargs)
+                return alias_cleanup_path if resolved == cleanup_path else resolved
+
+            original_samefile = os.path.samefile
+
+            def samefile_with_windows_alias(left, right):
+                if {Path(left), Path(right)} == {alias_suite_root, suite_root}:
+                    return True
+                return original_samefile(left, right)
+
             target = Target("dev", "dev-owner", "DEMO", "DEMO", "development")
             live = {"identity": dict(IDENTITY), "complete": True, "objects": []}
             rows = {
@@ -566,7 +588,9 @@ class TestProjectCleanupContract(unittest.TestCase):
                     run_dir,
                 )
 
-            with patch("scripts.dev_test_cleanup.resolve_target", return_value=target), \
+            with patch.object(Path, "resolve", new=resolve_with_windows_alias), \
+                    patch("scripts.path_utils.os.path.samefile", side_effect=samefile_with_windows_alias), \
+                    patch("scripts.dev_test_cleanup.resolve_target", return_value=target), \
                     patch("scripts.dev_test_cleanup._capture_live_inventory", return_value=live), \
                     patch("scripts.dev_test_runtime.read_rows", return_value=rows), \
                     patch("scripts.migration_checks.run_checks", side_effect=checks_runner):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -280,6 +281,42 @@ class DevTestCoreMigrationsTests(unittest.TestCase):
         stack.enter_context(patch.object(core_types, "capture_snapshot", side_effect=lambda target, inventory, keys, *_a, **_k: self._snapshot(inventory, keys)))
         stack.enter_context(patch.object(core_types, "run_checks", side_effect=self._run_checks))
         return stack
+
+    def test_generated_migration_accepts_equivalent_windows_root_alias(self) -> None:
+        from scripts.dev_test_core_migrations import _migration_folder
+
+        project = self.run.run_dir / "project"
+        alias_project = self.root.parent / "RUNNER~1" / project.relative_to(self.root)
+        build_folder = baseline._build_migration_folder
+        created: dict[str, Path] = {}
+
+        def build_under_alias(root, schema, family, files):
+            folder = build_folder(root, schema, family, files)
+            self.assertIsNotNone(folder)
+            created["folder"] = folder
+            return alias_project / folder.relative_to(root)
+
+        actual_samefile = os.path.samefile
+
+        def samefile(left, right):
+            if {Path(left), Path(right)} == {alias_project, project}:
+                return True
+            return actual_samefile(left, right)
+
+        columns = [{
+            "table_name": "ORDERS", "name": "ORDER_ID", "data_type": "NUMBER",
+            "data_precision": 10, "data_scale": 0, "data_length": 22,
+            "nullable": "N", "hidden": "NO", "virtual": "NO", "identity": "NO",
+        }]
+        with patch.object(baseline, "_build_migration_folder", side_effect=build_under_alias), patch(
+            "scripts.path_utils.os.path.samefile", side_effect=samefile,
+        ):
+            migration, _checks = _migration_folder(
+                project, self.target, self.context, self.run, "ORDERS", columns,
+                family_suffix="windows-path-alias",
+            )
+
+        self.assertEqual(migration.folder, created["folder"])
 
     def test_delivery_uses_rollout_and_reads_back_only_the_selected_row(self) -> None:
         from scripts import rollout as rollout_module
