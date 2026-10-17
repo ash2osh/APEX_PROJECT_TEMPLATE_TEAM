@@ -284,6 +284,7 @@ class DevTestCoreMigrationsTests(unittest.TestCase):
 
     def test_generated_migration_accepts_equivalent_windows_root_alias(self) -> None:
         from scripts.dev_test_core_migrations import _migration_folder
+        from scripts.path_utils import relative_to_root
 
         project = self.run.run_dir / "project"
         alias_project = self.root.parent / "RUNNER~1" / project.relative_to(self.root)
@@ -294,7 +295,7 @@ class DevTestCoreMigrationsTests(unittest.TestCase):
             folder = build_folder(root, schema, family, files)
             self.assertIsNotNone(folder)
             created["folder"] = folder
-            return alias_project / folder.relative_to(root)
+            return alias_project / relative_to_root(folder, root)
 
         actual_samefile = os.path.samefile
 
