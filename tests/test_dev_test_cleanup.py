@@ -1,6 +1,7 @@
 """Safety contracts for optional DEV fixture cleanup."""
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -128,10 +129,19 @@ def _write_project_cleanup_evidence(run: RunEvidence) -> tuple[dict, dict]:
     return report, contract
 
 
-def _artifact(run: RunEvidence, *, name: str | None = None, object_id: int | None = 101) -> dict:
+def _artifact(
+    run: RunEvidence,
+    *,
+    name: str | None = None,
+    object_id: int | None = 101,
+    scenario_id: str = "sqlcl-delivery",
+) -> dict:
+    if name is None:
+        prefix = f"DT_{hashlib.sha256((run.run_id + scenario_id).encode('utf-8')).hexdigest()[:12].upper()}_"
+        name = f"{prefix}SD_TAB"
     return {
         "owner": "DEMO",
-        "name": name or f"{run.object_prefix}SD_TAB",
+        "name": name,
         "type": "TABLE",
         "objectId": object_id,
         "dataObjectId": 501,
@@ -151,7 +161,7 @@ def _write_evidence(
     add_precreation: bool = True,
     add_observed: bool = True,
 ) -> dict:
-    artifact = artifact or _artifact(run)
+    artifact = artifact or _artifact(run, scenario_id=scenario_id)
     report = new_report(run, "run", "suite", [scenario_id], origin)
     report["finishedAt"] = "2026-10-16T12:00:00Z"
     report["target"]["configured"] = {
@@ -244,6 +254,22 @@ class TestCleanupPlanning(unittest.TestCase):
             result = cleanup_run(self.run, {})
         self.assertEqual(result["status"], "REFUSED")
         drop.assert_not_called()
+
+    def test_builtin_cleanup_accepts_scenario_scoped_fixture_prefix(self) -> None:
+        from scripts.dev_test_cleanup import plan_cleanup
+
+        run = create_run(Path(self.temp.name))
+        scenario_id = "sqlcl-delivery"
+        prefix = f"DT_{hashlib.sha256((run.run_id + scenario_id).encode('utf-8')).hexdigest()[:12].upper()}_"
+        artifact = _artifact(run, name=f"{prefix}SD_TAB")
+        _write_evidence(run, scenario_id=scenario_id, artifact=artifact)
+
+        with patch("scripts.dev_test_cleanup.resolve_target", return_value=self.target), \
+             patch("scripts.dev_test_cleanup._capture_live_inventory", return_value=self._live(artifact)):
+            result = plan_cleanup(run, {})
+
+        self.assertEqual("READY", result["status"])
+        self.assertEqual([artifact["name"]], [item["name"] for item in result["artifacts"] if item["status"] == "READY"])
 
     def test_changed_object_identity_or_new_dependent_is_retained(self) -> None:
         from scripts.dev_test_cleanup import plan_cleanup
@@ -498,27 +524,37 @@ class TestProjectCleanupContract(unittest.TestCase):
                 "rows": [{"ORDER_ID": "101"}],
                 "identity": dict(IDENTITY),
             }
+            retained_order_lines = {101}
             check_calls: list[list[str]] = []
 
             def checks_runner(_target, checks, _directory, **kwargs):
                 check_calls.append([check.id for check in checks])
+                check_results = [
+                    {
+                        "check": check.id,
+                        "passed": len(retained_order_lines) == check.expected,
+                        "value": len(retained_order_lines),
+                    }
+                    for check in checks
+                ]
                 return type("CheckReport", (), {
                     "coverage": {"sessions": 1, "sessionIdentities": [dict(IDENTITY)]},
-                    "complete": True, "passed": True,
-                    "results": [
-                        {"check": check.id, "passed": True, "value": 0}
-                        for check in checks
-                    ],
+                    "complete": True,
+                    "passed": all(result["passed"] for result in check_results),
+                    "results": check_results,
                 })()
 
             step_calls: list[str] = []
 
             def sqlcl_runner(_target, driver_path, run_dir, **_kwargs):
                 content = driver_path.read_text(encoding="utf-8")
+                payload = (driver_path.parent / "payload.sql").read_text(encoding="utf-8")
                 match = __import__("re").search(r"PROMPT DEVTEST_STEP_START:([a-z0-9-]+)", content)
                 self.assertIsNotNone(match)
                 step_id = match.group(1)
                 step_calls.append(step_id)
+                if "DELETE FROM ORDER_LINES" in payload and "COMMIT;" in payload:
+                    retained_order_lines.discard(101)
                 return SqlclResult(
                     0,
                     (
@@ -544,6 +580,7 @@ class TestProjectCleanupContract(unittest.TestCase):
             self.assertTrue(first["postconditionsPassed"])
             self.assertEqual(second["status"], "COMPLETE")
             self.assertEqual(len(step_calls), 1)
+            self.assertEqual(retained_order_lines, set())
             self.assertEqual(check_calls, [["rows-absent"], ["rows-absent"], ["rows-absent"]])
 
 

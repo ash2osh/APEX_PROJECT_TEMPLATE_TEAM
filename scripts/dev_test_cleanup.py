@@ -927,9 +927,8 @@ def _build_plan(run: RunEvidence, values: Mapping[str, str], runner: Callable) -
         artifacts: list[dict[str, Any]] = []
         programs: dict[str, dict[str, Any]] = {}
         for scenario in scenario_entries:
-            prefix = opened.object_prefix
+            prefix = f"DT_{hashlib.sha256((opened.run_id + scenario['id']).encode('utf-8')).hexdigest()[:12].upper()}_"
             if origin == "project":
-                prefix = f"DT_{hashlib.sha256((opened.run_id + scenario['id']).encode('utf-8')).hexdigest()[:12].upper()}_"
                 program = _project_program(opened, report, schema, scenario)
                 programs[scenario["id"]] = program
             for raw in scenario["objects"]:
@@ -1236,7 +1235,7 @@ def _cleanup_project(
                     )
                     step_id = f"project-{scenario_id}-{operation['index']:03d}"
                     step_scenario = SimpleNamespace(id="cleanup")
-                    step_sql = operation["source"]
+                    step_sql = operation["source"].rstrip() + "\nCOMMIT;\n"
                 else:
                     artifact = artifact_lookup.get((scenario_id, operation["name"], operation["type"]))
                     if artifact is None:

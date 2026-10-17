@@ -128,6 +128,24 @@ exit 17
                 self.assertIn("--cleanup", result.stdout)
                 self.assertNotIn("configuration file not found", result.stdout + result.stderr)
 
+    def test_top_level_help_lists_project_dev_test_options_in_both_wrappers(self) -> None:
+        for entry in ("team.sh", "team.ps1"):
+            if entry.endswith("ps1") and not shutil.which("pwsh"):
+                continue
+            launcher = [BASH] if entry.endswith("sh") else [shutil.which("pwsh"), "-NoProfile", "-File"]
+            result = subprocess.run(
+                [*launcher, str(ROOT / "scripts" / entry), "--help"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            with self.subTest(entry=entry):
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("--suite FILE", result.stdout)
+                self.assertIn("--scenario ID ...", result.stdout)
+                self.assertIn("--format text|json|markdown", result.stdout)
+
     def test_dev_test_forwards_schema_arguments_unchanged_in_both_wrappers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
