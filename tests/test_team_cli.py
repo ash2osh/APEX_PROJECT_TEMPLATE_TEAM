@@ -1183,7 +1183,7 @@ exit 17
                 "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
                 "if [[ -f login.sql ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
                 "if [[ -n \"${SQLPATH:-}\" && -f \"$SQLPATH/login.sql\" ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
-                "printf 'APEX_DOCTOR_VERIFIED:DEMO\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n'\n",
+                "printf 'DATABASE_VERSION_VERIFIED:23.26.0.0.0:23.0.0\\nAPEX_DOCTOR_VERIFIED:DEMO\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n'\n",
                 encoding="utf-8",
             )
             fake_sql.chmod(0o755)

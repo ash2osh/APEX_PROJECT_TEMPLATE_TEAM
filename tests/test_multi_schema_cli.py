@@ -120,7 +120,7 @@ class DoctorCliTests(unittest.TestCase):
             "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release %s Production\\n' \"${FAKE_SQLCL_VERSION:-26.3}\"; exit 0; fi\n"
             "printf '%s|%s|%s\\n' \"$4\" \"$6\" \"$8\" >> \"$FAKE_SQL_CALLS\"\n"
             "if [[ \"${FAKE_FAIL_CONNECTION:-}\" == \"$4\" ]]; then printf 'ORA-01017: invalid credentials\\n'; exit 1; fi\n"
-            "printf 'APEX_DOCTOR_VERIFIED:%s\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n' \"$8\"\n",
+            "printf 'DATABASE_VERSION_VERIFIED:23.26.0.0.0:23.0.0\\nAPEX_DOCTOR_VERIFIED:%s\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n' \"$8\"\n",
             encoding="utf-8",
         )
         fake_sql.chmod(0o755)
