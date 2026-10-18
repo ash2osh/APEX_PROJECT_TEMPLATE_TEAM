@@ -20,7 +20,10 @@ class DoctorDatabaseInfoTests(unittest.TestCase):
         self.env_file = self.root / ".env"
         self.env_file.write_text(self.config, encoding="utf-8")
         bin_path = Path(self.temporary.name) / "fake SQLcl"
-        fake_sqlcl.install(bin_path, r'''if [ "${1:-}" = -V ]; then
+        # Drain redirected input before exiting, as SQLcl does. Otherwise a fast
+        # fake races PowerShell's Start-Process input writer ("Broken pipe").
+        fake_sqlcl.install(bin_path, r'''cat > /dev/null
+if [ "${1:-}" = -V ]; then
   printf 'SQLcl: Release 26.3 Production\n'; exit 0
 fi
 printf 'SQLcl target: session_user=%s, current_schema=%s, db_name=DEV\n' "$8" "$6"

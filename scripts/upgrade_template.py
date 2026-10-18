@@ -219,8 +219,9 @@ def fetch_template(source: str, ref: str | None, destination: Path) -> str:
         try:
             resolved = run_git(destination, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}").strip()
         except UpgradeError:
+            remote_ref = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
             resolved = run_git(destination, "rev-parse", "--verify", "--end-of-options",
-                               "refs/remotes/origin/" + ref + "^{commit}").strip()
+                               "refs/remotes/origin/" + remote_ref + "^{commit}").strip()
         run_git(destination, "checkout", "--quiet", "--detach", resolved)
     return run_git(destination, "rev-parse", "HEAD").strip()
 
