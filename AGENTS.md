@@ -273,18 +273,17 @@ guards); it is skipped when the Graphify environment is not set up.
 
 ## Template update check
 
-At the start of every new conversation, check once, in the background, whether
-the template has moved. The check is read-only:
+At the start of every new conversation, run once in the background:
+`python3 scripts/check_template_update.py`. This read-only check compares the
+lock's `commit` with its recorded `templateRef` (branch or tag), using a portable
+10-second timeout on each Git call. It does not fetch objects into the project.
 
-1. Compare `commit` in `.template-lock.json` with the upstream head:
-   `timeout 10 git ls-remote "$(python3 -c 'import json;print(json.load(open(".template-lock.json"))["upstream"])')" HEAD`.
-2. Say nothing if the lock is missing, the network is unavailable, or the
-   commits match.
-3. If they differ, add one line to the first reply: `Template update available:
-   <lock short> -> <upstream short>; preview with scripts/team.sh upgrade-template
-   --dry-run (needs a clean working tree)`. Mention it once per conversation.
-4. Never run the upgrade, fetch into the project, or commit on your own
-   initiative; the developer decides.
+- Stay silent when the lock/ref is missing or invalid, a commit is pinned,
+  the ref is ambiguous, the network/Git is unavailable, or the commits match.
+- If the command prints an update notice, include it once in the first reply,
+  or the next progress update if the background result arrives later. Do not
+  delay the reply while waiting for it.
+- Never run the upgrade or commit on your own initiative; the developer decides.
 
 ## Project instructions
 

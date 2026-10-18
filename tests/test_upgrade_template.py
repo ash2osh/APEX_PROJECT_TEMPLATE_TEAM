@@ -1136,6 +1136,17 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read("scripts/tool.sh"), "echo v1\n")
         self.assertEqual(git(self.project, "status", "--porcelain"), "")
 
+    def test_qualified_non_default_branch_resolves_to_its_commit(self) -> None:
+        from scripts.upgrade_template import UpgradeError, fetch_template
+        git(self.template, "branch", "qualified-release")
+        expected = git(self.template, "rev-parse", "qualified-release")
+        try:
+            observed = fetch_template(str(self.template), "refs/heads/qualified-release",
+                                      Path(self.temporary.name) / "selected-template")
+        except UpgradeError as exc:
+            self.fail(str(exc))
+        self.assertEqual(expected, observed)
+
     def test_ref_selects_the_template_version(self) -> None:
         v1 = git(self.template, "rev-parse", "HEAD")
         self.release_v2({"scripts/tool.sh": "echo v2\n"})
