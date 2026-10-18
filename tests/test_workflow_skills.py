@@ -1,10 +1,13 @@
 """Exercise pack setup with real local Git repositories and real filesystem changes."""
+import errno
 import json
 import os
 import shutil
 import subprocess
+import stat
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 from pathlib import Path
 
@@ -16,6 +19,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def git(root, *args):
     return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+@contextmanager
+def windows_readonly_deletions():
+    """Model Windows denying unlink of read-only Git objects, using the real filesystem."""
+    unlink = os.unlink
+
+    def remove(path, *args, **kwargs):
+        mode = os.stat(path, dir_fd=kwargs.get("dir_fd"), follow_symlinks=False).st_mode
+        if not mode & stat.S_IWRITE:
+            raise PermissionError(errno.EACCES, "Windows read-only file cannot be unlinked", str(path))
+        return unlink(path, *args, **kwargs)
+
+    with patch.object(workflow_skills.os, "unlink", side_effect=remove):
+        yield
 
 
 class WorkflowSkillsTests(unittest.TestCase):
@@ -50,6 +68,43 @@ class WorkflowSkillsTests(unittest.TestCase):
         self.assertEqual(result["selection"], "none")
         self.assertEqual(result["primary"], "none")
         self.assertEqual(set(self.root.iterdir()), before)
+
+    def test_setup_cleans_readonly_git_objects_and_releases_the_setup_lock(self):
+        with windows_readonly_deletions():
+            try:
+                result = self.setup("superpowers")
+            except PermissionError as exc:
+                self.fail(f"setup must remove its read-only Git objects: {exc}")
+        self.assertEqual(result["selection"], "superpowers")
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(list((self.root / ".agent-skills").iterdir()), [])
+
+    def test_readonly_cleanup_does_not_replace_the_original_setup_refusal(self):
+        with windows_readonly_deletions():
+            try:
+                self.setup("superpowers")
+                self.catalog["mattpocock"]["commit"] = "f" * 40
+                with self.assertRaisesRegex(workflow_skills.SkillsError, "Git operation failed"):
+                    self.setup("both")
+            except PermissionError as exc:
+                self.fail(f"cleanup must preserve the original refusal: {exc}")
+        self.assertEqual(workflow_skills.status(self.root)["selection"], "superpowers")
+        self.assertEqual(list((self.root / ".agent-skills").iterdir()), [])
+
+    def test_cleanup_propagates_other_permission_errors_and_retains_recovery_lock(self):
+        unlink = os.unlink
+
+        def deny_writable(path, *args, **kwargs):
+            mode = os.stat(path, dir_fd=kwargs.get("dir_fd"), follow_symlinks=False).st_mode
+            if mode & stat.S_IWRITE:
+                raise PermissionError(errno.EACCES, "ACL denies deletion", str(path))
+            return unlink(path, *args, **kwargs)
+
+        with patch.object(workflow_skills.os, "unlink", side_effect=deny_writable):
+            with self.assertRaisesRegex(PermissionError, "ACL denies deletion"):
+                self.setup("superpowers")
+        self.assertTrue((self.root / ".agent-skills/setup-lock").is_dir())
+        self.assertTrue(workflow_skills.status(self.root)["issues"])
 
     def test_each_selection_installs_only_requested_packs_and_records_exact_commit(self):
         for selection, names in (("none", []), ("superpowers", ["brainstorming"]),

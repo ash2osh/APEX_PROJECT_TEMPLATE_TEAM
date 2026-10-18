@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -211,6 +212,21 @@ def write_json(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
+def remove_tree(path: Path) -> None:
+    """Remove owned trees, allowing Windows to unlink Git's read-only object files."""
+    def retry_readonly(function, filename, excinfo):
+        error = excinfo[1]
+        if not isinstance(error, PermissionError):
+            raise error
+        info = os.lstat(filename)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & stat.S_IWRITE:
+            raise error
+        os.chmod(filename, info.st_mode | stat.S_IWRITE)
+        function(filename)
+
+    shutil.rmtree(path, onerror=retry_readonly)
+
+
 def setup(root: Path, selection: str, *, primary: str | None = None, catalog: dict | None = None) -> dict:
     root = root.resolve()
     if selection not in SELECTIONS:
@@ -295,7 +311,7 @@ def setup(root: Path, selection: str, *, primary: str | None = None, catalog: di
         except BaseException:
             try:
                 for relative in reversed(installed):
-                    shutil.rmtree(safe(root, relative))
+                    remove_tree(safe(root, relative))
                 for relative in reversed(moved):
                     (stage / "backup" / relative).rename(safe(root, relative))
                 for name, contents in saved.items():
@@ -311,7 +327,7 @@ def setup(root: Path, selection: str, *, primary: str | None = None, catalog: di
     finally:
         if not preserve_stage:
             if stage is not None:
-                shutil.rmtree(stage)
+                remove_tree(stage)
             mutex.rmdir()
     return status(root)
 
