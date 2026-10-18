@@ -6,6 +6,7 @@ PROJECT_ENV_FILE="${1:-${PROJECT_ENV_FILE:-$project_env_repo_root/.env}}"
 unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER PROD_SCHEMA
 unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
 unset DEV_DBA_SQLCL_CONNECTION STAGING_DBA_SQLCL_CONNECTION PROD_DBA_SQLCL_CONNECTION
+unset DB_MAJOR_VERSION
 unset ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER
 unset INSTALL_UC_APX UC_APX_SKILLS_AGENT AGENT_STYLE AGENT_STYLE_LEARNING
 unset APEX_WORKSPACE_USERNAME
@@ -124,6 +125,7 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
     PROD_SQLCL_CONNECTION|PROD_EXPECTED_USER|PROD_SCHEMA|\
     STAGING_SQLCL_CONNECTION|STAGING_EXPECTED_USER|STAGING_SCHEMA|\
     DEV_DBA_SQLCL_CONNECTION|STAGING_DBA_SQLCL_CONNECTION|PROD_DBA_SQLCL_CONNECTION|\
+    DB_MAJOR_VERSION|\
     ORDS_SCHEMA|ORDS_SQLCL_CONNECTION|ORDS_EXPECTED_USER|\
     MIGRATION_SCHEMA|MIGRATION_SQLCL_CONNECTION|MIGRATION_EXPECTED_USER|\
     STAGING_MIGRATION_SCHEMA|STAGING_MIGRATION_SQLCL_CONNECTION|STAGING_MIGRATION_EXPECTED_USER|\
@@ -303,6 +305,18 @@ for project_env_dba_key in DEV_DBA_SQLCL_CONNECTION STAGING_DBA_SQLCL_CONNECTION
     project_env_check_list "$project_env_dba_key" alias || { return 1 2>/dev/null || exit 1; }
   fi
 done
+
+project_env_db_major_seen=false
+for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+  [ "$project_env_seen_key" != DB_MAJOR_VERSION ] || project_env_db_major_seen=true
+done
+if [ "$project_env_db_major_seen" = true ]; then
+  if ! project_env_match "${DB_MAJOR_VERSION:-}" '^[1-9][0-9]$'; then
+    project_env_fail "DB_MAJOR_VERSION must be the two-digit major number the database reports, for example 19 or 23"
+    return 1 2>/dev/null || exit 1
+  fi
+  export DB_MAJOR_VERSION
+fi
 
 for project_env_prefix in PROD STAGING; do
   project_env_connection_key="${project_env_prefix}_SQLCL_CONNECTION"

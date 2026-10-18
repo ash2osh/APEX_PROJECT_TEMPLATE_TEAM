@@ -14,6 +14,8 @@ DEFINE expected_user = '&3'
 DEFINE doctor_profile = '&4'
 DEFINE doctor_username_hex = '&5'
 DEFINE doctor_app_ids = '&6'
+-- Seventh argument: DB_MAJOR_VERSION from .env, or the word none when it is not set.
+DEFINE db_major_version = '&7'
 @@verify_db_access.sql
 -- The same identity driver also serves table/code profiles. Dynamic SQL keeps
 -- those profiles independent of APEX installation and privileges.
@@ -60,6 +62,21 @@ BEGIN
       END IF;
       DBMS_OUTPUT.PUT_LINE('APEX_WORKSPACE_USERS_VERIFIED');
     END;~' USING UPPER('&&target_schema'), v_username, '&&doctor_app_ids';
+  END IF;
+END;
+/
+DECLARE
+  v_declared VARCHAR2(16) := '&&db_major_version';
+  v_actual   PLS_INTEGER  := DBMS_DB_VERSION.VERSION;
+BEGIN
+  IF v_declared = 'none' THEN
+    DBMS_OUTPUT.PUT_LINE('Database major version ' || v_actual || '; DB_MAJOR_VERSION is not set in .env.');
+  ELSIF v_actual != TO_NUMBER(v_declared) THEN
+    RAISE_APPLICATION_ERROR(-20031,
+      'DB_MAJOR_VERSION=' || v_declared || ' but the database reports major version ' || v_actual
+      || '; fix .env or the connection (26ai reports 23).');
+  ELSE
+    DBMS_OUTPUT.PUT_LINE('Database major version ' || v_actual || ' matches DB_MAJOR_VERSION.');
   END IF;
 END;
 /

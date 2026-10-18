@@ -158,7 +158,7 @@ case "$command_name" in
       if ! invoke_sqlcl_safe "$workdir" \
         -S -noupdates -name "$connection" \
         "@$REPO_ROOT/scripts/$doctor_script" \
-        "$schema" "$DB_ENVIRONMENT" "$expected_user" "$doctor_profile" "$username_hex" "$APEX_APP_ID" \
+        "$schema" "$DB_ENVIRONMENT" "$expected_user" "$doctor_profile" "$username_hex" "$APEX_APP_ID" "${DB_MAJOR_VERSION:-none}" \
         < "$stdin" > "$output" 2>&1; then
         cat "$output" >&2
         printf 'team error: SQLcl doctor check failed for schema %s (connection %s)\n' "$schema" "$connection" >&2
