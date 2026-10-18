@@ -158,13 +158,18 @@ case "$command_name" in
       if ! invoke_sqlcl_safe "$workdir" \
         -S -noupdates -name "$connection" \
         "@$REPO_ROOT/scripts/$doctor_script" \
-        "$schema" "$DB_ENVIRONMENT" "$expected_user" "$doctor_profile" "$username_hex" "$APEX_APP_ID" "${DB_MAJOR_VERSION:-none}" \
+        "$schema" "$DB_ENVIRONMENT" "$expected_user" "$doctor_profile" "$username_hex" "$APEX_APP_ID" \
         < "$stdin" > "$output" 2>&1; then
         cat "$output" >&2
         printf 'team error: SQLcl doctor check failed for schema %s (connection %s)\n' "$schema" "$connection" >&2
         status=1
       else
         cat "$output"
+        if [ "$(grep -c '^DATABASE_VERSION_VERIFIED:' "$output" || true)" != 1 ] ||
+           ! grep -Eq '^DATABASE_VERSION_VERIFIED:[0-9]+([.][0-9]+)*:[0-9]+([.][0-9]+)*$' "$output"; then
+          printf 'team error: database version/compatibility detection is unknown for schema %s\n' "$schema" >&2
+          status=1
+        fi
         if ! grep -Fxq "APEX_DOCTOR_VERIFIED:$expected_user" "$output"; then
           printf 'team error: SQLcl did not verify the doctor script for schema %s; the result is unknown\n' "$schema" >&2
           status=1

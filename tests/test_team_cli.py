@@ -1183,7 +1183,7 @@ exit 17
                 "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
                 "if [[ -f login.sql ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
                 "if [[ -n \"${SQLPATH:-}\" && -f \"$SQLPATH/login.sql\" ]]; then touch \"$FAKE_LOGIN_MARKER\"; exit 0; fi\n"
-                "printf 'APEX_DOCTOR_VERIFIED:DEMO\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n'\n",
+                "printf 'DATABASE_VERSION_VERIFIED:23.26.0.0.0:23.0.0\\nAPEX_DOCTOR_VERIFIED:DEMO\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n'\n",
                 encoding="utf-8",
             )
             fake_sql.chmod(0o755)
@@ -1217,46 +1217,6 @@ exit 17
             doctor_sql = (scripts / "doctor.sql").read_text(encoding="utf-8")
             self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", doctor_sql)
             self.assertIn("@@verify_db_access.sql", doctor_sql)
-            # DB_MAJOR_VERSION is optional: the word "none" tells doctor.sql to skip the comparison.
-            self.assertEqual("none", args[-1])
-
-    def test_doctor_passes_the_declared_database_major_version(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            scripts = root / "scripts"
-            scripts.mkdir()
-            for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh", "apex_compatibility.py", "sqlcl_version.py"):
-                shutil.copy2(ROOT / "scripts" / name, scripts / name)
-            (scripts / "verify_db_access.sql").write_text("PROMPT identity checked\n", encoding="utf-8")
-            (root / ".env").write_text(
-                (ROOT / ".env.example").read_text(encoding="utf-8") + "\nDB_MAJOR_VERSION=23\n", encoding="utf-8")
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            sql_log = root / "sql-args.txt"
-            fake_sql = fake_bin / "sql"
-            fake_sql.write_text(
-                "#!/usr/bin/env bash\n"
-                "cat > /dev/null\n"
-                "if [[ ${1:-} == -V ]]; then printf 'SQLcl: Release 26.3 Production\\n'; exit 0; fi\n"
-                "printf '%s\\n' \"$@\" > \"$FAKE_SQL_LOG\"\n"
-                "printf 'APEX_DOCTOR_VERIFIED:DEMO\\nAPEX_RELEASE_VERIFIED:26.2\\nAPEX_WORKSPACE_USERS_VERIFIED\\n'\n",
-                encoding="utf-8",
-            )
-            fake_sql.chmod(0o755)
-            fake_sqlcl.add_launcher(fake_bin)
-            environment = os.environ.copy()
-            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
-            environment["FAKE_SQL_LOG"] = str(sql_log)
-            environment["PROJECT_ENV_FILE"] = str(root / ".env")
-            environment.pop("DB_MAJOR_VERSION", None)
-
-            result = subprocess.run(
-                [BASH, str(scripts / "team.sh"), "doctor"],
-                cwd=root, env=environment, text=True, capture_output=True, check=False,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual("23", sql_log.read_text(encoding="utf-8").splitlines()[-1])
 
     @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_ends_doctor_and_removes_its_working_directory")
     def test_interrupting_doctor_removes_its_working_directory(self) -> None:

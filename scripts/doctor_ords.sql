@@ -12,6 +12,7 @@ DEFINE target_schema = '&1'
 DEFINE db_environment = '&2'
 DEFINE expected_user = '&3'
 @@verify_ords_access.sql
+@@doctor_database_info.sql
 PROMPT SQLcl connection, database identity and ORDS checks passed.
 PROMPT APEX_DOCTOR_VERIFIED:&&expected_user
 EXIT SUCCESS ROLLBACK

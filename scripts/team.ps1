@@ -260,7 +260,7 @@ try {
             -TranscriptFile $transcriptFile -Arguments @(
             "-S", "-noupdates", "-name", $Connection,
             "@$(Join-Path $PSScriptRoot $DoctorScript)",
-            $SchemaName, $env:DB_ENVIRONMENT, $ExpectedUser, $DoctorProfile, $usernameHex, $env:APEX_APP_ID, $(if ($env:DB_MAJOR_VERSION) { $env:DB_MAJOR_VERSION } else { "none" })
+            $SchemaName, $env:DB_ENVIRONMENT, $ExpectedUser, $DoctorProfile, $usernameHex, $env:APEX_APP_ID
           )
           $output = [System.IO.File]::ReadAllText($transcriptFile)
           # Write-Host, not Write-Output: this function returns a status, and anything
@@ -268,6 +268,11 @@ try {
           Write-Host $output
           if ($sqlclExit -ne 0) {
             [Console]::Error.WriteLine("team error: SQLcl doctor check failed for schema $SchemaName (connection $Connection)")
+            return $false
+          }
+          if ([regex]::Matches($output, '(?m)^DATABASE_VERSION_VERIFIED:').Count -ne 1 -or
+              $output -notmatch '(?m)^DATABASE_VERSION_VERIFIED:[0-9]+([.][0-9]+)*:[0-9]+([.][0-9]+)*\r?$') {
+            [Console]::Error.WriteLine("team error: database version/compatibility detection is unknown for schema $SchemaName")
             return $false
           }
           if ($output -notmatch "(?m)^\s*APEX_DOCTOR_VERIFIED:$([regex]::Escape($ExpectedUser))\s*$") {

@@ -59,10 +59,6 @@ safety rule. Never commit or push `personal.md` on your own initiative. See
   app ID, and parsing schema explicitly.
 - Keep APEXlang and SQL files in LF line endings. Review generated source and
   database mirror changes before committing.
-- `DB_MAJOR_VERSION` (optional, one value for every environment) records the
-  Oracle Database major version as the database reports it: `19` for 19c, `23`
-  for 23ai and 26ai. `scripts/team.sh doctor` fails when a connected database
-  reports a different major version.
 - The shared database is the runtime source of truth. Do not add custom team
   metadata tables, mutexes, checkout rosters, or database-backed migration
   ledgers.
@@ -329,19 +325,23 @@ files, not shared Builder state.
   do not push unless asked.
 - If SQLcl, the database, or a requested environment is unavailable, report
   the check as unknown or unavailable rather than passed.
-- Write database code for the major version in `DB_MAJOR_VERSION` (root `.env`):
-  use the SQL and PL/SQL that version provides instead of legacy patterns from
-  older releases, and never use a feature newer than it. For example, on 12c or
-  later prefer `OFFSET ... FETCH FIRST ... ROWS ONLY` over `ROWNUM` wrappers,
-  identity columns over a sequence plus trigger, ANSI joins over `(+)`,
-  `LISTAGG` over `WM_CONCAT` or `XMLAGG` string building, `JSON_OBJECT` /
-  `JSON_ARRAYAGG` over concatenated JSON text, and `MERGE` over
-  insert-then-catch `DUP_VAL_ON_INDEX`. Apply this to code you write or change;
-  do not rewrite working code only to modernize it, and keep an established
-  pattern (for example `Y`/`N` flag columns or an existing interface) unless the
-  task changes it. When unsure what a version offers, check the Oracle
-  documentation or the `db` skill. If `DB_MAJOR_VERSION` is not set, ask the
-  developer once for the version and suggest adding it to `.env`.
+- Before writing version-dependent SQL or PL/SQL, obtain database version and
+  compatibility information for the intended target through the configured,
+  identity-guarded read-only flow. `scripts/team.sh doctor` (or `team.ps1 doctor`)
+  reports the full database version and `COMPATIBLE` for each checked DEV target;
+  existing migration and schema-comparison observations also record a database
+  version, but do not establish its compatibility setting. Do not infer staging
+  or production capabilities from DEV. For code intended for several targets,
+  use features supported by all of them, within their compatibility settings.
+  Use modern SQL and PL/SQL when supported and appropriate; preserve behavior,
+  established interfaces and data conventions. Do not rewrite working code only
+  to modernize it or assume different constructs have identical semantics.
+  Check Oracle documentation or the `db` skill for feature-specific requirements;
+  a version observation alone does not prove every feature is enabled or usable.
+  If the target is unavailable or its compatibility is unknown, report that and
+  ask once for the required compatibility level before choosing version-dependent
+  features; continue unrelated work. Never guess or maintain a database-version
+  setting in `.env`, and never change database compatibility to fit the code.
 
 See [README.md](README.md) for setup and command examples, and
 [migrations/README.md](migrations/README.md) and

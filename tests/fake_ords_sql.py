@@ -166,6 +166,7 @@ def main(arguments: list[str]) -> int:
         if scenario.startswith("wrong-owner"):
             print(f"ORA-20061: ORDS export must authenticate as the REST schema owner {schema} but the session user is DEPLOYER")
             return 1
+        print("DATABASE_VERSION_VERIFIED:23.26.0.0.0:23.0.0")
         print(f"APEX_DOCTOR_VERIFIED:{user}")
         if script == "doctor.sql" and len(rest) >= 4 and rest[3] == "apex":
             print("APEX_RELEASE_VERIFIED:26.2")

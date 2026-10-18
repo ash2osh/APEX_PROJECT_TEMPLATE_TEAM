@@ -95,29 +95,6 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
 
-    def test_db_major_version_loads_from_the_file_only(self) -> None:
-        probe = 'printf "[%s]\\n" "${DB_MAJOR_VERSION-unset}"'
-        self.assertEqual("[23]\n", load(write_env(self.directory, {}, "\nDB_MAJOR_VERSION=23\n"), probe).stdout)
-        self.assertEqual("[unset]\n", load(write_env(self.directory, {}), probe).stdout)
-
-    def test_db_major_version_ignores_an_ambient_value(self) -> None:
-        env_path = write_env(self.directory, {})
-        environment = os.environ.copy()
-        environment["DB_MAJOR_VERSION"] = "19"
-        result = subprocess.run(
-            [BASH, "-c", 'set -e; source "$1" "$2"; printf "[%s]\\n" "${DB_MAJOR_VERSION-unset}"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
-            env=environment, text=True, capture_output=True, check=False,
-        )
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("[unset]\n", result.stdout)
-
-    def test_db_major_version_refusals(self) -> None:
-        for bad_val in ("", "1", "019", "19c", "19.25", "26ai"):
-            with self.subTest(file_value=bad_val):
-                result = load(write_env(self.directory, {}, f"\nDB_MAJOR_VERSION={bad_val}\n"))
-                self.assertNotEqual(0, result.returncode)
-                self.assertIn("DB_MAJOR_VERSION must be the two-digit major number", result.stderr)
-
     def test_workspace_developer_is_independent_literal_optional_text(self) -> None:
         for username in ("dev@example.com", "o'neil", GREEK_USERNAME, "demo"):
             with self.subTest(username=username):

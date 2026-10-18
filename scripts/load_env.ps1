@@ -16,7 +16,6 @@ Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:PROD_SCHEMA, Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
   Env:STAGING_SCHEMA,
   Env:DEV_DBA_SQLCL_CONNECTION, Env:STAGING_DBA_SQLCL_CONNECTION, Env:PROD_DBA_SQLCL_CONNECTION,
-  Env:DB_MAJOR_VERSION,
   Env:ORDS_SCHEMA, Env:ORDS_SQLCL_CONNECTION, Env:ORDS_EXPECTED_USER,
   Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT, Env:AGENT_STYLE, Env:AGENT_STYLE_LEARNING, Env:APEX_WORKSPACE_USERNAME -ErrorAction SilentlyContinue
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
@@ -61,7 +60,6 @@ $projectEnvAllowed = @(
   "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER", "PROD_SCHEMA",
   "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA",
   "DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION",
-  "DB_MAJOR_VERSION",
   "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER",
   "MIGRATION_APPLY_TIMEOUT_SECONDS", "MIGRATION_CHECK_TIMEOUT_SECONDS", "MIGRATION_CHECK_BATCH_BYTES",
   "MIGRATION_PREFLIGHT_INVENTORY_RETRIES"
@@ -286,12 +284,6 @@ foreach ($projectEnvKey in @("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONN
     if ([string]::IsNullOrWhiteSpace($projectEnvValue)) { throw "project environment error: $projectEnvKey must not be empty when configured" }
     if ($projectEnvValue.Contains(",")) { throw "project environment error: $projectEnvKey accepts one saved SQLcl connection alias" }
     Assert-ProjectEnvList -Name $projectEnvKey -Kind alias
-  }
-}
-if ($projectEnvSeen.ContainsKey("DB_MAJOR_VERSION")) {
-  $projectEnvDbMajor = [Environment]::GetEnvironmentVariable("DB_MAJOR_VERSION", "Process")
-  if ($projectEnvDbMajor -cnotmatch '^[1-9][0-9]$') {
-    throw "project environment error: DB_MAJOR_VERSION must be the two-digit major number the database reports, for example 19 or 23"
   }
 }
 Assert-ProjectEnvTriple -SchemaKey TABLES_SCHEMA -ConnectionKey TABLES_SQLCL_CONNECTION -UserKey TABLES_EXPECTED_USER

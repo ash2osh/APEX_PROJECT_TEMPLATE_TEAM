@@ -31,16 +31,6 @@ class SqlDriverContractTests(unittest.TestCase):
                 self.assertIn("WHENEVER OSERROR EXIT FAILURE ROLLBACK", contents)
                 self.assertNotIn("SQL.SQLCODE", contents)
 
-    def test_doctor_compares_the_declared_database_major_version(self) -> None:
-        contents = (ROOT / "scripts/doctor.sql").read_text(encoding="utf-8")
-        self.assertIn("DEFINE db_major_version = '&7'", contents)
-        self.assertIn("DBMS_DB_VERSION.VERSION", contents)
-        self.assertIn("v_declared = 'none'", contents)
-        self.assertIn("TO_NUMBER(v_declared)", contents)
-        # The comparison runs after the identity check and before the success marker.
-        self.assertLess(contents.index("@@verify_db_access.sql"), contents.index("DBMS_DB_VERSION.VERSION"))
-        self.assertLess(contents.index("DBMS_DB_VERSION.VERSION"), contents.index("APEX_DOCTOR_VERIFIED"))
-
     def test_read_only_drivers_exit_success_with_rollback(self) -> None:
         for name in ("check_builder_drift.sql", "doctor.sql", "export_apps.sql", "lookup_app_schema.sql", "backup_db.sql"):
             with self.subTest(driver=name):
