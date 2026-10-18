@@ -1,0 +1,56 @@
+{
+  "superpowers": {
+    "repository": "https://github.com/obra/superpowers.git",
+    "commit": "bb92a77741419a4ab5f06e711a283343f1ada0c3",
+    "skills": {
+      "brainstorming": "skills/brainstorming",
+      "diagnosing-superpowers": "skills/diagnosing-superpowers",
+      "dispatching-parallel-agents": "skills/dispatching-parallel-agents",
+      "executing-plans": "skills/executing-plans",
+      "finishing-a-development-branch": "skills/finishing-a-development-branch",
+      "receiving-code-review": "skills/receiving-code-review",
+      "requesting-code-review": "skills/requesting-code-review",
+      "subagent-driven-development": "skills/subagent-driven-development",
+      "systematic-debugging": "skills/systematic-debugging",
+      "test-driven-development": "skills/test-driven-development",
+      "using-git-worktrees": "skills/using-git-worktrees",
+      "using-superpowers": "skills/using-superpowers",
+      "verification-before-completion": "skills/verification-before-completion",
+      "writing-plans": "skills/writing-plans",
+      "writing-skills": "skills/writing-skills"
+    }
+  },
+  "mattpocock": {
+    "repository": "https://github.com/mattpocock/skills.git",
+    "commit": "49dd158d1076134a641b33efb035946536778336",
+    "skills": {
+      "ask-matt": "skills/engineering/ask-matt",
+      "code-review": "skills/engineering/code-review",
+      "codebase-design": "skills/engineering/codebase-design",
+      "diagnosing-bugs": "skills/engineering/diagnosing-bugs",
+      "domain-modeling": "skills/engineering/domain-modeling",
+      "grill-with-docs": "skills/engineering/grill-with-docs",
+      "implement": "skills/engineering/implement",
+      "implement-spec": "skills/engineering/implement-spec",
+      "improve-codebase-architecture": "skills/engineering/improve-codebase-architecture",
+      "pr": "skills/engineering/pr",
+      "prototype": "skills/engineering/prototype",
+      "research": "skills/engineering/research",
+      "retro": "skills/engineering/retro",
+      "setup-matt-pocock-skills": "skills/engineering/setup-matt-pocock-skills",
+      "tdd": "skills/engineering/tdd",
+      "to-spec": "skills/engineering/to-spec",
+      "to-tickets": "skills/engineering/to-tickets",
+      "triage": "skills/engineering/triage",
+      "wayfinder": "skills/engineering/wayfinder",
+      "wizard": "skills/engineering/wizard",
+      "grill-me": "skills/productivity/grill-me",
+      "grilling": "skills/productivity/grilling",
+      "handoff": "skills/productivity/handoff",
+      "teach": "skills/productivity/teach",
+      "to-questionnaire": "skills/productivity/to-questionnaire",
+      "wait-what": "skills/productivity/wait-what",
+      "writing-for-agents": "skills/productivity/writing-for-agents"
+    }
+  }
+}

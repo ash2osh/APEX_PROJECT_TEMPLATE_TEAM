@@ -59,12 +59,15 @@ Commands:
                                               Update template-owned files from the template
   verify-local [--format text|json] [--skills-root <path>] [...] [--live]
                                               Validate local environment, lock, apps and skills read-only
+  skills setup none|superpowers|mattpocock|both [--primary superpowers|mattpocock]
+                                              Set up optional repository workflow packs
+  skills status [--format text|json]          Inspect repository workflow packs offline
   template-status [--format text|json] [--upstream --ref <ref>]
                                               Inspect local template drift; fetch upstream only when requested
   automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
                                               Observe, check or explicitly operate on one scoped automation
 Options:
-  --schema <NAME>                             Run one configured schema (except upgrade-template, verify-local, migration-plan and dev-test)
+  --schema <NAME>                             Run one configured schema (except offline/tooling commands)
   --help                                      Show this help
 Environment:
   MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
@@ -83,7 +86,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != dev-test ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -375,6 +378,20 @@ case "$command_name" in
     esac
 
     exec python3 "$verify_script" --repo-root "$verify_root" "$@"
+    ;;
+
+  skills)
+    skills_script="$REPO_ROOT/scripts/workflow_skills.py"
+    skills_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          skills_script="$(cygpath -m "$skills_script")"
+          skills_root="$(cygpath -m "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+    exec python3 "$skills_script" --repo-root "$skills_root" "$@"
     ;;
 
   template-status)

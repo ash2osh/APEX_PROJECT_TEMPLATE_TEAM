@@ -1029,6 +1029,40 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read(".agents/skills/uc-apx-skills/local.md"), "developer payload\n")
         self.assertTrue(all(path not in self.lock()["files"] for path in retired))
 
+    def test_workflow_pack_retirement_preserves_selection_and_local_install_inventory(self) -> None:
+        retired = (".agents/skills/brainstorming/SKILL.md", ".claude/skills/brainstorming/SKILL.md")
+        manifest = {**MANIFEST, "upstream": str(self.template),
+                    "templateOwned": [*MANIFEST["templateOwned"], ".gitignore", ".agents/skills/**", ".claude/skills/**"],
+                    "projectOwned": [*MANIFEST["projectOwned"], ".agent-skills.json"]}
+        initial = {"template-manifest.json": json.dumps(manifest),
+                   ".gitignore": ".agent-skills.lock.json\n.agents/skills/tdd/\n",
+                   ".agent-skills.json": '{"schemaVersion":1,"selection":"none","primary":"none"}\n',
+                   **{path: "old bundled skill\n" for path in retired}}
+        write(self.template, initial)
+        commit_all(self.template, "bundled workflow")
+        write(self.project, initial)
+        commit_all(self.project, "legacy downstream")
+        self.adopt()
+        selected = '{"schemaVersion":1,"selection":"mattpocock","primary":"mattpocock"}\n'
+        write(self.project, {".agent-skills.json": selected, retired[1]: "custom workflow\n"})
+        commit_all(self.project, "project selection and custom workflow")
+        # Generated, untracked pack files must not become template-managed on upgrade.
+        write(self.project, {".agents/skills/tdd/SKILL.md": "local optional pack\n",
+                             ".agent-skills.lock.json": "local content inventory\n"})
+        self.release_v2({}, removed=retired)
+
+        result = self.upgrade()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse((self.project / retired[0]).exists())
+        self.assertIn(f"KEEP-REMOVED {retired[1]}", result.stdout)
+        self.assertEqual(self.read(retired[1]), "custom workflow\n")
+        self.assertEqual(self.read(".agent-skills.json"), selected)
+        self.assertEqual(self.read(".agents/skills/tdd/SKILL.md"), "local optional pack\n")
+        self.assertEqual(self.read(".agent-skills.lock.json"), "local content inventory\n")
+        self.assertNotIn(".agents/skills/tdd/SKILL.md", self.lock()["files"])
+        self.assertTrue(all(path not in self.lock()["files"] for path in retired))
+
     def test_project_data_and_template_only_files_are_untouched(self) -> None:
         self.release_v2({"docs/plan.md": "template only v2\n"})
 

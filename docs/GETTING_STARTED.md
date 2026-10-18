@@ -496,3 +496,11 @@ revision folder instead (`...-r002`). Commit the folder.
   command reference.
 - [publish-rules.md](publish-rules.md) and [migration-rules.md](migration-rules.md):
   every rule in detail.
+
+## Optional workflow packs
+
+`/init` offers Superpowers, Matt Pocock's skills, both, or neither (default).
+Change the choice later with `scripts/team.sh skills setup <selection>` or
+`team.ps1 skills setup <selection>`; inspect it with `skills status`.
+See [workflow skill setup](workflow-skills.md) for pinned versions, the primary
+workflow when using both, global-plugin limits and existing-project upgrades.

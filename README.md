@@ -48,14 +48,14 @@ operational scripts, `.env`, manifest and lock.
 | Safety built in | Every connection is identity-checked, production-looking names are caught, production is read-only, file installs are all-or-nothing, and your uncommitted work is never overwritten. |
 | Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
 | Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
-| AI-assistant support | Repository rules, workflows, 25 skills, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
+| AI-assistant support | Repository rules, 11 skills plus optional workflow packs, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
 | Bash and PowerShell | `scripts/team.sh` and `scripts/team.ps1` expose the same commands. |
 
 ## Skills and agent support
 
 AI coding assistants read [AGENTS.md](AGENTS.md) (Claude Code loads it through
 `CLAUDE.md`) for the rules and load a skill on their own when a task matches
-its description. The same 25 skills are listed in `.agents/skills/` (for agents
+its description. The same 11 skills for APEX and project setup are listed in `.agents/skills/` (for agents
 that follow the `AGENTS.md` convention) and `.claude/skills/` (for Claude Code).
 Four Claude Code entries (`building-apex-template-components`, `chrome-devtools-mcp`,
 `safeguarding-apexlang-text-messages` and `sqlcl-mcp-r0`) are short pointers to the full
@@ -108,14 +108,19 @@ Agents also load a conversation style at the start of each conversation: set `AG
 | `chrome-devtools-mcp` | Inspecting or driving your running web app in Chrome through the project's persistent DevTools daemon. |
 | `building-apex-template-components` | Creating, translating or debugging an APEX template component (report type) for cards or lists: files, placeholders, region mapping, mobile and Arabic layout, optional Alpine.js, import and browser testing. |
 
-**Workflow skills** (from the Superpowers collection): `brainstorming`,
-`writing-plans`, `executing-plans`, `subagent-driven-development`,
-`dispatching-parallel-agents`, `test-driven-development`,
-`systematic-debugging`, `verification-before-completion`,
-`requesting-code-review`, `receiving-code-review`,
-`finishing-a-development-branch`, `using-superpowers`, `writing-skills` and
-`diagnosing-superpowers`. They guide how an assistant designs, implements,
-debugs and reviews a change.
+**Optional workflow packs:** choose Superpowers, Matt Pocock's skills, both, or
+neither during `/init` or later. New projects default to neither. Installations
+are local and ignored; pinned commits and content hashes are recorded.
+
+```bash
+scripts/team.sh skills setup both --primary superpowers
+scripts/team.sh skills status
+scripts/team.sh skills setup none
+```
+
+With both installed, use one primary workflow per task. This setting does not
+disable user-level skills or app plugins. See [workflow skill setup](docs/workflow-skills.md)
+for all choices, Matt's follow-up setup, upgrades and recovery.
 
 Rules and workflows that apply to everyone, human or assistant, live in
 `.agents/rules/` (`agent-safety.md`, `graphify.md`) and `.agents/workflows/`
@@ -789,6 +794,8 @@ Full changes and promotion retain team coordination; working copies remain defer
 | `scripts/team.sh deploy <id> --env <staging\|prod> [--manual] [--strict-bytes] [--no-restore-automations]` | Confirm a promotion or print a DBA runbook with the automation restore step. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
+| `scripts/team.sh skills setup none\|superpowers\|mattpocock\|both [--primary superpowers\|mattpocock]` | Set up optional, pinned workflow packs locally. |
+| `scripts/team.sh skills status [--format text\|json]` | Inspect repository-managed packs offline. |
 | `scripts/team.sh template-status [--format text\|json]` | Compare template-owned files with the local lock; no network access by default. |
 | `scripts/team.sh template-status --upstream --ref <ref>` | Explicitly compare local files with a branch, tag or commit from the manifest's upstream repository. |
 | `scripts/team.sh automations list <id> --env <env> --schema <schema>` | Read one application's automation status in its descriptor workspace. |
