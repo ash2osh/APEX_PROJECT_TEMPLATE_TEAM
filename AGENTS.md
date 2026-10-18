@@ -342,6 +342,23 @@ the template has moved. The check is read-only:
   do not push unless asked.
 - If SQLcl, the database, or a requested environment is unavailable, report
   the check as unknown or unavailable rather than passed.
+- Before writing version-dependent SQL or PL/SQL, obtain database version and
+  compatibility information for the intended target through the configured,
+  identity-guarded read-only flow. `scripts/team.sh doctor` (or `team.ps1 doctor`)
+  reports the full database version and `COMPATIBLE` for each checked DEV target;
+  existing migration and schema-comparison observations also record a database
+  version, but do not establish its compatibility setting. Do not infer staging
+  or production capabilities from DEV. For code intended for several targets,
+  use features supported by all of them, within their compatibility settings.
+  Use modern SQL and PL/SQL when supported and appropriate; preserve behavior,
+  established interfaces and data conventions. Do not rewrite working code only
+  to modernize it or assume different constructs have identical semantics.
+  Check Oracle documentation or the `db` skill for feature-specific requirements;
+  a version observation alone does not prove every feature is enabled or usable.
+  If the target is unavailable or its compatibility is unknown, report that and
+  ask once for the required compatibility level before choosing version-dependent
+  features; continue unrelated work. Never guess or maintain a database-version
+  setting in `.env`, and never change database compatibility to fit the code.
 
 See [README.md](README.md) for setup and command examples, and
 [migrations/README.md](migrations/README.md) and

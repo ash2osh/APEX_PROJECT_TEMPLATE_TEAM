@@ -15,6 +15,7 @@ DEFINE doctor_profile = '&4'
 DEFINE doctor_username_hex = '&5'
 DEFINE doctor_app_ids = '&6'
 @@verify_db_access.sql
+@@doctor_database_info.sql
 -- The same identity driver also serves table/code profiles. Dynamic SQL keeps
 -- those profiles independent of APEX installation and privileges.
 DECLARE

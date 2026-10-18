@@ -756,12 +756,22 @@ Full changes and promotion retain team coordination; working copies remain defer
 
 ## Command reference
 
+`doctor` detects the full database version and `COMPATIBLE` separately for each
+checked DEV target, including a configured ORDS target. It does not write these
+observations into `.env` or change database settings. Missing, malformed or
+unavailable detection makes the check fail; it is not a compatibility pass.
+The observations belong to the displayed target identity and this run: do not
+reuse DEV results as proof for staging or production. Before choosing a feature
+for several targets, establish their supported versions and compatibility
+settings through authorized read-only checks; if unavailable, report them as
+unknown. Version and compatibility do not prove feature privileges or availability.
+
 | Command | Purpose |
 | --- | --- |
 | `scripts/team.sh app-lock <id> --env dev` | Acquire a native application lock as the configured workspace developer. |
 | `scripts/team.sh app-unlock <id> --env dev` | Release only the configured developer's application lock after reconciliation. |
 | `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
-| `scripts/team.sh doctor` | Validate `.env` and check the DEV SQLcl identity. |
+| `scripts/team.sh doctor` | Validate `.env`, check the DEV SQLcl identity and report the detected database version and `COMPATIBLE`. |
 | `scripts/team.sh dev-test --env dev --schema NAME --plan\|--run` | Plan or run the six built-in DEV checks, or an explicitly selected project suite; fixtures are retained by default. See [DEV test runner](docs/dev-test.md). |
 | `scripts/team.sh dev-test --report <run-id> [--format text\|json\|markdown]` | Render saved evidence without connecting to a database. |
 | `scripts/team.sh dev-test --cleanup <run-id>` | Explicitly clean supported recorded artifacts; project suites without a cleanup contract remain manual. |

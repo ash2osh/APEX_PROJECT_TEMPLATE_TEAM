@@ -270,6 +270,11 @@ try {
             [Console]::Error.WriteLine("team error: SQLcl doctor check failed for schema $SchemaName (connection $Connection)")
             return $false
           }
+          if ([regex]::Matches($output, '(?m)^DATABASE_VERSION_VERIFIED:').Count -ne 1 -or
+              $output -notmatch '(?m)^DATABASE_VERSION_VERIFIED:[0-9]+([.][0-9]+)*:[0-9]+([.][0-9]+)*\r?$') {
+            [Console]::Error.WriteLine("team error: database version/compatibility detection is unknown for schema $SchemaName")
+            return $false
+          }
           if ($output -notmatch "(?m)^\s*APEX_DOCTOR_VERIFIED:$([regex]::Escape($ExpectedUser))\s*$") {
             [Console]::Error.WriteLine("team error: SQLcl did not verify the doctor script for schema $SchemaName; the result is unknown")
             return $false

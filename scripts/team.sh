@@ -165,6 +165,11 @@ case "$command_name" in
         status=1
       else
         cat "$output"
+        if [ "$(grep -c '^DATABASE_VERSION_VERIFIED:' "$output" || true)" != 1 ] ||
+           ! grep -Eq '^DATABASE_VERSION_VERIFIED:[0-9]+([.][0-9]+)*:[0-9]+([.][0-9]+)*$' "$output"; then
+          printf 'team error: database version/compatibility detection is unknown for schema %s\n' "$schema" >&2
+          status=1
+        fi
         if ! grep -Fxq "APEX_DOCTOR_VERIFIED:$expected_user" "$output"; then
           printf 'team error: SQLcl did not verify the doctor script for schema %s; the result is unknown\n' "$schema" >&2
           status=1
