@@ -36,6 +36,26 @@ hosts, customer, employee or business data, project or schema names, or anything
 safety rule. Never commit or push `personal.md` on your own initiative. See
 [.agents/styles/README.md](.agents/styles/README.md).
 
+## Optional workflow packs
+
+Read `.agent-skills.json` at task startup (missing means `none`). It records
+`selection` (`none`, `superpowers`, `mattpocock`, `both`) and `primary`.
+Only apply an enabled repository workflow pack. With both selected, use the
+primary pack's process by default; use the other for an explicit user request
+or task override, without duplicating whole workflows. Direct user instructions
+and project safety rules take precedence over either pack.
+
+Set up packs only when requested, using `scripts/team.sh skills setup <selection>`
+(or `team.ps1`). Use `skills status` for offline installation evidence. Selection
+controls repository-managed copies, not global skills or enabled app plugins;
+report those separately when they affect a request to use neither.
+
+The 11 template-authored domain/setup skills and mandatory Oracle refresh remain
+independent of optional workflow packs. After installing Matt's pack, invoke
+`/setup-matt-pocock-skills` when requested and put its project guidance in
+`AGENTS.project.md`, preserving existing instructions, instead of template-owned
+`AGENTS.md`/`CLAUDE.md`. See [workflow skill setup](docs/workflow-skills.md).
+
 ## Configuration and application source
 
 - Copy `.env.example` to root `.env`, set `DEVELOPER_NAME` to the

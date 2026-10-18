@@ -64,7 +64,9 @@
     "tools/probe_apex_26_2.py",
     "tools/qualify_automation_operations.py",
     "tools/qualify_synonym_namespaces.py",
-    "tools/qualify_template_readonly.py"
+    "tools/qualify_template_readonly.py",
+    "tools/workflow-skills/**",
+    "docs/workflow-skills.md"
   ],
   "projectOwned": [
     ".agents/rules/project.md",
@@ -75,7 +77,8 @@
     "ai_generate/.gitkeep",
     "apps/.gitkeep",
     "database/.gitkeep",
-    "migrations/.gitkeep"
+    "migrations/.gitkeep",
+    ".agent-skills.json"
   ],
   "templateOnly": [
     "docs/superpowers/**"

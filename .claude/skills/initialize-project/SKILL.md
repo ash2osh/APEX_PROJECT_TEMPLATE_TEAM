@@ -112,6 +112,13 @@ Collect values in this order:
    clients or secrets, and needs SQLcl 26.1 or newer. All three values are set,
    or none (no partial profile).
 
+9. Optional workflow packs: `none` (default), `superpowers`, `mattpocock`, or
+   `both`. If both, ask which primary workflow to use (default `superpowers`).
+   Preserve an existing `.agent-skills.json` selection unless the user chooses
+   to change it. Explain that user-level skills and app plugins are separate.
+   Show the chosen packs with optional tooling in the confirmation summary.
+   Do not add pack settings to `.env`.
+
 Schemas and users are uppercase Oracle identifiers matching
 `[A-Z][A-Z0-9_$#]{0,127}`. Saved-connection names match
 `[A-Za-z0-9][A-Za-z0-9._-]*`. Application IDs match strict CSV of
@@ -177,6 +184,22 @@ workspace".
 
 Do not add unknown keys, comments containing user secrets, shell expansions,
 or credential material.
+
+## Optional workflow setup
+
+After the user confirms the setup summary, run `scripts/team.sh skills setup
+<selection>` (or `scripts/team.ps1 skills setup <selection>`), adding `--primary
+<pack>` for `both`. Git and Python 3.10+ are sufficient; no Node.js or database
+connection is required. This downloads pinned skill files only when a pack is
+selected. A missing prerequisite or failed pack installation never prevents
+creating or validating `.env`; report the pack as unavailable and retain its
+previous selection. Do not claim it was installed.
+
+For Matt's pack, report `/setup-matt-pocock-skills` as the next interactive step.
+Its project guidance belongs in `AGENTS.project.md`, preserving existing content,
+instead of template-owned `AGENTS.md` or `CLAUDE.md`. Follow
+[workflow skill setup](../../../docs/workflow-skills.md). The repository selection
+does not disable globally installed skills or app plugins.
 
 ## Local validation
 
