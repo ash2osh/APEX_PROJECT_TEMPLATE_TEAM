@@ -222,7 +222,9 @@ checks, and `python3 scripts/graphify_project.py extract` to rebuild the canonic
 The corpus is a domain allowlist of `apps/`, `database/`, and `app_context/`.
 Graphify links cross-schema references and mirrored synonyms when their targets
 are present in the database mirror. The graph reflects this repository's
-files, not shared Builder state.
+files, not shared Builder state. When the graph exists, each new conversation
+starts a background incremental `extract` (see the graphify rules for its
+guards); it is skipped when the Graphify environment is not set up.
 
 ## Mandatory weekly Oracle skills refresh
 
@@ -268,6 +270,21 @@ files, not shared Builder state.
   No standalone automation is required. Inactive projects check at next task
   startup; projects sharing this user's installations reuse native freshness.
   Notification does not authorize messages to teammates or external channels.
+
+## Template update check
+
+At the start of every new conversation, check once, in the background, whether
+the template has moved. The check is read-only:
+
+1. Compare `commit` in `.template-lock.json` with the upstream head:
+   `timeout 10 git ls-remote "$(python3 -c 'import json;print(json.load(open(".template-lock.json"))["upstream"])')" HEAD`.
+2. Say nothing if the lock is missing, the network is unavailable, or the
+   commits match.
+3. If they differ, add one line to the first reply: `Template update available:
+   <lock short> -> <upstream short>; preview with scripts/team.sh upgrade-template
+   --dry-run (needs a clean working tree)`. Mention it once per conversation.
+4. Never run the upgrade, fetch into the project, or commit on your own
+   initiative; the developer decides.
 
 ## Project instructions
 
