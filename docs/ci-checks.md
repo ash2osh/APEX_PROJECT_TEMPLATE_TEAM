@@ -44,5 +44,9 @@ Set these in GitHub (Settings, Branches), they are not in the repository:
 
 - Require a pull request before merging into `main`.
 - Require the status checks `offline`, `windows-offline` and `macos-installer` to pass.
+- Do not allow administrators to bypass these rules, so no pull request merges before its checks pass.
+- Allow auto-merge and turn it on for each pull request (`gh pr merge --auto --merge`): GitHub merges it when the
+  checks pass, and nobody has to wait for the run.
+- Automatically delete head branches after a merge.
 
 AGENTS.md already says the template follows a normal branch and pull-request process; this makes it so.
