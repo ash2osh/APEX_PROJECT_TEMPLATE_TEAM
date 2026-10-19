@@ -482,6 +482,8 @@ revision folder instead (`...-r002`). Commit the folder.
 | test a SQL change against the database | `scripts/team.sh check-conflicts <folder> --env dev` |
 | plan or run the DEV fixture suite | `scripts/team.sh dev-test --env dev --schema <OWNER> --plan` or `--run`; see [dev-test.md](dev-test.md) for retained-fixture and project-suite rules |
 | apply a SQL change | `scripts/team.sh migrate <folder> --env dev` |
+| change a migration that was already attempted | `scripts/team.sh revise <folder>` |
+| list the everyday commands | `scripts/team.sh` (no command); `--help` lists every command |
 | see how two environments differ | `scripts/team.sh compare-schema --from dev --to staging --object <NAME>` |
 | release to staging or production | `scripts/team.sh deploy <app-id> --env staging` |
 | get the latest template scripts | `scripts/team.sh upgrade-template --dry-run` |

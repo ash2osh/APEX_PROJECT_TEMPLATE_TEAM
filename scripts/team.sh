@@ -75,9 +75,32 @@ Environment:
 USAGE
 }
 
+# No command prints only the everyday commands; --help prints all of them.
+usage_everyday() {
+  cat <<'USAGE'
+Usage: scripts/team.sh <command> [arguments]
+
+Everyday commands:
+  doctor                                  Check .env and the database connections
+  export <app_id>                         Copy a live app from DEV into Git
+  publish <app_id> --env dev              Import your edited app files to DEV
+  check-conflicts <folder> --env dev      Check a migration against the live database
+  migrate <folder> --env dev              Apply a migration
+  revise <folder>                         Start the next revision of an attempted migration
+  backup-db                               Refresh the local database mirror
+  upgrade-template --dry-run              Preview a template upgrade
+
+Run scripts/team.sh --help for every command and option.
+USAGE
+}
+
 fail() { printf 'team error: %s\n' "$*" >&2; exit 2; }
 
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ -z "${1:-}" ]; then
+if [ -z "${1:-}" ]; then
+  usage_everyday
+  exit 0
+fi
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
