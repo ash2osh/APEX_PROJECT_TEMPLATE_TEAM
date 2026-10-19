@@ -211,7 +211,9 @@ class WorkflowSkillsTests(unittest.TestCase):
 
         def interrupt_after_rename(path, target):
             result = rename(path, target)
-            if path == source:
+            # Compare the tail: on Windows the code renames the resolved path, whose temp
+            # directory is the long form of the short (RUNNER~1) name in `source`.
+            if Path(path).parts[-3:] == source.parts[-3:]:
                 raise KeyboardInterrupt
             return result
 
