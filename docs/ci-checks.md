@@ -38,6 +38,12 @@ visible. Any failing test that is not listed, or a rerun that fails, fails the j
 Add an entry only with evidence (the same code passing in another run) and a reason; remove it when the test is
 fixed. Never add a test that fails every time.
 
+## Parallel test runs
+
+CI runs each test module in its own process, 4 at a time (`CI_TEST_JOBS`), largest first.
+Locally, `python3 scripts/ci_run_tests.py --jobs 4` does the same; without `--jobs` it runs one
+process as before, and a run with unittest arguments such as `-k` always uses one process.
+
 ## Recommended repository settings
 
 Set these in GitHub (Settings, Branches), they are not in the repository:
