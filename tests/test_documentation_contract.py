@@ -319,7 +319,9 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_ci_runs_behavioral_unittest_suite(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")
-        self.assertIn("python3 -m unittest discover -s tests -v", workflow)
+        self.assertIn("python3 scripts/ci_run_tests.py", workflow)
+        self.assertIn("python scripts/ci_run_tests.py", workflow)
+        self.assertIn('"discover", "-s", "tests", "-v"', (ROOT / "scripts" / "ci_run_tests.py").read_text(encoding="utf-8"))
 
     def test_active_markdown_links_resolve(self) -> None:
         for path in DOCS:
