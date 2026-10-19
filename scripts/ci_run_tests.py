@@ -89,7 +89,7 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
     outputs: list[str] = []
     code = 0
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for module, (module_code, output) in zip(modules, pool.map(lambda name: module_runner([name]), modules)):
+        for module, (module_code, output) in zip(modules, pool.map(lambda name: module_runner([name]), modules), strict=True):
             print(f"===== {module}: exit {module_code}", flush=True)
             print(output, end="" if output.endswith("\n") else "\n", flush=True)
             outputs.append(output)
