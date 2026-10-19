@@ -100,3 +100,37 @@ the evidence, the preferred behavior, and the check that keeps it true.
   timestamp and repeat for stability, then exercise real bookmark URLs and
   explicit cutoff settings. The 2026-10-08 native runtime tests passed; the guarded
   no-notice route additionally requires an explicit live-matching salt and cutoff.
+
+### Compare a path the code resolved with a resolved path
+
+- Trigger: on 2026-10-19 `windows-offline` turned `main` red in both template
+  repositories with `KeyboardInterrupt not raised` in
+  `test_interrupt_after_skill_rename_restores_the_backup`.
+- Evidence: `workflow_skills.setup` calls `root.resolve()`. On the Windows
+  runner the temporary directory is the short name `RUNNER~1`, which `resolve()`
+  expands, so the test's `path == source` never matched. Linux and macOS passed,
+  and the pull request was merged before its Windows job finished.
+- Preferred behavior: when a test compares a path the code produced, compare
+  `os.path.normcase(os.path.realpath(...))` of both sides, never the raw
+  `Path` it built. Merge only after all three jobs pass; branch protection now
+  binds administrators, and auto-merge waits for the checks.
+- Verification: the test compares resolved paths, and its Windows job passed
+  in the fix's pull request.
+
+### Give each new command its own test module
+
+- Trigger: on 2026-10-19 three parallel pull requests (the everyday help,
+  `query`/`template-status`, and `new-migration`) each conflicted with the
+  others.
+- Evidence: each added its wrapper test just before the same method in
+  `tests/test_team_cli.py`, and its case arm just before `revise` in
+  `scripts/team.sh` and `scripts/team.ps1`. Git cannot merge two insertions at
+  one point, so every later pull request needed a manual merge.
+- Preferred behavior: put a new command's tests in a new
+  `tests/test_<command>_cli.py` (it may import helpers from
+  `tests/test_team_cli.py`), and add its case arm in alphabetical order rather
+  than before a fixed neighbour. Before opening several pull requests at once,
+  merge their branches in a scratch worktree and resolve any conflict while the
+  context is fresh.
+- Verification: each `tests/test_<command>_cli.py` runs alone with
+  `python3 -m unittest discover -s tests -p 'test_<command>_cli.py'`.
