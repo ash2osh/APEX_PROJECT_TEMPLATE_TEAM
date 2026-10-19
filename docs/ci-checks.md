@@ -44,6 +44,11 @@ CI runs each test module in its own process, 4 at a time (`CI_TEST_JOBS`), large
 Locally, `python3 scripts/ci_run_tests.py --jobs 4` does the same; without `--jobs` it runs one
 process as before, and a run with unittest arguments such as `-k` always uses one process.
 
+On Windows the test step sets `TEMP` and `TMP` to `runner.temp`: the runner's default temp
+directory is a short 8.3 name (`RUNNER~1`) that `resolve()` expands, which broke path
+comparisons in tests. CI therefore does not cover a short temp path; code that compares paths
+still resolves both sides.
+
 ## Recommended repository settings
 
 Set these in GitHub (Settings, Branches), they are not in the repository:
