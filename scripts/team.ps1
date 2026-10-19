@@ -26,6 +26,25 @@ function Exit-Team([int] $Code) {
   exit $Code
 }
 
+# No command prints only the everyday commands; --help prints all of them.
+function Show-EverydayUsage {
+  @"
+Usage: scripts/team.ps1 <command> [arguments]
+
+Everyday commands:
+  doctor                                  Check .env and the database connections
+  export <app_id>                         Copy a live app from DEV into Git
+  publish <app_id> --env dev              Import your edited app files to DEV
+  check-conflicts <folder> --env dev      Check a migration against the live database
+  migrate <folder> --env dev              Apply a migration
+  revise <folder>                         Start the next revision of an attempted migration
+  backup-db                               Refresh the local database mirror
+  upgrade-template --dry-run              Preview a template upgrade
+
+Run scripts/team.ps1 --help for every command and option.
+"@ | Write-Output
+}
+
 function Show-Usage {
   @"
 Usage: scripts/team.ps1 <command> [arguments]
@@ -208,7 +227,11 @@ function Invoke-TeamBash {
   if ($bashStatus -ne 0) { Exit-Team $bashStatus }
 }
 
-if ([string]::IsNullOrWhiteSpace($Command) -or $Command -in @("--help", "-h")) {
+if ([string]::IsNullOrWhiteSpace($Command)) {
+  Show-EverydayUsage
+  exit 0
+}
+if ($Command -in @("--help", "-h")) {
   Show-Usage
   exit 0
 }
