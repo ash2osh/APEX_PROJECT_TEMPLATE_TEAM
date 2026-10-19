@@ -36,7 +36,8 @@ def catalog(units):
 class NewMigrationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        # create() returns resolved paths; on Windows the temp dir is a short (RUNNER~1) name.
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "migrations").mkdir()
         self.calls = []
 
