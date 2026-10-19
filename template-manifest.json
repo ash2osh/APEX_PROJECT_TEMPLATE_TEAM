@@ -84,6 +84,7 @@
     ".agent-skills.json"
   ],
   "templateOnly": [
-    "docs/superpowers/**"
+    "docs/superpowers/**",
+    "tools/template_parity.py"
   ]
 }
