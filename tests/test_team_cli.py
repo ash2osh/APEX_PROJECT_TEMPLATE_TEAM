@@ -869,6 +869,19 @@ exit 17
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Usage: scripts/team.", result.stdout)
 
+    def test_new_migration_is_listed_and_needs_arguments_in_both_wrappers(self) -> None:
+        entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            entries.append([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")])
+        for command in entries:
+            with self.subTest(entry=command[-1]):
+                help_text = subprocess.run([*command, "--help"], text=True, capture_output=True, check=False, cwd=ROOT).stdout
+                self.assertIn("new-migration <name> --source TYPE:NAME [...] --env dev", help_text)
+                usage = subprocess.run([*command, "new-migration"], text=True, capture_output=True, check=False, cwd=ROOT)
+                self.assertNotEqual(usage.returncode, 0)
+                self.assertIn("new-migration <name> --source TYPE:NAME", usage.stderr)
+
     def test_argument_errors_read_and_exit_the_same_in_both_wrappers(self) -> None:
         # An uncaught throw makes PowerShell print an exception block with the
         # script path and line and exit 1; Bash prints one `team error:` line and

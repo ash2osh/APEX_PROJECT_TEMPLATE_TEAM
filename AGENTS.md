@@ -167,7 +167,10 @@ independent of optional workflow packs. After installing Matt's pack, invoke
   `migrations/YYYY-MM-DD_<name>-rNNN/` with consecutive named SQL steps such as
   `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
   path. Keep source immutable after a write attempt; a follow-up uses the next
-  revision folder. Run `scripts/team.sh check-conflicts <folder> --env dev`
+  revision folder. Start a code change with `scripts/team.sh new-migration
+  <name> --source "PACKAGE BODY:<NAME>" --env dev`: it copies the live DEV
+  source (not the mirror) into the steps, and its preconditions refuse the
+  apply if that source changes first. Run `scripts/team.sh check-conflicts <folder> --env dev`
   before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
   Keep `checks.json` schema 1 unchanged unless a reviewed rehearsal needs
   schema-2 `rehearsalMetrics`; those metrics run only under `--rehearse`, never
