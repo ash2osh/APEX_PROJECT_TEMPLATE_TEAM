@@ -25,7 +25,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE_DIRS = ("scripts", "tools", "tests")
-HOOK = "#!/bin/sh\nexec python3 scripts/pre_push_check.py\n"
+# A checkout from before the script existed skips the check instead of refusing every push.
+HOOK = (
+    "#!/bin/sh\n"
+    "if [ ! -f scripts/pre_push_check.py ]; then\n"
+    "  echo 'pre-push: scripts/pre_push_check.py is not in this checkout; check skipped' >&2\n"
+    "  exit 0\n"
+    "fi\n"
+    "exec python3 scripts/pre_push_check.py\n"
+)
 
 
 def existing(names: Sequence[str], root: Path = ROOT) -> list[str]:

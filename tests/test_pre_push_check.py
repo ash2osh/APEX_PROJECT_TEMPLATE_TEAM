@@ -1,8 +1,10 @@
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.pre_push_check import changed_python_files, changed_shell_scripts, changed_test_files, existing
+from scripts.pre_push_check import HOOK, changed_python_files, changed_shell_scripts, changed_test_files, existing
 
 
 class PrePushCheckTests(unittest.TestCase):
@@ -38,6 +40,18 @@ class PrePushCheckTests(unittest.TestCase):
             (root / "scripts").mkdir()
             (root / "tools").mkdir()
             self.assertEqual(existing(("scripts", "tools", "tests"), root), ["scripts", "tools"])
+
+
+    @unittest.skipUnless(shutil.which("sh"), "POSIX sh is not available")
+    def test_hook_skips_with_a_message_in_a_checkout_without_the_script(self):
+        hook = self.root / "pre-push"
+        hook.write_text(HOOK, encoding="utf-8", newline="\n")
+        empty = self.root / "old-checkout"
+        empty.mkdir()
+        result = subprocess.run(["sh", str(hook)], cwd=empty, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("check skipped", result.stderr)
+        self.assertIn("exec python3 scripts/pre_push_check.py", HOOK)
 
 
 if __name__ == "__main__":
