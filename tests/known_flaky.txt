@@ -1,0 +1,6 @@
+# Tests that fail on unchanged code and pass on a rerun. scripts/ci_run_tests.py reruns a failed CI
+# test run once, and only when every failing test is listed here. Format: module.Class.method  # reason, first seen.
+# Add an entry only with evidence (the same code passing in another run) and a reason; remove it when the test is fixed.
+test_team_cli.TeamCliTests.test_powershell_exits_130_when_interrupted_while_a_helper_runs  # pwsh crashes with exit -6 instead of 130 on the Linux runner; 3 runs, 2026-10-16 to 2026-10-18
+test_doctor_database_info.DoctorDatabaseInfoTests.test_detected_version_is_reported_per_target_without_configuration  # "Broken pipe" when the PowerShell wrapper closes its pipe early; 2 runs, 2026-10-18
+test_backup_ords_cli.BackupOrdsTests.test_every_untrustworthy_export_is_refused_and_the_previous_mirror_kept  # Windows, bash scenario; failed once after a merge, the same code passed in the PR run, 2026-10-19
