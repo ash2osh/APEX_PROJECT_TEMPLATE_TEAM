@@ -71,6 +71,7 @@ class StepResult:
     exit_code: int
     evidence_paths: tuple[str, ...] = ()
     message: str = ""
+    observed_identity: dict[str, str] | None = None
 
 
 def _utc_now() -> str:
@@ -339,6 +340,9 @@ def _directory_input_paths(
         relative = relative_to_root(entry, path)
         if migration_folder and len(relative.parts) == 1 and relative.name == f"status.{environment}.json":
             # This is a local apply receipt, not migration source.
+            continue
+        if migration_folder and len(relative.parts) == 1 and relative.name.startswith("attempt-event."):
+            # Generated attempt evidence is validated separately and is not frozen input.
             continue
         if app_source and relative.as_posix() == "apex-team-export.json":
             # This is local export baseline metadata, not imported APEX source.
@@ -1260,6 +1264,7 @@ def _script_driver(
     schema: str,
     expected_user: str,
     step_number: int,
+    expected_identity: Mapping[str, str] | None = None,
 ) -> Path:
     payload_path = run_dir / "payload.sql"
     payload_path.write_text(payload, encoding="utf-8", newline="\n")
@@ -1268,6 +1273,37 @@ def _script_driver(
     except OSError as error:
         raise RolloutError(f"could not secure SQL rollout payload ({error})") from error
     driver = run_dir / "rollout.sql"
+    identity_constants = ""
+    identity_checks = ""
+    identity_output = ""
+    if expected_identity is not None:
+        missing = [field for field in OBSERVED_IDENTITY_FIELDS if not str(expected_identity.get(field, "")).strip()]
+        if missing:
+            raise RolloutError("rollout expected identity is incomplete: " + ", ".join(missing))
+
+        def sql_hex(value: str) -> str:
+            return value.encode("utf-8").hex().upper()
+
+        identity_constants = "\n".join(
+            f"  c_expected_{field} CONSTANT VARCHAR2(512) := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('{sql_hex(str(expected_identity[field]))}'));"
+            for field in OBSERVED_IDENTITY_FIELDS
+        )
+        identity_checks = "\n".join(
+            f"  IF NVL(v_{field}, '{field.upper()}_MISSING') <> c_expected_{field} THEN RAISE_APPLICATION_ERROR(-20075, 'rollout writer identity mismatch'); END IF;"
+            for field in OBSERVED_IDENTITY_FIELDS
+        )
+        identity_output = (
+            "  DBMS_OUTPUT.PUT_LINE('ROLLOUT_WRITER_IDENTITY:' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_session_user)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_current_schema)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_database_name)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_db_unique_name)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_service_name)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_container_id)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_container_name)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_edition)) || ':' || "
+            "RAWTOHEX(UTL_RAW.CAST_TO_RAW(v_database_version)));"
+        )
     driver.write_text(
         "\n".join((
             "SET DEFINE OFF",
@@ -1322,6 +1358,22 @@ def _script_driver(
             "  DBMS_OUTPUT.PUT_LINE('ROLLOUT_TARGET:' || UPPER(NVL(v_database_name, '<NO_DB_NAME>')) || ':' || UPPER(NVL(v_db_unique_name, '<NO_DB_UNIQUE_NAME>')) || ':' || UPPER(NVL(v_service_name, '<NO_SERVICE>')));",
             "END;",
             "/",
+            "DECLARE",
+            "  v_session_user VARCHAR2(128) := SYS_CONTEXT('USERENV', 'SESSION_USER');",
+            "  v_current_schema VARCHAR2(128) := SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA');",
+            "  v_database_name VARCHAR2(128) := SYS_CONTEXT('USERENV', 'DB_NAME');",
+            "  v_db_unique_name VARCHAR2(128) := SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME');",
+            "  v_service_name VARCHAR2(256) := NVL(SYS_CONTEXT('USERENV', 'SERVICE_NAME'), '<NO_SERVICE>');",
+            "  v_container_id VARCHAR2(128) := NVL(SYS_CONTEXT('USERENV', 'CON_ID'), '0');",
+            "  v_container_name VARCHAR2(128) := NVL(SYS_CONTEXT('USERENV', 'CON_NAME'), 'NON-CDB');",
+            "  v_edition VARCHAR2(128) := NVL(SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'), '<NONEDITIONED>');",
+            "  v_database_version VARCHAR2(128) := TO_CHAR(DBMS_DB_VERSION.VERSION) || '.' || TO_CHAR(DBMS_DB_VERSION.RELEASE);",
+            identity_constants,
+            "BEGIN",
+            identity_checks,
+            identity_output,
+            "END;",
+            "/",
             "SET SQLBLANKLINES ON",
             "@@payload.sql",
             f"PROMPT ROLLOUT_SCRIPT_COMPLETED:{step_number:04d}",
@@ -1347,6 +1399,7 @@ def _execute_sql_payload(
     step_number: int,
     source: str,
     ords: bool = False,
+    expected_identity: Mapping[str, str] | None = None,
 ) -> StepResult:
     validate_sql_script(source, step_number)
     if ords:
@@ -1373,6 +1426,7 @@ def _execute_sql_payload(
         schema=step["schema"],
         expected_user=step["expectedUser"],
         step_number=step_number,
+        expected_identity=expected_identity,
     )
     mode = "assembled" if generated_clob_assembly(source) else "direct"
     for finding in lint_sqlcl_transport(source, mode):
@@ -1396,6 +1450,7 @@ def _execute_sql_payload(
     output = result.output
     identities = re.findall(r"(?m)^\s*ROLLOUT_IDENTITY:([A-Z][A-Z0-9_$#]*):([A-Z][A-Z0-9_$#]*)\s*$", output)
     targets = re.findall(r"(?m)^\s*ROLLOUT_TARGET:([A-Z0-9_.<>-]+):([A-Z0-9_.<>-]+):([A-Z0-9_.<>-]+)\s*$", output)
+    writer_markers = re.findall(r"(?m)^\s*ROLLOUT_WRITER_IDENTITY:([0-9A-F]+(?::[0-9A-F]+){8})\s*$", output)
     completions = re.findall(rf"(?m)^\s*ROLLOUT_SCRIPT_COMPLETED:{step_number:04d}\s*$", output)
     if identities != [(step["expectedUser"], step["schema"])]:
         return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "SQLcl did not print exactly the expected session user and current schema")
@@ -1405,7 +1460,18 @@ def _execute_sql_payload(
         return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "SQLcl did not report a complete database and service identity")
     if environment != "prod" and looks_like_production_identity(*targets[0]):
         return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "observed SQLcl database/service identity resembles production while the selected environment is not prod")
-    return StepResult(0, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "script completed with the expected identity")
+    observed_identity = None
+    if expected_identity is not None:
+        if len(writer_markers) != 1:
+            return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "SQLcl did not report exactly one complete writer identity")
+        try:
+            values = [bytes.fromhex(item).decode("utf-8") for item in writer_markers[0].split(":")]
+        except (UnicodeDecodeError, ValueError):
+            return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "SQLcl writer identity marker was not valid UTF-8 hex")
+        observed_identity = dict(zip(OBSERVED_IDENTITY_FIELDS, values, strict=True))
+        if observed_identity != {field: str(expected_identity[field]) for field in OBSERVED_IDENTITY_FIELDS}:
+            return StepResult(2, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "SQLcl writer identity differed from the independently observed target")
+    return StepResult(0, _relative_paths((driver, evidence_dir / "payload.sql", evidence_dir / "sqlcl-output.log"), repo_root), "script completed with the expected identity", observed_identity)
 
 
 def _execute_app_deploy(
@@ -1541,6 +1607,7 @@ def execute_step(
     manifest: RolloutManifest,
     plan: Sequence[dict],
     manifest_confirmed: bool,
+    expected_identity: Mapping[str, str] | None = None,
 ) -> StepResult:
     """Execute one step using existing command or SQLcl paths."""
     kind = step["type"]
@@ -1614,9 +1681,10 @@ def execute_step(
             step_number=step_number,
             source=source,
             ords=kind == "ords-import",
+            expected_identity=expected_identity,
         )
         if removed:
-            return StepResult(result.exit_code, result.evidence_paths, f"excluded ORDS modules {', '.join(removed)}; {result.message}")
+            return StepResult(result.exit_code, result.evidence_paths, f"excluded ORDS modules {', '.join(removed)}; {result.message}", result.observed_identity)
         return result
     if kind == "app-deploy":
         plan_item = next((item for item in plan if item["number"] == step_number), None)
@@ -1888,6 +1956,7 @@ def run_rollout(
                     manifest=manifest,
                     plan=plan,
                     manifest_confirmed=manifest_confirmed,
+                    expected_identity=before_identity,
                 )
                 if not isinstance(result, StepResult):
                     raise RolloutError("rollout step executor returned an invalid result")
@@ -1896,6 +1965,10 @@ def run_rollout(
                 if result.exit_code == 0:
                     _snapshot(manifest, plan, f"after step {item['number']}", environment)
                     if binding is not None:
+                        if item["step"]["type"] in {"sql-script", "ords-import"} and result.observed_identity != before_identity:
+                            raise RolloutError(
+                                f"step {item['number']} SQLcl writer identity did not match the independently observed target"
+                            )
                         after_dir = evidence_dir / "target-after"
                         after_identity = _observe_target_identity(_target_from_binding(binding), after_dir)
                         identity_evidence.append(relative_to_root(after_dir, root).as_posix())

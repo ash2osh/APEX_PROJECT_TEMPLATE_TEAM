@@ -297,8 +297,10 @@ def setup(root: Path, selection: str, *, primary: str | None = None, catalog: di
             for relative in old["directories"]:
                 backup = stage / "backup" / relative
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                safe(root, relative).rename(backup)
+                # Record the intended recovery before the move. A Ctrl-C
+                # between rename and bookkeeping must still restore the skill.
                 moved.append(relative)
+                safe(root, relative).rename(backup)
             for relative in new["directories"]:
                 target = safe(root, relative)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -313,7 +315,9 @@ def setup(root: Path, selection: str, *, primary: str | None = None, catalog: di
                 for relative in reversed(installed):
                     remove_tree(safe(root, relative))
                 for relative in reversed(moved):
-                    (stage / "backup" / relative).rename(safe(root, relative))
+                    backup = stage / "backup" / relative
+                    if backup.exists():
+                        backup.rename(safe(root, relative))
                 for name, contents in saved.items():
                     path = safe(root, name)
                     if contents is None:

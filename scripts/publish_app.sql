@@ -1,6 +1,8 @@
 -- Arguments: target parsing schema, target environment, expected session user,
 -- absolute APEXlang source directory, absolute deployment descriptor, app ID,
--- and the live state the Builder drift guard approved ('-' skips that re-check).
+-- the live state the Builder drift guard approved ('-' skips that re-check),
+-- the lock assertion script, and eight UTF-8 hex identity values captured
+-- before the writer session.
 SET DEFINE ON
 DEFINE target_schema = '&1'
 DEFINE db_environment = '&2'
@@ -10,6 +12,14 @@ DEFINE deployment_file = '&5'
 DEFINE expected_app_id = '&6'
 DEFINE expected_live_state = '&7'
 DEFINE lock_assert_script = '&8'
+DEFINE expected_db_unique_name = '&9'
+DEFINE expected_service_name = '&10'
+DEFINE expected_container_id = '&11'
+DEFINE expected_container_name = '&12'
+DEFINE expected_edition = '&13'
+DEFINE expected_server_host = '&14'
+DEFINE expected_session_user = '&15'
+DEFINE expected_current_schema = '&16'
 SET ENCODING UTF-8
 SET HEADING OFF
 SET FEEDBACK OFF
@@ -57,6 +67,8 @@ BEGIN
   END IF;
 END;
 /
+
+@@publish_identity_guard.sql &&expected_db_unique_name &&expected_service_name &&expected_container_id &&expected_container_name &&expected_edition &&expected_server_host &&expected_session_user &&expected_current_schema
 
 @@verify_apex_release.sql
 

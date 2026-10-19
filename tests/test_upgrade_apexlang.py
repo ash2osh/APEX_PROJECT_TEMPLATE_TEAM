@@ -104,6 +104,19 @@ class UpgradeApexlangTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Builder drift'):upgrade_source(None,100,source,'TEAM','files',root/'run',backend=backend)
             self.assertNotIn('import',backend.calls);self.assertIn('release',backend.calls)
 
+    def test_files_mode_restores_and_verifies_runtime_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, backend = self.fixture(root)
+            lifecycle_calls = []
+            backend.capture_lifecycle = lambda run_dir: lifecycle_calls.append(('capture', run_dir.name)) or {'snapshot': True}
+            backend.restore_lifecycle = lambda before, run_dir: lifecycle_calls.append(('restore', run_dir.name, before)) or {'status': 'pass'}
+            backend.verify_lifecycle = lambda before, run_dir: lifecycle_calls.append(('verify', run_dir.name, before)) or {'status': 'pass'}
+            upgrade_source(None, 100, source, 'TEAM', 'files', root / 'run', backend=backend)
+            self.assertEqual(['capture', 'restore', 'verify'], [item[0] for item in lifecycle_calls])
+            self.assertIn('import', backend.calls)
+            self.assertEqual(backend.calls.count('export'), 3)
+
     def test_upgrade_removes_obsolete_component_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             source,_,stage=self.run_upgrade(Path(temporary))

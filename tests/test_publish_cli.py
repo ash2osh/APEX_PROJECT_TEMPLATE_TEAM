@@ -958,14 +958,14 @@ class PublishAppCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             arguments = sql_log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(arguments[-2], "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper())
+            self.assertEqual(arguments[-10], "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper())
 
             forced = subprocess.run(
                 [BASH, str(runner), "100", "--force"], cwd=root, env=environment,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
-            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-2], "-")
+            self.assertEqual(sql_log.read_text(encoding="utf-8").splitlines()[-10], "-")
 
     def make_unexported_app(self, root: Path, *, app_exists: bool):
         """A stateful fixture whose app was never exported, in a target that has it or not."""
@@ -1117,7 +1117,7 @@ class PublishAppCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(
-                sql_log.read_text(encoding="utf-8").splitlines()[-2],
+                sql_log.read_text(encoding="utf-8").splitlines()[-10],
                 "P.2026-09-26T08:00:00." + b"Release 1.0".hex().upper(),
             )
 

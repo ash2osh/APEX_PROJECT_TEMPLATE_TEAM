@@ -911,10 +911,21 @@ def _capture_live_inventory(
     return {"identity": dict(catalog.identity), "complete": True, "objects": live}
 
 
-def _compare_artifact(saved: Mapping[str, Any], current: Mapping[str, Any]) -> str | None:
-    for key in ("owner", "name", "type", "objectId", "definitionSha256", "dependents"):
+def _compare_artifact(
+    saved: Mapping[str, Any],
+    current: Mapping[str, Any],
+    *,
+    removed_dependents: set[tuple[str, str, str]] | frozenset[tuple[str, str, str]] = frozenset(),
+) -> str | None:
+    for key in ("owner", "name", "type", "objectId", "definitionSha256"):
         if saved.get(key) != current.get(key):
             return f"{key} changed since the run recorded this fixture"
+    saved_dependents = {_event_key(item) for item in saved.get("dependents", [])}
+    current_dependents = {_event_key(item) for item in current.get("dependents", [])}
+    saved_dependents.discard(None)
+    current_dependents.discard(None)
+    if current_dependents != saved_dependents - removed_dependents:
+        return "dependents changed since the run recorded this fixture"
     for key in ("dataObjectId", "status", "memberDefinitions"):
         if key in saved and saved.get(key) != current.get(key):
             return f"{key} changed since the run recorded this fixture"
@@ -1219,6 +1230,7 @@ def _cleanup_project(
         for item in artifacts
     }
     any_write_started = False
+    removed_dependents: set[tuple[str, str, str]] = set()
     consumed: dict[str, set[str]] = {scenario_id: set() for scenario_id in programs}
     ordinal = 1
     try:
@@ -1279,8 +1291,11 @@ def _cleanup_project(
                     if current is None:
                         operation_result["status"] = "ALREADY_ABSENT"
                         result["operations"].append(operation_result)
+                        key = _event_key(artifact)
+                        if key is not None:
+                            removed_dependents.add(key)
                         continue
-                    mismatch = _compare_artifact(artifact, current)
+                    mismatch = _compare_artifact(artifact, current, removed_dependents=removed_dependents)
                     if mismatch:
                         operation_result.update({"status": "REFUSED", "reason": mismatch})
                         result["operations"].append(operation_result)
@@ -1314,6 +1329,9 @@ def _cleanup_project(
                         result["operations"].append(operation_result)
                         result["status"] = "INCOMPLETE"
                         break
+                    key = _event_key(artifact)
+                    if key is not None:
+                        removed_dependents.add(key)
                     operation_result["status"] = "COMPLETE"
                     result["operations"].append(operation_result)
                     continue
@@ -1422,6 +1440,7 @@ def cleanup_run(
         "artifacts": [],
     }
     any_write_started = False
+    removed_dependents: set[tuple[str, str, str]] = set()
     try:
         for ordinal, planned in enumerate(plan["artifacts"], 1):
             artifact = {key: value for key, value in planned.items() if key not in {"status", "reason", "scenarioId"}}
@@ -1439,8 +1458,11 @@ def cleanup_run(
             if live is None:
                 item_result["status"] = "ALREADY_ABSENT"
                 result["artifacts"].append(item_result)
+                key = _event_key(artifact)
+                if key is not None:
+                    removed_dependents.add(key)
                 continue
-            mismatch = _compare_artifact(artifact, live)
+            mismatch = _compare_artifact(artifact, live, removed_dependents=removed_dependents)
             if mismatch:
                 item_result.update({"status": "REFUSED", "reason": mismatch})
                 result["artifacts"].append(item_result)
@@ -1472,6 +1494,9 @@ def cleanup_run(
                 break
             item_result["status"] = "COMPLETE"
             result["artifacts"].append(item_result)
+            key = _event_key(artifact)
+            if key is not None:
+                removed_dependents.add(key)
 
         if result["status"] == "COMPLETE" and any(item["status"] == "REFUSED" for item in result["artifacts"]):
             result["status"] = "REFUSED" if not any_write_started else "INCOMPLETE"

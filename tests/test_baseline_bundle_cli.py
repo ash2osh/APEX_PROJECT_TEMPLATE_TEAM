@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -216,6 +217,17 @@ exit 17
         data_root.mkdir(parents=True)
         for name, table in source_data.items():
             (data_root / f"{name}.json").write_text(json.dumps(table) + "\n", encoding="utf-8")
+        manifest_tables = []
+        for name, table in source_data.items():
+            path = data_root / f"{name}.json"
+            contents = path.read_bytes()
+            manifest_tables.append({"name": name, "file": path.name, "sha256": hashlib.sha256(contents).hexdigest(), "rowCount": table["rowCount"]})
+        (data_root / "manifest.json").write_text(json.dumps({
+            "schemaVersion": baseline.DATA_EXPORT_MANIFEST_VERSION,
+            "environment": "dev", "schema": "APP_DEV", "sourceIdentity": fixture.source["identity"],
+            "tableCount": len(manifest_tables), "rowCount": sum(item["rowCount"] for item in manifest_tables),
+            "tables": manifest_tables, "complete": True,
+        }) + "\n", encoding="utf-8")
 
         def capture_hook(_target, environment, _catalog):
             return source_catalog if environment == "dev" else target_catalog

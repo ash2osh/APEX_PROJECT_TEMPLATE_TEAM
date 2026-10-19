@@ -343,6 +343,25 @@ class DevTestCliTests(unittest.TestCase):
             self.assertTrue(report["diagnostics"]["writeStarted"])
             self.assertEqual(2, dev_test.aggregate_exit(report))
 
+    def test_later_scenario_dispatch_write_is_unknown_even_after_an_earlier_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenarios = builtin_suite().scenarios[:2]
+            suite, run = self._execution_fixture(root, scenarios)
+
+            def execute(_target, scenario, _context, _run, *, runner):
+                append_event(run, {"type": "step-intent", "scenarioId": scenario.id, "writeStarted": True})
+                if scenario.id == scenarios[1].id:
+                    raise RuntimeError("dispatch failed after write intent")
+                return {"status": "PASSED", "eligible": True, "steps": [], "checks": [], "observations": [], "effects": {}}
+
+            with mock.patch.object(dev_test, "verify_saved_target_identity", side_effect=[dict(IDENTITY), dict(IDENTITY)]), \
+                    mock.patch.object(dev_test, "execute_project_scenario", side_effect=execute):
+                report = dev_test.execute_suite(suite, mock.Mock(schema="APP"), mock.Mock(values={}), run)
+
+            self.assertEqual(["PASSED", "UNKNOWN"], [item["status"] for item in report["scenarios"]])
+            self.assertTrue(report["scenarios"][1]["steps"][-1]["writeStarted"])
+
 
 if __name__ == "__main__":
     unittest.main()

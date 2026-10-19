@@ -203,6 +203,24 @@ class WorkflowSkillsTests(unittest.TestCase):
         self.assertEqual(workflow_skills.status(self.root)["issues"], [])
         self.assertFalse((self.root / ".claude/skills/tdd").exists())
 
+    def test_interrupt_after_skill_rename_restores_the_backup(self):
+        self.setup("superpowers")
+        original = (self.root / ".agents/skills/brainstorming/SKILL.md").read_bytes()
+        rename = Path.rename
+        source = self.root / ".agents/skills/brainstorming"
+
+        def interrupt_after_rename(path, target):
+            result = rename(path, target)
+            if path == source:
+                raise KeyboardInterrupt
+            return result
+
+        with patch.object(Path, "rename", interrupt_after_rename), self.assertRaises(KeyboardInterrupt):
+            self.setup("none")
+        self.assertEqual(original, (self.root / ".agents/skills/brainstorming/SKILL.md").read_bytes())
+        self.assertFalse((self.root / ".agent-skills/setup-lock").exists())
+        self.assertEqual(workflow_skills.status(self.root)["issues"], [])
+
     def test_source_symlinks_are_refused_without_installing_any_pack(self):
         source = self.base / "mattpocock"
         try:

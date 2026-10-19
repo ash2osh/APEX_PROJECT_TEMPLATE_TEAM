@@ -24,6 +24,7 @@ from scripts.record_export_state import read_state, marker_payload
 from scripts.source_provenance import preserve_source_provenance
 from scripts.deployment_descriptor import read_descriptor, observe_deployment
 from scripts.validate_app_source import validate_app_source, validate_import_effects
+from scripts.application_lifecycle import capture_lifecycle, restore_automations, verify_after_import, require_verified_lifecycle
 
 
 def literal(value: str) -> str:
@@ -175,6 +176,15 @@ end;
     def verify_effective(self, source, exported):
         observe_deployment(self.last_observation, exported / "deployments/default.json", self.descriptor)
 
+    def capture_lifecycle(self, run_dir):
+        return capture_lifecycle(self.target, self.workspace, self.app_id, run_dir)
+
+    def restore_lifecycle(self, before, run_dir):
+        return restore_automations(self.target, self.workspace, self.app_id, before, run_dir)
+
+    def verify_lifecycle(self, before, run_dir):
+        return verify_after_import(self.target, self.workspace, self.app_id, before, run_dir)
+
 
 def normalize_source(root: Path) -> None:
     tree_hashes(root)  # Refuse links before modifying the private exported tree.
@@ -229,6 +239,7 @@ def upgrade_source(target, app_id: int, source_dir: Path, workspace: str,
     except (OSError, ValueError, AttributeError):
         report["oldMmdVersion"] = None
     held = False
+    lifecycle_before = None
     try:
         backend.validate_target()
         if mode == "files":
@@ -243,8 +254,20 @@ def upgrade_source(target, app_id: int, source_dir: Path, workspace: str,
             # Import a backup copy; the working source is never stamped/modified.
             staged_input = run_dir / "import-input"
             shutil.copytree(source_dir, staged_input)
+            lifecycle_capture = getattr(backend, "capture_lifecycle", None)
+            if lifecycle_capture is not None:
+                lifecycle_before = lifecycle_capture(run_dir / "lifecycle-before")
+                report["lifecycleStatus"] = "captured"
             report["importAttempted"] = True
             backend.import_source(staged_input)
+            if lifecycle_before is not None:
+                lifecycle_restore = getattr(backend, "restore_lifecycle", None)
+                if lifecycle_restore is None:
+                    raise ValueError("files conversion has no lifecycle restoration adapter")
+                restore_report = lifecycle_restore(lifecycle_before, run_dir / "lifecycle-restore")
+                if not isinstance(restore_report, dict) or restore_report.get("status") != "pass":
+                    raise ValueError("files conversion automation restoration did not verify")
+                report["lifecycleStatus"] = "restored"
         first = backend.export("canonical-first")
         first_revision = getattr(backend, "last_revision", None)
         second = backend.export("canonical-second")
@@ -267,6 +290,13 @@ def upgrade_source(target, app_id: int, source_dir: Path, workspace: str,
                 from scripts.verify_publish_state import verify_source_bytes
                 verify_source_bytes(staged_input, second, getattr(backend, 'descriptor', None))
             backend.verify_effective(source_dir, second)
+            if lifecycle_before is not None:
+                lifecycle_verify = getattr(backend, "verify_lifecycle", None)
+                if lifecycle_verify is None:
+                    raise ValueError("files conversion has no lifecycle verification adapter")
+                lifecycle_report = lifecycle_verify(lifecycle_before, run_dir / "lifecycle-after")
+                require_verified_lifecycle(lifecycle_report)
+                report["lifecycleStatus"] = lifecycle_report.get("status", "pass")
         if tree_hashes(source_dir) != original:
             raise ValueError("local source changed during conversion; original retained")
         stage = run_dir / "canonical"
