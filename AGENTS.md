@@ -1,7 +1,8 @@
 # Team APEX agent contract
 
 This branch is the APEX 26.2 / APEXlang team template; APEX operations require
-SQLcl 26.3.0.0 or newer. APEX 26.1 projects use `codex/apex-26.1`. The template
+SQLcl 26.3.0.0 or newer. APEX 26.1 projects use the separate
+`APEX_PROJECT_TEMPLATE_26_1` repository. The template
 repository follows its normal branch and pull-request process: its `main`
 is protected, so a change goes through a branch and a pull request, and
 `python3 scripts/pre_push_check.py` runs before the push (see

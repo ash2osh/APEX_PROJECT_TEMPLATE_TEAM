@@ -1,8 +1,8 @@
 # APEX project template for teams
 
 This branch targets APEX 26.2 applications authored as APEXlang and requires
-SQLcl 26.3.0.0 or newer for APEX operations. APEX 26.1 projects use the pinned
-`codex/apex-26.1` maintenance branch. It uses
+SQLcl 26.3.0.0 or newer for APEX operations. APEX 26.1 projects use the separate
+[APEX_PROJECT_TEMPLATE_26_1](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_26_1) repository. It uses
 plain Git source, explicit deployment JSON, and dated, ordered SQL migration
 folders. No custom team metadata schema or database lock tables are required.
 
@@ -683,9 +683,10 @@ in a downstream project is reported as unknown, while the original template
 repository does not require a downstream lock.
 
 The lock also records the selected `templateRef` and `apexRelease`. Later runs
-reuse the recorded ref when `--ref` is omitted. Keep a 26.1 project pinned with
-`--ref codex/apex-26.1 --apex-release 26.1`. Moving to the 26.2 line requires
-an explicit `--ref main --apex-release 26.2` after that release is merged.
+reuse the recorded ref when `--ref` is omitted. Keep a 26.1 project on the 26.1
+repository with `--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_26_1.git --ref main --apex-release 26.1`.
+Moving to the 26.2 line requires an explicit
+`--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git --ref main --apex-release 26.2`.
 Unknown or different release lines are refused before files change. This is
 an offline choice: `doctor` and APEX operations still check the live release.
 A legacy upgrader refuses schema-2 manifests; bootstrap the newer reviewed
@@ -724,7 +725,8 @@ python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source
 ```
 
 The example selects the 26.2 template explicitly. For a project remaining on
-26.1, use `--ref codex/apex-26.1 --apex-release 26.1` instead.
+26.1, use `--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_26_1.git --ref main --apex-release 26.1`
+instead.
 That first run has no lock, so every file that differs from the template is
 reported as a conflict instead of being overwritten. Keep the project clean
 before running it; conflicts must be reviewed and merged manually.

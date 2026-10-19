@@ -130,7 +130,8 @@ those three.
 
 ### Post-clone cleanup
 
-For a 26.1 downstream project, use `--ref codex/apex-26.1 --apex-release 26.1`
+For a 26.1 downstream project, use
+`--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_26_1.git --ref main --apex-release 26.1`
 instead of the 26.2 commands below. The lock preserves that ref for later
 upgrades. To cross from 26.1 to 26.2, first review and replace the old
 `scripts/upgrade_template.py` with the new engine from the selected template
