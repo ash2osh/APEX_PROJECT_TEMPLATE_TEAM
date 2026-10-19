@@ -12,6 +12,7 @@ database/<SCHEMA>/packages/<NAME>_SPEC.sql or <NAME>_BODY.sql (`$` in a name is 
 backup-db writes it). A step without a mirror counterpart is written in full as new
 content. The default base is the mirror in the working tree, so run this before backup-db
 refreshes the mirror; `--base <git-ref>` reads the mirror from that commit instead.
+`scripts/team.sh migrate --env dev` calls `write_diff` after a verified apply.
 """
 from __future__ import annotations
 
@@ -76,6 +77,16 @@ def build_diff(root: Path, folder: Path, ref: str | None) -> tuple[list[str], li
     return summary, parts
 
 
+def write_diff(root: Path, folder: Path, day: str, ref: str | None = None) -> tuple[Path, list[str]]:
+    """Write ai_generate/<day>/<folder>.diff and return its path and per-step summary."""
+    summary, parts = build_diff(root, folder, ref)
+    out_dir = root / "ai_generate" / day
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{folder.name}.diff"
+    out.write_text("\n".join(summary) + "\n\n" + "\n".join(parts), encoding="utf-8", newline="\n")
+    return out, summary
+
+
 def main(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("migration", help="migration folder, e.g. migrations/<SCHEMA>/2026-01-31_add-index-r001")
@@ -89,11 +100,7 @@ def main(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
         print("--date must be YYYY-MM-DD", file=sys.stderr)
         return 2
-    summary, parts = build_diff(root, folder, args.base)
-    out_dir = root / "ai_generate" / args.date
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{folder.name}.diff"
-    out.write_text("\n".join(summary) + "\n\n" + "\n".join(parts), encoding="utf-8", newline="\n")
+    out, summary = write_diff(root, folder, args.date, args.base)
     print(f"wrote {out.relative_to(root).as_posix()}")
     print("\n".join(summary))
     return 0

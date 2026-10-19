@@ -188,9 +188,9 @@ independent of optional workflow packs. After installing Matt's pack, invoke
 - **Daily change record:** A package migration holds the whole source, so Git
   cannot show what changed. For each day with code work, keep
   `ai_generate/YYYY-MM-DD/` with the readable diff of each migration
-  (`python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>`, local files
-  only, run before `backup-db` refreshes the mirror) and one `WALKTHROUGH.md` for
-  that day. Commit the folder with the work. See
+  (`migrate --env dev` writes it after a verified apply; by hand,
+  `python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>` before
+  `backup-db` refreshes the mirror) and one `WALKTHROUGH.md` for that day. Commit the folder with the work. See
   [docs/daily-change-record.md](docs/daily-change-record.md).
 - **Promotion:** Put an explicit deployment descriptor in the application
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
