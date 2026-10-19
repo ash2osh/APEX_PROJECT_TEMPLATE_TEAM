@@ -17,12 +17,16 @@ Linux and 20 to 30 on Windows.
 ## Before you push
 
 ```bash
-python3 scripts/pre_push_check.py
+python3 scripts/pre_push_check.py          # the files you changed
+python3 scripts/pre_push_check.py --all    # everything CI lints
 ```
 
-It runs Python syntax, Ruff, shell syntax and the test files you changed, in about a second to a minute. It does not
-run the whole suite or any Windows check. `python3 scripts/pre_push_check.py --install-hook` runs it on every
-`git push` (it never replaces an existing hook). Install Ruff once with `python3 -m pip install 'ruff>=0.5'`.
+By default it checks only the files you changed (against the upstream branch or `origin/main`, plus uncommitted and
+untracked files): Python syntax, Ruff, shell syntax and the test files you changed, in about a second to a minute. Existing
+problems in other files do not block you, so it also works in a project created from the template. `--all` checks every
+file under `scripts/`, `tools/` and `tests/`, as CI does; use it before opening a pull request for a broad change. It does not
+run the whole suite or any Windows check. `python3 scripts/pre_push_check.py --install-hook` runs it on every `git push`
+(it never replaces an existing hook). Install Ruff once with `python3 -m pip install 'ruff>=0.5'`.
 
 ## Known flaky tests
 
