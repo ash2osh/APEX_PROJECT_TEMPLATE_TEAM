@@ -207,11 +207,13 @@ class WorkflowSkillsTests(unittest.TestCase):
         self.setup("superpowers")
         original = (self.root / ".agents/skills/brainstorming/SKILL.md").read_bytes()
         rename = Path.rename
-        source = self.root / ".agents/skills/brainstorming"
+        # The code renames the resolved path; on Windows its temp directory is the long form
+        # of the short (RUNNER~1) name, so compare resolved, case-normalized paths.
+        source = os.path.normcase(os.path.realpath(self.root / ".agents/skills/brainstorming"))
 
         def interrupt_after_rename(path, target):
             result = rename(path, target)
-            if path == source:
+            if os.path.normcase(os.path.realpath(path)) == source:
                 raise KeyboardInterrupt
             return result
 
