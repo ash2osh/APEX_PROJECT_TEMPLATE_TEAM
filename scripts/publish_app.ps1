@@ -368,6 +368,15 @@ try {
     '--workspace', [string]$deployment.workspace.name, '--app-id', $AppId, '--environment', $appEnvironment)
   & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') capture @lifecycleArguments --run-dir (Join-Path $publishWorkDir 'lifecycle-before')
   if ($LASTEXITCODE -ne 0) { throw 'publish error: lifecycle pre-read unavailable; nothing imported' }
+  $identitySnapshot = Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json'
+  $identityJson = Get-Content -LiteralPath $identitySnapshot -Raw | ConvertFrom-Json
+  $identityFields = @('db_unique_name','service_name','container_id','container_name','edition','server_host','session_user','current_schema')
+  $identityValues = @()
+  foreach ($field in $identityFields) {
+    $value = [string]$identityJson.identity.$field
+    if ([string]::IsNullOrEmpty($value)) { throw "publish error: pre-publication identity is incomplete ($field)" }
+    $identityValues += ([System.BitConverter]::ToString([System.Text.Encoding]::UTF8.GetBytes($value)) -replace '-', '')
+  }
 if ($appEnvironment -eq "dev" -and -not $force) {
   $driftGuard = Join-Path $repoRoot "scripts/check_builder_drift.py"
   if (-not (Test-Path -LiteralPath $driftGuard -PathType Leaf)) {
@@ -426,12 +435,13 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   $deploymentFile = Join-Path $appDir "deployments/$appEnvironment.json"
   $importRunning = $true
   $importAttempted = $true
-  $sqlclExit = Invoke-Sqlcl -WorkingDirectory $publishWorkDir -StdInFile $stdinFile -Arguments @(
+  $importArguments = @(
     "-S", "-noupdates", "-name", $sqlclConnection,
     "@$(Join-Path $PSScriptRoot 'publish_app.sql')",
     $parsingSchema, $targetEnvironment, $expectedUser,
     $applicationInput, $deploymentFile, $AppId, $expectedLiveState, $lockAssertScript
-  ) -TranscriptFile $transcriptFile
+  ) + $identityValues
+  $sqlclExit = Invoke-Sqlcl -WorkingDirectory $publishWorkDir -StdInFile $stdinFile -Arguments $importArguments -TranscriptFile $transcriptFile
   $importRunning = $false
   $sqlclOutput = [System.IO.File]::ReadAllText($transcriptFile)
   if (-not [string]::IsNullOrEmpty($sqlclOutput)) { Write-Output $sqlclOutput }

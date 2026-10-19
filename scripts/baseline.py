@@ -9,11 +9,13 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -59,6 +61,9 @@ DATA_PAGE_SIZE = 500
 DATA_STEP_STATEMENT_LIMIT = 100
 DATA_STEP_BYTE_LIMIT = 50_000
 DATA_TEXT_CHUNK_CHARS = 32
+DATA_EXPORT_LOCK_MARKER = ".baseline-export.lock"
+DATA_EXPORT_INCOMPLETE_MARKER = ".baseline-export.incomplete"
+DATA_EXPORT_MANIFEST_VERSION = 2
 
 
 class BaselineError(ValueError):
@@ -226,6 +231,138 @@ def _write_json(path: Path, value: object) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _reject_symlink_components(path: Path) -> None:
+    """Refuse scratch inputs whose existing path crosses a symbolic link."""
+    selected = path if path.is_absolute() else ROOT / path
+    for candidate in (selected, *selected.parents):
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise BaselineError(f"cannot inspect scratch path {candidate}: {error}") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise BaselineError(f"refusing a symbolic link in baseline data path: {candidate}")
+
+
+def _regular_file_info(path: Path, description: str, *, missing_ok: bool = False) -> os.stat_result | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise BaselineError(f"{description} is missing: {path}") from None
+    except OSError as error:
+        raise BaselineError(f"cannot inspect {description} {path}: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise BaselineError(f"{description} is not a regular file: {path}")
+    return metadata
+
+
+@contextmanager
+def _data_export_guard(output: Path):
+    """Invalidate old data before capture and serialize writers for one schema."""
+    _reject_symlink_components(output)
+    try:
+        output.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as error:
+        raise BaselineError(f"cannot create baseline data directory {output}: {error}") from error
+    _reject_symlink_components(output)
+    lock_path = output / DATA_EXPORT_LOCK_MARKER
+    incomplete_path = output / DATA_EXPORT_INCOMPLETE_MARKER
+    _regular_file_info(lock_path, "baseline data export lock marker", missing_ok=True)
+    if lock_path.exists() or lock_path.is_symlink():
+        raise BaselineError(f"baseline data export is locked by {lock_path}; verify no exporter is active before removing it")
+
+    try:
+        lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as error:
+        raise BaselineError(f"baseline data export is locked by {lock_path}; verify no exporter is active before removing it") from error
+    except OSError as error:
+        raise BaselineError(f"cannot create baseline data export lock {lock_path}: {error}") from error
+    lock_info = os.fstat(lock_fd)
+    invalidated = False
+    try:
+        os.write(lock_fd, f"pid={os.getpid()}\n".encode("ascii"))
+        os.fsync(lock_fd)
+        _reject_symlink_components(output)
+        incomplete_info = _regular_file_info(incomplete_path, "baseline data incomplete marker", missing_ok=True)
+        if incomplete_info is None:
+            try:
+                incomplete_fd = os.open(incomplete_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except OSError as error:
+                raise BaselineError(f"cannot create baseline data incomplete marker {incomplete_path}: {error}") from error
+            else:
+                try:
+                    os.write(incomplete_fd, b"export in progress\n")
+                    os.fsync(incomplete_fd)
+                finally:
+                    os.close(incomplete_fd)
+        invalidated = True
+        manifest_path = output / "manifest.json"
+        manifest_info = _regular_file_info(manifest_path, "baseline data manifest", missing_ok=True)
+        if manifest_info is not None:
+            try:
+                manifest_path.unlink()
+            except OSError as error:
+                raise BaselineError(f"cannot invalidate the previous baseline data manifest {manifest_path}: {error}") from error
+        yield
+    finally:
+        os.close(lock_fd)
+        if invalidated:
+            active_error = sys.exc_info()[0] is not None
+            try:
+                current_lock = _regular_file_info(lock_path, "baseline data export lock marker", missing_ok=True)
+                if current_lock is None or (current_lock.st_dev, current_lock.st_ino) != (lock_info.st_dev, lock_info.st_ino):
+                    raise BaselineError(f"baseline data export lock changed during capture: {lock_path}")
+                lock_path.unlink()
+            except (BaselineError, OSError) as error:
+                if not active_error:
+                    if isinstance(error, BaselineError):
+                        raise
+                    raise BaselineError(f"cannot remove baseline data export lock {lock_path}: {error}") from error
+
+
+def _clear_data_incomplete_marker(output: Path) -> None:
+    marker = output / DATA_EXPORT_INCOMPLETE_MARKER
+    _regular_file_info(marker, "baseline data incomplete marker")
+    try:
+        marker.unlink()
+    except OSError as error:
+        raise BaselineError(f"cannot clear baseline data incomplete marker {marker}: {error}") from error
+
+
+def _read_json_object(path: Path, description: str, *, parse_decimal: bool = False) -> tuple[dict, bytes]:
+    _reject_symlink_components(path)
+    _regular_file_info(path, description)
+    try:
+        contents = path.read_bytes()
+        value = json.loads(
+            contents.decode("utf-8"),
+            object_pairs_hook=_unique_pairs,
+            **({"parse_float": Decimal} if parse_decimal else {}),
+        )
+    except OSError as error:
+        raise BaselineError(f"cannot read {description} {path}: {error}") from error
+    except UnicodeError as error:
+        raise BaselineError(f"{description} is not UTF-8: {path}") from error
+    except json.JSONDecodeError as error:
+        raise BaselineError(f"{description} is invalid JSON {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise BaselineError(f"{description} must contain a JSON object: {path}")
+    return value, contents
+
+
+def _source_identity(identity: object, label: str) -> dict[str, str]:
+    if not isinstance(identity, Mapping):
+        raise BaselineError(f"{label} identity is missing")
+    missing = [field for field in REQUIRED_IDENTITY if identity.get(field) is None or not str(identity.get(field)).strip()]
+    if missing:
+        raise BaselineError(f"{label} identity is incomplete: {', '.join(missing)}")
+    return {field: str(identity[field]) for field in REQUIRED_IDENTITY}
+
 
 
 def _scratch_path(value: Path | None, default: Path) -> Path:
@@ -531,44 +668,67 @@ def _export_data(config: Mapping, values: Mapping[str, str], environment: str, s
     tables = _reference_tables(config)
     selected_schemas = schemas or config["schemas"]
     if not tables:
-        print("No referenceData.tables allow-list is configured; wrote empty data manifests")
+        print("No referenceData.tables allow-list is configured; writing identity-bound empty data manifests")
     for schema in selected_schemas:
         output = scratch / environment / "data" / schema
-        if not tables:
-            _write_json(output / "manifest.json", {
-                "schemaVersion": 1, "environment": environment, "schema": schema,
-                "tableCount": 0, "rowCount": 0, "complete": True,
-            })
-            continue
-        catalog = _capture(
-            values, environment, schema, ("baseline-data",), scratch / f"sqlcl-data-{environment}-{schema}",
-            baseline_data_tables=tables,
-        )
-        _complete(catalog, ("baseline-data",))
-        captured = catalog["sections"]["baseline-data"]
-        by_name = {}
-        for row in captured:
-            name = row.get("name")
-            if not isinstance(name, str) or name in by_name:
-                raise BaselineError("baseline-data returned a malformed or duplicate table record")
-            by_name[name] = row
-        if set(by_name) != {table["name"] for table in tables}:
-            raise BaselineError("baseline-data did not return every allow-listed reference table")
-        total_rows = 0
-        validated_tables: list[tuple[str, dict]] = []
-        for specification in tables:
-            data = _validate_reference_capture(by_name[specification["name"]], specification, environment, schema)
-            encoded = _json_bytes(data)
-            if len(encoded) > 128 * 1024 * 1024:
-                raise BaselineError(f"reference-data export for {specification['name']} exceeded the 128 MiB file cap")
-            validated_tables.append((specification["name"], data))
-            total_rows += data["rowCount"]
-        for name, data in validated_tables:
-            _write_json(output / f"{name}.json", data)
-        _write_json(output / "manifest.json", {
-            "schemaVersion": 1, "environment": environment, "schema": schema,
-            "tableCount": len(tables), "rowCount": total_rows, "complete": True,
-        })
+        with _data_export_guard(output):
+            catalog = _capture(
+                values, environment, schema, ("baseline-data",), scratch / f"sqlcl-data-{environment}-{schema}",
+                baseline_data_tables=tables,
+            )
+            _complete(catalog, ("baseline-data",))
+            source_identity = _source_identity(catalog.get("identity"), f"baseline data source for {schema}")
+            captured = catalog["sections"].get("baseline-data")
+            if not isinstance(captured, list):
+                raise BaselineError("baseline-data capture did not return a table array")
+            by_name = {}
+            for row in captured:
+                name = row.get("name") if isinstance(row, Mapping) else None
+                if not isinstance(name, str) or name in by_name:
+                    raise BaselineError("baseline-data returned a malformed or duplicate table record")
+                by_name[name] = row
+            if set(by_name) != {table["name"] for table in tables}:
+                raise BaselineError("baseline-data did not return every allow-listed reference table")
+            total_rows = 0
+            validated_tables: list[tuple[str, dict]] = []
+            for specification in tables:
+                data = _validate_reference_capture(by_name[specification["name"]], specification, environment, schema)
+                encoded = _json_bytes(data)
+                if len(encoded) > 128 * 1024 * 1024:
+                    raise BaselineError(f"reference-data export for {specification['name']} exceeded the 128 MiB file cap")
+                validated_tables.append((specification["name"], data))
+                total_rows += data["rowCount"]
+
+            manifest_tables = []
+            for name, data in validated_tables:
+                path = output / f"{name}.json"
+                _write_json(path, data)
+                written, contents = _read_json_object(path, f"reference-data export for {name}", parse_decimal=True)
+                if contents != _json_bytes(data):
+                    raise BaselineError(f"reference-data export for {name} changed while being written")
+                written = _validate_reference_capture(written, next(table for table in tables if table["name"] == name), environment, schema)
+                manifest_tables.append({
+                    "name": name,
+                    "file": path.name,
+                    "sha256": hashlib.sha256(contents).hexdigest(),
+                    "rowCount": written["rowCount"],
+                })
+
+            manifest = {
+                "schemaVersion": DATA_EXPORT_MANIFEST_VERSION,
+                "environment": environment,
+                "schema": schema,
+                "sourceIdentity": source_identity,
+                "tableCount": len(manifest_tables),
+                "rowCount": total_rows,
+                "tables": manifest_tables,
+                "complete": True,
+            }
+            _write_json(output / "manifest.json", manifest)
+            observed_manifest, contents = _read_json_object(output / "manifest.json", "baseline data manifest")
+            if observed_manifest != manifest or contents != _json_bytes(manifest):
+                raise BaselineError(f"baseline data manifest changed while being written: {output / 'manifest.json'}")
+            _clear_data_incomplete_marker(output)
 
 
 def _sql_identifier(value: str) -> str:
@@ -751,7 +911,7 @@ def _check_sql_value(value: object, column: Mapping) -> str:
             pieces.append(_sql_literal("".join(current)))
             current = []
         if char == "\r" and value[index + 1 : index + 2] == "\n":
-            pieces.append("CHR(10)")
+            pieces.extend(("CHR(13)", "CHR(10)"))
             index += 2
         else:
             pieces.append("CHR(13)" if char == "\r" else "CHR(10)")
@@ -785,23 +945,107 @@ def _reference_data_tables(catalog: Mapping, config_tables: Sequence[Mapping], e
     return result
 
 
-def _read_exported_reference_data(data_root: Path, config_tables: Sequence[Mapping], environment: str, schema: str) -> dict[str, dict]:
+def _read_exported_reference_data(
+    data_root: Path,
+    config_tables: Sequence[Mapping],
+    environment: str,
+    schema: str,
+    current_source_identity: Mapping,
+) -> dict[str, dict]:
+    schema_dir = data_root / schema
+    _reject_symlink_components(schema_dir)
+    for marker_name, state in (
+        (DATA_EXPORT_LOCK_MARKER, "locked or in progress"),
+        (DATA_EXPORT_INCOMPLETE_MARKER, "incomplete"),
+    ):
+        marker_path = schema_dir / marker_name
+        marker_info = _regular_file_info(marker_path, "baseline data export marker", missing_ok=True)
+        if marker_info is not None:
+            raise BaselineError(f"reference-data export is {state}; cannot use {schema_dir}")
+
+    manifest_path = schema_dir / "manifest.json"
+    manifest, _manifest_bytes = _read_json_object(manifest_path, "baseline data manifest")
+    manifest_fields = {
+        "schemaVersion", "environment", "schema", "sourceIdentity", "tableCount", "rowCount", "tables", "complete",
+    }
+    if set(manifest) != manifest_fields or manifest.get("schemaVersion") != DATA_EXPORT_MANIFEST_VERSION:
+        raise BaselineError("reference-data manifest is invalid or uses an unsupported legacy format")
+    if manifest.get("complete") is not True:
+        raise BaselineError("reference-data manifest is incomplete")
+    if manifest.get("environment") != environment or manifest.get("schema") != schema:
+        raise BaselineError(f"reference-data manifest identity does not match {environment}/{schema}")
+
+    manifest_identity = manifest.get("sourceIdentity")
+    if (
+        not isinstance(manifest_identity, Mapping)
+        or set(manifest_identity) != set(REQUIRED_IDENTITY)
+        or any(not isinstance(manifest_identity.get(field), str) for field in REQUIRED_IDENTITY)
+    ):
+        raise BaselineError("reference-data manifest source identity is invalid or incomplete")
+    expected_identity = _source_identity(current_source_identity, "current live source")
+    if (
+        not same_database_scope(manifest_identity, expected_identity)
+        or str(manifest_identity["session_user"]).upper() != expected_identity["session_user"].upper()
+    ):
+        raise BaselineError("reference-data manifest source identity does not match the current live source")
+
+    records = manifest.get("tables")
+    if not isinstance(records, list):
+        raise BaselineError("reference-data manifest table inventory is invalid")
+    records_by_name: dict[str, Mapping] = {}
+    for record in records:
+        if (
+            not isinstance(record, Mapping)
+            or set(record) != {"name", "file", "sha256", "rowCount"}
+            or not isinstance(record.get("name"), str)
+            or record["name"] in records_by_name
+        ):
+            raise BaselineError("reference-data manifest contains a malformed or duplicate table record")
+        records_by_name[record["name"]] = record
+    expected_names = {str(table.get("name", "")) for table in config_tables}
+    if set(records_by_name) != expected_names:
+        raise BaselineError("reference-data manifest does not match the configured table allow-list")
+    if type(manifest.get("tableCount")) is not int or manifest["tableCount"] != len(records):
+        raise BaselineError("reference-data manifest table total is invalid")
+
     result: dict[str, dict] = {}
+    observed_rows = 0
     for specification in config_tables:
-        path = data_root / schema / f"{specification['name']}.json"
-        try:
-            value = json.loads(
-                path.read_text(encoding="utf-8"),
-                object_pairs_hook=_unique_pairs,
-                parse_float=Decimal,
-            )
-        except OSError as error:
-            raise BaselineError(f"reference-data export is missing for {specification['name']}: {path}") from error
-        except (UnicodeError, json.JSONDecodeError) as error:
-            raise BaselineError(f"reference-data export is invalid for {specification['name']}: {error}") from error
-        if not isinstance(value, dict) or value.get("environment") != environment or value.get("schema") != schema or value.get("table") != specification["name"]:
-            raise BaselineError(f"reference-data export identity does not match {environment}/{schema}/{specification['name']}")
-        result[specification["name"]] = _validate_reference_capture(value, specification, environment, schema)
+        name = specification.get("name")
+        if not isinstance(name, str) or SCHEMA_RE.fullmatch(name) is None:
+            raise BaselineError("configured reference-data table name is unsafe")
+        record = records_by_name[name]
+        expected_file = f"{name}.json"
+        if (
+            record.get("file") != expected_file
+            or not isinstance(record.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", record["sha256"], re.ASCII) is None
+            or type(record.get("rowCount")) is not int
+            or record["rowCount"] < 0
+        ):
+            raise BaselineError(f"reference-data manifest metadata is invalid for {name}")
+        path = schema_dir / expected_file
+        value, contents = _read_json_object(path, f"reference-data export for {name}", parse_decimal=True)
+        if hashlib.sha256(contents).hexdigest() != record["sha256"]:
+            raise BaselineError(f"reference-data export is stale or mismatched for {name}: manifest checksum differs")
+        if value.get("environment") != environment or value.get("schema") != schema or value.get("table") != name:
+            raise BaselineError(f"reference-data export identity does not match {environment}/{schema}/{name}")
+        validated = _validate_reference_capture(value, specification, environment, schema)
+        if validated["rowCount"] != record["rowCount"]:
+            raise BaselineError(f"reference-data export row total does not match its manifest for {name}")
+        observed_rows += validated["rowCount"]
+        result[name] = validated
+
+    if type(manifest.get("rowCount")) is not int or manifest["rowCount"] != observed_rows:
+        raise BaselineError("reference-data manifest row total is invalid")
+    for marker_name, state in (
+        (DATA_EXPORT_LOCK_MARKER, "locked or in progress"),
+        (DATA_EXPORT_INCOMPLETE_MARKER, "incomplete"),
+    ):
+        marker_path = schema_dir / marker_name
+        marker_info = _regular_file_info(marker_path, "baseline data export marker", missing_ok=True)
+        if marker_info is not None:
+            raise BaselineError(f"reference-data export became {state} while it was being read; cannot use {schema_dir}")
     return result
 
 
@@ -2493,7 +2737,9 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
             data_differences: Sequence[str] = ()
             if reference_specs:
                 assert data_root is not None
-                source_data = _read_exported_reference_data(data_root, reference_specs, args.source_environment, source_target.schema)
+                source_data = _read_exported_reference_data(
+                    data_root, reference_specs, args.source_environment, source_target.schema, source.get("identity", {}),
+                )
                 target_data = _reference_data_tables(target, reference_specs, args.target_environment, target_target.schema)
                 data_bundle = _reference_data_bundle(
                     config, source_target.schema, target_target.schema, source, target, source_data, target_data,

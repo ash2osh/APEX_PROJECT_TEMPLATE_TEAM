@@ -126,6 +126,7 @@ class RolloutManifestTests(unittest.TestCase):
             fake_bin,
             'printf "invoked\\n" >> "$FAKE_CALL_LOG"\n'
             'printf "ROLLOUT_IDENTITY:OPS:APP\\nROLLOUT_TARGET:TESTDB:TESTDB_UNIQUE:DEV_SERVICE\\n'
+            'ROLLOUT_WRITER_IDENTITY:4F5053:415050:544553544442:5445535444425F554E49515545:746573742E73657276696365:33:544553545F504442:4F52412442415345:32332E302E302E302E30\\n'
             'ROLLOUT_SCRIPT_COMPLETED:0001\\n"\n',
         )
         manifest = self.write_manifest([{
@@ -672,6 +673,19 @@ class RolloutManifestTests(unittest.TestCase):
         self.assertLess(driver.index("IF c_target_environment <> 'prod'"), driver.index("@@payload.sql"))
         self.assertTrue((evidence / "sqlcl-output.log").is_file())
 
+    def test_sql_script_driver_binds_full_observed_writer_identity(self) -> None:
+        expected = self.observe_target_identity(type("Target", (), {"expected_user": "OPS", "schema": "APP"})(), self.root / "identity")
+        (self.root / "identity-driver").mkdir()
+        driver = rollout._script_driver(
+            self.root / "identity-driver", "SELECT 1 FROM dual;\n",
+            environment="dev", schema="APP", expected_user="OPS", step_number=1,
+            expected_identity=expected,
+        )
+        text = driver.read_text(encoding="utf-8")
+        self.assertIn("c_expected_db_unique_name", text)
+        self.assertIn("rollout writer identity mismatch", text)
+        self.assertIn("ROLLOUT_WRITER_IDENTITY", text)
+
     def test_sql_script_failure_report_includes_sqlcl_error_output(self) -> None:
         payload = self.root / "scripts" / "prerequisite.sql"
         payload.write_text("CREATE TABLE APP.PRECHECK (ID NUMBER);\n", encoding="utf-8")
@@ -1127,6 +1141,16 @@ class RolloutManifestTests(unittest.TestCase):
             "apps/DEMO/100/status.staging.json",
             {item["path"] for item in plan[0]["inputHashes"]},
         )
+
+    def test_migration_hashes_ignore_generated_attempt_evidence(self) -> None:
+        folder = self.root / "migrations" / "2026-10-10_release-r001"
+        folder.mkdir(parents=True)
+        source = folder / "001-create-table.sql"
+        source.write_text("CREATE TABLE T (ID NUMBER);\n", encoding="utf-8")
+        generated = folder / "attempt-event.0123456789abcdef.json"
+        generated.write_text("{}\n", encoding="utf-8")
+        paths = rollout._directory_input_paths(folder, self.root, "dev", migration_folder=True)
+        self.assertEqual(paths, [source])
 
     def test_report_path_cannot_overlap_app_deployment_inputs(self) -> None:
         app_dir = self.add_app()

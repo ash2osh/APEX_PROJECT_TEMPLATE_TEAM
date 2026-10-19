@@ -134,6 +134,17 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("false|DEMO|DEMO|docker-demo|DEMO|DEMO|docker-demo\n", result.stdout)
 
+    def test_bash_loader_does_not_echo_malformed_line_contents(self) -> None:
+        secret = "DO_NOT_LEAK_THIS_ENV_VALUE"
+        result = load(write_env(self.directory, {}, f"INVALID LINE {secret}\n"), "echo loaded")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        if PWSH:
+            path = write_env(self.directory, {}, f"INVALID LINE {secret}\n")
+            ps = subprocess.run([PWSH, "-NoProfile", "-Command", f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{path}"'], text=True, capture_output=True)
+            self.assertNotEqual(ps.returncode, 0)
+            self.assertNotIn(secret, ps.stdout + ps.stderr)
+
     def test_lists_load_and_stay_unnarrowed_without_a_selection(self) -> None:
         result = load(write_env(self.directory, MULTI))
         self.assertEqual(0, result.returncode, result.stderr)

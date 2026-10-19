@@ -221,7 +221,9 @@ class BaselineExportTests(unittest.TestCase):
             with self.assertRaisesRegex(baseline.BaselineError, "exceeded its rowLimit 10"):
                 baseline._export_data(config, self.environ, "dev", self.root / "scratch", ["APP_DEV"])
 
-        self.assertFalse((self.root / "scratch" / "dev" / "data" / "APP_DEV").exists())
+        output = self.root / "scratch" / "dev" / "data" / "APP_DEV"
+        self.assertTrue((output / baseline.DATA_EXPORT_INCOMPLETE_MARKER).is_file())
+        self.assertFalse((output / "manifest.json").exists())
 
     def test_source_export_refuses_incomplete_paged_capture_before_writing(self) -> None:
         config = baseline.load_config(self.root / "baseline.json")
@@ -325,6 +327,7 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         self.assertIn("CHR(10)", expression)
         self.assertIn("q'!", expression)
         self.assertIn("CHR(13) || CHR(10)", baseline._text_sql_literal("first\r\nsecond"))
+        self.assertIn("CHR(13) || CHR(10)", baseline._check_sql_value("first\r\nsecond", {"name": "VALUE", "data_type": "VARCHAR2"}))
         self.assertEqual(baseline._text_sql_literal(""), "NULL")
 
     def test_reference_dates_are_typed_and_invalid_date_text_stays_text(self) -> None:
@@ -1012,6 +1015,33 @@ class BaselineReferenceDataTests(unittest.TestCase):
             self.assertIsNone(locked)
             self.assertIn("Skipped receipted or attempted migration without changing it", locked_output.getvalue())
 
+    def test_exported_reference_data_requires_a_complete_bound_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_root = root / "APP_DEV"
+            data_root.mkdir()
+            for name, value in self.source_raw.items():
+                (data_root / f"{name}.json").write_text(json.dumps(value) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(baseline.BaselineError, "manifest is missing"):
+                baseline._read_exported_reference_data(root, self.config["referenceData"]["tables"], "dev", "APP_DEV", self.source_raw["APP_CANCEL_REASON"].get("identity", {}))
+
+            identity = {
+                "session_user": "APP_DEV", "current_schema": "APP_DEV", "db_name": "DEVDB",
+                "db_unique_name": "DEVDB1", "service_name": "DEV", "container_id": "3",
+                "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "19.26",
+            }
+            records = []
+            for name in self.source_raw:
+                path = data_root / f"{name}.json"
+                records.append({"name": name, "file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "rowCount": self.source_raw[name]["rowCount"]})
+            (data_root / "manifest.json").write_text(json.dumps({
+                "schemaVersion": baseline.DATA_EXPORT_MANIFEST_VERSION, "environment": "dev", "schema": "APP_DEV",
+                "sourceIdentity": identity, "tableCount": len(records), "rowCount": sum(item["rowCount"] for item in records),
+                "tables": records, "complete": True,
+            }) + "\n", encoding="utf-8")
+            result = baseline._read_exported_reference_data(root, self.config["referenceData"]["tables"], "dev", "APP_DEV", identity)
+            self.assertEqual(set(result), set(self.source_raw))
+
 
 class BaselineOrdsFilterTests(unittest.TestCase):
     fixtures = ROOT / "tests" / "fixtures" / "baseline"
@@ -1268,6 +1298,17 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
         for name, table in source_data.items():
             (data_root / f"{name}.json").parent.mkdir(parents=True, exist_ok=True)
             (data_root / f"{name}.json").write_text(json.dumps(table) + "\n", encoding="utf-8")
+        manifest_tables = []
+        for name, table in source_data.items():
+            path = data_root / f"{name}.json"
+            contents = path.read_bytes()
+            manifest_tables.append({"name": name, "file": path.name, "sha256": hashlib.sha256(contents).hexdigest(), "rowCount": table["rowCount"]})
+        (data_root / "manifest.json").write_text(json.dumps({
+            "schemaVersion": baseline.DATA_EXPORT_MANIFEST_VERSION,
+            "environment": "dev", "schema": "APP_DEV", "sourceIdentity": self.source["identity"],
+            "tableCount": len(manifest_tables), "rowCount": sum(item["rowCount"] for item in manifest_tables),
+            "tables": manifest_tables, "complete": True,
+        }) + "\n", encoding="utf-8")
         target_data = json.loads((self.fixtures / "reference_data_target.json").read_text(encoding="utf-8"))
         target_data["APP_CANCEL_POLICY"]["columns"].append(dict(timestamp_column))
         constraints = json.loads((self.fixtures / "reference_data_constraints.json").read_text(encoding="utf-8"))

@@ -293,7 +293,6 @@ def execute_suite(
             planned_objects,
             context.values,
         )
-        intent_before = _has_write_started(run)
         try:
             if suite.id == "builtin" and suite.manifest_path is None and scenario.id in BUILTIN_SCENARIO_IDS:
                 outcome = run_builtin(scenario.id, target, scenario_context, run, runner=runner)
@@ -302,7 +301,7 @@ def execute_suite(
         except KeyboardInterrupt:
             return finish_interrupted(scenario.id, prior_event_names)
         except Exception as error:
-            record["status"] = "UNKNOWN" if (_has_write_started(run) and not intent_before) else "BLOCKED"
+            record["status"] = "UNKNOWN" if _has_new_write_started(run, prior_event_names) else "BLOCKED"
             record.setdefault("steps", []).append({
                 "id": "scenario-dispatch",
                 "status": record["status"],

@@ -262,6 +262,7 @@ class DevTestCoreMigrationsTests(unittest.TestCase):
             ]
         output = "\n".join((
             "ROLLOUT_IDENTITY:DEMO:DEMO", "ROLLOUT_TARGET:FREEPDB1:FREEPDB1:FREEPDB1",
+            "ROLLOUT_WRITER_IDENTITY:44454D4F:44454D4F:4652454550444231:4652454550444231:4652454550444231:33:4652454550444231:4F52412442415345:32332E34",
             "ROLLOUT_SCRIPT_COMPLETED:0001", "",
         ))
         run_dir.mkdir(parents=True, exist_ok=True)

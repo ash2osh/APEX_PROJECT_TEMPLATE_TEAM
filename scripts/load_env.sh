@@ -106,7 +106,7 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
     continue
   fi
   if ! project_env_match "$project_env_line" '^([A-Z][A-Z0-9_]*)=(.*)$'; then
-    project_env_fail "invalid line in $PROJECT_ENV_FILE: $project_env_line"
+    project_env_fail "invalid line in $PROJECT_ENV_FILE"
     return 1 2>/dev/null || exit 1
   fi
   project_env_key="${BASH_REMATCH[1]}"

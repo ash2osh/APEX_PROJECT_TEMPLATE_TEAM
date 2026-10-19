@@ -281,12 +281,21 @@ class TestCleanupPlanning(unittest.TestCase):
             result = plan_cleanup(self.run, {})
         self.assertEqual(result["status"], "REFUSED")
         self.assertIn(self.artifact["name"], {item.get("name") for item in result["refused"]})
-
         extended = {**self.artifact, "dependents": [{"owner": "DEMO", "name": "NEW_CHILD", "type": "TRIGGER", "objectId": 707}]}
         with patch("scripts.dev_test_cleanup.resolve_target", return_value=self.target), \
              patch("scripts.dev_test_cleanup._capture_live_inventory", return_value=self._live(extended)):
             result = plan_cleanup(self.run, {})
         self.assertEqual(result["status"], "REFUSED")
+
+    def test_successfully_removed_dependents_are_ignored_for_parent_recheck(self) -> None:
+        from scripts.dev_test_cleanup import _compare_artifact
+
+        dependent = {"owner": "DEMO", "name": "CHILD_VIEW", "type": "VIEW", "objectId": 707}
+        saved = {**self.artifact, "dependents": [dependent]}
+        current = {**self.artifact, "dependents": []}
+        key = (dependent["owner"], dependent["name"], dependent["type"])
+        self.assertIsNone(_compare_artifact(saved, current, removed_dependents={key}))
+        self.assertIn("dependents changed", _compare_artifact(saved, current))
 
     def test_missing_or_corrupt_inventory_refuses_before_database_read(self) -> None:
         from scripts.dev_test_cleanup import plan_cleanup

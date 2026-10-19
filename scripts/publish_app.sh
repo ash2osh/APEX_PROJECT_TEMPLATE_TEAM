@@ -396,6 +396,20 @@ fi
 lifecycle_args=(--connection "$sqlcl_connection" --expected-user "$expected_user" --schema "$parsing_schema"
   --workspace "$workspace_name" --app-id "$app_id" --environment "$app_environment")
 python3 "$REPO_ROOT/scripts/application_lifecycle.py" capture "${lifecycle_args[@]}" --run-dir "$staging_dir/lifecycle-before"
+identity_values="$(python3 - "$staging_dir/lifecycle-before/lifecycle-snapshot.json" <<'PY'
+import json, sys
+from pathlib import Path
+fields = ('db_unique_name', 'service_name', 'container_id', 'container_name', 'edition', 'server_host', 'session_user', 'current_schema')
+data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+identity = data.get('identity', {})
+values = [identity.get(field) for field in fields]
+if any(not isinstance(value, str) or not value for value in values):
+    raise SystemExit('pre-publication identity is incomplete')
+print('\t'.join(value.encode('utf-8').hex().upper() for value in values))
+PY
+)"
+if [ -z "$identity_values" ]; then fail 'pre-publication database identity is unavailable; nothing imported'; fi
+IFS=$'\t' read -r expected_db_unique_name expected_service_name expected_container_id expected_container_name expected_edition expected_server_host expected_session_user expected_current_schema <<< "$identity_values"
 if [ "$app_environment" = dev ] && [ "$force" != true ]; then
   drift_guard="$REPO_ROOT/scripts/check_builder_drift.py"
   [ -f "$drift_guard" ] || fail "Builder drift guard is missing; refusing import"
@@ -449,6 +463,7 @@ sqlcl_status=0
     "@$REPO_ROOT/scripts/publish_app.sql" \
     "$parsing_schema" "$target_environment" "$expected_user" \
     "$application_source" "$deployment_file" "$app_id" "$expected_live_state" "$lock_assert_script" \
+    "$expected_db_unique_name" "$expected_service_name" "$expected_container_id" "$expected_container_name" "$expected_edition" "$expected_server_host" "$expected_session_user" "$expected_current_schema" \
     < "$sqlcl_stdin"
 ) > "$sqlcl_output" 2>&1 || sqlcl_status=$?
 if [ "$sqlcl_status" -ne 0 ]; then

@@ -73,7 +73,7 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   $projectEnvLine = $projectEnvLine.TrimEnd("`r")
   if ([string]::IsNullOrWhiteSpace($projectEnvLine) -or $projectEnvLine.StartsWith("#")) { continue }
   if ($projectEnvLine -cnotmatch '^([A-Z][A-Z0-9_]*)=(.*)$') {
-    throw "project environment error: invalid line in ${EnvFile}: $projectEnvLine"
+    throw "project environment error: invalid line in ${EnvFile}"
   }
   $projectEnvKey = $Matches[1]
   $projectEnvValue = $Matches[2]
