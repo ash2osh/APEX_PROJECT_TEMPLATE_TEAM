@@ -8,12 +8,14 @@ record keeps the readable diff and the day's evidence in one dated folder.
 
 - Each day with code work has a folder `ai_generate/YYYY-MM-DD/` (today's date; create
   it when missing). It holds that day's diffs and one `WALKTHROUGH.md`.
-- For each migration, write its diff with
-  `python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>`. The script compares
-  every SQL step with the mirrored source it replaces and writes
-  `ai_generate/YYYY-MM-DD/<folder>.diff`. It reads only local files. Run it before
+- Each migration gets its diff `ai_generate/YYYY-MM-DD/<folder>.diff`, which compares
+  every SQL step with the mirrored source it replaces. `scripts/team.sh migrate --env dev`
+  writes it after a verified apply, before you refresh the mirror; an existing diff file
+  is kept, and a failure to write it is reported without changing the migration result.
+  Staging and production runs and `--rehearse` write nothing. To write it by hand, run
+  `python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>` before
   `scripts/team.sh backup-db` refreshes the mirror, or pass `--base <git-ref>` to read
-  the mirror from a commit. `--date` sets another dated folder.
+  the mirror from a commit. `--date` sets another dated folder. It reads only local files.
 - Other changes (APEX pages, scripts, documents) go into the same folder as `git diff`
   output.
 - `WALKTHROUGH.md` tracks the day: what changed and why, the files and diffs, the

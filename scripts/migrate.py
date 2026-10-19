@@ -36,6 +36,7 @@ from .migration_checks import (
     preflight_inventory_retries,
     run_checks,
 )
+from .migration_diff import write_diff
 from .migration_manifest import (
     Migration,
     MigrationFile,
@@ -1293,7 +1294,33 @@ def main(
         return 2
     if args.rehearse:
         return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report)
-    return apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose)
+    status = apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose)
+    if status == 0 and target.environment == "dev":
+        record_daily_diffs(Path(repo_root), migrations)
+    return status
+
+
+def record_daily_diffs(repo_root: Path, migrations: Sequence[Migration], day: str | None = None) -> None:
+    """Write each applied folder's readable diff to ai_generate/<today>/ (daily change record).
+
+    Runs only after a verified DEV apply, in a project that has ai_generate/. An existing
+    diff is kept: after backup-db the mirror already holds the change, and a rewrite would
+    show no difference. A failure here is reported and never changes the migration result.
+    """
+    root = Path(repo_root)
+    if not (root / "ai_generate").is_dir():
+        return
+    day = day or datetime.now().date().isoformat()
+    for migration in migrations:
+        existing = root / "ai_generate" / day / f"{migration.folder.name}.diff"
+        try:
+            if existing.exists():
+                print(f"daily change record: kept {existing.relative_to(root).as_posix()}")
+                continue
+            out, _ = write_diff(root, migration.folder, day)
+            print(f"daily change record: wrote {out.relative_to(root).as_posix()}")
+        except (OSError, UnicodeError, SystemExit, ValueError) as error:
+            print(f"daily change record: not written for {migration.folder.name}: {error}", file=sys.stderr)
 
 
 def _interrupt_on_sigterm() -> None:
