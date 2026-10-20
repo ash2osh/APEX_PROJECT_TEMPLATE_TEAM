@@ -39,3 +39,13 @@ line; very large files (`rollout.py`, `publish_app.*`, `team.*`) were not read h
   `attempt-event` files in `.gitignore`, and `team-flow.md` frontmatter.
 
 After 26.1 gained `verify-local` (2026-10-20, 26.1 PR 21) the report covers 392 shared files, 123 differing: 33 `missed`, 27 `feature`, 63 `intended`, none unreviewed.
+
+Update 2026-10-20, after the ports (26.1 PRs 23 and 24, TEAM PRs 53, 54 and 55): 114 of 392 shared files differ, none unreviewed:
+5 `missed`, 32 `feature`, 77 `intended`. What is left in `missed` are two open owner decisions, not ports:
+
+- **Lock policy for a malformed attempt-event chain** (`scripts/migration_revision.py`, `tests/test_migration_revision.py`,
+  `tests/test_migrate_cli.py`): 26.1 fails closed for any target, 26.2 scopes to the selected one.
+- **Transaction control in rollout scripts** (`scripts/validate_migration.py`, `tests/test_validate_migration.py`): 26.1 accepts only
+  `COMMIT` / `ROLLBACK [WORK]`, 26.2 also accepts `ROLLBACK TO SAVEPOINT`.
+
+`scripts/backup_db.sh` is `intended`: the Windows ORDS flake (TEAM issue 49) is not caused by its `return`/`exit` form.

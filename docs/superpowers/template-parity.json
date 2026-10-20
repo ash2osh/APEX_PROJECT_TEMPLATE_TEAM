@@ -41,14 +41,6 @@
         "afdfca91a002a6f854a6758e60e3c24831875d59"
       ]
     },
-    ".agents/workflows/team-flow.md": {
-      "status": "missed",
-      "reason": "26.2 added name/description frontmatter; 26.1 lacks it. Port to 26.1.",
-      "blobs": [
-        "e2a32b8629f53fb2b1ca69d4f8f4cbb9dd38f498",
-        "3fc459a3747076fa770fcc125074141ea4748cfc"
-      ]
-    },
     ".claude/skills/initialize-project/SKILL.md": {
       "status": "intended",
       "reason": "Mirror of .agents/skills/initialize-project/SKILL.md.",
@@ -74,11 +66,11 @@
       ]
     },
     ".gitignore": {
-      "status": "missed",
-      "reason": "26.2 ignores migrations/**/attempt-event.*.json; 26.1 writes the same files (scripts/migration_attempts.py) but does not ignore them. Port to 26.1 (the uc-apx and .venv-graphify lines are intended).",
+      "status": "intended",
+      "reason": "attempt-event is now ignored in both (26.1 PR 24); only the uc-apx and .venv-graphify lines differ, as intended.",
       "blobs": [
         "c05e219feb613b4da020816f2c1ceecc099459e8",
-        "92ede91a9ed8eaa392e4d50196e8226f7fb0763a"
+        "62fac27dc22af9460b6323166bac6383d6c3f47b"
       ]
     },
     "AGENTS.md": {
@@ -218,18 +210,18 @@
       ]
     },
     "scripts/backup_db.sh": {
-      "status": "missed",
-      "reason": "Suspect for a TEAM-only Windows flake: in 30 failed-run logs per repo, backup-db returned exit 0 instead of 2 after printing the ORDS refusal twice in 26.2 (test_backup_ords_cli, bash) and never in 26.1. The only difference on that path: 26.2 'return 2' in run_ords_scope plus '|| exit $?' at the call site (commit 6770f55, 2026-10-13); 26.1 exits inside the function. Reproduce on Windows, then align 26.2 with 26.1 if it is the cause.",
+      "status": "intended",
+      "reason": "Not the cause of the Windows ORDS flake (TEAM issue 49): the same failure occurred on 2026-10-13 at commit 9adb983, before the return form (6770f55) existed, and 96 Windows runs of both forms reproduced nothing. The return/exit forms behave the same.",
       "blobs": [
         "ec5b999b1888e131c2c750ab7aaeadaf3a8d00e0",
         "a4d847829121a6290ebd13134ee11fac3ff9cb1a"
       ]
     },
     "scripts/baseline.py": {
-      "status": "missed",
-      "reason": "26.1 adds NOT NULL data preconditions to the structure bundle (table empty / no NULL rows before the constraint) and uses relative_to_root; 26.2's structure bundle returns no preconditions. Port both to 26.2. (Both check for a supported SQLcl before a live capture.)",
+      "status": "intended",
+      "reason": "Ported on 2026-10-20 (TEAM PR 54): NOT NULL data preconditions and relative_to_root. What still differs is formatting and function order.",
       "blobs": [
-        "dde6fe7393ec0a355e56f513bf27f4cb1412b46b",
+        "692b55d4f4cc3482f15be7c38fa5abf6b789cfdc",
         "b8fcef72e1df9eecdcc6295c1054414e4a74939a"
       ]
     },
@@ -265,19 +257,11 @@
         "8a4a9fe47c4eb2c113256f151109b43b87365f8a"
       ]
     },
-    "scripts/compare_env_catalog.sql": {
-      "status": "missed",
-      "reason": "26.1 orders columns by column_id NULLS LAST, internal_column_id; 26.2 still orders by column_name. Port the 26.1 ordering to 26.2.",
-      "blobs": [
-        "ffa83421b05b2159a7891ec7198f3b62b46f1a8b",
-        "86f929bcfbe364935c07a1bf710f8cb983e7f994"
-      ]
-    },
     "scripts/compare_schema.py": {
-      "status": "missed",
-      "reason": "26.1's compare-env report also adds a blocker when source and target resolve to the same database scope (26.2 uses same_database_scope only in its other checks). Port to 26.2. (26.1 also needs nothing from 26.2 here.)",
+      "status": "intended",
+      "reason": "Ported the same-scope blocker (TEAM PR 54); what still differs is code style and catalog-argument formatting.",
       "blobs": [
-        "323cc1c84a41844841e8fd09e28d3a0dd96970a1",
+        "9e54b24452d2c6e3d58425006c7c2b198cefc460",
         "79536f51717c0d5cd7fd8f5fbbdd39e73bf0dbf3"
       ]
     },
@@ -306,10 +290,10 @@
       ]
     },
     "scripts/directory_install.py": {
-      "status": "missed",
-      "reason": "26.1 pins each directory component (POSIX descriptors, Windows handles) so a parent swap cannot redirect an exclusive install, with Windows rename-by-handle; 26.2 has the simpler implementation plus a macOS exclusive-rename path. Port the pinned installer to 26.2.",
+      "status": "intended",
+      "reason": "The pinned-handle installer was ported (TEAM PR 53); the only difference left is the compat helper _is_symlink_or_reparse.",
       "blobs": [
-        "c5aa876e626eb948e9d95f32d3e991bd9e5b316a",
+        "82cf05418531cfd0813fdcc93ede3097e2ac8ec8",
         "7ce3efe07d4d0e54e6a0d9f639c3a4858dd18317"
       ]
     },
@@ -378,67 +362,51 @@
       ]
     },
     "scripts/migrate.py": {
-      "status": "missed",
-      "reason": "26.2 runs the SQLcl transport lint before recording a write attempt (_preflight_transport); 26.1 has scripts/sqlcl_transport.py but does not call it. 26.1 uses relative_to_root, 26.2 does not. Port the preflight to 26.1 and relative_to_root to 26.2.",
+      "status": "intended",
+      "reason": "Ported both ways: 26.1 got the transport preflight (26.1 PR 24), 26.2 got relative_to_root (TEAM PR 55); only import layout differs.",
       "blobs": [
-        "b18b64c7132fb56952cc4dda22eaf5a58b42930e",
-        "ca983d0644b3b7cec734eb101862889f5ad394cd"
+        "55695cf8a3635ec5322c2a3e5338b49a16e071de",
+        "18bbaa79de819f62ac1706a10d6a2c65f75e89e8"
       ]
     },
     "scripts/migration_attempts.py": {
-      "status": "missed",
-      "reason": "26.1 uses path_utils.relative_to_root (Windows path alias fix); 26.2 still calls Path.relative_to. Port to 26.2.",
+      "status": "intended",
+      "reason": "relative_to_root ported (TEAM PR 55); the only difference left is one blank line.",
       "blobs": [
-        "e65093f824b15b68b2cb0b60a06419a5959153cb",
+        "1e56be33432ff587ee4f9e89c70a36f7ded0942a",
         "7a3554fefd9538da9f3e299f482c6e52e2e7773e"
       ]
     },
     "scripts/migration_checks.py": {
-      "status": "missed",
-      "reason": "26.1 uses relative_to_root and declared-binding names; 26.2 adds rehearsal metric phases (feature). Port relative_to_root to 26.2.",
+      "status": "feature",
+      "reason": "relative_to_root ported (TEAM PR 55); what remains is the 26.2-only rehearsal metric phases.",
       "blobs": [
-        "0b46283754533fbaf0870b8cd844dc052f69a228",
+        "4a97445a9a3a8a56cc8c1284946e772bdfe59c77",
         "98bd58b82cd340833fe25b8334db27423ee4c39b"
       ]
     },
     "scripts/migration_manifest.py": {
-      "status": "missed",
-      "reason": "26.1 uses relative_to_root and validates declared binding names as strings; 26.2 adds RehearsalMetric/schema-2 checks (feature). Port relative_to_root to 26.2.",
+      "status": "feature",
+      "reason": "relative_to_root and declared-binding validation ported (TEAM PR 55); what remains is RehearsalMetric and schema-2 checks (26.2 only).",
       "blobs": [
-        "a3fe74adad2961d5232bb176f4699dbfb7e62607",
+        "bf14298797181daa7a07c5696e597b4af51953e5",
         "c72f12c1008ffc11188a4c42e4762015fb4a2d8f"
       ]
     },
-    "scripts/migration_plan.py": {
-      "status": "missed",
-      "reason": "26.1 uses relative_to_root; 26.2 refines when an incomplete observed identity is reported (only after capture completed). Port relative_to_root to 26.2 and the identity refinement to 26.1.",
-      "blobs": [
-        "24bdb44a5fb1266aa372ad04726cc185883ea926",
-        "02ebe702fd64c069d67b937b88dd80e37d082219"
-      ]
-    },
     "scripts/migration_rehearsal.py": {
-      "status": "missed",
-      "reason": "26.2 adds rehearsal metrics (feature); 26.1 uses relative_to_root. Port relative_to_root to 26.2.",
+      "status": "feature",
+      "reason": "relative_to_root ported (TEAM PR 55); what remains is the 26.2-only rehearsal metrics.",
       "blobs": [
-        "1b21890f845caf22876c6998cad1be31eea94748",
+        "f9d3a933f228aa99cab4c8a7f064976fce99fe5c",
         "450255ca2bc398dfc36ff28552c4d628b0452977"
       ]
     },
     "scripts/migration_revision.py": {
       "status": "missed",
-      "reason": "26.1 uses relative_to_root (Windows alias safe) and fails closed on any malformed attempt-event chain even for another target; 26.2 uses Path.relative_to and ignores unrelated malformed chains for a selected target. Port relative_to_root to 26.2; decide which lock policy is canonical.",
+      "reason": "Open owner decision: the lock policy for a malformed attempt-event chain (26.1 fails closed for any target; 26.2 scopes to the selected target). relative_to_root is ported (TEAM PR 55).",
       "blobs": [
-        "eed35c3894f35e3c26694c4a62a1c200bd732ed9",
+        "83a342ce6cc88c4a4846af65e0a2ca1967f2fa65",
         "2e11ee0478961bfcab9c75b1597e3b19b2d65a1e"
-      ]
-    },
-    "scripts/ords_export.py": {
-      "status": "missed",
-      "reason": "26.2 reads ORDS export files and the SQLcl transcript as strict UTF-8 (read_utf8); 26.1 still decodes with errors='replace', which can hide corrupted evidence. Port to 26.1.",
-      "blobs": [
-        "8d008cc32f01667335d4df2d422423f3d66c6cf1",
-        "36a4e9429a87dc327dd77d43157b8b30fec63b1f"
       ]
     },
     "scripts/publish_app.ps1": {
@@ -578,10 +546,10 @@
       ]
     },
     "scripts/workflow_skills.py": {
-      "status": "missed",
-      "reason": "Skill list differs on purpose (install-uc-apx vs building-apex-template-components), but 26.1 also passes core.hooksPath as_posix() (Windows fix) that 26.2 lacks. Port that line to 26.2.",
+      "status": "intended",
+      "reason": "hooksPath fix ported (TEAM PR 55); the skill list differs by release (install-uc-apx vs building-apex-template-components).",
       "blobs": [
-        "6718401f1d248c39d528af4fd81bc6b9c2b1c337",
+        "ca7bb373aca56933ad57fb8896f2d5eeb4422f58",
         "7feb2901b5b85613477dcf9784a8396692e59c4f"
       ]
     },
@@ -607,22 +575,6 @@
       "blobs": [
         "0ad6b27f15072dfbb8829beab65f9a773745adda",
         "a6a304aa23fd4de1107d1801d3fe7424eced4627"
-      ]
-    },
-    "tests/fixtures/baseline/build_snapshot.json": {
-      "status": "missed",
-      "reason": "Trailing newline only (26.2 has it). Align 26.1.",
-      "blobs": [
-        "f9748af96899331a103354dde21a7177dafb7a4f",
-        "0511fa327407dc24cae46293c1dae5480993af2c"
-      ]
-    },
-    "tests/fixtures/baseline/grants_dev.json": {
-      "status": "missed",
-      "reason": "Trailing newline only (26.2 has it). Align 26.1.",
-      "blobs": [
-        "03c77394cc9f081312f84fbd65dd6eaec3cd32ff",
-        "91df71ea1b53fdb7ed34c7976de42c85ca1032ad"
       ]
     },
     "tests/fixtures/baseline/ords_modules.sql": {
@@ -674,10 +626,10 @@
       ]
     },
     "tests/test_baseline.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/baseline.py: 26.1's test_not_null_changes_require_data_preconditions_before_migration and its reference-data refusal tests have no 26.2 counterpart.",
+      "status": "intended",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the rest are 26.1-specific (for example the 26.1 database tools have no 26.2 dependency).",
       "blobs": [
-        "fcd55c4515843c008560af3b0960cd5dccc7b950",
+        "8138da602c63e0ce3dfcb9c2a650d881277cc232",
         "3744697ef6bb27cf6f1ec767627fa836128303ba"
       ]
     },
@@ -697,19 +649,11 @@
         "9825760527caea94632a5136ca9cb4af77865710"
       ]
     },
-    "tests/test_catalog_transport.py": {
-      "status": "missed",
-      "reason": "26.1 tests that compare-env framing keeps compressed and legacy payloads through parse_framed_catalog_payloads; the function exists in 26.2's schema_catalog.py but has no such test. Port the test to 26.2.",
-      "blobs": [
-        "3b24fb18fc96afaf1b3cb8b83f1887c65b539b03",
-        "140ecafc86c8b543c1c6f61a0a0d3492425bbe19"
-      ]
-    },
     "tests/test_compare_env.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/compare_schema.py: 18 26.1-only tests (same-scope blocker, constraint paging) with no 26.2 counterpart.",
+      "status": "intended",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring.",
       "blobs": [
-        "ac2d6fa3f46cfd61356b6ce41d94a9d5816fcb23",
+        "e7e5787945e5991c876564c4e8bdde2813a0b285",
         "6a14befc181dba80bf7f14450ea585ab51468f16"
       ]
     },
@@ -738,10 +682,10 @@
       ]
     },
     "tests/test_directory_install.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/directory_install.py: 26.1's Linux/Darwin/Windows parent-swap tests have no 26.2 counterpart.",
+      "status": "intended",
+      "reason": "26.1 parent-swap tests ported (TEAM PR 53); TEAM keeps its Darwin refusal test.",
       "blobs": [
-        "722002a6c18111fdbb71d58ba081b9dc040ea630",
+        "c0b79f940aa2f0687f012a54ad9f653e8ea8df64",
         "7065ab72f2810a56d9753b3b485c27670766d559"
       ]
     },
@@ -793,36 +737,28 @@
         "33d8d746e5df16333623bcb45857efe56b665154"
       ]
     },
-    "tests/test_migration_attempts.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/migration_attempts.py: 26.1's 8 durable-attempt tests have no 26.2 counterpart.",
-      "blobs": [
-        "4dc9f0a984f2881e587672f58e261cecf6ffc3d3",
-        "b885f2a1cb9424a6760a718781241790594e2d89"
-      ]
-    },
     "tests/test_migration_checks.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/migration_checks.py (26.2-only metric-phase tests are a feature).",
+      "status": "feature",
+      "reason": "Goes with scripts/migration_checks.py: the 26.2-only metric-phase tests.",
       "blobs": [
-        "a54ede1fe0544fa0fc591daa66ec6c7d56f8a1bb",
+        "406391557a4465bc22ce47e9549d2547faa6db8e",
         "c3f88ad87ec219c12bd95e8219d7dc6a8b4e4af1"
       ]
     },
     "tests/test_migration_manifest.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/migration_manifest.py.",
+      "status": "feature",
+      "reason": "Goes with scripts/migration_manifest.py: 26.2 rehearsal-metric tests.",
       "blobs": [
-        "dce0c7055fcc63e5bc593327f409765656139a89",
+        "a7bcea033d5f8f2f91b1920578d8d52ed9c22b27",
         "dbcf96304afbddf05fc1c8f96900ef0d8180c297"
       ]
     },
     "tests/test_migration_plan.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/migration_plan.py.",
+      "status": "intended",
+      "reason": "Identity refinement test ported to 26.1 (26.1 PR 24); the files are close to identical.",
       "blobs": [
         "6416ed87a920bd85f50ca4fe10acc6a6a749cbdf",
-        "59d9b8a38df0530c3a6442b3b1670c544f6517c8"
+        "e325be0fe50ef421604d416f641b1f69bf6ed97f"
       ]
     },
     "tests/test_migration_rehearsal.py": {
@@ -835,9 +771,9 @@
     },
     "tests/test_migration_revision.py": {
       "status": "missed",
-      "reason": "Goes with scripts/migration_revision.py: lock policy differs (26.1 fail-closed on any malformed chain, 26.2 scopes to the selected target).",
+      "reason": "Goes with scripts/migration_revision.py: the tests encode the two lock policies; pending the owner decision.",
       "blobs": [
-        "baa4f28df2b6eee7b45e7f9d66b1ecf962f06854",
+        "5caebd5c8f801c6fadd3422cf9781ae5c4106de1",
         "791f2d53afb244f64ea828bc11adae7461cb8b0a"
       ]
     },
@@ -855,14 +791,6 @@
       "blobs": [
         "a84758ad9cda71a6866e65d7d8548c8750687c7d",
         "78db26ace0ce81f35e3d9a27ae2cb9b6dc08ec6e"
-      ]
-    },
-    "tests/test_ords_export.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/ords_export.py: 26.2's two invalid-UTF-8 tests have no 26.1 counterpart.",
-      "blobs": [
-        "d671e5fdd22f3de4720667b3583f622dc130f99c",
-        "cb1ddc7f6df69d9d1da4d3d126f6a602af2990e6"
       ]
     },
     "tests/test_path_utils.py": {
@@ -906,19 +834,19 @@
       ]
     },
     "tests/test_sql_driver_contracts.py": {
-      "status": "missed",
-      "reason": "26.1 asserts the BLOB / UTL_COMPRESS chunking details of scripts/schema_catalog.sql (identical file); 26.2's test checks only the encoding marker and chunk size. Port 26.1's assertions to 26.2.",
+      "status": "intended",
+      "reason": "26.1 BLOB/UTL_COMPRESS chunking assertions ported (TEAM PR 54).",
       "blobs": [
-        "75c012dbcf7fa582bf4cba5e4f6712ac08d3e81b",
+        "8adb682605cc543abc47c39a70933249fbfc4320",
         "0b79a4a7a6ebd396f87204659c29b6692a78e8cf"
       ]
     },
     "tests/test_sqlcl_transport.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/migrate.py: 26.2's tests prove the transport preflight refuses before apply; 26.1 has no such wiring or test.",
+      "status": "intended",
+      "reason": "Transport preflight tests ported to 26.1 (26.1 PR 24).",
       "blobs": [
         "80beaed34fa42fd0d8eb3fa64c1ce87aca7ba79d",
-        "db1ff34a8655bc2e87aa2654e06f1f4f23e0cc58"
+        "3a284495d0ccfd91758b52fb0fa57ab569dd3ceb"
       ]
     },
     "tests/test_team_cli.py": {
