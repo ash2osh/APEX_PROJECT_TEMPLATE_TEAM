@@ -637,8 +637,21 @@ class ChromeMcpTcpTests(unittest.TestCase):
         self.stop_daemon(daemon, thread)
         self.assertFalse(token_file.exists())
         self.assertIsNotNone(child.poll(), "the MCP child must be stopped")
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rebind:
-            rebind.bind(("127.0.0.1", self.port))
+        # The port must be free again once the daemon stopped. A closed connection can leave a TIME_WAIT
+        # socket on it and the OS may hand it out briefly, so allow SO_REUSEADDR where it only ignores
+        # TIME_WAIT (POSIX; on Windows it would also allow binding over a live listener) and retry briefly.
+        deadline = time.monotonic() + 3.0
+        while True:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rebind:
+                if os.name != "nt":
+                    rebind.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    rebind.bind(("127.0.0.1", self.port))
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+            time.sleep(0.05)
 
     def test_daemon_stops_when_the_mcp_child_exits(self):
         starts = self.root / "fake-pids"
