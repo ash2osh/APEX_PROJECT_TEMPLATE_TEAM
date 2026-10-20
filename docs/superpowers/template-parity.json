@@ -331,10 +331,10 @@
     },
     "scripts/invoke_sqlcl.ps1": {
       "status": "intended",
-      "reason": "26.2 adds Assert-SqlclApexVersion (SQLcl 26.3 gate); wait completion and interrupted transcript retention fixes exist in both.",
+      "reason": "26.2 adds Assert-SqlclApexVersion (SQLcl 26.3 gate); both lines retain diagnostics through wait/stop exceptions, complete exited-child output and permit inherited Windows writer handles.",
       "blobs": [
-        "fa7ef535e39a38a834ec4d1abf1a3d011c60ea6c",
-        "68179726a66726b7f670b4fb8e04884ee5c45c5e"
+        "3e9c4968b8eff2171b7e9f8cf3415d52fee63009",
+        "e07d46bcd8a2ea4ee5b57c72af78f9c181765c48"
       ]
     },
     "scripts/load_env.ps1": {
@@ -803,10 +803,10 @@
     },
     "tests/test_publish_cli.py": {
       "status": "feature",
-      "reason": "13 26.2-only publish tests (locks, lifecycle, partial publish).",
+      "reason": "Release-specific publish tests: 26.2 locks, lifecycle and partial publish; 26.1 retains explicit unknown-import diagnostic assertions under POSIX and native Windows Ctrl-C.",
       "blobs": [
         "ef5cd86edc6278ea2a0dcef2e7efb6aaeba23ead",
-        "a57c83627a27f87ef63b843556811d3dbb66ed8e"
+        "c9e18d92b645ad69e41029cbedb5e91edf7cbf62"
       ]
     },
     "tests/test_record_export_state.py": {
