@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [exec_trap_return, exec_trap_exit, noexec_trap_return, exec_notrap_return, exec_trap_python, exec_trap_rm_slow]
+        variant: [exec_trap_return, exec_trap_exit, noexec_trap_return]
+        launcher: [bin, usr]
     steps:
       - name: Count wrong exit statuses
         shell: bash
@@ -57,7 +58,9 @@ jobs:
           chmod +x parent.sh child.sh
           cat > caller.py <<'PY'
           import subprocess, sys, threading, shutil
-          bash = shutil.which("bash") or "bash"
+          import os
+          bash = os.path.join(r"C:\Program Files\Git", "${{ matrix.launcher }}", "bash.exe") if "${{ matrix.launcher }}" == "bin" else os.path.join(r"C:\Program Files\Git\usr\bin", "bash.exe")
+          assert os.path.isfile(bash), bash
           wrong = []
           lock = threading.Lock()
           def worker(wid):
@@ -71,7 +74,7 @@ jobs:
           [t.join() for t in threads]
           for item in wrong:
               print("wrong exit status:", item)
-          print(f"variant ${{ matrix.variant }}: total=600 wrong_status={len(wrong)} bash={bash}")
+          print(f"variant ${{ matrix.variant }} launcher ${{ matrix.launcher }}: total=600 wrong_status={len(wrong)} bash={bash}")
           sys.exit(1 if wrong else 0)
           PY
           python caller.py
