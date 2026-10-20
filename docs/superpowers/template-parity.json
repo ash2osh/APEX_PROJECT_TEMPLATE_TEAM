@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "files": {
+    ".agents/workflows/team-flow.md": {
+      "status": "missed",
+      "reason": "26.2 added name/description frontmatter; 26.1 lacks it. Port to 26.1.",
+      "blobs": [
+        "e2a32b8629f53fb2b1ca69d4f8f4cbb9dd38f498",
+        "3fc459a3747076fa770fcc125074141ea4748cfc"
+      ]
+    },
+    ".github/workflows/database-checks.yml": {
+      "status": "intended",
+      "reason": "26.1 keeps the optional '.[graph]' extra in pyproject.toml, so CI validates its resolution; 26.2 installs Graphify in its own pinned venv.",
+      "blobs": [
+        "a14d8e82c54609e8c2542e6a9a5ef512e6eff70a",
+        "8536fe7f2c44f70dcbbc2dc0d7b742cd8412d14c"
+      ]
+    },
+    "docs/compare-env.md": {
+      "status": "intended",
+      "reason": "26.1 states the SQLcl 26.3 minimum for live comparisons; 26.2 requires SQLcl 26.3 for everything.",
+      "blobs": [
+        "be827d36e1b4ed0d895b4269faaa6ffdb13af1ef",
+        "b4c23c4894a1cccd1340d00b7d17f8549da49bf3"
+      ]
+    },
+    "docs/workflow-skills.md": {
+      "status": "intended",
+      "reason": "Mentions the Oracle skills refresh, which only the 26.2 line has.",
+      "blobs": [
+        "44635b06d0523c0d776c2cb34e71c482533d19de",
+        "797435be6cc5f1328c97430101da00f9d25fd616"
+      ]
+    },
+    "pyproject.toml": {
+      "status": "intended",
+      "reason": "26.2 moved Graphify to a separate pinned .venv-graphify (scripts/graphify_project.py); 26.1 keeps the '.[graph]' extra.",
+      "blobs": [
+        "27dba6151392b7032c6580324665eabac020ccb4",
+        "7b7c8157af6f4296b1c234154c0264958d850f11"
+      ]
+    },
+    "scripts/application_lifecycle.py": {
+      "status": "intended",
+      "reason": "Release check: APEX 26.2 vs 26.1.",
+      "blobs": [
+        "0334927016be8b87590137ab4a777534d747854e",
+        "3f3da22536ef9e007e8059ff1e4f1a6d168ff302"
+      ]
+    },
+    "scripts/application_lifecycle.sql": {
+      "status": "intended",
+      "reason": "Release check: APEX 26.2 vs 26.1.",
+      "blobs": [
+        "161a7eba7b8a9354d1c2bddbbcef3eb4e8f7ae9b",
+        "e8e915091deda37ca91618a2e54bc44cd8d28edb"
+      ]
+    },
+    "scripts/check_db_target.ps1": {
+      "status": "feature",
+      "reason": "26.2-only MIGRATION_* owner profile (migration target); not ported to 26.1.",
+      "blobs": [
+        "dda7327cc86de3663d501de9f510a649183eb1d7",
+        "3f3467abceec66daf0bf5dd915f64a1a4fc83b1c"
+      ]
+    },
+    "scripts/compare_env_catalog.sql": {
+      "status": "missed",
+      "reason": "26.1 orders columns by column_id NULLS LAST, internal_column_id; 26.2 still orders by column_name. Port the 26.1 ordering to 26.2.",
+      "blobs": [
+        "ffa83421b05b2159a7891ec7198f3b62b46f1a8b",
+        "86f929bcfbe364935c07a1bf710f8cb983e7f994"
+      ]
+    },
+    "scripts/migration_attempts.py": {
+      "status": "missed",
+      "reason": "26.1 uses path_utils.relative_to_root (Windows path alias fix); 26.2 still calls Path.relative_to. Port to 26.2.",
+      "blobs": [
+        "e65093f824b15b68b2cb0b60a06419a5959153cb",
+        "7a3554fefd9538da9f3e299f482c6e52e2e7773e"
+      ]
+    },
+    "scripts/workflow_skills.py": {
+      "status": "missed",
+      "reason": "Skill list differs on purpose (install-uc-apx vs building-apex-template-components), but 26.1 also passes core.hooksPath as_posix() (Windows fix) that 26.2 lacks. Port that line to 26.2.",
+      "blobs": [
+        "6718401f1d248c39d528af4fd81bc6b9c2b1c337",
+        "7feb2901b5b85613477dcf9784a8396692e59c4f"
+      ]
+    },
+    "tests/fixtures/baseline/build_snapshot.json": {
+      "status": "missed",
+      "reason": "Trailing newline only (26.2 has it). Align 26.1.",
+      "blobs": [
+        "f9748af96899331a103354dde21a7177dafb7a4f",
+        "0511fa327407dc24cae46293c1dae5480993af2c"
+      ]
+    },
+    "tests/fixtures/baseline/grants_dev.json": {
+      "status": "missed",
+      "reason": "Trailing newline only (26.2 has it). Align 26.1.",
+      "blobs": [
+        "03c77394cc9f081312f84fbd65dd6eaec3cd32ff",
+        "91df71ea1b53fdb7ed34c7976de42c85ca1032ad"
+      ]
+    },
+    "tests/test_ords_contracts.py": {
+      "status": "intended",
+      "reason": "26.2 passes --apex-release 26.2 to the upgrader; variable rename only otherwise.",
+      "blobs": [
+        "a84758ad9cda71a6866e65d7d8548c8750687c7d",
+        "78db26ace0ce81f35e3d9a27ae2cb9b6dc08ec6e"
+      ]
+    }
+  }
+}

@@ -276,6 +276,30 @@ is false, and 2 when a check errors, a session is incomplete, or the selected
 target identity cannot be verified. A SQL or identity error takes precedence
 over false results and returns 2.
 
+
+## Starting a code migration from DEV
+
+A package, procedure, function, trigger or type change starts from the source that is
+live on DEV, not from the mirror under `database/`: the mirror is refreshed irregularly
+and teammates change live code.
+
+```bash
+scripts/team.sh new-migration add-customer-flag --source "PACKAGE:CUSTOMER_PKG" --source "PACKAGE BODY:CUSTOMER_PKG" --env dev
+```
+
+It reads the stored source read-only, through the same identity-checked capture as
+`baseline export-source`, and writes `migrations/<SCHEMA>/<today>_<name>-r001/`:
+
+- one step per object (`CREATE OR REPLACE` plus the live source) to edit;
+- preconditions `unchanged-since-read-*` that compare every live source line with what was
+  read, so `check-conflicts` and `migrate` refuse when someone changed the object after you
+  started (take their change into your steps, or start again);
+- postconditions `valid-*`: each object VALID without compile errors. Add checks for what
+  your change must do.
+
+A name that already exists as a migration family is refused; edit that folder, or use
+`scripts/team.sh revise` after a write attempt.
+
 ## Rehearsal
 
 Use `migrate --rehearse` to try data changes on the selected real target and

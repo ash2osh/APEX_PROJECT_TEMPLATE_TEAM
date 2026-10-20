@@ -236,7 +236,7 @@ preserves it during upgrades, including when tracked. Do not stage, commit,
 or push it without an explicit instruction.
 
 If the project was newly cloned from the template, direct the user to
-[docs/GETTING_STARTED.md#post-clone-cleanup](docs/GETTING_STARTED.md#post-clone-cleanup)
+[docs/GETTING_STARTED.md#post-clone-cleanup](../../../docs/GETTING_STARTED.md#post-clone-cleanup)
 for file-level provenance review against `template-manifest.json` and `.template-lock.json`,
 preserving project tests, plans, rules, and documentation rather than performing
 broad directory sweeps.

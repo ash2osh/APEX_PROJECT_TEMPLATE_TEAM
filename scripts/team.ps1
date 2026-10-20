@@ -26,6 +26,25 @@ function Exit-Team([int] $Code) {
   exit $Code
 }
 
+# No command prints only the everyday commands; --help prints all of them.
+function Show-EverydayUsage {
+  @"
+Usage: scripts/team.ps1 <command> [arguments]
+
+Everyday commands:
+  doctor                                  Check .env and the database connections
+  export <app_id>                         Copy a live app from DEV into Git
+  publish <app_id> --env dev              Import your edited app files to DEV
+  check-conflicts <folder> --env dev      Check a migration against the live database
+  migrate <folder> --env dev              Apply a migration
+  revise <folder>                         Start the next revision of an attempted migration
+  backup-db                               Refresh the local database mirror
+  upgrade-template --dry-run              Preview a template upgrade
+
+Run scripts/team.ps1 --help for every command and option.
+"@ | Write-Output
+}
+
 function Show-Usage {
   @"
 Usage: scripts/team.ps1 <command> [arguments]
@@ -49,6 +68,8 @@ Commands:
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]
                                               Plan, run, inspect or explicitly clean retained DEV fixtures
+  new-migration <name> --source TYPE:NAME [...] --env dev
+                                              Start a code migration from the live DEV source
   migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
                                               Apply, or rehearse DML in one transaction and roll it back
   revise <folder> [--reason TEXT]             Copy to the next migration revision
@@ -208,7 +229,11 @@ function Invoke-TeamBash {
   if ($bashStatus -ne 0) { Exit-Team $bashStatus }
 }
 
-if ([string]::IsNullOrWhiteSpace($Command) -or $Command -in @("--help", "-h")) {
+if ([string]::IsNullOrWhiteSpace($Command)) {
+  Show-EverydayUsage
+  exit 0
+}
+if ($Command -in @("--help", "-h")) {
   Show-Usage
   exit 0
 }
@@ -423,6 +448,10 @@ try {
     "query" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 query --env dev|staging|prod --connection tables|code|apex|ords|migration [--file <path> | SQL]" }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("query") + @($Arguments))
+    }
+    "new-migration" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 new-migration <name> --source TYPE:NAME [...] --env dev [--schema NAME]" }
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("new-migration") + @($Arguments))
     }
     "revise" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 revise <folder> [--reason TEXT] | revise --check <folder>" }

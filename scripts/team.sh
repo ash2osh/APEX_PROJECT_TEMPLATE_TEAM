@@ -25,6 +25,8 @@ Commands:
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]
                                               Plan, run, inspect or explicitly clean retained DEV fixtures
+  new-migration <name> --source TYPE:NAME [...] --env dev
+                                              Start a code migration from the live DEV source
   migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]
                                               Apply, or rehearse DML in one transaction and roll it back
   revise <folder> [--reason TEXT]             Copy to the next migration revision
@@ -75,9 +77,32 @@ Environment:
 USAGE
 }
 
+# No command prints only the everyday commands; --help prints all of them.
+usage_everyday() {
+  cat <<'USAGE'
+Usage: scripts/team.sh <command> [arguments]
+
+Everyday commands:
+  doctor                                  Check .env and the database connections
+  export <app_id>                         Copy a live app from DEV into Git
+  publish <app_id> --env dev              Import your edited app files to DEV
+  check-conflicts <folder> --env dev      Check a migration against the live database
+  migrate <folder> --env dev              Apply a migration
+  revise <folder>                         Start the next revision of an attempted migration
+  backup-db                               Refresh the local database mirror
+  upgrade-template --dry-run              Preview a template upgrade
+
+Run scripts/team.sh --help for every command and option.
+USAGE
+}
+
 fail() { printf 'team error: %s\n' "$*" >&2; exit 2; }
 
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ -z "${1:-}" ]; then
+if [ -z "${1:-}" ]; then
+  usage_everyday
+  exit 0
+fi
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
@@ -304,6 +329,14 @@ case "$command_name" in
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
     cd "$REPO_ROOT"
     exec python3 -m scripts.read_only_query "$@"
+    ;;
+  new-migration)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh new-migration <name> --source TYPE:NAME [...] --env dev [--schema NAME]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    # shellcheck source=load_env.sh
+    source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.new_migration "$@"
     ;;
   revise)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh revise <folder> [--reason TEXT] | revise --check <folder>"

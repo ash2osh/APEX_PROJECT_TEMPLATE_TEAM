@@ -869,6 +869,38 @@ exit 17
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Usage: scripts/team.", result.stdout)
 
+    def test_new_migration_is_listed_and_needs_arguments_in_both_wrappers(self) -> None:
+        entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            entries.append([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")])
+        for command in entries:
+            with self.subTest(entry=command[-1]):
+                help_text = subprocess.run([*command, "--help"], text=True, capture_output=True, check=False, cwd=ROOT).stdout
+                self.assertIn("new-migration <name> --source TYPE:NAME [...] --env dev", help_text)
+                usage = subprocess.run([*command, "new-migration"], text=True, capture_output=True, check=False, cwd=ROOT)
+                self.assertNotEqual(usage.returncode, 0)
+                self.assertIn("new-migration <name> --source TYPE:NAME", usage.stderr)
+
+    def test_no_command_lists_only_everyday_commands_and_help_lists_all(self) -> None:
+        entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            entries.append([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")])
+        for command in entries:
+            with self.subTest(entry=command[-1]):
+                short = subprocess.run(command, text=True, capture_output=True, check=False, cwd=ROOT)
+                self.assertEqual(short.returncode, 0, short.stderr)
+                self.assertIn("Everyday commands:", short.stdout)
+                for everyday in ("doctor", "export <app_id>", "migrate <folder>", "revise <folder>", "backup-db"):
+                    self.assertIn(everyday, short.stdout)
+                self.assertNotIn("compare-env", short.stdout)
+                self.assertIn("--help for every command", short.stdout)
+                full = subprocess.run([*command, "--help"], text=True, capture_output=True, check=False, cwd=ROOT)
+                self.assertEqual(full.returncode, 0, full.stderr)
+                self.assertIn("compare-env", full.stdout)
+                self.assertNotIn("Everyday commands:", full.stdout)
+
     def test_argument_errors_read_and_exit_the_same_in_both_wrappers(self) -> None:
         # An uncaught throw makes PowerShell print an exception block with the
         # script path and line and exit 1; Bash prints one `team error:` line and

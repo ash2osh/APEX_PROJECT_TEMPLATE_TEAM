@@ -1,7 +1,8 @@
 # Team APEX agent contract
 
 This branch is the APEX 26.2 / APEXlang team template; APEX operations require
-SQLcl 26.3.0.0 or newer. APEX 26.1 projects use `codex/apex-26.1`. The template
+SQLcl 26.3.0.0 or newer. APEX 26.1 projects use the separate
+`APEX_PROJECT_TEMPLATE_26_1` repository. The template
 repository follows its normal branch and pull-request process: its `main`
 is protected, so a change goes through a branch and a pull request, and
 `python3 scripts/pre_push_check.py` runs before the push (see
@@ -167,7 +168,10 @@ independent of optional workflow packs. After installing Matt's pack, invoke
   `migrations/YYYY-MM-DD_<name>-rNNN/` with consecutive named SQL steps such as
   `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
   path. Keep source immutable after a write attempt; a follow-up uses the next
-  revision folder. Run `scripts/team.sh check-conflicts <folder> --env dev`
+  revision folder. Start a code change with `scripts/team.sh new-migration
+  <name> --source "PACKAGE BODY:<NAME>" --env dev`: it copies the live DEV
+  source (not the mirror) into the steps, and its preconditions refuse the
+  apply if that source changes first. Run `scripts/team.sh check-conflicts <folder> --env dev`
   before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
   Keep `checks.json` schema 1 unchanged unless a reviewed rehearsal needs
   schema-2 `rehearsalMetrics`; those metrics run only under `--rehearse`, never
@@ -188,9 +192,9 @@ independent of optional workflow packs. After installing Matt's pack, invoke
 - **Daily change record:** A package migration holds the whole source, so Git
   cannot show what changed. For each day with code work, keep
   `ai_generate/YYYY-MM-DD/` with the readable diff of each migration
-  (`python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>`, local files
-  only, run before `backup-db` refreshes the mirror) and one `WALKTHROUGH.md` for
-  that day. Commit the folder with the work. See
+  (`migrate --env dev` writes it after a verified apply; by hand,
+  `python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>` before
+  `backup-db` refreshes the mirror) and one `WALKTHROUGH.md` for that day. Commit the folder with the work. See
   [docs/daily-change-record.md](docs/daily-change-record.md).
 - **Promotion:** Put an explicit deployment descriptor in the application
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
