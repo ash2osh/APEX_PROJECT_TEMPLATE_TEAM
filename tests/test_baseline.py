@@ -90,6 +90,27 @@ class TeamBaselineCommandTests(unittest.TestCase):
         self.assertEqual(config["schemas"], ["APP"])
         self.assertEqual(config["sequenceMappings"][0]["sequence"], "APP_ITEMS_SEQ")
 
+    def test_live_baseline_commands_require_supported_sqlcl_before_capture(self) -> None:
+        config = {"schemas": ["APP"], "prefixes": [], "excludedObjects": []}
+        error_output = io.StringIO()
+        with (
+            patch.object(baseline, "load_config", return_value=config),
+            patch.object(baseline, "_selected_schemas", return_value=["APP"]),
+            patch.object(baseline, "_export_source") as export_source,
+            patch.object(
+                migration_runtime,
+                "require_migration_sqlcl_version",
+                side_effect=migration_runtime.MigrationRuntimeError("unsupported SQLcl"),
+            ) as check_version,
+            redirect_stderr(error_output),
+        ):
+            result = baseline.main(["export-source", "--from", "dev"], environ={})
+
+        self.assertEqual(2, result)
+        self.assertIn("unsupported SQLcl", error_output.getvalue())
+        self.assertTrue(check_version.called)
+        export_source.assert_not_called()
+
 
 class BaselineExportTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -236,6 +257,46 @@ class BaselineExportTests(unittest.TestCase):
                 baseline._export_source(config, self.environ, "dev", output)
 
         self.assertFalse((output / "dev" / "APP_DEV").exists())
+
+    def test_exported_reference_data_refuses_a_different_physical_source(self) -> None:
+        result, _record, error = self.call_baseline("export-data", "--from", "dev")
+        self.assertEqual(result, 0, error)
+        config = baseline.load_config(self.root / "baseline.json")
+        current_identity = json.loads((self.fixture_dir / "data_dev.json").read_text(encoding="utf-8"))["identity"]
+        different_identity = dict(current_identity, db_unique_name="OTHERDB")
+
+        with self.assertRaisesRegex(baseline.BaselineError, "source identity does not match"):
+            baseline._read_exported_reference_data(
+                self.root / "scratch" / "baseline" / "dev" / "data",
+                config["referenceData"]["tables"], "dev", "APP_DEV", different_identity,
+            )
+
+    def test_exported_reference_data_refuses_an_active_lock_marker(self) -> None:
+        result, _record, error = self.call_baseline("export-data", "--from", "dev")
+        self.assertEqual(result, 0, error)
+        config = baseline.load_config(self.root / "baseline.json")
+        schema_dir = self.root / "scratch" / "baseline" / "dev" / "data" / "APP_DEV"
+        (schema_dir / baseline.DATA_EXPORT_LOCK_MARKER).write_text("pid=active\n", encoding="ascii")
+        source_identity = json.loads((self.fixture_dir / "data_dev.json").read_text(encoding="utf-8"))["identity"]
+
+        with self.assertRaisesRegex(baseline.BaselineError, "locked or in progress"):
+            baseline._read_exported_reference_data(
+                schema_dir.parent, config["referenceData"]["tables"], "dev", "APP_DEV", source_identity,
+            )
+
+    def test_exported_reference_data_refuses_table_bytes_that_disagree_with_manifest(self) -> None:
+        result, _record, error = self.call_baseline("export-data", "--from", "dev")
+        self.assertEqual(result, 0, error)
+        config = baseline.load_config(self.root / "baseline.json")
+        schema_dir = self.root / "scratch" / "baseline" / "dev" / "data" / "APP_DEV"
+        with (schema_dir / "APP_REF_ITEMS.json").open("ab") as stream:
+            stream.write(b" ")
+        source_identity = json.loads((self.fixture_dir / "data_dev.json").read_text(encoding="utf-8"))["identity"]
+
+        with self.assertRaisesRegex(baseline.BaselineError, "stale or mismatched"):
+            baseline._read_exported_reference_data(
+                schema_dir.parent, config["referenceData"]["tables"], "dev", "APP_DEV", source_identity,
+            )
 
 
 class BaselineBuilderUnitTests(unittest.TestCase):
@@ -600,6 +661,41 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         weight_check = next(c for c in postconditions.values() if "WEIGHT" in c["sql"])
         self.assertIn("FLOAT", weight_check["sql"])
         self.assertIn("DATA_PRECISION = 63", weight_check["sql"])
+
+    def test_not_null_changes_require_data_preconditions_before_migration(self) -> None:
+        config = {"schemas": ["APP_DEV"], "prefixes": [], "excludedObjects": [], "sequenceMappings": []}
+        source = {"sections": {
+            "tables": [{"name": "APP_ITEMS"}],
+            "columns": [
+                {"table_name": "APP_ITEMS", "name": "NEW_CODE", "data_type": "VARCHAR2", "data_length": 20, "char_length": 20, "char_used": "B", "nullable": "N"},
+                {"table_name": "APP_ITEMS", "name": "OPTIONAL_CODE", "data_type": "VARCHAR2", "data_length": 20, "char_length": 20, "char_used": "B", "nullable": "N"},
+            ],
+            "constraints": [], "indexes": [], "sequences": [], "identity-columns": [],
+        }}
+        target = {"sections": {
+            "tables": [{"name": "APP_ITEMS"}],
+            "columns": [{"table_name": "APP_ITEMS", "name": "OPTIONAL_CODE", "data_type": "VARCHAR2", "data_length": 20, "data_precision": None, "data_scale": None, "char_length": 20, "char_used": "B", "nullable": "Y"}],
+            "constraints": [], "indexes": [], "sequences": [], "identity-columns": [],
+        }}
+
+        steps, checks = baseline._structure_bundle(
+            config, "APP_DEV", "APP_STAGE", source, target, SchemaSnapshot({}, {}, {}, {}, "", ""),
+        )
+
+        self.assertEqual(1, len(steps))
+        preconditions = {check["id"]: check for check in checks["preconditions"]}
+        self.assertEqual(2, len(preconditions))
+        new_column = next(
+            check for check in preconditions.values()
+            if 'COUNT(*) FROM "APP_STAGE"."APP_ITEMS"' in check["sql"] and "WHERE" not in check["sql"]
+        )
+        existing_column = next(check for check in preconditions.values() if 'WHERE "OPTIONAL_CODE" IS NULL' in check["sql"])
+        self.assertEqual(1, new_column["expected"])
+        self.assertIn(") = 0 THEN 1 ELSE 0", new_column["sql"])
+        self.assertEqual(1, existing_column["expected"])
+        self.assertIn(") = 0 THEN 1 ELSE 0", existing_column["sql"])
+        for check in checks["preconditions"]:
+            baseline.validate_check_query(check["sql"])
 
     def test_added_boolean_column_generates_a_scoped_definition_check(self) -> None:
         config = {"schemas": ["APP_DEV"], "prefixes": [], "excludedObjects": []}
@@ -1155,7 +1251,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
             "baseline-structure": {
                 "001-structure-delta.sql": "92f814e782896125d3d0ae0114d4bcf54696253091b55f17c0da0cf09ca4af77",
                 "README.md": "9c5d0dc56df15beeb62127357b5ad06989ff5e49daa69da2c131960383de2179",
-                "checks.json": "c95d6be80cce1e6a376f0e7d8de3e6141018e5a2eba66341d7db437cdf41a342",
+                "checks.json": "4b3cb31d677f53387a0b613a762337dd838da580a00e72f2b837ce61a2d5440a",
             },
         }
 

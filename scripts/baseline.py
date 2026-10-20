@@ -41,6 +41,7 @@ from .migration_manifest import (
     validate_staged_migration,
 )
 from .migration_revision import inspect_migration_lock
+from .path_utils import relative_to_root
 from .rollout import RolloutError, exclude_ords_modules
 from .schema_catalog import (
     CatalogError,
@@ -2163,6 +2164,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
     definitions = snapshot.objects
     chunks: list[str] = []
     posts: list[dict] = []
+    preconditions: list[dict] = []
 
     for name in sorted(source_tables):
         if name in target_tables:
@@ -2175,6 +2177,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         posts.append(_count_check(f"table-{_safe_check_slug(name)}", f"ALL_TABLES WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(name)}", 1))
 
     to_make_not_null = set()
+    checked_empty_tables: set[str] = set()
     for key, row in sorted(source_columns.items()):
         table_name, column_name = key
         if table_name not in target_tables:
@@ -2194,6 +2197,12 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             posts.append(_column_definition_check(target_schema, row))
             if row.get("nullable") == "N":
                 to_make_not_null.add(key)
+                if table_name not in checked_empty_tables:
+                    checked_empty_tables.add(table_name)
+                    preconditions.append(_count_check(
+                        f"not-null-empty-table-{_safe_check_slug(table_name)}",
+                        f"{_sql_identifier(target_schema)}.{_sql_identifier(table_name)}", 0,
+                    ))
         else:
             type_fields = ("data_type", "data_length", "data_precision", "data_scale", "char_used", "char_length")
             changed = [field for field in type_fields if row.get(field) != existing.get(field)]
@@ -2201,6 +2210,10 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
                 raise BaselineError(f"column type changes need a reviewed data migration: {table_name}.{column_name} ({', '.join(changed)})")
             if row.get("nullable") == "N" and existing.get("nullable") == "Y":
                 to_make_not_null.add(key)
+                preconditions.append(_count_check(
+                    f"not-null-no-null-rows-{_safe_check_slug(table_name + '-' + column_name)}",
+                    f"{_sql_identifier(target_schema)}.{_sql_identifier(table_name)} WHERE {_sql_identifier(column_name)} IS NULL", 0,
+                ))
         if row.get("nullable") == "N":
             posts.append(_count_check(
                 f"not-null-{_safe_check_slug(table_name + '-' + column_name)}",
@@ -2291,7 +2304,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         ))
 
     steps = {"001-structure-delta.sql": "\n".join(chunks)} if chunks else {}
-    return steps, {"preconditions": [], "postconditions": posts}
+    return steps, {"preconditions": preconditions, "postconditions": posts}
 
 
 def _grant_bundle(config: Mapping, source_schema: str, target_schema: str, source: Mapping, target: Mapping) -> tuple[dict[str, str], dict]:
@@ -2499,7 +2512,7 @@ def _baseline_family_state(root: Path, parent: Path, family: str) -> tuple[dict[
 
     state = []
     for revision, folder in sorted(existing.items()):
-        relative = folder.relative_to(root).as_posix()
+        relative = relative_to_root(folder, root).as_posix()
         lock = inspect_migration_lock(root, relative)
         if lock.status == "unknown":
             raise BaselineError(
@@ -2598,7 +2611,7 @@ def _build_migration_folder(root: Path, schema: str, family: str, files: Mapping
     existing, initial_state = _baseline_family_state(root, parent, family)
     if existing:
         latest = existing[max(existing)]
-        relative = latest.relative_to(root).as_posix()
+        relative = relative_to_root(latest, root).as_posix()
         lock = inspect_migration_lock(root, relative)
         if _folder_contents_match(latest, files):
             if lock.status == "unlocked":
@@ -2611,7 +2624,7 @@ def _build_migration_folder(root: Path, schema: str, family: str, files: Mapping
         raise BaselineError(f"migration revisions are exhausted for {schema}/{family}")
     folder = parent / f"{dt.date.today().isoformat()}_{family}-r{revision:03d}"
     if folder.exists() or folder.is_symlink():
-        raise BaselineError(f"refusing to overwrite an existing migration folder: {folder.relative_to(root).as_posix()}")
+        raise BaselineError(f"refusing to overwrite an existing migration folder: {relative_to_root(folder, root).as_posix()}")
 
     scratch_root = root / "scratch"
     if scratch_root.is_symlink() or (scratch_root.exists() and not scratch_root.is_dir()):
@@ -2620,7 +2633,7 @@ def _build_migration_folder(root: Path, schema: str, family: str, files: Mapping
     stage = Path(tempfile.mkdtemp(prefix="baseline-stage-", dir=scratch_root))
     try:
         _secure_private_migration_stage(stage)
-        relative = folder.relative_to(root).as_posix()
+        relative = relative_to_root(folder, root).as_posix()
         _write_migration_stage(stage, files)
         try:
             stage_device = stage.stat().st_dev
@@ -2810,7 +2823,7 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
                             readme += "\n## Target precondition differences\n\n" + "\n".join(f"- {item}" for item in data_differences) + "\n"
                 installed = _build_migration_folder(ROOT, target_target.schema, family, _migration_bytes(steps, checks, readme))
                 if installed is not None:
-                    created.append(installed.relative_to(ROOT.resolve()).as_posix())
+                    created.append(relative_to_root(installed, ROOT.resolve()).as_posix())
     except Exception as error:
         if created:
             created_paths = ", ".join(created)

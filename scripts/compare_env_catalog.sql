@@ -986,7 +986,7 @@ BEGIN
       'nullable' VALUE c.nullable, 'hidden' VALUE CASE WHEN c.hidden_column = 'YES' THEN 'Y' ELSE 'N' END,
       'virtual' VALUE CASE WHEN c.virtual_column = 'YES' THEN 'Y' ELSE 'N' END RETURNING CLOB) row_json
       FROM all_tab_cols c WHERE c.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(c.table_name))
-     ORDER BY c.table_name, c.column_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+     ORDER BY c.table_name, c.column_id NULLS LAST, c.internal_column_id OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
   add_query_section('constraints', q'~
     SCOPE_WITH
