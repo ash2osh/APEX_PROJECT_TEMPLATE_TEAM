@@ -162,7 +162,7 @@ class ChromeMcpDaemonTests(unittest.TestCase):
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.addCleanup(listener.close)
             listener.bind(str(target))
-            listener.listen(2)
+            listener.listen(8)  # two probes and the call, even if the accepting thread is slow
             accepted = []
             def accept_connections():
                 for _ in range(2):
@@ -705,7 +705,7 @@ class ChromeMcpTcpTests(unittest.TestCase):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addCleanup(listener.close)
         listener.bind(("127.0.0.1", self.port))
-        listener.listen(2)
+        listener.listen(8)  # two probes and the call, even if the accepting thread is slow
         accepted = []
 
         def accept_connections():
