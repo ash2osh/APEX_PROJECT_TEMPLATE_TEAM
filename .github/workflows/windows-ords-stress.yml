@@ -6,51 +6,66 @@ permissions:
   contents: read
 
 jobs:
-  stress:
+  status-loss:
     runs-on: windows-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        job: [1, 2, 3, 4, 5, 6]
+        variant: [exec_trap_return, exec_trap_exit, noexec_trap_return, exec_notrap_return, exec_trap_python, exec_trap_rm_slow]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.10'
-      - name: Four copies of the failing tests at once, with CPU burners
+      - name: Count wrong exit statuses
         shell: bash
         run: |
-          python -c "
-          import multiprocessing, time
-          def burn():
-              while True: pass
-          if __name__ == '__main__':
-              [multiprocessing.Process(target=burn, daemon=True).start() for _ in range(2)]
-              time.sleep(3600)
-          " &
-          fails=0
-          total=0
-          for round in 1 2 3 4; do
-            for p in 1 2 3 4; do
-              ( python -m unittest discover -s tests -p test_backup_ords_cli.py \
-                  -k test_an_ords_failure_installs_no_table_or_code_mirror \
-                  -k test_every_untrustworthy_export_is_refused_and_the_previous_mirror_kept \
-                  > "out-$round-$p.txt" 2>&1; echo $? > "rc-$round-$p.txt" ) &
+          mkdir -p lab && cd lab
+          variant='${{ matrix.variant }}'
+          # parent: like scripts/team.sh (exec into the script, or run it as a child)
+          if [ "$variant" = noexec_trap_return ]; then
+            printf '#!/usr/bin/env bash\n"$(dirname "$0")/child.sh"\nexit $?\n' > parent.sh
+          else
+            printf '#!/usr/bin/env bash\nexec "$(dirname "$0")/child.sh"\n' > parent.sh
+          fi
+          # child: like scripts/backup_db.sh
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'set -euo pipefail'
+            echo 'STAGING="$(mktemp -d "$(dirname "$0")/stage.XXXXXX")"'
+            if [ "$variant" != exec_notrap_return ]; then
+              echo 'cleanup() { rm -rf -- "$STAGING"; }'
+              echo 'trap cleanup EXIT'
+              echo "trap 'exit 130' INT"
+              echo "trap 'exit 143' TERM HUP"
+            fi
+            echo 'for i in $(seq 1 40); do echo "payload $i" > "$STAGING/file-$i.txt"; done'
+            echo 'mkdir -p "$STAGING/sub/deeper"; echo x > "$STAGING/sub/deeper/f.txt"'
+            if [ "$variant" = exec_trap_exit ]; then
+              echo 'run_scope() { echo "export verification failed: refused" >&2; echo "the mirror was not replaced" >&2; exit 2; }'
+              echo 'run_scope'
+            elif [ "$variant" = exec_trap_python ]; then
+              echo 'run_scope() { python -c "import sys; print(\"verification failed\"); sys.exit(2)" || { echo "the mirror was not replaced" >&2; return 2; }; }'
+              echo 'run_scope || exit $?'
+            elif [ "$variant" = exec_trap_rm_slow ]; then
+              echo 'for i in $(seq 1 600); do echo "more $i" > "$STAGING/more-$i.txt"; done'
+              echo 'run_scope() { echo "export verification failed: refused" >&2; echo "the mirror was not replaced" >&2; return 2; }'
+              echo 'run_scope || exit $?'
+            else
+              echo 'run_scope() { echo "export verification failed: refused" >&2; echo "the mirror was not replaced" >&2; return 2; }'
+              echo 'run_scope || exit $?'
+            fi
+            echo 'exit 0'
+          } > child.sh
+          chmod +x parent.sh child.sh
+          wrong=0; total=0
+          worker() {
+            local id=$1 w=0
+            for n in $(seq 1 150); do
+              bash ./parent.sh > /dev/null 2>&1; rc=$?
+              [ "$rc" = 2 ] || { w=$((w+1)); echo "worker $id iteration $n: exit status $rc (expected 2)"; }
             done
-            wait %2 %3 %4 %5 2>/dev/null || true
-            for p in 1 2 3 4; do
-              total=$((total+1))
-              while [ ! -s "rc-$round-$p.txt" ]; do sleep 2; done
-              if [ "$(cat rc-$round-$p.txt)" != 0 ]; then
-                fails=$((fails+1))
-                echo "=== FAILED round $round copy $p"
-                grep -E '^(FAIL|ERROR)|AssertionError' "out-$round-$p.txt" | cut -c1-300 | head -10
-              fi
-            done
-          done
-          echo "job ${{ matrix.job }}: total=$total failures=$fails"
-          [ "$fails" = 0 ]
+            echo "$w" > "wrong-$id.txt"
+          }
+          for id in 1 2 3 4; do worker $id & done
+          wait
+          for id in 1 2 3 4; do wrong=$((wrong + $(cat wrong-$id.txt))); total=$((total+150)); done
+          echo "variant $variant: total=$total wrong_status=$wrong"
+          [ "$wrong" = 0 ]
