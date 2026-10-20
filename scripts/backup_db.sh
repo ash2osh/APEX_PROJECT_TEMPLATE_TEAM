@@ -245,16 +245,16 @@ run_ords_scope() {
       ' | tee "$transcript"
   ) || {
     local ords_status=$?
-    [ "$ords_status" -gt 128 ] && return "$ords_status"
+    [ "$ords_status" -gt 128 ] && exit "$ords_status"
     echo "ORDS export for $schema failed in SQLcl; the mirror was not replaced" >&2
-    return 2
+    exit 2
   }
   python3 "$REPO_ROOT/scripts/ords_export.py" verify \
     --stage "$STAGING_DIR" --spool-schema "$spool_schema" \
     --schema "$schema" --expected-user "$expected_user" \
     --transcript "$transcript" || {
     echo "the mirror was not replaced" >&2
-    return 2
+    exit 2
   }
 }
 
@@ -268,7 +268,7 @@ for ((index = 0; index < ${#CODE_SCHEMAS[@]}; index++)); do
     "${CODE_USERS[$index]}" "$CODE_PREFIXES"
 done
 for ((index = 0; index < ${#ORDS_SCHEMAS[@]}; index++)); do
-  run_ords_scope "${ORDS_SCHEMAS[$index]}" "${ORDS_CONNECTIONS[$index]}" "${ORDS_USERS[$index]}" || exit $?
+  run_ords_scope "${ORDS_SCHEMAS[$index]}" "${ORDS_CONNECTIONS[$index]}" "${ORDS_USERS[$index]}"
 done
 
 REPLACE_ARGS=()
