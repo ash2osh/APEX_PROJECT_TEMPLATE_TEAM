@@ -38,6 +38,18 @@ visible. Any failing test that is not listed, or a rerun that fails, fails the j
 Add an entry only with evidence (the same code passing in another run) and a reason; remove it when the test is
 fixed. Never add a test that fails every time.
 
+## Parallel test runs
+
+CI runs each test module in its own process, 4 at a time (`CI_TEST_JOBS`), largest first.
+Locally, `python3 scripts/ci_run_tests.py --jobs 4` does the same; without `--jobs` it runs one
+process as before, and a run with unittest arguments such as `-k` always uses one process.
+
+On Windows a step before the tests sets `TEMP` and `TMP` to the long form of the runner's own temp
+directory. The runner's default is a short 8.3 name (`RUNNER~1`) that `resolve()` expands, which broke
+path comparisons in tests. The runner's own directory is kept rather than `runner.temp`, because that
+one grants the Users group read access and a test checks that a report file carries no broad permission.
+CI therefore does not cover a short temp path; code that compares paths still resolves both sides.
+
 ## Recommended repository settings
 
 Set these in GitHub (Settings, Branches), they are not in the repository:

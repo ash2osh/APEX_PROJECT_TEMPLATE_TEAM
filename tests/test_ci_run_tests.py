@@ -1,8 +1,12 @@
+import contextlib
+import io
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from scripts.ci_run_tests import failed_test_ids, load_known, main
+from scripts.ci_run_tests import failed_test_ids, load_known, main, ordered_modules, parse_jobs, run_parallel
 
 KNOWN_TEXT = "# comment\n\nmod_a.ClassA.test_one  # reason\nmod_b.ClassB.test_two\n"
 FAIL_ONE = "FAIL: test_one (mod_a.ClassA)\n----\nFAILED (failures=1)\n"
@@ -20,6 +24,11 @@ class Runner:
 
 class CiRunTestsTests(unittest.TestCase):
     def setUp(self):
+        # CI sets CI_TEST_JOBS=4; without this, main() would start a parallel run of the whole suite from inside it.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("CI_TEST_JOBS", None)
         self.temporary = tempfile.TemporaryDirectory()
         self.known = Path(self.temporary.name) / "known_flaky.txt"
         self.known.write_text(KNOWN_TEXT, encoding="utf-8")
@@ -78,6 +87,96 @@ class CiRunTestsTests(unittest.TestCase):
         code, runner = self.run_main((1, FAIL_ONE), (1, FAIL_ONE))
         self.assertEqual(code, 1)
         self.assertEqual(len(runner.calls), 2)
+
+
+class ParallelRunTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.tests = Path(self.temporary.name)
+        for name, size in (("test_big", 900), ("test_mid", 500), ("test_small", 400), ("test_tiny", 100)):
+            (self.tests / f"{name}.py").write_text("#" * size, encoding="utf-8")
+        (self.tests / "helper.py").write_text("x", encoding="utf-8")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_modules_run_largest_first_and_helpers_are_left_out(self):
+        self.assertEqual(ordered_modules(self.tests), ["test_big", "test_mid", "test_small", "test_tiny"])
+
+    def test_jobs_come_from_the_option_then_the_variable_then_default_one(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(parse_jobs([]), (1, []))
+            self.assertEqual(parse_jobs(["--jobs", "3", "-k", "x"]), (3, ["-k", "x"]))
+            self.assertEqual(parse_jobs(["--jobs=2"]), (2, []))
+        with patch.dict(os.environ, {"CI_TEST_JOBS": "4"}):
+            self.assertEqual(parse_jobs([]), (4, []))
+        for bad in (["--jobs", "0"], ["--jobs", "x"], ["--jobs"]):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                parse_jobs(bad)
+
+    def test_parallel_run_fails_when_any_module_fails_and_keeps_all_output(self):
+        def module_runner(modules):
+            return (1, "FAIL: test_one (test_mid.C)\n") if modules == ["test_mid"] else (0, "ok\n")
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            code, output = run_parallel(2, module_runner, self.tests)
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL: test_one (test_mid.C)", output)
+        self.assertEqual(output.count("ok"), 3)
+        self.assertIn("===== test_mid: exit 1", printed.getvalue())
+
+    def test_main_runs_in_parallel_only_for_a_whole_run_with_more_than_one_job(self):
+        calls = []
+        def parallel(jobs):
+            calls.append(jobs)
+            return 0, ""
+        runner = Runner((0, ""))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(main(["--jobs", "3"], runner=runner, parallel=parallel), 0)
+            self.assertEqual(calls, [3])
+            self.assertEqual(runner.calls, [])
+            self.assertEqual(main(["--jobs", "3", "-k", "x"], runner=runner, parallel=parallel), 0)
+            self.assertEqual(runner.calls, [["discover", "-s", "tests", "-v", "-k", "x"]])
+
+    def test_a_known_flaky_failure_in_a_parallel_run_is_rerun_once(self):
+        known = self.tests / "known.txt"
+        known.write_text("mod_a.ClassA.test_one\n", encoding="utf-8")
+        runner = Runner((0, ""))
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--jobs", "2"], runner=runner, known_path=known, parallel=lambda jobs: (1, FAIL_ONE))
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, [["discover", "-s", "tests", "-v", "-k", "test_one"]])
+
+
+class JobsFromEnvironmentTests(unittest.TestCase):
+    def test_tests_in_a_parallel_ci_run_never_start_another_parallel_run(self):
+        calls = []
+        runner = Runner((0, ""))
+        with patch.dict(os.environ, {"CI_TEST_JOBS": "4"}):
+            code = main([], runner=runner, parallel=lambda jobs: calls.append(jobs) or (0, "x"))
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [4])  # the variable alone selects parallel; the child guard is below
+
+    def test_child_processes_get_one_job(self):
+        seen = {}
+        class Done:
+            returncode, stdout = 0, ""
+        def fake_run(*args, **kwargs):
+            seen.update(kwargs["env"])
+            return Done()
+        with patch.dict(os.environ, {"CI_TEST_JOBS": "4"}), patch("scripts.ci_run_tests.subprocess.run", fake_run):
+            from scripts.ci_run_tests import run_modules
+            run_modules(["test_x"])
+        self.assertEqual(seen["CI_TEST_JOBS"], "1")
+
+    def test_each_child_loads_the_guard_that_discovery_gives_every_module(self):
+        commands = []
+        class Done:
+            returncode, stdout = 0, ""
+        with patch("scripts.ci_run_tests.subprocess.run", lambda command, **kwargs: commands.append(command) or Done()):
+            from scripts.ci_run_tests import run_modules
+            run_modules(["test_x", "test_y"])
+        self.assertIn("import _no_real_sqlcl", commands[0][2])
+        self.assertEqual(commands[0][3:], ["-v", "test_x", "test_y"])
 
 
 if __name__ == "__main__":

@@ -6,13 +6,19 @@ every failing test is listed in tests/known_flaky.txt; then only those tests run
 and the job passes when that rerun passes. An unlisted failing test, a crash with no
 failing test, or a failed rerun fails the job exactly as before. A rerun is reported as a
 `::warning` annotation so it stays visible in the run.
+
+`--jobs N` (default: the CI_TEST_JOBS variable, else 1) runs each test module in its own
+process, N at a time, largest module first. Each module's output is printed whole, in
+that order, and the job fails when any module fails.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,9 +66,66 @@ def run_unittest(args: Sequence[str]) -> tuple[int, str]:
     return process.wait(), "".join(lines)
 
 
-def main(argv: Sequence[str] | None = None, *, runner: Runner = run_unittest, known_path: Path = KNOWN_FLAKY) -> int:
-    args = list(argv) if argv is not None else sys.argv[1:]
-    code, output = runner(["discover", "-s", "tests", "-v", *args])
+def ordered_modules(tests_dir: Path) -> list[str]:
+    """Test module names, largest file first, so the long modules start early."""
+    paths = sorted(tests_dir.glob("test_*.py"), key=lambda item: (-item.stat().st_size, item.name))
+    return [path.stem for path in paths]
+
+
+def run_modules(modules: Sequence[str]) -> tuple[int, str]:
+    """Run test modules in one process, as `discover -s tests` would import them; return (exit code, output)."""
+    environment = dict(os.environ)
+    # A module that runs this script again (its own tests) must not start a second parallel run.
+    environment["CI_TEST_JOBS"] = "1"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(ROOT / "tests"), str(ROOT), environment.get("PYTHONPATH", "")) if part)
+    # `discover -s tests` imports every module into one process, so the guard that keeps tests away from a
+    # real SQLcl (and makes write_text write LF on Windows) applies to all of them; load it for each module too.
+    guard = "import _no_real_sqlcl, sys, unittest; sys.argv[0] = 'python -m unittest'; unittest.main(module=None)"
+    result = subprocess.run(
+        [sys.executable, "-c", guard, "-v", *modules], cwd=ROOT, env=environment, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+    return result.returncode, result.stdout
+
+
+def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path = ROOT / "tests") -> tuple[int, str]:
+    """Run every test module in its own process, `jobs` at a time; print each one's output in order."""
+    modules = ordered_modules(tests_dir)
+    outputs: list[str] = []
+    code = 0
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for module, (module_code, output) in zip(modules, pool.map(lambda name: module_runner([name]), modules), strict=True):
+            print(f"===== {module}: exit {module_code}", flush=True)
+            print(output, end="" if output.endswith("\n") else "\n", flush=True)
+            outputs.append(output)
+            code = code or module_code
+    return code, "".join(outputs)
+
+
+def parse_jobs(args: list[str]) -> tuple[int, list[str]]:
+    """Take `--jobs N` out of the arguments; the default comes from CI_TEST_JOBS, else 1."""
+    jobs = os.environ.get("CI_TEST_JOBS", "1")
+    rest = []
+    iterator = iter(args)
+    for argument in iterator:
+        if argument == "--jobs":
+            jobs = next(iterator, "")
+        elif argument.startswith("--jobs="):
+            jobs = argument.split("=", 1)[1]
+        else:
+            rest.append(argument)
+    if not jobs.isdigit() or int(jobs) < 1:
+        raise SystemExit(f"--jobs needs a positive whole number, got {jobs!r}")
+    return int(jobs), rest
+
+
+def main(argv: Sequence[str] | None = None, *, runner: Runner = run_unittest, known_path: Path = KNOWN_FLAKY,
+         parallel: Callable[[int], tuple[int, str]] = run_parallel) -> int:
+    jobs, args = parse_jobs(list(argv) if argv is not None else sys.argv[1:])
+    if jobs > 1 and not args:
+        code, output = parallel(jobs)
+    else:
+        code, output = runner(["discover", "-s", "tests", "-v", *args])
     if code == 0:
         return 0
     failed = failed_test_ids(output)
