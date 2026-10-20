@@ -18,6 +18,7 @@ from typing import Any
 from . import migration_manifest as manifest
 from .migration_runtime import MigrationRuntimeError, require_migration_sqlcl_version
 from .migration_revision import LockReport, MigrationRevisionError, inspect_migration_lock
+from .path_utils import relative_to_root
 
 
 SUMMARY_FIELDS = (
@@ -90,7 +91,7 @@ def _error_text(error: BaseException, root: Path | None = None) -> str:
 
 def _path_label(path: Path, root: Path) -> str:
     try:
-        return _safe_text(path.relative_to(root).as_posix())
+        return _safe_text(relative_to_root(path, root).as_posix())
     except ValueError:
         return _safe_text(path.as_posix())
 
@@ -423,7 +424,7 @@ def build_migration_plan(repo_root: Path, folders: Sequence[str] = (), *, schema
             try:
                 batch = manifest.load_batch(root, group)
                 for migration in batch:
-                    loaded[migration.folder.relative_to(root).as_posix()] = migration
+                    loaded[relative_to_root(migration.folder, root).as_posix()] = migration
             except (manifest.MigrationManifestError, OSError, ValueError) as error:
                 diagnostics.append(_diagnostic("selection-invalid", group[0] if group else None, _error_text(error, root)))
                 # Preserve valid individual records when a batch-level ordering or content error occurs.
@@ -512,7 +513,7 @@ def _changed_input_path(
 
     observed_hashes: dict[str, str] = {}
     for migration in current:
-        folder = migration.folder.resolve().relative_to(root).as_posix()
+        folder = relative_to_root(migration.folder.resolve(), root).as_posix()
         observed_hashes.update({f"{folder}/{source_file.name}": source_file.sha256 for source_file in migration.files})
         observed_hashes[f"{folder}/checks.json"] = migration.checks_sha256
 
@@ -528,7 +529,7 @@ def _first_selected_folder_path(repo_root: Path, folders: Sequence[str]) -> str:
     try:
         selected = Path(folders[0])
         candidate = selected if selected.is_absolute() else repo_root / selected
-        return candidate.resolve().relative_to(repo_root).as_posix()
+        return relative_to_root(candidate.resolve(), repo_root).as_posix()
     except (OSError, RuntimeError, TypeError, ValueError):
         return "migrations"
 

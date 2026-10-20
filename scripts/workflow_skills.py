@@ -159,7 +159,7 @@ def fetch_pack(stage: Path, pack: str, spec: dict) -> dict[str, Path]:
     repo.mkdir()
     empty_hooks = stage / "empty-hooks"
     empty_hooks.mkdir(exist_ok=True)
-    options = ("-c", f"core.hooksPath={empty_hooks}", "-c", "core.autocrlf=false")
+    options = ("-c", f"core.hooksPath={empty_hooks.as_posix()}", "-c", "core.autocrlf=false")
     run_git(repo, *options, "init", "--bare", f"--template={empty_hooks}", "-q")
     run_git(repo, *options, "fetch", "--quiet", "--depth=1", "--no-tags", "--", repository, commit)
     if run_git(repo, "rev-parse", "FETCH_HEAD") != commit:

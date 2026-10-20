@@ -49,6 +49,7 @@ from .migration_manifest import (
     validate_receipt,
     verify_loaded_input_hashes,
 )
+from .path_utils import relative_to_root
 from .migration_attempts import (
     MigrationAttemptError,
     not_started_reason,
@@ -388,7 +389,7 @@ def _verify_durable_folder_locks(
     target_identity: Mapping[str, str],
 ) -> None:
     for migration in migrations:
-        relative = migration.folder.relative_to(repo_root).as_posix()
+        relative = relative_to_root(migration.folder, repo_root).as_posix()
         lock = inspect_migration_lock(
             repo_root,
             relative,
@@ -898,7 +899,7 @@ def _attempt_event(
         "runId": run_id,
         "predecessorEventId": predecessor_event_id,
         "recordedAt": _utc_now(),
-        "migrationPath": migration.folder.relative_to(repo_root).as_posix(),
+        "migrationPath": relative_to_root(migration.folder, repo_root).as_posix(),
         "environment": str(target_identity["environment"]),
         "target": {
             "environment": str(target_identity["environment"]),
@@ -990,7 +991,7 @@ def apply_batch(
 
         # Re-read original bytes after review and before any write.
         for item in frozen:
-            relative = item.original.folder.relative_to(repo_root).as_posix()
+            relative = relative_to_root(item.original.folder, repo_root).as_posix()
             current = load_migration(repo_root, relative)
             if current.payload_digest != item.original.payload_digest:
                 raise MigrationApplyError(f"source changed after preflight: {item.original.folder.name}")
@@ -1075,7 +1076,7 @@ def apply_batch(
                             predecessor_event_id=pending_event["eventId"],
                             evidence=({
                                 "kind": "no-write-sqlcl-output",
-                                "path": output_path.relative_to(repo_root).as_posix(),
+                                "path": relative_to_root(output_path, repo_root).as_posix(),
                                 "sha256": output_digest,
                                 "classification": not_started,
                             },),
@@ -1164,7 +1165,7 @@ def apply_batch(
                     f"{details}. Reconcile. Evidence: {run_dir}"
                 )
 
-            source_relative = original.folder.relative_to(repo_root).as_posix()
+            source_relative = relative_to_root(original.folder, repo_root).as_posix()
             current_source = load_migration(repo_root, source_relative)
             staged_digest = _verify_staged_payload(staged)
             if current_source.payload_digest != original.payload_digest or staged_digest != original.payload_digest:

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Sequence
 
+from .path_utils import relative_to_root
 from .migration_attempts import (
     MigrationAttemptError,
     not_started_reason as not_started_reason,
@@ -104,7 +105,7 @@ def revise_folder(repo_root: Path, relative_folder: str, reason: str | None = No
         if candidate.is_symlink():
             raise MigrationRevisionError("symbolic links are not allowed in migration paths")
     try:
-        source.resolve(strict=True).relative_to(root)
+        relative_to_root(source.resolve(strict=True), root)
     except (OSError, ValueError) as error:
         raise MigrationRevisionError("migration folder is missing or outside the repository") from error
 
@@ -125,7 +126,7 @@ def revise_folder(repo_root: Path, relative_folder: str, reason: str | None = No
     next_name = f"{family_prefix}-r{revision + 1:03d}"
     destination = source.parent / next_name
     if destination.exists() or destination.is_symlink():
-        raise MigrationRevisionError(f"next revision folder already exists: {destination.relative_to(root).as_posix()}")
+        raise MigrationRevisionError(f"next revision folder already exists: {relative_to_root(destination, root).as_posix()}")
 
     selected_reason = DEFAULT_REASON if reason is None else reason.strip()
     if not selected_reason:
@@ -133,7 +134,7 @@ def revise_folder(repo_root: Path, relative_folder: str, reason: str | None = No
     if any(not character.isprintable() for character in selected_reason):
         raise MigrationRevisionError("--reason must be one printable line")
 
-    relative_destination = destination.relative_to(root).as_posix()
+    relative_destination = relative_to_root(destination, root).as_posix()
     header = f"Supersedes {source.name}: {selected_reason}\n".encode()
     original_readme = source / "README.md"
     try:
@@ -161,7 +162,7 @@ def revise_folder(repo_root: Path, relative_folder: str, reason: str | None = No
     except OSError as error:
         raise MigrationRevisionError(f"could not create revision {relative_destination}: {error}") from error
 
-    hint_paths = [revisions[number].relative_to(root).as_posix() for number in sorted(revisions)]
+    hint_paths = [relative_to_root(revisions[number], root).as_posix() for number in sorted(revisions)]
     hint_paths.append(relative_destination)
     order_hint = (
         "Supply any required revisions explicitly in ascending order: "
@@ -195,7 +196,7 @@ def inspect_migration_lock(
             if candidate.is_symlink():
                 raise MigrationRevisionError("symbolic links are not allowed in migration paths")
         try:
-            folder.resolve(strict=True).relative_to(root)
+            relative_to_root(folder.resolve(strict=True), root)
         except (OSError, ValueError) as error:
             raise MigrationRevisionError("migration folder is missing or outside the repository") from error
         if not folder.is_dir():
@@ -333,7 +334,7 @@ def inspect_migration_lock(
                         if (
                             event is None
                             or event.get("runId") != attempt_dir.name
-                            or event.get("migrationPath") != folder.relative_to(root).as_posix()
+                            or event.get("migrationPath") != relative_to_root(folder, root).as_posix()
                             or event.get("environment") != target.get("environment")
                             or event.get("target", {}).get("current_schema") != target.get("current_schema")
                         ):
@@ -373,7 +374,7 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
     except (MigrationRevisionError, MigrationManifestError, OSError, ValueError) as error:
         print(f"migration revision error: {error}", file=sys.stderr)
         return 2
-    print(f"Created revision: {result.folder.relative_to(arguments.repo_root.resolve()).as_posix()}")
+    print(f"Created revision: {relative_to_root(result.folder, arguments.repo_root.resolve()).as_posix()}")
     print(f"Migration order hint: {result.order_hint}")
     return 0
 

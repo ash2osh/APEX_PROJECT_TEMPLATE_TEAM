@@ -21,6 +21,7 @@ from .migration_checks import (
 )
 from .migration_manifest import Migration, MigrationManifestError
 from .rehearsal_metrics import MetricCapture, parse_metric_frame, render_metric_driver
+from .path_utils import relative_to_root
 from .schema_catalog import CatalogError, capture_inventory
 from .sqlcl_session import SqlclError, run_sqlcl, safe_rmtree
 from .sqlcl_transport import lint_sqlcl_transport
@@ -598,7 +599,7 @@ def _report_target(path: Path | str | None, repo_root: Path) -> Path | None:
                 f"rehearsal report cannot be written inside protected source or publish evidence: {resolved}"
             )
     try:
-        scratch_relative = resolved.relative_to(root / "scratch")
+        scratch_relative = relative_to_root(resolved, root / "scratch")
     except ValueError:
         scratch_relative = None
     if scratch_relative and scratch_relative.parts:
@@ -953,7 +954,7 @@ def rehearse_batch(
                 return exit_code
 
         for item in frozen:
-            relative = item.original.folder.relative_to(repo_root).as_posix()
+            relative = relative_to_root(item.original.folder, repo_root).as_posix()
             current = migration_runner.load_migration(repo_root, relative)
             if current.payload_digest != item.original.payload_digest:
                 raise MigrationManifestError(f"source changed after rehearsal review: {item.original.folder.name}")
@@ -1039,7 +1040,7 @@ def rehearse_batch(
         _merge_metric_rollback_proof(report)
 
         for item in frozen:
-            relative = item.original.folder.relative_to(repo_root).as_posix()
+            relative = relative_to_root(item.original.folder, repo_root).as_posix()
             current = migration_runner.load_migration(repo_root, relative)
             if current.payload_digest != item.original.payload_digest:
                 report["errors"].append(f"local source changed during rehearsal: {item.original.folder.name}")
