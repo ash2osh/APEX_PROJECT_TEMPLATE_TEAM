@@ -1,0 +1,56 @@
+name: windows-ords-stress
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+      - name: Four copies of the failing tests at once, with CPU burners
+        shell: bash
+        run: |
+          python -c "
+          import multiprocessing, time
+          def burn():
+              while True: pass
+          if __name__ == '__main__':
+              [multiprocessing.Process(target=burn, daemon=True).start() for _ in range(2)]
+              time.sleep(3600)
+          " &
+          fails=0
+          total=0
+          for round in 1 2 3 4; do
+            for p in 1 2 3 4; do
+              ( python -m unittest discover -s tests -p test_backup_ords_cli.py \
+                  -k test_an_ords_failure_installs_no_table_or_code_mirror \
+                  -k test_every_untrustworthy_export_is_refused_and_the_previous_mirror_kept \
+                  > "out-$round-$p.txt" 2>&1; echo $? > "rc-$round-$p.txt" ) &
+            done
+            wait %2 %3 %4 %5 2>/dev/null || true
+            for p in 1 2 3 4; do
+              total=$((total+1))
+              while [ ! -s "rc-$round-$p.txt" ]; do sleep 2; done
+              if [ "$(cat rc-$round-$p.txt)" != 0 ]; then
+                fails=$((fails+1))
+                echo "=== FAILED round $round copy $p"
+                grep -E '^(FAIL|ERROR)|AssertionError' "out-$round-$p.txt" | cut -c1-300 | head -10
+              fi
+            done
+          done
+          echo "job ${{ matrix.job }}: total=$total failures=$fails"
+          [ "$fails" = 0 ]
