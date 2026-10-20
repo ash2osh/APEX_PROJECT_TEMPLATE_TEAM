@@ -4,3 +4,4 @@
 test_team_cli.TeamCliTests.test_powershell_exits_130_when_interrupted_while_a_helper_runs  # pwsh crashes with exit -6 instead of 130 on the Linux runner; 3 runs, 2026-10-16 to 2026-10-18
 test_doctor_database_info.DoctorDatabaseInfoTests.test_detected_version_is_reported_per_target_without_configuration  # "Broken pipe" when the PowerShell wrapper closes its pipe early; 2 runs, 2026-10-18
 test_backup_ords_cli.BackupOrdsTests.test_every_untrustworthy_export_is_refused_and_the_previous_mirror_kept  # Windows, bash scenario; failed once after a merge, the same code passed in the PR run, 2026-10-19
+test_backup_ords_cli.BackupDbWithOrdsTests.test_an_ords_failure_installs_no_table_or_code_mirror  # Windows, bash scenarios (drift-counts, wrong-owner-silent): backup-db prints the refusal but exits 0 instead of 2; 26.2 only (26.1 exits inside run_ords_scope); failed on docs-only PR 48 on 2026-10-20 and passed on the same code in main

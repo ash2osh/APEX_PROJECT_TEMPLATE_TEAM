@@ -1,6 +1,46 @@
 {
   "schemaVersion": 1,
   "files": {
+    ".agents/rules/agent-safety.md": {
+      "status": "intended",
+      "reason": "26.2 adds the Oracle skills refresh and lock/partial-publish rules; the template-feedback rule exists in both.",
+      "blobs": [
+        "0e0d48750e9a2547aeb50e189d8ede244669702a",
+        "0c47723f63c88a807a17ead2c91ab0561da3ed0f"
+      ]
+    },
+    ".agents/rules/graphify.md": {
+      "status": "intended",
+      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py; 26.1 uses setup_graphify_apx.py.",
+      "blobs": [
+        "9e1dee421dc01c43fefe24f355bf4100f66e36f0",
+        "2c9dc3783dbf6faec8d3e4756750270bb5fa8ce6"
+      ]
+    },
+    ".agents/skills/initialize-project/SKILL.md": {
+      "status": "intended",
+      "reason": "26.1 reserves install-uc-apx; 26.2 retired uc-apx and links its own release route.",
+      "blobs": [
+        "595652b6ee1b7d8360e73adcd82aa208b5fa8321",
+        "bee0ffb9f812f18f22bb2dec3ac82ea61fc0173f"
+      ]
+    },
+    ".agents/skills/safeguarding-apexlang-text-messages/SKILL.md": {
+      "status": "intended",
+      "reason": "Wording changes from 26.2 review findings; 26.1 keeps uc-apx references.",
+      "blobs": [
+        "bc8cdc4b0749b49bcb750b04f33bc99c55209915",
+        "91db0aaef14fcfa949175706c3c9c77d9367e824"
+      ]
+    },
+    ".agents/workflows/graphify.md": {
+      "status": "intended",
+      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py.",
+      "blobs": [
+        "ca26199b45be15381928f31407b49fb8d2c9f00b",
+        "afdfca91a002a6f854a6758e60e3c24831875d59"
+      ]
+    },
     ".agents/workflows/team-flow.md": {
       "status": "missed",
       "reason": "26.2 added name/description frontmatter; 26.1 lacks it. Port to 26.1.",
@@ -9,12 +49,84 @@
         "3fc459a3747076fa770fcc125074141ea4748cfc"
       ]
     },
+    ".claude/skills/initialize-project/SKILL.md": {
+      "status": "intended",
+      "reason": "Mirror of .agents/skills/initialize-project/SKILL.md.",
+      "blobs": [
+        "595652b6ee1b7d8360e73adcd82aa208b5fa8321",
+        "bee0ffb9f812f18f22bb2dec3ac82ea61fc0173f"
+      ]
+    },
+    ".env.example": {
+      "status": "intended",
+      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT.",
+      "blobs": [
+        "c95eaddd2d7ec7bd9b3c08868c02c3b8d4b31a84",
+        "f9479bcc4e77f5f35ae3c40fed15c655a8a2c5c5"
+      ]
+    },
     ".github/workflows/database-checks.yml": {
       "status": "intended",
-      "reason": "26.1 keeps the optional '.[graph]' extra in pyproject.toml, so CI validates its resolution; 26.2 installs Graphify in its own pinned venv.",
+      "reason": "26.1 keeps the optional '.[graph]' extra, so CI validates its resolution; 26.2 uses a pinned .venv-graphify instead.",
       "blobs": [
-        "a14d8e82c54609e8c2542e6a9a5ef512e6eff70a",
-        "8536fe7f2c44f70dcbbc2dc0d7b742cd8412d14c"
+        "882e5dcf71a3c3aa645fd419239705c466197b64",
+        "95cb7302528ae9869904d21f99e3b8cd1c9ecc50"
+      ]
+    },
+    ".gitignore": {
+      "status": "missed",
+      "reason": "26.2 ignores migrations/**/attempt-event.*.json; 26.1 writes the same files (scripts/migration_attempts.py) but does not ignore them. Port to 26.1 (the uc-apx and .venv-graphify lines are intended).",
+      "blobs": [
+        "c05e219feb613b4da020816f2c1ceecc099459e8",
+        "92ede91a9ed8eaa392e4d50196e8226f7fb0763a"
+      ]
+    },
+    "AGENTS.md": {
+      "status": "intended",
+      "reason": "26.2 release content: native locks, partial publish, runtime verification, MIGRATION_* profiles, Oracle skills refresh.",
+      "blobs": [
+        "aea9d788a7d9c9ec541b1922d6fe78999559ae98",
+        "1a64beb8a1326c11a9ec824019c6fea9efb14695"
+      ]
+    },
+    "README.md": {
+      "status": "intended",
+      "reason": "26.2 release content and command reference (verify-local, app-lock, upgrade-apexlang); 26.1 documents its own commands.",
+      "blobs": [
+        "249e1151398825f1589d73fb1bbe6062cb63c6e5",
+        "a9d84683afea753e8b9a24246e5fa7e4f4053fc1"
+      ]
+    },
+    "docs/EXAMPLES.md": {
+      "status": "intended",
+      "reason": "Release-specific examples.",
+      "blobs": [
+        "cac169e98f38c776894aa7dffa7e6f35b89648ab",
+        "2bab86f1f2cce7cf3e3c195fa7aebf8419d02934"
+      ]
+    },
+    "docs/GETTING_STARTED.md": {
+      "status": "intended",
+      "reason": "Release-specific setup, upgrade and cleanup steps.",
+      "blobs": [
+        "379035cc8efe243f9dfbb7752266004f8cdaf5fc",
+        "99c502697948c1cd32332579b6a2a6f0da3f8af2"
+      ]
+    },
+    "docs/TROUBLESHOOTING.md": {
+      "status": "intended",
+      "reason": "26.2 error messages for features 26.1 does not have.",
+      "blobs": [
+        "623384ec7a938eebae4647fe0688efc6618c9f0f",
+        "c0a8dfe282de39a3d6e2d5a5848ddc3f9d92626f"
+      ]
+    },
+    "docs/baseline.md": {
+      "status": "intended",
+      "reason": "Describes each line's baseline contract (26.2 bound manifest, SQLcl 26.3).",
+      "blobs": [
+        "665adf19db5871ece70613a83f254b047ef11051",
+        "6a63c4b6086ff97c73019d51fee965b3cc2f72f8"
       ]
     },
     "docs/compare-env.md": {
@@ -25,12 +137,60 @@
         "b4c23c4894a1cccd1340d00b7d17f8549da49bf3"
       ]
     },
+    "docs/known-limitations.md": {
+      "status": "intended",
+      "reason": "Lists 26.2-only deliberate limits (locks, partial publish, normalization).",
+      "blobs": [
+        "a0fab7f4fcb29fc0eaaa4de0c83b0433b0e46e1a",
+        "26c22f8e16ee3ac0df7534ddaf54eac3976c3803"
+      ]
+    },
+    "docs/migration-rules.md": {
+      "status": "intended",
+      "reason": "26.2 documents MIGRATION_* profiles, rehearsal metrics and schema-2 checks.",
+      "blobs": [
+        "e6d758777323ac943373afa88e32f0f56556d88b",
+        "a115f3612e1191b0dd78b493421b75a6d0416a21"
+      ]
+    },
+    "docs/publish-rules.md": {
+      "status": "intended",
+      "reason": "26.2 documents locks, partial publish, normalization and runtime verification.",
+      "blobs": [
+        "2710637fd75ce28b885de9f04d645249b5bee4c6",
+        "640015b11cef2df05b4bc6727001fedf1cd6154e"
+      ]
+    },
+    "docs/superpowers/plans/2026-10-13-migration-improvements.md": {
+      "status": "intended",
+      "reason": "Template-only planning record; release-specific wording.",
+      "blobs": [
+        "73e5f6665c243fb3e67cd19df8ee9a40f8e4e591",
+        "37a1d04ee2cffc66dc56dc4f8fb24764a0c7a175"
+      ]
+    },
+    "docs/template-feedback.md": {
+      "status": "intended",
+      "reason": "Release label in the example record (26.1 / 26.2).",
+      "blobs": [
+        "b409c5594d34982906041f04b0b6c5f96cf0f289",
+        "eafe740b336ad131a8fd77fdbaf95a38f5bc5b30"
+      ]
+    },
     "docs/workflow-skills.md": {
       "status": "intended",
       "reason": "Mentions the Oracle skills refresh, which only the 26.2 line has.",
       "blobs": [
         "44635b06d0523c0d776c2cb34e71c482533d19de",
         "797435be6cc5f1328c97430101da00f9d25fd616"
+      ]
+    },
+    "migrations/README.md": {
+      "status": "feature",
+      "reason": "26.2-only MIGRATION_* owner profiles are documented there; the migration-plan wording differs.",
+      "blobs": [
+        "288f3e7f9cf16514d19e0a875c9ff574e1c55495",
+        "75a02d0611cb4533bf9fd7931a7f80c87cacf7c4"
       ]
     },
     "pyproject.toml": {
@@ -57,12 +217,52 @@
         "e8e915091deda37ca91618a2e54bc44cd8d28edb"
       ]
     },
+    "scripts/backup_db.sh": {
+      "status": "missed",
+      "reason": "Suspect for a TEAM-only Windows flake: in 30 failed-run logs per repo, backup-db returned exit 0 instead of 2 after printing the ORDS refusal twice in 26.2 (test_backup_ords_cli, bash) and never in 26.1. The only difference on that path: 26.2 'return 2' in run_ords_scope plus '|| exit $?' at the call site (commit 6770f55, 2026-10-13); 26.1 exits inside the function. Reproduce on Windows, then align 26.2 with 26.1 if it is the cause.",
+      "blobs": [
+        "ec5b999b1888e131c2c750ab7aaeadaf3a8d00e0",
+        "a4d847829121a6290ebd13134ee11fac3ff9cb1a"
+      ]
+    },
+    "scripts/baseline.py": {
+      "status": "missed",
+      "reason": "26.1 adds NOT NULL data preconditions to the structure bundle (table empty / no NULL rows before the constraint) and uses relative_to_root; 26.2's structure bundle returns no preconditions. Port both to 26.2. (Both check for a supported SQLcl before a live capture.)",
+      "blobs": [
+        "dde6fe7393ec0a355e56f513bf27f4cb1412b46b",
+        "b8fcef72e1df9eecdcc6295c1054414e4a74939a"
+      ]
+    },
+    "scripts/baseline_bundle.py": {
+      "status": "intended",
+      "reason": "Both validate bundle components with 23 refusals each; the helpers are structured differently (26.1 _validate_check_list/_validate_component_steps, 26.2 _append_checks/_ordered_steps).",
+      "blobs": [
+        "d9c904ef75eddf47043274de5ea7d7c6a6d61e4d",
+        "b315388db2876a3da0c5481b17554db9685720cd"
+      ]
+    },
     "scripts/check_db_target.ps1": {
       "status": "feature",
       "reason": "26.2-only MIGRATION_* owner profile (migration target); not ported to 26.1.",
       "blobs": [
         "dda7327cc86de3663d501de9f510a649183eb1d7",
         "3f3467abceec66daf0bf5dd915f64a1a4fc83b1c"
+      ]
+    },
+    "scripts/check_db_target.sh": {
+      "status": "feature",
+      "reason": "26.2-only MIGRATION_* owner profile (migration target).",
+      "blobs": [
+        "e0094e5cc6b6520bae83b9174c82fdc6d25967ee",
+        "82c74dfc5dbcffbc35a714e4574be08b2929879a"
+      ]
+    },
+    "scripts/check_graphify_apx.py": {
+      "status": "intended",
+      "reason": "26.2 resolves the Graphify interpreter from .venv-graphify.",
+      "blobs": [
+        "0664f2b901fa7e1f975941a94e95909943ff5e1d",
+        "8a4a9fe47c4eb2c113256f151109b43b87365f8a"
       ]
     },
     "scripts/compare_env_catalog.sql": {
@@ -73,6 +273,118 @@
         "86f929bcfbe364935c07a1bf710f8cb983e7f994"
       ]
     },
+    "scripts/compare_schema.py": {
+      "status": "missed",
+      "reason": "26.1's compare-env report also adds a blocker when source and target resolve to the same database scope (26.2 uses same_database_scope only in its other checks). Port to 26.2. (26.1 also needs nothing from 26.2 here.)",
+      "blobs": [
+        "323cc1c84a41844841e8fd09e28d3a0dd96970a1",
+        "79536f51717c0d5cd7fd8f5fbbdd39e73bf0dbf3"
+      ]
+    },
+    "scripts/deploy.sh": {
+      "status": "feature",
+      "reason": "26.2 adds --strict-bytes, --no-restore-automations, lifecycle capture and no_application_lock.",
+      "blobs": [
+        "54c0d4727888915e9de831e355059db4202380d5",
+        "e2b238aed3e182870e62bf97d60b046265f9a3a3"
+      ]
+    },
+    "scripts/deployment_descriptor.py": {
+      "status": "feature",
+      "reason": "26.2 observes and verifies the effective deployment (compare, observe_deployment, remap_subscription_source).",
+      "blobs": [
+        "37d3966e9faa61fdbbc74ac50e516b97518cc118",
+        "b4e35deae6edd0084107732512b308ea752cfd76"
+      ]
+    },
+    "scripts/dev_test_core_migrations.py": {
+      "status": "intended",
+      "reason": "26.2 rollout steps report a writer identity (F01, 26.2 only); 26.1 keeps the legacy rollout marker check.",
+      "blobs": [
+        "46440eb126572cb4141050a387731bd17a9030bb",
+        "a0aa3798eca3b4d3c7a785e066c840fad98b29dd"
+      ]
+    },
+    "scripts/directory_install.py": {
+      "status": "missed",
+      "reason": "26.1 pins each directory component (POSIX descriptors, Windows handles) so a parent swap cannot redirect an exclusive install, with Windows rename-by-handle; 26.2 has the simpler implementation plus a macOS exclusive-rename path. Port the pinned installer to 26.2.",
+      "blobs": [
+        "c5aa876e626eb948e9d95f32d3e991bd9e5b316a",
+        "7ce3efe07d4d0e54e6a0d9f639c3a4858dd18317"
+      ]
+    },
+    "scripts/doctor.sql": {
+      "status": "feature",
+      "reason": "26.2 verifies the APEX release and workspace users.",
+      "blobs": [
+        "23aaec5ea8d02971a7aaa3daeed9f5fa8d8ab165",
+        "77a9b78a38216b1f30d003d6da7e30e653766a7f"
+      ]
+    },
+    "scripts/export_apps.ps1": {
+      "status": "feature",
+      "reason": "Same 26.2-only export extras as export_apps.sh.",
+      "blobs": [
+        "396078c4bbb567b84b6e4a989ffc269624d86837",
+        "f043fe9fb0e4d8e824b8134d7a8288d862e8de4b"
+      ]
+    },
+    "scripts/export_apps.sh": {
+      "status": "feature",
+      "reason": "26.2-only export extras: SQLcl/APEX version gate, page-lock state, release before/after for provenance.",
+      "blobs": [
+        "bab2bef36dd0582120bbd04a1b350be7b2d7a76a",
+        "c3674c7119635a1e172c5f5d9c9fca663d3917a8"
+      ]
+    },
+    "scripts/export_apps.sql": {
+      "status": "feature",
+      "reason": "Same 26.2-only export extras (release and page-lock capture, translations).",
+      "blobs": [
+        "f3c04ca626da5f6ed95de52a79e3bc19026f81ed",
+        "2aed4c5476ac19a723d1f7100e3861fd388b8db1"
+      ]
+    },
+    "scripts/invoke_sqlcl.ps1": {
+      "status": "intended",
+      "reason": "26.2 adds Assert-SqlclApexVersion (SQLcl 26.3 gate); the WaitForExit fix exists in both.",
+      "blobs": [
+        "3c0bf020aab04840103244c8c2bf8348e0036aef",
+        "73c1734db72e99b2763f4eb1ebae8cc27a54bde8"
+      ]
+    },
+    "scripts/load_env.ps1": {
+      "status": "intended",
+      "reason": "26.1 keeps the uc-apx settings; 26.2 retired them.",
+      "blobs": [
+        "7bb3ee4f11dd8b0f80dc1f3421122e832fa49a61",
+        "699d8aa88eebf83820ea5b08ca3024e215f69195"
+      ]
+    },
+    "scripts/load_env.sh": {
+      "status": "intended",
+      "reason": "26.1 keeps the uc-apx settings; 26.2 retired them.",
+      "blobs": [
+        "0ab6119d187ffc766b2f9a9a048676ef7a59dd50",
+        "f6c2b936f39d69925f7435f28b6610480fe8de9e"
+      ]
+    },
+    "scripts/local_config.py": {
+      "status": "intended",
+      "reason": "26.1 keeps the uc-apx settings; 26.2 retired them. DBA keys only move.",
+      "blobs": [
+        "02626ddf8aae7068568561c5e994e6b03cedafa3",
+        "2696ed4c681ec2312ca6083d783b1050dc6a52ab"
+      ]
+    },
+    "scripts/migrate.py": {
+      "status": "missed",
+      "reason": "26.2 runs the SQLcl transport lint before recording a write attempt (_preflight_transport); 26.1 has scripts/sqlcl_transport.py but does not call it. 26.1 uses relative_to_root, 26.2 does not. Port the preflight to 26.1 and relative_to_root to 26.2.",
+      "blobs": [
+        "b18b64c7132fb56952cc4dda22eaf5a58b42930e",
+        "ca983d0644b3b7cec734eb101862889f5ad394cd"
+      ]
+    },
     "scripts/migration_attempts.py": {
       "status": "missed",
       "reason": "26.1 uses path_utils.relative_to_root (Windows path alias fix); 26.2 still calls Path.relative_to. Port to 26.2.",
@@ -81,12 +393,212 @@
         "7a3554fefd9538da9f3e299f482c6e52e2e7773e"
       ]
     },
+    "scripts/migration_checks.py": {
+      "status": "missed",
+      "reason": "26.1 uses relative_to_root and declared-binding names; 26.2 adds rehearsal metric phases (feature). Port relative_to_root to 26.2.",
+      "blobs": [
+        "0b46283754533fbaf0870b8cd844dc052f69a228",
+        "98bd58b82cd340833fe25b8334db27423ee4c39b"
+      ]
+    },
+    "scripts/migration_manifest.py": {
+      "status": "missed",
+      "reason": "26.1 uses relative_to_root and validates declared binding names as strings; 26.2 adds RehearsalMetric/schema-2 checks (feature). Port relative_to_root to 26.2.",
+      "blobs": [
+        "a3fe74adad2961d5232bb176f4699dbfb7e62607",
+        "c72f12c1008ffc11188a4c42e4762015fb4a2d8f"
+      ]
+    },
+    "scripts/migration_plan.py": {
+      "status": "missed",
+      "reason": "26.1 uses relative_to_root; 26.2 refines when an incomplete observed identity is reported (only after capture completed). Port relative_to_root to 26.2 and the identity refinement to 26.1.",
+      "blobs": [
+        "24bdb44a5fb1266aa372ad04726cc185883ea926",
+        "02ebe702fd64c069d67b937b88dd80e37d082219"
+      ]
+    },
+    "scripts/migration_rehearsal.py": {
+      "status": "missed",
+      "reason": "26.2 adds rehearsal metrics (feature); 26.1 uses relative_to_root. Port relative_to_root to 26.2.",
+      "blobs": [
+        "1b21890f845caf22876c6998cad1be31eea94748",
+        "450255ca2bc398dfc36ff28552c4d628b0452977"
+      ]
+    },
+    "scripts/migration_revision.py": {
+      "status": "missed",
+      "reason": "26.1 uses relative_to_root (Windows alias safe) and fails closed on any malformed attempt-event chain even for another target; 26.2 uses Path.relative_to and ignores unrelated malformed chains for a selected target. Port relative_to_root to 26.2; decide which lock policy is canonical.",
+      "blobs": [
+        "eed35c3894f35e3c26694c4a62a1c200bd732ed9",
+        "2e11ee0478961bfcab9c75b1597e3b19b2d65a1e"
+      ]
+    },
+    "scripts/ords_export.py": {
+      "status": "missed",
+      "reason": "26.2 reads ORDS export files and the SQLcl transcript as strict UTF-8 (read_utf8); 26.1 still decodes with errors='replace', which can hide corrupted evidence. Port to 26.1.",
+      "blobs": [
+        "8d008cc32f01667335d4df2d422423f3d66c6cf1",
+        "36a4e9429a87dc327dd77d43157b8b30fec63b1f"
+      ]
+    },
+    "scripts/publish_app.ps1": {
+      "status": "feature",
+      "reason": "Same 26.2 publish features as publish_app.sh.",
+      "blobs": [
+        "6719dd64c6ec1bf4bd16043ac3fa25a85801be8e",
+        "19786a9d4440d3f8e1d760c4d89a47311783c2df"
+      ]
+    },
+    "scripts/publish_app.sh": {
+      "status": "feature",
+      "reason": "26.2 adds locks, normalization, automation restore and partial publish.",
+      "blobs": [
+        "45b4c883803d5c9d1b7ceeb31ef99b5deefec2a9",
+        "62de19908f1827583c06e24c115a8dfdaa9a0e30"
+      ]
+    },
+    "scripts/publish_app.sql": {
+      "status": "intended",
+      "reason": "Each line passes the observed writer identity to the import session in its own form (F01 is 26.2 only).",
+      "blobs": [
+        "f60c12c44c80fab26f45a204ea11530b6a1ffc80",
+        "4c3e6e32d0cbf2573f54f068bc93fa34382531f9"
+      ]
+    },
+    "scripts/record_export_state.py": {
+      "status": "feature",
+      "reason": "26.2 writes the schema-2 export marker with source provenance and release.",
+      "blobs": [
+        "6ef3f723211c9b7a5ef7213280f2de6208ad6eff",
+        "23f48a73ffdb914426e5744d1dc9b0ebc405e8a9"
+      ]
+    },
+    "scripts/replace_mirror.ps1": {
+      "status": "intended",
+      "reason": "Both handle Windows short paths (26.1 ConvertTo-LongPath, 26.2 its alias support); behaviour the same.",
+      "blobs": [
+        "ad6d1ad7d3a9ac695135eb4805a91ec60730d9ab",
+        "67a20be9ee41a27f5c6aae77a1129500771ea2fb"
+      ]
+    },
+    "scripts/replace_mirror.sh": {
+      "status": "feature",
+      "reason": "26.2-only --verified-source mirror replacement (source provenance).",
+      "blobs": [
+        "034484f8ca6c1aadb042ce03460b9e08abea8b2d",
+        "c3eb5ef87e4ed030ed5e0dff70f7b59d1d1c7fce"
+      ]
+    },
+    "scripts/rollout.py": {
+      "status": "intended",
+      "reason": "26.2 rollout binds and receipts the writer identity per step (F01, 26.2 only); 26.1 observes identity per step.",
+      "blobs": [
+        "73041a5fae3d26404024ac20b2419fd8f792a755",
+        "05e99d40f9ce625f6bb727dbc51f05c7c5a8126d"
+      ]
+    },
+    "scripts/setup_graphify_apx.py": {
+      "status": "intended",
+      "reason": "26.2 sets up the isolated .venv-graphify with atomic patching; 26.1 patches the installed Graphify.",
+      "blobs": [
+        "48d7771c8a92a361abd3d59e2aab93d5f083781a",
+        "4eca5178bb1441f61ecf72ab71c9b2d991925157"
+      ]
+    },
+    "scripts/sqlcl_safe.sh": {
+      "status": "intended",
+      "reason": "26.2 requires SQLcl 26.3 for APEX source (sqlcl_require_apex_version); 26.1 has no such gate.",
+      "blobs": [
+        "cbf199f48051b6c94472057abb7bd987d5ff95be",
+        "004204de5a924db827d621eb6ade0940dd778866"
+      ]
+    },
+    "scripts/team.ps1": {
+      "status": "feature",
+      "reason": "26.2 commands: app-lock, app-unlock, upgrade-apexlang, verify-local, partial publish, query migration profile.",
+      "blobs": [
+        "d727682cf2ac3c069f380a99c74241401f07cc23",
+        "c5075d3291ac6cd07c3899a2e683f24bcf2bf31d"
+      ]
+    },
+    "scripts/team.sh": {
+      "status": "feature",
+      "reason": "Same 26.2 commands as team.ps1.",
+      "blobs": [
+        "979c9b511c285caf3845efce4ac4215621ebc0c3",
+        "fd3af6175610dcd54c8b8eea93c1265ee24ad860"
+      ]
+    },
+    "scripts/template_drift.py": {
+      "status": "intended",
+      "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1.",
+      "blobs": [
+        "cd178b49647c6b9ec0dc85a7f41e4dbd782eb93c",
+        "5ec854abc9a735acd3e0e3c9035f6bc2a0e7bd7b"
+      ]
+    },
+    "scripts/upgrade_template.py": {
+      "status": "intended",
+      "reason": "26.2 reads schema-2 manifests and apexRelease; 26.1 reads schema 1.",
+      "blobs": [
+        "59877646dc5fec0ae34226b80fa40e2f69ee02fe",
+        "543b4b7b48b6c81251de6be8721a6af49cab7507"
+      ]
+    },
+    "scripts/validate_app_source.py": {
+      "status": "feature",
+      "reason": "26.2-only validate_import_effects (refuses includeInAppExport autoInstall) and --for-import.",
+      "blobs": [
+        "161bbf878500aadffe104380882b26b95dcc32a6",
+        "2bd03da4c02f2c770b7ab2e8fe1cd72106635982"
+      ]
+    },
+    "scripts/validate_migration.py": {
+      "status": "missed",
+      "reason": "26.1 refuses any transaction-control statement other than COMMIT or ROLLBACK [WORK] (scripts/validate_migration.py:375-377); 26.2 lacks that check. Port to 26.2.",
+      "blobs": [
+        "24cd85392a946b64ee51a74bdaa29aff1efc0eec",
+        "30daa49b1d6ccbe4ccd5a26e1468a62805ad8881"
+      ]
+    },
+    "scripts/verify_publish_state.py": {
+      "status": "feature",
+      "reason": "26.2 verifies a stable re-export with normalization and a publish summary.",
+      "blobs": [
+        "f624860c78f441d925cbd5f043bc42665011fe75",
+        "508061427a64f77ecfe4f0f9d29d2d026ee374f2"
+      ]
+    },
     "scripts/workflow_skills.py": {
       "status": "missed",
       "reason": "Skill list differs on purpose (install-uc-apx vs building-apex-template-components), but 26.1 also passes core.hooksPath as_posix() (Windows fix) that 26.2 lacks. Port that line to 26.2.",
       "blobs": [
         "6718401f1d248c39d528af4fd81bc6b9c2b1c337",
         "7feb2901b5b85613477dcf9784a8396692e59c4f"
+      ]
+    },
+    "self_improve.md": {
+      "status": "feature",
+      "reason": "Two 26.2-only lessons (native locks, version stamp).",
+      "blobs": [
+        "b5820128f2114ebeca27bbd597a4449fea5d8faa",
+        "cd34eee64204ea11b25e854e79b29df4fc5875ba"
+      ]
+    },
+    "template-manifest.json": {
+      "status": "intended",
+      "reason": "26.2 has apexRelease, minimumSqlclVersion and a template-only parity tool; 26.1 pins their absence.",
+      "blobs": [
+        "87d0443f2003d514d9e55c0e178fe4159f0f7890",
+        "edb9874330cb0c404a4cb6a9230f41092909420f"
+      ]
+    },
+    "tests/fake_ords_sql.py": {
+      "status": "intended",
+      "reason": "26.2 fake reports SQLcl 26.3 and the APEX release check; 26.1 reports SQLcl 26.2.",
+      "blobs": [
+        "0ad6b27f15072dfbb8829beab65f9a773745adda",
+        "a6a304aa23fd4de1107d1801d3fe7424eced4627"
       ]
     },
     "tests/fixtures/baseline/build_snapshot.json": {
@@ -105,12 +617,348 @@
         "91df71ea1b53fdb7ed34c7976de42c85ca1032ad"
       ]
     },
+    "tests/fixtures/baseline/ords_modules.sql": {
+      "status": "intended",
+      "reason": "One trailing space on the Date line in 26.1's fixture; no behaviour.",
+      "blobs": [
+        "90a8e10fda78922950f6ccb1691dae17d6697f12",
+        "8d42a053314fb6709b7b0ad00296bdf539898a44"
+      ]
+    },
+    "tests/fixtures/baseline/system_dev.json": {
+      "status": "intended",
+      "reason": "Trailing blank line only (26.2 has it); no behaviour.",
+      "blobs": [
+        "c56d665d457341db5cbfd486bf686adb7fd9e4d1",
+        "2e6235945ef9a7f81ca3119e0d9d5fe1d199c40c"
+      ]
+    },
+    "tests/fixtures/schema_catalog/view-synonyms.json": {
+      "status": "feature",
+      "reason": "26.2 synonym target_exists/target_type fields (TF-001), used by 26.2-only tests.",
+      "blobs": [
+        "4336f0557faf5c26509d25ac007e627c7b1ceb24",
+        "c01cc7ac4ad869e239b8fb369dc54e631ef867c0"
+      ]
+    },
+    "tests/test_backup_db_cli.py": {
+      "status": "intended",
+      "reason": "Same manifest validation (scripts/backup_manifest.py is identical); the tests are written per line.",
+      "blobs": [
+        "fea92bbbb5fdeecb81e7d85e1b7ee9ea9d795ceb",
+        "ec97495209867bed81897697c6ad87f96745e4ec"
+      ]
+    },
+    "tests/test_backup_ords_cli.py": {
+      "status": "intended",
+      "reason": "26.2 fixtures include the SQLcl 26.3 version helper.",
+      "blobs": [
+        "0e68f5f1b6543589275850e203d88651d26b67ff",
+        "37b713b28e48d8a371cb6292e3459eb9f93b89ea"
+      ]
+    },
+    "tests/test_baseline.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/baseline.py: 26.1's test_not_null_changes_require_data_preconditions_before_migration and its reference-data refusal tests have no 26.2 counterpart.",
+      "blobs": [
+        "fcd55c4515843c008560af3b0960cd5dccc7b950",
+        "3744697ef6bb27cf6f1ec767627fa836128303ba"
+      ]
+    },
+    "tests/test_baseline_bundle.py": {
+      "status": "intended",
+      "reason": "Tests each line's bundle helpers; classified with scripts/baseline_bundle.py.",
+      "blobs": [
+        "5ff0f67272f651a850ea1eb6cb8036d430cd722f",
+        "e7ac47a17c353abc7d3c97c33ac6fcb264bc5a09"
+      ]
+    },
+    "tests/test_baseline_bundle_cli.py": {
+      "status": "intended",
+      "reason": "Builds the reference-data capture differently for each line's baseline.py; classified with scripts/baseline.py.",
+      "blobs": [
+        "e93dd3b3454c3dae8bd95c52f635dc22a79b8964",
+        "9825760527caea94632a5136ca9cb4af77865710"
+      ]
+    },
+    "tests/test_catalog_transport.py": {
+      "status": "missed",
+      "reason": "26.1 tests that compare-env framing keeps compressed and legacy payloads through parse_framed_catalog_payloads; the function exists in 26.2's schema_catalog.py but has no such test. Port the test to 26.2.",
+      "blobs": [
+        "3b24fb18fc96afaf1b3cb8b83f1887c65b539b03",
+        "140ecafc86c8b543c1c6f61a0a0d3492425bbe19"
+      ]
+    },
+    "tests/test_compare_env.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/compare_schema.py: 18 26.1-only tests (same-scope blocker, constraint paging) with no 26.2 counterpart.",
+      "blobs": [
+        "ac2d6fa3f46cfd61356b6ce41d94a9d5816fcb23",
+        "6a14befc181dba80bf7f14450ea585ab51468f16"
+      ]
+    },
+    "tests/test_compare_schema.py": {
+      "status": "intended",
+      "reason": "One test each; both exercise the same schema comparison.",
+      "blobs": [
+        "db0b839f68c289b199bc513e9ec107384088439e",
+        "b5bad67c58799bb66c034aec83f684c304c97baa"
+      ]
+    },
+    "tests/test_deployment_descriptor.py": {
+      "status": "feature",
+      "reason": "Tests the 26.2-only deployment verification.",
+      "blobs": [
+        "5956de5a1ac09a255c51c7d2a208c0e0c0478911",
+        "1d96395036daa5f8bcc67608d74eb7d61f6e43a8"
+      ]
+    },
+    "tests/test_dev_test_core_migrations.py": {
+      "status": "intended",
+      "reason": "Tests the same F01 writer-identity difference as scripts/dev_test_core_migrations.py.",
+      "blobs": [
+        "5b92c0ca65533312cdf35ef44d1c776da17fb612",
+        "6c544794c28b97631112694b1ede2340ec1676cc"
+      ]
+    },
+    "tests/test_directory_install.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/directory_install.py: 26.1's Linux/Darwin/Windows parent-swap tests have no 26.2 counterpart.",
+      "blobs": [
+        "722002a6c18111fdbb71d58ba081b9dc040ea630",
+        "7065ab72f2810a56d9753b3b485c27670766d559"
+      ]
+    },
+    "tests/test_documentation_contract.py": {
+      "status": "intended",
+      "reason": "Pins each line's documentation contract.",
+      "blobs": [
+        "32f3f53484e497c4581435ffb37daa5affee5b53",
+        "5663dfd7d7e34ec8064df555ae5b768f40216540"
+      ]
+    },
+    "tests/test_env_schema_lists.py": {
+      "status": "intended",
+      "reason": "Tests the profile loader; the uc-apx and DBA-key differences follow scripts/load_env.*.",
+      "blobs": [
+        "d611b0323eba5a473cefa33f08db416dd6a9adaf",
+        "5f950b897cf58d68e9364c5242b2949b848b6e9e"
+      ]
+    },
+    "tests/test_export_cli.py": {
+      "status": "feature",
+      "reason": "Tests the 26.2-only export extras (translations, release capture).",
+      "blobs": [
+        "584905ab705adc75672bfcaf6b2a3823187e7dbf",
+        "3d5c03b928c366755e2b6b1f85fbd9739e5bfc83"
+      ]
+    },
+    "tests/test_graphify_corpus.py": {
+      "status": "intended",
+      "reason": "Corpus rules for the 26.2 Graphify environment.",
+      "blobs": [
+        "99e9ea6669ec7eaf4c24f6395c6cc8b4ce731b25",
+        "7bcebaf62c6100de5d2f8baeef10c28e04abf4e0"
+      ]
+    },
+    "tests/test_local_config.py": {
+      "status": "intended",
+      "reason": "26.1 keeps legacy uc-apx settings; 26.2 rejects them.",
+      "blobs": [
+        "f0a544020cc418f4ff433d7a60153d40cd87acde",
+        "cf10f1e411ba1dc00925ceda326d1836435ba708"
+      ]
+    },
+    "tests/test_migrate_cli.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/migrate.py and migration_revision.py: 26.1's 7 lock-scoping and fail-closed tests vs 26.2's selected-lock tests.",
+      "blobs": [
+        "84df1c46f2efc1ad926d24d05f14f153a2ca62fb",
+        "33d8d746e5df16333623bcb45857efe56b665154"
+      ]
+    },
+    "tests/test_migration_attempts.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/migration_attempts.py: 26.1's 8 durable-attempt tests have no 26.2 counterpart.",
+      "blobs": [
+        "4dc9f0a984f2881e587672f58e261cecf6ffc3d3",
+        "b885f2a1cb9424a6760a718781241790594e2d89"
+      ]
+    },
+    "tests/test_migration_checks.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/migration_checks.py (26.2-only metric-phase tests are a feature).",
+      "blobs": [
+        "a54ede1fe0544fa0fc591daa66ec6c7d56f8a1bb",
+        "c3f88ad87ec219c12bd95e8219d7dc6a8b4e4af1"
+      ]
+    },
+    "tests/test_migration_manifest.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/migration_manifest.py.",
+      "blobs": [
+        "dce0c7055fcc63e5bc593327f409765656139a89",
+        "dbcf96304afbddf05fc1c8f96900ef0d8180c297"
+      ]
+    },
+    "tests/test_migration_plan.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/migration_plan.py.",
+      "blobs": [
+        "6416ed87a920bd85f50ca4fe10acc6a6a749cbdf",
+        "59d9b8a38df0530c3a6442b3b1670c544f6517c8"
+      ]
+    },
+    "tests/test_migration_rehearsal.py": {
+      "status": "feature",
+      "reason": "Tests the 26.2-only rehearsal metrics.",
+      "blobs": [
+        "07743d3d3186ddcf2770853f253412984ce9bbac",
+        "d17661d81d317286e1bd8d6e1fd6d2d585cfec3d"
+      ]
+    },
+    "tests/test_migration_revision.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/migration_revision.py: lock policy differs (26.1 fail-closed on any malformed chain, 26.2 scopes to the selected target).",
+      "blobs": [
+        "baa4f28df2b6eee7b45e7f9d66b1ecf962f06854",
+        "791f2d53afb244f64ea828bc11adae7461cb8b0a"
+      ]
+    },
+    "tests/test_multi_schema_cli.py": {
+      "status": "feature",
+      "reason": "Tests 26.2-only migration profiles, locks and SQLcl version fixtures.",
+      "blobs": [
+        "2769c8d3652bd632fca50ae1c3c65e7435e0e9e7",
+        "a5464386715a98e0a753d367bb1f3065e6ebae73"
+      ]
+    },
     "tests/test_ords_contracts.py": {
       "status": "intended",
       "reason": "26.2 passes --apex-release 26.2 to the upgrader; variable rename only otherwise.",
       "blobs": [
         "a84758ad9cda71a6866e65d7d8548c8750687c7d",
         "78db26ace0ce81f35e3d9a27ae2cb9b6dc08ec6e"
+      ]
+    },
+    "tests/test_ords_export.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/ords_export.py: 26.2's two invalid-UTF-8 tests have no 26.1 counterpart.",
+      "blobs": [
+        "d671e5fdd22f3de4720667b3583f622dc130f99c",
+        "cb1ddc7f6df69d9d1da4d3d126f6a602af2990e6"
+      ]
+    },
+    "tests/test_path_utils.py": {
+      "status": "intended",
+      "reason": "Same helper (scripts/path_utils.py is identical); the two tests exercise it differently.",
+      "blobs": [
+        "9bf6f46a774bd75d52c7f91958008dd2ed9bdab7",
+        "445b14d626dc58ec8f4cd658de5955888346898c"
+      ]
+    },
+    "tests/test_publish_cli.py": {
+      "status": "feature",
+      "reason": "13 26.2-only publish tests (locks, lifecycle, partial publish).",
+      "blobs": [
+        "ef5cd86edc6278ea2a0dcef2e7efb6aaeba23ead",
+        "be462187bc2b3421842879b8472e301e21093ee3"
+      ]
+    },
+    "tests/test_record_export_state.py": {
+      "status": "feature",
+      "reason": "26.2 schema-2 export marker test.",
+      "blobs": [
+        "6d6f5928692d162b86d05a247f62143bde454d7c",
+        "7fc4e36c19c0d6ad535c7919d9e486d4f26d437a"
+      ]
+    },
+    "tests/test_rollout.py": {
+      "status": "intended",
+      "reason": "Tests the F01 rollout receipts (26.2 only).",
+      "blobs": [
+        "696f8eaa12ca6b85798019205ed4fcbdfc008a9f",
+        "ae92df6d76bbbfd92861f478dd59984b110ca5ab"
+      ]
+    },
+    "tests/test_setup_graphify.py": {
+      "status": "intended",
+      "reason": "Tests each line's Graphify setup.",
+      "blobs": [
+        "f917b32bfd37b083a1dcf542102d60db8db70389",
+        "f18ce591f5f437236799b50d009cf8b0e94a7c4e"
+      ]
+    },
+    "tests/test_sql_driver_contracts.py": {
+      "status": "missed",
+      "reason": "26.1 asserts the BLOB / UTL_COMPRESS chunking details of scripts/schema_catalog.sql (identical file); 26.2's test checks only the encoding marker and chunk size. Port 26.1's assertions to 26.2.",
+      "blobs": [
+        "75c012dbcf7fa582bf4cba5e4f6712ac08d3e81b",
+        "0b79a4a7a6ebd396f87204659c29b6692a78e8cf"
+      ]
+    },
+    "tests/test_sqlcl_transport.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/migrate.py: 26.2's tests prove the transport preflight refuses before apply; 26.1 has no such wiring or test.",
+      "blobs": [
+        "80beaed34fa42fd0d8eb3fa64c1ce87aca7ba79d",
+        "db1ff34a8655bc2e87aa2654e06f1f4f23e0cc58"
+      ]
+    },
+    "tests/test_team_cli.py": {
+      "status": "feature",
+      "reason": "Tests 26.2-only commands; the wrapper tests for shared commands exist in both.",
+      "blobs": [
+        "ff2266b3fd9872ba659473816199877521e9b9e6",
+        "7372b29439f7143dbeefb135af9c9dba3f063057"
+      ]
+    },
+    "tests/test_template_drift.py": {
+      "status": "intended",
+      "reason": "Fixture is a 26.1 project (schema-1 manifest) in 26.1.",
+      "blobs": [
+        "e25442ed8c90228e740bc70579f6c77e35cef731",
+        "e6aa2fbad3eaa0e051dead9b20d9eaebf706aa2c"
+      ]
+    },
+    "tests/test_template_manifest.py": {
+      "status": "intended",
+      "reason": "Pins each line's manifest identity.",
+      "blobs": [
+        "b95b1f80d35e0457d04b594f809748b06e95f643",
+        "5ca170337694a05b68d9a5ce61ddece7345248ca"
+      ]
+    },
+    "tests/test_upgrade_template.py": {
+      "status": "intended",
+      "reason": "Tests the schema-2 / apexRelease handling (26.2 only).",
+      "blobs": [
+        "2104397e1bcdbb77e44cf382c7a2ab16d99ec5a8",
+        "479cf1a977323b4c7c97bcda7c8336ada1a54d6e"
+      ]
+    },
+    "tests/test_validate_migration.py": {
+      "status": "missed",
+      "reason": "Goes with scripts/validate_migration.py: 26.1's test expects the strict COMMIT/ROLLBACK-only rule; 26.2's test accepts 'ROLLBACK TO SAVEPOINT'. Decide the rule, then align both.",
+      "blobs": [
+        "ab3e68cdd6a8d0e7ca4df09c3db2ee1aa600744c",
+        "15d2a6f0c3b31153422a1ca1a26e3a9e96d37574"
+      ]
+    },
+    "tests/test_verify_publish_state.py": {
+      "status": "feature",
+      "reason": "Tests the 26.2-only verification.",
+      "blobs": [
+        "0204e4ccedbf08964f764a92fbe5feb4b3ce53dc",
+        "c4c82f0a8aa38632a976806c14cb35a8fdf5c8c6"
+      ]
+    },
+    "tests/test_windows_support.py": {
+      "status": "intended",
+      "reason": "26.2 adds Windows tests for its extra commands.",
+      "blobs": [
+        "9b4220ac5f475ae2ce87d163c60d0c6bf114f9e9",
+        "775a46e0e615ed9427938c061f7df76fd94e8907"
       ]
     }
   }
