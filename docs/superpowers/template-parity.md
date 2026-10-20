@@ -24,7 +24,7 @@ Run it after a fix lands in either repository. It exits 1 while anything is `unr
 template-only: projects never receive them.
 
 Review 2026-10-20 (TEAM `c15be4f`, 26_1 `f19ba08`): 390 shared files, 120 differing, all classified:
-32 `missed`, 27 `feature`, 61 `intended`, none unreviewed. The `missed` entries are fixes to port (each reason
+33 `missed`, 27 `feature`, 60 `intended`, none unreviewed. The `missed` entries are fixes to port (each reason
 says to which repository). Tests, documents and skills were classified together with the module they
 accompany. Scripts were compared by their function sets and by reading the hunks that exist in only one
 line; very large files (`rollout.py`, `publish_app.*`, `team.*`) were not read hunk by hunk, so a `feature` or
@@ -34,5 +34,6 @@ line; very large files (`rollout.py`, `publish_app.*`, `team.*`) were not read h
   COMMIT/ROLLBACK-only rule in `validate_migration.py`, NOT NULL data preconditions in baseline bundles,
   the pinned-handle `directory_install.py`, and 26.1's tests for attempts, lock scoping and compare-env.
   The lock policy for malformed attempt chains differs between the lines and needs an owner decision.
+  `backup_db.sh` is the suspect for a Windows-only flake that only 26.2 shows (see `tests/known_flaky.txt`).
 - **26.1 needs:** strict UTF-8 reads in `ords_export.py`, the SQLcl transport preflight in `migrate.py`,
   `attempt-event` files in `.gitignore`, and `team-flow.md` frontmatter.

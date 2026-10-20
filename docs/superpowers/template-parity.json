@@ -218,8 +218,8 @@
       ]
     },
     "scripts/backup_db.sh": {
-      "status": "intended",
-      "reason": "Same behaviour: 26.2's run_ords_scope returns and the caller exits; 26.1 exits inside the function.",
+      "status": "missed",
+      "reason": "Suspect for a TEAM-only Windows flake: in 30 failed-run logs per repo, backup-db returned exit 0 instead of 2 after printing the ORDS refusal twice in 26.2 (test_backup_ords_cli, bash) and never in 26.1. The only difference on that path: 26.2 'return 2' in run_ords_scope plus '|| exit $?' at the call site (commit 6770f55, 2026-10-13); 26.1 exits inside the function. Reproduce on Windows, then align 26.2 with 26.1 if it is the cause.",
       "blobs": [
         "ec5b999b1888e131c2c750ab7aaeadaf3a8d00e0",
         "a4d847829121a6290ebd13134ee11fac3ff9cb1a"
