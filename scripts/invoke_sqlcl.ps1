@@ -174,26 +174,37 @@ function Invoke-Sqlcl {
       return $process.ExitCode
     } finally {
       $waitInterrupted = $null -ne $process -and -not $waited
-      if ($waitInterrupted) {
-        Stop-SqlclProcess $process  # before its output files are read or removed
-        $waited = $true
-      }
       try {
-        # Capture after stopping the child even when waiting raised or Ctrl-C
-        # arrived. The caller retains this transcript for an unknown import.
-        $stdout = [System.IO.File]::ReadAllText($stdoutFile)
-        $stderr = [System.IO.File]::ReadAllText($stderrFile)
-        $transcript = $stdout
-        if ($stdout.Length -gt 0 -and $stderr.Length -gt 0) {
-          $transcript += [Environment]::NewLine
+        if ($waitInterrupted) {
+          Stop-SqlclProcess $process  # before its output files are read or removed
+          $waited = $true
         }
-        $transcript += $stderr
-        [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
-      } catch {
-        if (-not $waitInterrupted) { throw }
-        Write-Warning "SQLcl diagnostics could not be captured after interruption: $TranscriptFile"
       } finally {
-        Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        try {
+          # Timed waits do not drain redirected output. Complete the async
+          # handlers after an interrupted stop too, before opening their files.
+          if ($null -ne $process -and $process.HasExited) { $process.WaitForExit() }
+          # A stop failure must not skip diagnostic capture during unwinding.
+          # Windows descendants may still hold inherited writable handles after
+          # an interrupted stop. Permit those handles while reading the evidence.
+          $stdoutReader = [System.IO.StreamReader]::new([System.IO.File]::Open($stdoutFile,
+            [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite))
+          try { $stdout = $stdoutReader.ReadToEnd() } finally { $stdoutReader.Dispose() }
+          $stderrReader = [System.IO.StreamReader]::new([System.IO.File]::Open($stderrFile,
+            [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite))
+          try { $stderr = $stderrReader.ReadToEnd() } finally { $stderrReader.Dispose() }
+          $transcript = $stdout
+          if ($stdout.Length -gt 0 -and $stderr.Length -gt 0) {
+            $transcript += [Environment]::NewLine
+          }
+          $transcript += $stderr
+          [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
+        } catch {
+          if (-not $waitInterrupted) { throw }
+          Write-Warning "SQLcl diagnostics could not be captured after interruption: $TranscriptFile"
+        } finally {
+          Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        }
       }
     }
   } finally {

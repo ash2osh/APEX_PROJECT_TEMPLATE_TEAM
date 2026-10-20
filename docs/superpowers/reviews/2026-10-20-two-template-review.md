@@ -14,7 +14,7 @@
 - Known limitations were read before classifying defects.
   - The intentional application-lock limitations, release-specific features, and different damaged-attempt evidence policies remain unchanged.
   - No real database, APEX Builder, browser, migration, import, export or deployment operation was performed.
-  - Native Windows/macOS execution and live Oracle/APEX/ORDS qualification were not performed. Local tests use Linux and Python 3.14, including available PowerShell and fake SQLcl fixtures.
+  - Local tests use Linux and Python 3.14, including available PowerShell and fake SQLcl fixtures. The subsequent integration PRs run native Windows and macOS checks; their first Windows failures and corrections are recorded below. Live Oracle/APEX/ORDS qualification was not performed.
 - Oracle skills were current at task startup.
   - Native repository and 10 deduplicated loaded installations were checked; oldest recorded installation: `2026-10-18T11:41:02.192622103Z`. No sync was needed or claimed.
 
@@ -36,7 +36,8 @@
 - **P2 — PowerShell discarded SQLcl output when waiting was interrupted, in both lines.**
   - The transcript was assembled only after a successful wait, while `finally` deleted stdout/stderr temporary files. Reproduced with a real fake-SQLcl process followed by a wait exception; the process output existed but the requested transcript did not.
   - Correction: stop an interrupted child, capture its stdout/stderr in `finally`, then remove the intermediate files. Preserve the interrupt/failure outcome; a transcript capture failure during interruption is a warning, never success.
-  - Regression: `tests/test_sqlcl_transcript.py`, wait-error and normal completion in each line. The existing 26.1 POSIX/PowerShell import-interrupt test also verifies retained transcript and unverified summary; its native Windows twin has the same assertion but remains unexecuted here.
+  - Regression: `tests/test_sqlcl_transcript.py`, wait-error and normal completion in each line. The existing 26.1 POSIX/PowerShell import-interrupt test also verifies retained transcript and unverified summary; its native Windows twin has the same assertion and is qualified through the integration PR.
+  - Hosted integration also exposed missing diagnostics after a native Windows Ctrl-C. Capture now has its own `finally`, so a stop exception cannot skip it; a new failing-then-passing stop-error regression covers that path. After stopping an exited child, complete its redirected-output handlers before reading their files, following the [.NET wait contract](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.waitforexit). Windows diagnostic reads also permit inherited writable handles while collecting available bytes after interruption. Native Windows requalification remains a merge gate.
 - **P2 — Manual deployment commands omitted required captured identity arguments, in both lines.**
   - TEAM printed 8 of 16 SQL script arguments; 26.1 printed 7 of 15. The remaining arguments were unconditional substitution variables in `publish_app.sql`.
   - Correction: capture lifecycle identity, validate the snapshot, encode all eight identity fields, and pass them to the printed import command. Preserve recovery evidence until verification succeeds; include 26.1 lifecycle restoration/post-read steps. Both manual runbooks record successful source comparison before lifecycle verification so recovery summaries distinguish the two gates.
@@ -77,7 +78,7 @@
   - Full suite command: `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py`.
 - Each behavior correction has a failing reproduction followed by a passing focused check.
   - Each line: 18 migration-diff tests, 21 CI runner tests, 5 publication identity/runbook tests, 2 chunked planning-output tests.
-  - Each line: 2 real fake-SQLcl subprocess transcript tests passed. The 26.1 real signal/unknown-import retention test passed after the launcher correction.
+  - Each line: 3 real fake-SQLcl subprocess transcript tests cover normal completion, wait errors and stop errors. The 26.1 real signal/unknown-import retention test also verifies retained diagnostics.
   - TEAM: 71 combined Graphify receipt/project/readiness tests passed after the last Graphify correction.
   - 26.1: lifecycle-gate regression passed with six engine/failure-mode subcases (Bash and installed PowerShell).
   - The first integration pre-push pass caught a missing `zip(strict=...)` test argument and the old 26.1 unconditional-cleanup assertion; both were corrected and their focused checks rerun.
@@ -87,15 +88,15 @@
 
   | Release line | Pre-push gate | Full CI command | Modules | Tests including skips | Skipped |
   | --- | --- | --- | ---: | ---: | ---: |
-  | 26.1 | exit 0 | exit 0 | 100 | 1,919 | 32 |
-  | TEAM 26.2 | exit 0 | exit 0 | 121 | 2,291 | 38 |
+  | 26.1 | exit 0 | exit 0 | 100 | 1,920 | 32 |
+  | TEAM 26.2 | exit 0 | exit 0 | 121 | 2,292 | 38 |
 
   - Every module in both final runs exited 0. Synthetic `mod_a.ClassA.test_one` retry warnings are emitted by the CI runner's own passing regression tests, not an actual failing repository test.
   - Final commands were `python3 scripts/pre_push_check.py --all`, followed by `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py` in each worktree. `git diff --check` also passed both.
   - Logs are retained under each worktree's ignored `scratch/full-review-2026-10-20/`: `<line>-baseline.log`, `<line>-prepush-final.log`, `<line>-full-final.log`, and the first integration attempt `<line>-full-first-attempt.log`, where `<line>` is `261` or `262`.
   - Focused planning, readiness/Graphify and 26.1 lifecycle/interrupt evidence is retained beside those logs. TEAM also has `working-parity.json`, a comparison of working-file Git blob hashes rather than HEAD-only results.
   - Remote `main` was reread during final verification and still matched each recorded base. The first pushes exercised and exposed the hook-environment defect above; neither reached the remote.
-  - After fixing hook isolation, both pre-push/full-suite sequences passed again with the counts above. Integration logs and final cleanup evidence are retained outside the disposable review worktrees in the Codex task artifacts; hosted outcomes remain recorded on the integration PRs.
+  - After the hook and hosted-Windows follow-ups, both fresh pre-push/full-suite sequences passed again with the final counts above. Integration logs and final cleanup evidence are retained outside the disposable review worktrees in the Codex task artifacts; hosted outcomes remain recorded on the integration PRs.
 - Committed baseline parity was checked with the existing TEAM tool.
   - 392 shared files, 114 differing: 32 `feature`, 82 `intended`, 0 unreviewed/changed/missed/stale.
   - The tool compares committed HEAD only; pending working-file corrections are not represented by that baseline result.
@@ -108,3 +109,10 @@
   - The Windows-only ORDS exit-status flake has no confirmed reproduction/root cause in this review. No speculative `backup_db.sh` change was made and no flaky-list entry was added or weakened.
 - At review completion the fixes were local and uncommitted; the developer subsequently authorized committing, merging through protected `main`, and cleaning up the task-owned worktrees.
   - Integration requires the pre-push/full-suite gates and all three hosted checks before merge. Hosted outcomes belong to the integration PRs; the local review results above are not a claim that those hosted checks ran.
+
+## Hosted integration corrections
+
+- First PR runs: Linux and macOS passed in both lines; Windows refused both merges.
+  - The new manual-runbook tests passed generated commands through a native Windows `bash -c` argument, which stripped the Python backslash escapes: eight identity values became one `t`-joined value and the summary gained a literal trailing `n`. Execute the exact printed commands from LF `.sh` files instead of adding that extra command-line parser.
+  - The 26.1 native Ctrl-C regression retained the recovery directory and unknown summary but found no import transcript under either Windows PowerShell or PowerShell 7. The launcher corrections above cover stop unwinding and redirected-output completion; the native test now includes console text and retained filenames in a failure message.
+  - No failing assertion was removed, no CI gate was weakened and no flaky-list entry was added. The PRs must repeat all hosted checks against the corrected tips before merging.

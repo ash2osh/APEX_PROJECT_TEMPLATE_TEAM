@@ -46,7 +46,9 @@ class PublicationIdentityTests(unittest.TestCase):
             environment.update(PATH=str(root / 'bin') + os.pathsep + environment['PATH'],
                                FAKE_SQL_LOG=str(log), FAKE_SOURCE_DIR=str(root / 'apps/DEMO/100'))
             shell = 'set -euo pipefail\nsqlcl_dir="$1"\n' + '\n'.join(commands)
-            executed = subprocess.run([BASH, '-c', shell, 'bash', str(capture.parent)], cwd=root,
+            runbook = root / 'run-import.sh'
+            runbook.write_text(shell, encoding='utf-8', newline='\n')
+            executed = subprocess.run([BASH, str(runbook), str(capture.parent)], cwd=root,
                                       env=environment, text=True, capture_output=True)
             if malformed:
                 self.assertNotEqual(executed.returncode, 0, executed.stdout + executed.stderr)
@@ -111,8 +113,9 @@ class PublicationIdentityTests(unittest.TestCase):
             self.assertLess(lines.index(writers[0]), lifecycle_index)
             evidence = root / 'manual-evidence'
             evidence.mkdir()
-            executed = subprocess.run([BASH, '-c', 'set -euo pipefail\nsqlcl_dir="$1"\n' + writers[0],
-                                       'bash', str(evidence)], cwd=root, text=True, capture_output=True)
+            runbook = root / 'run-summary.sh'
+            runbook.write_text('set -euo pipefail\nsqlcl_dir="$1"\n' + writers[0], encoding='utf-8', newline='\n')
+            executed = subprocess.run([BASH, str(runbook), str(evidence)], cwd=root, text=True, capture_output=True)
             self.assertEqual(executed.returncode, 0, executed.stderr)
             self.assertEqual(json.loads((evidence / 'publish-verification.json').read_text()),
                              {'schemaVersion': 1, 'sourceVerified': True, 'lifecycleStatus': 'unavailable'})

@@ -20,7 +20,10 @@ class SqlclTranscriptTests(unittest.TestCase):
     def test_completed_process_keeps_the_same_transcript(self):
         self.run_launcher(interrupted=False)
 
-    def run_launcher(self, *, interrupted):
+    def test_stop_exception_keeps_captured_output(self):
+        self.run_launcher(interrupted=True, stop_error=True)
+
+    def run_launcher(self, *, interrupted, stop_error=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             binary = fake_sqlcl.install(root / "bin", 'cat > /dev/null\nprintf "before interruption\\n"\nprintf "stderr evidence\\n" >&2\n')
@@ -28,6 +31,8 @@ class SqlclTranscriptTests(unittest.TestCase):
             helper = str(ROOT / "scripts/invoke_sqlcl.ps1").replace("'", "''")
             override = ("function Wait-SqlclProcess { param($Process) $Process.WaitForExit(); "
                         "throw 'simulated wait interruption' }\n") if interrupted else ""
+            if stop_error:
+                override += "function Stop-SqlclProcess { param($Process) throw 'simulated stop failure' }\n"
             script = root / "run.ps1"
             script.write_text(
                 "param($RunDirectory, $Transcript)\n$ErrorActionPreference = 'Stop'\n"
