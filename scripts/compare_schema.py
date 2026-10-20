@@ -1052,6 +1052,18 @@ def compare_environment_catalogs(
             "targetRows": len(right),
         }
 
+    source_identity = source.get("identity", {})
+    target_identity = target.get("identity", {})
+    if (
+        isinstance(source_identity, Mapping)
+        and isinstance(target_identity, Mapping)
+        and same_database_scope(source_identity, target_identity)
+    ):
+        blockers.append({
+            "section": "identity",
+            "side": "both",
+            "message": "source and target resolve to the same observed database, container, schema, and edition scope",
+        })
     blockers.sort(key=lambda item: (item.get("section", ""), item.get("side", ""), item.get("name", ""), item.get("message", "")))
     differences.sort(key=lambda item: (item["section"], item["name"], item["classification"]))
     identical.sort(key=lambda item: (item["section"], item["name"]))

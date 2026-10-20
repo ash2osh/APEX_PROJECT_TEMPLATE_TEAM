@@ -102,6 +102,70 @@ class EnvironmentComparisonTests(unittest.TestCase):
                     self.assertEqual(arguments[2], "646576")
                     self.assertTrue(all(arguments), invocation)
 
+    def test_unreadable_selected_dictionary_section_blocks_readiness(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        for payload in (source, target):
+            payload["coverage"]["sections"]["tables"] = {
+                "complete": False, "pages": [0], "reason": "dictionary section is unavailable",
+            }
+            payload["sections"]["tables"] = []
+            payload["unavailable"] = {"tables": "dictionary section is unavailable"}
+
+        parsed = parse_environment_catalog_output(framed(source), sections=("tables",))
+        report = compare_environment_catalogs(parsed, target, sections=("tables",))
+
+        self.assertEqual(report["exit_code"], 2)
+        self.assertEqual(report["readiness"], "blocked")
+        self.assertEqual(report["sections"]["tables"]["status"], "incomplete")
+
+    def test_same_database_different_selected_schema_is_allowed(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        for payload in (source, target):
+            payload["identity"]["db_unique_name"] = "SHARED_DATABASE"
+            payload["identity"]["container_id"] = "3"
+            payload["identity"]["container_name"] = "APP_PDB"
+        source["sections"]["tables"] = []
+        target["sections"]["tables"] = []
+
+        report = compare_environment_catalogs(source, target, sections=("tables",))
+
+        self.assertEqual(report["exit_code"], 0)
+        self.assertEqual(report["readiness"], "ready")
+
+    def test_same_observed_database_container_schema_and_edition_is_blocked(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        target["schema"] = source["schema"]
+        target["identity"] = dict(source["identity"])
+        target["sections"]["tables"] = list(source["sections"]["tables"])
+
+        report = compare_environment_catalogs(source, target, sections=("tables",))
+
+        self.assertEqual(report["exit_code"], 2)
+        self.assertEqual(report["readiness"], "blocked")
+        self.assertTrue(any(item["section"] == "identity" for item in report["blockers"]))
+
+    def test_timestamp_timezone_precision_is_part_of_the_column_type(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        for payload, precision in ((source, 9), (target, 6)):
+            payload["sections"]["columns"] = [{
+                "table_name": "T_SHARED", "name": "CREATED_AT",
+                "column_position": 1, "user_generated": "YES",
+                "data_type": f"TIMESTAMP({precision}) WITH TIME ZONE",
+                "data_type_mod": None, "data_type_owner": None, "data_length": 13,
+                "data_precision": precision, "data_scale": 0, "char_used": None,
+                "char_length": None, "nullable": "N", "hidden": "NO", "virtual": "NO",
+            }]
+            payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+
+        report = compare_environment_catalogs(source, target, sections=("columns",))
+
+        self.assertEqual(report["exit_code"], 1)
+        self.assertIn("data_type", report["differences"][0]["fields"])
+
     def test_catalog_fixture_covers_every_documented_section(self) -> None:
         self.assertEqual(
             COMPARE_ENV_SECTIONS,
@@ -346,6 +410,8 @@ class EnvironmentComparisonTests(unittest.TestCase):
         target = json.loads(json.dumps(source))
         target["environment"] = "staging"
         target["schema"] = "APP_STAGE"
+        target["identity"]["session_user"] = "APP_STAGE"
+        target["identity"]["current_schema"] = "APP_STAGE"
         target["reference_rows"] = [{"id": 900, "label": "Changed"}]
         source["reference_rows"] = [{"id": 1, "label": "Original"}]
         target["erp_camp_rows"] = [{"id": 100, "value": "different"}]
@@ -451,6 +517,28 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertEqual(2, report["exit_code"], report)
         self.assertEqual("incomplete", report["sections"]["network-aces"]["status"])
         self.assertIn("start_date", report["differences"][0]["fields"])
+        self.assertTrue(any("timezone" in blocker["message"].lower() for blocker in report["blockers"]))
+
+    def test_equal_unqualified_bounded_aces_block_readiness_but_remain_compared(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        ace = {
+            "host": "api.example.test", "lower_port": 443, "upper_port": 443,
+            "principal": "APP_DEV", "principal_type": "DATABASE", "privilege": "connect",
+            "grant_type": "GRANT", "inverted_principal": "NO",
+            "start_date": "2026-10-14T12:30:45.123456", "end_date": None,
+            "bounds_timezone_qualified": False,
+        }
+        source["sections"]["network-aces"] = [dict(ace)]
+        target["sections"]["network-aces"] = [{**ace, "principal": "APP_STAGE"}]
+        for payload in (source, target):
+            payload["coverage"]["sections"]["network-aces"] = {"complete": True, "pages": [1]}
+
+        report = compare_environment_catalogs(source, target, sections=("network-aces",))
+
+        self.assertEqual(report["exit_code"], 2, report)
+        self.assertEqual(report["sections"]["network-aces"]["status"], "incomplete")
+        self.assertEqual(len(report["identical"]), 1)
         self.assertTrue(any("timezone" in blocker["message"].lower() for blocker in report["blockers"]))
 
     def test_timezone_qualified_recorded_ace_bounds_compare_without_blocking(self) -> None:
@@ -675,6 +763,11 @@ class EnvironmentComparisonTests(unittest.TestCase):
         sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
         self.assertIn("'COLUMN_POSITION' VALUE C.COLUMN_ID", sql)
         self.assertIn("'USER_GENERATED' VALUE C.USER_GENERATED", sql)
+        normalized_sql = " ".join(sql.split())
+        self.assertIn(
+            "ORDER BY C.TABLE_NAME, C.COLUMN_ID NULLS LAST, C.INTERNAL_COLUMN_ID OFFSET :PAGE_OFFSET ROWS FETCH NEXT :PAGE_SIZE ROWS ONLY",
+            normalized_sql,
+        )
 
     def test_ace_capture_preserves_timestamp6_without_inventing_timezone(self) -> None:
         sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8").upper()
@@ -731,7 +824,12 @@ class EnvironmentComparisonTests(unittest.TestCase):
         payload["coverage"]["sections"]["tables"] = {"complete": True, "pages": [500, 1]}
         parsed = parse_environment_catalog_output(framed(payload), sections=("tables",))
         self.assertEqual(len(parsed["sections"]["tables"]), 501)
-        report = compare_environment_catalogs(parsed, parsed, sections=("tables",))
+        target = json.loads(json.dumps(parsed))
+        target["environment"] = "staging"
+        target["schema"] = "APP_STAGE"
+        target["identity"]["session_user"] = "APP_STAGE"
+        target["identity"]["current_schema"] = "APP_STAGE"
+        report = compare_environment_catalogs(parsed, target, sections=("tables",))
         self.assertEqual(len(report["identical"]), 501)
         self.assertEqual(report["exit_code"], 0)
 

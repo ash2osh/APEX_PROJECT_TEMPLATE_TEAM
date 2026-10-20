@@ -20,6 +20,7 @@ from scripts.schema_catalog import (
     SCHEMA_VERSION,
     _inventory_signature,
     decode_catalog_payload,
+    parse_framed_catalog_payloads,
     parse_inventory,
     parse_snapshot,
 )
@@ -84,6 +85,22 @@ class CatalogTransportTests(unittest.TestCase):
         self.assertEqual(inv_legacy.objects, inv_comp.objects)
         self.assertEqual(inv_legacy.identity, inv_comp.identity)
         self.assertEqual(_inventory_signature(inv_legacy.objects), _inventory_signature(inv_comp.objects))
+
+    def test_compare_env_phase_preserves_compressed_and_legacy_framing(self) -> None:
+        payload = {
+            "schemaVersion": 2,
+            "phase": "compare-env",
+            "environment": "dev",
+            "schema": "APP_DEV",
+            "identity": {},
+            "coverage": {"pageSize": 500, "maxRows": 100000, "sections": {}},
+            "sections": {},
+            "unavailable": {},
+        }
+
+        for output in (frame_legacy(payload), frame_compressed(payload)):
+            with self.subTest(compressed="CATALOG_ENCODING" in output):
+                self.assertEqual(parse_framed_catalog_payloads(output, "compare-env"), [payload])
 
     def test_native_sqlcl_trailing_blank_before_end_marker_is_presentation(self) -> None:
         framed = frame_compressed(self.base_inventory).replace(
