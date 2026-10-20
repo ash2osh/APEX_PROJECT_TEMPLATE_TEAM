@@ -92,9 +92,7 @@ def _absolute_path(path: Path, *, label: str) -> Path:
 
 
 def _filesystem_id(handle: object) -> int:
-    """Return the volume identifier from an already-open directory handle or path."""
-    if isinstance(handle, (str, Path)):
-        return int(Path(handle).stat().st_dev)
+    """Return the volume identifier from an already-open directory handle."""
     if os.name == "nt":
         return int(_windows_file_information(handle).dwVolumeSerialNumber)
     return int(os.fstat(int(handle)).st_dev)
@@ -216,11 +214,7 @@ def _rename_darwin_noreplace(
     """Use renameatx_np(RENAME_EXCL) relative to pinned directory descriptors."""
     try:
         libc = ctypes.CDLL(None, use_errno=True)
-        renameatx_np = getattr(libc, "renameatx_np", None)
-        if renameatx_np is None:
-            renameatx_np = getattr(libc, "renamex_np", None)
-            if renameatx_np is None:
-                raise AttributeError("renameatx_np")
+        renameatx_np = libc.renameatx_np
     except (AttributeError, OSError) as exc:
         raise DirectoryInstallError("Darwin renameatx_np(RENAME_EXCL) is unavailable") from exc
 
