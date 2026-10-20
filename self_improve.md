@@ -134,3 +134,21 @@ the evidence, the preferred behavior, and the check that keeps it true.
   context is fresh.
 - Verification: each `tests/test_<command>_cli.py` runs alone with
   `python3 -m unittest discover -s tests -p 'test_<command>_cli.py'`.
+
+### A variable only CI sets must be isolated in the tests that read it
+
+- Trigger: on 2026-10-20 the first full CI run of the parallel test runner hung
+  for 30 minutes on Linux, although the suite passed locally in 163 s.
+- Evidence: CI sets `CI_TEST_JOBS=4`; locally it is unset. The tests of
+  `scripts/ci_run_tests.py` call `main()` with default arguments, which then read
+  the variable and started the whole suite again from inside the suite. The log
+  showed 67 of 92 modules reported and `test_ci_run_tests` as the first one that
+  never did.
+- Preferred behavior: a test that exercises code reading an environment
+  variable patches that variable itself, and a script that starts child test
+  processes sets the variable for them. Before pushing a change to the workflow,
+  run the same command with the workflow's `env:` values set
+  (`CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py`).
+- Verification: `test_child_processes_get_one_job` and
+  `test_tests_in_a_parallel_ci_run_never_start_another_parallel_run`; the full
+  suite with `CI_TEST_JOBS=4` set passes in 163 s (26.1) and 199 s (26.2).
