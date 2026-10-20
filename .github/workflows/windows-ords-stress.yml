@@ -59,13 +59,17 @@ jobs:
           worker() {
             local id=$1 w=0
             for n in $(seq 1 150); do
-              bash ./parent.sh > /dev/null 2>&1; rc=$?
-              [ "$rc" = 2 ] || { w=$((w+1)); echo "worker $id iteration $n: exit status $rc (expected 2)"; }
+              rc=0
+              bash ./parent.sh > /dev/null 2>&1 || rc=$?
+              if [ "$rc" != 2 ]; then w=$((w+1)); echo "worker $id iteration $n: exit status $rc (expected 2)"; fi
             done
             echo "$w" > "wrong-$id.txt"
           }
           for id in 1 2 3 4; do worker $id & done
           wait
-          for id in 1 2 3 4; do wrong=$((wrong + $(cat wrong-$id.txt))); total=$((total+150)); done
+          for id in 1 2 3 4; do
+            [ -s "wrong-$id.txt" ] || { echo "worker $id produced no result"; exit 1; }
+            wrong=$((wrong + $(cat wrong-$id.txt))); total=$((total+150))
+          done
           echo "variant $variant: total=$total wrong_status=$wrong"
           [ "$wrong" = 0 ]
