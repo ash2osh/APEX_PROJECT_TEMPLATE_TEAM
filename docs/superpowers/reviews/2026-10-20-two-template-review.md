@@ -93,8 +93,8 @@
 - Committed baseline parity was checked with the existing TEAM tool.
   - 392 shared files, 114 differing: 32 `feature`, 82 `intended`, 0 unreviewed/changed/missed/stale.
   - The tool compares committed HEAD only; pending working-file corrections are not represented by that baseline result.
-  - Working-file review after fixes: 395 shared files, still 114 differing, no new differing paths and no stale entries. Existing classifications remain appropriate. Fourteen reviewed entries need new committed blob stamps after integration commits; do not claim the HEAD-only result verifies uncommitted files.
-  - Paths requiring `--mark` after those commits: `.agents/rules/graphify.md`, `.agents/workflows/graphify.md`, `README.md`, `docs/publish-rules.md`, `scripts/deploy.sh`, `scripts/invoke_sqlcl.ps1`, `scripts/migrate.py`, `scripts/publish_app.ps1`, `scripts/publish_app.sh`, `scripts/publish_app.sql`, `scripts/verify_local.py`, `tests/test_publish_cli.py`, `tests/test_team_cli.py`, `tests/test_verify_local.py`. Retain their existing `intended`/`feature` statuses and update the explanation only where the new behavior needs it. Use `tools/template_parity.py --mark`, not hand-edited JSON.
+  - After committing both source changes, parity was refreshed with `tools/template_parity.py --mark` and verified against both committed HEADs: 395 shared files, 114 differing, 32 `feature`, 82 `intended`, 0 unreviewed/changed/missed/stale. No JSON was edited by hand.
+  - The shared fixes were ported to both affected lines; Graphify isolation/coverage and other established release-specific behavior remain deliberately different.
 
 ## Remaining limits
 

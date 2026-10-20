@@ -59,3 +59,16 @@ After 26.1 gained `verify-local` (2026-10-20, 26.1 PR 21) the report covers 392 
 - **`scripts/backup_db.sh` and the Windows ORDS flake (TEAM issue 49):** the `return`/`exit` form is not the cause (the failure
   predates it, and over 11,000 Windows attempts in three experiments reproduced nothing, including 3 x 3,600 isolated exit-status
   loops). The two tests stay in `tests/known_flaky.txt`; the issue stays open.
+
+## Full-review integration — 2026-10-20
+
+After the ten confirmed review corrections were committed in both release lines,
+`template_parity.py --mark` refreshed the fourteen changed shared-file records.
+Verification against the committed source: 395 shared files, 114 differing,
+32 `feature`, 82 `intended`, and no unreviewed, changed, missed or stale entries.
+The shared CI, publication identity/transcript, daily-diff and DEV planning fixes
+exist in both lines. The 26.1 lifecycle baseline/recovery correction restores its
+existing contract; it does not port the 26.2-only publish features. Exact-detector
+Graphify coverage receipts and the missing-template-file readiness correction
+remain in the 26.2 tooling. See [the consolidated review](reviews/2026-10-20-two-template-review.md)
+for reproductions, verification and remaining runtime limits.
