@@ -62,7 +62,7 @@ After 26.1 gained `verify-local` (2026-10-20, 26.1 PR 21) the report covers 392 
 
 ## Full-review integration — 2026-10-20
 
-After the ten confirmed review corrections were committed in both release lines,
+After the review corrections were committed in both release lines,
 `template_parity.py --mark` refreshed the fourteen changed shared-file records.
 Verification against the committed source: 395 shared files, 114 differing,
 32 `feature`, 82 `intended`, and no unreviewed, changed, missed or stale entries.
@@ -72,3 +72,5 @@ existing contract; it does not port the 26.2-only publish features. Exact-detect
 Graphify coverage receipts and the missing-template-file readiness correction
 remain in the 26.2 tooling. See [the consolidated review](reviews/2026-10-20-two-template-review.md)
 for reproductions, verification and remaining runtime limits.
+The additional pre-push hook environment isolation fix and its regression are
+identical in both lines; the number of intentional differences is unchanged.

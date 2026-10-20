@@ -20,6 +20,11 @@
 
 ## Confirmed defects and corrections
 
+- **P1 — The pre-push gate leaked Git's hook environment into fixture repositories, in both lines.**
+  - Standalone gates passed, but real pushes exported repository-local Git variables into tests. Fixture Git commands then changed the invoking repository's configuration, index and review branch instead of their temporary repositories; the push refused.
+  - Correction: clear the names reported by `git rev-parse --local-env-vars` before selecting files or starting checks. This also protects already installed hooks without replacing them.
+  - Regression: `test_hook_does_not_pass_repository_environment_to_fixture_tests` runs the real hook and check script with explicit hook-style Git variables; it failed before the fix and passes after it.
+  - Integration recovery restored the task-owned branches/indexes from their saved commits and the changed shared Git settings. Original checkout source files were untouched. A separate PowerShell cancellation crash in the failed 26.1 hook matched an existing known-flaky entry; no retry policy or flaky list was changed.
 - **P1 — 26.1 advanced the DEV baseline before lifecycle verification and deleted failed-import diagnostics.**
   - A stateful fake import followed by a failed post-read advanced `apex-team-export.json` and left no recovery directory despite returning failure.
   - Correction: verify source and lifecycle first, record the baseline last, and retain transcripts/staging after attempted imports until verification succeeds, in both Bash and PowerShell. Recovery summaries set `sourceVerified` only after the completed source comparison.
@@ -82,14 +87,15 @@
 
   | Release line | Pre-push gate | Full CI command | Modules | Tests including skips | Skipped |
   | --- | --- | --- | ---: | ---: | ---: |
-  | 26.1 | exit 0 | exit 0 | 100 | 1,918 | 32 |
-  | TEAM 26.2 | exit 0 | exit 0 | 121 | 2,290 | 38 |
+  | 26.1 | exit 0 | exit 0 | 100 | 1,919 | 32 |
+  | TEAM 26.2 | exit 0 | exit 0 | 121 | 2,291 | 38 |
 
   - Every module in both final runs exited 0. Synthetic `mod_a.ClassA.test_one` retry warnings are emitted by the CI runner's own passing regression tests, not an actual failing repository test.
   - Final commands were `python3 scripts/pre_push_check.py --all`, followed by `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py` in each worktree. `git diff --check` also passed both.
   - Logs are retained under each worktree's ignored `scratch/full-review-2026-10-20/`: `<line>-baseline.log`, `<line>-prepush-final.log`, `<line>-full-final.log`, and the first integration attempt `<line>-full-first-attempt.log`, where `<line>` is `261` or `262`.
   - Focused planning, readiness/Graphify and 26.1 lifecycle/interrupt evidence is retained beside those logs. TEAM also has `working-parity.json`, a comparison of working-file Git blob hashes rather than HEAD-only results.
-  - Remote `main` was reread during final verification and still matched each recorded base. Remote reads succeeded; push access was not exercised.
+  - Remote `main` was reread during final verification and still matched each recorded base. The first pushes exercised and exposed the hook-environment defect above; neither reached the remote.
+  - After fixing hook isolation, both pre-push/full-suite sequences passed again with the counts above. Integration logs and final cleanup evidence are retained outside the disposable review worktrees in the Codex task artifacts; hosted outcomes remain recorded on the integration PRs.
 - Committed baseline parity was checked with the existing TEAM tool.
   - 392 shared files, 114 differing: 32 `feature`, 82 `intended`, 0 unreviewed/changed/missed/stale.
   - The tool compares committed HEAD only; pending working-file corrections are not represented by that baseline result.
