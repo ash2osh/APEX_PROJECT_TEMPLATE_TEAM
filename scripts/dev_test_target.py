@@ -305,7 +305,9 @@ def _parse_planning_output(output: str) -> dict[str, Any]:
     end = "PLAN_PAYLOAD_END:plan"
     sentinel = "PLAN_VERIFIED:plan"
 
-    lines = output.splitlines()
+    # Split physical SQLcl output lines only. Unicode line separators can be
+    # valid JSON string contents and must not disappear during reassembly.
+    lines = [line.removesuffix("\r") for line in output.split("\n")]
     if lines.count(begin) != 1 or lines.count(end) != 1 or lines.count(sentinel) != 1:
         raise DevTestTargetError(
             "Target inspection frames are duplicated or ambiguous; cannot verify live target."
@@ -325,7 +327,9 @@ def _parse_planning_output(output: str) -> dict[str, Any]:
             "Target inspection sentinel is missing; live inspection was unverified."
         )
 
-    json_text = "\n".join(lines[start_idx + 1:end_idx]).strip()
+    # The driver splits a single JSON CLOB into DBMS_OUTPUT chunks. Its line
+    # separators are transport framing and may occur inside a JSON token.
+    json_text = "".join(lines[start_idx + 1:end_idx]).strip()
     try:
         payload = json.loads(json_text)
     except json.JSONDecodeError as exc:

@@ -937,7 +937,17 @@ python3 scripts/graphify_project.py extract
 ```
 
 - `python3 scripts/graphify_project.py verify` checks the isolated installation,
-  pinned versions, and corpus coverage without modifying any files.
+  pinned versions, and cached corpus coverage without modifying files or launching
+  a subprocess. Missing/stale corpus receipts report coverage as unavailable.
+- `python3 scripts/graphify_project.py verify --refresh-corpus` explicitly runs the
+  local detector with saved exclusions and writes the ignored
+  `graphify-out/.template-corpus.json` coverage receipt. Extraction also refreshes
+  it. Source, ignore, build-setting, Git index/exclusion or graph changes invalidate it.
+  Domain-root and ignore-metadata symlinks are unsupported and refuse coverage;
+  excluded source links are inventoried without reading their targets, and selected
+  links must resolve inside the project. Refresh explicitly after changing external
+  Git environment/configuration. This proves file presence, not extracted content
+  freshness or semantic completeness.
 - `python3 scripts/graphify_project.py setup` creates or updates the isolated
   `.venv-graphify/` using copy mode, installs pinned dependencies, patches the
   canonical APEXlang extractor, and clears stale extraction caches.

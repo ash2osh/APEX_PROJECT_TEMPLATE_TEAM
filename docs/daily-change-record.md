@@ -8,10 +8,13 @@ record keeps the readable diff and the day's evidence in one dated folder.
 
 - Each day with code work has a folder `ai_generate/YYYY-MM-DD/` (today's date; create
   it when missing). It holds that day's diffs and one `WALKTHROUGH.md`.
-- Each migration gets its diff `ai_generate/YYYY-MM-DD/<folder>.diff`, which compares
-  every SQL step with the mirrored source it replaces. `scripts/team.sh migrate --env dev`
+- Each schema-folder migration gets its diff
+  `ai_generate/YYYY-MM-DD/<SCHEMA>/<folder>.diff`, which compares every SQL step with the mirrored source it replaces. `scripts/team.sh migrate --env dev`
   writes it after a verified apply, before you refresh the mirror; an existing diff file
   is kept, and a failure to write it is reported without changing the migration result.
+  Flat `migrations/<folder>/` migrations keep `ai_generate/YYYY-MM-DD/<folder>.diff`.
+  Existing unscoped diffs from schema-folder migrations stay where they are; they do not
+  suppress new schema-scoped records, since their original schema cannot be inferred safely.
   Staging and production runs and `--rehearse` write nothing. To write it by hand, run
   `python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>` before
   `scripts/team.sh backup-db` refreshes the mirror, or pass `--base <git-ref>` to read
@@ -27,11 +30,12 @@ record keeps the readable diff and the day's evidence in one dated folder.
 
 ## What the script matches
 
-A step is matched to its mirror file by the object in its first lines
+A step is matched to its mirror file by the object in its first SQL header
 (`CREATE OR REPLACE ... PACKAGE [BODY] "SCHEMA"."NAME"`), which gives
 `database/<SCHEMA>/packages/<NAME>_SPEC.sql` or `_BODY.sql` (`$` in a name is `-S-`, as
-`backup-db` writes it). A step with no such counterpart, such as `ALTER TABLE`, is
-written in full as new content. The diff header lists `+added -removed` per step.
+`backup-db` writes it). Header comments and newlines are accepted; quoted identifier
+case is preserved, and package names mentioned only in comments are ignored. A step
+with no such counterpart, such as `ALTER TABLE`, is written in full as new content. The diff header lists `+added -removed` per step.
 
 ## Walkthrough skeleton
 

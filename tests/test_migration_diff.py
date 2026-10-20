@@ -43,17 +43,56 @@ class MigrationDiffTests(unittest.TestCase):
         self.assertEqual(mirror_path('CREATE OR REPLACE PACKAGE BODY a.p$x AS'), Path("database/A/packages/P-S-X_BODY.sql"))
         self.assertIsNone(mirror_path("ALTER TABLE T ADD (C NUMBER);"))
 
+    def test_header_mapping_ignores_comments_and_accepts_multiline_tokens(self):
+        source = ('-- Previous CREATE OR REPLACE PACKAGE BODY "APP"."OLD" AS\n'
+                  '/* CREATE OR REPLACE PACKAGE BODY "APP"."ALSO_OLD" AS */\n'
+                  'CREATE /* audited */ OR REPLACE\nNONEDITIONABLE PACKAGE\n'
+                  'BODY "APP" . "PKG" AS\nEND;\n/\n')
+        self.assertEqual(mirror_path(source), Path("database/APP/packages/PKG_BODY.sql"))
+        self.assertIsNone(mirror_path("BEGIN\n NULL; -- CREATE OR REPLACE PACKAGE BODY APP.PKG AS\nEND;\n/\n"))
+
+    def test_header_mapping_preserves_quoted_case_and_filename_encoding(self):
+        source = 'CREATE OR REPLACE PACKAGE "APP"."Mixed$Pkg#" AS\nEND;\n/\n'
+        self.assertEqual(mirror_path(source), Path("database/APP/packages/Mixed-S-Pkg#_SPEC.sql"))
+        self.assertEqual(mirror_path('CREATE OR REPLACE PACKAGE BODY app.pkg# AS'),
+                         Path("database/APP/packages/PKG#_BODY.sql"))
+        self.assertIsNone(mirror_path('CREATE OR REPLACE PACKAGE "APP"."../outside" AS'))
+
+    def test_header_mapping_preserves_existing_unicode_identifiers(self):
+        source = 'CREATE OR REPLACE PACKAGE "مخطط"."حزمة$اختبار" AS\nEND;\n/\n'
+        self.assertEqual(mirror_path(source), Path("database/مخطط/packages/حزمة-S-اختبار_SPEC.sql"))
+        self.assertEqual(mirror_path('CREATE OR REPLACE PACKAGE BODY مخطط.حزمة AS'),
+                         Path("database/مخطط/packages/حزمة_BODY.sql"))
+
+    def test_manual_diffs_keep_same_named_schema_folders_separate(self):
+        other = self.root / "migrations" / "OTHER" / self.folder.name
+        other.mkdir(parents=True)
+        (other / "001-other.sql").write_text("ALTER TABLE OTHER_TABLE ADD C NUMBER;\n", encoding="utf-8")
+        self.assertEqual(self.run_main(str(self.folder.relative_to(self.root)), "--date", "2026-01-31")[0], 0)
+        self.assertEqual(self.run_main(str(other.relative_to(self.root)), "--date", "2026-01-31")[0], 0)
+        day = self.root / "ai_generate" / "2026-01-31"
+        self.assertIn("+  FUNCTION g", (day / "APP" / f"{self.folder.name}.diff").read_text(encoding="utf-8"))
+        self.assertIn("OTHER_TABLE", (day / "OTHER" / f"{other.name}.diff").read_text(encoding="utf-8"))
+
+    def test_flat_migration_keeps_the_original_artifact_path(self):
+        flat = self.root / "migrations" / "2026-01-31_flat-r001"
+        flat.mkdir()
+        (flat / "001-edit.sql").write_text("ALTER TABLE T ADD X NUMBER;\n", encoding="utf-8")
+        code, output = self.run_main(str(flat.relative_to(self.root)), "--date", "2026-01-31")
+        self.assertEqual(code, 0, output)
+        self.assertTrue((self.root / "ai_generate" / "2026-01-31" / f"{flat.name}.diff").is_file())
+
     def test_writes_only_the_changed_lines_into_the_dated_folder(self):
         code, output = self.run_main("migrations/APP/2026-01-31_add-g-r001", "--date", "2026-01-31")
         self.assertEqual(code, 0, output)
-        diff = (self.root / "ai_generate" / "2026-01-31" / "2026-01-31_add-g-r001.diff").read_text(encoding="utf-8")
+        diff = (self.root / "ai_generate" / "2026-01-31" / "APP" / "2026-01-31_add-g-r001.diff").read_text(encoding="utf-8")
         self.assertIn("# 001-pkg-body.sql: +1 -0 (vs database/APP/packages/PKG_BODY.sql)", diff)
         self.assertIn("+  FUNCTION g RETURN NUMBER IS BEGIN RETURN 2; END g;", diff)
         self.assertNotIn("+  FUNCTION f RETURN NUMBER", diff)  # unchanged lines are context, not additions
 
     def test_step_without_a_mirror_counterpart_is_shown_in_full(self):
         self.run_main("migrations/APP/2026-01-31_add-g-r001", "--date", "2026-01-31")
-        diff = (self.root / "ai_generate" / "2026-01-31" / "2026-01-31_add-g-r001.diff").read_text(encoding="utf-8")
+        diff = (self.root / "ai_generate" / "2026-01-31" / "APP" / "2026-01-31_add-g-r001.diff").read_text(encoding="utf-8")
         self.assertIn("# 002-add-column.sql: +1 -0 (no mirror counterpart, shown in full)", diff)
 
     def test_read_only_for_the_migration_and_the_mirror(self):
@@ -80,12 +119,12 @@ class DailyDiffAfterMigrateTests(unittest.TestCase):
         return out.getvalue()
 
     def diff_file(self):
-        return self.root / "ai_generate" / "2026-01-31" / "2026-01-31_add-g-r001.diff"
+        return self.root / "ai_generate" / "2026-01-31" / "APP" / "2026-01-31_add-g-r001.diff"
 
     def test_writes_the_diff_when_the_project_has_ai_generate(self):
         (self.root / "ai_generate").mkdir()
         output = self.record()
-        self.assertIn("daily change record: wrote ai_generate/2026-01-31/2026-01-31_add-g-r001.diff", output)
+        self.assertIn("daily change record: wrote ai_generate/2026-01-31/APP/2026-01-31_add-g-r001.diff", output)
         self.assertIn("+  FUNCTION g", self.diff_file().read_text(encoding="utf-8"))
 
     def test_keeps_an_existing_diff_written_before_the_mirror_refresh(self):
@@ -94,6 +133,20 @@ class DailyDiffAfterMigrateTests(unittest.TestCase):
         output = self.record()
         self.assertIn("daily change record: kept", output)
         self.assertEqual(self.diff_file().read_text(encoding="utf-8"), "first diff\n")
+
+    def test_automatic_diffs_keep_same_named_schema_folders_separate(self):
+        other = self.root / "migrations" / "OTHER" / self.folder.name
+        other.mkdir(parents=True)
+        (other / "001-other.sql").write_text("ALTER TABLE OTHER_TABLE ADD C NUMBER;\n", encoding="utf-8")
+        day = self.root / "ai_generate" / "2026-01-31"
+        day.mkdir(parents=True)
+        legacy = day / f"{self.folder.name}.diff"
+        legacy.write_text("old unscoped evidence\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            migrate.record_daily_diffs(self.root, [SimpleNamespace(folder=self.folder), SimpleNamespace(folder=other)], "2026-01-31")
+        self.assertIn("+  FUNCTION g", self.diff_file().read_text(encoding="utf-8"))
+        self.assertIn("OTHER_TABLE", (day / "OTHER" / f"{other.name}.diff").read_text(encoding="utf-8"))
+        self.assertEqual(legacy.read_text(encoding="utf-8"), "old unscoped evidence\n")
 
     def test_does_nothing_without_ai_generate(self):
         self.assertEqual(self.record(), "")
@@ -105,6 +158,14 @@ class DailyDiffAfterMigrateTests(unittest.TestCase):
             step.unlink()
         output = self.record()
         self.assertIn("daily change record: not written for 2026-01-31_add-g-r001", output)
+
+    def test_path_resolution_failure_is_reported_without_changing_migration_result(self):
+        (self.root / "ai_generate").mkdir()
+        with patch.object(migrate, "diff_path", side_effect=OSError("cannot resolve daily diff path")):
+            output = self.record()
+        self.assertIn("daily change record: not written for 2026-01-31_add-g-r001", output)
+        self.assertIn("cannot resolve daily diff path", output)
+        self.assertFalse(self.diff_file().exists())
 
     def test_main_records_only_after_a_successful_dev_apply(self):
         cases = (("dev", 0, 1), ("dev", 1, 0), ("staging", 0, 0), ("prod", 0, 0))

@@ -286,7 +286,7 @@ def build_report(
     }
     if drift_status == "unsafe":
         status = "fail"
-    elif drift.get("lockStatus") == "unknown":
+    elif drift.get("lockStatus") == "unknown" or counts["missing"]:
         status = "attention"
     else:
         # Safe local customization is expected and remains upgradeable; it is

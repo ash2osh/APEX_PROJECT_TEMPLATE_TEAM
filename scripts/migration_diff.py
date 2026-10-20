@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Write the readable diff of a migration folder to ai_generate/<date>/<folder>.diff.
+"""Write a migration diff under ai_generate/<date>/, namespaced by schema when present.
 
 A package migration holds the whole package source, so Git shows thousands of added lines
 for a few changed ones. This compares every SQL step of a migration folder with the
 mirrored source it replaces (the files `scripts/team.sh backup-db` writes) and writes one
 unified diff. Read-only: no database connection, no change to the migration folder.
 
-A step is matched to its mirror file by the object named in its first lines
+A step is matched to its mirror file by the object named in its first SQL header
 (CREATE OR REPLACE ... PACKAGE [BODY] "SCHEMA"."NAME"), which gives
 database/<SCHEMA>/packages/<NAME>_SPEC.sql or <NAME>_BODY.sql (`$` in a name is `-S-`, as
 backup-db writes it). A step without a mirror counterpart is written in full as new
@@ -26,23 +26,41 @@ from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# Match only the first statement header. A comment may mention a different
+# package, and Oracle allows comments/newlines between header tokens.
+_TRIVIA = r"(?:\s|--[^\r\n]*(?:\r?\n|$)|/\*[\s\S]*?\*/)"
+_GAP = _TRIVIA + "+"
+_IDENTIFIER = r'(?:"(?u:[\w$#]+)"|(?u:[^\W\d_][\w$#]*))'
 HEADER = re.compile(
-    r'CREATE\s+OR\s+REPLACE\s+(?:NON)?EDITIONABLE\s+PACKAGE\s+(BODY\s+)?"?([\w$#]+)"?\."?([\w$#]+)"?'
-    r'|CREATE\s+OR\s+REPLACE\s+PACKAGE\s+(BODY\s+)?"?([\w$#]+)"?\."?([\w$#]+)"?',
-    re.IGNORECASE,
+    rf'\A{_TRIVIA}*CREATE{_GAP}OR{_GAP}REPLACE{_GAP}'
+    rf'(?:(?:NON)?EDITIONABLE{_GAP})?PACKAGE{_GAP}(?:(?P<body>BODY){_GAP})?'
+    rf'(?P<schema>{_IDENTIFIER}){_TRIVIA}*\.{_TRIVIA}*(?P<name>{_IDENTIFIER})'
+    rf'(?={_TRIVIA}|[;(]|$)',
+    re.IGNORECASE | re.ASCII,
 )
 
 
 def mirror_path(sql_text: str) -> Path | None:
-    """The mirror file a package step replaces, or None when the step names no schema-qualified package."""
-    for line in sql_text.splitlines()[:8]:
-        match = HEADER.search(line)
-        if match:
-            body, schema, name = (match.group(1), match.group(2), match.group(3)) if match.group(2) else (
-                match.group(4), match.group(5), match.group(6))
-            kind = "BODY" if body else "SPEC"
-            return Path("database") / schema.upper() / "packages" / f"{name.upper().replace('$', '-S-')}_{kind}.sql"
-    return None
+    """The mirror for the first schema-qualified package header, preserving quoted case."""
+    match = HEADER.match(sql_text)
+    if match is None:
+        return None
+
+    def identifier(value: str) -> str:
+        return value[1:-1] if value.startswith('"') else value.upper()
+
+    schema = identifier(match.group("schema"))
+    name = identifier(match.group("name")).replace("$", "-S-")
+    kind = "BODY" if match.group("body") else "SPEC"
+    return Path("database") / schema / "packages" / f"{name}_{kind}.sql"
+
+
+def diff_path(root: Path, folder: Path, day: str) -> Path:
+    """Namespace schema-folder evidence; retain the original flat-folder path."""
+    out_dir = root / "ai_generate" / day
+    if folder.parent.parent.resolve() == (root / "migrations").resolve():
+        out_dir /= folder.parent.name
+    return out_dir / f"{folder.name}.diff"
 
 
 def read_base(root: Path, rel: Path, ref: str | None) -> str | None:
@@ -78,11 +96,10 @@ def build_diff(root: Path, folder: Path, ref: str | None) -> tuple[list[str], li
 
 
 def write_diff(root: Path, folder: Path, day: str, ref: str | None = None) -> tuple[Path, list[str]]:
-    """Write ai_generate/<day>/<folder>.diff and return its path and per-step summary."""
+    """Write the schema-scoped daily diff and return its path and per-step summary."""
     summary, parts = build_diff(root, folder, ref)
-    out_dir = root / "ai_generate" / day
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{folder.name}.diff"
+    out = diff_path(root, folder, day)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(summary) + "\n\n" + "\n".join(parts), encoding="utf-8", newline="\n")
     return out, summary
 

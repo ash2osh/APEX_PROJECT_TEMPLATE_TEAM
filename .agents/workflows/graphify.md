@@ -69,6 +69,20 @@ nothing and exits non-zero when the integration or environment is not ready:
 python3 scripts/graphify_project.py verify
 ```
 
+Coverage is read from `graphify-out/.template-corpus.json`, an ignored receipt
+written after extraction using the exact local detector and its saved exclusions.
+Source files, ignore rules, build settings, Git index/exclusions and graph changes
+invalidate that receipt. To refresh coverage for an existing graph explicitly, run
+`python3 scripts/graphify_project.py verify --refresh-corpus`; this launches the
+project's detector and writes the ignored receipt. Default `verify` and
+`verify-local` launch no detector and write no cache. A missing/stale receipt means
+coverage is unavailable; it does not mean an intentionally excluded file is missing.
+Domain-root and ignore-metadata symbolic links are unsupported and refuse coverage.
+Excluded source links are inventoried without reading their targets; selected links
+must resolve inside the project. Refresh explicitly after external Git configuration
+or environment changes. The receipt proves file presence, not semantic completeness
+or extracted content freshness.
+
 If it fails, run `python3 scripts/graphify_project.py setup` to reinstall. Graphify
 has no supported APEXlang extension point, so setup validates the current
 package anchors and fails closed if an upgrade is incompatible. Never repair

@@ -171,21 +171,30 @@ function Invoke-Sqlcl {
       $null = $process.Handle
       Wait-SqlclProcess $process
       $waited = $true
-      $stdout = [System.IO.File]::ReadAllText($stdoutFile)
-      $stderr = [System.IO.File]::ReadAllText($stderrFile)
-      $transcript = $stdout
-      if ($stdout.Length -gt 0 -and $stderr.Length -gt 0) {
-        $transcript += [Environment]::NewLine
-      }
-      $transcript += $stderr
-      [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
       return $process.ExitCode
     } finally {
-      if ($null -ne $process -and -not $waited) {
-        Stop-SqlclProcess $process  # before its output files are removed
+      $waitInterrupted = $null -ne $process -and -not $waited
+      if ($waitInterrupted) {
+        Stop-SqlclProcess $process  # before its output files are read or removed
         $waited = $true
       }
-      Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+      try {
+        # Capture after stopping the child even when waiting raised or Ctrl-C
+        # arrived. The caller retains this transcript for an unknown import.
+        $stdout = [System.IO.File]::ReadAllText($stdoutFile)
+        $stderr = [System.IO.File]::ReadAllText($stderrFile)
+        $transcript = $stdout
+        if ($stdout.Length -gt 0 -and $stderr.Length -gt 0) {
+          $transcript += [Environment]::NewLine
+        }
+        $transcript += $stderr
+        [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
+      } catch {
+        if (-not $waitInterrupted) { throw }
+        Write-Warning "SQLcl diagnostics could not be captured after interruption: $TranscriptFile"
+      } finally {
+        Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+      }
     }
   } finally {
     if ($null -ne $process -and -not $waited) { Stop-SqlclProcess $process }
