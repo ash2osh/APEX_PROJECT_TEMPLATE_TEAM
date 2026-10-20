@@ -75,6 +75,8 @@ def ordered_modules(tests_dir: Path) -> list[str]:
 def run_modules(modules: Sequence[str]) -> tuple[int, str]:
     """Run test modules in one process, as `discover -s tests` would import them; return (exit code, output)."""
     environment = dict(os.environ)
+    # A module that runs this script again (its own tests) must not start a second parallel run.
+    environment["CI_TEST_JOBS"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(ROOT / "tests"), str(ROOT), environment.get("PYTHONPATH", "")) if part)
     result = subprocess.run(

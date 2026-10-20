@@ -24,6 +24,11 @@ class Runner:
 
 class CiRunTestsTests(unittest.TestCase):
     def setUp(self):
+        # CI sets CI_TEST_JOBS=4; without this, main() would start a parallel run of the whole suite from inside it.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("CI_TEST_JOBS", None)
         self.temporary = tempfile.TemporaryDirectory()
         self.known = Path(self.temporary.name) / "known_flaky.txt"
         self.known.write_text(KNOWN_TEXT, encoding="utf-8")
@@ -140,6 +145,28 @@ class ParallelRunTests(unittest.TestCase):
             code = main(["--jobs", "2"], runner=runner, known_path=known, parallel=lambda jobs: (1, FAIL_ONE))
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, [["discover", "-s", "tests", "-v", "-k", "test_one"]])
+
+
+class JobsFromEnvironmentTests(unittest.TestCase):
+    def test_tests_in_a_parallel_ci_run_never_start_another_parallel_run(self):
+        calls = []
+        runner = Runner((0, ""))
+        with patch.dict(os.environ, {"CI_TEST_JOBS": "4"}):
+            code = main([], runner=runner, parallel=lambda jobs: calls.append(jobs) or (0, "x"))
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [4])  # the variable alone selects parallel; the child guard is below
+
+    def test_child_processes_get_one_job(self):
+        seen = {}
+        class Done:
+            returncode, stdout = 0, ""
+        def fake_run(*args, **kwargs):
+            seen.update(kwargs["env"])
+            return Done()
+        with patch.dict(os.environ, {"CI_TEST_JOBS": "4"}), patch("scripts.ci_run_tests.subprocess.run", fake_run):
+            from scripts.ci_run_tests import run_modules
+            run_modules(["test_x"])
+        self.assertEqual(seen["CI_TEST_JOBS"], "1")
 
 
 if __name__ == "__main__":
