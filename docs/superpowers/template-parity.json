@@ -141,8 +141,8 @@
       "status": "intended",
       "reason": "26.2 documents MIGRATION_* profiles, rehearsal metrics and schema-2 checks.",
       "blobs": [
-        "e6d758777323ac943373afa88e32f0f56556d88b",
-        "a115f3612e1191b0dd78b493421b75a6d0416a21"
+        "c1e4c1483f11574f7227c9368d455c1ea4395bf5",
+        "9870bd2e370eee254547bddd2fe0d46246af755d"
       ]
     },
     "docs/publish-rules.md": {
@@ -402,8 +402,8 @@
       ]
     },
     "scripts/migration_revision.py": {
-      "status": "missed",
-      "reason": "Open owner decision: the lock policy for a malformed attempt-event chain (26.1 fails closed for any target; 26.2 scopes to the selected target). relative_to_root is ported (TEAM PR 55).",
+      "status": "intended",
+      "reason": "Decided 2026-10-20 to keep both policies and document them (migration-rules.md in both): 26.1 validates every attempt-event chain first and fails closed for any target; 26.2 validates the selected target strictly, ignores damaged evidence of other targets, and stays fail-closed without a target. Both are safe for the selected target; 26.2 avoids blocking a DEV apply on a damaged production record.",
       "blobs": [
         "83a342ce6cc88c4a4846af65e0a2ca1967f2fa65",
         "2e11ee0478961bfcab9c75b1597e3b19b2d65a1e"
@@ -522,10 +522,10 @@
       ]
     },
     "scripts/validate_migration.py": {
-      "status": "missed",
-      "reason": "26.1 refuses any transaction-control statement other than COMMIT or ROLLBACK [WORK] (scripts/validate_migration.py:375-377); 26.2 lacks that check. Port to 26.2.",
+      "status": "intended",
+      "reason": "Decided 2026-10-20: both accept only COMMIT and ROLLBACK [WORK] in rollout scripts (TEAM PR 59 aligned 26.2 with 26.1; ROLLBACK TO SAVEPOINT could never be used and COMMIT/ROLLBACK FORCE was accepted). What differs is docstring and code layout.",
       "blobs": [
-        "24cd85392a946b64ee51a74bdaa29aff1efc0eec",
+        "81c01695f1eb0077df18c3f9d03af2910940dd37",
         "30daa49b1d6ccbe4ccd5a26e1468a62805ad8881"
       ]
     },
@@ -603,9 +603,9 @@
     },
     "tests/known_flaky.txt": {
       "status": "intended",
-      "reason": "26.2 lists the ORDS backup Windows flake (BackupDbWithOrdsTests); it has not appeared in 26.1, whose backup_db.sh exits inside the function (see scripts/backup_db.sh).",
+      "reason": "26.2 lists its own Windows ORDS backup and Linux publish-interrupt flakes; they have not appeared in 26.1.",
       "blobs": [
-        "df52ba4e0d4cf900e20a7ae5deb3d4399a4ff79f",
+        "44195aa66b7e25ac04b1092e4ad5db406a8ba067",
         "d20f8cafea7ca52d2e2657af97d11b923bdd3b0b"
       ]
     },
@@ -730,8 +730,8 @@
       ]
     },
     "tests/test_migrate_cli.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/migrate.py and migration_revision.py: 26.1's 7 lock-scoping and fail-closed tests vs 26.2's selected-lock tests.",
+      "status": "intended",
+      "reason": "Goes with scripts/migration_revision.py: 26.1 tests its fail-closed policy, 26.2 its scoped policy.",
       "blobs": [
         "84df1c46f2efc1ad926d24d05f14f153a2ca62fb",
         "33d8d746e5df16333623bcb45857efe56b665154"
@@ -770,8 +770,8 @@
       ]
     },
     "tests/test_migration_revision.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/migration_revision.py: the tests encode the two lock policies; pending the owner decision.",
+      "status": "intended",
+      "reason": "Goes with scripts/migration_revision.py: each line tests its own documented policy.",
       "blobs": [
         "5caebd5c8f801c6fadd3422cf9781ae5c4106de1",
         "791f2d53afb244f64ea828bc11adae7461cb8b0a"
@@ -882,11 +882,11 @@
       ]
     },
     "tests/test_validate_migration.py": {
-      "status": "missed",
-      "reason": "Goes with scripts/validate_migration.py: 26.1's test expects the strict COMMIT/ROLLBACK-only rule; 26.2's test accepts 'ROLLBACK TO SAVEPOINT'. Decide the rule, then align both.",
+      "status": "intended",
+      "reason": "Both pin the strict rule (TEAM PR 59, 26.1 PR 25); the test layouts differ.",
       "blobs": [
-        "ab3e68cdd6a8d0e7ca4df09c3db2ee1aa600744c",
-        "15d2a6f0c3b31153422a1ca1a26e3a9e96d37574"
+        "fe2255fda097a06ac4cd7eaefe6b6ea93461417f",
+        "c9fd79f888017b55ec16467125cbe4546f59d331"
       ]
     },
     "tests/test_verify_local.py": {
