@@ -1614,6 +1614,7 @@ exit 17
                     "100",
                     "-",
                     fake_sqlcl.native(checkout_root / "scripts/no_application_lock.sql"),
+                    "${publication_identity[@]}",
                 ],
             )
             self.assertEqual(

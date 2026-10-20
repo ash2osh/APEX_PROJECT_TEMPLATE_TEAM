@@ -143,7 +143,10 @@ if [ "$manual" = true ]; then
     '   export SQLPATH="$sqlcl_dir" ORACLE_PATH="$sqlcl_dir"'
   printf '   python3 %q capture --connection %q --expected-user %q --schema %q --workspace %q --app-id %q --environment %q --run-dir "$sqlcl_dir/lifecycle-before"\n' \
     "$runbook_root/scripts/application_lifecycle.py" "$sqlcl_connection" "$expected_user" "$parsing_schema" "$workspace_name" "$app_id" "$app_environment"
-  printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q %q %q\n' \
+  identity_reader='import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from scripts.application_lifecycle import read_snapshot; data = read_snapshot(Path(sys.argv[2])); fields = ("db_unique_name", "service_name", "container_id", "container_name", "edition", "server_host", "session_user", "current_schema"); print("\t".join(data["identity"][key].encode("utf-8").hex().upper() for key in fields))'
+  printf '   publication_identity_hex=$(python3 -c %q %q "$sqlcl_dir/lifecycle-before/lifecycle-snapshot.json")\n' "$identity_reader" "$runbook_root"
+  printf '%s\n' '   read -r -a publication_identity <<< "$publication_identity_hex"'
+  printf '   sql -S -noupdates -name %q %q %q %q %q %q %q %q %q %q "${publication_identity[@]}"\n' \
     "$sqlcl_connection" "@$runbook_root/scripts/publish_app.sql" "$parsing_schema" \
     "$target_environment" "$expected_user" "$app_dir" \
     "$app_dir/deployments/$app_environment.json" "$app_id" - "$runbook_root/scripts/no_application_lock.sql"
@@ -172,6 +175,8 @@ if [ "$manual" = true ]; then
     "$runbook_root/scripts/verify_publish_state.py" "$app_id" "$app_dir" "$runbook_root" "$app_dir/deployments/$app_environment.json"
   [ "$strict_bytes" = false ] || printf ' --strict-bytes'
   printf '\n'
+  summary_writer='import json, sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({"schemaVersion": 1, "sourceVerified": True, "lifecycleStatus": "unavailable"}) + "\n", encoding="utf-8")'
+  printf '   python3 -c %q "$sqlcl_dir/publish-verification.json"\n' "$summary_writer"
   printf '   # Source check must print APEX_PUBLISH_SOURCE_VERIFIED:%s.\n' "$app_id"
   printf '6. Verify lifecycle independently; failures retain recovery diagnostics:\n'
   printf '   python3 %q verify --connection %q --expected-user %q --schema %q --workspace %q --app-id %q --environment %q --before "$sqlcl_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$sqlcl_dir/lifecycle-after" --summary-path "$sqlcl_dir/publish-verification.json"\n' \

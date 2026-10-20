@@ -24,6 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 KNOWN_FLAKY = ROOT / "tests" / "known_flaky.txt"
 FAILURE = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
+FAILED_SUMMARY = re.compile(r"^FAILED \([^\r\n]+\)\s*\Z", re.MULTILINE)
 Runner = Callable[[Sequence[str]], tuple[int, str]]
 
 
@@ -39,6 +40,11 @@ def failed_test_ids(output: str) -> set[str]:
             method, owner = match.groups()
             ids.add(owner if owner.endswith("." + method) else f"{owner}.{method}")
     return ids
+
+
+def completed_failure(output: str) -> bool:
+    """Whether unittest finished reporting a named failure, rather than crashing mid-run."""
+    return bool(failed_test_ids(output) and FAILED_SUMMARY.search(output))
 
 
 def load_known(path: Path) -> set[str]:
@@ -98,7 +104,13 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
             print(f"===== {module}: exit {module_code}", flush=True)
             print(output, end="" if output.endswith("\n") else "\n", flush=True)
             outputs.append(output)
-            code = code or module_code
+            if module_code:
+                # A child can die without a named failure while another child
+                # reports a known flaky test. Keep that incomplete run fatal;
+                # concatenating their output must not make it retryable.
+                outcome = 2 if module_code == 1 and not completed_failure(output) else module_code
+                if code in (0, 1):
+                    code = outcome
     return code, "".join(outputs)
 
 
@@ -122,12 +134,18 @@ def parse_jobs(args: list[str]) -> tuple[int, list[str]]:
 def main(argv: Sequence[str] | None = None, *, runner: Runner = run_unittest, known_path: Path = KNOWN_FLAKY,
          parallel: Callable[[int], tuple[int, str]] = run_parallel) -> int:
     jobs, args = parse_jobs(list(argv) if argv is not None else sys.argv[1:])
-    if jobs > 1 and not args:
+    parallel_run = jobs > 1 and not args
+    if parallel_run:
         code, output = parallel(jobs)
     else:
         code, output = runner(["discover", "-s", "tests", "-v", *args])
     if code == 0:
         return 0
+    # unittest reports ordinary failures with exit 1. Signals, fatal teardown
+    # errors and incomplete output are never eligible for the flaky retry.
+    # Parallel children were individually checked before aggregation above.
+    if code != 1 or (not parallel_run and not completed_failure(output)):
+        return code
     failed = failed_test_ids(output)
     known = load_known(known_path)
     if not failed or not failed <= known:

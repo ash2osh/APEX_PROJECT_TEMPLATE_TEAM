@@ -1,6 +1,8 @@
 import contextlib
 import io
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -77,6 +79,11 @@ class CiRunTestsTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(len(runner.calls), 1)
 
+    def test_a_known_failure_with_incomplete_output_is_not_rerun(self):
+        code, runner = self.run_main((1, "FAIL: test_one (mod_a.ClassA)\n"), (0, ""))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(runner.calls), 1)
+
     def test_a_known_flaky_failure_is_rerun_once_and_passes(self):
         code, runner = self.run_main((1, FAIL_ONE), (0, ""))
         self.assertEqual(code, 0)
@@ -116,7 +123,7 @@ class ParallelRunTests(unittest.TestCase):
 
     def test_parallel_run_fails_when_any_module_fails_and_keeps_all_output(self):
         def module_runner(modules):
-            return (1, "FAIL: test_one (test_mid.C)\n") if modules == ["test_mid"] else (0, "ok\n")
+            return (1, "FAIL: test_one (test_mid.C)\nFAILED (failures=1)\n") if modules == ["test_mid"] else (0, "ok\n")
         with contextlib.redirect_stdout(io.StringIO()) as printed:
             code, output = run_parallel(2, module_runner, self.tests)
         self.assertEqual(code, 1)
@@ -145,6 +152,74 @@ class ParallelRunTests(unittest.TestCase):
             code = main(["--jobs", "2"], runner=runner, known_path=known, parallel=lambda jobs: (1, FAIL_ONE))
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, [["discover", "-s", "tests", "-v", "-k", "test_one"]])
+
+
+class CrashedProcessTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.tests = Path(self.temporary.name)
+        self.known = self.tests / "known.txt"
+        self.known.write_text("test_flaky.C.test_retry\n", encoding="utf-8")
+        self.retry_calls = []
+
+    def write_flaky(self, *, crash_at_exit=False):
+        crash = "   atexit.register(lambda: os._exit(7))\n" if crash_at_exit else ""
+        (self.tests / "test_flaky.py").write_text(
+            "import atexit, os, unittest\nfrom pathlib import Path\n"
+            "class C(unittest.TestCase):\n def test_retry(self):\n"
+            "  marker = Path(__file__).with_suffix('.marker')\n"
+            "  if not marker.exists():\n   marker.touch()\n" + crash
+            + "   self.fail('known first-run failure')\n", encoding="utf-8")
+
+    def run_unittest(self, args):
+        result = subprocess.run([sys.executable, "-m", "unittest", *args],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8")
+        return result.returncode, result.stdout
+
+    def runner(self, args):
+        self.retry_calls.append(list(args))
+        args = list(args)
+        args[args.index("-s") + 1] = str(self.tests)
+        return self.run_unittest(args)
+
+    def test_unrelated_parallel_crash_is_not_hidden_by_a_known_failure(self):
+        self.write_flaky()
+        (self.tests / "test_crash.py").write_text(
+            "import os, unittest\nclass C(unittest.TestCase):\n"
+            " def test_unrelated(self):\n  os._exit(7)\n", encoding="utf-8")
+
+        def module_runner(names):
+            return self.run_unittest(["discover", "-s", str(self.tests), "-p", names[0] + ".py", "-v"])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--jobs", "2"], runner=self.runner, known_path=self.known,
+                        parallel=lambda jobs: run_parallel(jobs, module_runner, self.tests))
+        self.assertEqual(code, 7)
+        self.assertEqual(self.retry_calls, [])
+
+    def test_serial_crash_after_a_known_failure_is_not_rerun(self):
+        self.write_flaky(crash_at_exit=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--jobs", "1"], runner=self.runner, known_path=self.known)
+        self.assertEqual(code, 7)
+        self.assertEqual(len(self.retry_calls), 1)
+
+    def test_incomplete_parallel_failure_is_not_hidden_by_a_known_failure(self):
+        self.write_flaky()
+        (self.tests / "test_incomplete.py").write_text("# no completed unittest result\n", encoding="utf-8")
+
+        def module_runner(names):
+            if names == ["test_incomplete"]:
+                return 1, "FAIL: test_retry (test_flaky.C)\n"
+            return self.run_unittest(["discover", "-s", str(self.tests), "-p", names[0] + ".py", "-v"])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--jobs", "2"], runner=self.runner, known_path=self.known,
+                        parallel=lambda jobs: run_parallel(jobs, module_runner, self.tests))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.retry_calls, [])
 
 
 class JobsFromEnvironmentTests(unittest.TestCase):

@@ -11,9 +11,9 @@
     },
     ".agents/rules/graphify.md": {
       "status": "intended",
-      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py; 26.1 uses setup_graphify_apx.py.",
+      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py; 26.1 uses setup_graphify_apx.py. The 26.2-only isolated Graphify workflow also documents exact-detector corpus receipts; shared review fixes are aligned.",
       "blobs": [
-        "9e1dee421dc01c43fefe24f355bf4100f66e36f0",
+        "2b82747ca034db99477c03b4162abcb866251931",
         "2c9dc3783dbf6faec8d3e4756750270bb5fa8ce6"
       ]
     },
@@ -35,9 +35,9 @@
     },
     ".agents/workflows/graphify.md": {
       "status": "intended",
-      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py.",
+      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py. The 26.2-only isolated Graphify workflow also documents exact-detector corpus receipts; shared review fixes are aligned.",
       "blobs": [
-        "ca26199b45be15381928f31407b49fb8d2c9f00b",
+        "617a972f35336fd4fc6c08eddeef307039a9ae4f",
         "afdfca91a002a6f854a6758e60e3c24831875d59"
       ]
     },
@@ -83,9 +83,9 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "26.2 release content and command reference (app-lock, upgrade-apexlang); 26.1 documents its own commands.",
+      "reason": "26.2 release content and command reference (app-lock, upgrade-apexlang); 26.1 documents its own commands. The 26.2-only isolated Graphify workflow also documents exact-detector corpus receipts; shared review fixes are aligned.",
       "blobs": [
-        "249e1151398825f1589d73fb1bbe6062cb63c6e5",
+        "df068ccb1365a4581b9ede6df9ff48df26928412",
         "a089a938b4a48620852f386b039d85b266ac664d"
       ]
     },
@@ -149,8 +149,8 @@
       "status": "intended",
       "reason": "26.2 documents locks, partial publish, normalization and runtime verification.",
       "blobs": [
-        "2710637fd75ce28b885de9f04d645249b5bee4c6",
-        "640015b11cef2df05b4bc6727001fedf1cd6154e"
+        "d2caac3398e503e8295da32eddad8eddd8945fe8",
+        "55ed00c9f4c85f0eae78ed3db8955f986ca627e4"
       ]
     },
     "docs/superpowers/plans/2026-10-13-migration-improvements.md": {
@@ -269,8 +269,8 @@
       "status": "feature",
       "reason": "26.2 adds --strict-bytes, --no-restore-automations, lifecycle capture and no_application_lock.",
       "blobs": [
-        "54c0d4727888915e9de831e355059db4202380d5",
-        "e2b238aed3e182870e62bf97d60b046265f9a3a3"
+        "948b4f3591fd200fe18e683ac56ece1e7e715c52",
+        "7ba7aa7eb11eeaf8ba62deb7badea233163e0ce8"
       ]
     },
     "scripts/deployment_descriptor.py": {
@@ -331,10 +331,10 @@
     },
     "scripts/invoke_sqlcl.ps1": {
       "status": "intended",
-      "reason": "26.2 adds Assert-SqlclApexVersion (SQLcl 26.3 gate); the WaitForExit fix exists in both.",
+      "reason": "26.2 adds Assert-SqlclApexVersion (SQLcl 26.3 gate); both lines retain diagnostics through wait/stop exceptions, complete exited-child output and permit inherited Windows writer handles.",
       "blobs": [
-        "3c0bf020aab04840103244c8c2bf8348e0036aef",
-        "73c1734db72e99b2763f4eb1ebae8cc27a54bde8"
+        "3e9c4968b8eff2171b7e9f8cf3415d52fee63009",
+        "e07d46bcd8a2ea4ee5b57c72af78f9c181765c48"
       ]
     },
     "scripts/load_env.ps1": {
@@ -365,8 +365,8 @@
       "status": "intended",
       "reason": "Ported both ways: 26.1 got the transport preflight (26.1 PR 24), 26.2 got relative_to_root (TEAM PR 55); only import layout differs.",
       "blobs": [
-        "55695cf8a3635ec5322c2a3e5338b49a16e071de",
-        "18bbaa79de819f62ac1706a10d6a2c65f75e89e8"
+        "9bee6f1fe3245f2c158879ef4866bfc376998f3a",
+        "36ca458cfe94e40a5f63dccb7372c297fbef44a9"
       ]
     },
     "scripts/migration_attempts.py": {
@@ -414,7 +414,7 @@
       "reason": "Same 26.2 publish features as publish_app.sh.",
       "blobs": [
         "6719dd64c6ec1bf4bd16043ac3fa25a85801be8e",
-        "19786a9d4440d3f8e1d760c4d89a47311783c2df"
+        "e591281f389d31b6d6681e89583dc28b6c798cd4"
       ]
     },
     "scripts/publish_app.sh": {
@@ -422,15 +422,15 @@
       "reason": "26.2 adds locks, normalization, automation restore and partial publish.",
       "blobs": [
         "45b4c883803d5c9d1b7ceeb31ef99b5deefec2a9",
-        "62de19908f1827583c06e24c115a8dfdaa9a0e30"
+        "ca7eb2bad8b62fd48915af70be9c6757bb6fc918"
       ]
     },
     "scripts/publish_app.sql": {
       "status": "intended",
       "reason": "Each line passes the observed writer identity to the import session in its own form (F01 is 26.2 only).",
       "blobs": [
-        "f60c12c44c80fab26f45a204ea11530b6a1ffc80",
-        "4c3e6e32d0cbf2573f54f068bc93fa34382531f9"
+        "276f8acf32220ac035e7d822ff47ce6fa66de26c",
+        "a21d3d10f88c27f8f2cab09148bf1243534e7200"
       ]
     },
     "scripts/record_export_state.py": {
@@ -531,9 +531,9 @@
     },
     "scripts/verify_local.py": {
       "status": "intended",
-      "reason": "26.1 port of verify-local without the 26.2-only checks (Oracle skills registry, native-lock recovery records, Graphify venv); the lock may omit apexRelease; is_original_template comes from template_drift.",
+      "reason": "26.1 port of verify-local without the 26.2-only checks (Oracle skills registry, native-lock recovery records, Graphify venv); the lock may omit apexRelease; is_original_template comes from template_drift. 26.2 additionally reports missing template-locked files as attention; its Graphify coverage receipt checks remain release-specific.",
       "blobs": [
-        "3a8d725c3fe124fa99f2e3b7dd75c96617176f9e",
+        "a590cac254fe69242f0dbf8bea3cdad367c9184d",
         "e4f8a7f6a1f390b8b576fe4ff6aa9c570e56d4b1"
       ]
     },
@@ -803,10 +803,10 @@
     },
     "tests/test_publish_cli.py": {
       "status": "feature",
-      "reason": "13 26.2-only publish tests (locks, lifecycle, partial publish).",
+      "reason": "Release-specific publish tests: 26.2 locks, lifecycle and partial publish; 26.1 retains explicit unknown-import diagnostic assertions under POSIX and native Windows Ctrl-C.",
       "blobs": [
         "ef5cd86edc6278ea2a0dcef2e7efb6aaeba23ead",
-        "be462187bc2b3421842879b8472e301e21093ee3"
+        "c9e18d92b645ad69e41029cbedb5e91edf7cbf62"
       ]
     },
     "tests/test_record_export_state.py": {
@@ -853,8 +853,8 @@
       "status": "feature",
       "reason": "Tests 26.2-only commands; the wrapper tests for shared commands exist in both.",
       "blobs": [
-        "ff2266b3fd9872ba659473816199877521e9b9e6",
-        "7372b29439f7143dbeefb135af9c9dba3f063057"
+        "f3a69e797d3b6bc1a40e0ef589afe3c918badcdc",
+        "06f5e3d853c8f4105a1e9d1cba5d8af31772f3d0"
       ]
     },
     "tests/test_template_drift.py": {
@@ -891,9 +891,9 @@
     },
     "tests/test_verify_local.py": {
       "status": "intended",
-      "reason": "Adapted for 26.1: schema-1 manifest, lock with optional apexRelease, no skills, recovery or Graphify tests.",
+      "reason": "Adapted for 26.1: schema-1 manifest, lock with optional apexRelease, no skills, recovery or Graphify tests. 26.2 additionally reports missing template-locked files as attention; its Graphify coverage receipt checks remain release-specific.",
       "blobs": [
-        "f865cce9c69a767bc7d045768c72aa8b7c8ff63e",
+        "487f8fbbf17e0ecd0f39672622c2ff3732944283",
         "e1149f6b9d39562186c1fe46bf14719e5b48a8b9"
       ]
     },

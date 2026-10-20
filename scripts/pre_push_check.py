@@ -16,6 +16,7 @@ Read-only except `--install-hook`.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -100,6 +101,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.install_hook:
         return install_hook()
+    # Hooks export repository-local Git variables. Fixture tests use other
+    # repositories; inheriting these redirects their Git writes into this one.
+    for name in git_lines("rev-parse", "--local-env-vars"):
+        os.environ.pop(name, None)
     paths = changed_paths()
     if args.all:
         python_targets = existing(CODE_DIRS)

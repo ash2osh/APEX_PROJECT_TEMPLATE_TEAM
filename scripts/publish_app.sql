@@ -68,6 +68,10 @@ BEGIN
 END;
 /
 
+-- Match the schema context captured by lifecycle observation while preserving
+-- the authenticated session user verified above.
+ALTER SESSION SET CURRENT_SCHEMA = &&target_schema;
+
 @@publish_identity_guard.sql &&expected_db_unique_name &&expected_service_name &&expected_container_id &&expected_container_name &&expected_edition &&expected_server_host &&expected_session_user &&expected_current_schema
 
 @@verify_apex_release.sql

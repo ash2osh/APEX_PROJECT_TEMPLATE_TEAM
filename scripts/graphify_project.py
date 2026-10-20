@@ -9,12 +9,15 @@ repositories.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Prevent bytecode caching
@@ -22,6 +25,23 @@ sys.dont_write_bytecode = True
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS_FILE = REPO_ROOT / "tools" / "graphify" / "requirements.txt"
+CORPUS_RECEIPT = ".template-corpus.json"
+CORPUS_SCAN = """
+import json, sys, tempfile
+from contextlib import redirect_stdout
+from pathlib import Path
+from graphify.detect import detect
+from graphify.watch import _read_build_excludes, _read_build_gitignore
+root = Path(sys.argv[1])
+build = root / "graphify-out"
+with tempfile.TemporaryDirectory(prefix="graphify-corpus.") as cache:
+    with redirect_stdout(sys.stderr):
+        result = detect(root, cache_root=Path(cache),
+                        extra_excludes=_read_build_excludes(build) or None,
+                        gitignore=_read_build_gitignore(build))
+    print(json.dumps({"files": [p for paths in result["files"].values() for p in paths],
+                      "walk_errors": result["walk_errors"]}))
+"""
 
 try:
     from scripts.setup_graphify_apx import (
@@ -66,47 +86,159 @@ def find_graphify_package_dir(env_dir: Path) -> Path | None:
 
 
 def scan_eligible_domain_files(repo_root: Path) -> set[str]:
-    """Scan repo_root for eligible domain files according to .graphifyignore rules."""
+    """Raw candidate inventory for receipt invalidation, never guessed ignore eligibility."""
     eligible: set[str] = set()
-
-    def is_ignored(rel_str: str) -> bool:
-        parts = rel_str.split("/")
-        filename = parts[-1]
-        if filename.startswith(".") and filename != ".gitkeep":
-            return True
-        if filename in (".gitkeep", "README.md", "manifest-code.txt", "manifest-tables.txt", "export.log", "export_err.log"):
-            return True
-        if ".apex" in parts or "deployments" in parts or "workspace-components" in parts:
-            return True
-        if filename == "static-files.apx" or "static-files" in parts:
-            return True
-        return False
-
-    apps_dir = repo_root / "apps"
-    if apps_dir.is_dir():
-        for f in apps_dir.rglob("*.apx"):
-            if f.is_file():
-                rel = f.relative_to(repo_root).as_posix()
-                if not is_ignored(rel):
-                    eligible.add(rel)
-
-    db_dir = repo_root / "database"
-    if db_dir.is_dir():
-        for f in db_dir.rglob("*.sql"):
-            if f.is_file():
-                rel = f.relative_to(repo_root).as_posix()
-                if not is_ignored(rel):
-                    eligible.add(rel)
-
-    ctx_dir = repo_root / "app_context"
-    if ctx_dir.is_dir():
-        for f in ctx_dir.rglob("*.md"):
-            if f.is_file():
-                rel = f.relative_to(repo_root).as_posix()
-                if not is_ignored(rel):
-                    eligible.add(rel)
-
+    for name, suffix in (("apps", ".apx"), ("database", ".sql"), ("app_context", ".md")):
+        folder = repo_root / name
+        if folder.is_dir() and not folder.is_symlink():
+            for path in folder.rglob("*"):
+                if path.suffix.lower() == suffix and (path.is_file() or path.is_symlink()):
+                    eligible.add(path.relative_to(repo_root).as_posix())
     return eligible
+
+
+def _fingerprint(path: Path, *, source_link: bool = False):
+    if path.is_symlink():
+        if source_link:
+            return {"link": os.readlink(path)}
+        raise ValueError("corpus input is a symbolic link")
+    if not path.exists():
+        return None
+    if path.is_dir():
+        return "directory"
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError("corpus input is not a regular file")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def corpus_inputs(repo_root: Path) -> dict:
+    """Fingerprint sources/settings, including linked-worktree metadata, without Git."""
+    candidates = scan_eligible_domain_files(repo_root)
+    paths = {name: repo_root / name for name in candidates}
+    for name in (".gitignore", ".graphifyignore", "graphify-out/.graphify_build.json"):
+        paths[name] = repo_root / name
+    for name in ("apps", "database", "app_context"):
+        folder = repo_root / name
+        paths[name + "/"] = folder
+        if folder.is_dir() and not folder.is_symlink():
+            for pattern in (".gitignore", ".graphifyignore"):
+                for path in folder.rglob(pattern):
+                    paths[path.relative_to(repo_root).as_posix()] = path
+    marker = repo_root / ".git"
+    paths["git:marker"] = marker
+    git_dir = marker
+    if marker.is_file() and not marker.is_symlink():
+        text = marker.read_text(encoding="utf-8").strip()
+        if not text.startswith("gitdir: ") or not text[8:]:
+            raise ValueError("invalid Git worktree metadata")
+        git_dir = (repo_root / text[8:]).resolve()
+    if git_dir.is_dir():
+        paths["git:index"] = git_dir / "index"
+        paths["git:exclude"] = git_dir / "info/exclude"
+        paths["git:commondir"] = git_dir / "commondir"
+        common_file = git_dir / "commondir"
+        if common_file.is_file() and not common_file.is_symlink():
+            relative = common_file.read_text(encoding="utf-8").strip()
+            if not relative:
+                raise ValueError("invalid Git common directory metadata")
+            paths["git:common-exclude"] = (git_dir / relative).resolve() / "info/exclude"
+    inputs = {name: _fingerprint(path, source_link=name in candidates) for name, path in sorted(paths.items())}
+    # Detector noise pruning also depends on non-source markers (coverage
+    # reports, venv launchers, conda-meta, snapshots, ...). Record every path's
+    # own type without opening payloads or following directory links.
+    inventory = {}
+    def walk_error(error):
+        raise error
+    for name in ("apps", "database", "app_context"):
+        folder = repo_root / name
+        if not folder.is_dir() or folder.is_symlink():
+            continue
+        for base, directories, files in os.walk(folder, followlinks=False, onerror=walk_error):
+            for leaf in directories + files:
+                path = Path(base) / leaf
+                inventory[path.relative_to(repo_root).as_posix()] = stat.S_IFMT(path.lstat().st_mode)
+    inputs["domain:path-types"] = inventory
+    return inputs
+
+
+def _selected_inputs(repo_root: Path, selected: set[str]) -> dict:
+    result = {}
+    candidates = scan_eligible_domain_files(repo_root)
+    for name in sorted(selected):
+        if name not in candidates:
+            raise ValueError("invalid selected domain source")
+        physical = (repo_root / name).resolve()
+        physical.relative_to(repo_root.resolve())
+        result[name] = _fingerprint(physical)
+    return result
+
+
+def _receipt_sources(repo_root: Path, graph_bytes: bytes) -> set[str]:
+    path = repo_root / "graphify-out" / CORPUS_RECEIPT
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("missing corpus receipt; coverage unavailable")
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(receipt, dict) or receipt.get("schemaVersion") != 1
+            or not isinstance(receipt.get("selected"), list)
+            or not all(isinstance(item, str) for item in receipt["selected"])):
+        raise ValueError("invalid corpus receipt; coverage unavailable")
+    if (receipt.get("inputs") != corpus_inputs(repo_root)
+            or receipt.get("graphSha256") != hashlib.sha256(graph_bytes).hexdigest()
+            or receipt.get("selectedInputs") != _selected_inputs(repo_root, set(receipt["selected"]))):
+        raise ValueError("corpus inputs or graph changed; coverage unavailable until refreshed")
+    return set(receipt["selected"])
+
+
+def refresh_corpus_receipt(repo_root: Path) -> None:
+    """Run only the local detector and atomically cache verified domain eligibility."""
+    output = repo_root / "graphify-out"
+    if output.is_symlink() or not output.is_dir():
+        raise ValueError("canonical graphify-out directory is unavailable")
+    before = corpus_inputs(repo_root)
+    process = subprocess.run(
+        [str(environment_python(project_graphify_environment(repo_root))), "-B", "-c", CORPUS_SCAN, str(repo_root)],
+        cwd=repo_root, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    if process.returncode:
+        raise ValueError("local Graphify corpus scan failed")
+    payload = json.loads(process.stdout)
+    if (not isinstance(payload, dict) or not isinstance(payload.get("files"), list)
+            or not isinstance(payload.get("walk_errors"), list) or payload["walk_errors"]
+            or not all(isinstance(item, str) for item in payload["files"])):
+        raise ValueError("local Graphify corpus scan was invalid or incomplete")
+    candidates = scan_eligible_domain_files(repo_root)
+    selected = set()
+    for text in payload["files"]:
+        path = Path(text)
+        if not path.is_absolute():
+            path = repo_root / path
+        path.resolve().relative_to(repo_root.resolve())
+        relative = path.absolute().relative_to(repo_root.absolute()).as_posix()
+        if relative in candidates:
+            selected.add(relative)
+    graph_path = output / "graph.json"
+    graph_bytes = graph_path.read_bytes()
+    graph = json.loads(graph_bytes)
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+        raise ValueError("graph has no valid nodes list")
+    represented = {node.get("source_file") for node in graph["nodes"] if isinstance(node, dict)
+                   and isinstance(node.get("source_file"), str)}
+    if selected - represented:
+        raise ValueError("eligible domain source missing from graph: " + sorted(selected - represented)[0])
+    selected_inputs = _selected_inputs(repo_root, selected)
+    if (before != corpus_inputs(repo_root) or graph_bytes != graph_path.read_bytes()
+            or selected_inputs != _selected_inputs(repo_root, selected)):
+        raise ValueError("corpus inputs or graph changed during the scan")
+    receipt = {"schemaVersion": 1, "inputs": before, "selected": sorted(selected),
+               "graphSha256": hashlib.sha256(graph_bytes).hexdigest(), "selectedInputs": selected_inputs}
+    staged = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=output, prefix=".corpus-", delete=False, encoding="utf-8") as handle:
+            staged = Path(handle.name)
+            json.dump(receipt, handle, sort_keys=True)
+        os.replace(staged, output / CORPUS_RECEIPT)
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
 
 
 def get_installed_dist_version(sp_dir: Path, pkg_name: str) -> str | None:
@@ -354,14 +486,22 @@ def inspect_graphify(repo_root: Path, target_env: Path | None = None) -> dict:
         reasons.append(f"Stale APEXlang AST cache entries detected ({stale_cache_count} file(s)).")
 
     # 7. Domain coverage & graph schema check
-    eligible_files = scan_eligible_domain_files(repo_root)
+    if any((repo_root / name).is_symlink() for name in ("apps", "database", "app_context")):
+        reasons.append("Domain root symbolic links are unsupported; coverage unavailable.")
+    candidates = scan_eligible_domain_files(repo_root)
     graph_path = repo_root / "graphify-out" / "graph.json"
     if not graph_path.is_file():
-        if eligible_files:
+        if candidates:
             reasons.append("Graph at graphify-out/graph.json is missing.")
     else:
         try:
-            graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
+            graph_bytes = graph_path.read_bytes()
+            graph_data = json.loads(graph_bytes)
+            try:
+                eligible_files = _receipt_sources(repo_root, graph_bytes)
+            except (OSError, UnicodeError, ValueError) as exc:
+                eligible_files = set()
+                reasons.append(f"Domain corpus {exc}; run extract or verify --refresh-corpus.")
             if not isinstance(graph_data, dict) or not isinstance(graph_data.get("nodes"), list):
                 reasons.append("Graph at graphify-out/graph.json has invalid schema: missing nodes list.")
             else:
@@ -512,9 +652,20 @@ def setup_graphify(repo_root: Path, target_env: Path | None = None) -> int:
     return 0
 
 
-def verify_graphify(repo_root: Path, target_env: Path | None = None, output_format: str = "text") -> int:
-    """Read-only verification of Graphify environment."""
+def verify_graphify(repo_root: Path, target_env: Path | None = None, output_format: str = "text",
+                    *, refresh_corpus: bool = False) -> int:
+    """Inspect offline; only explicit refresh_corpus runs tooling and writes its receipt."""
     result = inspect_graphify(repo_root, target_env)
+    if refresh_corpus:
+        if target_env is not None or not result.get("is_package_ready", False):
+            print("Error: corpus refresh requires the ready project-isolated environment.", file=sys.stderr)
+            return 1
+        try:
+            refresh_corpus_receipt(repo_root)
+        except (OSError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"Error: corpus coverage unavailable: {exc}", file=sys.stderr)
+            return 1
+        result = inspect_graphify(repo_root)
     if output_format == "json":
         print(json.dumps(result, indent=2, default=str))
         return 0 if result["status"] in ("current", "absent") else 1
@@ -601,6 +752,11 @@ def extract_graphify(repo_root: Path, extra_args: list[str], target_env: Path | 
     check_res = subprocess.run([str(py_bin), str(checker), "--root", str(repo_root), "--graph", str(graph_path)], cwd=repo_root, check=False)
     if check_res.returncode != 0:
         return check_res.returncode
+    try:
+        refresh_corpus_receipt(repo_root)
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"Error: corpus coverage unavailable: {exc}", file=sys.stderr)
+        return 1
     current = inspect_graphify(repo_root)
     if current['status'] != 'current':
         print('Error: Extracted graph did not pass local coverage/cache verification.', file=sys.stderr)
@@ -619,8 +775,10 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers.add_parser("setup", help="Configure or repair the project-isolated Graphify environment")
     verify_parser = subparsers.add_parser("verify", help="Check status of Graphify environment (read-only)")
-    verify_parser.add_argument("--format", choices=["text", "json"], default=None, help="Output format")
-    verify_parser.add_argument("--target", type=Path, default=None, help="Explicit target environment (verify only)")
+    verify_parser.add_argument("--format", choices=["text", "json"], default=argparse.SUPPRESS, help="Output format")
+    verify_parser.add_argument("--target", type=Path, default=argparse.SUPPRESS, help="Explicit target environment (verify only)")
+    verify_parser.add_argument("--refresh-corpus", action="store_true",
+                               help="Run the local detector and write the ignored corpus cache receipt")
     extract_parser = subparsers.add_parser("extract", help="Run extraction within project-isolated environment")
     extract_parser.add_argument("extract_args", nargs=argparse.REMAINDER, help="Arguments passed to graphify extract")
 
@@ -635,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "verify":
         fmt = getattr(args, "format", None) or "text"
         tgt = getattr(args, "target", None)
-        return verify_graphify(root, target_env=tgt, output_format=fmt)
+        return verify_graphify(root, target_env=tgt, output_format=fmt, refresh_corpus=args.refresh_corpus)
     elif args.command == "extract":
         if args.target is not None:
             print("Error: --target is not permitted for extract. Extract always uses project-isolated .venv-graphify.", file=sys.stderr)

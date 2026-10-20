@@ -34,6 +34,9 @@ run the whole suite or any Windows check. `python3 scripts/pre_push_check.py --i
 `scripts/ci_run_tests.py`: if the suite fails and every failing test is in that list, only those tests run once
 more and the job passes when the rerun passes. The run shows a `::warning` annotation, so each occurrence stays
 visible. Any failing test that is not listed, or a rerun that fails, fails the job as before.
+An abnormal process exit or a failing module without a completed unittest result also fails
+the job, even when another module reports a listed flaky test. The same rule applies to a
+single-process run that crashes after reporting a listed failure.
 
 Add an entry only with evidence (the same code passing in another run) and a reason; remove it when the test is
 fixed. Never add a test that fails every time.

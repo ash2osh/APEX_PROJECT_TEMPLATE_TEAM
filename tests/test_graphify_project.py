@@ -430,6 +430,12 @@ class GraphifyProjectTests(unittest.TestCase):
             }),
             encoding="utf-8"
         )
+        from scripts.graphify_project import refresh_corpus_receipt
+        selected = [str(self.proj_a / path) for path in (
+            "apps/DEMO/101/pages/p1.apx", "database/orders.sql", "app_context/domain.md")]
+        scan = mock.Mock(returncode=0, stdout=json.dumps({"files": selected, "walk_errors": []}), stderr="")
+        with mock.patch("scripts.graphify_project.subprocess.run", return_value=scan):
+            refresh_corpus_receipt(self.proj_a)
         result2 = inspect_graphify(self.proj_a)
         self.assertEqual(result2["status"], "current")
         self.assertTrue(result2.get("is_graph_current", False))

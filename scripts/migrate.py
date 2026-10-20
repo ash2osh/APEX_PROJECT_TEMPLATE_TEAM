@@ -36,7 +36,7 @@ from .migration_checks import (
     preflight_inventory_retries,
     run_checks,
 )
-from .migration_diff import write_diff
+from .migration_diff import diff_path, write_diff
 from .migration_manifest import (
     Migration,
     MigrationFile,
@@ -1313,8 +1313,8 @@ def record_daily_diffs(repo_root: Path, migrations: Sequence[Migration], day: st
         return
     day = day or datetime.now().date().isoformat()
     for migration in migrations:
-        existing = root / "ai_generate" / day / f"{migration.folder.name}.diff"
         try:
+            existing = diff_path(root, migration.folder, day)
             if existing.exists():
                 print(f"daily change record: kept {existing.relative_to(root).as_posix()}")
                 continue
