@@ -16,6 +16,7 @@ from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 
 from .migration_attempts import EVENT_FILENAME_RE, MigrationAttemptError, read_attempt_events
+from .path_utils import relative_to_root
 from .validate_migration import validate_sql_only
 
 
@@ -282,20 +283,25 @@ def validate_check_query(
     if allowed_bind_names is None and allowed_binds is not None:
         allowed_bind_names = allowed_binds
 
+    allowed_names = {"target_schema"}
     if allowed_bind_names is not None:
-        allowed_set = {"target_schema"} | {
-            b[1:].casefold() if b.startswith(":") else b.casefold()
-            for b in allowed_bind_names
-        }
-    else:
-        allowed_set = {"target_schema"}
+        try:
+            for name in allowed_bind_names:
+                if not isinstance(name, str):
+                    raise MigrationManifestError("allowed check binding names must be strings")
+                normalized = name[1:] if name.startswith(":") else name
+                if not normalized or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]*", normalized, re.ASCII):
+                    raise MigrationManifestError("allowed check binding name is invalid")
+                allowed_names.add(normalized.casefold())
+        except TypeError as error:
+            raise MigrationManifestError("allowed check binding names must be iterable strings") from error
 
     for index, token in enumerate(tokens):
         if token == ":":
             if index + 1 >= len(tokens) or not tokens[index + 1].startswith("WORD:"):
                 raise MigrationManifestError("checks may bind only :target_schema")
             bind_name = tokens[index + 1][5:]
-            if bind_name not in allowed_set:
+            if bind_name not in allowed_names:
                 if allowed_bind_names is None:
                     raise MigrationManifestError("checks may bind only :target_schema")
                 raise MigrationManifestError(
@@ -597,7 +603,7 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
     if folder.is_symlink():
         raise MigrationManifestError("symbolic links are not allowed in migration paths")
     try:
-        folder.resolve(strict=True).relative_to(root)
+        relative_to_root(folder.resolve(strict=True), root)
     except (OSError, ValueError) as exc:
         raise MigrationManifestError(f"migration folder is missing or outside the repository: {_printable(relative_folder)}") from exc
     if not folder.is_dir():
@@ -755,7 +761,7 @@ def verify_loaded_input_hashes(
     root = repo_root.resolve()
     for migration in migrations:
         folder = migration.folder.resolve()
-        relative_folder = folder.relative_to(root).as_posix()
+        relative_folder = relative_to_root(folder, root).as_posix()
         for source_file in migration.files:
             relative = f"{relative_folder}/{source_file.name}"
             observed = hashlib.sha256(source_file.source).hexdigest()
@@ -890,7 +896,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.folders:
                 raise MigrationManifestError("--list does not accept folder arguments")
             for folder in list_migration_folders(arguments.repo_root):
-                print(folder.relative_to(arguments.repo_root.resolve()).as_posix())
+                print(relative_to_root(folder, arguments.repo_root.resolve()).as_posix())
             return 0
         batch = load_batch(arguments.repo_root, arguments.folders)
         for migration in batch:

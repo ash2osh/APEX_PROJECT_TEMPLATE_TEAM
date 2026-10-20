@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .path_utils import relative_to_root
+
 
 EVENT_FILENAME_RE = re.compile(
     r"attempt-event\.(?P<event_id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json\Z",
@@ -393,7 +395,7 @@ def validate_no_write_evidence(repo_root: Path, event: Mapping) -> bool:
         if current.is_symlink():
             return False
     try:
-        candidate.resolve(strict=True).relative_to(root)
+        relative_to_root(candidate.resolve(strict=True), root)
         if not candidate.is_file():
             return False
         content = candidate.read_bytes()

@@ -151,6 +151,7 @@ class MigrationRevisionTests(unittest.TestCase):
             "migration_revision.py",
             "migration_attempts.py",
             "migration_manifest.py",
+            "path_utils.py",
             "validate_migration.py",
         ):
             shutil.copy2(Path(__file__).resolve().parents[1] / "scripts" / name, scripts / name)
