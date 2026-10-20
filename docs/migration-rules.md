@@ -593,6 +593,14 @@ These files are evidence from this checkout; they are not a shared ledger.
 Never create a planned, pending, failed, or aspirational status file, and do
 not treat a receipt by itself as proof of today's live state.
 
+### Evidence of other targets
+
+A folder can hold evidence for several targets (environment and schema). `migrate` for one target checks
+that target's receipt and attempt-event chain strictly and ignores damaged evidence that belongs to another
+target, so a teammate's broken record for production does not block a DEV apply. Reports and
+`revise --check` without a target check everything and stay fail-closed. The 26.1 template is stricter
+(see its migration rules): there, damaged evidence of any target blocks every apply of the folder.
+
 ## Conflict checks and the independent-repository limit
 
 Run the conflict checker on the folders you intend to apply:

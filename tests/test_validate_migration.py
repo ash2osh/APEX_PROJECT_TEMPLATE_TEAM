@@ -381,14 +381,27 @@ class ValidateMigrationTests(unittest.TestCase):
                 self.assertIn("SQL-only migration", result.stderr)
 
     def test_rollout_transaction_opt_in_preserves_statement_spans(self) -> None:
-        source = "COMMIT;\nROLLBACK;\nCOMMIT WORK;\nROLLBACK TO SAVEPOINT review_point;\n"
+        source = "COMMIT;\nROLLBACK;\nCOMMIT WORK;\nROLLBACK WORK;\n"
         spans = statement_spans(source, allow_transaction_control=True)
         self.assertEqual([source[start:end] for start, end in spans], [
-            "COMMIT", "ROLLBACK", "COMMIT WORK", "ROLLBACK TO SAVEPOINT review_point",
+            "COMMIT", "ROLLBACK", "COMMIT WORK", "ROLLBACK WORK",
         ])
         validate_sql_only(source, allow_transaction_control=True)
         with self.assertRaises(ValueError):
             validate_sql_only(source)
+
+    def test_rollout_transaction_control_accepts_only_commit_and_rollback(self) -> None:
+        for source in ("COMMIT;\n", "ROLLBACK;\n", "COMMIT WORK;\n", "ROLLBACK WORK;\n", "commit work;\n"):
+            with self.subTest(accepted=source):
+                validate_sql_only(source, allow_transaction_control=True)
+        # FORCE needs a special privilege and acts on in-doubt distributed transactions; a savepoint cannot exist
+        # at the top level of a SQL-only script (SAVEPOINT itself is refused), so ROLLBACK TO has no use either.
+        for source in (
+            "ROLLBACK TO SAVEPOINT review_point;\n", "ROLLBACK TO review_point;\n", "COMMIT FORCE '1.2.3';\n",
+            "ROLLBACK FORCE '1.2.3';\n", "COMMIT COMMENT 'x';\n", "COMMIT WRITE WAIT;\n", "SAVEPOINT review_point;\n",
+        ):
+            with self.subTest(refused=source), self.assertRaises(ValueError):
+                validate_sql_only(source, allow_transaction_control=True)
 
     def test_rollout_transaction_opt_in_still_refuses_client_hazards(self) -> None:
         for source in (

@@ -367,6 +367,10 @@ def statement_spans(source: str, *, allow_transaction_control: bool = False) -> 
                 f"SQL-only migration statement must end with a semicolon at line {line_at(masked, statement_start)}"
             )
         reject_sqlcl_line_hazards(masked, statement_start, statement_end, plsql=False)
+        if transaction_control:
+            transaction_text = masked[index:statement_end].strip()
+            if not re.fullmatch(r"(?:COMMIT|ROLLBACK)(?:\s+WORK)?", transaction_text, re.IGNORECASE | re.ASCII):
+                raise ValueError("SQL-only transaction control accepts only COMMIT or ROLLBACK [WORK]")
         spans.append((statement_start, statement_end))
         index = statement_end + 1
         previous_end = index
