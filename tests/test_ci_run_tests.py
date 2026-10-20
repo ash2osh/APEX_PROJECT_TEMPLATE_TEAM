@@ -168,6 +168,16 @@ class JobsFromEnvironmentTests(unittest.TestCase):
             run_modules(["test_x"])
         self.assertEqual(seen["CI_TEST_JOBS"], "1")
 
+    def test_each_child_loads_the_guard_that_discovery_gives_every_module(self):
+        commands = []
+        class Done:
+            returncode, stdout = 0, ""
+        with patch("scripts.ci_run_tests.subprocess.run", lambda command, **kwargs: commands.append(command) or Done()):
+            from scripts.ci_run_tests import run_modules
+            run_modules(["test_x", "test_y"])
+        self.assertIn("import _no_real_sqlcl", commands[0][2])
+        self.assertEqual(commands[0][3:], ["-v", "test_x", "test_y"])
+
 
 if __name__ == "__main__":
     unittest.main()

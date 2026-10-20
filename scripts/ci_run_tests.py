@@ -79,8 +79,11 @@ def run_modules(modules: Sequence[str]) -> tuple[int, str]:
     environment["CI_TEST_JOBS"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(ROOT / "tests"), str(ROOT), environment.get("PYTHONPATH", "")) if part)
+    # `discover -s tests` imports every module into one process, so the guard that keeps tests away from a
+    # real SQLcl (and makes write_text write LF on Windows) applies to all of them; load it for each module too.
+    guard = "import _no_real_sqlcl, sys, unittest; sys.argv[0] = 'python -m unittest'; unittest.main(module=None)"
     result = subprocess.run(
-        [sys.executable, "-m", "unittest", "-v", *modules], cwd=ROOT, env=environment, stdout=subprocess.PIPE,
+        [sys.executable, "-c", guard, "-v", *modules], cwd=ROOT, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
     return result.returncode, result.stdout
 

@@ -152,3 +152,20 @@ the evidence, the preferred behavior, and the check that keeps it true.
 - Verification: `test_child_processes_get_one_job` and
   `test_tests_in_a_parallel_ci_run_never_start_another_parallel_run`; the full
   suite with `CI_TEST_JOBS=4` set passes in 163 s (26.1) and 199 s (26.2).
+
+### A test module must pass when it is run alone
+
+- Trigger: on 2026-10-20 the first parallel CI run (one process per module)
+  failed `test_source_provenance` on Windows in the 26.2 repository, and a test
+  of the report file's permissions in the 26.1 repository.
+- Evidence: `discover -s tests` imports every module into one process, so
+  `_no_real_sqlcl` (and `_windows_lf`, which makes `write_text` write LF on
+  Windows) applied to modules that never import them. Run alone,
+  `test_source_provenance` wrote its marker with CRLF and the code refused it.
+  The permissions test passed only because the runner's own temp folder is
+  private: `runner.temp` grants the Users group read access.
+- Preferred behavior: the parallel runner loads `_no_real_sqlcl` in each child
+  process; a test imports what it depends on; a CI step may change the temp
+  directory only to another private one (the long form of the runner's own).
+- Verification: `python3 -m unittest discover -s tests -p 'test_<module>.py'`
+  for each module, and the Windows job of the pull request that introduced it.
