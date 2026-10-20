@@ -23,5 +23,16 @@ Run it after a fix lands in either repository. It exits 1 while anything is `unr
 `changed`. Both checkouts are read at their committed `HEAD`. The tool and this list are
 template-only: projects never receive them.
 
-First pass 2026-10-19: 117 differing files, 14 classified (6 `missed`, 1 `feature`,
-7 `intended`), 103 still `unreviewed`.
+Review 2026-10-20 (TEAM `c15be4f`, 26_1 `f19ba08`): 390 shared files, 120 differing, all classified:
+32 `missed`, 27 `feature`, 61 `intended`, none unreviewed. The `missed` entries are fixes to port (each reason
+says to which repository). Tests, documents and skills were classified together with the module they
+accompany. Scripts were compared by their function sets and by reading the hunks that exist in only one
+line; very large files (`rollout.py`, `publish_app.*`, `team.*`) were not read hunk by hunk, so a `feature` or
+`intended` mark on them rests on the function lists and commit history. The largest groups of `missed` entries:
+
+- **26.2 needs:** `relative_to_root` (Windows alias safe) in the migration modules, the strict
+  COMMIT/ROLLBACK-only rule in `validate_migration.py`, NOT NULL data preconditions in baseline bundles,
+  the pinned-handle `directory_install.py`, and 26.1's tests for attempts, lock scoping and compare-env.
+  The lock policy for malformed attempt chains differs between the lines and needs an owner decision.
+- **26.1 needs:** strict UTF-8 reads in `ords_export.py`, the SQLcl transport preflight in `migrate.py`,
+  `attempt-event` files in `.gitignore`, and `team-flow.md` frontmatter.
