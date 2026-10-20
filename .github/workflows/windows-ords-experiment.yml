@@ -1,0 +1,42 @@
+name: windows-ords-experiment
+
+on:
+  pull_request:
+
+concurrency:
+  group: windows-ords-experiment-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ords-experiment:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [team_current, template_26_1, team_traced]
+        batch: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+      - name: Use the long form of the temp directory
+        run: |
+          @'
+          import os
+          import pathlib
+
+          long_temp = str(pathlib.Path(os.environ["TEMP"]).resolve())
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"TEMP={long_temp}\nTMP={long_temp}\n")
+          print("TEMP is now", long_temp)
+          '@ | python -
+      - name: Run ORDS experiment loop under parallel load
+        run: |
+          python tools/run_ords_experiment.py --variant ${{ matrix.variant }} --workers 2 --iterations-per-worker 8
