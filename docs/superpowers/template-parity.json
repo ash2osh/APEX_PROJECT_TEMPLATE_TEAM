@@ -86,15 +86,15 @@
       "reason": "26.2 release content: native locks, partial publish, runtime verification, MIGRATION_* profiles, Oracle skills refresh.",
       "blobs": [
         "aea9d788a7d9c9ec541b1922d6fe78999559ae98",
-        "1a64beb8a1326c11a9ec824019c6fea9efb14695"
+        "6b04c19a390af7a8787a1cb9356239a21d284459"
       ]
     },
     "README.md": {
       "status": "intended",
-      "reason": "26.2 release content and command reference (verify-local, app-lock, upgrade-apexlang); 26.1 documents its own commands.",
+      "reason": "26.2 release content and command reference (app-lock, upgrade-apexlang); 26.1 documents its own commands.",
       "blobs": [
         "249e1151398825f1589d73fb1bbe6062cb63c6e5",
-        "a9d84683afea753e8b9a24246e5fa7e4f4053fc1"
+        "a089a938b4a48620852f386b039d85b266ac664d"
       ]
     },
     "docs/EXAMPLES.md": {
@@ -110,7 +110,7 @@
       "reason": "Release-specific setup, upgrade and cleanup steps.",
       "blobs": [
         "379035cc8efe243f9dfbb7752266004f8cdaf5fc",
-        "99c502697948c1cd32332579b6a2a6f0da3f8af2"
+        "36450cf92930143ac6b1ca98f854b9132bbd08dd"
       ]
     },
     "docs/TROUBLESHOOTING.md": {
@@ -515,18 +515,18 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 commands: app-lock, app-unlock, upgrade-apexlang, verify-local, partial publish, query migration profile.",
+      "reason": "26.2 commands: app-lock, app-unlock, upgrade-apexlang, partial publish, query migration profile (verify-local now exists in both).",
       "blobs": [
         "d727682cf2ac3c069f380a99c74241401f07cc23",
-        "c5075d3291ac6cd07c3899a2e683f24bcf2bf31d"
+        "6f41e8c356c61292e655092968de4d72e7870974"
       ]
     },
     "scripts/team.sh": {
       "status": "feature",
-      "reason": "Same 26.2 commands as team.ps1.",
+      "reason": "Same 26.2 commands as team.ps1 (verify-local now exists in both).",
       "blobs": [
         "979c9b511c285caf3845efce4ac4215621ebc0c3",
-        "fd3af6175610dcd54c8b8eea93c1265ee24ad860"
+        "261ca8cabdabc23a655a8957fc3cf7470841da0d"
       ]
     },
     "scripts/template_drift.py": {
@@ -534,7 +534,7 @@
       "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1.",
       "blobs": [
         "cd178b49647c6b9ec0dc85a7f41e4dbd782eb93c",
-        "5ec854abc9a735acd3e0e3c9035f6bc2a0e7bd7b"
+        "bfab86e07a5b43fd1b1ef89892c3db398fbe27aa"
       ]
     },
     "scripts/upgrade_template.py": {
@@ -559,6 +559,14 @@
       "blobs": [
         "24cd85392a946b64ee51a74bdaa29aff1efc0eec",
         "30daa49b1d6ccbe4ccd5a26e1468a62805ad8881"
+      ]
+    },
+    "scripts/verify_local.py": {
+      "status": "intended",
+      "reason": "26.1 port of verify-local without the 26.2-only checks (Oracle skills registry, native-lock recovery records, Graphify venv); the lock may omit apexRelease; is_original_template comes from template_drift.",
+      "blobs": [
+        "3a8d725c3fe124fa99f2e3b7dd75c96617176f9e",
+        "e4f8a7f6a1f390b8b576fe4ff6aa9c570e56d4b1"
       ]
     },
     "scripts/verify_publish_state.py": {
@@ -639,6 +647,14 @@
       "blobs": [
         "4336f0557faf5c26509d25ac007e627c7b1ceb24",
         "c01cc7ac4ad869e239b8fb369dc54e631ef867c0"
+      ]
+    },
+    "tests/known_flaky.txt": {
+      "status": "intended",
+      "reason": "26.2 lists the ORDS backup Windows flake (BackupDbWithOrdsTests); it has not appeared in 26.1, whose backup_db.sh exits inside the function (see scripts/backup_db.sh).",
+      "blobs": [
+        "df52ba4e0d4cf900e20a7ae5deb3d4399a4ff79f",
+        "d20f8cafea7ca52d2e2657af97d11b923bdd3b0b"
       ]
     },
     "tests/test_backup_db_cli.py": {
@@ -943,6 +959,14 @@
       "blobs": [
         "ab3e68cdd6a8d0e7ca4df09c3db2ee1aa600744c",
         "15d2a6f0c3b31153422a1ca1a26e3a9e96d37574"
+      ]
+    },
+    "tests/test_verify_local.py": {
+      "status": "intended",
+      "reason": "Adapted for 26.1: schema-1 manifest, lock with optional apexRelease, no skills, recovery or Graphify tests.",
+      "blobs": [
+        "f865cce9c69a767bc7d045768c72aa8b7c8ff63e",
+        "e1149f6b9d39562186c1fe46bf14719e5b48a8b9"
       ]
     },
     "tests/test_verify_publish_state.py": {

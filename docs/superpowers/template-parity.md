@@ -37,3 +37,5 @@ line; very large files (`rollout.py`, `publish_app.*`, `team.*`) were not read h
   `backup_db.sh` is the suspect for a Windows-only flake that only 26.2 shows (see `tests/known_flaky.txt`).
 - **26.1 needs:** strict UTF-8 reads in `ords_export.py`, the SQLcl transport preflight in `migrate.py`,
   `attempt-event` files in `.gitignore`, and `team-flow.md` frontmatter.
+
+After 26.1 gained `verify-local` (2026-10-20, 26.1 PR 21) the report covers 392 shared files, 123 differing: 33 `missed`, 27 `feature`, 63 `intended`, none unreviewed.
