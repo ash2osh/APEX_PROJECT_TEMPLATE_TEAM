@@ -278,12 +278,12 @@ if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
 $expectedLiveState = "-"
 
 . (Join-Path $PSScriptRoot "invoke_sqlcl.ps1")
-$stdinFile = [System.IO.Path]::GetTempFileName()
-$transcriptFile = [System.IO.Path]::GetTempFileName()
-$verifyTranscriptFile = [System.IO.Path]::GetTempFileName()
-$stabilityTranscriptFile = [System.IO.Path]::GetTempFileName()
 $publishWorkDir = Join-Path $repoRoot ("scratch/apex-publish-" + [Guid]::NewGuid().ToString("N"))
 [System.IO.Directory]::CreateDirectory($publishWorkDir) | Out-Null
+$stdinFile = [System.IO.Path]::GetTempFileName()
+$transcriptFile = Join-Path $publishWorkDir "import-transcript.log"
+$verifyTranscriptFile = Join-Path $publishWorkDir "verify-transcript.log"
+$stabilityTranscriptFile = Join-Path $publishWorkDir "stability-transcript.log"
 $applicationSource = Join-Path $appDir "application.apx"
 $unstampedSource = Join-Path $publishWorkDir "application.apx.unstamped"
 $stampedSource = Join-Path $publishWorkDir "application.apx.stamped"
@@ -624,7 +624,7 @@ if ($appEnvironment -eq "dev" -and -not $force) {
       }
     }
   }
-  Remove-Item -LiteralPath $stdinFile, $transcriptFile, $verifyTranscriptFile, $stabilityTranscriptFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stdinFile -Force -ErrorAction SilentlyContinue
   if (-not $keepPublishWorkDir -and (Test-Path -LiteralPath $publishWorkDir)) {
     Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $publishWorkDir) {

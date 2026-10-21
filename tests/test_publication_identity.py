@@ -49,7 +49,7 @@ class PublicationIdentityTests(unittest.TestCase):
             runbook = root / 'run-import.sh'
             runbook.write_text(shell, encoding='utf-8', newline='\n')
             executed = subprocess.run([BASH, str(runbook), str(capture.parent)], cwd=root,
-                                      env=environment, text=True, capture_output=True)
+                                      env=environment, text=True, capture_output=True, stdin=subprocess.DEVNULL)
             if malformed:
                 self.assertNotEqual(executed.returncode, 0, executed.stdout + executed.stderr)
                 self.assertFalse(log.exists(), 'malformed captured identity must refuse before import')
@@ -115,7 +115,7 @@ class PublicationIdentityTests(unittest.TestCase):
             evidence.mkdir()
             runbook = root / 'run-summary.sh'
             runbook.write_text('set -euo pipefail\nsqlcl_dir="$1"\n' + writers[0], encoding='utf-8', newline='\n')
-            executed = subprocess.run([BASH, str(runbook), str(evidence)], cwd=root, text=True, capture_output=True)
+            executed = subprocess.run([BASH, str(runbook), str(evidence)], cwd=root, text=True, capture_output=True, stdin=subprocess.DEVNULL)
             self.assertEqual(executed.returncode, 0, executed.stderr)
             self.assertEqual(json.loads((evidence / 'publish-verification.json').read_text()),
                              {'schemaVersion': 1, 'sourceVerified': True, 'lifecycleStatus': 'unavailable'})

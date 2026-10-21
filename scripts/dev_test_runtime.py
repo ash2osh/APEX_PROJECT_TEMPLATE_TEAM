@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import re
 import secrets
 from collections.abc import Callable, Mapping, Sequence
@@ -115,6 +116,22 @@ def _same_live_target(expected: Mapping[str, Any], observed: Mapping[str, Any]) 
         ):
             return False
     return True
+
+
+def _load_plan_identity(run: RunEvidence) -> Mapping[str, Any] | None:
+    plan_path = run.run_dir / "plan.json"
+    if not plan_path.is_symlink() and plan_path.is_file():
+        try:
+            data = json.loads(plan_path.read_text(encoding="utf-8"))
+            if isinstance(data, Mapping):
+                target_map = data.get("target")
+                if isinstance(target_map, Mapping):
+                    obs = target_map.get("observed")
+                    if isinstance(obs, Mapping) and obs:
+                        return obs
+        except Exception:
+            pass
+    return None
 
 
 def _project_fixture_names(scenario: Scenario, context: RenderContext) -> dict[str, str]:
@@ -540,8 +557,11 @@ def execute_step(
     run: RunEvidence,
     *,
     runner: Callable = run_sqlcl,
+    expected_identity: Mapping[str, Any] | None = None,
 ) -> dict:
     """Execute a single scenario step with pre-write intent, exact start/identity checks, and error verification."""
+    if expected_identity is None:
+        expected_identity = _load_plan_identity(run)
     step_id = str(step.get("id", ""))
     raw_expected = step.get("expected", {})
     expected_record = dict(raw_expected) if isinstance(raw_expected, Mapping) else {}
@@ -677,6 +697,30 @@ def execute_step(
         "       OR resembles_production(v_service_name)) THEN",
         "    RAISE_APPLICATION_ERROR(-20074, 'rollout target identity resembles production');",
         "  END IF;",
+    ]
+    if expected_identity:
+        if expected_identity.get("db_name"):
+            exp_db = _sql_literal(str(expected_identity["db_name"]).upper())
+            driver_lines.extend([
+                f"  IF UPPER(NVL(v_database_name, ' ')) <> {exp_db} THEN",
+                "    RAISE_APPLICATION_ERROR(-20075, 'rollout database name mismatch with planned target');",
+                "  END IF;",
+            ])
+        if expected_identity.get("db_unique_name"):
+            exp_unique = _sql_literal(str(expected_identity["db_unique_name"]).upper())
+            driver_lines.extend([
+                f"  IF UPPER(NVL(v_db_unique_name, ' ')) <> {exp_unique} THEN",
+                "    RAISE_APPLICATION_ERROR(-20076, 'rollout database unique name mismatch with planned target');",
+                "  END IF;",
+            ])
+        if expected_identity.get("service_name"):
+            exp_service = _sql_literal(str(expected_identity["service_name"]).upper())
+            driver_lines.extend([
+                f"  IF UPPER(NVL(v_service_name, ' ')) <> {exp_service} THEN",
+                "    RAISE_APPLICATION_ERROR(-20077, 'rollout service name mismatch with planned target');",
+                "  END IF;",
+            ])
+    driver_lines.extend([
         "END;",
         "/",
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
@@ -694,7 +738,7 @@ def execute_step(
         "  DBMS_OUTPUT.PUT_LINE('ROLLOUT_TARGET:' || UPPER(NVL(v_database_name, '<NO_DB_NAME>')) || ':' || UPPER(NVL(v_db_unique_name, '<NO_DB_UNIQUE_NAME>')) || ':' || UPPER(NVL(v_service_name, '<NO_SERVICE>')));",
         "END;",
         "/",
-    ]
+    ])
     if variable_lines:
         driver_lines.extend(variable_lines)
         driver_lines.append("BEGIN")
@@ -972,6 +1016,18 @@ def execute_step(
             "writeStarted": True,
         }
 
+    if expected_identity and step_identity and not _same_live_target(expected_identity, step_identity):
+        return {
+            "id": step_id,
+            "status": "UNKNOWN",
+            "phase": "apply",
+            "expected": step_expected,
+            "error": "Step execution observed a different live database identity than planned",
+            "identity": step_identity,
+            "evidence": str(evidence_file),
+            "writeStarted": True,
+        }
+
     return {
         "id": step_id,
         "status": "PASSED",
@@ -990,6 +1046,7 @@ def execute_project_scenario(
     run: RunEvidence,
     *,
     runner: Callable = run_sqlcl,
+    expected_identity: Mapping[str, Any] | None = None,
 ) -> dict:
     """Execute a project scenario sequentially with frozen inputs, selectors, steps, and assertions."""
     # 1. Assert frozen inputs unchanged before any selector or step can run.
@@ -1048,8 +1105,12 @@ def execute_project_scenario(
             "error": "Expected Oracle-error scenarios require independent postcondition checks",
         }
 
+    if expected_identity is None:
+        expected_identity = _load_plan_identity(run)
     current_context = context
-    scenario_identity: Mapping[str, Any] | None = None
+    scenario_identity: Mapping[str, Any] | None = (
+        dict(expected_identity) if isinstance(expected_identity, Mapping) else None
+    )
     selector_records: list[dict[str, Any]] = []
     project_expected_identity: Mapping[str, Any] | None = None
     project_object_names: dict[str, str] = {}
@@ -1280,7 +1341,15 @@ def execute_project_scenario(
     # 3. Execute Steps
     step_records: list[dict[str, Any]] = []
     for step in scenario.steps:
-        step_rec = execute_step(target, scenario, step, current_context, run, runner=runner)
+        step_rec = execute_step(
+            target,
+            scenario,
+            step,
+            current_context,
+            run,
+            runner=runner,
+            expected_identity=scenario_identity,
+        )
         step_records.append(step_rec)
         step_identity = step_rec.get("identity")
         if not isinstance(step_identity, Mapping):

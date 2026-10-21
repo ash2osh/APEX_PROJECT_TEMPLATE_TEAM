@@ -75,6 +75,57 @@ class NewMigrationTests(unittest.TestCase):
         load_migration(self.root, folder.relative_to(self.root).as_posix())
         self.assertFalse((self.root / "scratch" / "new-migration").exists() and any((self.root / "scratch" / "new-migration").iterdir()))
 
+    def test_captured_compiler_settings_are_included_in_steps_and_postconditions(self):
+        settings_rows = [
+            {
+                "name": "PKG",
+                "type": "PACKAGE BODY",
+                "plsql_optimize_level": 2,
+                "plsql_code_type": "INTERPRETED",
+                "plsql_debug": "FALSE",
+                "plsql_warnings": "ENABLE:ALL",
+                "plsql_ccflags": "FEATURE_X:TRUE",
+                "nls_length_semantics": "CHAR",
+                "plscope_settings": "IDENTIFIERS:ALL",
+            },
+            {
+                "name": "PKG",
+                "type": "PACKAGE",
+                "plsql_optimize_level": 3,
+                "plsql_code_type": "INTERPRETED",
+                "plsql_debug": "FALSE",
+                "plsql_warnings": "DISABLE:ALL",
+                "plsql_ccflags": "FEATURE_X:TRUE",
+                "nls_length_semantics": "CHAR",
+                "plscope_settings": "",
+            },
+        ]
+
+        def fake_capture(values, environment, schema, sections, scratch, **options):
+            cat = catalog({("PACKAGE BODY", "PKG"): BODY, ("PACKAGE", "PKG"): SPEC})
+            cat["sections"]["baseline-settings"] = settings_rows
+            return cat
+
+        folder = new_migration.create(
+            self.root, "change-pkg", ["PACKAGE:PKG", "package_body:pkg"],
+            environ=ENV, capture=fake_capture, now=lambda: NOW
+        )
+        spec = (folder / "001-pkg-spec.sql").read_text(encoding="utf-8")
+        self.assertIn("ALTER SESSION SET PLSQL_CCFLAGS = 'FEATURE_X:TRUE';", spec)
+        self.assertIn("ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL = 3;", spec)
+        body = (folder / "002-pkg-body.sql").read_text(encoding="utf-8")
+        self.assertIn("ALTER SESSION SET PLSQL_CCFLAGS = 'FEATURE_X:TRUE';", body)
+        self.assertIn("ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL = 2;", body)
+
+        checks = json.loads((folder / "checks.json").read_text(encoding="utf-8"))
+        post_ids = [c["id"] for c in checks["postconditions"]]
+        self.assertIn("settings-pkg-spec", post_ids)
+        self.assertIn("settings-pkg-body", post_ids)
+        spec_check = next(c for c in checks["postconditions"] if c["id"] == "settings-pkg-spec")
+        self.assertIn("ALL_PLSQL_OBJECT_SETTINGS", spec_check["sql"])
+        self.assertIn("S.PLSQL_CCFLAGS = 'FEATURE_X:TRUE'", spec_check["sql"])
+        load_migration(self.root, folder.relative_to(self.root).as_posix())
+
     def test_an_object_missing_on_dev_writes_nothing(self):
         with self.assertRaisesRegex(new_migration.NewMigrationError, "not found in APP on DEV: PROCEDURE NOPE"):
             self.create(["PACKAGE:PKG", "PROCEDURE:NOPE"])

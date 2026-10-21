@@ -412,7 +412,15 @@ def _execute_generated_step(
         "expected": {"kind": "success"},
     }
     try:
-        result = execute_step(target, scenario, step, context, run, runner=runner)
+        result = execute_step(
+            target,
+            scenario,
+            step,
+            context,
+            run,
+            runner=runner,
+            expected_identity=expected_identity,
+        )
     except Exception as error:
         return {
             "id": step_id,

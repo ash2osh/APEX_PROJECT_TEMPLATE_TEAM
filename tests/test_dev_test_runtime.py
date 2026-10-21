@@ -410,6 +410,86 @@ class DevTestRuntimeTests(unittest.TestCase):
         self.assertEqual(step_record["status"], "PASSED")
         self.assertTrue(step_record["writeStarted"])
 
+    def test_step_writer_session_asserts_planned_database_identity(self) -> None:
+        scenario = _make_dummy_scenario(self.suite_dir)
+        self._freeze_scenario(scenario)
+
+        expected_id = {
+            "session_user": "DEMO",
+            "current_schema": "DEMO",
+            "db_name": "PLANNED_DB",
+            "db_unique_name": "PLANNED_UNIQUE",
+            "service_name": "planned_svc",
+        }
+
+        captured_content: list[str] = []
+
+        def runner(
+            target: Target, driver_path: Path, run_dir: Path, **kwargs: Any
+        ) -> SqlclResult:
+            content = driver_path.read_text(encoding="utf-8")
+            captured_content.append(content)
+            output = (
+                "ROLLOUT_IDENTITY:DEMO:DEMO\n"
+                "ROLLOUT_TARGET:PLANNED_DB:PLANNED_UNIQUE:PLANNED_SVC\n"
+                "DEVTEST_STEP_START:step-1\n"
+                "DEVTEST_STEP_COMPLETED:step-1\n"
+            )
+            return SqlclResult(0, output, run_dir)
+
+        step_record = execute_step(
+            self.target,
+            scenario,
+            scenario.steps[0],
+            self.context,
+            self.run,
+            runner=runner,
+            expected_identity=expected_id,
+        )
+        self.assertEqual(step_record["status"], "PASSED")
+        self.assertEqual(len(captured_content), 1)
+        driver_text = captured_content[0]
+        self.assertIn("IF UPPER(NVL(v_database_name, ' ')) <> 'PLANNED_DB' THEN", driver_text)
+        self.assertIn("RAISE_APPLICATION_ERROR(-20075", driver_text)
+        self.assertIn("IF UPPER(NVL(v_db_unique_name, ' ')) <> 'PLANNED_UNIQUE' THEN", driver_text)
+        self.assertIn("RAISE_APPLICATION_ERROR(-20076", driver_text)
+        self.assertIn("IF UPPER(NVL(v_service_name, ' ')) <> 'PLANNED_SVC' THEN", driver_text)
+        self.assertIn("RAISE_APPLICATION_ERROR(-20077", driver_text)
+
+    def test_project_scenario_refuses_step_database_differing_from_plan(self) -> None:
+        scenario = _make_dummy_scenario(self.suite_dir)
+        self._freeze_scenario(scenario)
+
+        expected_id = {
+            "session_user": "DEMO",
+            "current_schema": "DEMO",
+            "db_name": "PLANNED_DB",
+            "db_unique_name": "PLANNED_UNIQUE",
+            "service_name": "planned_svc",
+        }
+
+        def runner_on_other_db(
+            target: Target, driver_path: Path, run_dir: Path, **kwargs: Any
+        ) -> SqlclResult:
+            output = (
+                "ROLLOUT_IDENTITY:DEMO:DEMO\n"
+                "ROLLOUT_TARGET:OTHER_DB:OTHER_UNIQUE:OTHER_SVC\n"
+                "DEVTEST_STEP_START:step-1\n"
+                "DEVTEST_STEP_COMPLETED:step-1\n"
+            )
+            return SqlclResult(0, output, run_dir)
+
+        result = execute_project_scenario(
+            self.target,
+            scenario,
+            self.context,
+            self.run,
+            runner=runner_on_other_db,
+            expected_identity=expected_id,
+        )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIn("different live database identity", result.get("error", ""))
+
     def test_invalid_sql_preflight_returns_blocked_without_recording_intent(self) -> None:
         scenario = _make_dummy_scenario(self.suite_dir)
         self._freeze_scenario(scenario)
