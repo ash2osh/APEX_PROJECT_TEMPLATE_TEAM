@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,6 +85,40 @@ def tree_hashes(root: Path) -> dict[str, str]:
         if path.is_file():
             hashes[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashes
+
+
+def checkpoint_probe_source(checkout: Path, app: Path) -> None:
+    """Commit only this private probe app so a fresh export can replace it."""
+    relative = app.relative_to(checkout).as_posix()
+    subprocess.run(["git", "-C", str(checkout), "add", "--", relative],
+                   check=True, capture_output=True, text=True)
+    staged = subprocess.run(["git", "-C", str(checkout), "diff", "--cached", "--quiet", "--", relative],
+                            capture_output=True, text=True, check=False)
+    if staged.returncode == 1:
+        subprocess.run([
+            "git", "-C", str(checkout), "-c", "user.name=Qualification Fixture",
+            "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m",
+            "Refresh disposable app baseline", "--only", "--", relative,
+        ], check=True, capture_output=True, text=True)
+    elif staged.returncode != 0:
+        raise ProbeError("could not inspect the private disposable app checkpoint")
+    status = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain", "--", relative],
+                            capture_output=True, text=True, check=False)
+    if status.returncode != 0 or status.stdout.strip():
+        raise ProbeError("private disposable app source is not clean before reconciliation export")
+
+
+def run_partial_publish_probe(app: Path, app_id: int, *, checkpoint: Callable[[], None],
+                              command: Callable[[str, list[str]], object]) -> None:
+    """Reconcile a clean disposable source baseline before editing one page."""
+    checkpoint()
+    command("production-reconcile-export", ["export", str(app_id)])
+    page = app / "pages/p00001-home.apx"
+    source = page.read_text(encoding="utf-8")
+    if source.count("title: Home") != 1:
+        raise ProbeError("fresh export did not contain exactly one disposable home page title")
+    page.write_text(source.replace("title: Home", "title: Lifecycle Partial Probe", 1), encoding="utf-8")
+    command("production-partial", ["publish", str(app_id), "--env", "dev", "--file", "pages/p00001-home.apx"])
 
 
 def require_version_changed_files(changed: set[str]):
@@ -518,8 +553,12 @@ end;
             return result
         command('production-export',['export',str(t.app_id)])
         command('production-full',['publish',str(t.app_id),'--env','dev'])
-        page=app/'pages/p00001-home.apx';page.write_text(page.read_text().replace('title: Home','title: Lifecycle Partial Probe',1),encoding='utf-8')
-        command('production-partial',['publish',str(t.app_id),'--env','dev','--file','pages/p00001-home.apx'])
+        run_partial_publish_probe(
+            app,
+            t.app_id,
+            checkpoint=lambda: checkpoint_probe_source(checkout, app),
+            command=command,
+        )
         original_baseline=(app/'apex-team-export.json').read_bytes()
         helper=checkout/'scripts/application_lifecycle.py';helper_bytes=helper.read_bytes()
         injected=helper_bytes.decode().replace('def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path, *, _runner=run_sqlcl) -> dict:', 'def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path, *, _runner=run_sqlcl) -> dict:\n    if "lifecycle-after" in Path(run_dir).parts: raise ValueError("controlled qualification post-read failure")')

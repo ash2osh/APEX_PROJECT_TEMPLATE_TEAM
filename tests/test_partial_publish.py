@@ -2,11 +2,13 @@ import json
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from fake_sqlcl import BASH
-from scripts.partial_publish import select_page_files, require_selected_pages_unchanged, stage_partial_source, verify_partial_source
+from scripts.partial_publish import NativePartialBackend, select_page_files, require_selected_pages_unchanged, stage_partial_source, verify_partial_source
 from scripts.source_evidence import tree_hashes
+from scripts.upgrade_apexlang import NativeBackend
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,6 +110,23 @@ class PartialPublishTests(unittest.TestCase):
             (live / 'pages/p00001-home.apx').write_text('page 1 (title: Other editor)\n')
             with self.assertRaisesRegex(ValueError, 'selected page'):
                 require_selected_pages_unchanged(live, files, baseline)
+
+    def test_native_partial_export_normalizes_formatting_before_baseline_comparison(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source, baseline = self.fixture(root)
+            selected = select_page_files(source, ['pages/p00001-home.apx'], baseline)
+            live = root / 'live'; shutil.copytree(source, live)
+            page = live / 'pages/p00001-home.apx'
+            page.write_bytes(page.read_bytes() + b'\n')
+            backend = object.__new__(NativePartialBackend)
+
+            with mock.patch.object(NativeBackend, 'export', return_value=live):
+                observed = backend.export('live-first')
+
+            self.assertEqual(observed, live)
+            self.assertEqual(page.read_bytes(), (source / 'pages/p00001-home.apx').read_bytes())
+            self.assertEqual(backend.live_application_bytes, (live / 'application.apx').read_bytes())
+            require_selected_pages_unchanged(live, selected, baseline)
 
     def test_page_alias_changes_refuse_before_import(self):
         with tempfile.TemporaryDirectory() as temporary:
