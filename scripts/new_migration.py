@@ -35,6 +35,9 @@ from .baseline import (
     _capture,
     _check,
     _complete,
+    _exact_settings_check,
+    _session_settings_sql,
+    _setting_row,
     _source_check_queries,
     _source_lines,
     _sql_literal,
@@ -76,7 +79,7 @@ def step_name(index: int, kind: str, name: str) -> str:
     return f"{index:03d}-{slug}-{STEP_SUFFIX[kind]}.sql"
 
 
-def step_sql(schema: str, kind: str, name: str, lines: Sequence[str]) -> str:
+def step_sql(schema: str, kind: str, name: str, lines: Sequence[str], *, settings: Mapping | None = None) -> str:
     """CREATE OR REPLACE plus the stored source; the first line names the object schema-qualified when it can."""
     text = list(lines)
     kind_pattern = r"\s+".join(map(re.escape, kind.split()))
@@ -89,7 +92,8 @@ def step_sql(schema: str, kind: str, name: str, lines: Sequence[str]) -> str:
     body = "".join(text)
     if not body.endswith("\n"):
         body += "\n"
-    return f"CREATE OR REPLACE {body}/\n"
+    prefix = f"{_session_settings_sql(settings)}\n" if settings else ""
+    return f"{prefix}CREATE OR REPLACE {body}/\n"
 
 
 def owner_check(schema: str) -> dict:
@@ -107,6 +111,12 @@ def valid_check(schema: str, kind: str, name: str) -> dict:
         f"AND OBJECT_TYPE = {object_type} AND STATUS = 'VALID') = 1 "
         f"AND (SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = {owner} AND NAME = {object_name} AND TYPE = {object_type}) = 0 "
         "THEN 1 ELSE 0 END FROM DUAL"))
+
+
+def settings_check(schema: str, kind: str, name: str, settings: Mapping) -> dict:
+    slug = step_name(0, kind, name)[4:-4]
+    check = _exact_settings_check(settings, name, kind, schema)
+    return _check(f"settings-{slug}", check["sql"])
 
 
 def renamed_checks(checks: Sequence[dict], kind: str, name: str) -> list[dict]:
@@ -160,8 +170,13 @@ def create(
                                         baseline_prefixes=sorted({n for _k, n in objects}))
         _complete(catalog, SECTIONS)
         rows = catalog["sections"]["baseline-source"]
+        settings_rows = catalog["sections"].get("baseline-settings", [])
         units = {(kind, object_name): _source_lines(rows, object_name, kind) for kind, object_name in objects
                  if any(row.get("name") == object_name and row.get("type") == kind for row in rows)}
+        unit_settings: dict[tuple[str, str], dict] = {}
+        for kind, object_name in objects:
+            if any(row.get("name") == object_name and row.get("type") == kind for row in settings_rows):
+                unit_settings[(kind, object_name)] = _setting_row(settings_rows, object_name, kind)
     except (BaselineError, CatalogError, SqlclError) as error:
         raise NewMigrationError(f"reading DEV failed: {error}") from error
     finally:
@@ -174,10 +189,13 @@ def create(
     preconditions, postconditions = [owner_check(schema)], [owner_check(schema)]
     for index, (kind, object_name) in enumerate(objects, start=1):
         lines = units[(kind, object_name)]
-        steps[step_name(index, kind, object_name)] = step_sql(schema, kind, object_name, lines)
+        settings = unit_settings.get((kind, object_name))
+        steps[step_name(index, kind, object_name)] = step_sql(schema, kind, object_name, lines, settings=settings)
         unit = {"name": object_name, "type": kind, "lines": lines}
         preconditions += renamed_checks(_source_check_queries(unit, schema), kind, object_name)
         postconditions.append(valid_check(schema, kind, object_name))
+        if settings:
+            postconditions.append(settings_check(schema, kind, object_name, settings))
 
     folder = root / "migrations" / schema / f"{started.date().isoformat()}_{name}-r001"
     relative = relative_to_root(folder, root).as_posix()

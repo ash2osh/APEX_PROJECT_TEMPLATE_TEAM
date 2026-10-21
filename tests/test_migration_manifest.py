@@ -404,6 +404,9 @@ class MigrationManifestTests(unittest.TestCase):
             "SELECT LPAD('x', 2, '0') FROM dual",
             "SELECT RPAD('x', 2, '0') FROM dual",
             "SELECT LISTAGG('x', ',') WITHIN GROUP (ORDER BY line) FROM dual",
+            "SELECT TO_DATE('2026-01-01', 'YYYY-MM-DD') FROM dual",
+            "SELECT TO_TIMESTAMP('2026-01-01T12:00:00', 'YYYY-MM-DD\"T\"HH24:MI:SS') FROM dual",
+            "SELECT TO_TIMESTAMP_TZ('2026-01-01T12:00:00+00:00', 'YYYY-MM-DD\"T\"HH24:MI:SS TZH:TZM') FROM dual",
         )
         for query in allowed:
             with self.subTest(query=query):
@@ -412,6 +415,7 @@ class MigrationManifestTests(unittest.TestCase):
         names = (
             "CHR", "ORA_HASH", "STANDARD_HASH", "DECODE", "NULLIF", "INSTR", "REPLACE",
             "TRIM", "LTRIM", "RTRIM", "LENGTHB", "LPAD", "RPAD", "LISTAGG",
+            "TO_DATE", "TO_TIMESTAMP", "TO_TIMESTAMP_TZ",
         )
         for name in names:
             with self.subTest(function=name):

@@ -778,6 +778,7 @@ class PublishAppCliTests(unittest.TestCase):
                 publish_work_dirs = sorted((root / "scratch").glob("apex-publish*"))
                 self.assertEqual(len(publish_work_dirs), 1, screen)
                 self.assertTrue((publish_work_dirs[0] / "publish-verification.json").is_file())
+                self.assertTrue((publish_work_dirs[0] / "import-transcript.log").is_file())
                 plain = " ".join(re.sub(r"\x1b\[[0-9;]*m|\|", " ", screen).split())
                 self.assertIn("interrupted while the import was running", plain)
                 self.assertIn("its result is unknown", plain)
