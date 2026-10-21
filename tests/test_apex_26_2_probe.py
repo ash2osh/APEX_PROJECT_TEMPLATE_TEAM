@@ -1,11 +1,19 @@
 import json
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from tools.probe_apex_26_2 import Probe, ProbeError, ProbeTarget, require_version_changed_files
+from tools.probe_apex_26_2 import (
+    Probe,
+    ProbeError,
+    ProbeTarget,
+    checkpoint_probe_source,
+    require_version_changed_files,
+    run_partial_publish_probe,
+)
 
 
 class ProbeTests(unittest.TestCase):
@@ -48,6 +56,56 @@ class ProbeTests(unittest.TestCase):
         for changed in (set(), {"deployments/default.json"}, {"application.apx", "pages/p00001-home.apx"}):
             with self.subTest(changed=changed), self.assertRaises(ProbeError):
                 require_version_changed_files(changed)
+
+    def test_partial_probe_checkpoints_exports_then_edits_selected_page(self):
+        app = Path(self.temporary.name) / "app"
+        page = app / "pages/p00001-home.apx"
+        page.parent.mkdir(parents=True)
+        page.write_text("page 1 (\n title: Home\n)\n", encoding="utf-8")
+        events = []
+
+        def checkpoint():
+            events.append(("checkpoint", page.read_text(encoding="utf-8")))
+
+        def command(name, arguments):
+            events.append((name, list(arguments), page.read_text(encoding="utf-8")))
+
+        run_partial_publish_probe(app, 940262, checkpoint=checkpoint, command=command)
+
+        self.assertEqual([event[0] for event in events], [
+            "checkpoint", "production-reconcile-export", "production-partial",
+        ])
+        self.assertEqual(events[1][1], ["export", "940262"])
+        self.assertIn("title: Home", events[1][2])
+        self.assertEqual(events[2][1], ["publish", "940262", "--env", "dev", "--file", "pages/p00001-home.apx"])
+        self.assertIn("title: Lifecycle Partial Probe", events[2][2])
+
+    def test_checkpoint_commits_only_the_private_probe_app(self):
+        checkout = Path(self.temporary.name) / "checkout"
+        app = checkout / "apps/DEMO/940262"
+        app.mkdir(parents=True)
+        page = app / "pages/p00001-home.apx"
+        page.parent.mkdir()
+        page.write_text("page 1 (\n title: Home\n)\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        subprocess.run(["git", "-C", str(checkout), "add", "--", "apps"], check=True)
+        subprocess.run([
+            "git", "-C", str(checkout), "-c", "user.name=Probe Test",
+            "-c", "user.email=probe@example.test", "commit", "-qm", "Initial app source",
+        ], check=True)
+
+        page.write_text("page 1 (\n title: Full Publish Result\n)\n", encoding="utf-8")
+        unrelated = checkout / "recovery-note.txt"
+        unrelated.write_text("preserve me\n", encoding="utf-8")
+        checkpoint_probe_source(checkout, app)
+
+        status = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout.splitlines()
+        committed = subprocess.run([
+            "git", "-C", str(checkout), "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD",
+        ], capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertEqual(status, ["?? recovery-note.txt"])
+        self.assertEqual(committed, ["apps/DEMO/940262/pages/p00001-home.apx"])
 
     def test_wrong_identity_stops_before_write(self):
         self.identity["serverHost"] = "another-host"

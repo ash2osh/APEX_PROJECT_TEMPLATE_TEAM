@@ -298,7 +298,7 @@ def page_lock_guard(app_id: int, selected: tuple[Path, ...], locks: list[dict]) 
     return 'set define off\ndeclare n number;begin\n' + '\n'.join(statements) + '\nend;\n/\n'
 
 
-from scripts.upgrade_apexlang import NativeBackend, quoted, literal
+from scripts.upgrade_apexlang import NativeBackend, quoted, literal, normalize_source
 
 
 class NativePartialBackend(NativeBackend):
@@ -316,6 +316,7 @@ class NativePartialBackend(NativeBackend):
 
     def export(self, name):
         result = super().export(name)
+        normalize_source(result)
         if name.startswith('live-'):
             self.live_application_bytes = (result / 'application.apx').read_bytes()
         return result

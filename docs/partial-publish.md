@@ -22,6 +22,10 @@ validates the complete application against current shared components. Unrelated
 saved live changes are preserved and become part of the synchronized local
 source; review them afterwards.
 
+Each native live export receives the same LF and final-newline normalization as
+the standard APEX export before baseline and whole-app comparisons. The
+remaining source comparisons are byte-exact.
+
 SQLcl imports only the selected page files. The wrapper stamps the version
 through public `APEX_APPLICATION_ADMIN.SET_APPLICATION_VERSION`, then verifies
 the entire re-export, effective deployment, and exact selected Builder lock
