@@ -36,6 +36,18 @@ BASE = {
 
 
 class LoginDiffersFromSchemaTests(unittest.TestCase):
+    def test_doc_describes_the_proxy_alternative(self) -> None:
+        contents = (ROOT / "docs" / "login-acts-as-schema.md").read_text(encoding="utf-8")
+
+        for required_text in (
+            "Proxy login alternative",
+            "APP_LOGIN[APP_STAGE]",
+            "CONNECT THROUGH",
+            "STAGING_EXPECTED_USER=APP_STAGE",
+        ):
+            with self.subTest(required_text=required_text):
+                self.assertIn(required_text, contents)
+
     def test_doc_exists_and_is_linked_from_readme_and_limitations(self) -> None:
         doc_path = ROOT / "docs" / "login-acts-as-schema.md"
         self.assertTrue(doc_path.is_file(), "the login/schema mode guide is missing")
