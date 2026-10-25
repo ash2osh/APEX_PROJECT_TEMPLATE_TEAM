@@ -36,6 +36,23 @@ class MigrationRevisionTests(unittest.TestCase):
             (folder / "status.dev.json").write_text('{"schemaVersion":1,"state":"verified"}\n', encoding="utf-8")
         return folder
 
+    def write_archive_prefix(self, parent, family, revisions):
+        records = [
+            {
+                "folder": f"2026-10-{revision:02d}_{family}-r{revision:03d}",
+                "family": family,
+                "revision": revision,
+                "payloadDigest": f"{revision:064x}",
+                "archivedAt": "2026-10-20",
+                "reason": "released",
+                "destination": f"migrations-archive/APP_DEV/2026-10-{revision:02d}_{family}-r{revision:03d}",
+            }
+            for revision in revisions
+        ]
+        (parent / ".archived.json").write_text(
+            json.dumps({"schemaVersion": 1, "archived": records}) + "\n", encoding="utf-8"
+        )
+
     def make_attempt_event(
         self, folder, *, environment, schema, attempt_id=None, predecessor=None,
         state="pending", write_attempted=True, evidence=None,
@@ -127,6 +144,24 @@ class MigrationRevisionTests(unittest.TestCase):
             (result.folder / "README.md").read_bytes(),
             b"Supersedes 2026-10-01_create-things-r001: follow-up revision\nNotes without final newline",
         )
+
+    def test_revise_continues_after_an_archived_prefix(self):
+        parent = self.root / "migrations" / "APP_DEV"
+        parent.mkdir()
+        self.write_archive_prefix(parent, "archive-family", range(1, 5))
+        self.add_folder("migrations/APP_DEV/2026-10-05_archive-family-r005")
+
+        result = revise_folder(self.root, "migrations/APP_DEV/2026-10-05_archive-family-r005")
+
+        self.assertEqual(result.folder.name, "2026-10-05_archive-family-r006")
+
+    def test_revise_refuses_a_family_whose_revisions_are_all_archived(self):
+        parent = self.root / "migrations" / "APP_DEV"
+        parent.mkdir()
+        self.write_archive_prefix(parent, "archive-family", [1])
+
+        with self.assertRaisesRegex(ValueError, "unarchive an archived folder or start a new family"):
+            revise_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
 
     def test_revise_refuses_an_existing_newer_revision_and_a_name_without_revision_suffix(self):
         self.add_folder("migrations/2026-10-01_create-things-r001")

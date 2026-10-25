@@ -31,6 +31,9 @@ Commands:
                                               Apply, or rehearse DML in one transaction and roll it back
   revise <folder> [--reason TEXT]             Copy to the next migration revision
   revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
+  archive-migrations <folder> [...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes]
+  archive-migrations --all [--keep <folder>...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes]
+                                              Move released folders outside migrations/ (dry run by default)
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
   query --env <env> --connection <profile> [--file <path> | SQL]
@@ -91,6 +94,7 @@ Everyday commands:
   check-conflicts <folder> --env dev      Check a migration against the live database
   migrate <folder> --env dev              Apply a migration
   revise <folder>                         Start the next revision of an attempted migration
+  archive-migrations <folder> [...]       Preview migration folders to archive
   backup-db                               Refresh the local database mirror
   upgrade-template --dry-run              Preview a template upgrade
 
@@ -113,7 +117,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -317,6 +321,18 @@ case "$command_name" in
         ;;
     esac
     exec python3 -m scripts.migration_plan --repo-root "$migration_plan_root" "$@"
+    ;;
+  archive-migrations)
+    archive_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          archive_root="$(cygpath -m -- "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.migration_archive --repo-root "$archive_root" "$@"
     ;;
   dev-test)
     exec "$REPO_ROOT/scripts/dev_test.sh" "$@"

@@ -27,6 +27,7 @@ from .migration_manifest import (
     STATUS_ENVIRONMENTS,
     _folder_parts,
     _validate_relative_folder,
+    archived_family_revisions,
     decode_json,
     load_migration,
 )
@@ -104,20 +105,31 @@ def revise_folder(repo_root: Path, relative_folder: str, reason: str | None = No
         candidate = candidate / part
         if candidate.is_symlink():
             raise MigrationRevisionError("symbolic links are not allowed in migration paths")
+    schema = parts[1] if len(parts) == 3 else None
+    try:
+        archived = archived_family_revisions(source.parent / ".archived.json", schema, family)
+    except MigrationManifestError as error:
+        raise MigrationRevisionError(str(error)) from error
+    revisions = _family_revisions(source.parent, family)
+    if not revisions and archived:
+        raise MigrationRevisionError(
+            f"all visible revisions for {family} are archived; unarchive an archived folder or start a new family"
+        )
     try:
         relative_to_root(source.resolve(strict=True), root)
     except (OSError, ValueError) as error:
         raise MigrationRevisionError("migration folder is missing or outside the repository") from error
 
-    revisions = _family_revisions(source.parent, family)
     newer = sorted(number for number in revisions if number > revision)
     if newer:
         raise MigrationRevisionError(
             f"newer revision r{newer[-1]:03d} already exists for {family}; revise the latest revision instead"
         )
     expected_revisions = set(range(1, revision + 1))
-    if set(revisions) != expected_revisions:
-        raise MigrationRevisionError(f"revision history for {family} is incomplete; revisions must be consecutive from r001")
+    if set(revisions) | set(archived) != expected_revisions:
+        raise MigrationRevisionError(
+            f"revision history for {family} is incomplete; revisions must be consecutive from r001 or its archived prefix"
+        )
     if revision >= 999:
         raise MigrationRevisionError("migration revision r999 cannot be incremented")
 

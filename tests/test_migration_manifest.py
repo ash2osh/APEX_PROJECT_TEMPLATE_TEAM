@@ -235,6 +235,117 @@ class MigrationManifestTests(unittest.TestCase):
         self.assertEqual(listed[1:], tuple(sorted((older.resolve(), same_day.resolve()), key=lambda path: path.name, reverse=True)))
         self.assertEqual(tuple(migration.folder for migration in batch), (older.resolve(), newer.resolve()))
 
+    def test_archived_prefix_allows_visible_revisions_to_continue_after_it(self) -> None:
+        api = self.require_manifest()
+        family = "archive-family"
+        records = [
+            {
+                "folder": f"2026-10-0{revision}_{family}-r{revision:03d}",
+                "family": family,
+                "revision": revision,
+                "payloadDigest": f"{revision:064x}",
+                "archivedAt": "2026-10-20",
+                "reason": "released",
+                "destination": f"migrations-archive/2026-10-0{revision}_{family}-r{revision:03d}",
+            }
+            for revision in range(1, 5)
+        ]
+        (self.root / "migrations" / ".archived.json").write_text(
+            json.dumps({"schemaVersion": 1, "archived": records}) + "\n", encoding="utf-8"
+        )
+        fifth = self.add_folder("2026-10-05_archive-family-r005")
+        sixth = self.add_folder("2026-10-06_archive-family-r006")
+
+        folders = api.list_migration_folders(self.root)
+        batch = api.load_batch(self.root, [
+            "migrations/2026-10-05_archive-family-r005",
+            "migrations/2026-10-06_archive-family-r006",
+        ])
+
+        self.assertIn(fifth.resolve(), folders)
+        self.assertIn(sixth.resolve(), folders)
+        self.assertEqual([migration.revision for migration in batch], [5, 6])
+
+    def test_archived_prefix_still_refuses_a_visible_revision_below_or_after_a_hole(self) -> None:
+        api = self.require_manifest()
+        family = "archive-family"
+        records = [
+            {
+                "folder": f"2026-10-0{revision}_{family}-r{revision:03d}",
+                "family": family,
+                "revision": revision,
+                "payloadDigest": f"{revision:064x}",
+                "archivedAt": "2026-10-20",
+                "reason": "released",
+                "destination": f"migrations-archive/2026-10-0{revision}_{family}-r{revision:03d}",
+            }
+            for revision in (1, 2)
+        ]
+        (self.root / "migrations" / ".archived.json").write_text(
+            json.dumps({"schemaVersion": 1, "archived": records}) + "\n", encoding="utf-8"
+        )
+        self.add_folder("2026-10-03_archive-family-r003")
+        self.add_folder("2026-10-05_archive-family-r005")
+
+        with self.assertRaisesRegex(api.MigrationManifestError, "archived prefix.*consecutive"):
+            api.list_migration_folders(self.root)
+
+    def test_archived_prefix_refuses_a_visible_revision_at_or_below_the_archived_high_water_mark(self) -> None:
+        api = self.require_manifest()
+        family = "archive-family"
+        records = [
+            {
+                "folder": f"2026-10-0{revision}_{family}-r{revision:03d}",
+                "family": family,
+                "revision": revision,
+                "payloadDigest": f"{revision:064x}",
+                "archivedAt": "2026-10-20",
+                "reason": "released",
+                "destination": f"migrations-archive/2026-10-0{revision}_{family}-r{revision:03d}",
+            }
+            for revision in (1, 2)
+        ]
+        (self.root / "migrations" / ".archived.json").write_text(
+            json.dumps({"schemaVersion": 1, "archived": records}) + "\n", encoding="utf-8"
+        )
+        self.add_folder("2026-10-01_archive-family-r001")
+        self.add_folder("2026-10-03_archive-family-r003")
+
+        with self.assertRaisesRegex(api.MigrationManifestError, "visible revision at or below its archived prefix r002"):
+            api.list_migration_folders(self.root)
+
+    def test_archived_index_is_strict_and_rejects_unknown_keys(self) -> None:
+        api = self.require_manifest()
+        (self.root / "migrations" / ".archived.json").write_text(
+            '{"schemaVersion":1,"archived":[],"unexpected":true}\n', encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(api.MigrationManifestError, "archived index.*unknown key"):
+            api.list_migration_folders(self.root)
+
+    def test_staged_validator_accepts_next_revision_after_archived_prefix(self) -> None:
+        validate = self.require_stage_validator()
+        family = "archive-family"
+        records = [
+            {
+                "folder": f"2026-10-0{revision}_{family}-r{revision:03d}",
+                "family": family,
+                "revision": revision,
+                "payloadDigest": f"{revision:064x}",
+                "archivedAt": "2026-10-20",
+                "reason": "released",
+                "destination": f"migrations-archive/2026-10-0{revision}_{family}-r{revision:03d}",
+            }
+            for revision in range(1, 5)
+        ]
+        (self.root / "migrations" / ".archived.json").write_text(
+            json.dumps({"schemaVersion": 1, "archived": records}) + "\n", encoding="utf-8"
+        )
+        self.add_folder("2026-10-05_archive-family-r005")
+        stage = self.add_stage()
+
+        validate(self.root, stage, "migrations/2026-10-06_archive-family-r006")
+
     def test_sequences_are_contiguous_and_named(self) -> None:
         api = self.require_manifest()
         folder = self.add_folder(

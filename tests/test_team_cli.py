@@ -57,6 +57,71 @@ exit 17
         )
         return root, environment, calls
 
+    def migration_archive_checkout(self, parent: Path):
+        """Copy only the offline archive command and its shared validators."""
+        root = parent / "archive project [folder path]"
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True)
+        names = (
+            "team.sh", "team.ps1", "resolve_python.ps1", "__init__.py", "migration_archive.py",
+            "migration_manifest.py", "migration_revision.py", "migration_attempts.py", "path_utils.py",
+            "validate_migration.py",
+        )
+        for name in names:
+            source = ROOT / "scripts" / name
+            if source.is_file():
+                shutil.copy2(source, scripts / name)
+        (root / "migrations" / "APP_DEV").mkdir(parents=True)
+        (root / "migrations" / "APP_STAGE").mkdir(parents=True)
+        for schema, family in (("APP_DEV", "first-family"), ("APP_STAGE", "second-family")):
+            folder = root / "migrations" / schema / f"2026-10-01_{family}-r001"
+            folder.mkdir()
+            (folder / "001-create-table.sql").write_text("CREATE TABLE T (ID NUMBER);\n", encoding="utf-8")
+            (folder / "checks.json").write_text(
+                '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
+                encoding="utf-8",
+            )
+        return root
+
+    def test_powershell_archive_route_keeps_schema_option_and_matches_bash_dispatch(self) -> None:
+        wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("archive-migrations <folder> [...] [--schema SCHEMA]", wrapper)
+        self.assertIn('"archive-migrations" {', wrapper)
+        self.assertIn('"archive-migrations") + $archiveArguments)', wrapper)
+        self.assertIn('"migration-plan", "archive-migrations", "dev-test"', wrapper)
+
+    def test_archive_migrations_help_and_schema_scope_are_offline_in_both_wrappers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.migration_archive_checkout(Path(temporary))
+            environment = dict(os.environ, PROJECT_ENV_FILE="/no/such/team-env")
+            entries = [("team.sh", [BASH])]
+            pwsh = shutil.which("pwsh")
+            if pwsh:
+                entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
+
+            for name, launcher in entries:
+                script = root / "scripts" / name
+                with self.subTest(entry=name, command="help"):
+                    help_result = subprocess.run(
+                        [*launcher, str(script), "--help"], cwd=root, env=environment,
+                        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=30,
+                    )
+                    self.assertEqual(0, help_result.returncode, help_result.stdout + help_result.stderr)
+                    self.assertIn("archive-migrations", help_result.stdout)
+
+                with self.subTest(entry=name, command="archive-migrations"):
+                    result = subprocess.run(
+                        [*launcher, str(script), "archive-migrations", "--all", "--schema", "APP_DEV"],
+                        cwd=root, env=environment, capture_output=True, text=True, check=False,
+                        stdin=subprocess.DEVNULL, timeout=30,
+                    )
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("dry run", result.stdout)
+                    self.assertIn("migrations/APP_DEV/2026-10-01_first-family-r001", result.stdout)
+                    self.assertNotIn("APP_STAGE", result.stdout)
+                    self.assertFalse((root / "migrations-archive").exists())
+
     def run_bash_env_loader(self, environment: Path) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             scripts = Path(temporary) / "scripts"
