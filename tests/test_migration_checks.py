@@ -915,6 +915,28 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 1)
         self.assertTrue(any(item["code"] == "COLUMN_ALREADY_EXISTS" for item in report.conflicts))
 
+    def test_index_can_use_column_added_to_existing_table_earlier_in_selected_batch(self):
+        self.add_folder("2026-09-27_add-index-column-r001", {
+            "001-add-column.sql": "ALTER TABLE ORDERS ADD NEW_COL NUMBER;\n",
+            "002-create-index.sql": "CREATE INDEX ORDERS_NEW_COL_I ON ORDERS (NEW_COL);\n",
+        })
+        migration = self.migration_batch("2026-09-27_add-index-column-r001")
+        orders = ObjectDefinition(
+            ObjectKey("APP", "ORDERS", "TABLE"),
+            {"columns": [{"name": "ID", "column_id": 1}]},
+            "CREATE TABLE APP.ORDERS (ID NUMBER)",
+            (),
+            True,
+        )
+
+        report = preflight(
+            migration,
+            self.snapshot((("ORDERS", "TABLE", {}),), (orders,)),
+            self.passing_checks(),
+        )
+
+        self.assertEqual(report.exit_code, 0, report.to_dict())
+
     def test_unsupported_operations_require_explicit_precondition_and_coverage_is_reported(self):
         self.add_folder("2026-09-27_data-change-r001", "UPDATE CUSTOMERS SET ACTIVE = 'Y';\n")
         migration = self.migration_batch("2026-09-27_data-change-r001")
