@@ -1264,6 +1264,77 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertFalse((self.project / "scripts/link.sh").exists())
 
 
+class PostUpgradeGraphifyTests(unittest.TestCase):
+    def test_main_runs_post_upgrade_sync_after_apply_and_keeps_lock_metadata(self) -> None:
+        project = Path(tempfile.gettempdir()) / "upgrade-main-test-project"
+        lock = {"apexRelease": "26.2", "templateRef": "main"}
+        actions = [upgrade_engine.Action("UPDATE", "scripts/graphify_apexlang_extractor.py")]
+        new_lock = {"scripts/graphify_apexlang_extractor.py": "a" * 64}
+        manifest = {
+            "schemaVersion": 2,
+            "apexRelease": "26.2",
+            "upstream": "unused",
+        }
+
+        with (
+            patch.object(upgrade_engine, "run_git", return_value=str(project)),
+            patch.object(upgrade_engine, "check_project"),
+            patch.object(upgrade_engine, "read_lock_with_hash", return_value=(lock, "lock-hash")),
+            patch.object(upgrade_engine, "fetch_template", return_value="1" * 40),
+            patch.object(upgrade_engine, "load_manifest", return_value=manifest),
+            patch.object(upgrade_engine, "classify", return_value=([], [])),
+            patch.object(upgrade_engine, "validate_lock_ownership"),
+            patch.object(upgrade_engine, "plan_upgrade", return_value=(actions, new_lock)),
+            patch.object(upgrade_engine, "apply_actions") as apply_actions,
+            patch.object(upgrade_engine, "_post_upgrade_sync") as post_sync,
+        ):
+            result = upgrade_engine.main(
+                ["--project-root", str(project), "--source", "unused", "--ref", "main"]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(apply_actions.call_args.kwargs["lock_metadata"], {
+            "templateRef": "main",
+            "apexRelease": "26.2",
+        })
+        post_sync.assert_called_once_with(project, actions)
+
+    def test_post_upgrade_sync_runs_setup_graphify_when_extractor_touched(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            scripts = project / "scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            setup_script = scripts / "setup_graphify_apx.py"
+            setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            actions = [upgrade_engine.Action("UPDATE", "scripts/graphify_apexlang_extractor.py")]
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="", stderr=""
+                )
+                upgrade_engine._post_upgrade_sync(project, actions)
+                mock_run.assert_called_once_with(
+                    [sys.executable, str(setup_script)],
+                    cwd=project,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+    def test_post_upgrade_sync_skipped_when_extractor_untouched_and_no_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            scripts = project / "scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            (scripts / "setup_graphify_apx.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with patch("subprocess.run") as mock_run:
+                upgrade_engine._post_upgrade_sync(
+                    project, [upgrade_engine.Action("UPDATE", "AGENTS.md")]
+                )
+                mock_run.assert_not_called()
+
+
 class EnvironmentGitPolicyTests(unittest.TestCase):
     def test_root_configuration_is_trackable_but_nested_and_variant_env_files_are_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

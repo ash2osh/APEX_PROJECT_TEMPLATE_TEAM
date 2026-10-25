@@ -510,6 +510,64 @@ APEX_EXPECTED_USER=DEMO
         self.assertEqual(json.loads(result.stdout)["schemaVersion"], 1)
         self.assertEqual(_hash_dir(self.repo), before)
 
+    def test_graphify_setup_verified_when_graph_json_present(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        self.create_valid_app()
+        graphify_dir = self.repo / "graphify-out"
+        graphify_dir.mkdir(parents=True)
+        (graphify_dir / "graph.json").write_text("{}", encoding="utf-8")
+        setup_script = self.repo / "scripts" / "setup_graphify_apx.py"
+        setup_script.parent.mkdir(parents=True, exist_ok=True)
+        setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        from scripts.local_config import read_project_env
+        values = read_project_env(self.repo / ".env")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="OK\n", stderr=""
+            )
+            report = build_report(self.repo, values, self.current_skills)
+
+        check = next((row for row in report["checks"] if row["check"] == "graphify_setup"), None)
+        self.assertIsNotNone(check)
+        self.assertEqual(check["status"], "pass")
+        self.assertIn("verified and in sync", check["message"])
+
+    def test_graphify_setup_attention_when_extractor_unverified(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        self.create_valid_app()
+        graphify_dir = self.repo / "graphify-out"
+        graphify_dir.mkdir(parents=True)
+        (graphify_dir / "graph.json").write_text("{}", encoding="utf-8")
+        setup_script = self.repo / "scripts" / "setup_graphify_apx.py"
+        setup_script.parent.mkdir(parents=True, exist_ok=True)
+        setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        from scripts.local_config import read_project_env
+        values = read_project_env(self.repo / ".env")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="installed extractor differs from canonical source\n"
+            )
+            report = build_report(self.repo, values, self.current_skills)
+
+        check = next((row for row in report["checks"] if row["check"] == "graphify_setup"), None)
+        self.assertIsNotNone(check)
+        self.assertEqual(check["status"], "attention")
+        self.assertIn("run python3 scripts/setup_graphify_apx.py", check["message"])
+        self.assertEqual(report["exitCode"], 1)
+
+    def test_graphify_setup_omitted_when_no_graph_json(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        self.create_valid_app()
+        from scripts.local_config import read_project_env
+        values = read_project_env(self.repo / ".env")
+        report = build_report(self.repo, values, self.current_skills)
+        self.assertFalse(any(row["check"] == "graphify_setup" for row in report["checks"]))
+
 
 if __name__ == "__main__":
     unittest.main()
