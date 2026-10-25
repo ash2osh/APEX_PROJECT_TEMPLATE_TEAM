@@ -221,7 +221,7 @@ def _render_planning_driver(
         "  l_payload.put('identity', l_identity);",
         # Capture APEX version if visible
         "  BEGIN",
-        "    EXECUTE IMMEDIATE 'SELECT APEX_RELEASE.VERSION_NO FROM DUAL' INTO l_apex_version;",
+        "    EXECUTE IMMEDIATE 'SELECT VERSION_NO FROM APEX_RELEASE' INTO l_apex_version;",
         "  EXCEPTION",
         "    WHEN OTHERS THEN",
         "      l_apex_version := 'unavailable';",

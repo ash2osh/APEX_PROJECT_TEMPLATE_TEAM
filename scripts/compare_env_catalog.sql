@@ -1188,7 +1188,7 @@ BEGIN
     l_pages := JSON_ARRAY_T();
     SELECT MAX(version) INTO l_db_version FROM product_component_version WHERE product LIKE 'Oracle%Database%';
     BEGIN
-    EXECUTE IMMEDIATE 'SELECT APEX_RELEASE.VERSION_NO FROM DUAL' INTO l_apex_version;
+    EXECUTE IMMEDIATE 'SELECT VERSION_NO FROM APEX_RELEASE' INTO l_apex_version;
     EXCEPTION
       WHEN OTHERS THEN
         l_apex_version := NULL;
