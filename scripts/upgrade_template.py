@@ -754,6 +754,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.dry_run:
                 apply_actions(project_root, template_root, actions, source, commit, new_lock,
                               lock_hash=lock_hash, lock_metadata=metadata)
+                _post_upgrade_sync(project_root, actions)
             if release:
                 print(f"Template targets APEX {release}; run team doctor to verify the live instance before APEX operations.")
     except UpgradeError as exc:
@@ -780,6 +781,40 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     return 0
+
+
+def _post_upgrade_sync(project_root: Path, actions: list[Action]) -> None:
+    """Refresh optional Graphify integration after an upgrade changes its code."""
+    setup_script = project_root / "scripts" / "setup_graphify_apx.py"
+    if not setup_script.is_file():
+        return
+    graphify_out = project_root / "graphify-out"
+    touched_extractor = any(
+        action.path in (
+            "scripts/graphify_apexlang_extractor.py",
+            "scripts/setup_graphify_apx.py",
+        )
+        and action.kind in ("UPDATE", "ADD")
+        for action in actions
+    )
+    if not (graphify_out.is_dir() or touched_extractor):
+        return
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(setup_script)],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            print("Graphify APEXlang extractor synchronized")
+        else:
+            detail = (result.stderr or result.stdout or "").strip()
+            print(f"notice: Graphify setup did not verify: {detail}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - optional tooling must not undo a verified upgrade
+        print(f"notice: could not run setup_graphify_apx: {exc}", file=sys.stderr)
 
 
 def _interrupt_on_sigterm() -> None:

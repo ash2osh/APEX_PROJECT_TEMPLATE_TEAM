@@ -328,6 +328,62 @@ class GraphifyPatchTests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_installed_extractor_delegates_to_workspace_extractor(self) -> None:
+        installed_dir = self.root / "site-packages" / "graphify" / "extractors"
+        installed_dir.mkdir(parents=True, exist_ok=True)
+        installed_file = installed_dir / "apexlang.py"
+        shutil.copyfile(MODULE.CANONICAL_EXTRACTOR, installed_file)
+
+        spec = importlib.util.spec_from_file_location("installed_apexlang", installed_file)
+        assert spec and spec.loader
+        installed_mod = importlib.util.module_from_spec(spec)
+        sys.modules["installed_apexlang"] = installed_mod
+        spec.loader.exec_module(installed_mod)
+
+        workspace = self.project / "workspace"
+        workspace_scripts = workspace / "scripts"
+        workspace_scripts.mkdir(parents=True, exist_ok=True)
+        workspace_extractor = workspace_scripts / "graphify_apexlang_extractor.py"
+        workspace_extractor.write_text(
+            "from pathlib import Path\n"
+            "def extract_apexlang(path: Path) -> dict:\n"
+            '    return {"nodes": [{"id": "delegated_success"}], "edges": []}\n'
+            "def extract_sql_linked(path: Path) -> dict:\n"
+            '    return {"nodes": [{"id": "delegated_sql_success"}], "edges": []}\n',
+            encoding="utf-8",
+        )
+
+        sample_apx = workspace / "apps" / "DEMO" / "100" / "pages" / "p00001.apx"
+        sample_apx.parent.mkdir(parents=True, exist_ok=True)
+        sample_apx.write_text("page 1 (name: Test)\n", encoding="utf-8")
+        self.assertEqual(
+            installed_mod.extract_apexlang(sample_apx)["nodes"][0]["id"],
+            "delegated_success",
+        )
+
+        sample_sql = workspace / "database" / "DEMO" / "tables" / "test.sql"
+        sample_sql.parent.mkdir(parents=True, exist_ok=True)
+        sample_sql.write_text("create table test (id number);\n", encoding="utf-8")
+        self.assertEqual(
+            installed_mod.extract_sql_linked(sample_sql)["nodes"][0]["id"],
+            "delegated_sql_success",
+        )
+
+    def test_installed_extractor_no_recursion_on_samefile(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "canonical_apexlang", MODULE.CANONICAL_EXTRACTOR
+        )
+        assert spec and spec.loader
+        canonical_mod = importlib.util.module_from_spec(spec)
+        sys.modules["canonical_apexlang"] = canonical_mod
+        spec.loader.exec_module(canonical_mod)
+
+        self.assertIsNone(canonical_mod._get_project_delegate(Path(__file__)))
+        sample_apx = REPO_ROOT / "apps" / "templates" / "100" / "application.apx"
+        if sample_apx.is_file():
+            result = canonical_mod.extract_apexlang(sample_apx)
+            self.assertIn("nodes", result)
+
 
 if __name__ == "__main__":
     unittest.main()

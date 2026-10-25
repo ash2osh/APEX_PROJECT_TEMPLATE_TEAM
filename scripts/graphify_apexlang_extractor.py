@@ -5,9 +5,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import importlib.util
 from pathlib import Path
 import re
 import sys
+import threading
+from types import ModuleType
 import unicodedata
 
 
@@ -885,6 +888,94 @@ def parse_apexlang(text: str, path: Path) -> dict[str, object]:
     return {"nodes": nodes, "edges": edges}
 
 
+_DELEGATE_CACHE: dict[Path, tuple[tuple[int, int], ModuleType]] = {}
+_DELEGATION_STATE = threading.local()
+
+
+def _find_project_extractor(source_path: Path) -> Path | None:
+    """Find the nearest project-owned extractor above a source file."""
+    try:
+        resolved = source_path.resolve()
+        for parent in resolved.parents:
+            candidate = parent / "scripts" / "graphify_apexlang_extractor.py"
+            if candidate.is_file():
+                return candidate.resolve()
+    except (OSError, RuntimeError):
+        pass
+    return None
+
+
+def _get_project_delegate(source_path: Path) -> tuple[Path, ModuleType] | None:
+    """Load the project extractor, unless it resolves to this installed file."""
+    candidate = _find_project_extractor(source_path)
+    if candidate is None:
+        return None
+    try:
+        if candidate.samefile(Path(__file__).resolve()):
+            return None
+    except (OSError, ValueError):
+        if candidate == Path(__file__).resolve():
+            return None
+
+    active: set[Path] = getattr(_DELEGATION_STATE, "active", set())
+    if candidate in active:
+        return None
+    try:
+        candidate_stat = candidate.stat()
+    except OSError:
+        return None
+    fingerprint = (candidate_stat.st_mtime_ns, candidate_stat.st_size)
+    cached = _DELEGATE_CACHE.get(candidate)
+    if cached and cached[0] == fingerprint:
+        return candidate, cached[1]
+
+    module_name = "_project_apexlang_" + hashlib.sha256(
+        str(candidate).encode("utf-8")
+    ).hexdigest()[:20]
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, candidate)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - an optional delegate must not break extraction
+        sys.modules.pop(module_name, None)
+        print(
+            f"Warning: could not load project extractor '{candidate}': {exc}",
+            file=sys.stderr,
+        )
+        return None
+    _DELEGATE_CACHE[candidate] = (fingerprint, module)
+    return candidate, module
+
+
+def _call_project_delegate(source_path: Path, function_name: str) -> tuple[bool, object]:
+    """Call a checkout extractor while guarding same-thread delegation loops."""
+    loaded = _get_project_delegate(source_path)
+    if loaded is None:
+        return False, None
+    candidate, module = loaded
+    function = getattr(module, function_name, None)
+    if not callable(function):
+        return False, None
+    active: set[Path] = getattr(_DELEGATION_STATE, "active", set())
+    if candidate in active:
+        return False, None
+    active.add(candidate)
+    _DELEGATION_STATE.active = active
+    try:
+        return True, function(source_path)
+    except Exception as exc:  # noqa: BLE001 - fall back to this module's extractor
+        print(
+            f"Warning: project extractor '{candidate}' failed in {function_name}: {exc}",
+            file=sys.stderr,
+        )
+        return False, None
+    finally:
+        active.discard(candidate)
+
+
 def extract_sql_linked(path: Path) -> dict:
     """Graphify's SQL extraction, with foreign keys pointed at mirrored tables.
 
@@ -894,6 +985,10 @@ def extract_sql_linked(path: Path) -> dict:
     replaced here by the parent's node id whenever the parent is mirrored under
     ``database/<schema>/``; anything else is left exactly as extracted.
     """
+    delegated, result = _call_project_delegate(path, "extract_sql_linked")
+    if delegated:
+        return result  # type: ignore[return-value]
+
     from graphify.extractors.sql import extract_sql
 
     result = extract_sql(path)
@@ -933,6 +1028,10 @@ def extract_apexlang(path: Path) -> dict[str, object]:
     warning matters as much as the catch -- returning an `error` nobody reads
     is how a file silently vanishes from the graph.
     """
+    delegated, result = _call_project_delegate(path, "extract_apexlang")
+    if delegated:
+        return result  # type: ignore[return-value]
+
     try:
         text = path.read_text(encoding="utf-8")
         return parse_apexlang(text, path)

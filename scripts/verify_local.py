@@ -492,6 +492,51 @@ def build_report(
             "message": "no upgrade conflicts present",
         })
 
+    graphify_out = repo_root / "graphify-out"
+    if (graphify_out / "graph.json").is_file():
+        setup_script = repo_root / "scripts" / "setup_graphify_apx.py"
+        if not setup_script.is_file():
+            checks.append({
+                "check": "graphify_setup",
+                "status": "attention",
+                "path": str(graphify_out),
+                "message": "graphify-out exists but scripts/setup_graphify_apx.py is missing",
+            })
+        else:
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(setup_script), "--verify"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode == 0:
+                    checks.append({
+                        "check": "graphify_setup",
+                        "status": "pass",
+                        "path": str(graphify_out),
+                        "message": "Graphify APEXlang extractor verified and in sync",
+                    })
+                else:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    checks.append({
+                        "check": "graphify_setup",
+                        "status": "attention",
+                        "path": str(setup_script),
+                        "message": (
+                            f"Graphify APEXlang extractor unverified: {detail}; "
+                            "run python3 scripts/setup_graphify_apx.py"
+                        ),
+                    })
+            except Exception as exc:  # noqa: BLE001 - readiness should report tool availability
+                checks.append({
+                    "check": "graphify_setup",
+                    "status": "attention",
+                    "path": str(setup_script),
+                    "message": f"could not verify Graphify setup: {exc}",
+                })
+
     # Optional tooling stays offline: inspect installed metadata and local graph only.
     try:
         graphify=inspect_graphify(repo_root)
