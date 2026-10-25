@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from scripts.sqlcl_session import bash_command
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "browser_mcp.py"
@@ -237,9 +239,10 @@ class BrowserMcpTests(unittest.TestCase):
         shutil.copy2(ROOT / "scripts/team.sh", scripts / "team.sh")
         if SCRIPT.is_file():
             shutil.copy2(SCRIPT, scripts / "browser_mcp.py")
+        bash = bash_command()
 
         setup = subprocess.run(
-            ["bash", str(scripts / "team.sh"), "mcp", "setup", "--choice", "firefox"],
+            [bash, str(scripts / "team.sh"), "mcp", "setup", "--choice", "firefox"],
             cwd=repo,
             capture_output=True,
             text=True,
@@ -247,7 +250,7 @@ class BrowserMcpTests(unittest.TestCase):
         )
         self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
         status = subprocess.run(
-            ["bash", str(scripts / "team.sh"), "mcp", "status"],
+            [bash, str(scripts / "team.sh"), "mcp", "status"],
             cwd=repo,
             capture_output=True,
             text=True,
