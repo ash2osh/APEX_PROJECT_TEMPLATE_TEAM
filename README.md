@@ -302,6 +302,10 @@ schema. An unlisted schema is never mapped to a target.
 Pass `--schema <NAME>` to narrow a command to one schema. `doctor` and
 `backup-db` check or mirror all configured schemas by default.
 
+For supported commands, the SQLcl login may differ from the target schema;
+see [Running as a login that acts as another schema](docs/login-acts-as-schema.md)
+for the privilege and command limits.
+
 | Command | Multi-schema behavior |
 | --- | --- |
 | `doctor` | Checks every distinct `(connection, expected user, schema)` across the three profiles, and every ORDS target when that optional profile exists, with one read-only SQLcl identity check each. It reports each schema and fails if any check fails. `--schema` narrows it. |

@@ -234,7 +234,7 @@ if ($projectEnvOrdsPresent -eq 3) {
   $projectEnvOrdsUsers = @(Split-ProjectEnvList $env:ORDS_EXPECTED_USER)
   for ($projectEnvOrdsIndex = 0; $projectEnvOrdsIndex -lt $projectEnvOrdsSchemas.Count; $projectEnvOrdsIndex++) {
     if ($projectEnvOrdsSchemas[$projectEnvOrdsIndex] -cne $projectEnvOrdsUsers[$projectEnvOrdsIndex]) {
-      throw "project environment error: ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry (found $($projectEnvOrdsUsers[$projectEnvOrdsIndex]) for $($projectEnvOrdsSchemas[$projectEnvOrdsIndex])): the ORDS export logs in as the REST schema owner"
+      throw "project environment error: ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry (found $($projectEnvOrdsUsers[$projectEnvOrdsIndex]) for $($projectEnvOrdsSchemas[$projectEnvOrdsIndex])): the ORDS export needs the schema owner; use a connection that logs in as that schema"
     }
   }
   $env:PROJECT_ORDS_CONFIGURED = "true"

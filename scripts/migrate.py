@@ -19,6 +19,7 @@ from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
 
 from .db_targets import (
+    ACTING_AS_BANNER,
     Target,
     TargetResolutionError,
     batch_schema,
@@ -843,6 +844,8 @@ def _preflight_snapshot(
 
 def _print_target_summary(target: Target, identity: Mapping[str, str], frozen: Sequence[_FrozenMigration]) -> None:
     print(f"Target {target.environment.upper()}: connection={target.connection} expected_user={target.expected_user} schema={target.schema}")
+    if target.acts_as_other_schema:
+        print(ACTING_AS_BANNER.format(schema=target.schema, login=target.expected_user))
     print(
         "Observed: "
         f"session_user={identity.get('session_user')} schema={identity.get('current_schema')} "

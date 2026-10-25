@@ -228,6 +228,14 @@ if [ -z "$sqlcl_connection" ] || [ -z "$expected_user" ]; then
   esac
 fi
 
+acting_as_banner=""
+if [ "$expected_user" != "$parsing_schema" ]; then
+  acting_as_banner="Acting as schema $parsing_schema through ALTER SESSION SET CURRENT_SCHEMA; login is $expected_user."
+fi
+
+if [ -n "$acting_as_banner" ]; then
+  printf '%s\n' "$acting_as_banner"
+fi
 if [ "$app_environment" != dev ]; then
   printf 'Deploying to %s. Proceed? [y/N]: ' "$target_label"
   answer=""

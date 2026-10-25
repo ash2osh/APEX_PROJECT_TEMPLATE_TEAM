@@ -25,6 +25,7 @@ DOCS = (
     ROOT / "docs" / "EXAMPLES.md",
     ROOT / "docs" / "TROUBLESHOOTING.md",
     ROOT / "docs" / "known-limitations.md",
+    ROOT / "docs" / "login-acts-as-schema.md",
     ROOT / "docs" / "production-deployment.md",
     ROOT / "docs" / "template-feedback.md",
 )

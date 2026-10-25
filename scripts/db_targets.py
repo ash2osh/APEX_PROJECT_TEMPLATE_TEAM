@@ -11,6 +11,7 @@ from collections.abc import Iterable, Mapping
 ORACLE_IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 SQLCL_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
 CLASSIFICATIONS = {"development", "test", "staging", "production"}
+ACTING_AS_BANNER = "Acting as schema {schema} through ALTER SESSION SET CURRENT_SCHEMA; login is {login}."
 # A production marker is "production" or "live" as a whole token, "prod" or
 # "prd" ending a token (PROD, ERPPROD, erpprod.example.com), or starting one
 # before "db" or a digit (PRODDB, PROD1). Pre-production words (PREPROD,
@@ -44,6 +45,10 @@ class Target:
     expected_user: str
     schema: str
     classification: str
+
+    @property
+    def acts_as_other_schema(self) -> bool:
+        return self.expected_user != self.schema
 
 
 def _required(values: Mapping[str, str], key: str) -> str:

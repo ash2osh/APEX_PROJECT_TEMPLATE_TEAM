@@ -266,7 +266,7 @@ do not add spaces or trailing comments.
 | `APEX_APP_ID` | The numeric IDs of your APEX apps, separated by commas. | `100,200` |
 | `*_SCHEMA` | The schema that owns your tables, your code, and your APEX apps. | `DEMO` |
 | `*_SQLCL_CONNECTION` | The saved connection from step 5. | `my-dev` |
-| `*_EXPECTED_USER` | The database user that connection should log in as. A safety check: the scripts stop if it is not this user. | `DEMO` |
+| `*_EXPECTED_USER` | The database user that connection logs in as; scripts verify it. Supported commands can use a login different from `*_SCHEMA`; see [running as a login that acts as another schema](login-acts-as-schema.md). | `DEMO` |
 
 The example uses the same schema, connection and user for tables, code and APEX,
 which is right for most projects. If you work with an AI assistant, you can ask
