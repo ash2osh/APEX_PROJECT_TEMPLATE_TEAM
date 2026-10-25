@@ -60,6 +60,54 @@ suffix, a revision at `r999`, a gap in the family history, or any newer family
 revision. Its order hint lists the local family in ascending revision order;
 include only folders that still need to be applied.
 
+## Archiving released folders
+
+Use `archive-migrations` after a migration is released or superseded to move
+its complete folder out of the active migration tree:
+
+```bash
+scripts/team.sh archive-migrations <folder> [<folder>...] [--schema SCHEMA] \
+  [--destination DIR] [--reason TEXT] [--yes]
+scripts/team.sh archive-migrations --all [--keep <folder>...] [--schema SCHEMA] \
+  [--destination DIR] [--reason TEXT] [--yes]
+```
+
+The default is a dry run. It prints each folder, family, revision, local
+receipt or attempt evidence, and destination, then exits without changing any
+files. Add `--yes` to move the folders. The command reads local files only; it
+does not connect to Oracle or run Git. The default destination is
+`migrations-archive/`; a schema folder is preserved, so an
+`APP_DEV` migration goes to `migrations-archive/APP_DEV/`. A destination
+inside `migrations/` or an existing target folder is refused. Folder contents
+move byte for byte, including `status.*.json` receipts and attempt-event files.
+
+Each archive operation adds records to
+`migrations/<SCHEMA>/.archived.json`, or `migrations/.archived.json` for the
+flat layout. The committed schema-version-1 index stores `folder`, `family`,
+`revision`, `payloadDigest`, `archivedAt` (UTC ISO date), `reason`, and the
+repository-relative `destination`. Unknown keys or malformed records make
+migration discovery refuse the index.
+
+A folder with an attempt record but no verified receipt is refused as unknown state;
+`--allow-unverified-attempts` archives such failed or abandoned attempts and records the
+evidence as `attempt-without-verified-receipt (accepted)` in the plan.
+
+Archiving must remove the contiguous low prefix of a family, or its whole
+visible history. A folder with an attempt record and no verified receipt for
+any environment is refused because its state is unknown. Once an archived
+prefix exists, visible revisions must continue directly after its highest
+revision; a visible revision at or below the prefix or a later hole is still
+refused. Without an archived prefix, the existing `r001` start and consecutive
+revision rule is unchanged.
+
+For example, archive `archive-family` revisions r001 through r004 from
+`migrations/APP_DEV/` with `--yes`. The index records those four revisions,
+their folders move under `migrations-archive/APP_DEV/`, and
+`migrations/APP_DEV/2026-10-05_archive-family-r005/` stays visible. Migration
+discovery accepts r005 and a later r006 because r001 through r004 are recorded
+as the archived prefix. `revise` can continue from visible r005; when every
+revision is archived, unarchive an archived folder or start a new family.
+
 Each immediate SQL file is named `NNN-<step-name>.sql`; sequence numbers must
 be unique and consecutive from `001`. The runner executes those files in
 ascending numeric order in one migration session. When several folders are

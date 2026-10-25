@@ -121,6 +121,16 @@ RECEIPT_FIELDS = {
     "normalization",
 }
 STATUS_ENVIRONMENTS = {"dev", "staging", "prod"}
+ARCHIVED_INDEX_FIELDS = {"schemaVersion", "archived"}
+ARCHIVED_RECORD_FIELDS = {
+    "folder",
+    "family",
+    "revision",
+    "payloadDigest",
+    "archivedAt",
+    "reason",
+    "destination",
+}
 
 
 class MigrationManifestError(ValueError):
@@ -376,6 +386,82 @@ def _folder_parts(folder_name: str) -> tuple[str, str, int]:
     return match.group("date"), match.group("family"), revision
 
 
+def load_archived_index(path: Path, schema: str | None) -> tuple[dict, ...]:
+    """Read and strictly validate the archived-prefix index for one layout."""
+    if path.is_symlink():
+        raise MigrationManifestError(f"archived index cannot be a symbolic link: {path}")
+    if not path.exists():
+        return ()
+    try:
+        raw = decode_json(path.read_bytes(), "archived index")
+    except OSError as exc:
+        raise MigrationManifestError(f"archived index could not be read: {exc}") from exc
+    if not isinstance(raw, dict) or set(raw) != ARCHIVED_INDEX_FIELDS:
+        unknown = sorted(set(raw) - ARCHIVED_INDEX_FIELDS) if isinstance(raw, dict) else []
+        detail = f"; unknown key {unknown[0]!r}" if unknown else ""
+        raise MigrationManifestError(f"archived index fields do not match schemaVersion 1{detail}")
+    if type(raw["schemaVersion"]) is not int or raw["schemaVersion"] != 1 or not isinstance(raw["archived"], list):
+        raise MigrationManifestError("archived index must use schemaVersion 1 and an archived array")
+
+    records: list[dict] = []
+    identities: set[tuple[str, int]] = set()
+    folders: set[str] = set()
+    for record in raw["archived"]:
+        if not isinstance(record, dict) or set(record) != ARCHIVED_RECORD_FIELDS:
+            unknown = sorted(set(record) - ARCHIVED_RECORD_FIELDS) if isinstance(record, dict) else []
+            detail = f"; unknown key {unknown[0]!r}" if unknown else ""
+            raise MigrationManifestError(f"archived index record fields do not match schemaVersion 1{detail}")
+        folder = record["folder"]
+        if not isinstance(folder, str):
+            raise MigrationManifestError("archived index folder must be a migration folder name")
+        _date, family, revision = _folder_parts(folder)
+        if record["family"] != family or type(record["revision"]) is not int or record["revision"] != revision:
+            raise MigrationManifestError(f"archived index folder identity does not match {folder}")
+        identity = (family, revision)
+        if identity in identities or folder in folders:
+            raise MigrationManifestError(f"archived index contains duplicate migration identity {family}-r{revision:03d}")
+        identities.add(identity)
+        folders.add(folder)
+
+        digest = record["payloadDigest"]
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest, re.ASCII) is None:
+            raise MigrationManifestError(f"archived index payloadDigest must be a SHA-256 hex digest: {folder}")
+        archived_at = record["archivedAt"]
+        if not isinstance(archived_at, str):
+            raise MigrationManifestError(f"archived index archivedAt must be a UTC ISO date: {folder}")
+        try:
+            if date.fromisoformat(archived_at).isoformat() != archived_at:
+                raise ValueError("not a canonical ISO date")
+        except ValueError as exc:
+            raise MigrationManifestError(f"archived index archivedAt must be a UTC ISO date: {folder}") from exc
+        reason = record["reason"]
+        if not isinstance(reason, str) or not reason or any(not character.isprintable() for character in reason):
+            raise MigrationManifestError(f"archived index reason must be one printable line: {folder}")
+        destination = record["destination"]
+        parts = destination.split("/") if isinstance(destination, str) else []
+        if (
+            not parts
+            or "\\" in destination
+            or destination.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+            or parts[0] == "migrations"
+            or parts[-1] != folder
+            or (schema is not None and (len(parts) < 2 or parts[-2] != schema))
+        ):
+            raise MigrationManifestError(f"archived index destination is not a safe archive path: {folder}")
+        records.append(record)
+    return tuple(records)
+
+
+def archived_family_revisions(path: Path, schema: str | None, family: str) -> dict[int, dict]:
+    """Return archived records for one family after validating the full index."""
+    return {
+        record["revision"]: record
+        for record in load_archived_index(path, schema)
+        if record["family"] == family
+    }
+
+
 def _migration_directories(repo_root: Path) -> list[tuple[Path, str | None, str, int]]:
     root = repo_root.resolve()
     migrations_dir = root / "migrations"
@@ -428,9 +514,37 @@ def _migration_directories(repo_root: Path) -> list[tuple[Path, str | None, str,
             )
         seen[identity] = path
         revisions.setdefault((schema, family), set()).add(revision)
-    for (_schema, family), values in revisions.items():
-        expected = set(range(1, max(values) + 1))
-        if values != expected:
+    archived_revisions: dict[tuple[str | None, str], set[int]] = {}
+    parents: dict[str | None, Path] = {None: migrations_dir}
+    for path in migrations_dir.iterdir():
+        if path.is_dir() and SCHEMA_DIRECTORY_RE.fullmatch(path.name):
+            parents[path.name] = path
+    for schema, parent in parents.items():
+        for record in load_archived_index(parent / ".archived.json", schema):
+            archived_revisions.setdefault((schema, record["family"]), set()).add(record["revision"])
+
+    for schema, family in revisions.keys() | archived_revisions.keys():
+        visible = revisions.get((schema, family), set())
+        archived = archived_revisions.get((schema, family), set())
+        if archived:
+            archived_expected = set(range(1, max(archived) + 1))
+            if archived != archived_expected:
+                raise MigrationManifestError(
+                    f"archived prefix for migration family {family} is incomplete; archived revisions must be consecutive from r001"
+                )
+            highest_archived = max(archived)
+            if any(revision <= highest_archived for revision in visible):
+                raise MigrationManifestError(
+                    f"migration family {family} has a visible revision at or below its archived prefix r{highest_archived:03d}"
+                )
+            combined = visible | archived
+            expected = set(range(1, max(combined) + 1))
+            if combined != expected:
+                raise MigrationManifestError(
+                    f"migration family {family} has a revision gap after archived prefix r{highest_archived:03d}; "
+                    "visible revisions must continue consecutively"
+                )
+        elif visible != set(range(1, max(visible) + 1)):
             raise MigrationManifestError(f"migration family {family} has a revision gap; revisions start at r001")
     return directories
 
@@ -684,6 +798,16 @@ def validate_staged_migration(repo_root: Path, stage: Path, relative_destination
         for _path, schema, existing_family, existing_revision in directories
         if existing_family == family
     ]
+    parents: dict[str | None, Path] = {None: migrations_dir}
+    for path in migrations_dir.iterdir():
+        if path.is_dir() and SCHEMA_DIRECTORY_RE.fullmatch(path.name):
+            parents[path.name] = path
+    for schema, parent in parents.items():
+        family_directories.extend(
+            (schema, record["revision"])
+            for record in load_archived_index(parent / ".archived.json", schema)
+            if record["family"] == family
+        )
     layouts = {schema for schema, _existing_revision in family_directories}
     if destination_schema is None and any(schema is not None for schema in layouts):
         raise MigrationManifestError(f"migration family {family} already uses a schema-specific layout")
