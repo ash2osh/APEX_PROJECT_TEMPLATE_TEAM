@@ -1534,6 +1534,7 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
                     coverage["complete"] = False
                     continue
                 staged_tables[table_name] = set(columns)
+                columns = staged_tables[table_name]
             for column in operation["columns"]:
                 if column in columns:
                     conflicts.append({"code": "COLUMN_ALREADY_EXISTS", "table": table_name, "column": column, **location})
