@@ -478,6 +478,9 @@ class TestDevTestTarget(unittest.TestCase):
         self.assertTrue(report["coverage"]["complete"])
 
         self.assertTrue(len(runner.recorded_drivers) > 0)
+        plan_driver = next(driver for driver in runner.recorded_drivers if "apexVersion" in driver)
+        self.assertIn("SELECT VERSION_NO FROM APEX_RELEASE", plan_driver)
+        self.assertNotIn("SELECT APEX_RELEASE.VERSION_NO FROM DUAL", plan_driver)
         for driver in runner.recorded_drivers:
             # No suite step SQL executed
             self.assertNotIn("UNIQUE_SUITE_PAYLOAD_MARKER_998877", driver)
