@@ -147,13 +147,15 @@ def revise_folder(repo_root: Path, relative_folder: str, reason: str | None = No
         raise MigrationRevisionError("--reason must be one printable line")
 
     relative_destination = relative_to_root(destination, root).as_posix()
-    header = f"Supersedes {source.name}: {selected_reason}\n".encode()
     original_readme = source / "README.md"
     try:
         readme_bytes = original_readme.read_bytes() if original_readme.exists() else b""
         readme_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError) as error:
         raise MigrationRevisionError(f"migration README.md must be readable UTF-8: {error}") from error
+    newline_match = re.search(rb"\r\n|\n|\r", readme_bytes)
+    line_ending = newline_match.group(0) if newline_match is not None else b"\n"
+    header = f"Supersedes {source.name}: {selected_reason}".encode() + line_ending
 
     try:
         with tempfile.TemporaryDirectory(prefix=".migration-revision-", dir=root) as temporary:

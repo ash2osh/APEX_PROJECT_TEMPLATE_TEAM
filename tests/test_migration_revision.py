@@ -145,6 +145,17 @@ class MigrationRevisionTests(unittest.TestCase):
             b"Supersedes 2026-10-01_create-things-r001: follow-up revision\nNotes without final newline",
         )
 
+    def test_revise_uses_existing_crlf_style_for_the_prepended_header(self):
+        self.add_folder("migrations/DEMO/2026-10-01_create-things-r001", readme=b"First line\r\nSecond line\r\n")
+
+        result = revise_folder(self.root, "migrations/DEMO/2026-10-01_create-things-r001")
+
+        self.assertEqual(
+            (result.folder / "README.md").read_bytes(),
+            b"Supersedes 2026-10-01_create-things-r001: follow-up revision\r\n"
+            b"First line\r\nSecond line\r\n",
+        )
+
     def test_revise_continues_after_an_archived_prefix(self):
         parent = self.root / "migrations" / "APP_DEV"
         parent.mkdir()
