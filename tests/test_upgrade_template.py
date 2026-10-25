@@ -1266,7 +1266,7 @@ class UpgradeTemplateTests(unittest.TestCase):
 
 class PostUpgradeGraphifyTests(unittest.TestCase):
     def test_main_runs_post_upgrade_sync_after_apply_and_keeps_lock_metadata(self) -> None:
-        project = Path("/tmp/upgrade-main-test-project")
+        project = Path(tempfile.gettempdir()) / "upgrade-main-test-project"
         lock = {"apexRelease": "26.2", "templateRef": "main"}
         actions = [upgrade_engine.Action("UPDATE", "scripts/graphify_apexlang_extractor.py")]
         new_lock = {"scripts/graphify_apexlang_extractor.py": "a" * 64}
