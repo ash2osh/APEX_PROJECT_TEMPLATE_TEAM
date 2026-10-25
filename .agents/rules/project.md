@@ -1,12 +1,13 @@
 ---
 trigger: always_on
-description: Use the project's persistent Chrome DevTools MCP daemon for browser access.
+description: Honor the selected project browser MCP and avoid duplicate browser connections.
 ---
 
 <!-- Project-specific agent rules. The template upgrade never overwrites this file. -->
 # Project browser access
 
-- Before browser work, read [the Chrome DevTools MCP skill](../skills/chrome-devtools-mcp/SKILL.md) and [its daemon guide](../../docs/CHROME_DEVTOOLS_MCP.md).
-- Route browser calls through `python3 tools/chrome_devtools_client.py <tool> [json_args]`. Never call another browser MCP connection or attach directly to Chrome as a workaround.
-- The client does not start a daemon. Use one daemon for the user's consented Chrome connection; if it is unavailable, start it explicitly only when the current task authorizes startup and consent is available. Otherwise report that it is unavailable and ask the user to start it.
+- Before browser work, run `scripts/team.sh mcp status`, read the [browser MCP guide](../../docs/browser-mcp.md), and follow the skill for the saved choice: [Chrome](../skills/chrome-devtools-mcp/SKILL.md) or [Firefox](../skills/firefox-devtools-mcp/SKILL.md).
+- Use only direct project MCP servers enabled by the saved checkout choice. If both are enabled, use the browser requested for the task and one connection for that browser.
+- When Chrome is selected, use the direct project Chrome MCP; do not also use the daemon or another Chrome MCP connection for that session.
+- If Chrome is not selected and the task requires Chrome, use the daemon only with explicit startup authorization and user consent; follow the [daemon guide](../../docs/CHROME_DEVTOOLS_MCP.md). If a selected server is unavailable, report it instead of bypassing the saved choice.
 - Treat browser actions as real app interactions. Follow `AGENTS.md` and shared APEX workflow rules before actions that write app data or Builder state.
