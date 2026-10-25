@@ -169,6 +169,32 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
+    def test_browser_mcp_feature_files_are_upgrade_owned_and_project_rules_are_protected(self) -> None:
+        for path in (
+            ".gitignore",
+            "AGENTS.md",
+            "README.md",
+            "scripts/team.sh",
+            "scripts/team.ps1",
+            "scripts/browser_mcp.py",
+            "docs/browser-mcp.md",
+            ".agents/skills/chrome-devtools-mcp/SKILL.md",
+            ".agents/skills/firefox-devtools-mcp/SKILL.md",
+            ".claude/skills/firefox-devtools-mcp/SKILL.md",
+            "tests/test_browser_mcp.py",
+            "template-manifest.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["templateOwned"])
+        for path in (
+            "AGENTS.project.md",
+            ".agents/rules/project.md",
+            ".agents/styles/personal.md",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify(path), ["projectOwned"])
+        self.assertEqual(self.classify("docs/superpowers/plans/local-plan.md"), ["templateOnly"])
+
     def test_template_declares_the_qualified_release_boundary(self) -> None:
         from scripts.upgrade_template import load_manifest
         manifest = load_manifest(ROOT)

@@ -13,14 +13,15 @@ FORBIDDEN = (
 
 
 class ChromeDevToolsDocumentationTests(unittest.TestCase):
-    def test_browser_skill_uses_daemon_cli(self):
+    def test_browser_skill_follows_selected_direct_mcp_or_authorized_daemon(self):
         path = ROOT / ".agents/skills/chrome-devtools-mcp/SKILL.md"
         self.assertTrue(path.is_file(), "project browser skill must exist")
         skill = path.read_text(encoding="utf-8")
-        self.assertIn("tools/chrome_devtools_client.py", skill)
-        self.assertIn("tools/chrome_mcp_daemon.py", skill)
+        self.assertIn("project-configured direct Chrome DevTools MCP", skill)
+        self.assertIn("daemon client", skill)
         self.assertIn("list_pages", skill)
         self.assertIn("does not start", skill)
+        self.assertIn("startup is authorized", skill)
 
     def test_browser_docs_are_project_neutral(self):
         path = ROOT / "docs/CHROME_DEVTOOLS_MCP.md"
@@ -72,6 +73,43 @@ class ChromeDevToolsDocumentationTests(unittest.TestCase):
         for source, relative in links:
             with self.subTest(source=source.name, target=relative):
                 self.assertTrue((source.parent / relative).resolve().is_file())
+
+    def test_browser_mcp_selection_guide_covers_both_clients_and_safe_setup(self):
+        path = ROOT / "docs/browser-mcp.md"
+        self.assertTrue(path.is_file(), "the per-checkout browser MCP guide must ship with the template")
+        guide = path.read_text(encoding="utf-8")
+        for required in (
+            "mcp setup",
+            "chrome",
+            "firefox",
+            "both",
+            "none",
+            "does not start a browser or an MCP process",
+            "trusted",
+            "chrome-devtools-mcp",
+            "@mozilla/firefox-devtools-mcp",
+            "firefox-devtools-mcp/SKILL.md",
+            "template upgrades preserve those files",
+            "AGENTS.project.md",
+            ".agents/rules/project.md",
+            "align them with this selection",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required.lower(), guide.lower())
+
+    def test_firefox_skill_requires_selection_and_describes_session_safety(self):
+        path = ROOT / ".agents/skills/firefox-devtools-mcp/SKILL.md"
+        self.assertTrue(path.is_file(), "Firefox DevTools skill must ship with the template")
+        skill = path.read_text(encoding="utf-8")
+        for required in (
+            "saved choice is firefox or both",
+            "dedicated Firefox profile",
+            "does not start the browser",
+            "--marionette --remote-debugging-port",
+            "restart Firefox normally",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required.lower(), skill.lower())
 
 
 if __name__ == "__main__":

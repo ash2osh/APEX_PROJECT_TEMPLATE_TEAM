@@ -61,6 +61,8 @@ Commands:
                                               Update template-owned files from the template
   verify-local [--format text|json] [--skills-root <path>] [...] [--live]
                                               Validate local environment, lock, apps and skills read-only
+  mcp setup [--choice chrome|firefox|both|none] Choose browser MCPs for this checkout
+  mcp status                                  Show the saved browser MCP choice
   skills setup none|superpowers|mattpocock|both [--primary superpowers|mattpocock]
                                               Set up optional repository workflow packs
   skills status [--format text|json]          Inspect repository workflow packs offline
@@ -111,7 +113,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -418,6 +420,19 @@ case "$command_name" in
     exec python3 "$verify_script" --repo-root "$verify_root" "$@"
     ;;
 
+  mcp)
+    mcp_script="$REPO_ROOT/scripts/browser_mcp.py"
+    mcp_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          mcp_script="$(cygpath -m "$mcp_script")"
+          mcp_root="$(cygpath -m "$mcp_root")"
+        fi
+        ;;
+    esac
+    exec python3 "$mcp_script" --repo-root "$mcp_root" "$@"
+    ;;
   skills)
     skills_script="$REPO_ROOT/scripts/workflow_skills.py"
     skills_root="$REPO_ROOT"

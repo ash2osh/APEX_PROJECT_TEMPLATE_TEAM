@@ -25,6 +25,7 @@
     "app_context/README.md",
     "apps/templates/**",
     "docs/CHROME_DEVTOOLS_MCP.md",
+    "docs/browser-mcp.md",
     "docs/ci-checks.md",
     "docs/compare-env.md",
     "docs/daily-change-record.md",

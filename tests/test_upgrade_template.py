@@ -590,6 +590,114 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read("scripts/tool.sh"), "echo v2\n")
         self.assertEqual(self.read("scripts/new.sh"), "echo new\n")
 
+    def test_browser_mcp_release_updates_and_adds_owned_files_without_configuring_clients(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            template = root / "template"
+            project = root / "project"
+            init_repo(template)
+            manifest = {
+                "schemaVersion": 1,
+                "upstream": str(template),
+                "templateOwned": [
+                    ".gitignore",
+                    "README.md",
+                    "AGENTS.md",
+                    "scripts/**",
+                    "docs/browser-mcp.md",
+                    ".agents/skills/**",
+                    "tests/**",
+                    "template-manifest.json",
+                ],
+                "projectOwned": [
+                    "AGENTS.project.md",
+                    ".agents/rules/project.md",
+                    ".agents/styles/personal.md",
+                ],
+                "templateOnly": ["docs/superpowers/**"],
+            }
+            version_one = {
+                "template-manifest.json": json.dumps(manifest) + "\n",
+                ".gitignore": "# template v1\n",
+                "README.md": "browser setup is not documented\n",
+                "AGENTS.md": "template rules v1\n",
+                "scripts/team.sh": "# wrapper v1\n",
+                "AGENTS.project.md": "template project placeholder\n",
+                ".agents/rules/project.md": "template project rule placeholder\n",
+                ".agents/styles/personal.md": "template personal style placeholder\n",
+            }
+            write(template, version_one)
+            commit_all(template, "template v1")
+
+            init_repo(project)
+            write(project, version_one)
+            write(
+                project,
+                {
+                    "AGENTS.project.md": "project agent rules\n",
+                    ".agents/rules/project.md": "project rule\n",
+                    ".agents/styles/personal.md": "personal style\n",
+                },
+            )
+            commit_all(project, "downstream from template v1")
+            first = subprocess.run(
+                [sys.executable, str(ENGINE), "--project-root", str(project), "--source", str(template)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            commit_all(project, "adopt v1 lock")
+
+            manifest_v2 = {
+                **manifest,
+                "templateOwned": [*manifest["templateOwned"], ".claude/skills/**", "docs/CHROME_DEVTOOLS_MCP.md"],
+            }
+            version_two = {
+                "template-manifest.json": json.dumps(manifest_v2) + "\n",
+                ".gitignore": "# template v2\n/.mcp.json\n/.browser-mcp-selection.json\n/.codex/config.toml\n",
+                "README.md": "Choose Chrome, Firefox, both, or none for this checkout.\n",
+                "AGENTS.md": "template rules v2: inspect the browser MCP guide\n",
+                ".agents/skills/chrome-devtools-mcp/SKILL.md": "# Updated Chrome MCP skill\n",
+                ".agents/skills/initialize-project/SKILL.md": "# Updated APEX initialization guidance\n",
+                ".agents/skills/firefox-devtools-mcp/SKILL.md": "# Firefox MCP skill\n",
+                ".claude/skills/firefox-devtools-mcp/SKILL.md": "# Firefox MCP skill for Claude\n",
+                ".claude/skills/initialize-project/SKILL.md": "# Updated Claude APEX initialization guidance\n",
+                "docs/CHROME_DEVTOOLS_MCP.md": "# Updated Chrome setup guide\n",
+                "scripts/team.sh": "# wrapper v2\nmcp setup --choice chrome|firefox|both|none\n",
+                "scripts/team.ps1": "# PowerShell wrapper v2\n",
+                "scripts/browser_mcp.py": "# browser setup code\nprint('No browser or MCP process was started.')\n",
+                "docs/browser-mcp.md": "# Browser MCP selection\n",
+                "tests/test_browser_mcp.py": "# browser MCP regressions\n",
+                "tests/test_chrome_devtools_docs.py": "# Chrome and Firefox documentation regressions\n",
+                "tests/test_template_manifest.py": "# Template ownership regressions\n",
+                "tests/test_upgrade_template.py": "# Upgrade regression coverage\n",
+            }
+            write(template, version_two)
+            commit_all(template, "template v2 browser MCP choice")
+            second = subprocess.run(
+                [sys.executable, str(ENGINE), "--project-root", str(project), "--source", str(template)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("UPDATE template-manifest.json", second.stdout)
+            self.assertIn("UPDATE .gitignore", second.stdout)
+            self.assertIn("UPDATE scripts/team.sh", second.stdout)
+            for relative, contents in version_two.items():
+                with self.subTest(path=relative):
+                    self.assertEqual((project / relative).read_text(encoding="utf-8"), contents)
+            for relative, contents in (
+                ("AGENTS.project.md", "project agent rules\n"),
+                (".agents/rules/project.md", "project rule\n"),
+                (".agents/styles/personal.md", "personal style\n"),
+            ):
+                self.assertEqual((project / relative).read_text(encoding="utf-8"), contents)
+            for relative in (".mcp.json", ".codex/config.toml", ".browser-mcp-selection.json"):
+                self.assertFalse((project / relative).exists(), f"upgrade unexpectedly configured {relative}")
+
     def test_edit_saved_after_planning_is_not_overwritten(self) -> None:
         self.adopt()
         original_lock = self.read(".template-lock.json")

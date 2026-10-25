@@ -16,6 +16,7 @@ separate file changes only and do not isolate a shared APEX application.
 | I want to… | Read |
 | --- | --- |
 | set everything up for the first time | [Getting started](docs/GETTING_STARTED.md) |
+| choose a browser MCP for this checkout | [Browser MCP selection](docs/browser-mcp.md) |
 | do a specific task, step by step | [Examples](docs/EXAMPLES.md) |
 | understand an error message | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | look up a command | [Command reference](#command-reference) |
@@ -48,16 +49,16 @@ operational scripts, `.env`, manifest and lock.
 | Safety built in | Every connection is identity-checked, production-looking names are caught, production is read-only, file installs are all-or-nothing, and your uncommitted work is never overwritten. |
 | Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
 | Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
-| AI-assistant support | Repository rules, 11 skills plus optional workflow packs, SQLcl MCP guidance and a Chrome DevTools daemon for assistants such as Claude Code and Codex. |
+| AI-assistant support | Repository rules, 12 skills, optional workflow packs, SQLcl MCP, per-checkout Chrome/Firefox MCP selection, and an optional Chrome daemon. |
 | Bash and PowerShell | `scripts/team.sh` and `scripts/team.ps1` expose the same commands. |
 
 ## Skills and agent support
 
 AI coding assistants read [AGENTS.md](AGENTS.md) (Claude Code loads it through
 `CLAUDE.md`) for the rules and load a skill on their own when a task matches
-its description. The same 11 skills for APEX and project setup are listed in `.agents/skills/` (for agents
+its description. The same 12 skills for APEX and project setup are listed in `.agents/skills/` (for agents
 that follow the `AGENTS.md` convention) and `.claude/skills/` (for Claude Code).
-Four Claude Code entries (`building-apex-template-components`, `chrome-devtools-mcp`,
+Five Claude Code entries (`building-apex-template-components`, `chrome-devtools-mcp`, `firefox-devtools-mcp`,
 `safeguarding-apexlang-text-messages` and `sqlcl-mcp-r0`) are short pointers to the full
 `.agents/skills/` copy.
 You do not have to call them by name.
@@ -105,7 +106,8 @@ Agents also load a conversation style at the start of each conversation: set `AG
 | `safeguarding-apexlang-text-messages` | Localizing or repairing `textMessages` without breaking substitutions or tokens. |
 | `sqlcl-mcp-r0` | An assistant operates SQLcl through MCP at restriction level 0. |
 | `sqlcl-script-path-debugging` | Nested SQLcl scripts load the wrong file, or relative `SPOOL` and include paths misbehave. |
-| `chrome-devtools-mcp` | Inspecting or driving your running web app in Chrome through the project's persistent DevTools daemon. |
+| Chrome DevTools MCP | Inspecting or driving your running web app through the selected Chrome MCP or authorized daemon fallback. |
+| Firefox DevTools MCP | Inspecting or driving your running web app through the selected Firefox MCP. |
 | `building-apex-template-components` | Creating, translating or debugging an APEX template component (report type) for cards or lists: files, placeholders, region mapping, mobile and Arabic layout, optional Alpine.js, import and browser testing. |
 
 **Optional workflow packs:** choose Superpowers, Matt Pocock's skills, both, or
@@ -127,6 +129,10 @@ Rules and workflows that apply to everyone, human or assistant, live in
 (`team-flow.md`, `graphify.md`). Put your project's own
 instructions in `AGENTS.project.md`, `.agents/rules/project.md` and
 `PROJECT.md`; template upgrades never overwrite those.
+
+## Browser MCP setup
+
+Choose Chrome, Firefox, both, or none for this checkout with scripts/team.sh mcp setup. Run scripts/team.sh mcp status to see the saved choice. The files are local and ignored; Codex requires a trusted checkout, and the client must be reloaded after a change. Setup starts no browser process. See the Browser MCP selection guide.
 
 ## Quickstart
 
@@ -809,6 +815,8 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
 | `scripts/team.sh skills setup none\|superpowers\|mattpocock\|both [--primary superpowers\|mattpocock]` | Set up optional, pinned workflow packs locally. |
 | `scripts/team.sh skills status [--format text\|json]` | Inspect repository-managed packs offline. |
+| `scripts/team.sh mcp setup [--choice chrome\|firefox\|both\|none]` | Select checkout-local Chrome and Firefox MCP servers; setup writes ignored client configuration only. |
+| `scripts/team.sh mcp status` | Show the saved browser MCP choice for this checkout. |
 | `scripts/team.sh template-status [--format text\|json]` | Compare template-owned files with the local lock; no network access by default. |
 | `scripts/team.sh template-status --upstream --ref <ref>` | Explicitly compare local files with a branch, tag or commit from the manifest's upstream repository. |
 | `scripts/team.sh automations list <id> --env <env> --schema <schema>` | Read one application's automation status in its descriptor workspace. |
