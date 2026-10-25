@@ -3,6 +3,9 @@
 .env.*
 !/.env.example
 !/.env
+/.mcp.json
+/.browser-mcp-selection.json
+/.codex/config.toml
 .sync-state/
 scratch/
 migrations/**/attempt-event.*.json

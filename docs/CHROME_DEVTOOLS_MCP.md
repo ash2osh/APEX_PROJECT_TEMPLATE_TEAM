@@ -2,6 +2,14 @@
 
 This project can use the `chrome-devtools-mcp` server through a persistent local daemon. The daemon attaches to the user's running Chrome session; the small CLI client sends allowlisted tool calls over a private Unix socket on Linux and macOS, or over a token-protected TCP loopback port on Windows.
 
+## Selected browser route
+
+Run scripts/team.sh mcp status and read the Browser MCP selection guide before
+using this daemon. When the direct Chrome MCP is selected, use that connection
+and do not start or call the daemon. Use the daemon only when Chrome is not
+selected and the task requests Chrome browser work with authorized startup and
+user consent. Never connect both routes to one Chrome session.
+
 ## Prerequisites
 
 - `chrome-devtools-mcp` must already be installed and available on `PATH`, or be selected with `CHROME_MCP_EXECUTABLE`.
