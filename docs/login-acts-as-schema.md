@@ -9,12 +9,53 @@ both identities and use `ALTER SESSION SET CURRENT_SCHEMA` to resolve
 unqualified names in that schema. This needs neither the schema owner's
 credentials nor a proxy grant; it does not make the login the schema owner or
 give it extra privileges.
+When a proxy grant is available, use the [proxy login alternative](#proxy-login-alternative).
 
 When the login and target schema are the same, behavior is unchanged: there is
 no acts-as-schema banner and `doctor` adds no privilege report. A different
 login must already have the privileges required for the requested statements.
 Live catalog preflight requires either `SELECT ANY DICTIONARY` or
 `SELECT_CATALOG_ROLE` to validate metadata visibility.
+Cross-owner metadata extraction through `DBMS_METADATA.GET_DDL`, including the
+code scope of `backup-db`, also needs `SELECT_CATALOG_ROLE`. In a live check,
+`SELECT ANY DICTIONARY` passed catalog preflight but did not allow package DDL
+extraction; adding `SELECT_CATALOG_ROLE` allowed `backup-db` to complete.
+
+## Proxy login alternative
+
+When a DBA can grant proxy access, prefer it over acts-as-schema mode:
+
+```sql
+ALTER USER APP_STAGE GRANT CONNECT THROUGH APP_LOGIN;
+```
+
+Save a SQLcl connection using the proxy form `APP_LOGIN[APP_STAGE]`. Oracle
+then reports `SESSION_USER` as `APP_STAGE`, so set both values to the schema:
+
+```dotenv
+STAGING_EXPECTED_USER=APP_STAGE
+STAGING_SCHEMA=APP_STAGE
+```
+
+The template sees an ordinary owner session: there is no acting-as banner or
+`doctor` privilege report. `dev-test` and `backup-ords` pass their owner check
+because `SESSION_USER` equals the selected schema.
+
+| Mode | Trade-off |
+| --- | --- |
+| Proxy login | Requires a DBA grant; direct statements use the schema owner's privileges, preserving owner-grant fidelity, and need no cross-schema `ANY` privileges. |
+| Acts-as-schema | Needs no proxy grant; direct statements use the login's privileges, and `doctor` reports those privileges. |
+
+The template checks only the saved connection alias and reported
+`SESSION_USER`/`CURRENT_SCHEMA`; it does not inspect the proxy grant itself.
+Live proxy checks on APEX 26.1.5 and 26.2.0 with SQLcl 26.3 returned
+`SESSION_USER=APP_STAGE`, `PROXY_USER=APP_LOGIN`, and
+`CURRENT_SCHEMA=APP_STAGE`. `dev-test --plan` accepted the owner identity, but
+its scenarios were blocked because the disposable schema lacked fixture DDL
+privileges; fixture execution was not tested. `backup-ords` accepted the owner
+identity and verified an empty export because the schema was not REST-enabled
+and had no ORDS metadata. The owner identity takes the ordinary-session path,
+with no acts-as-schema banner or additional `doctor` privilege report.
 
 ## Configuration
 
