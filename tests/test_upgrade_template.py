@@ -649,15 +649,29 @@ class UpgradeTemplateTests(unittest.TestCase):
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
             commit_all(project, "adopt v1 lock")
 
+            manifest_v2 = {
+                **manifest,
+                "templateOwned": [*manifest["templateOwned"], ".claude/skills/**", "docs/CHROME_DEVTOOLS_MCP.md"],
+            }
             version_two = {
+                "template-manifest.json": json.dumps(manifest_v2) + "\n",
                 ".gitignore": "# template v2\n/.mcp.json\n/.browser-mcp-selection.json\n/.codex/config.toml\n",
                 "README.md": "Choose Chrome, Firefox, both, or none for this checkout.\n",
                 "AGENTS.md": "template rules v2: inspect the browser MCP guide\n",
+                ".agents/skills/chrome-devtools-mcp/SKILL.md": "# Updated Chrome MCP skill\n",
+                ".agents/skills/initialize-project/SKILL.md": "# Updated APEX initialization guidance\n",
+                ".agents/skills/firefox-devtools-mcp/SKILL.md": "# Firefox MCP skill\n",
+                ".claude/skills/firefox-devtools-mcp/SKILL.md": "# Firefox MCP skill for Claude\n",
+                ".claude/skills/initialize-project/SKILL.md": "# Updated Claude APEX initialization guidance\n",
+                "docs/CHROME_DEVTOOLS_MCP.md": "# Updated Chrome setup guide\n",
                 "scripts/team.sh": "# wrapper v2\nmcp setup --choice chrome|firefox|both|none\n",
+                "scripts/team.ps1": "# PowerShell wrapper v2\n",
                 "scripts/browser_mcp.py": "# browser setup code\nprint('No browser or MCP process was started.')\n",
                 "docs/browser-mcp.md": "# Browser MCP selection\n",
-                ".agents/skills/firefox-devtools-mcp/SKILL.md": "# Firefox MCP skill\n",
                 "tests/test_browser_mcp.py": "# browser MCP regressions\n",
+                "tests/test_chrome_devtools_docs.py": "# Chrome and Firefox documentation regressions\n",
+                "tests/test_template_manifest.py": "# Template ownership regressions\n",
+                "tests/test_upgrade_template.py": "# Upgrade regression coverage\n",
             }
             write(template, version_two)
             commit_all(template, "template v2 browser MCP choice")
@@ -669,6 +683,7 @@ class UpgradeTemplateTests(unittest.TestCase):
             )
 
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("UPDATE template-manifest.json", second.stdout)
             self.assertIn("UPDATE .gitignore", second.stdout)
             self.assertIn("UPDATE scripts/team.sh", second.stdout)
             for relative, contents in version_two.items():
