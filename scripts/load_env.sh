@@ -384,7 +384,7 @@ if [ "$project_env_ords_present" -eq 3 ]; then
   project_env_split_csv project_env_ords_users "$ORDS_EXPECTED_USER"
   for ((project_env_ords_index = 0; project_env_ords_index < ${#project_env_ords_schemas[@]}; project_env_ords_index++)); do
     if [ "${project_env_ords_schemas[$project_env_ords_index]}" != "${project_env_ords_users[$project_env_ords_index]}" ]; then
-      project_env_fail "ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry (found ${project_env_ords_users[$project_env_ords_index]} for ${project_env_ords_schemas[$project_env_ords_index]}): the ORDS export logs in as the REST schema owner"
+      project_env_fail "ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry (found ${project_env_ords_users[$project_env_ords_index]} for ${project_env_ords_schemas[$project_env_ords_index]}): the ORDS export needs the schema owner; use a connection that logs in as that schema"
       return 1 2>/dev/null || exit 1
     fi
   done

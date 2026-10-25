@@ -307,7 +307,7 @@ def read_project_env(path: Path) -> dict[str, str]:
         ords_users = values["ORDS_EXPECTED_USER"].split(",")
         for s_item, u_item in zip(ords_schemas, ords_users, strict=True):
             if s_item != u_item:
-                raise ConfigError("ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry: the ORDS export logs in as the REST schema owner")
+                raise ConfigError("ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry: the ORDS export needs the schema owner; use a connection that logs in as that schema")
 
     for key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
         if key in seen_keys:

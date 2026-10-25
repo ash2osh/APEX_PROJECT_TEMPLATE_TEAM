@@ -1,0 +1,1 @@
+-- No privilege report is needed when the login owns the target schema.

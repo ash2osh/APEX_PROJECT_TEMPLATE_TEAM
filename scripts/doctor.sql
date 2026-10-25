@@ -16,6 +16,16 @@ DEFINE doctor_username_hex = '&5'
 DEFINE doctor_app_ids = '&6'
 @@verify_db_access.sql
 @@doctor_database_info.sql
+-- SQL*Plus includes cannot be conditional. Select a report or a comment-only
+-- script so owner logins keep the existing doctor output unchanged.
+COLUMN doctor_session_privilege_script NEW_VALUE doctor_session_privilege_script NOPRINT
+SELECT CASE
+         WHEN UPPER('&&expected_user') <> UPPER('&&target_schema')
+           THEN 'doctor_session_privileges.sql'
+         ELSE 'doctor_no_report.sql'
+       END AS doctor_session_privilege_script
+FROM dual;
+@@&&doctor_session_privilege_script
 -- The same identity driver also serves table/code profiles. Dynamic SQL keeps
 -- those profiles independent of APEX installation and privileges.
 DECLARE

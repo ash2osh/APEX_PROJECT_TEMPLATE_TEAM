@@ -89,6 +89,10 @@ independent of optional workflow packs. After installing Matt's pack, invoke
   metadata tables, mutexes, checkout rosters, or database-backed migration
   ledgers.
 
+Supported commands may use a SQLcl login different from the target schema;
+owner-only commands retain their owner-login checks. See
+[docs/login-acts-as-schema.md](docs/login-acts-as-schema.md).
+
 ## Team workflow
 
 - **Builder-first:** Coordinate with teammates before editing a shared app in
