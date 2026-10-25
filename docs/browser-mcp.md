@@ -22,6 +22,10 @@ Codex reads project settings only after the checkout is trusted. Reload the codi
 
 The pinned packages are `chrome-devtools-mcp@1.9.0` and `@mozilla/firefox-devtools-mcp@0.10.6`. See the [Firefox DevTools MCP skill](../.agents/skills/firefox-devtools-mcp/SKILL.md) for attaching and inspecting Firefox.
 
+## Project-owned browser rules
+
+Downstream projects may have browser routing rules in `AGENTS.project.md` or `.agents/rules/project.md`. Template upgrades preserve those files. After changing the browser selection, review any local browser rules and align them with this selection; otherwise they may direct the agent to a different client.
+
 Firefox must be started with remote debugging and Marionette enabled. Use a dedicated Firefox profile: the MCP can access its tabs, cookies, and signed-in sessions. On Linux, for example:
 
     firefox --marionette --remote-debugging-port

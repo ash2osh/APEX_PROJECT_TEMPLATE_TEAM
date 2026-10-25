@@ -89,6 +89,10 @@ class ChromeDevToolsDocumentationTests(unittest.TestCase):
             "chrome-devtools-mcp",
             "@mozilla/firefox-devtools-mcp",
             "firefox-devtools-mcp/SKILL.md",
+            "template upgrades preserve those files",
+            "AGENTS.project.md",
+            ".agents/rules/project.md",
+            "align them with this selection",
         ):
             with self.subTest(required=required):
                 self.assertIn(required.lower(), guide.lower())
