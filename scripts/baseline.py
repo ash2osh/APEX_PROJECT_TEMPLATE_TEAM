@@ -1704,7 +1704,7 @@ def _count_check(check_id: str, table_and_where: str, expected: int) -> dict:
     )
 
 
-def _source_line_matches(name: str, object_type: str, schema: str, line_number: int, line: str, *, final: bool) -> str:
+def _source_line_predicate(line_number: int, line: str, *, final: bool) -> str:
     exact = _sql_literal(line[:-1] if final and line.endswith("\n") else line)
     text = f"(S.TEXT || CHR(1)) = ({exact} || CHR(1))"
     if final:
@@ -1713,11 +1713,7 @@ def _source_line_matches(name: str, object_type: str, schema: str, line_number: 
             f"(S.TEXT || CHR(1)) = ({exact} || CHR(1)) OR "
             f"(S.TEXT || CHR(1)) = ({final_newline} || CHR(1))"
         )
-    return (
-        "EXISTS (SELECT 1 FROM ALL_SOURCE S "
-        f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} AND S.TYPE = {_sql_literal(object_type)} "
-        f"AND S.LINE = {line_number} AND ({text}))"
-    )
+    return f"(S.LINE = {line_number} AND ({text}))"
 
 
 def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000) -> list[dict]:
@@ -1728,14 +1724,16 @@ def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000)
 
     def query(rows: Sequence[tuple[int, str]]) -> str:
         predicates = [
-            _source_line_matches(name, object_type, schema, line_no, text, final=line_no == len(lines))
+            _source_line_predicate(line_no, text, final=line_no == len(lines))
             for line_no, text in rows
         ]
-        text_match = " AND ".join(predicates) if predicates else "1 = 1"
+        text_match = " OR ".join(predicates) if predicates else "1 = 0"
         return (
             "SELECT CASE WHEN "
-            f"(SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = {_sql_literal(schema)} AND NAME = {_sql_literal(name)} AND TYPE = {_sql_literal(object_type)}) = {len(lines)} "
-            f"AND ({text_match}) THEN 1 ELSE 0 END FROM DUAL"
+            f"COUNT(*) = {len(lines)} AND COUNT(DISTINCT CASE WHEN {text_match} THEN S.LINE END) = {len(rows)} "
+            "THEN 1 ELSE 0 END FROM ALL_SOURCE S "
+            f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} "
+            f"AND S.TYPE = {_sql_literal(object_type)}"
         )
 
     result: list[dict] = []
