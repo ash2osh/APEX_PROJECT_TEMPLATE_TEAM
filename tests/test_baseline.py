@@ -20,7 +20,7 @@ from unittest.mock import patch
 from fake_sqlcl import BASH
 from tests import fake_sqlcl
 from scripts import baseline, migration_runtime
-from scripts.migration_manifest import load_migration
+from scripts.migration_manifest import load_migration, validate_check_query
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -361,6 +361,55 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         connection.execute("UPDATE ALL_SOURCE SET TEXT = ? WHERE LINE = 2", ("g_extra NUMBER;\n",))
 
         self.assertTrue(all(connection.execute(check["sql"]).fetchone()[0] == 0 for check in checks))
+
+    def test_source_checks_group_many_lines_into_bounded_single_scans(self) -> None:
+        unit = {
+            "name": "PKG_LARGE",
+            "type": "PACKAGE BODY",
+            "lines": [f"line {line_number:04d}\n" for line_number in range(500)],
+        }
+
+        checks = baseline._source_check_queries(unit, "APP_STAGE")
+
+        self.assertLess(len(checks), 4)
+        for check in checks:
+            self.assertEqual(check["sql"].count("ALL_SOURCE"), 1)
+            self.assertLessEqual(len(check["sql"].encode("utf-8")), 24000)
+            validate_check_query(check["sql"])
+
+    def test_source_check_single_scans_preserve_exact_line_and_newline_semantics(self) -> None:
+        unit = {
+            "name": "PKG_EXACT",
+            "type": "PACKAGE BODY",
+            "lines": ["PACKAGE BODY PKG_EXACT AS\n", "  v_name := 'أهلاً';\n", "\n", "END;\n"],
+        }
+        checks = baseline._source_check_queries(unit, "APP_STAGE", max_bytes=900)
+        connection = sqlite3.connect(":memory:")
+        connection.create_function("CHR", 1, chr)
+        connection.execute("CREATE TABLE DUAL (DUMMY TEXT)")
+        connection.execute("INSERT INTO DUAL VALUES ('X')")
+        connection.execute("CREATE TABLE ALL_SOURCE (OWNER TEXT, NAME TEXT, TYPE TEXT, LINE INTEGER, TEXT TEXT)")
+        rows = [
+            ("APP_STAGE", "PKG_EXACT", "PACKAGE BODY", 1, "PACKAGE BODY PKG_EXACT AS\n"),
+            ("APP_STAGE", "PKG_EXACT", "PACKAGE BODY", 2, "  v_name := 'أهلاً';\n"),
+            ("APP_STAGE", "PKG_EXACT", "PACKAGE BODY", 3, "\n"),
+            ("APP_STAGE", "PKG_EXACT", "PACKAGE BODY", 4, "END;\n"),
+        ]
+
+        def passes(source_rows: list[tuple]) -> bool:
+            connection.execute("DELETE FROM ALL_SOURCE")
+            connection.executemany("INSERT INTO ALL_SOURCE VALUES (?, ?, ?, ?, ?)", source_rows)
+            return all(
+                connection.execute(check["sql"].replace("S.TEXT ||", "COALESCE(S.TEXT, '') ||")).fetchone()[0] == 1
+                for check in checks
+            )
+
+        self.assertTrue(passes(rows))
+        self.assertTrue(passes(rows[:-1] + [(*rows[-1][:-1], "END;")]))
+        self.assertFalse(passes(rows[:-1]))
+        self.assertFalse(passes(rows[:2] + [("APP_STAGE", "PKG_EXACT", "PACKAGE BODY", 3, None)] + rows[3:]))
+        self.assertFalse(passes(rows[:1] + [("APP_STAGE", "PKG_EXACT", "PACKAGE BODY", 2, "changed\n")] + rows[2:]))
+        self.assertFalse(passes(rows + [("APP_STAGE", "PKG_EXACT", "PACKAGE BODY", 5, "extra\n")]))
 
     def test_q_quote_delimiter_collision_selects_a_safe_delimiter(self) -> None:
         literal = baseline._q_literal("value~'quoted")
@@ -1241,7 +1290,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
                 "002-view-v-alpha-c84bc776.sql": "8fa2d6c64ae5ae045a97e66185ac6df772b95ab9a72bd65a0fbe6fa12e05b408",
                 "003-compile-all.sql": "129069e30a63ed90794a92a868333fe69a285bb2b43085bd2fdc83665d2abc9b",
                 "README.md": "e6be64748b36edf32d8b43f0d16421921aadfc0ac668a257783cbc75976693bf",
-                "checks.json": "f7af1a3345cae5c3e9e2584055b8b3aa9149108474e114c05ee5e077aa4b745b",
+                "checks.json": "269b26513eb4040d6b0599d472f2d81f1ca57426a7d2e5008ca271e9bb212e0c",
             },
             "baseline-grants": {
                 "001-object-grants.sql": "b33b8ba6a46f8214f2348ced90a82d4800bb11964fe891ff23db593ac5b90de4",
