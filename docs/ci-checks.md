@@ -44,8 +44,11 @@ fixed. Never add a test that fails every time.
 ## Parallel test runs
 
 CI runs each test module in its own process, 4 at a time (`CI_TEST_JOBS`), largest first.
-Locally, `python3 scripts/ci_run_tests.py --jobs 4` does the same; without `--jobs` it runs one
-process as before, and a run with unittest arguments such as `-k` always uses one process.
+On an 8 CPU Linux machine, `python3 scripts/ci_run_tests.py --jobs 8` is the fast full-suite command; it
+prints a combined test/skip/failure count and exits non-zero if any module fails. Use
+`python3 scripts/ci_run_tests.py --jobs 4` to match CI. Without `--jobs` the runner uses one process, and
+unittest arguments such as `-k` always use one process. The plain
+`python3 -m unittest discover -s tests` command remains valid for a serial run.
 
 On Windows a step before the tests sets `TEMP` and `TMP` to the long form of the runner's own temp
 directory. The runner's default is a short 8.3 name (`RUNNER~1`) that `resolve()` expands, which broke

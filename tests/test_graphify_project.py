@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import _test_subprocess_safety  # noqa: F401
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest import mock

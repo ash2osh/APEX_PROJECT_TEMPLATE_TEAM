@@ -8,8 +8,8 @@ narrowed by --schema like every other profile.
 
 import os
 import re
-import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +18,7 @@ from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PWSH = shutil.which("pwsh")
+PWSH = _test_subprocess_safety.working_pwsh()
 
 ORDS_ONE = "\nORDS_SCHEMA=REST_API\nORDS_SQLCL_CONNECTION=dev-rest\nORDS_EXPECTED_USER=REST_API\n"
 ORDS_TWO = "\nORDS_SCHEMA=REST_ONE,REST_TWO\nORDS_SQLCL_CONNECTION=dev-rest-one,dev-rest-two\nORDS_EXPECTED_USER=REST_ONE,REST_TWO\n"

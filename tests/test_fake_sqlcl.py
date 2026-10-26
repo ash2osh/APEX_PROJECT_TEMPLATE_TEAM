@@ -10,6 +10,7 @@ launcher starts it (Python subprocess, Start-Process in Windows PowerShell 5.1 a
 import os
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path

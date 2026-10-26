@@ -5,6 +5,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import threading

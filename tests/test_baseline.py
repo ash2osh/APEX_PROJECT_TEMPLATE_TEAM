@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 import contextlib

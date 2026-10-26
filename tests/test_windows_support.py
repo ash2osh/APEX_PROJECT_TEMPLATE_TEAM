@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import types
@@ -23,7 +24,7 @@ from scripts import sqlcl_session
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@unittest.skipUnless(shutil.which("pwsh") and os.name != "nt", "PowerShell async-output double uses the POSIX wait path")
+@unittest.skipUnless(_test_subprocess_safety.working_pwsh() and os.name != "nt", "PowerShell async-output double uses the POSIX wait path")
 class SqlclOutputCompletionTests(unittest.TestCase):
     def test_wait_finishes_pending_output_after_process_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -834,7 +835,7 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
                         self.assertIn("Result: exit 0", result.stdout)
 
 
-@unittest.skipUnless(shutil.which("pwsh"), "needs PowerShell 7")
+@unittest.skipUnless(_test_subprocess_safety.working_pwsh(), "needs PowerShell 7")
 class ResolvePythonTests(unittest.TestCase):
     """scripts/resolve_python.ps1 on every platform: a working Python 3.10+ is found and run."""
 
@@ -843,7 +844,7 @@ class ResolvePythonTests(unittest.TestCase):
             f". '{ROOT / 'scripts' / 'resolve_python.ps1'}'; $python = Resolve-TeamPython; "
             "& $python.Path @($python.Prefix) -c 'import sys; print(sys.version_info >= (3, 10))'"
         )
-        result = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", script], capture_output=True, text=True, check=False)
+        result = subprocess.run([_test_subprocess_safety.working_pwsh(), "-NoProfile", "-Command", script], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "True")
 

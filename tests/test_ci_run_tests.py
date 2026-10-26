@@ -2,13 +2,14 @@ import contextlib
 import io
 import os
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from scripts.ci_run_tests import failed_test_ids, load_known, main, ordered_modules, parse_jobs, run_parallel
+from scripts.ci_run_tests import failed_test_ids, load_known, main, ordered_modules, parse_jobs, run_parallel, run_unittest
 
 KNOWN_TEXT = "# comment\n\nmod_a.ClassA.test_one  # reason\nmod_b.ClassB.test_two\n"
 FAIL_ONE = "FAIL: test_one (mod_a.ClassA)\n----\nFAILED (failures=1)\n"
@@ -123,13 +124,20 @@ class ParallelRunTests(unittest.TestCase):
 
     def test_parallel_run_fails_when_any_module_fails_and_keeps_all_output(self):
         def module_runner(modules):
-            return (1, "FAIL: test_one (test_mid.C)\nFAILED (failures=1)\n") if modules == ["test_mid"] else (0, "ok\n")
+            return (
+                1,
+                "FAIL: test_one (test_mid.C)\nRan 2 tests in 0.1s\nFAILED (failures=1)\n",
+            ) if modules == ["test_mid"] else (
+                0,
+                "ok\nRan 3 tests in 0.1s\nOK (skipped=1)\n",
+            )
         with contextlib.redirect_stdout(io.StringIO()) as printed:
             code, output = run_parallel(2, module_runner, self.tests)
         self.assertEqual(code, 1)
         self.assertIn("FAIL: test_one (test_mid.C)", output)
         self.assertEqual(output.count("ok"), 3)
         self.assertIn("===== test_mid: exit 1", printed.getvalue())
+        self.assertIn("===== Combined: Ran 11 tests; skipped=3; failures=1; errors=0", printed.getvalue())
 
     def test_main_runs_in_parallel_only_for_a_whole_run_with_more_than_one_job(self):
         calls = []
@@ -237,11 +245,15 @@ class JobsFromEnvironmentTests(unittest.TestCase):
             returncode, stdout = 0, ""
         def fake_run(*args, **kwargs):
             seen.update(kwargs["env"])
+            seen["stdin"] = kwargs["stdin"]
+            seen["timeout"] = kwargs["timeout"]
             return Done()
         with patch.dict(os.environ, {"CI_TEST_JOBS": "4"}), patch("scripts.ci_run_tests.subprocess.run", fake_run):
             from scripts.ci_run_tests import run_modules
             run_modules(["test_x"])
         self.assertEqual(seen["CI_TEST_JOBS"], "1")
+        self.assertIs(seen["stdin"], subprocess.DEVNULL)
+        self.assertEqual(seen["timeout"], 900)
 
     def test_each_child_loads_the_guard_that_discovery_gives_every_module(self):
         commands = []
@@ -252,6 +264,41 @@ class JobsFromEnvironmentTests(unittest.TestCase):
             run_modules(["test_x", "test_y"])
         self.assertIn("import _no_real_sqlcl", commands[0][2])
         self.assertEqual(commands[0][3:], ["-v", "test_x", "test_y"])
+
+
+class UnittestRunnerSafetyTests(unittest.TestCase):
+    def test_run_unittest_closes_stdin_and_bounds_the_suite(self):
+        seen = {}
+
+        class Completed:
+            returncode, stdout = 0, "suite output\n"
+
+        def fake_run(command, **kwargs):
+            seen.update(kwargs)
+            return Completed()
+
+        with patch("scripts.ci_run_tests.subprocess.Popen", side_effect=AssertionError("Popen must not be used")), \
+             patch("scripts.ci_run_tests.subprocess.run", fake_run), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code, output = run_unittest(["discover", "-s", "tests"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(output, "suite output\n")
+        self.assertIs(seen["stdin"], subprocess.DEVNULL)
+        self.assertEqual(seen["timeout"], 900)
+
+    def test_run_unittest_returns_a_bounded_timeout_with_partial_output(self):
+        def fake_run(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"], output=b"partial output\n")
+
+        with patch("scripts.ci_run_tests.subprocess.Popen", side_effect=AssertionError("Popen must not be used")), \
+             patch("scripts.ci_run_tests.subprocess.run", fake_run), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code, output = run_unittest(["discover", "-s", "tests"])
+
+        self.assertEqual(code, 124)
+        self.assertIn("partial output", output)
+        self.assertIn("unittest timed out after 900 seconds", output)
 
 
 if __name__ == "__main__":

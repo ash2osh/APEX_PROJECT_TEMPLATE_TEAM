@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import unittest
@@ -260,7 +261,7 @@ class BrowserMcpTests(unittest.TestCase):
         self.assertIn("Browser MCP selection: firefox", status.stdout)
 
     def test_powershell_wrapper_dispatches_mcp_when_available(self) -> None:
-        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        powershell = _test_subprocess_safety.working_powershell()
         if not powershell:
             self.skipTest("PowerShell is not installed")
 

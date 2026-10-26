@@ -6,6 +6,7 @@ import os
 import socket
 import stat
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import io
 import tempfile
 import unittest

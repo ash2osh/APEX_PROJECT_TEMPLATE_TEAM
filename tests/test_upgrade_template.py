@@ -4,6 +4,7 @@ import os
 import shutil
 import signal
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import time
 import unittest

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import stat
 import tempfile
 import unittest
@@ -278,9 +279,9 @@ class WorkflowSkillsTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         for entry in ("team.sh", "team.ps1"):
             if entry.endswith("ps1"):
-                if not shutil.which("pwsh"):
+                if not _test_subprocess_safety.working_pwsh():
                     continue
-                launcher = [shutil.which("pwsh"), "-NoProfile", "-File"]
+                launcher = [_test_subprocess_safety.working_pwsh(), "-NoProfile", "-File"]
             else:
                 from fake_sqlcl import BASH
                 launcher = [BASH]

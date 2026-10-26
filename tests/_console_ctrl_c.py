@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import time

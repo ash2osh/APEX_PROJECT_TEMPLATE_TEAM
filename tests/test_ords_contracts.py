@@ -10,6 +10,7 @@ feature without touching a project's own files.
 import json
 import re
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import unittest
