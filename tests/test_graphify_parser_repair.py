@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import types
 from contextlib import redirect_stdout
 from pathlib import Path

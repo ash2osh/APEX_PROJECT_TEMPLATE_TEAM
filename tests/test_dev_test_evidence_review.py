@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import unittest

@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from fake_sqlcl import BASH
@@ -278,7 +279,7 @@ class ProductionMarkerTests(unittest.TestCase):
     def test_bash_guard_matches_python(self) -> None:
         self.assert_guard_matches_python([BASH, "check_db_target.sh"])
 
-    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is not installed")
+    @unittest.skipUnless(_test_subprocess_safety.working_pwsh(), "PowerShell 7 is not installed")
     def test_powershell_guard_matches_python(self) -> None:
         self.assert_guard_matches_python(["pwsh", "-NoProfile", "-NonInteractive", "-File", "check_db_target.ps1"])
 

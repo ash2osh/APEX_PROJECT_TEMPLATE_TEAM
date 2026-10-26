@@ -6,6 +6,7 @@ import base64
 import gzip
 import json
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import unittest
 import zlib

@@ -1,7 +1,7 @@
 import unittest
 import os
-import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 from pathlib import Path
 
@@ -56,7 +56,7 @@ class LauncherCompatibilityTests(unittest.TestCase):
                 result = subprocess.run([BASH, "-c", 'REPO_ROOT=$1; source "$1/scripts/sqlcl_safe.sh"; sqlcl_require_apex_version "$2"',
                                          "bash", str(root), str(work)], env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, accepted, result.stderr)
-                if shutil.which("pwsh"):
+                if _test_subprocess_safety.working_pwsh():
                     driver = directory / "check.ps1"
                     driver.write_text('param($Helper,$Work)\n. $Helper\ntry { Assert-SqlclApexVersion -WorkDirectory $Work } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }\n')
                     result = subprocess.run(["pwsh", "-NoProfile", "-File", str(driver),

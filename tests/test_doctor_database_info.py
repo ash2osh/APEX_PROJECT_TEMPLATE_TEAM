@@ -2,6 +2,7 @@
 from pathlib import Path
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 
@@ -44,8 +45,8 @@ exit "$FAKE_DOCTOR_EXIT"
 
     def wrappers(self):
         yield [fake_sqlcl.BASH, str(self.root / "scripts/team.sh")]
-        if shutil.which("pwsh"):
-            yield [shutil.which("pwsh"), "-NoProfile", "-File", str(self.root / "scripts/team.ps1")]
+        if _test_subprocess_safety.working_pwsh():
+            yield [_test_subprocess_safety.working_pwsh(), "-NoProfile", "-File", str(self.root / "scripts/team.ps1")]
 
     def run_doctor(self, wrapper):
         return subprocess.run(

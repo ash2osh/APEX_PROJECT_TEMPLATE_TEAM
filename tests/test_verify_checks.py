@@ -3,6 +3,7 @@ import io
 import json
 import os
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path

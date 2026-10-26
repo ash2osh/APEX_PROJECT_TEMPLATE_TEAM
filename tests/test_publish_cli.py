@@ -4,6 +4,7 @@ import os
 import shutil
 import signal
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import time
 import unittest
@@ -480,7 +481,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertFalse(sql_log.exists(), "SQLcl must not run for a symlinked application root")
 
     def test_powershell_symlinked_app_root_is_rejected_before_sqlcl_import(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -619,7 +620,7 @@ class PublishAppCliTests(unittest.TestCase):
         # prints "Deployment file cannot be parsed", exits 0 and imports nothing),
         # and Windows PowerShell's -Encoding UTF8 writes one. Both shells say so
         # before connecting.
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         shells = ["bash"] + (["pwsh"] if pwsh else [])
         for shell in shells:
             with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
@@ -642,7 +643,7 @@ class PublishAppCliTests(unittest.TestCase):
     def test_a_descriptor_for_another_application_names_both_ids_in_both_shells(self) -> None:
         # The template's own descriptor example has "id": 100; copied unchanged for another
         # application it is a number, just the wrong one. Say so, not "must be numeric".
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         shells = ["bash"] + (["pwsh"] if pwsh else [])
         cases = (
             ('"id": 7', "is 7 but this is application 100"),
@@ -677,7 +678,7 @@ class PublishAppCliTests(unittest.TestCase):
         # SQLcl may already have finished the import when the interrupt arrives,
         # before publish has read its output; the old source is put back, so
         # the developer must be told that DEV may have changed.
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         # pwsh ends at once on SIGTERM and runs no finally block, so only Ctrl-C is
         # handled in PowerShell (docs/publish-rules.md says so).
         shells = [("bash", signal.SIGTERM, "team.sh")] + ([("pwsh", signal.SIGINT, "team.ps1")] if pwsh else [])
@@ -723,7 +724,7 @@ class PublishAppCliTests(unittest.TestCase):
         # Where a program holds a file of the publish directory open (on Windows), or the
         # directory cannot be emptied, the cleanup failed silently in PowerShell and with a
         # bare rm error in Bash, and the developer was never told to remove it.
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         shells = ["bash"] + (["pwsh"] if pwsh else [])
         for shell in shells:
             with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
@@ -756,8 +757,8 @@ class PublishAppCliTests(unittest.TestCase):
         engines = [
             [path, *flags]
             for path, flags in (
-                (shutil.which("powershell"), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]),
-                (shutil.which("pwsh"), ["-NoProfile", "-File"]),
+                (_test_subprocess_safety.working_windows_powershell(), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]),
+                (_test_subprocess_safety.working_pwsh(), ["-NoProfile", "-File"]),
             )
             if path
         ]
@@ -793,7 +794,7 @@ class PublishAppCliTests(unittest.TestCase):
         # environment to the programs it starts. A Windows PowerShell started that way loads
         # PowerShell 7's Utility and Management modules and loses Get-FileHash, Get-Acl and
         # Set-Acl, which the publish swap of application.apx used to need.
-        powershell, pwsh = shutil.which("powershell"), shutil.which("pwsh")
+        powershell, pwsh = _test_subprocess_safety.working_windows_powershell(), _test_subprocess_safety.working_pwsh()
         if not (powershell and pwsh):
             self.skipTest("needs Windows PowerShell and PowerShell 7")
         module_path = subprocess.run(
@@ -828,7 +829,7 @@ class PublishAppCliTests(unittest.TestCase):
 
     def test_drift_refusal_names_the_export_command_of_the_shell_in_use(self) -> None:
         # A PowerShell user must not be told to run the Bash wrapper.
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         shells = [("bash", "team.sh")] + ([("pwsh", "team.ps1")] if pwsh else [])
         for shell, wrapper in shells:
             with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
@@ -887,7 +888,7 @@ class PublishAppCliTests(unittest.TestCase):
     def test_application_source_that_cannot_be_moved_is_reported_as_such(self) -> None:
         # On Windows an editor holding the file open blocks the rename; a
         # read-only folder blocks it the same way here.
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         shells = [("bash", None)] + ([("pwsh", pwsh)] if pwsh else [])
         for shell, executable in shells:
             with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
@@ -921,7 +922,7 @@ class PublishAppCliTests(unittest.TestCase):
     def test_unverified_import_says_to_commit_the_stamp_before_exporting(self) -> None:
         # Export refuses to write over uncommitted changes, so the kept stamp
         # must be committed before the documented recovery export.
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         shells = [("bash", "team.sh")] + ([("pwsh", "team.ps1")] if pwsh else [])
         for shell, wrapper in shells:
             with self.subTest(shell=shell), tempfile.TemporaryDirectory() as temporary:
@@ -1069,7 +1070,7 @@ class PublishAppCliTests(unittest.TestCase):
                 self.assertEqual(marker.read_bytes() if marker.exists() else None, marker_before)
 
     def test_powershell_import_skipped_by_sqlcl_is_a_failure_and_restores_the_source(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1088,7 +1089,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual((app / "application.apx").read_bytes(), original)
 
     def test_powershell_failed_import_keeps_an_edit_saved_during_publish(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1105,7 +1106,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("// saved during publish", (app / "application.apx").read_text(encoding="utf-8"))
 
     def test_powershell_import_session_receives_the_approved_live_state(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1123,7 +1124,7 @@ class PublishAppCliTests(unittest.TestCase):
             )
 
     def test_powershell_first_publish_of_an_absent_app_refuses_before_import(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1140,7 +1141,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertFalse((app/'apex-team-export.json').exists())
 
     def test_powershell_import_that_clears_builder_timestamp_publishes(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1167,7 +1168,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertRegex(marker["version"], STAMPED_VERSION.format(counter="002"))
 
     def test_powershell_failed_import_restores_the_unstamped_source(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1208,7 +1209,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertFalse(calls.exists(), calls.read_text(encoding="utf-8") if calls.exists() else "")
 
     def test_powershell_production_like_dev_connection_is_refused_before_any_sqlcl_session(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1258,7 +1259,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
 
     def test_powershell_verified_dev_publish_advances_baseline_for_the_next_publish(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1280,7 +1281,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual(marker["builderLastUpdatedOn"], "2026-09-26T09:45:00")
 
     def test_powershell_unverified_publish_keeps_old_baseline_and_next_attempt_refuses(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -1304,7 +1305,7 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertEqual((state_dir / "import-count.txt").read_text(encoding="utf-8").strip(), "1")
 
     def test_powershell_publish_requires_clean_client_output_and_sentinel(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
 

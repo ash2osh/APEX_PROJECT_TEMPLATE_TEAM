@@ -12,6 +12,7 @@ import re
 import shutil
 import signal
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import time
@@ -26,7 +27,7 @@ from ords_fixtures import SCHEMA, export_text
 from scripts import ords_export
 
 ROOT = Path(__file__).resolve().parents[1]
-PWSH = shutil.which("pwsh")
+PWSH = _test_subprocess_safety.working_pwsh()
 FAKE = Path(__file__).resolve().parent / "fake_ords_sql.py"
 
 SQL_FILES = (

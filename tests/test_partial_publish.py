@@ -2,6 +2,7 @@ import json
 import shutil
 import tempfile
 import unittest
+import _test_subprocess_safety  # noqa: F401
 from unittest import mock
 from pathlib import Path
 

@@ -1,7 +1,7 @@
 import os
 import re
-import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +25,7 @@ class AppIdLimitTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.pwsh = shutil.which("pwsh")
+        self.pwsh = _test_subprocess_safety.working_pwsh()
         self.example_environment = {**os.environ, "PROJECT_ENV_FILE": str(ROOT / ".env.example")}
         self.missing_environment = {**os.environ, "PROJECT_ENV_FILE": "/no/such/env"}
 

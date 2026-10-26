@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from fake_sqlcl import BASH
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PWSH = shutil.which("pwsh")
+PWSH = _test_subprocess_safety.working_pwsh()
 
 
 class ExportCliTests(unittest.TestCase):

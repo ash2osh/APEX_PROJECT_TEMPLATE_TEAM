@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 KNOWN_FLAKY = ROOT / "tests" / "known_flaky.txt"
 FAILURE = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
 FAILED_SUMMARY = re.compile(r"^FAILED \([^\r\n]+\)\s*\Z", re.MULTILINE)
+RAN_SUMMARY = re.compile(r"^Ran (\d+) tests? in [\d.]+s$", re.MULTILINE)
+OUTCOME_SUMMARY = re.compile(r"^(OK|FAILED)(?: \(([^\r\n]*)\))?$", re.MULTILINE)
 Runner = Callable[[Sequence[str]], tuple[int, str]]
 
 
@@ -59,17 +61,28 @@ def load_known(path: Path) -> set[str]:
     return entries
 
 
+def _partial_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
 def run_unittest(args: Sequence[str]) -> tuple[int, str]:
-    """Run unittest in the repository root, echo its output as it arrives and return (exit code, output)."""
-    process = subprocess.Popen(
-        [sys.executable, "-m", "unittest", *args], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace")
-    lines = []
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(line, end="", flush=True)
-        lines.append(line)
-    return process.wait(), "".join(lines)
+    """Run unittest in the repository root with closed stdin and a suite-level timeout."""
+    timeout = 900
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest", *args], cwd=ROOT, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout)
+        output = result.stdout or ""
+        print(output, end="", flush=True)
+        return result.returncode, output
+    except subprocess.TimeoutExpired as error:
+        output = _partial_text(error.stdout)
+        output += f"\nunittest timed out after {timeout} seconds\n"
+        print(output, end="", flush=True)
+        return 124, output
 
 
 def ordered_modules(tests_dir: Path) -> list[str]:
@@ -88,22 +101,41 @@ def run_modules(modules: Sequence[str]) -> tuple[int, str]:
     # `discover -s tests` imports every module into one process, so the guard that keeps tests away from a
     # real SQLcl (and makes write_text write LF on Windows) applies to all of them; load it for each module too.
     guard = "import _no_real_sqlcl, sys, unittest; sys.argv[0] = 'python -m unittest'; unittest.main(module=None)"
-    result = subprocess.run(
-        [sys.executable, "-c", guard, "-v", *modules], cwd=ROOT, env=environment, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-    return result.returncode, result.stdout
+    timeout = 900
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", guard, "-v", *modules], cwd=ROOT, env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout)
+        return result.returncode, result.stdout or ""
+    except subprocess.TimeoutExpired as error:
+        output = _partial_text(error.stdout)
+        output += f"\nmodule process timed out after {timeout} seconds\n"
+        return 124, output
 
 
 def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path = ROOT / "tests") -> tuple[int, str]:
     """Run every test module in its own process, `jobs` at a time; print each one's output in order."""
     modules = ordered_modules(tests_dir)
     outputs: list[str] = []
+    tests_run = skipped = failures = errors = reported_modules = 0
     code = 0
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         for module, (module_code, output) in zip(modules, pool.map(lambda name: module_runner([name]), modules), strict=True):
             print(f"===== {module}: exit {module_code}", flush=True)
             print(output, end="" if output.endswith("\n") else "\n", flush=True)
             outputs.append(output)
+            ran = RAN_SUMMARY.search(output)
+            outcome = OUTCOME_SUMMARY.search(output)
+            if ran:
+                reported_modules += 1
+                tests_run += int(ran.group(1))
+            if outcome:
+                details = outcome.group(2) or ""
+                counts = {name: int(value) for name, value in re.findall(r"(skipped|failures|errors)=(\d+)", details)}
+                skipped += counts.get("skipped", 0)
+                failures += counts.get("failures", 0)
+                errors += counts.get("errors", 0)
             if module_code:
                 # A child can die without a named failure while another child
                 # reports a known flaky test. Keep that incomplete run fatal;
@@ -111,6 +143,12 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
                 outcome = 2 if module_code == 1 and not completed_failure(output) else module_code
                 if code in (0, 1):
                     code = outcome
+    incomplete = len(modules) - reported_modules
+    print(
+        f"===== Combined: Ran {tests_run} tests; skipped={skipped}; failures={failures}; "
+        f"errors={errors}; incomplete_modules={incomplete}",
+        flush=True,
+    )
     return code, "".join(outputs)
 
 

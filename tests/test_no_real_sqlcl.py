@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import unittest
 
 import _no_real_sqlcl  # noqa: F401  (installs the guard)

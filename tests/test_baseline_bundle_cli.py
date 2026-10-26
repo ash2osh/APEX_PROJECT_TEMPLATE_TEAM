@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path
@@ -624,7 +625,7 @@ exit 17
         self.assertFalse((fixture.root / "scratch").exists())
 
     def test_bash_and_powershell_route_bundle_arguments_through_fake_sqlcl(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         entries = [("team.sh", [BASH])]
         if pwsh is not None:
             entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
@@ -663,7 +664,7 @@ exit 17
                     calls.write_text("", encoding="utf-8")
 
     def test_baseline_subcommand_help_is_offline_through_both_wrappers(self) -> None:
-        pwsh = shutil.which("pwsh")
+        pwsh = _test_subprocess_safety.working_pwsh()
         entries = [("team.sh", [BASH])]
         if pwsh is not None:
             entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
