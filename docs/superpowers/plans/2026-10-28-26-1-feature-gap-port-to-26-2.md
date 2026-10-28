@@ -6,10 +6,15 @@ database operation, import, or deployment.
 ## Comparison baseline
 
 - 26.2 `main`: `86fb735` (`origin/main` at review time).
-- 26.1 `main`: `e3b34db` (`origin/main` at review time).
+- 26.1 `main`: `2295318` (after merging dependency PR #42; refreshed review).
 - The repositories have a shared history through `5178f57` (2026-10-05), but
   have since advanced independently. Port reviewed changes selectively; do not
   merge the 26.1 branch wholesale into the 26.2 template.
+
+The refreshed 26.1 baseline also includes PR #43's trigger-validity guard:
+selected triggers must have a known `ALL_OBJECTS.STATUS` during feature
+preparation, and post-apply verification checks that status separately from
+enabled/disabled state. The 26.2 feature path needs the same fail-closed check.
 
 The 26.1 implementation sources are in `scripts/feature_cli.py`,
 `feature_manifest.py`, `feature_preflight.py`, `feature_release.py`,
@@ -99,6 +104,31 @@ Windows console encoding, output containing an unencodable character can raise
   the runner's exit code or summary parsing.
 - The regression tests pass with an explicitly restricted encoding, and the
   pre-push check still rejects genuine test failures and incomplete runs.
+
+## Gap 3: trigger validity in feature preparation
+
+The refreshed 26.1 main records selected triggers' `ALL_OBJECTS.STATUS` in the
+schema catalog and requires that validity evidence during feature preparation
+and after apply. The 26.2 schema comparison catalog does not currently expose
+that field, so the feature path could not carry this guard over unchanged.
+
+### Planned implementation work
+
+- Add `OBJECT_STATUS` to the selected trigger catalog query and parse it in
+  `compare_schema.py` without changing the existing enabled/disabled fields.
+- Require a known trigger validity status when preparing a selected trigger;
+  fail closed when evidence is absent, and verify the expected status after
+  apply.
+- Port the 26.1 regressions for missing catalog status and post-apply validity
+  mismatch, adapted to the 26.2 catalog and feature modules.
+
+### Acceptance criteria
+
+- Selected trigger validity is captured and checked independently from
+  `ALL_TRIGGERS.STATUS` (enabled/disabled state).
+- Missing or changed validity evidence refuses preparation/verification.
+- Existing schema comparison and migration behavior remains unchanged for
+  objects that are not selected feature triggers.
 
 ## Explicit exclusions
 
