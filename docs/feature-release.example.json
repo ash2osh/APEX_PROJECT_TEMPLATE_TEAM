@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "databaseObjectBudgetSeconds": 120,
+  "steps": [
+    {
+      "type": "feature-migrate",
+      "schema": "APP_DATA",
+      "inputs": [
+        "features/inventory/APP_DATA/ddl.sql"
+      ]
+    },
+    {
+      "type": "feature-migrate",
+      "schema": "APP_CODE",
+      "inputs": [
+        "features/inventory/APP_CODE/packages/item_lookup.pks.sql",
+        "features/inventory/APP_CODE/packages/item_lookup.pkb.sql"
+      ]
+    },
+    {
+      "type": "sql-script",
+      "file": "scripts/data.sql",
+      "schema": "APP_DATA"
+    },
+    {
+      "type": "ords-import",
+      "file": "database/REST_OWNER/ords/schema.sql",
+      "schema": "REST_OWNER",
+      "excludeModules": []
+    },
+    {
+      "type": "app-deploy",
+      "appId": 100
+    }
+  ]
+}

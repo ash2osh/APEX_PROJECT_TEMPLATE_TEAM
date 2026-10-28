@@ -1795,15 +1795,16 @@ def _needs_clob_assembly(lines: Sequence[str]) -> bool:
     return False
 
 
-def _clob_source_step(unit: Mapping, settings: Mapping) -> str:
-    lines = [
-        f"-- Exact stored source for {unit['type']} {unit['name']} assembled as a CLOB.",
-        _session_settings_sql(settings),
+def _clob_source_step(unit: Mapping, settings: Mapping | None) -> str:
+    lines = [f"-- Exact stored source for {unit['type']} {unit['name']} assembled as a CLOB."]
+    if settings is not None:
+        lines.append(_session_settings_sql(settings))
+    lines.extend([
         "DECLARE",
         "  l_source CLOB;",
         "BEGIN",
         "  l_source := TO_CLOB('CREATE OR REPLACE ');",
-    ]
+    ])
     for exported in unit["lines"]:
         has_newline = exported.endswith("\n")
         content = exported[:-1] if has_newline else exported
@@ -1819,11 +1820,12 @@ def _clob_source_step(unit: Mapping, settings: Mapping) -> str:
     return "\n".join(lines)
 
 
-def _direct_source_step(unit: Mapping, settings: Mapping) -> str:
+def _direct_source_step(unit: Mapping, settings: Mapping | None) -> str:
     stored = "".join(unit["lines"])
+    settings_sql = f"{_session_settings_sql(settings)}\n" if settings is not None else ""
     sql = (
         f"-- Exact stored source for {unit['type']} {unit['name']}.\n"
-        f"{_session_settings_sql(settings)}\n"
+        f"{settings_sql}"
         "CREATE OR REPLACE "
         f"{stored}"
     )

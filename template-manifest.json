@@ -32,6 +32,8 @@
     "docs/dev-test.md",
     "docs/dev-test-examples/**",
     "docs/EXAMPLES.md",
+    "docs/feature-release.example.json",
+    "docs/feature-releases.md",
     "docs/GETTING_STARTED.md",
     "docs/TROUBLESHOOTING.md",
     "docs/apex-26.2-qualification.md",

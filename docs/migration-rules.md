@@ -432,13 +432,19 @@ could not complete. Rehearsal evidence is kept under
 `rollout` runs a reviewed release as an ordered manifest. It uses the existing
 migration, read-only verification and app deployment paths; standalone DBA
 scripts get a private SQLcl driver with an identity check before the payload.
+Schema-version 2 is the feature-capsule path: it freezes committed feature
+sources once, prepares an environment-specific target plan, executes selected
+package and DDL checkpoints, and requires a verified staging report before
+production. See [feature-oriented releases](feature-releases.md) and its
+[version-2 example](feature-release.example.json). The
+[version-1 example](rollout-manifest.example.json) remains the example for the
+original step model.
 For the pre-window checklist, DML rehearsal, one-window execution, browser
 checks, and DBA-owned recovery plan, see the
 [production deployment runbook](production-deployment.md).
-The [example manifest](rollout-manifest.example.json) shows every supported
-step type. Replace its example folders, schema, connection alias, ORDS source
-and application ID with files and descriptors in the project before running
-it.
+The version-1 example manifest shows every supported version-1 step type.
+Replace its example folders, schema, connection alias, ORDS source and
+application ID with files and descriptors in the project before running it.
 
 The manifest is UTF-8 JSON with no duplicate keys. Its root has exactly these
 properties:

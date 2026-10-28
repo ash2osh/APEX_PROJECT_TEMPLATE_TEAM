@@ -37,6 +37,18 @@ class SqlDriverContractTests(unittest.TestCase):
                 contents = (ROOT / "scripts" / name).read_text(encoding="utf-8")
                 self.assertRegex(contents, r"(?im)^EXIT SUCCESS ROLLBACK\s*$")
 
+    def test_feature_trigger_catalog_captures_database_object_status(self) -> None:
+        from scripts import compare_schema
+
+        contents = (ROOT / "scripts/compare_env_catalog.sql").read_text(encoding="utf-8")
+        start = contents.index("PROCEDURE add_triggers")
+        end = contents.index("PROCEDURE add_stored_code", start)
+        trigger_reader = contents[start:end]
+        self.assertIn("all_objects o", trigger_reader)
+        self.assertIn("o.object_type = 'TRIGGER'", trigger_reader)
+        self.assertIn("l_page.put('object_status', trigger_row.object_status)", trigger_reader)
+        self.assertIn("object_status", compare_schema.COMPARE_ENV_FIELDS["triggers"])
+
     def test_generated_catalog_driver_exits_success_with_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             driver = _catalog_driver(Path(temporary), "inventory", Target("dev", "dev-profile", "APP_DEV", "APP_DEV", "development"))

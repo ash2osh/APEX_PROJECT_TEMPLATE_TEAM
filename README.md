@@ -20,6 +20,7 @@ separate file changes only and do not isolate a shared APEX application.
 | do a specific task, step by step | [Examples](docs/EXAMPLES.md) |
 | understand an error message | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | look up a command | [Command reference](#command-reference) |
+| build a focused package release capsule | [Feature-oriented releases](docs/feature-releases.md) |
 | know exactly when publish or migrate refuses | [publish-rules](docs/publish-rules.md), [migration-rules](docs/migration-rules.md) |
 | know which limits are deliberate | [Known limitations](docs/known-limitations.md) |
 | see what an AI assistant can do here | [Skills and agent support](#skills-and-agent-support) |
@@ -40,6 +41,7 @@ operational scripts, `.env`, manifest and lock.
 | Two ways to work | **Builder-first** (change it in APEX, export it) or **file-first** (edit the files, publish them). |
 | Safe publish | Refuses newer Builder work, restores only automations that were active before import, then verifies normalized source. |
 | SQL migrations | Dated folders of numbered SQL plus `checks.json`; a live check for conflicts before applying; a verified receipt after. |
+| Feature-oriented releases | Mutable complete package sources, readable DEV diffs and one frozen staging-to-production capsule with local recovery evidence. |
 | DEV test runner | Read-only planning and explicit schema-owner fixture runs with durable reports and retained results; see [DEV test runner](docs/dev-test.md). |
 | Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production. |
 | Environment baselines | Read-only source, grant and allow-listed reference-row exports plus reviewed structure, grant, source and optional reference-data migrations from `baseline.json`. |
@@ -615,6 +617,31 @@ existing migrations or reveal pending work in other independent repositories.
 Oracle DDL can commit implicitly, so a failed bundle needs target inspection and
 reviewed recovery. Existing attempted or applied folders remain immutable.
 
+## Feature-oriented releases
+
+Use mutable feature directories for new database-object work that benefits
+from complete package sources and compact review diffs. `feature capture` reads
+only DEV; `feature diff` stays offline. Freeze committed inputs into one
+environment-neutral capsule, prepare each target separately, and promote the
+same payload from staging to production:
+
+```bash
+scripts/team.sh feature init inventory --schema APP_CODE
+scripts/team.sh feature capture inventory --package ITEM_LOOKUP --schema APP_CODE --env dev
+scripts/team.sh feature diff inventory --schema APP_CODE
+scripts/team.sh feature freeze releases/current.json
+scripts/team.sh rollout releases/current.json --env staging --dry-run --capsule <capsule-dir>
+scripts/team.sh rollout releases/current.json --env staging --prepare --capsule <capsule-dir> --report scratch/staging-prepare.json
+```
+
+Keep existing dated migrations and schema-version 1 rollout manifests on their
+current path. Capsule runs use a separate target plan and local attempt state;
+an unresolved write requires reconciliation before recovery. Production also
+requires the verified staging report for the same capsule. Budget timing covers
+selected feature checkpoints only, not app imports or excluded legacy object
+work. Read the [feature release guide](docs/feature-releases.md) before using a
+capsule against a shared target.
+
 ## Staging and production deployments
 
 For direct promotion, configure the target connection/user pair in `.env` and
@@ -805,7 +832,8 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh revise --check <folder>` | Report whether local receipt or attempt evidence locks a migration folder; exit 0/1/2 for unlocked/locked/unknown. |
 | `scripts/team.sh archive-migrations <folder> [...] [--schema NAME] [--destination DIR] [--reason TEXT] [--yes]` | Preview archiving released folders; `--yes` moves them and updates the archived revision index. Use `--all [--keep <folder>...]` to select by schema scope. |
 | `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
-| `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>]` | Run a frozen, ordered migration, SQL, ORDS and app deployment plan; staging and production show one manifest-wide hash confirmation. |
+| `scripts/team.sh feature <init\|capture\|diff\|freeze\|clean-capsule> ...` | Create and review mutable feature sources, freeze committed schema-version 2 inputs, or preview/apply eligible local capsule cleanup. |
+| `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare] [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]` | Run a schema-version 1 ordered rollout or prepare, execute and promote a feature capsule; production capsule execution requires staging proof. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
 | `scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [--format text\|json\|markdown] [--emit-dba-script <file>]` | Compare complete, paged environment catalogs by object name; see [compare-env](docs/compare-env.md). |
 | `scripts/team.sh baseline export-source --from <env>` | Export configured exact stored source, compiler settings and view text to scratch. |
