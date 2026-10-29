@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import _test_subprocess_safety  # noqa: F401
 import tempfile
@@ -11,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
-from fake_sqlcl import environment as fake_environment, install as install_fake_sqlcl
+from fake_sqlcl import BASH, environment as fake_environment, install as install_fake_sqlcl
 
 from scripts import rollout
 from scripts.migration_manifest import load_batch
@@ -525,6 +526,20 @@ class RolloutManifestTests(unittest.TestCase):
         self.assertIn(sha256, output)
         report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
         self.assertEqual(report["status"], "planned")
+
+    def test_team_rollout_dry_run_does_not_require_a_project_env_file(self) -> None:
+        shutil.copytree(ROOT / "scripts", self.root / "scripts", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+        self.write_manifest([{"type": "pause", "message": "review before applying"}])
+        environment = os.environ.copy()
+        environment.pop("PROJECT_ENV_FILE", None)
+
+        result = subprocess.run(
+            [BASH, str(self.root / "scripts" / "team.sh"), "rollout", "rollout.json", "--env", "dev", "--dry-run"],
+            cwd=self.root, env=environment, text=True, capture_output=True, check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("dry run", result.stdout.casefold())
         self.assertFalse(list((self.root / "scratch").glob("rollout-receipts/**/step-*.json")))
 
     def test_manifest_schema_rejects_unknown_fields_duplicate_keys_and_unsafe_paths(self) -> None:

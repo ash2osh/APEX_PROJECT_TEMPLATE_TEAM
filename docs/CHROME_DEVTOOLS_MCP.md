@@ -4,11 +4,7 @@ This project can use the `chrome-devtools-mcp` server through a persistent local
 
 ## Selected browser route
 
-Run scripts/team.sh mcp status and read the Browser MCP selection guide before
-using this daemon. When the direct Chrome MCP is selected, use that connection
-and do not start or call the daemon. Use the daemon only when Chrome is not
-selected and the task requests Chrome browser work with authorized startup and
-user consent. Never connect both routes to one Chrome session.
+Run `scripts/team.sh mcp status` and read the [Browser MCP selection guide](browser-mcp.md) before using this daemon. When the direct Chrome MCP is selected, use that connection and do not start or call the daemon. Use the daemon only when Chrome is not selected and the task requests Chrome browser work with authorized startup and user consent. Never connect both routes to one Chrome session.
 
 ## Prerequisites
 
