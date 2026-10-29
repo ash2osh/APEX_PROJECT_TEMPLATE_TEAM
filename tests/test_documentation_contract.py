@@ -341,6 +341,10 @@ class DocumentationContractTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")
         self.assertIn("python3 scripts/ci_run_tests.py", workflow)
         self.assertIn("python scripts/ci_run_tests.py", workflow)
+        linux_job = workflow.split("  offline:", 1)[1].split("  windows-offline:", 1)[0]
+        windows_job = workflow.split("  windows-offline:", 1)[1].split("  macos-installer:", 1)[0]
+        self.assertIn("CI_TEST_JOBS: '4'", linux_job)
+        self.assertIn("CI_TEST_JOBS: '2'", windows_job)
         self.assertIn('"discover", "-s", "tests", "-v"', (ROOT / "scripts" / "ci_run_tests.py").read_text(encoding="utf-8"))
 
     def test_active_markdown_links_resolve(self) -> None:
