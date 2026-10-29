@@ -930,10 +930,10 @@
       ]
     },
     "tests/test_rollout.py": {
-      "status": "intended",
-      "reason": "26.2 retains schema-2 capsule and F01 target-binding coverage; env-free wrapper dry-run coverage is now present in both releases, while receipt/target fixtures follow each rollout contract.",
+      "status": "feature",
+      "reason": "26.2 retains schema-2 capsule and F01 target-binding coverage; its env-free wrapper dry-run regression uses fake_sqlcl.BASH to select Git Bash instead of the WSL launcher on Windows. Core dry-run behavior is shared.",
       "blobs": [
-        "ba2a781b02a08a200751c152695adb0afca765ac",
+        "fa9fcd83d9619377023b194194c242b036e0e848",
         "5355d063d898cb93e89a8d85479cb3e898e70908"
       ]
     },
