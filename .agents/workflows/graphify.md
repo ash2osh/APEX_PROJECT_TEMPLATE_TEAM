@@ -5,10 +5,15 @@ description: Turn any folder of files into a navigable knowledge graph
 
 # Workflow: graphify
 
-Use the graphify skill exposed by the current agent client when available. If
-the client does not expose that skill, use the repository's
-`scripts/graphify_project.py` helper commands directly; do not
-assume a provider-specific home directory or invent an unavailable tool.
+For all graph updates, use only the repository's offline, project-isolated CLI wrapper:
+`python3 scripts/graphify_project.py extract`. Do not use the Graphify skill or
+MCP to update the graph, call a provider API directly, or run a bare
+`graphify update` command. Routine `.apx` and `database/*.sql` updates use local
+extraction and do not require an LLM API key. Changed `app_context/**/*.md`
+files may use a configured semantic backend for optional context indexing; that
+is separate from routine code graph updates. If the CLI reports that semantic
+indexing is unavailable, report that limitation accurately and continue with
+normal source reads instead of asking developers for a key to update code.
 
 ## Domain corpus
 
@@ -32,7 +37,7 @@ files (`PROJECT.md`, `docs/`, `app_context/`), not ignored graph artifacts.
 
 ## Fresh setup and full rebuild
 
-Configure a supported semantic backend and run:
+Set up the isolated environment and run:
 
 ```bash
 python3 scripts/graphify_project.py setup
@@ -46,6 +51,10 @@ isolated Graphify package, registers `.apx`, verifies the installed bytes, and
 clears stale extraction caches. The full extraction indexes Markdown context as well
 as deterministic APEXlang and SQL structure. Do not add `--code-only`: that
 would omit `app_context`.
+
+Only semantic indexing of changed Markdown context may use a semantic backend.
+It is optional and never a prerequisite for routine `.apx` or SQL graph
+updates. Do not ask developers for an LLM API key to perform those updates.
 
 ## Incremental updates
 

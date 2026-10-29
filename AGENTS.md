@@ -274,6 +274,10 @@ project's ignored `.venv-graphify/` (Python 3.12+). Run
 `python3 scripts/graphify_project.py verify` for read-only package/cache/coverage
 checks, and `python3 scripts/graphify_project.py extract` to rebuild the canonical
 `graphify-out/`. Never patch a global/shared installation or another project.
+For graph updates, use only this offline, project-isolated CLI wrapper; do not
+use the Graphify skill or MCP to update the graph. Routine `.apx` and
+`database/*.sql` updates use local extraction and do not require an LLM API
+key. Semantic indexing of changed `app_context/**/*.md` is optional and separate.
 The corpus is a domain allowlist of `apps/`, `database/`, and `app_context/`.
 Graphify links cross-schema references and mirrored synonyms when their targets
 are present in the database mirror. The graph reflects this repository's
