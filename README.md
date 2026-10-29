@@ -977,6 +977,12 @@ python3 scripts/graphify_project.py setup
 python3 scripts/graphify_project.py extract
 ```
 
+Use `python3 scripts/graphify_project.py extract` as the only Graphify update
+path. Routine `.apx` and `database/*.sql` updates use the offline project-local
+CLI and do not require an LLM API key. Do not use a Graphify skill or MCP update
+operation. Semantic indexing of changed `app_context/**/*.md` files is optional
+and may use a configured backend; it is separate from routine code updates.
+
 - `python3 scripts/graphify_project.py verify` checks the isolated installation,
   pinned versions, and cached corpus coverage without modifying files or launching
   a subprocess. Missing/stale corpus receipts report coverage as unavailable.

@@ -11,9 +11,9 @@
     },
     ".agents/rules/graphify.md": {
       "status": "intended",
-      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py; 26.1 uses setup_graphify_apx.py. The 26.2-only isolated Graphify workflow also documents exact-detector corpus receipts; shared review fixes are aligned.",
+      "reason": "26.2 uses the isolated graphify_project.py wrapper and exact-detector corpus receipt workflow; this clarification makes the offline CLI the only graph update path and keeps semantic context indexing optional. 26.1 uses its separate Graphify setup path and is reviewed separately.",
       "blobs": [
-        "2b82747ca034db99477c03b4162abcb866251931",
+        "88038cf071e1abfb0dce58d88eec469b9db29056",
         "2c9dc3783dbf6faec8d3e4756750270bb5fa8ce6"
       ]
     },
@@ -43,9 +43,9 @@
     },
     ".agents/workflows/graphify.md": {
       "status": "intended",
-      "reason": "26.2 uses the isolated .venv-graphify and graphify_project.py. The 26.2-only isolated Graphify workflow also documents exact-detector corpus receipts; shared review fixes are aligned.",
+      "reason": "26.2 uses the isolated graphify_project.py workflow; this clarification makes the offline CLI the only graph update path and keeps semantic context indexing optional. 26.1 uses its separate Graphify setup path and is reviewed separately.",
       "blobs": [
-        "617a972f35336fd4fc6c08eddeef307039a9ae4f",
+        "b089f4c53773f35990c6d64674ba4c61aadacc4c",
         "afdfca91a002a6f854a6758e60e3c24831875d59"
       ]
     },
@@ -83,9 +83,9 @@
     },
     "AGENTS.md": {
       "status": "intended",
-      "reason": "26.2 contract adds native application locks, selected-page partial publish, runtime workflow/automation/task verification, MIGRATION_* owner profiles, schema-2 rehearsal metrics and Oracle skills refresh; 26.1 retains its release-specific workflow.",
+      "reason": "26.2 adds release-specific operational rules and the offline Graphify update requirement; 26.1 retains its own release commands and workflow.",
       "blobs": [
-        "2a5366eec19952319aefa477c8ff1c7edaa68ee1",
+        "49947fb16c3ad57b2096ee0cf3d4d1d372b48a02",
         "079c21fef0665f0c90e50438255ef403bee1417a"
       ]
     },
@@ -107,9 +107,9 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "26.2 release reference documents SQLcl 26.3, native locks, partial publish, feature capsules, migration profiles, automation controls and the Oracle skills refresh; 26.1 documents its own release commands and workflows.",
+      "reason": "26.2 documents its release-specific commands and the offline Graphify update requirement; 26.1 retains its own release commands and workflow.",
       "blobs": [
-        "0e15feec2506e31af22020f2daed28f8ea9dd37e",
+        "7fdc78e85609d01db83e74509dd13117d2bcba89",
         "b20f5c88a57a0e8267be794c504fb3c3bf633743"
       ]
     },
@@ -131,9 +131,9 @@
     },
     "docs/TROUBLESHOOTING.md": {
       "status": "intended",
-      "reason": "26.2 error messages for features 26.1 does not have.",
+      "reason": "26.2 release-specific troubleshooting includes the offline Graphify update path and optional semantic context indexing; 26.1 maintains its own guidance.",
       "blobs": [
-        "623384ec7a938eebae4647fe0688efc6618c9f0f",
+        "f3a05c50aabc19936396382c4a6cee8906aaaf0e",
         "c0a8dfe282de39a3d6e2d5a5848ddc3f9d92626f"
       ]
     },
