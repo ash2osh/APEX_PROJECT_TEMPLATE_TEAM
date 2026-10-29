@@ -14,6 +14,7 @@ from decimal import Decimal
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import _no_real_sqlcl  # noqa: F401
@@ -22,6 +23,7 @@ from scripts.db_targets import Target
 from scripts.compare_schema import (
     COMPARE_ENV_SECTIONS,
     _environment_driver,
+    capture_environment_catalog,
     compare_environment_catalogs,
     emit_dba_script,
     parse_environment_catalog_output,
@@ -88,7 +90,7 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertIn("SELECT VERSION_NO FROM APEX_RELEASE", source)
         self.assertNotIn("SELECT APEX_RELEASE.VERSION_NO FROM DUAL", source)
 
-    def test_environment_driver_always_supplies_all_ten_sqlcl_arguments(self) -> None:
+    def test_environment_driver_always_supplies_all_twelve_sqlcl_arguments(self) -> None:
         target = Target("dev", "docker-demo2", "APP_OWNER", "APP_OWNER", "development")
         with tempfile.TemporaryDirectory() as temporary:
             for dba_capture in (False, True):
@@ -102,7 +104,7 @@ class EnvironmentComparisonTests(unittest.TestCase):
                     )
                     arguments = invocation.split()[1:]
 
-                    self.assertEqual(len(arguments), 10, invocation)
+                    self.assertEqual(len(arguments), 12, invocation)
                     self.assertEqual(arguments[0], "4150505F4F574E4552")
                     self.assertEqual(arguments[1], "4150505F4F574E4552")
                     self.assertEqual(arguments[2], "646576")
@@ -216,6 +218,21 @@ class EnvironmentComparisonTests(unittest.TestCase):
         difference = report["differences"][0]
         self.assertEqual(difference["name"], "TRG_AUDIT")
         self.assertNotEqual(difference["source"]["source_hash"], difference["target"]["source_hash"])
+
+    def test_trigger_validity_is_compared_separately_from_enablement(self) -> None:
+        source = catalog("dev")
+        target = catalog("staging")
+        source["sections"]["triggers"][0]["status"] = "DISABLED"
+        target["sections"]["triggers"][0]["status"] = "DISABLED"
+        source["sections"]["triggers"][0]["object_status"] = "VALID"
+        target["sections"]["triggers"][0]["object_status"] = "INVALID"
+
+        report = compare_environment_catalogs(source, target, sections=("triggers",))
+
+        difference = next(row for row in report["differences"] if row["name"] == "TRG_AUDIT")
+        self.assertEqual(difference["source"]["status"], "DISABLED")
+        self.assertEqual(difference["target"]["status"], "DISABLED")
+        self.assertIn("object_status", difference["fields"])
 
     def test_trigger_header_formatting_alone_is_not_a_logic_difference(self) -> None:
         source = catalog("dev")
@@ -659,17 +676,94 @@ class EnvironmentComparisonTests(unittest.TestCase):
                         if line.startswith("@@compare_env_catalog.sql ")
                     )
                     arguments = invocation.split()[1:]
-                    self.assertEqual(len(arguments), 10, invocation)
+                    self.assertEqual(len(arguments), 12, invocation)
                     self.assertEqual(json.loads(bytes.fromhex(arguments[9]).decode("utf-8")), expected)
+                    self.assertEqual(json.loads(bytes.fromhex(arguments[10]).decode("utf-8")), [])
+                    self.assertEqual(json.loads(bytes.fromhex(arguments[11]).decode("utf-8")), [])
+
+    def test_feature_capture_passes_exact_source_and_object_names_to_catalog_driver(self) -> None:
+        target = Target("staging", "docker-demo2", "APP_OWNER", "APP_OWNER", "stage")
+        seen = {}
+
+        def runner(_target, driver, _run_dir, *, phase):
+            seen["phase"] = phase
+            seen["invocation"] = next(
+                line for line in driver.read_text(encoding="utf-8").splitlines()
+                if line.startswith("@@compare_env_catalog.sql ")
+            )
+            return SimpleNamespace(output="captured")
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "scripts.compare_schema.parse_environment_catalog_output", return_value={"captured": True},
+        ):
+            result = capture_environment_catalog(
+                target,
+                "staging",
+                ("tables", "baseline-source", "feature-dependencies"),
+                Path(temporary),
+                baseline_capture=True,
+                baseline_names=("ITEM_LOOKUP",),
+                scope_names=("ORDERS",),
+                _runner=runner,
+            )
+
+        self.assertEqual(result, {"captured": True})
+        self.assertEqual(seen["phase"], "inventory")
+        arguments = seen["invocation"].split()[1:]
+        self.assertEqual(len(arguments), 12, seen["invocation"])
+        self.assertEqual(json.loads(bytes.fromhex(arguments[10]).decode("utf-8")), ["ITEM_LOOKUP"])
+        self.assertEqual(json.loads(bytes.fromhex(arguments[11]).decode("utf-8")), ["ORDERS"])
+
+    def test_feature_internal_catalog_sections_and_exact_scope_are_private(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        model = (ROOT / "scripts" / "compare_schema.py").read_text(encoding="utf-8")
+
+        self.assertIn('"feature-dependencies"', model)
+        self.assertIn('"feature-synonym-access"', model)
+        self.assertIn("DEFINE compare_baseline_names_hex = '&11'", sql)
+        self.assertIn("DEFINE compare_scope_names_hex = '&12'", sql)
+        self.assertIn("sn AS (SELECT x.object_name", sql)
+        self.assertIn("feature-dependencies", sql)
+        self.assertIn("feature-synonym-access", sql)
+        self.assertIn("OR EXISTS (SELECT 1 FROM sn WHERE sn.object_name =", sql)
+
+    def test_feature_catalog_queries_include_selected_and_dependent_objects(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+
+        def query(name: str) -> str:
+            match = re.search(rf"add_query_section\('{name}', q'~(.*?)~'\)", sql, flags=re.DOTALL)
+            self.assertIsNotNone(match, name)
+            return match.group(1)
+
+        views = sql[sql.index("PROCEDURE add_views IS"):sql.index("PROCEDURE add_baseline_views IS")]
+        triggers = sql[sql.index("PROCEDURE add_triggers IS"):sql.index("PROCEDURE add_stored_code IS")]
+        stored_code = sql[sql.index("PROCEDURE add_stored_code IS"):sql.index("BEGIN\n  DBMS_OUTPUT.ENABLE", sql.index("PROCEDURE add_stored_code IS"))]
+        self.assertIn("c_scope_names_json", views)
+        self.assertIn("FROM all_dependencies d WHERE d.owner = v.owner", views)
+        self.assertIn("sn.object_name = t.trigger_name", triggers)
+        self.assertIn("sn.object_name = t.table_name", triggers)
+        self.assertIn("sn.object_name = s.name", stored_code)
+        self.assertIn("FROM all_dependencies d WHERE d.owner = s.owner", stored_code)
+        self.assertIn("sn.object_name = d.referenced_name", stored_code)
+
+        dependency_query = query("feature-dependencies")
+        self.assertTrue(dependency_query.lstrip().startswith("SCOPE_WITH"))
+        self.assertIn("SCOPE_MATCH(d.name)", dependency_query)
+        self.assertIn("SCOPE_MATCH(d.referenced_name)", dependency_query)
+        synonym_query = query("feature-synonym-access")
+        self.assertTrue(synonym_query.lstrip().startswith("SCOPE_WITH"))
+        self.assertIn("SCOPE_MATCH(s.synonym_name)", synonym_query)
+        self.assertIn("p.grantee IN (:scope, 'PUBLIC')", synonym_query)
 
     def test_catalog_sql_scope_tokens_are_expanded_with_one_prefix_bind(self) -> None:
-        """Scoped section queries carry SCOPE_* tokens; the expansion adds exactly one :scope_prefixes bind, bound first."""
+        """Scoped section queries carry SCOPE_* tokens with prefix and exact-name binds, bound first."""
         sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
         expand = sql[sql.index("FUNCTION expand_scope("):sql.index("PROCEDURE append_rows(")]
         self.assertEqual(expand.count(":scope_prefixes"), 1)
+        self.assertEqual(expand.count(":scope_names"), 1)
         append = sql[sql.index("PROCEDURE append_rows("):sql.index("PROCEDURE add_query_section(")]
-        self.assertIn("USING c_scope_prefixes_json, c_schema, l_offset, c_page_size", append)
-        self.assertIn("c_scope_prefixes_json, c_schema, c_baseline_prefixes_json", append)
+        self.assertIn("USING c_scope_prefixes_json, c_scope_names_json, c_schema, l_offset, c_page_size", append)
+        self.assertIn("c_scope_prefixes_json, c_scope_names_json, c_schema", append)
         for name in ("tables", "columns", "constraints", "indexes", "sequences", "synonyms",
                      "invalid-objects", "identity-columns", "object-grants"):
             match = re.search(rf"add_query_section\('{name}', q'~(.*?)~'\)", sql, flags=re.DOTALL)
@@ -697,6 +791,28 @@ class EnvironmentComparisonTests(unittest.TestCase):
         triggers = sql[sql.index("PROCEDURE add_triggers IS"):sql.index("PROCEDURE add_stored_code IS")]
         self.assertIn("SUBSTR(t.trigger_name, 1, LENGTH(sp.prefix))", triggers)
         self.assertIn("SUBSTR(t.table_name, 1, LENGTH(sp.prefix))", triggers)
+
+    def test_feature_catalog_capture_requires_private_exact_name_sections(self) -> None:
+        target = Target("dev", "docker-demo2", "APP_OWNER", "APP_OWNER", "development")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(CatalogError, "private baseline capture mode"):
+                _environment_driver(
+                    Path(temporary), target, "dev", ("tables",), dba_capture=False,
+                    scope_names=("ORDERS",),
+                )
+            with self.assertRaisesRegex(ValueError, "unsupported compare-env section"):
+                _environment_driver(
+                    Path(temporary), target, "dev", ("feature-dependencies",), dba_capture=False,
+                )
+            driver = _environment_driver(
+                Path(temporary), target, "dev", ("feature-dependencies",),
+                dba_capture=False, baseline_capture=True,
+            )
+            invocation = next(
+                line for line in driver.read_text(encoding="utf-8").splitlines()
+                if line.startswith("@@compare_env_catalog.sql ")
+            )
+        self.assertEqual(len(invocation.split()[1:]), 12)
 
     def test_compare_env_cli_scopes_the_capture_to_the_configured_prefixes(self) -> None:
         from scripts import compare_schema

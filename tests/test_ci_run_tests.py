@@ -6,6 +6,7 @@ import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -96,6 +97,23 @@ class CiRunTestsTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(runner.calls), 2)
 
+    def test_serial_output_is_escaped_for_a_restricted_console_encoding(self):
+        captured = io.BytesIO()
+        console = io.TextIOWrapper(captured, encoding="cp1252", errors="strict")
+        with patch("scripts.ci_run_tests.subprocess.run", return_value=SimpleNamespace(
+            returncode=0, stdout="captured: \ufffd\n",
+        )):
+            try:
+                with contextlib.redirect_stdout(console):
+                    code, output = run_unittest(["-v"])
+                    console.flush()
+            except UnicodeEncodeError as error:
+                self.fail(f"serial runner leaked a console encoding error: {error}")
+
+        self.assertEqual(code, 0)
+        self.assertIn("captured: \ufffd", output)
+        self.assertIn(b"captured: \\ufffd", captured.getvalue())
+
 
 class ParallelRunTests(unittest.TestCase):
     def setUp(self):
@@ -138,6 +156,20 @@ class ParallelRunTests(unittest.TestCase):
         self.assertEqual(output.count("ok"), 3)
         self.assertIn("===== test_mid: exit 1", printed.getvalue())
         self.assertIn("===== Combined: Ran 11 tests; skipped=3; failures=1; errors=0", printed.getvalue())
+
+    def test_parallel_output_is_escaped_for_a_restricted_console_encoding(self):
+        captured = io.BytesIO()
+        console = io.TextIOWrapper(captured, encoding="cp1252", errors="strict")
+        try:
+            with contextlib.redirect_stdout(console):
+                code, output = run_parallel(1, lambda _modules: (0, "captured: \ufffd\n"), self.tests)
+                console.flush()
+        except UnicodeEncodeError as error:
+            self.fail(f"parallel runner leaked a console encoding error: {error}")
+
+        self.assertEqual(code, 0)
+        self.assertIn("captured: \ufffd", output)
+        self.assertIn(b"captured: \\ufffd", captured.getvalue())
 
     def test_main_runs_in_parallel_only_for_a_whole_run_with_more_than_one_job(self):
         calls = []

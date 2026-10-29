@@ -8,6 +8,10 @@
 /.codex/config.toml
 .sync-state/
 scratch/
+/releases/.local-state.json
+/releases/.local-state.lock
+/releases/.target-writer-*.lock
+/releases/.local-state-history/
 migrations/**/attempt-event.*.json
 dist/
 

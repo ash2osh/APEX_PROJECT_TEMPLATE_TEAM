@@ -189,6 +189,17 @@ owner-only commands retain their owner-login checks. See
   `migrations/<SCHEMA>/…`; one migration changes one schema. See
   [docs/migration-rules.md](docs/migration-rules.md) for naming, ordering,
   recovery, and detection limits.
+- **Feature releases:** For new work that benefits from complete package source
+  and a focused release capsule, use mutable `features/<slug>/<SCHEMA>/` files,
+  `scripts/team.sh feature capture` for reviewed DEV capture, and `feature diff`
+  for the daily readable source diff. Replace the scaffold check, commit all
+  selected sources and the version-2 manifest, then `feature freeze` before
+  preparing a staging or production target. Review the target plan and digests;
+  production also requires verified staging proof for the same capsule. An
+  interrupted or unknown attempt needs reconciliation before recovery. Capsule
+  timing covers selected feature checkpoints, not app imports or excluded
+  legacy object steps. Existing migrations and version-1 rollouts keep their
+  current behavior. Follow [docs/feature-releases.md](docs/feature-releases.md).
 - **Schema comparison:** Use `scripts/team.sh compare-schema --env staging
   --object CUSTOMERS` or `--from dev --to prod --pattern 'HR_*'` to compare
   selected live objects. This reports schema drift; local receipts cannot
@@ -198,7 +209,8 @@ owner-only commands retain their owner-login checks. See
   `ai_generate/YYYY-MM-DD/` with the readable diff of each migration
   (`migrate --env dev` writes it after a verified apply; by hand,
   `python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>` before
-  `backup-db` refreshes the mirror) and one `WALKTHROUGH.md` for that day. Commit the folder with the work. See
+  `backup-db` refreshes the mirror; `feature diff` writes complete package
+  source diffs under `feature-diffs/`) and one `WALKTHROUGH.md` for that day. Commit the folder with the work. See
   [docs/daily-change-record.md](docs/daily-change-record.md).
 - **Promotion:** Put an explicit deployment descriptor in the application
   source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;

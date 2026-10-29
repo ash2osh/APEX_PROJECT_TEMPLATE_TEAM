@@ -12,6 +12,10 @@ DEFINE compare_baseline_prefixes_hex = '&7'
 DEFINE compare_baseline_excluded_hex = '&8'
 DEFINE compare_baseline_data_tables_hex = '&9'
 DEFINE compare_scope_prefixes_hex = '&10'
+DEFINE compare_baseline_names_hex = '&11'
+DEFINE compare_scope_names_hex = '&12'
+-- Argument 10 scopes structure by prefix; 11 scopes baseline source by exact name;
+-- 12 scopes structure by exact selected object name.
 SET LONG 2000000000
 SET LONGCHUNKSIZE 32767
 SET SERVEROUTPUT ON SIZE UNLIMITED
@@ -30,6 +34,8 @@ DECLARE
   c_baseline_excluded_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_excluded_hex'));
   c_baseline_data_tables_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_data_tables_hex'));
   c_scope_prefixes_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_scope_prefixes_hex'));
+  c_baseline_names_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_baseline_names_hex'));
+  c_scope_names_json CONSTANT CLOB := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('&&compare_scope_names_hex'));
   c_page_size CONSTANT PLS_INTEGER := 500;
   c_max_rows CONSTANT PLS_INTEGER := 100000;
   l_payload JSON_OBJECT_T := JSON_OBJECT_T();
@@ -247,19 +253,21 @@ DECLARE
   END;
 
   -- A section query may use three tokens, expanded here so each query stays one readable SQL text:
-  --   SCOPE_WITH          a leading CTE "sp" holding the upper-cased scope prefixes (one :scope_prefixes bind);
-  --   SCOPE_ALL           true when no scope prefixes were requested (everything is in scope);
-  --   SCOPE_MATCH(expr)   true when expr starts with one of the scope prefixes.
+  --   SCOPE_WITH          leading CTEs for prefix and exact-name filters;
+  --   SCOPE_ALL           true when neither prefixes nor exact names were requested;
+  --   SCOPE_MATCH(expr)   true when expr matches a requested prefix or exact name.
   -- Dependent objects (indexes, triggers, constraints, columns, identity sequences) are matched through their
   -- parent table in the query itself, so an object named without the prefix is kept when its table has it.
   FUNCTION expand_scope(p_query VARCHAR2) RETURN VARCHAR2 IS
     l_text VARCHAR2(32767) := p_query;
   BEGIN
     l_text := REPLACE(l_text, 'SCOPE_WITH',
-      'WITH sp AS (SELECT UPPER(x.prefix) prefix FROM JSON_TABLE(:scope_prefixes, ''$[*]'' COLUMNS (prefix VARCHAR2(128) PATH ''$'')) x)');
-    l_text := REPLACE(l_text, 'SCOPE_ALL', 'NOT EXISTS (SELECT 1 FROM sp)');
+      'WITH sp AS (SELECT UPPER(x.prefix) prefix FROM JSON_TABLE(:scope_prefixes, ''$[*]'' COLUMNS (prefix VARCHAR2(128) PATH ''$'')) x), '
+      || 'sn AS (SELECT x.object_name FROM JSON_TABLE(:scope_names, ''$[*]'' COLUMNS (object_name VARCHAR2(128) PATH ''$'')) x)');
+    l_text := REPLACE(l_text, 'SCOPE_ALL', 'NOT EXISTS (SELECT 1 FROM sp) AND NOT EXISTS (SELECT 1 FROM sn)');
     l_text := REGEXP_REPLACE(l_text, 'SCOPE_MATCH\(([A-Za-z0-9_.]+)\)',
-      'EXISTS (SELECT 1 FROM sp WHERE SUBSTR(\1, 1, LENGTH(sp.prefix)) = sp.prefix)');
+      '(EXISTS (SELECT 1 FROM sp WHERE SUBSTR(\1, 1, LENGTH(sp.prefix)) = sp.prefix) '
+      || 'OR EXISTS (SELECT 1 FROM sn WHERE sn.object_name = \1))');
     RETURN l_text;
   END;
 
@@ -274,16 +282,18 @@ DECLARE
     l_total := 0;
     LOOP
       l_page_count := 0;
-      IF p_section IN ('baseline-source', 'baseline-settings', 'object-grants') THEN
-        IF INSTR(p_query, ':scope_prefixes') > 0 THEN
-          OPEN l_cursor FOR p_query USING
-            c_scope_prefixes_json, c_schema, c_baseline_prefixes_json, c_baseline_prefixes_json,
-            c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
-        ELSE
-          OPEN l_cursor FOR p_query USING
-            c_schema, c_baseline_prefixes_json, c_baseline_prefixes_json,
-            c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
-        END IF;
+      IF p_section IN ('baseline-source', 'baseline-settings') THEN
+        OPEN l_cursor FOR p_query USING
+          c_schema, c_baseline_names_json, c_baseline_names_json, c_baseline_names_json,
+          c_baseline_prefixes_json, c_baseline_prefixes_json,
+          c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
+      ELSIF p_section = 'object-grants' THEN
+        OPEN l_cursor FOR p_query USING
+          c_scope_prefixes_json, c_scope_names_json, c_schema,
+          c_baseline_prefixes_json, c_baseline_prefixes_json,
+          c_baseline_excluded_json, c_baseline_excluded_json, l_offset, c_page_size;
+      ELSIF INSTR(p_query, ':scope_prefixes') > 0 AND INSTR(p_query, ':scope_names') > 0 THEN
+        OPEN l_cursor FOR p_query USING c_scope_prefixes_json, c_scope_names_json, c_schema, l_offset, c_page_size;
       ELSIF INSTR(p_query, ':scope_prefixes') > 0 THEN
         OPEN l_cursor FOR p_query USING c_scope_prefixes_json, c_schema, l_offset, c_page_size;
       ELSE
@@ -729,9 +739,18 @@ DECLARE
           FROM all_views v
           JOIN all_objects o ON o.owner = v.owner AND o.object_name = v.view_name AND o.object_type = 'VIEW'
          WHERE v.owner = c_schema
-           AND (DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 OR EXISTS (
+           AND ((DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2)
+             OR EXISTS (
              SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-              WHERE SUBSTR(v.view_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
+              WHERE SUBSTR(v.view_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
+             OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
+              WHERE sn.object_name = v.view_name)
+             OR EXISTS (SELECT 1 FROM all_dependencies d WHERE d.owner = v.owner AND d.name = v.view_name
+              AND d.referenced_owner = d.owner AND (
+                EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
+                 WHERE SUBSTR(d.referenced_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
+                OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
+                 WHERE sn.object_name = d.referenced_name))))
          ORDER BY v.view_name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
       ) LOOP
@@ -854,13 +873,22 @@ DECLARE
       l_page_count := 0;
       FOR trigger_row IN (
         SELECT t.trigger_name, t.table_name, t.trigger_type, t.triggering_event,
-            t.base_object_type, t.status
+            t.base_object_type, t.status,
+            (SELECT CASE WHEN COUNT(DISTINCT o.status) = 1 THEN MIN(o.status) END
+               FROM all_objects o
+              WHERE o.owner = t.owner AND o.object_name = t.trigger_name
+                AND o.object_type = 'TRIGGER' AND o.subobject_name IS NULL) object_status
           FROM all_triggers t WHERE t.owner = c_schema
-           AND ((DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 OR EXISTS (
+           AND ((DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2)
+             OR EXISTS (
              SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-              WHERE SUBSTR(t.trigger_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
+              WHERE SUBSTR(t.trigger_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
              OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-              WHERE SUBSTR(t.table_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
+              WHERE SUBSTR(t.table_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
+             OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
+              WHERE sn.object_name = t.trigger_name)
+             OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
+              WHERE sn.object_name = t.table_name))
          ORDER BY t.trigger_name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
       ) LOOP
@@ -875,6 +903,7 @@ DECLARE
         l_page.put('triggering_event', trigger_row.triggering_event);
         l_page.put('base_object_type', trigger_row.base_object_type);
         l_page.put('status', trigger_row.status);
+        l_page.put('object_status', trigger_row.object_status);
         l_page.put('line_count', line_count_value);
         l_page.put('source_hash', hash_sum_value);
         l_rows.append(l_page);
@@ -909,9 +938,18 @@ DECLARE
           JOIN all_objects o ON o.owner = s.owner AND o.object_name = s.name AND o.object_type = s.type
          WHERE s.owner = c_schema
            AND s.type IN ('FUNCTION','PROCEDURE','PACKAGE','PACKAGE BODY','TYPE','TYPE BODY')
-           AND (DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 OR EXISTS (
+           AND ((DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2)
+             OR EXISTS (
              SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-              WHERE SUBSTR(s.name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix)))
+              WHERE SUBSTR(s.name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
+             OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
+              WHERE sn.object_name = s.name)
+             OR EXISTS (SELECT 1 FROM all_dependencies d WHERE d.owner = s.owner AND d.name = s.name
+              AND d.referenced_owner = d.owner AND (
+                EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
+                 WHERE SUBSTR(d.referenced_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
+                OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
+                 WHERE sn.object_name = d.referenced_name))))
          GROUP BY s.name, s.type
          ORDER BY s.type, s.name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
@@ -1066,9 +1104,12 @@ BEGIN
         FROM all_source s
        WHERE s.owner = :scope
          AND s.type IN ('PACKAGE','PACKAGE BODY','TRIGGER','FUNCTION','PROCEDURE','TYPE','TYPE BODY')
-         AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+         AND ((DBMS_LOB.GETLENGTH(:baseline_names) > 2 AND EXISTS (
+           SELECT 1 FROM JSON_TABLE(:baseline_names, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) n
+            WHERE s.name = n.object_name)) OR (DBMS_LOB.GETLENGTH(:baseline_names) <= 2 AND
+           (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
            SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) p
-            WHERE SUBSTR(s.name, 1, LENGTH(p.prefix)) = UPPER(p.prefix)))
+            WHERE SUBSTR(s.name, 1, LENGTH(p.prefix)) = UPPER(p.prefix)))))
          AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
            SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) e
             WHERE s.name = UPPER(e.object_name)))
@@ -1082,13 +1123,41 @@ BEGIN
         'plsql_ccflags' VALUE p.plsql_ccflags, 'plscope_settings' VALUE p.plscope_settings RETURNING CLOB) row_json
        FROM all_plsql_object_settings p
        WHERE p.owner = :scope
-         AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+         AND ((DBMS_LOB.GETLENGTH(:baseline_names) > 2 AND EXISTS (
+           SELECT 1 FROM JSON_TABLE(:baseline_names, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) n
+            WHERE p.name = n.object_name)) OR (DBMS_LOB.GETLENGTH(:baseline_names) <= 2 AND
+           (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
            SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
-            WHERE SUBSTR(p.name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))
+            WHERE SUBSTR(p.name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))))
          AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
            SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x
             WHERE p.name = UPPER(x.object_name)))
        ORDER BY p.type, p.name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+
+    add_query_section('feature-dependencies', q'~
+      SCOPE_WITH
+      SELECT JSON_OBJECT('name' VALUE d.name, 'type' VALUE d.type,
+        'referenced_owner' VALUE d.referenced_owner, 'referenced_name' VALUE d.referenced_name,
+        'referenced_type' VALUE d.referenced_type, 'dependency_type' VALUE d.dependency_type RETURNING CLOB) row_json
+        FROM all_dependencies d
+       WHERE d.owner = :scope
+         AND (SCOPE_MATCH(d.name)
+           OR (d.referenced_owner = :scope AND SCOPE_MATCH(d.referenced_name)))
+       ORDER BY d.name, d.type, d.referenced_owner, d.referenced_name, d.referenced_type
+       OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+
+    add_query_section('feature-synonym-access', q'~
+      SCOPE_WITH
+      SELECT JSON_OBJECT('owner' VALUE p.table_schema, 'object_name' VALUE p.table_name,
+        'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
+        FROM all_synonyms s
+        JOIN all_tab_privs p ON p.table_schema = s.table_owner AND p.table_name = s.table_name
+       WHERE (s.owner = :scope OR s.owner = 'PUBLIC')
+         AND SCOPE_MATCH(s.synonym_name)
+         AND p.grantee IN (:scope, 'PUBLIC')
+         AND p.privilege = 'SELECT'
+       ORDER BY p.table_schema, p.table_name, p.grantee, p.privilege
+       OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
     add_baseline_views;
     add_baseline_data;

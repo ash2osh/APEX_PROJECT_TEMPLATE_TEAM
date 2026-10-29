@@ -43,11 +43,12 @@ fixed. Never add a test that fails every time.
 
 ## Parallel test runs
 
-CI runs each test module in its own process, 4 at a time (`CI_TEST_JOBS`), largest first.
-On an 8 CPU Linux machine, `python3 scripts/ci_run_tests.py --jobs 8` is the fast full-suite command; it
-prints a combined test/skip/failure count and exits non-zero if any module fails. Use
-`python3 scripts/ci_run_tests.py --jobs 4` to match CI. Without `--jobs` the runner uses one process, and
-unittest arguments such as `-k` always use one process. The plain
+CI runs each test module in its own process, largest first: Linux runs 4 at a time and Windows runs 2
+(`CI_TEST_JOBS`). The Windows suite starts many PowerShell processes and needs lower concurrency to stay
+within the per-module timeout. On an 8 CPU Linux machine, `python3 scripts/ci_run_tests.py --jobs 8` is the
+fast full-suite command; it prints a combined test/skip/failure count and exits non-zero if any module fails.
+Use `--jobs 4` to match Linux CI or `--jobs 2` to match Windows CI. Without `--jobs` the runner uses one
+process, and unittest arguments such as `-k` always use one process. The plain
 `python3 -m unittest discover -s tests` command remains valid for a serial run.
 
 On Windows a step before the tests sets `TEMP` and `TMP` to the long form of the runner's own temp

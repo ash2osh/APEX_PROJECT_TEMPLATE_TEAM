@@ -935,6 +935,21 @@ exit 17
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Usage: scripts/team.", result.stdout)
 
+    def test_feature_help_is_wired_through_both_wrappers(self) -> None:
+        entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if pwsh:
+            entries.append([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")])
+        for command in entries:
+            with self.subTest(entry=command[-1]):
+                result = subprocess.run(
+                    [*command, "feature", "--help"],
+                    text=True, capture_output=True, check=False, cwd=ROOT,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for operation in ("init", "capture", "diff", "freeze", "clean-capsule"):
+                    self.assertIn(operation, result.stdout)
+
     def test_new_migration_is_listed_and_needs_arguments_in_both_wrappers(self) -> None:
         entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
         pwsh = _test_subprocess_safety.working_pwsh()

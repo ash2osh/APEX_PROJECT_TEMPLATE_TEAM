@@ -81,7 +81,7 @@ jobs:
           '@ | python -
       - name: Behavioral tests
         env:
-          CI_TEST_JOBS: '4'
+          CI_TEST_JOBS: '2'
         run: python scripts/ci_run_tests.py
       - name: Validate the example configuration
         shell: bash

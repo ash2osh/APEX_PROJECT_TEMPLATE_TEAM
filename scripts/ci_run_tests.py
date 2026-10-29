@@ -67,6 +67,21 @@ def _partial_text(value: str | bytes | None) -> str:
     return value or ""
 
 
+def _write_output(text: str, *, end: str = "") -> None:
+    """Write captured output, escaping characters unsupported by the active console encoding."""
+    stream = sys.stdout
+    value = text + end
+    try:
+        stream.write(value)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None)
+        if not encoding:
+            raise
+        escaped = value.encode(encoding, "backslashreplace").decode(encoding)
+        stream.write(escaped)
+    stream.flush()
+
+
 def run_unittest(args: Sequence[str]) -> tuple[int, str]:
     """Run unittest in the repository root with closed stdin and a suite-level timeout."""
     timeout = 900
@@ -76,12 +91,12 @@ def run_unittest(args: Sequence[str]) -> tuple[int, str]:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
             timeout=timeout)
         output = result.stdout or ""
-        print(output, end="", flush=True)
+        _write_output(output)
         return result.returncode, output
     except subprocess.TimeoutExpired as error:
         output = _partial_text(error.stdout)
         output += f"\nunittest timed out after {timeout} seconds\n"
-        print(output, end="", flush=True)
+        _write_output(output)
         return 124, output
 
 
@@ -123,7 +138,7 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         for module, (module_code, output) in zip(modules, pool.map(lambda name: module_runner([name]), modules), strict=True):
             print(f"===== {module}: exit {module_code}", flush=True)
-            print(output, end="" if output.endswith("\n") else "\n", flush=True)
+            _write_output(output, end="" if output.endswith("\n") else "\n")
             outputs.append(output)
             ran = RAN_SUMMARY.search(output)
             outcome = OUTCOME_SUMMARY.search(output)

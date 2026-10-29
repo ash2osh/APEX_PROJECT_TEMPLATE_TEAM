@@ -54,7 +54,10 @@ COMPARE_ENV_SECTIONS = (
 COMPARE_ENV_DBA_SECTIONS = frozenset({
     "system-privileges", "roles", "network-aces", "ords", "installed-options",
 })
-BASELINE_INTERNAL_SECTIONS = frozenset({"baseline-source", "baseline-settings", "baseline-views", "baseline-data"})
+BASELINE_INTERNAL_SECTIONS = frozenset({
+    "baseline-source", "baseline-settings", "baseline-views", "baseline-data",
+    "feature-dependencies", "feature-synonym-access",
+})
 COMPARE_ENV_PAGE_SIZE = 500
 COMPARE_ENV_MAX_ROWS = 100_000
 COMPARE_ENV_NOT_COMPARED = (
@@ -73,7 +76,7 @@ COMPARE_ENV_FIELDS = {
     "columns": ("column_position", "data_type", "data_type_mod", "data_type_owner", "data_length", "data_precision", "data_scale", "char_used", "char_length", "nullable", "hidden", "user_generated", "virtual"),
     "constraints": ("constraint_type", "columns", "referenced_table", "referenced_columns", "condition", "condition_truncated", "status", "validated", "delete_rule", "deferrable", "deferred", "rely"),
     "indexes": ("table_name", "uniqueness", "columns", "index_type", "visibility", "status"),
-    "triggers": ("table_name", "trigger_type", "triggering_event", "base_object_type", "status", "line_count", "source_hash"),
+    "triggers": ("table_name", "trigger_type", "triggering_event", "base_object_type", "status", "object_status", "line_count", "source_hash"),
     "sequences": ("increment_by", "min_value", "max_value", "cycle_flag", "order_flag", "cache_size"),
     "synonyms": ("table_owner", "table_name", "db_link"),
     "views": ("status", "line_count", "source_hash"),
@@ -1255,10 +1258,12 @@ def _environment_driver(
     baseline_excluded: Sequence[str] = (),
     baseline_data_tables: Sequence[Mapping] = (),
     scope_prefixes: Sequence[str] = (),
+    baseline_names: Sequence[str] = (),
+    scope_names: Sequence[str] = (),
 ) -> Path:
     selected = _validate_compare_env_sections(sections, allow_baseline_internal=baseline_capture)
-    if not baseline_capture and (baseline_prefixes or baseline_excluded or baseline_data_tables):
-        raise CatalogError("baseline filters and data tables require the private baseline capture mode")
+    if not baseline_capture and (baseline_prefixes or baseline_excluded or baseline_data_tables or baseline_names or scope_names):
+        raise CatalogError("baseline filters and exact-name scope require the private baseline capture mode")
     sql_source = Path(__file__).with_name("compare_env_catalog.sql")
     if not sql_source.is_file():
         raise CatalogError("compare-env SQL catalog driver is missing")
@@ -1269,6 +1274,8 @@ def _environment_driver(
     excluded_json = json.dumps(list(baseline_excluded), separators=(",", ":"))
     data_tables_json = json.dumps(list(baseline_data_tables), separators=(",", ":"))
     scope_json = json.dumps([str(item).upper() for item in scope_prefixes], separators=(",", ":"))
+    baseline_names_json = json.dumps(list(baseline_names), ensure_ascii=False, separators=(",", ":"))
+    scope_names_json = json.dumps(list(scope_names), ensure_ascii=False, separators=(",", ":"))
     driver = run_dir / "compare-env-driver.sql"
     content = "\n".join((
         f"-- COMPARE_ENVIRONMENT:{environment}",
@@ -1282,7 +1289,20 @@ def _environment_driver(
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
         "SET TRANSACTION READ ONLY;",
-        f"@@compare_env_catalog.sql {_environment_hex(target.schema)} {_environment_hex(target.expected_user)} {_environment_hex(environment)} {'1' if dba_capture else '0'} {_environment_hex(section_json)} {'1' if baseline_capture else '0'} {_environment_hex(prefix_json)} {_environment_hex(excluded_json)} {_environment_hex(data_tables_json)} {_environment_hex(scope_json)}",
+        "@@compare_env_catalog.sql " + " ".join((
+            _environment_hex(target.schema),
+            _environment_hex(target.expected_user),
+            _environment_hex(environment),
+            "1" if dba_capture else "0",
+            _environment_hex(section_json),
+            "1" if baseline_capture else "0",
+            _environment_hex(prefix_json),
+            _environment_hex(excluded_json),
+            _environment_hex(data_tables_json),
+            _environment_hex(scope_json),
+            _environment_hex(baseline_names_json),
+            _environment_hex(scope_names_json),
+        )),
         "SET DEFINE OFF",
         "EXIT SUCCESS ROLLBACK",
         "",
@@ -1304,6 +1324,8 @@ def capture_environment_catalog(
     baseline_excluded: Sequence[str] = (),
     baseline_data_tables: Sequence[Mapping] = (),
     scope_prefixes: Sequence[str] = (),
+    baseline_names: Sequence[str] = (),
+    scope_names: Sequence[str] = (),
     _runner: Callable = run_sqlcl,
 ) -> dict:
     """Capture selected environment catalog sections through read-only SQLcl."""
@@ -1322,6 +1344,7 @@ def capture_environment_catalog(
             dba_capture=dba_capture, baseline_capture=baseline_capture,
             baseline_prefixes=baseline_prefixes, baseline_excluded=baseline_excluded,
             baseline_data_tables=baseline_data_tables, scope_prefixes=scope_prefixes,
+            baseline_names=baseline_names, scope_names=scope_names,
         )
         result = _runner(target, driver, private_dir, phase="inventory")
         return parse_environment_catalog_output(
