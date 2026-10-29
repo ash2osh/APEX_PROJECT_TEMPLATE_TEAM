@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
-from fake_sqlcl import environment as fake_environment, install as install_fake_sqlcl
+from fake_sqlcl import BASH, environment as fake_environment, install as install_fake_sqlcl
 
 from scripts import rollout
 from scripts.migration_manifest import load_batch
@@ -534,7 +534,7 @@ class RolloutManifestTests(unittest.TestCase):
         environment.pop("PROJECT_ENV_FILE", None)
 
         result = subprocess.run(
-            ["bash", str(self.root / "scripts" / "team.sh"), "rollout", "rollout.json", "--env", "dev", "--dry-run"],
+            [BASH, str(self.root / "scripts" / "team.sh"), "rollout", "rollout.json", "--env", "dev", "--dry-run"],
             cwd=self.root, env=environment, text=True, capture_output=True, check=False,
         )
 
