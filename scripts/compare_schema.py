@@ -54,6 +54,8 @@ COMPARE_ENV_SECTIONS = (
 COMPARE_ENV_DBA_SECTIONS = frozenset({
     "system-privileges", "roles", "network-aces", "ords", "installed-options",
 })
+# ASHARIF 2026-10-30: Add an optional complete grant capture without requiring DBA access for owner sessions.
+COMPARE_ENV_DBA_CAPTURE_SECTIONS = COMPARE_ENV_DBA_SECTIONS | {"object-grants"}
 BASELINE_INTERNAL_SECTIONS = frozenset({
     "baseline-source", "baseline-settings", "baseline-views", "baseline-data",
     "feature-dependencies", "feature-synonym-access",
@@ -1377,7 +1379,15 @@ def _merge_dba_capture(base: dict, privileged: dict) -> dict:
         raise CatalogError("DBA compare-env connection did not reach the same database, container, schema, and edition as the environment connection")
     merged = dict(base)
     merged["sections"] = {**base.get("sections", {}), **privileged.get("sections", {})}
-    merged["unavailable"] = {**base.get("unavailable", {}), **privileged.get("unavailable", {})}
+    unavailable = dict(base.get("unavailable", {}))
+    privileged_unavailable = privileged.get("unavailable", {})
+    privileged_coverage = privileged.get("coverage", {}).get("sections", {})
+    # ASHARIF 2026-10-30: A complete privileged section replaces an incomplete base capture.
+    for section, state in privileged_coverage.items():
+        if isinstance(state, Mapping) and state.get("complete") is True:
+            unavailable.pop(section, None)
+    unavailable.update(privileged_unavailable)
+    merged["unavailable"] = unavailable
     merged["coverage"] = dict(base.get("coverage", {}))
     merged["coverage"]["sections"] = {
         **base.get("coverage", {}).get("sections", {}),
@@ -1465,7 +1475,8 @@ def main_compare_env(
         run_dir = Path(run_dir)
         run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    dba_sections = tuple(section for section in sections if section in COMPARE_ENV_DBA_SECTIONS)
+    # ASHARIF 2026-10-30: Capture object grants through DBA views when available, while retaining owner-session capture.
+    dba_sections = tuple(section for section in sections if section in COMPARE_ENV_DBA_CAPTURE_SECTIONS)
     normal_sections = tuple(section for section in sections if section not in COMPARE_ENV_DBA_SECTIONS)
     if not normal_sections:
         # The unprivileged session supplies the database identity for a DBA-only selection.

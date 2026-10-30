@@ -345,6 +345,41 @@ DECLARE
     l_coverage_sections.put(p_name, l_page);
   END;
 
+  -- ASHARIF 2026-10-30: Use complete grant visibility or mark acting-as-schema captures incomplete.
+  PROCEDURE add_object_grants IS
+  BEGIN
+    IF NOT selected('object-grants') THEN RETURN; END IF;
+    IF c_dba_mode THEN
+      add_query_section('object-grants', q'~
+        SCOPE_WITH
+        SELECT JSON_OBJECT('owner' VALUE p.owner, 'object_name' VALUE p.table_name,
+          'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
+          FROM dba_tab_privs p WHERE p.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(p.table_name))
+           AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+             SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
+              WHERE SUBSTR(p.table_name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))
+           AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
+             SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x
+              WHERE p.table_name = UPPER(x.object_name)))
+         ORDER BY p.table_name, p.grantee, p.privilege OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    ELSIF SYS_CONTEXT('USERENV', 'SESSION_USER') = c_schema THEN
+      add_query_section('object-grants', q'~
+        SCOPE_WITH
+        SELECT JSON_OBJECT('owner' VALUE p.table_schema, 'object_name' VALUE p.table_name,
+          'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
+          FROM all_tab_privs p WHERE p.table_schema = :scope AND (SCOPE_ALL OR SCOPE_MATCH(p.table_name))
+           AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+             SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
+              WHERE SUBSTR(p.table_name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))
+           AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
+             SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x
+              WHERE p.table_name = UPPER(x.object_name)))
+         ORDER BY p.table_name, p.grantee, p.privilege OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    ELSE
+      add_unavailable('object-grants', 'complete object-grant visibility requires owner session or DBA capture');
+    END IF;
+  END;
+
   PROCEDURE add_java_mle IS
     mle_module_count PLS_INTEGER;
     language_row_count PLS_INTEGER;
@@ -1182,18 +1217,7 @@ BEGIN
       FROM all_tab_identity_cols i WHERE i.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(i.table_name))
      ORDER BY i.table_name, i.column_name OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 
-  add_query_section('object-grants', q'~
-    SCOPE_WITH
-    SELECT JSON_OBJECT('owner' VALUE p.table_schema, 'object_name' VALUE p.table_name,
-      'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
-      FROM all_tab_privs p WHERE p.table_schema = :scope AND (SCOPE_ALL OR SCOPE_MATCH(p.table_name))
-       AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
-         SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
-          WHERE SUBSTR(p.table_name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))
-       AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
-         SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x
-          WHERE p.table_name = UPPER(x.object_name)))
-     ORDER BY p.table_name, p.grantee, p.privilege OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+  add_object_grants;
 
   add_java_mle;
 

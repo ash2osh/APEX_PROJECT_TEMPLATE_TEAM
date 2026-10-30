@@ -94,14 +94,21 @@ STAGING_DBA_SQLCL_CONNECTION=stage-dba-readonly
 PROD_DBA_SQLCL_CONNECTION=prod-dba-readonly
 ```
 
-The command uses a configured DBA alias only for `system-privileges`, `roles`,
-`network-aces`, `ords`, and `installed-options`. Those sessions set
+The command uses a configured DBA alias for `system-privileges`, `roles`,
+`network-aces`, `ords`, and `installed-options`. It also captures object grants
+through `DBA_TAB_PRIVS` when an alias is configured. Those sessions set
 `ALTER SESSION DISABLE COMMIT IN PROCEDURE` and `SET TRANSACTION READ ONLY`.
 The alias is never used for writes. Without a DBA alias, each selected DBA
 section is listed as `not compared (no DBA connection)` under blockers and the
 command exits 2 because readiness is incomplete. A configured alias that
 cannot read a required view also leaves a blocker and retains SQLcl evidence
 under `scratch/`.
+
+Without a DBA alias, an owner login captures object grants from
+`ALL_TAB_PRIVS`. If the session login differs from the selected schema, the
+object-grant section is marked incomplete because `ALL_TAB_PRIVS` may not show
+all grants on that schema's objects. A configured DBA alias supplies the
+complete section; if that capture also fails, the comparison remains blocked.
 
 ## DBA script output
 
