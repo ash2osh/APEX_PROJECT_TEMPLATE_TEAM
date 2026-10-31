@@ -23,6 +23,12 @@ python3 -m unittest discover -s tests -p test_live_feature_release.py -v
 For the two-schema check, also set `TEMPLATE_LIVE_SECOND_CONNECTION` and
 `TEMPLATE_LIVE_SECOND_SCHEMA`. Without them that one check is skipped.
 
+To run the staging profile on a separate database, such as a local Docker
+container, also set `TEMPLATE_LIVE_STAGING_CONNECTION`. It names a saved
+connection that logs in as the same schema there. The staging profile then uses
+it, and the production profile keeps `TEMPLATE_LIVE_CONNECTION`. Do not combine
+it with the two-schema variables.
+
 The whole module takes about three to four minutes against a local container.
 
 ## Safety
