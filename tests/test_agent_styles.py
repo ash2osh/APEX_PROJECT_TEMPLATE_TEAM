@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -40,6 +41,17 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def committed_text(relative: str) -> str:
+    """The copy Git holds at HEAD, not the working tree."""
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"HEAD:{relative}"],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"{relative} is not committed at HEAD: {result.stderr.strip()}")
+    return result.stdout
+
+
 class AgentStyleFileTests(unittest.TestCase):
     def test_every_allowed_style_has_a_file_with_all_sections_and_the_override_sentence(self) -> None:
         for name in AGENT_STYLES:
@@ -63,13 +75,22 @@ class AgentStyleFileTests(unittest.TestCase):
         for marker in ("**A.", "**B.", "**C.", "(recommended)"):
             self.assertIn(marker, text)
 
-    def test_personal_layer_placeholder_has_the_sections_and_no_entries(self) -> None:
-        text = read(STYLES / "personal.md")
+    def test_committed_personal_layer_has_the_sections_and_no_entries(self) -> None:
+        # The working copy belongs to the developer, and AGENTS.md lets agents
+        # record preferences in it. The committed placeholder is what new
+        # projects receive, so it must stay empty.
+        text = committed_text(".agents/styles/personal.md")
         for heading in PERSONAL_SECTIONS:
             self.assertIn(heading, text)
         self.assertLessEqual(len(text.splitlines()), PERSONAL_LINE_BUDGET)
         outside_comments = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
         self.assertEqual([l for l in outside_comments.splitlines() if l.startswith("- ")], [])
+
+    def test_personal_layer_working_copy_keeps_the_sections_and_line_budget(self) -> None:
+        text = read(STYLES / "personal.md")
+        for heading in PERSONAL_SECTIONS:
+            self.assertIn(heading, text)
+        self.assertLessEqual(len(text.splitlines()), PERSONAL_LINE_BUDGET)
 
     def test_styles_readme_lists_every_style_and_the_precedence(self) -> None:
         text = read(STYLES / "README.md")

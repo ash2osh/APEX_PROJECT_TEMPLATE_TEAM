@@ -91,6 +91,14 @@ class FeaturePreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "occupied"):
             feature_preflight.prepare_checkpoint(checkpoint, _state(indexes=(("T", "OTHER"),)), ())
 
+    def test_rerun_of_an_applied_one_time_ddl_says_it_cannot_be_released_twice(self) -> None:
+        # The DDL of an applied release reaches the occupied-name check when it is prepared again.
+        # The refusal must say that the one-time DDL was already applied, not only that a name is taken.
+        checkpoint = _checkpoint("CREATE INDEX APP_CODE.IX_T ON APP_CODE.T (ID);\n")
+        state = _state(tables=("T",), columns=(("T", "ID"),), indexes=(("IX_T", "T"),))
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "occupied.*one-time.*new revision"):
+            feature_preflight.prepare_checkpoint(checkpoint, state, ())
+
     def test_external_view_dependency_is_not_treated_as_selected_coverage(self) -> None:
         checkpoint = _checkpoint("CREATE VIEW APP_CODE.V AS SELECT ID FROM OTHER_SCHEMA.T;\n")
         with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "dependency"):

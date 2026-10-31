@@ -205,10 +205,18 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = run_unittest, kn
         return code
     names = sorted(failed)
     print(f"::warning title=Known flaky test failed::{', '.join(names)}; rerunning once", flush=True)
-    rerun = ["discover", "-s", "tests", "-v"]
-    for test_id in names:
-        rerun += ["-k", test_id.rsplit(".", 1)[1]]
-    rerun_code, _ = runner(rerun)
+    # -k matches substrings of method names, and method names repeat across modules, so each
+    # failing module is rerun on its own file: -p selects the file exactly, and -k only
+    # narrows within that one module.
+    rerun_code = 0
+    for module in sorted({test_id.split(".", 1)[0] for test_id in names}):
+        rerun = ["discover", "-s", "tests", "-p", f"{module}.py", "-v"]
+        for test_id in names:
+            if test_id.split(".", 1)[0] == module:
+                rerun += ["-k", test_id.rsplit(".", 1)[1]]
+        code, _ = runner(rerun)
+        if code != 0:
+            rerun_code = code
     if rerun_code == 0:
         print("::warning title=Known flaky test passed on rerun::" + ", ".join(names), flush=True)
     return rerun_code

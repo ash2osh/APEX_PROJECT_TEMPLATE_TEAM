@@ -95,8 +95,13 @@ cd uc-local-apex-dev
 ```
 
 It opens APEX at `http://localhost:8181/ords/apex` and registers a SQLcl saved
-connection for each user it creates. Run `./local-26ai.sh --help` for the other
-helpers, such as `upgrade-apex` (if you need 26.2) and
+connection for each user it creates. A saved connection names a host and port.
+When the container that listens there is stopped, the connection fails with
+ORA-12541 (no listener), even though the saved login is correct. Start that
+container, or use a connection whose port is serving.
+
+Run `./local-26ai.sh --help` for the other helpers, such as `upgrade-apex` (if
+you need 26.2) and
 `unexpire-accounts` (if a login says the account is locked). Their
 [documentation](https://www.united-codes.com/products/uc-local-apex-dev/docs/)
 is the authority for that setup; this template only needs a schema, a

@@ -179,6 +179,30 @@ class SqlDriverContractTests(unittest.TestCase):
                 self.assertEqual(contents.count("|| '|' || MAX(version)"), queries)
                 self.assertIn("SET LINESIZE 32767", contents)
 
+    def test_rollout_identity_guard_only_checks_variables_the_driver_declares(self) -> None:
+        # The guard compares each observed field with v_<field>. db_name is declared as
+        # v_database_name, so an undeclared v_db_name failed every SQL-script rollout.
+        identity = {
+            "session_user": "APP", "current_schema": "APP", "db_name": "FREEPDB1",
+            "db_unique_name": "FREE", "service_name": "freepdb1", "container_id": "3",
+            "container_name": "FREEPDB1", "edition": "ORA$BASE", "database_version": "23.0",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = rollout._script_driver(
+                Path(temporary),
+                "UPDATE review_table SET flag = 1 WHERE id = 1;\n",
+                environment="staging",
+                schema="APP",
+                expected_user="APP",
+                step_number=1,
+                expected_identity=identity,
+            )
+            contents = driver.read_text(encoding="utf-8")
+        declared = set(re.findall(r"^  (v_\w+) ", contents, flags=re.MULTILINE))
+        checked = set(re.findall(r"IF NVL\((v_\w+),", contents))
+        self.assertEqual(len(checked), len(identity))
+        self.assertEqual(checked - declared, set())
+
     def test_rollout_driver_enables_sqlblanklines_before_include(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             driver = rollout._script_driver(

@@ -1589,7 +1589,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.local:
             report = _local_report(migrations, args.repo_root)
         else:
-            report = _live_report(migrations, args.env, args.repo_root, args.schema)
+            report = _with_applied_source_conflicts(
+                _live_report(migrations, args.env, args.repo_root, args.schema), args.repo_root, migrations, args.env,
+            )
     except KeyboardInterrupt:
         print("preflight interrupted; it only reads, so nothing was changed", file=sys.stderr)
         return 130
@@ -1727,6 +1729,7 @@ def preflight_selected(
         report = _local_report(migrations, repo_root)
     else:
         report = _live_report(migrations, environment, repo_root, schema, values=values)
+        report = _with_applied_source_conflicts(report, repo_root, migrations, environment)
     coverage = dict(report.coverage)
     coverage["deferredPreconditionFolders"] = deferred_precondition_folders(migrations)
     changed_path = _changed_selected_input(repo_root, folders, migrations)
@@ -1741,6 +1744,50 @@ def preflight_selected(
         return PreflightReport(2, report.conflicts, errors, coverage, report.limitation)
     coverage["selectedInputHashesVerified"] = True
     return PreflightReport(report.exit_code, report.conflicts, report.errors, coverage, report.limitation)
+
+
+def _applied_source_conflicts(repo_root: Path, migrations: Sequence[Migration], environment: str) -> list[dict]:
+    """Folders whose verified receipt for this environment no longer matches their SQL or checks.
+
+    Such a folder is already applied. Naming that is clearer than the failed postcondition
+    a changed folder would otherwise show against the state its receipt recorded.
+    """
+    conflicts = []
+    for migration in migrations:
+        path = migration.folder / f"status.{environment}.json"
+        if not path.exists():
+            continue
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            receipt = None
+        if (
+            isinstance(receipt, dict)
+            and receipt.get("payloadDigest") == migration.payload_digest
+            and receipt.get("checksSha256") == migration.checks_sha256
+        ):
+            continue
+        conflicts.append({
+            "code": "APPLIED_SOURCE_CHANGED",
+            "name": migration.folder.name,
+            "message": (
+                f"{migration.folder.name} already has a verified {environment} receipt, and its SQL or checks "
+                "changed since. Leave the applied folder as it is and add a follow-up revision "
+                "(scripts/team.sh revise <folder>)."
+            ),
+        })
+    return conflicts
+
+
+def _with_applied_source_conflicts(
+    report: PreflightReport, repo_root: Path, migrations: Sequence[Migration], environment: str,
+) -> PreflightReport:
+    """Add named conflicts for applied folders whose SQL or checks changed; error exits stay 2."""
+    applied_changed = _applied_source_conflicts(repo_root, migrations, environment)
+    if not applied_changed:
+        return report
+    exit_code = 2 if report.exit_code == 2 else 1
+    return PreflightReport(exit_code, (*report.conflicts, *applied_changed), report.errors, report.coverage, report.limitation)
 
 
 def _changed_selected_input(

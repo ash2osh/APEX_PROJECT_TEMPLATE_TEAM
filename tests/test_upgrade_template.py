@@ -1300,6 +1300,24 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertEqual(self.read("scripts/tool.sh"), "echo v1\n")
         self.assertEqual(self.lock()["commit"], v1)
 
+    def test_source_that_begins_with_a_dash_is_refused_before_git_runs(self) -> None:
+        self.adopt()
+        lock = self.lock()
+        # git clone reads "-bogus-option" as "-b ogus-option", so a lock or flag
+        # that names an option must never reach the clone.
+        lock["upstream"] = "-bogus-option"
+        write(self.project, {".template-lock.json": json.dumps(lock)})
+        commit_all(self.project, "lock names an option as its source")
+        before = git(self.project, "status", "--porcelain")
+
+        from_lock = self.upgrade_without_source("--dry-run")
+        explicit = self.upgrade_without_source("--source=-bogus-option", "--dry-run")
+
+        for result in (from_lock, explicit):
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("template source must not begin with '-'", result.stderr)
+        self.assertEqual(git(self.project, "status", "--porcelain"), before)
+
     def test_invalid_manifest_paths_are_refused_without_changes(self) -> None:
         bad_manifest = dict(MANIFEST)
         bad_manifest["templateOwned"] = ["../outside/**"]
@@ -1421,6 +1439,27 @@ class PostUpgradeGraphifyTests(unittest.TestCase):
                 mock_run.return_value = subprocess.CompletedProcess(
                     args=[], returncode=0, stdout="", stderr=""
                 )
+                upgrade_engine._post_upgrade_sync(project, actions)
+                mock_run.assert_called_once_with(
+                    [sys.executable, str(setup_script)],
+                    cwd=project,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+    def test_post_upgrade_sync_runs_setup_graphify_when_extractor_is_created(self) -> None:
+        # An upgrade that adds the extractor reports CREATE, never ADD.
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            scripts = project / "scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            setup_script = scripts / "setup_graphify_apx.py"
+            setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            actions = [upgrade_engine.Action("CREATE", "scripts/graphify_apexlang_extractor.py")]
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
                 upgrade_engine._post_upgrade_sync(project, actions)
                 mock_run.assert_called_once_with(
                     [sys.executable, str(setup_script)],

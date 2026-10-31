@@ -90,7 +90,27 @@ class CiRunTestsTests(unittest.TestCase):
         code, runner = self.run_main((1, FAIL_ONE), (0, ""))
         self.assertEqual(code, 0)
         self.assertEqual(len(runner.calls), 2)
-        self.assertEqual(runner.calls[1], ["discover", "-s", "tests", "-v", "-k", "test_one"])
+        self.assertEqual(runner.calls[1], ["discover", "-s", "tests", "-p", "mod_a.py", "-v", "-k", "test_one"])
+
+    def test_a_known_flaky_failure_reruns_only_its_own_module(self):
+        # A method name is not unique across modules, and -k matches substrings, so the
+        # rerun must be restricted to the failing test's module file.
+        both = FAIL_ONE + "FAIL: test_one (mod_b.ClassB.test_one)\n----\nFAILED (failures=2)\n"
+        known = self.known
+        known.write_text("mod_a.ClassA.test_one\nmod_b.ClassB.test_one\n", encoding="utf-8")
+        code, runner = self.run_main((1, both), (0, ""), (0, ""))
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls[1:], [
+            ["discover", "-s", "tests", "-p", "mod_a.py", "-v", "-k", "test_one"],
+            ["discover", "-s", "tests", "-p", "mod_b.py", "-v", "-k", "test_one"],
+        ])
+
+    def test_a_failed_rerun_in_any_module_fails_the_job(self):
+        both = FAIL_ONE + "FAIL: test_one (mod_b.ClassB.test_one)\n----\nFAILED (failures=2)\n"
+        self.known.write_text("mod_a.ClassA.test_one\nmod_b.ClassB.test_one\n", encoding="utf-8")
+        code, runner = self.run_main((1, both), (0, ""), (1, ""))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(runner.calls), 3)
 
     def test_a_known_flaky_failure_that_fails_again_fails_the_job(self):
         code, runner = self.run_main((1, FAIL_ONE), (1, FAIL_ONE))
@@ -191,7 +211,7 @@ class ParallelRunTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             code = main(["--jobs", "2"], runner=runner, known_path=known, parallel=lambda jobs: (1, FAIL_ONE))
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, [["discover", "-s", "tests", "-v", "-k", "test_one"]])
+        self.assertEqual(runner.calls, [["discover", "-s", "tests", "-p", "mod_a.py", "-v", "-k", "test_one"]])
 
 
 class CrashedProcessTests(unittest.TestCase):

@@ -622,6 +622,72 @@ class FeatureRuntimeTests(unittest.TestCase):
         self.assertEqual(attempts[1]["state"], "verified")
         self.assertEqual(attempts[1]["recoveryOf"], attempt_id)
 
+    def test_recovery_checkpoint_runs_while_the_killed_parent_rollout_is_still_recorded_running(self) -> None:
+        # A killed rollout keeps its run record "running". Starting the recovery already treats
+        # that parent as retired, so the checkpoint occupancy check must treat it the same way.
+        from scripts import feature_release, release_state
+
+        initial = self._state()
+        partial = self._state(lines=["PACKAGE DISPATCH AS\n", "  PROCEDURE PARTIAL;\n", "END DISPATCH;\n"])
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release, "capture_selected_state", return_value=initial):
+            original = feature_release.prepare_target(self.root, self.capsule, "staging", environ=self._environ())
+        parent_run_id, attempt_id = self._leave_attempt_in_run(self.capsule, original, state="attempting")
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release, "capture_selected_state", return_value=partial):
+            recovery = feature_release.prepare_target(
+                self.root, self.capsule, "staging", environ=self._environ(),
+                recovery_attempt=attempt_id, terminal_ack=f"RECONCILE {attempt_id}",
+            )
+
+        run_id = self._start_run(self.capsule, recovery)
+        result, _apply = self._runtime(recovery, runner=self._fake_runner(), state=partial, run_id=run_id)
+        self.assertEqual(result.exit_code, 0, result.message)
+        parent = next(row for row in release_state._load_index(self.root)["rollouts"] if row["runId"] == parent_run_id)
+        self.assertEqual(parent["state"], "running")
+
+    def test_a_later_run_is_not_blocked_by_a_killed_parent_that_a_recovery_reconciled(self) -> None:
+        # After a recovery verifies the interrupted checkpoint, the killed parent still reads
+        # "running". Later runs on the same scope must not be refused on its account.
+        from scripts import feature_release, release_state
+
+        initial = self._state()
+        partial = self._state(lines=["PACKAGE DISPATCH AS\n", "  PROCEDURE PARTIAL;\n", "END DISPATCH;\n"])
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release, "capture_selected_state", return_value=initial):
+            original = feature_release.prepare_target(self.root, self.capsule, "staging", environ=self._environ())
+        _parent_run_id, attempt_id = self._leave_attempt_in_run(self.capsule, original, state="attempting")
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release, "capture_selected_state", return_value=partial):
+            recovery = feature_release.prepare_target(
+                self.root, self.capsule, "staging", environ=self._environ(),
+                recovery_attempt=attempt_id, terminal_ack=f"RECONCILE {attempt_id}",
+            )
+        recovery_run_id = self._start_run(self.capsule, recovery)
+        result, _apply = self._runtime(recovery, runner=self._fake_runner(), state=partial, run_id=recovery_run_id)
+        self.assertEqual(result.exit_code, 0, result.message)
+        verification_ids = [
+            row["verificationId"] for row in release_state._load_index(self.root)["checkpointVerifications"]
+            if row["runId"] == recovery_run_id
+        ]
+        release_state.finish_rollout(self.root, recovery_run_id, outcome={
+            "state": "failed", "databaseState": "verified", "steps": [],
+            "checkpointVerificationIds": verification_ids,
+            "budget": {"seconds": self.capsule.database_object_budget_seconds, "elapsedSeconds": None,
+                       "coverageComplete": False, "passed": False},
+            "finalReportPath": None, "finalReportSha256": None,
+        })
+
+        # The later run starts from the frozen result, so its plan differs from the killed one.
+        expected_unit, _settings = feature_release._stored_source(self.item)
+        expected = self._state(lines=expected_unit["lines"])
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release, "capture_selected_state", return_value=expected):
+            later = feature_release.prepare_target(self.root, self.capsule, "staging", environ=self._environ())
+        later_run_id = self._start_run(self.capsule, later)
+        result, _apply = self._runtime(later, runner=self._fake_runner(), state=expected, run_id=later_run_id)
+        self.assertEqual(result.exit_code, 0, result.message)
+
     def test_wrong_apply_identity_and_compilation_warning_never_verify_attempt(self) -> None:
         from scripts import feature_release
 
@@ -711,6 +777,33 @@ class FeatureRuntimeTests(unittest.TestCase):
         self.assertTrue(result.evidence_paths)
         index = json.loads((self.root / "releases/.local-state.json").read_text(encoding="utf-8"))
         self.assertEqual(index["attempts"][-1]["state"], "unknown")
+
+    def test_stored_source_header_blanks_the_owner_as_oracle_stores_all_source(self) -> None:
+        # ALL_SOURCE keeps the columns of an owner qualifier as blanks, so the expected
+        # first line must have that padding or every source postcondition fails live.
+        from scripts import feature_release
+
+        source = (
+            b'CREATE OR REPLACE PACKAGE BODY "APP_CODE"."DISPATCH" as\n'
+            b"  PROCEDURE RUN is begin null; end;\n"
+            b'end "DISPATCH";\n/\n'
+        )
+        item = replace(
+            self.item, path="features/dispatch/APP_CODE/packages/dispatch.pkb.sql", source=source,
+            sha256=hashlib.sha256(source).hexdigest(), unit=("APP_CODE", "PACKAGE BODY", "DISPATCH"),
+        )
+        expected_unit, _settings = feature_release._stored_source(item)
+        self.assertEqual(expected_unit["lines"][0], "PACKAGE BODY" + " " * 12 + '"DISPATCH" as\n')
+
+    def test_validity_check_ids_are_kebab_case_for_underscored_unit_names(self) -> None:
+        # Oracle names often contain underscores, but the check runner accepts only
+        # lowercase kebab-case ids. An underscore id failed every feature postcondition.
+        from scripts import feature_release, migration_manifest
+
+        for object_type, name in (("PACKAGE BODY", "ITEM_LOOKUP"), ("PACKAGE", "APP_DISPATCH_2"), ("TRIGGER", "T$AUDIT")):
+            with self.subTest(name=name):
+                identifier = feature_release._validity_check_id(object_type, name)
+                self.assertIsNotNone(migration_manifest.CHECK_ID_RE.fullmatch(identifier), identifier)
 
     def test_noop_unit_has_no_apply_session_or_write_attempt(self) -> None:
         from scripts import feature_release

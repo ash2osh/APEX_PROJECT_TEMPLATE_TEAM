@@ -314,6 +314,12 @@ def statement_spans(source: str, *, allow_transaction_control: bool = False) -> 
         # a comment glued to the word ('DECLARE/**/') does not count as a gap.
         word_end = first_match.end()
         first = first_match.group().upper()
+        if first in {"COMMIT", "ROLLBACK"} and not allow_transaction_control:
+            # The migration runner commits once after a clean run, so a file cannot end the transaction.
+            raise ValueError(
+                f"SQL-only migration does not allow transaction control ({first}) at line "
+                f"{line_at(masked, statement_start)}: the migration runner commits once after the last statement"
+            )
         transaction_control = allow_transaction_control and first in {"COMMIT", "ROLLBACK"}
         transaction_terminator = transaction_control and source[word_end:word_end + 1] == ";"
         if word_end < len(source) and source[word_end] not in " \t\r\n" and not transaction_terminator:
