@@ -313,8 +313,9 @@ def _stored_source(item: FeatureInput) -> tuple[dict, dict[str, str]]:
     if actual_name != name or actual_owner not in {None, owner}:
         raise FeatureReleaseError(f"stored source header does not match validated unit {object_type} {name}: {item.path}")
     if actual_owner is not None:
-        prefix = f"{header.group('indent')}{header.group('kind')} {header.group('second')}"
-        lines[0] = prefix + lines[0][header.end():]
+        # ALL_SOURCE blanks the owner qualifier and keeps its columns, so the expected header does too.
+        owner_start, name_start = header.start("first"), header.start("second")
+        lines[0] = lines[0][:owner_start] + " " * (name_start - owner_start) + lines[0][name_start:]
     overrides: dict[str, str] = {}
     for start, end in spans[:-1]:
         statement = text[start:end].strip()
@@ -369,6 +370,34 @@ def _guard_query(query: Mapping) -> dict:
     if not isinstance(value["id"], str) or not isinstance(value["sql"], str) or type(value["expected"]) is not int:
         raise FeatureReleaseError("generated source guard query is malformed")
     return value
+
+
+def _header_tokens(line: str) -> list[str]:
+    tokens = re.findall(r'"(?:[^"]|"")*"|[^\s"]+', line)
+    return [token[1:-1].replace('""', '"') if token.startswith('"') else token.upper() for token in tokens]
+
+
+def _same_stored_source(live_lines: list[str], expected_lines: list[str]) -> bool:
+    """Compare captured source with the live text.
+
+    The header names the unit, so its keywords may differ in case, its name may be quoted or
+    not, and blanks may stand where an owner qualifier was. The body must match exactly.
+    """
+    if not live_lines or len(live_lines) != len(expected_lines):
+        return live_lines == expected_lines
+    return (
+        _header_tokens(live_lines[0]) == _header_tokens(expected_lines[0])
+        and live_lines[1:] == expected_lines[1:]
+    )
+
+
+def _same_settings(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
+    """Compare compiler settings by value. The live query returns numbers and the validator
+    returns text, and an empty PLSQL_CCFLAGS is stored as NULL."""
+    def text(value: object) -> str:
+        return "" if value is None else str(value)
+
+    return {key: text(value) for key, value in left.items()} == {key: text(value) for key, value in right.items()}
 
 
 def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_number: int) -> list[dict]:
@@ -435,9 +464,9 @@ def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_num
             before_lines = list(actual["lines"])
             expected_valid = actual.get("valid") is True
 
-        expected_matches = before_lines == expected_lines
+        expected_matches = _same_stored_source(before_lines, expected_lines)
         settings_match = not setting_overrides or (
-            before_settings is not None and apply_settings == before_settings
+            before_settings is not None and _same_settings(apply_settings, before_settings)
         )
         no_op = actual is not None and expected_matches and settings_match and expected_valid
         if not isinstance(apply_settings, Mapping):
@@ -1094,7 +1123,12 @@ def _checkpoint_guard(plan: TargetPlan, checkpoint_number: int, checkpoint: Feat
             raise FeatureReleaseError("prepared source compiler guard checks are malformed")
         if source_guard.get("valid") is not None and type(source_guard.get("valid")) is not bool:
             raise FeatureReleaseError("prepared source compiler guard validity is malformed")
+        # Only a unit that does not exist yet has no before-state digest.
+        if (source_guard.get("beforeSourceSha256") is None) != (source_guard.get("targetExists") is False):
+            raise FeatureReleaseError("prepared source compiler guard before-state does not match whether the unit exists")
         for digest_field in ("beforeSourceSha256", "expectedSourceSha256", "settingsPrologueSha256"):
+            if digest_field == "beforeSourceSha256" and source_guard.get(digest_field) is None:
+                continue
             if not isinstance(source_guard.get(digest_field), str) or HASH_RE.fullmatch(source_guard[digest_field]) is None:
                 raise FeatureReleaseError(f"prepared source compiler guard {digest_field} is malformed")
         _validated_source_prologue(source_guard)
@@ -1133,6 +1167,11 @@ def _runtime_checks(checks: Sequence[QueryCheck], label: str) -> tuple[QueryChec
     return tuple(result)
 
 
+def _validity_check_id(object_type: str, name: str) -> str:
+    # Check ids are lowercase kebab-case, so Oracle underscores and $ are slugged and hashed.
+    return f"valid-{baseline._safe_check_slug(name + '-' + object_type)}"
+
+
 def _checkpoint_runtime_checks(
     checkpoint: FeatureCheckpoint,
     guard: Mapping,
@@ -1158,12 +1197,6 @@ def _checkpoint_runtime_checks(
         if item.category != "stored-source" or item.unit is None:
             continue
         _owner, object_type, name = item.unit
-        expected_unit, _overrides = _stored_source(item)
-        expected_lines = expected_unit["lines"]
-        for query in baseline._source_check_queries(
-            {"name": name, "type": object_type, "lines": expected_lines}, checkpoint.schema,
-        ):
-            postconditions.append(QueryCheck(query["id"], query["sql"], query["expected"]))
         source_guard = next((
             row for row in guard["sourceGuards"]
             if isinstance(row, Mapping)
@@ -1173,12 +1206,25 @@ def _checkpoint_runtime_checks(
         ), None)
         if source_guard is None or not isinstance(source_guard.get("applySettings"), Mapping):
             raise FeatureReleaseError(f"prepared compiler settings are missing for {object_type} {name}")
+        if source_guard.get("noOp") is True:
+            # A unit that is already current keeps the text it has. Its header may be rendered
+            # differently from the frozen one, so check the live text the plan captured.
+            source_checks = source_guard.get("sourceVerification")
+            if not isinstance(source_checks, list) or not source_checks:
+                raise FeatureReleaseError(f"prepared no-op source check is missing for {object_type} {name}")
+        else:
+            expected_unit, _overrides = _stored_source(item)
+            source_checks = baseline._source_check_queries(
+                {"name": name, "type": object_type, "lines": expected_unit["lines"]}, checkpoint.schema,
+            )
+        for query in source_checks:
+            postconditions.append(QueryCheck(query["id"], query["sql"], query["expected"]))
         setting_query = baseline._exact_settings_check(
             source_guard["applySettings"], name, object_type, checkpoint.schema,
         )
         postconditions.append(QueryCheck(setting_query["id"], setting_query["sql"], setting_query["expected"]))
         postconditions.append(QueryCheck(
-            f"valid-{object_type.lower().replace(' ', '-')}-{name.lower()}",
+            _validity_check_id(object_type, name),
             "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_OBJECTS "
             f"WHERE OWNER = {_sql_literal(checkpoint.schema)} AND OBJECT_TYPE = {_sql_literal(object_type)} "
             f"AND OBJECT_NAME = {_sql_literal(name)} AND STATUS = 'VALID') "

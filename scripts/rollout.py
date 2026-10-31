@@ -1446,8 +1446,10 @@ def _script_driver(
             f"  c_expected_{field} CONSTANT VARCHAR2(512) := UTL_RAW.CAST_TO_VARCHAR2(HEXTORAW('{sql_hex(str(expected_identity[field]))}'));"
             for field in OBSERVED_IDENTITY_FIELDS
         )
+        # The driver declares the database name as v_database_name; every other field is v_<field>.
+        identity_variables = {"db_name": "database_name"}
         identity_checks = "\n".join(
-            f"  IF NVL(v_{field}, '{field.upper()}_MISSING') <> c_expected_{field} THEN RAISE_APPLICATION_ERROR(-20075, 'rollout writer identity mismatch'); END IF;"
+            f"  IF NVL(v_{identity_variables.get(field, field)}, '{field.upper()}_MISSING') <> c_expected_{field} THEN RAISE_APPLICATION_ERROR(-20075, 'rollout writer identity mismatch'); END IF;"
             for field in OBSERVED_IDENTITY_FIELDS
         )
         identity_output = (
@@ -2104,14 +2106,19 @@ def _assert_recovery_will_not_replay_prior_writes(plan: Sequence[dict], target_p
     if checkpoint_step_number is None:
         raise RolloutError("recovery checkpoint is outside the frozen rollout step list")
 
+    # A parent killed mid-step records no outcome for that step or any later one, so only
+    # the earlier writing steps must have an outcome. Those are the only ones that could
+    # have completed and be replayed.
     parent_steps = parent_run.get("steps")
-    if not isinstance(parent_steps, list) or len(parent_steps) != len(plan):
-        raise RolloutError("recovery parent does not contain complete ordered step outcomes")
+    if not isinstance(parent_steps, list) or len(parent_steps) > len(plan):
+        raise RolloutError("recovery parent has more step outcomes than the frozen plan")
     write_types = {"migrate", "sql-script", "ords-import", "app-deploy", "feature-migrate"}
     completed_writes = []
     for item in plan[:checkpoint_step_number - 1]:
         if item["type"] not in write_types:
             continue
+        if item["number"] > len(parent_steps):
+            raise RolloutError(f"recovery parent has no recorded outcome for earlier writing step {item['number']}")
         outcome = parent_steps[item["number"] - 1]
         if not isinstance(outcome, Mapping) or outcome.get("step") != item["number"]:
             raise RolloutError(f"recovery parent step {item['number']} outcome is malformed")

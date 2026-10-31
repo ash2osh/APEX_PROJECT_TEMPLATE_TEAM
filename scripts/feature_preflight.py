@@ -41,6 +41,12 @@ GRANT_RE = re.compile(
 )
 
 
+# A name that is already taken usually means this one-time DDL was applied before.
+OCCUPIED_HINT = (
+    " (one-time DDL: if this release was already applied, do not release it again; prepare a new revision)"
+)
+
+
 class StructuralPreflightError(ValueError):
     """The selected structural effects are unsafe or cannot be proven."""
 
@@ -647,7 +653,7 @@ def prepare_checkpoint(
             replace_view = kind == "CREATE_VIEW" and operation.get("replace") is True and "VIEW" in existing and bool(checkpoint.preconditions)
             replace_existing_view = replace_view
             if name in staged_names or (existing and not replace_view):
-                raise StructuralPreflightError(f"object namespace is occupied for {name}: {sorted(existing)}")
+                raise StructuralPreflightError(f"object namespace is occupied for {name}: {sorted(existing)}{OCCUPIED_HINT}")
             staged_names.add(name)
             object_type = {"CREATE_TABLE": "TABLE", "CREATE_VIEW": "VIEW", "CREATE_SEQUENCE": "SEQUENCE"}[kind]
             common.setdefault(name, set()).add(object_type)
@@ -658,7 +664,7 @@ def prepare_checkpoint(
                 columns[name] = declared_columns
         elif kind == "CREATE_INDEX":
             if name in staged_indexes or name in indexes:
-                raise StructuralPreflightError(f"index namespace is occupied for {name}")
+                raise StructuralPreflightError(f"index namespace is occupied for {name}{OCCUPIED_HINT}")
             table = str(operation.get("table", ""))
             indexed = {str(item) for item in operation.get("columns", ())}
             available = columns.get(table)
@@ -677,7 +683,7 @@ def prepare_checkpoint(
             additions = {str(item) for item in operation.get("columns", ())}
             overlap = sorted(available.intersection(additions))
             if overlap:
-                raise StructuralPreflightError(f"column namespace is occupied on {table}: {', '.join(overlap)}")
+                raise StructuralPreflightError(f"column namespace is occupied on {table}: {', '.join(overlap)}{OCCUPIED_HINT}")
             available.update(additions)
         elif kind == "CREATE_VIEW":
             pass
@@ -691,7 +697,7 @@ def prepare_checkpoint(
             if target_owner != checkpoint.schema.upper() or not _object_present(common, target_name):
                 raise StructuralPreflightError(f"missing synonym target {target_owner}.{target_name}")
             if synonym_name in staged_names or _object_present(common, synonym_name):
-                raise StructuralPreflightError(f"synonym namespace is occupied for {synonym_name}")
+                raise StructuralPreflightError(f"synonym namespace is occupied for {synonym_name}{OCCUPIED_HINT}")
             staged_names.add(synonym_name)
             common.setdefault(synonym_name, set()).add("SYNONYM")
             staged_synonyms[synonym_name] = (target_owner, target_name)

@@ -1052,7 +1052,11 @@ def _assert_checkpoint_allowed_index(
         raise ReleaseStateError("checkpoint does not belong to the active rollout run and prepared target")
     if any(row["runId"] == run_id and row["checkpoint"] == checkpoint for row in index["checkpointVerifications"]):
         raise ReleaseStateError("this checkpoint already has a durable verification in the active rollout")
-    matching = [row for row in index["rollouts"] if row["state"] == "running" and row["runId"] != run_id and scope in row["targetScopes"]]
+    matching = [
+        row for row in index["rollouts"]
+        if row["state"] == "running" and row["runId"] != run_id and scope in row["targetScopes"]
+        and not _rollout_retired(index, row, capsule, plan)
+    ]
     if matching:
         raise ReleaseStateError("another active rollout owns this physical target scope")
     recovery_id = _attempt_plan(capsule, plan, checkpoint)[2]["recoveryOf"]
@@ -1223,6 +1227,7 @@ def assert_auxiliary_step_allowed(
             raise ReleaseStateError("SQL/ORDS step does not belong to the active rollout and prepared target")
         if any(
             row["runId"] != run_id and row["state"] == "running" and scope in row["targetScopes"]
+            and not _rollout_retired(index, row, capsule, plan)
             for row in index["rollouts"]
         ):
             raise ReleaseStateError("another active rollout owns this physical target scope")
@@ -1721,6 +1726,15 @@ def _rollout_is_reconciled(index: Mapping, run: Mapping, capsule: ReleaseCapsule
     return _run_uncertainty_is_checkpoint_only(run, capsule, recovered)
 
 
+def _rollout_retired(index: Mapping, run: Mapping, capsule: ReleaseCapsule, plan: TargetPlan) -> bool:
+    """Whether a run still marked running no longer occupies its target.
+
+    That holds once an acknowledged recovery has reconciled it, or when it is the parent
+    of the recovery plan being used. Every occupancy check uses this one rule.
+    """
+    return _rollout_is_reconciled(index, run, capsule) or _rollout_is_recovery_parent(index, run, capsule, plan)
+
+
 def _auxiliary_target_scope(plan, number: int, step: Mapping) -> dict:
     targets = getattr(plan, "targets", None)
     key = f"step:{number}"
@@ -1840,9 +1854,7 @@ def start_rollout(repo_root: Path, capsule: ReleaseCapsule, plan) -> str:
                 existing["state"] in {"running", "unknown"} or existing["databaseState"] == "unknown"
             ):
                 continue
-            if _rollout_is_reconciled(index, existing, capsule):
-                continue
-            if _rollout_is_recovery_parent(index, existing, capsule, plan):
+            if _rollout_retired(index, existing, capsule, plan):
                 continue
             active.append(existing)
         if active:

@@ -57,6 +57,13 @@ and is never executed.
 | `installed-options` | JVM and Spatial option values and installed component status. |
 | `versions` | Database and APEX versions. |
 
+The capture's `identity` records `database_version` as `DBMS_DB_VERSION` reports
+it, for example `23.0`. The migration checks and the feature-release preflight
+record the same value, so a capture from this version compares cleanly with
+them. Captures made before this change stored the internal version string
+(`23.0.0.0.0`) in that field. Take a fresh capture before comparing those with
+a feature-release preflight.
+
 Each record is matched by its section key and then compared field by field.
 Reports classify records as `missing on target`, `different`, or `only on
 target`. A `different` item includes the field names that changed in JSON and
@@ -159,5 +166,12 @@ end.
   database versions before using the report for a production rollout.
 - Oracle catalog columns and ORDS metadata views vary by database/ORDS release.
   Unsupported or unreadable sections are blockers, not identical results.
+- Environments must have distinct database identities. The comparison refuses a
+  source and target that resolve to the same database, container, schema and
+  edition, and it reports `SELF_COMPARISON`. Containers built from the same Oracle Free
+  image all report `FREE` and `FREEPDB1`, so a rehearsal across them cannot be compared.
+  Give each environment its own `DB_UNIQUE_NAME`. The same limit applies to a release
+  guard: when identities match, nothing in the identity can tell a mis-pointed
+  connection from the right one, so connection names and profiles carry that check.
 - A source hash identifies changed stored logic but is not a source export.
   Use an exact source baseline and review the deployment migration separately.

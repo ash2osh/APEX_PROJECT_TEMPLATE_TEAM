@@ -135,6 +135,39 @@ class MigrationChecksTests(unittest.TestCase):
         self.assertEqual(report.coverage["deferred_preconditions"]["folders"], ["2026-09-30_dep-r002"])
         self.assertIn("preconditions of 2026-09-30_dep-r002 are not checked here", _render_preflight(report, False))
 
+    def test_applied_folder_whose_sql_changed_is_named_as_a_conflict(self):
+        # The receipt says this folder was applied. If its SQL or checks changed since, the
+        # preflight must name that change, not report a failed postcondition for the new state.
+        from scripts import migration_checks
+
+        folder = self.add_folder("2026-10-13_applied-r001", "INSERT INTO zz_t (id) VALUES (1);\n")
+        migrations = load_batch(self.root, ["migrations/2026-10-13_applied-r001"])
+        receipt = folder / "status.dev.json"
+        receipt.write_text(json.dumps({
+            "payloadDigest": "0" * 64, "checksSha256": migrations[0].checks_sha256,
+        }) + "\n", encoding="utf-8")
+        conflicts = migration_checks._applied_source_conflicts(self.root, migrations, "dev")
+        self.assertEqual([row["code"] for row in conflicts], ["APPLIED_SOURCE_CHANGED"])
+        self.assertIn("follow-up revision", conflicts[0]["message"])
+
+        receipt.write_text(json.dumps({
+            "payloadDigest": migrations[0].payload_digest, "checksSha256": migrations[0].checks_sha256,
+        }) + "\n", encoding="utf-8")
+        self.assertEqual(migration_checks._applied_source_conflicts(self.root, migrations, "dev"), [])
+
+    def test_applied_source_conflicts_are_added_to_a_live_report_and_keep_error_exits(self):
+        from scripts import migration_checks
+
+        folder = self.add_folder("2026-10-13_applied-r001", "INSERT INTO zz_t (id) VALUES (1);\n")
+        migrations = load_batch(self.root, ["migrations/2026-10-13_applied-r001"])
+        (folder / "status.dev.json").write_text(json.dumps({"payloadDigest": "0" * 64, "checksSha256": migrations[0].checks_sha256}) + "\n", encoding="utf-8")
+        clean = migration_checks.PreflightReport(0, (), (), {"complete": True})
+        changed = migration_checks._with_applied_source_conflicts(clean, self.root, migrations, "dev")
+        self.assertEqual(changed.exit_code, 1)
+        self.assertEqual([row["code"] for row in changed.conflicts], ["APPLIED_SOURCE_CHANGED"])
+        failed = migration_checks.PreflightReport(2, (), ({"code": "X"},), {"complete": False})
+        self.assertEqual(migration_checks._with_applied_source_conflicts(failed, self.root, migrations, "dev").exit_code, 2)
+
     def test_preflight_selected_uses_explicit_values_and_reports_observed_identity(self):
         from scripts import migration_checks
 

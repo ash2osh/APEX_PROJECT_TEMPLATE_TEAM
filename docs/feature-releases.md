@@ -20,7 +20,10 @@ scripts/team.sh feature diff inventory --schema APP_CODE
 ```
 
 Capture reads the complete live DEV package specification and body, when a body
-exists, and stores a retained source baseline under ignored `scratch/`. It
+exists, and stores a retained source baseline under ignored `scratch/`. It uses the
+`CODE_*` profile, not `MIGRATION_*`. A feature that touches more than one schema
+needs every DEV schema listed in `CODE_SCHEMA`, with aligned `CODE_SQLCL_CONNECTION`
+and `CODE_EXPECTED_USER` values; otherwise the second schema's capture is refused. It
 refuses to replace edited source; use `--refresh` only after reviewing the live
 change and reconciling the source. `diff` is offline and writes source diffs and
 review metadata under `ai_generate/YYYY-MM-DD/feature-diffs/`. Add its output to
@@ -109,6 +112,12 @@ keeps the attempt, receipt, and capsule intact. Do not rerun that capsule; retai
 the evidence while preparing a separately reviewed recovery plan that does not
 repeat the completed writes. The runner will not infer that replay is safe.
 
+A rollout killed mid-step may record no outcome for that step or any later one.
+Recovery accepts such a parent, provided every earlier writing step has a
+verified outcome. Once an acknowledged recovery has verified the interrupted
+checkpoint, the killed run's record no longer blocks later runs on the same
+target. Those runs must still pass the same occupancy checks as any other.
+
 Production needs its own prepared production plan and a successful staging
 report for the same capsule:
 
@@ -171,3 +180,7 @@ template guide or example.
 Offline tests and hosted CI do not prove live staging performance. A measured
 claim needs a separately authorized disposable staging rehearsal with the
 actual selected payload and final source/settings/validity read-back.
+
+To exercise this path against a disposable schema, run the opt-in live checks
+described in [live feature-release checks](live-feature-tests.md). CI does not
+run them.

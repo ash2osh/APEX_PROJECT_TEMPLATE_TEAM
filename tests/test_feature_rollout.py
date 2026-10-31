@@ -367,6 +367,35 @@ class FeatureRolloutTests(unittest.TestCase):
                 write_plan, write_target_plan, write_parent_run,
             )
 
+    def test_recovery_accepts_a_parent_killed_before_recording_its_checkpoint_or_later_steps(self) -> None:
+        # A rollout killed mid-step records no outcome for that step or later ones. Nothing
+        # before the checkpoint ran, so there is nothing to replay and recovery may proceed.
+        plan = self._plan([self.steps[0], self.steps[1]])
+        target_plan = SimpleNamespace(recovery_binding={"checkpoint": 1})
+        rollout._assert_recovery_will_not_replay_prior_writes(plan, target_plan, {"steps": []})
+        rollout._assert_recovery_will_not_replay_prior_writes(
+            plan, target_plan, {"steps": [{"step": 1, "status": "unknown"}]},
+        )
+
+    def test_recovery_refuses_an_earlier_write_step_with_no_recorded_outcome(self) -> None:
+        plan = self._plan([
+            {"type": "sql-script", "schema": "APP_DATA"},
+            self.steps[0],
+            self.steps[1],
+        ])
+        with self.assertRaisesRegex(rollout.RolloutError, "no recorded outcome for earlier writing step 1"):
+            rollout._assert_recovery_will_not_replay_prior_writes(
+                plan, SimpleNamespace(recovery_binding={"checkpoint": 2}), {"steps": []},
+            )
+
+    def test_recovery_refuses_a_parent_with_more_outcomes_than_the_frozen_plan(self) -> None:
+        plan = self._plan([self.steps[0]])
+        with self.assertRaisesRegex(rollout.RolloutError, "more step outcomes than the frozen plan"):
+            rollout._assert_recovery_will_not_replay_prior_writes(
+                plan, SimpleNamespace(recovery_binding={"checkpoint": 1}),
+                {"steps": [{"step": 1, "status": "unknown"}, {"step": 2, "status": "unknown"}]},
+            )
+
     def test_capsule_recovery_refuses_prior_write_before_confirmation(self) -> None:
         from scripts import release_state
 
