@@ -10,6 +10,10 @@ runs them: the module is skipped unless these variables are set:
     TEMPLATE_LIVE_SCHEMA=<SCHEMA>    the disposable schema, which must be that login's user
     TEMPLATE_LIVE_SECOND_CONNECTION  optional, with TEMPLATE_LIVE_SECOND_SCHEMA, for the
     TEMPLATE_LIVE_SECOND_SCHEMA      two-schema check
+    TEMPLATE_LIVE_STAGING_CONNECTION optional, a saved connection to a separate staging
+                                     database (for example Docker) for the staging profile.
+                                     The production profile keeps TEMPLATE_LIVE_CONNECTION.
+                                     Do not combine it with the two-schema variables.
 
 See docs/live-feature-tests.md for the procedure and the scenarios covered.
 """
@@ -34,6 +38,8 @@ CONNECTION = os.environ.get("TEMPLATE_LIVE_CONNECTION", "")
 SCHEMA = os.environ.get("TEMPLATE_LIVE_SCHEMA", "").upper()
 SECOND_CONNECTION = os.environ.get("TEMPLATE_LIVE_SECOND_CONNECTION", "")
 SECOND_SCHEMA = os.environ.get("TEMPLATE_LIVE_SECOND_SCHEMA", "").upper()
+STAGING_CONNECTION = os.environ.get("TEMPLATE_LIVE_STAGING_CONNECTION", "")
+STAGING_DB = STAGING_CONNECTION or CONNECTION
 ENABLED = os.environ.get("TEMPLATE_LIVE_DISPOSABLE") == "1" and bool(CONNECTION and SCHEMA)
 SKIP_REASON = (
     "live feature checks need TEMPLATE_LIVE_DISPOSABLE=1, TEMPLATE_LIVE_CONNECTION and "
@@ -84,6 +90,19 @@ def _drop_if_present(kind: str, target: str, missing_codes: tuple[int, ...]) -> 
     )
 
 
+def _sweep_token(token: str) -> str:
+    # Drops every package and table named with this run's token, on whichever database it runs against.
+    return (
+        "begin\n"
+        "  for o in (select object_name, object_type from user_objects\n"
+        "            where object_type in ('PACKAGE', 'TABLE') and instr(object_name, '" + token + "') > 0) loop\n"
+        "    execute immediate 'drop ' || o.object_type || ' ' || o.object_name\n"
+        "      || case when o.object_type = 'TABLE' then ' purge' end;\n"
+        "  end loop;\n"
+        "end;\n/"
+    )
+
+
 def _sqlcl(connection: str, script: str, workdir: str, env: dict, *, tolerate: bool = False) -> str:
     """Run a script in SQLcl. A failure raises unless tolerate is set (used for cleanup)."""
     header = "whenever sqlerror continue\n" if tolerate else "whenever sqlerror exit failure rollback\n"
@@ -98,6 +117,7 @@ def _sqlcl(connection: str, script: str, workdir: str, env: dict, *, tolerate: b
 def _env_text() -> str:
     schemas = [SCHEMA, *([SECOND_SCHEMA] if SECOND_SCHEMA else [])]
     connections = [CONNECTION, *([SECOND_CONNECTION] if SECOND_SCHEMA else [])]
+    staging_connections = [STAGING_CONNECTION or CONNECTION, *([SECOND_CONNECTION] if SECOND_SCHEMA else [])]
     return "\n".join([
         "PROJECT_NAME=live-feature-checks",
         "DEVELOPER_NAME=LIVECHECK",
@@ -109,7 +129,7 @@ def _env_text() -> str:
         f"CODE_SQLCL_CONNECTION={CONNECTION}", f"CODE_EXPECTED_USER={SCHEMA}",
         f"APEX_PARSING_SCHEMA={SCHEMA}", f"APEX_SQLCL_CONNECTION={CONNECTION}", f"APEX_EXPECTED_USER={SCHEMA}",
         f"MIGRATION_SCHEMA={SCHEMA}", f"MIGRATION_SQLCL_CONNECTION={CONNECTION}", f"MIGRATION_EXPECTED_USER={SCHEMA}",
-        f"STAGING_SCHEMA={','.join(schemas)}", f"STAGING_SQLCL_CONNECTION={','.join(connections)}",
+        f"STAGING_SCHEMA={','.join(schemas)}", f"STAGING_SQLCL_CONNECTION={','.join(staging_connections)}",
         f"STAGING_EXPECTED_USER={','.join(schemas)}",
         f"PROD_SCHEMA={','.join(schemas)}", f"PROD_SQLCL_CONNECTION={','.join(connections)}",
         f"PROD_EXPECTED_USER={','.join(schemas)}",
@@ -144,6 +164,12 @@ class LiveFeatureReleaseTests(unittest.TestCase):
                 _sqlcl(connection, statement, cls.workdir.name, cls.env)
             except RuntimeError as error:
                 failures.append(f"{statement}: {error}")
+        if STAGING_DB != CONNECTION:
+            # Objects that staging checkpoints create on their own database never reach the drops above.
+            try:
+                _sqlcl(STAGING_DB, _sweep_token(cls.token), cls.workdir.name, cls.env)
+            except RuntimeError as error:
+                failures.append(f"sweep of {cls.token} on the staging database: {error}")
         cls.workdir.cleanup()
         if failures:
             raise AssertionError("live cleanup left objects behind:\n" + "\n".join(failures))
@@ -161,12 +187,18 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self._register_drops(connection, *drops)
         return _sqlcl(connection, script, self.workdir.name, self.env, tolerate=tolerate)
 
+    def _sql_on_both(self, script: str, *, drops: tuple[str, ...] = ()) -> None:
+        """Create a fixture on DEV and, when staging is a separate database, on staging too."""
+        self._sql(CONNECTION, script, drops=drops)
+        if STAGING_DB != CONNECTION:
+            self._sql(STAGING_DB, script, drops=drops)
+
     def _register_drops(self, connection: str, *statements: str) -> None:
         # Cleanup runs in reverse registration order, so later objects go first.
         self.drops.extend((connection, statement) for statement in statements)
 
-    def _count(self, sql: str) -> int:
-        output = self._sql(CONNECTION, f"set heading off feedback off\n{sql};\n")
+    def _count(self, sql: str, connection: str = CONNECTION) -> int:
+        output = self._sql(connection, f"set heading off feedback off\n{sql};\n")
         return int(output.strip().splitlines()[-1])
 
     def _team(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -239,14 +271,17 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(document["status"], "success")
         return document
 
-    def _wait_until_settled(self, package: str, *, quiet_seconds: int = 10, limit_seconds: int = 180) -> None:
+    def _wait_until_settled(self, package: str, *, connection: str = CONNECTION,
+                            quiet_seconds: int = 10, limit_seconds: int = 180) -> None:
         """Wait until the package body's DDL timestamp and status stop changing for quiet_seconds."""
         query = (f"select to_char(last_ddl_time, 'YYYYMMDDHH24MISS') || ':' || status from user_objects "
                  f"where object_name = '{package}' and object_type = 'PACKAGE BODY'")
         deadline = time.monotonic() + limit_seconds
         previous, stable_since = None, time.monotonic()
         while time.monotonic() < deadline:
-            current = self._sql(CONNECTION, f"set heading off feedback off\n{query};\n").strip().splitlines()[-1]
+            output = self._sql(connection, f"set heading off feedback off\n{query};\n").strip()
+            # No row means the killed run had not yet created the package body; that is a settled state too.
+            current = output.splitlines()[-1] if output else "absent"
             if current != previous:
                 previous, stable_since = current, time.monotonic()
             elif time.monotonic() - stable_since >= quiet_seconds:
@@ -272,7 +307,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
     def test_capture_freeze_then_staging_and_production_with_stage_proof(self) -> None:
         slug = self._name("ping")
         package, log = f"LIVE_{self.token}_PKG", f"LIVE_{self.token}_LOG"
-        self._sql(CONNECTION, f"""
+        self._sql_on_both(f"""
             create table {log} (id number generated by default on null as identity primary key, msg varchar2(200));
             create or replace package {package} as
               function ping return number;
@@ -304,7 +339,13 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(production["status"], "success")
-        self.assertEqual(self._count(f"select count(*) from {log} where msg = 'ran'"), 2)
+        ran = f"select count(*) from {log} where msg = 'ran'"
+        if STAGING_DB != CONNECTION:
+            # Staging and production run mark.sql against different databases; each records one row.
+            self.assertEqual(self._count(ran, STAGING_DB), 1)
+            self.assertEqual(self._count(ran), 1)
+        else:
+            self.assertEqual(self._count(ran), 2)
 
         payload = Path(capsule).name.split("-")[0]
         cleanup = self._team("feature", "clean-capsule", payload)
@@ -352,7 +393,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         result, _ = self._rollout("staging", capsule=capsule, prepare=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing prerequisite table", result.stdout + result.stderr)
-        self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{early}'"), 0)
+        self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{early}'", STAGING_DB), 0)
 
     def test_abrupt_termination_mid_apply_is_recovered_after_reconciliation(self) -> None:
         slug = self._name("kill")
@@ -393,7 +434,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         process.communicate(timeout=120)
         # Killing the client does not stop a DDL the server is already running. Wait for the
         # package to stop changing before reconciling, or recovery captures a moving target.
-        self._wait_until_settled(package)
+        self._wait_until_settled(package, connection=STAGING_DB)
 
         result = self._team("rollout", "releases/current.json", "--env", "staging", "--prepare",
                             "--capsule", capsule, "--recover", attempt, stdin=f"RECONCILE {attempt}\n")
@@ -435,7 +476,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
         slug = self._name("noop")
         package = f"LIVE_{self.token}_NOOP"
-        self._sql(CONNECTION, f"""
+        self._sql_on_both(f"""
             create or replace package {package} as
               function ping return number;
             end {package};
@@ -492,7 +533,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual([row for row in index["checkpointVerifications"] if row["runId"] == run_id], [])
         self.assertEqual(self._count(
             f"select count(*) from user_source where name = '{package}' and type = 'PACKAGE BODY' "
-            "and text like '%return 1;%'"), 1)
+            "and text like '%return 1;%'", STAGING_DB), 1)
 
 
 if __name__ == "__main__":
