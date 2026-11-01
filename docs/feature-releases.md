@@ -68,6 +68,15 @@ Constraint options are limited to `ENABLE`, `DISABLE`, `VALIDATE` and
 `UNIQUE` or `PRIMARY KEY` is refused when an identical key already exists. Name
 every `CHECK`: an unnamed one has no catalog identity to prove.
 
+What the after-state checks do **not** compare: the text of a view's query or
+of an index expression, and the text of a `CHECK` condition. A view is proven to
+exist and be valid; an expression index to exist with the stated uniqueness and
+the stated number of columns and expressions. Review those definitions in the
+diff. The dependencies of a view (CTEs, inline views, comma joins, parenthesised
+joins, subqueries at any depth) are extracted by a scanner that is compared with
+Oracle's own `ALL_DEPENDENCIES` by a live test, and any view it cannot place with
+certainty is refused rather than guessed.
+
 These stay refused and belong in a reviewed migration or workflow: `DROP`,
 `TRUNCATE`, `RENAME`, `DROP` or `ENABLE`/`DISABLE` of an existing object,
 `USING INDEX`, deferrable constraints, a parenthesised `ADD (...)` list that mixes
