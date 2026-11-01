@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from . import feature_ddl_forms
 from .migration_checks import MigrationAnalysisError, analyze_batch, compiled_units
 from .migration_manifest import (
     Migration,
@@ -39,16 +40,6 @@ SESSION_SETTINGS = (
     ("NLS_LENGTH_SEMANTICS", re.compile(r"ALTER\s+SESSION\s+SET\s+NLS_LENGTH_SEMANTICS\s*=\s*(BYTE|CHAR)\Z", re.I | re.ASCII)),
     ("PLSCOPE_SETTINGS", re.compile(rf"ALTER\s+SESSION\s+SET\s+PLSCOPE_SETTINGS\s*=\s*({SETTING_VALUE})\Z", re.I | re.ASCII)),
 )
-GRANT_IDENT = r'(?:"(?:[^"]|"")+"|[A-Za-z][A-Za-z0-9_$#]*)'
-OBJECT_GRANT_RE = re.compile(
-    rf"GRANT\s+(?:ALL(?:\s+PRIVILEGES)?|[A-Za-z][A-Za-z0-9_$#]*(?:\s*,\s*[A-Za-z][A-Za-z0-9_$#]*)*)"
-    rf"\s+ON\s+({GRANT_IDENT})\s*\.\s*({GRANT_IDENT})\s+TO\s+"
-    rf"{GRANT_IDENT}(?:\s*,\s*{GRANT_IDENT})*"
-    rf"(?:\s+WITH\s+GRANT\s+OPTION)?\Z",
-    re.I | re.ASCII,
-)
-
-
 class FeatureManifestError(ValueError):
     """A feature checkpoint is incomplete, ambiguous, or unsafe to apply."""
 
@@ -230,19 +221,14 @@ def _source_unit(item: FeatureInput, schema: str) -> tuple[str, str, str] | None
 
 
 def _unquote_identifier(value: str) -> str:
-    if value.startswith('"') and value.endswith('"'):
-        return value[1:-1].replace('""', '"')
-    return value.upper()
+    return feature_ddl_forms.unquote_identifier(value)
 
 
 def _static_grant_object(statement: str, schema: str) -> tuple[str, str] | None:
-    match = OBJECT_GRANT_RE.fullmatch(statement.strip())
-    if match is None:
-        return None
-    owner, name = (_unquote_identifier(match.group(index)) for index in (1, 2))
-    if owner != schema:
-        raise FeatureManifestError(f"object grant owner {owner!r} does not match feature checkpoint schema {schema}")
-    return owner, name
+    try:
+        return feature_ddl_forms.static_grant_object(statement, schema)
+    except feature_ddl_forms.FeatureDdlError as error:
+        raise FeatureManifestError(str(error)) from error
 
 
 def _validate_ddl(item: FeatureInput, schema: str) -> tuple[tuple[str, str], ...]:
@@ -269,11 +255,13 @@ def _validate_ddl(item: FeatureInput, schema: str) -> tuple[tuple[str, str], ...
                 keys.append((owner, name))
             continue
         statement = text[start:end].strip()
-        if operation.get("kind") == "REVIEWED_OPERATION" and statement.upper().startswith("GRANT "):
-            grant_key = _static_grant_object(statement, schema)
-            if grant_key is not None:
-                keys.append(grant_key)
-                continue
+        try:
+            modelled = feature_ddl_forms.model_statement(statement, operation, schema)
+        except feature_ddl_forms.FeatureDdlError as error:
+            raise FeatureManifestError(f"feature DDL cannot be modelled safely ({item.path}): {error}") from error
+        if modelled is not None:
+            keys.append(feature_ddl_forms.operation_key(modelled))
+            continue
         kind = operation.get("kind", "UNKNOWN")
         reason = operation.get("reason", "operation is not statically supported")
         raise FeatureManifestError(f"feature DDL contains unsupported {kind} in {item.path}: {reason}")

@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import feature_manifest, migration_checks
+from . import feature_ddl_forms, feature_manifest, migration_checks
 from .feature_manifest import FeatureCheckpoint
 from .migration_manifest import MigrationManifestError, QueryCheck, validate_check_query
 from .schema_catalog import ObjectKey
@@ -27,18 +27,9 @@ COMMON_TYPES = {
     "PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY", "TRIGGER", "CLUSTER", "JAVA SOURCE",
     "JAVA CLASS", "LIBRARY", "OPERATOR", "INDEXTYPE",
 }
-IDENT = r'(?:"(?:[^"]|"")+"|[A-Za-z][A-Za-z0-9_$#]*)'
-SYNONYM_RE = re.compile(
-    rf"\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(PUBLIC)\s+)?SYNONYM\s+"
-    rf"({IDENT})(?:\s*\.\s*({IDENT}))?\s+FOR\s+({IDENT})(?:\s*\.\s*({IDENT}))?"
-    rf"(?:\s*@\s*({IDENT}))?\s*\Z",
-    re.I | re.ASCII,
-)
-GRANT_RE = re.compile(
-    rf"\s*GRANT\s+(.+?)\s+ON\s+({IDENT})\s*\.\s*({IDENT})\s+TO\s+"
-    rf"({IDENT}(?:\s*,\s*{IDENT})*)(?:\s+WITH\s+GRANT\s+OPTION)?\s*\Z",
-    re.I | re.ASCII,
-)
+IDENT = feature_ddl_forms.IDENT
+SYNONYM_RE = feature_ddl_forms.SYNONYM_RE
+GRANT_RE = feature_ddl_forms.GRANT_RE
 
 
 # A name that is already taken usually means this one-time DDL was applied before.
@@ -119,39 +110,12 @@ def _ddl_operations(checkpoint: FeatureCheckpoint) -> tuple[dict, ...]:
             statement = item.source.decode("utf-8")[start:end].strip()
         except (UnicodeError, IndexError, ValueError) as error:
             raise StructuralPreflightError(f"selected DDL statement could not be mapped: {error}") from error
-        grant = GRANT_RE.fullmatch(statement)
-        if operation.get("kind") == "REVIEWED_OPERATION" and grant is not None:
-            static = feature_manifest._static_grant_object(statement, checkpoint.schema)
-            if static is None:
-                raise StructuralPreflightError("direct object grant could not be scoped safely")
-            privileges = grant.group(1).strip().upper()
-            grantees = tuple(feature_manifest._unquote_identifier(value.strip()) for value in grant.group(4).split(","))
-            operations.append({
-                **operation, "kind": "GRANT_OBJECT", "supported": True,
-                "owner": static[0], "name": static[1], "privileges": privileges,
-                "grantees": grantees,
-            })
-            continue
-        synonym = SYNONYM_RE.fullmatch(statement)
-        if operation.get("kind") in {"OPAQUE", "UNKNOWN"} and synonym is not None:
-            public = synonym.group(1) is not None
-            first, second = synonym.group(2), synonym.group(3)
-            synonym_owner = "PUBLIC" if public else (feature_manifest._unquote_identifier(first) if second else checkpoint.schema)
-            synonym_name = feature_manifest._unquote_identifier(second if second else first)
-            target_first, target_second, db_link = synonym.group(4), synonym.group(5), synonym.group(6)
-            target_owner = feature_manifest._unquote_identifier(target_second and target_first or checkpoint.schema)
-            target_name = feature_manifest._unquote_identifier(target_second or target_first)
-            if db_link:
-                raise StructuralPreflightError("synonym dependency through a database link is outside selected structural coverage")
-            if synonym_owner not in {checkpoint.schema, "PUBLIC"}:
-                raise StructuralPreflightError("synonym owner is outside the selected schema scope")
-            if target_owner != checkpoint.schema:
-                raise StructuralPreflightError("external synonym target access is not provable from selected structural coverage")
-            operations.append({
-                **operation, "kind": "CREATE_SYNONYM", "supported": True,
-                "owner": synonym_owner, "name": synonym_name,
-                "target_owner": target_owner, "target_name": target_name,
-            })
+        try:
+            modelled = feature_ddl_forms.model_statement(statement, operation, checkpoint.schema)
+        except feature_ddl_forms.FeatureDdlError as error:
+            raise StructuralPreflightError(str(error)) from error
+        if modelled is not None:
+            operations.append(modelled)
             continue
         reason = operation.get("reason", "operation is outside the structural analyzer")
         raise StructuralPreflightError(f"unsupported structural dependency/effect in {operation.get('file')}: {reason}")
@@ -162,6 +126,8 @@ def _effect_record(operation: Mapping) -> dict:
     fields = (
         "kind", "owner", "name", "object_type", "table", "columns", "dependencies", "replace",
         "unique", "bitmap", "target_owner", "target_name", "privileges", "grantees",
+        "column", "comment", "constraint", "constraint_type", "ref_table", "ref_columns",
+        "delete_rule", "status", "validated", "condition",
     )
     return {field: operation[field] for field in fields if field in operation}
 
@@ -183,6 +149,13 @@ def _keys_for(checkpoint: FeatureCheckpoint, operations: Sequence[Mapping]) -> t
             elif kind == "GRANT_OBJECT":
                 prerequisites.add(ObjectKey(owner, name, "TABLE"))
                 prerequisites.add(ObjectKey(owner, name, "VIEW"))
+            elif kind == "COMMENT_ON":
+                prerequisites.add(ObjectKey(owner, name, "TABLE"))
+                prerequisites.add(ObjectKey(owner, name, "VIEW"))
+            elif kind == "ADD_CONSTRAINT":
+                objects.add(ObjectKey(owner, str(operation.get("table", name)), "TABLE"))
+                if isinstance(operation.get("ref_table"), str):
+                    prerequisites.add(ObjectKey(owner, operation["ref_table"], "TABLE"))
             else:
                 object_type = operation.get("object_type")
                 if isinstance(object_type, str):
@@ -264,6 +237,16 @@ def _live_catalog(structural: Mapping) -> tuple[dict[str, set[str]], dict[str, s
     return common, indexes, columns
 
 
+def _constraint_names(structural: Mapping, operations: Sequence[Mapping]) -> set[str]:
+    """Named constraints already present in the selected scope plus those earlier operations add."""
+    names = {str(row["name"]) for row in structural["constraints"] if isinstance(row.get("name"), str)}
+    names.update(
+        str(row["constraint"]) for row in operations
+        if row.get("kind") == "ADD_CONSTRAINT" and isinstance(row.get("constraint"), str)
+    )
+    return names
+
+
 def _prior_operations(earlier_effects: Sequence[Mapping], owner: str) -> tuple[list[dict], tuple[int, ...]]:
     operations: list[dict] = []
     checkpoints: set[int] = set()
@@ -306,6 +289,10 @@ def _simulated_catalog(state_structural: Mapping, operations: Sequence[Mapping])
         elif kind == "ALTER_ADD_COLUMN":
             table = str(operation.get("table", ""))
             columns.setdefault(table, set()).update(str(item) for item in operation.get("columns", ()))
+        elif kind == "ADD_CONSTRAINT":
+            if operation.get("constraint_type") in {"P", "U"} and isinstance(operation.get("constraint"), str):
+                indexes[operation["constraint"]] = {str(operation.get("table", ""))}
+                common.setdefault(operation["constraint"], set()).add("INDEX")
         elif kind == "CREATE_SYNONYM":
             if operation.get("owner") in {"PUBLIC", "public"}:
                 common.setdefault(name, set()).add("SYNONYM")
@@ -378,16 +365,176 @@ def _dependency_check(check_id: str, name: str) -> QueryCheck:
     )
 
 
+def _table_exists_sql(table: str) -> str:
+    return (
+        "EXISTS (SELECT 1 FROM ALL_TABLES T WHERE T.OWNER = :target_schema "
+        f"AND T.TABLE_NAME = {_literal(table)})"
+    )
+
+
+def _column_exists_sql(table: str, column: str) -> str:
+    return (
+        "EXISTS (SELECT 1 FROM ALL_TAB_COLUMNS C WHERE C.OWNER = :target_schema "
+        f"AND C.TABLE_NAME = {_literal(table)} AND C.COLUMN_NAME = {_literal(column)})"
+    )
+
+
+def _constraint_columns_sql(alias: str, columns: Sequence[str]) -> str:
+    """The constraint's column list, in order, is exactly ``columns``."""
+    count = (
+        f"(SELECT COUNT(*) FROM ALL_CONS_COLUMNS K WHERE K.OWNER = {alias}.OWNER "
+        f"AND K.CONSTRAINT_NAME = {alias}.CONSTRAINT_NAME) = {len(columns)}"
+    )
+    positions = [
+        f"EXISTS (SELECT 1 FROM ALL_CONS_COLUMNS K{position} WHERE K{position}.OWNER = {alias}.OWNER "
+        f"AND K{position}.CONSTRAINT_NAME = {alias}.CONSTRAINT_NAME AND K{position}.POSITION = {position} "
+        f"AND K{position}.COLUMN_NAME = {_literal(column)})"
+        for position, column in enumerate(columns, 1)
+    ]
+    return " AND ".join([count, *positions])
+
+
+def _constraint_exists_sql(operation: Mapping, *, named: bool, state: bool) -> str:
+    """A constraint of the modelled shape exists on its table."""
+    table, ctype = str(operation["table"]), str(operation["constraint_type"])
+    columns = tuple(str(item) for item in operation.get("columns", ()))
+    parts = [
+        "C.OWNER = :target_schema", f"C.TABLE_NAME = {_literal(table)}",
+        f"C.CONSTRAINT_TYPE = {_literal(ctype)}",
+    ]
+    if named and isinstance(operation.get("constraint"), str):
+        parts.append(f"C.CONSTRAINT_NAME = {_literal(operation['constraint'])}")
+    if ctype != "C":
+        parts.append(_constraint_columns_sql("C", columns))
+    if ctype == "R":
+        parent = [
+            "P.OWNER = C.R_OWNER", "P.CONSTRAINT_NAME = C.R_CONSTRAINT_NAME", "P.OWNER = :target_schema",
+            f"P.TABLE_NAME = {_literal(str(operation['ref_table']))}",
+        ]
+        ref_columns = operation.get("ref_columns")
+        if ref_columns:
+            parent.append(_constraint_columns_sql("P", tuple(str(item) for item in ref_columns)))
+        parts.append("EXISTS (SELECT 1 FROM ALL_CONSTRAINTS P WHERE " + " AND ".join(parent) + ")")
+        parts.append(f"C.DELETE_RULE = {_literal(str(operation.get('delete_rule', 'NO ACTION')))}")
+    if state:
+        parts.append(f"C.STATUS = {_literal(str(operation.get('status', 'ENABLED')))}")
+        if isinstance(operation.get("validated"), str):
+            parts.append(f"C.VALIDATED = {_literal(operation['validated'])}")
+    return "EXISTS (SELECT 1 FROM ALL_CONSTRAINTS C WHERE " + " AND ".join(parts) + ")"
+
+
+def _add_constraint_queries(
+    operation: Mapping, index: int, staged_tables: frozenset[str], staged_columns: frozenset[tuple[str, str]],
+) -> tuple[list[QueryCheck], list[QueryCheck]]:
+    table, ctype = str(operation["table"]), str(operation["constraint_type"])
+    columns = tuple(str(item) for item in operation.get("columns", ()))
+    cname = operation.get("constraint")
+    terms: list[str] = []
+    if table not in staged_tables:
+        terms.append(_table_exists_sql(table))
+        terms.extend(_column_exists_sql(table, column) for column in columns if (table, column) not in staged_columns)
+    if ctype == "R":
+        ref = str(operation["ref_table"])
+        if ref not in staged_tables:
+            terms.append(_table_exists_sql(ref))
+            terms.extend(
+                _column_exists_sql(ref, str(column)) for column in operation.get("ref_columns") or ()
+                if (ref, str(column)) not in staged_columns
+            )
+    if isinstance(cname, str):
+        terms.append(
+            "NOT EXISTS (SELECT 1 FROM ALL_CONSTRAINTS C WHERE C.OWNER = :target_schema "
+            f"AND C.CONSTRAINT_NAME = {_literal(cname)})"
+        )
+        if ctype in {"P", "U"}:
+            terms.append(
+                "NOT EXISTS (SELECT 1 FROM ALL_INDEXES I WHERE I.OWNER = :target_schema "
+                f"AND I.INDEX_NAME = {_literal(cname)})"
+            )
+    if ctype in {"P", "U"}:
+        same_columns = (
+            "EXISTS (SELECT 1 FROM ALL_CONSTRAINTS C WHERE C.OWNER = :target_schema "
+            f"AND C.TABLE_NAME = {_literal(table)} AND C.CONSTRAINT_TYPE IN ('P','U') "
+            f"AND {_constraint_columns_sql('C', columns)})"
+        )
+        terms.append(f"NOT {same_columns}")
+    if ctype == "P":
+        terms.append(
+            "NOT EXISTS (SELECT 1 FROM ALL_CONSTRAINTS C WHERE C.OWNER = :target_schema "
+            f"AND C.TABLE_NAME = {_literal(table)} AND C.CONSTRAINT_TYPE = 'P')"
+        )
+    before = [_query(
+        f"structural-before-{index:04d}",
+        f"SELECT CASE WHEN {' AND '.join(terms) or '1 = 1'} THEN 1 ELSE 0 END FROM DUAL",
+    )]
+    after = [_query(
+        f"structural-after-{index:04d}",
+        f"SELECT CASE WHEN {_constraint_exists_sql(operation, named=True, state=True)} THEN 1 ELSE 0 END FROM DUAL",
+    )]
+    return before, after
+
+
+def _comment_queries(
+    operation: Mapping, index: int, staged_tables: frozenset[str], staged_columns: frozenset[tuple[str, str]],
+) -> tuple[list[QueryCheck], list[QueryCheck]]:
+    name, column = str(operation["name"]), operation.get("column")
+    comment = str(operation.get("comment", ""))
+    terms: list[str] = []
+    if name not in staged_tables:
+        terms.append(
+            "EXISTS (SELECT 1 FROM ALL_OBJECTS O WHERE O.OWNER = :target_schema "
+            f"AND O.OBJECT_NAME = {_literal(name)} AND O.OBJECT_TYPE IN ('TABLE','VIEW'))"
+        )
+        if isinstance(column, str) and (name, column) not in staged_columns:
+            terms.append(_column_exists_sql(name, column))
+    before = [_query(
+        f"structural-before-{index:04d}",
+        f"SELECT CASE WHEN {' AND '.join(terms)} THEN 1 ELSE 0 END FROM DUAL",
+    )] if terms else []
+    matches = f"= {_literal(comment)}" if comment else "IS NULL"
+    if isinstance(column, str):
+        found = (
+            "EXISTS (SELECT 1 FROM ALL_COL_COMMENTS M WHERE M.OWNER = :target_schema "
+            f"AND M.TABLE_NAME = {_literal(name)} AND M.COLUMN_NAME = {_literal(column)} AND M.COMMENTS {matches})"
+        )
+    else:
+        found = (
+            "EXISTS (SELECT 1 FROM ALL_TAB_COMMENTS M WHERE M.OWNER = :target_schema "
+            f"AND M.TABLE_NAME = {_literal(name)} AND M.COMMENTS {matches})"
+        )
+    after = [_query(f"structural-after-{index:04d}", f"SELECT CASE WHEN {found} THEN 1 ELSE 0 END FROM DUAL")]
+    return before, after
+
+
+def _dependent_check(index: int, reference_name: str) -> QueryCheck:
+    return _query(
+        f"structural-dependent-{index:04d}",
+        "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM ALL_DEPENDENCIES D JOIN ALL_OBJECTS O "
+        "ON O.OWNER = D.OWNER AND O.OBJECT_NAME = D.NAME AND O.OBJECT_TYPE = D.TYPE "
+        "WHERE D.OWNER = :target_schema AND D.REFERENCED_OWNER = :target_schema "
+        f"AND D.REFERENCED_NAME = {_literal(reference_name)} AND O.STATUS = 'INVALID') "
+        "THEN 1 ELSE 0 END FROM DUAL",
+    )
+
+
 def _effect_queries(
     operation: Mapping,
     index: int,
     owner: str,
     *,
     replace_existing_view: bool = False,
+    staged_tables: frozenset[str] = frozenset(),
+    staged_columns: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[list[QueryCheck], list[QueryCheck]]:
     kind, name = operation.get("kind"), operation.get("name")
     if not isinstance(name, str):
         return [], []
+    if kind == "COMMENT_ON":
+        return _comment_queries(operation, index, staged_tables, staged_columns)
+    if kind == "ADD_CONSTRAINT":
+        before_constraint, after_constraint = _add_constraint_queries(operation, index, staged_tables, staged_columns)
+        after_constraint.append(_dependent_check(index, name))
+        return before_constraint, after_constraint
     before: list[QueryCheck] = []
     after: list[QueryCheck] = []
     if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE"}:
@@ -497,14 +644,7 @@ def _effect_queries(
     # Every selected effect is followed by a narrow invalid-dependent assertion.
     if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE", "CREATE_INDEX", "ALTER_ADD_COLUMN"}:
         reference_name = str(operation.get("table", name)) if kind in {"CREATE_INDEX", "ALTER_ADD_COLUMN"} else name
-        after.append(_query(
-            f"structural-dependent-{index:04d}",
-            "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM ALL_DEPENDENCIES D JOIN ALL_OBJECTS O "
-            "ON O.OWNER = D.OWNER AND O.OBJECT_NAME = D.NAME AND O.OBJECT_TYPE = D.TYPE "
-            "WHERE D.OWNER = :target_schema AND D.REFERENCED_OWNER = :target_schema "
-            f"AND D.REFERENCED_NAME = {_literal(reference_name)} AND O.STATUS = 'INVALID') "
-            "THEN 1 ELSE 0 END FROM DUAL",
-        ))
+        after.append(_dependent_check(index, reference_name))
     return before, after
 
 
@@ -603,6 +743,8 @@ def prepare_checkpoint(
     prior_ops = [{key: value for key, value in row.items() if key != "_checkpoint"} for row in prior_ops_with_checkpoint]
     common, indexes, columns = _simulated_catalog(structural, prior_ops)
     staged_names: set[str] = set()
+    staged_columns: set[tuple[str, str]] = set()
+    constraint_names = _constraint_names(structural, prior_ops)
     staged_indexes: set[str] = set()
     staged_synonyms: dict[str, tuple[str, str]] = {}
     prior_names = {str(row.get("name", "")) for row in prior_ops}
@@ -614,7 +756,7 @@ def prepare_checkpoint(
             "name": row["name"], "kind": str(row.get("kind", "")),
             "table": str(row.get("table", "")), "checkpoint": row["_checkpoint"],
         }
-        for field in ("columns", "grantees", "privileges"):
+        for field in ("columns", "grantees", "privileges", "constraint", "constraint_type"):
             if field in row:
                 effect[field] = row[field]
         prior_effects.append(effect)
@@ -687,6 +829,39 @@ def prepare_checkpoint(
             available.update(additions)
         elif kind == "CREATE_VIEW":
             pass
+        elif kind == "COMMENT_ON":
+            if not _object_present(common, name, ("TABLE", "VIEW")):
+                raise StructuralPreflightError(f"missing COMMENT ON target {name}")
+            column = operation.get("column")
+            known = columns.get(name)
+            if isinstance(column, str) and known is not None and column not in known:
+                raise StructuralPreflightError(f"missing COMMENT ON column {name}.{column}")
+        elif kind == "ADD_CONSTRAINT":
+            table = str(operation.get("table", ""))
+            available = columns.get(table)
+            if available is None:
+                raise StructuralPreflightError(f"missing prerequisite table {table} for ALTER TABLE ADD CONSTRAINT")
+            missing = sorted({str(item) for item in operation.get("columns", ())} - available)
+            if missing:
+                raise StructuralPreflightError(f"missing constraint column(s) on {table}: {', '.join(missing)}")
+            constraint = operation.get("constraint")
+            if isinstance(constraint, str):
+                if constraint in constraint_names or (
+                    operation.get("constraint_type") in {"P", "U"} and (constraint in indexes or constraint in staged_indexes)
+                ):
+                    raise StructuralPreflightError(f"constraint namespace is occupied for {constraint}{OCCUPIED_HINT}")
+                constraint_names.add(constraint)
+                if operation.get("constraint_type") in {"P", "U"}:
+                    staged_indexes.add(constraint)
+                    indexes[constraint] = {table}
+            if operation.get("constraint_type") == "R":
+                parent = str(operation.get("ref_table", ""))
+                parent_columns = columns.get(parent)
+                if parent_columns is None and not _object_present(common, parent, ("TABLE",)):
+                    raise StructuralPreflightError(f"missing foreign key parent table {parent}")
+                missing = sorted({str(item) for item in operation.get("ref_columns") or ()} - (parent_columns or set()))
+                if parent_columns is not None and missing:
+                    raise StructuralPreflightError(f"missing foreign key parent column(s) on {parent}: {', '.join(missing)}")
         elif kind == "GRANT_OBJECT":
             if not _object_present(common, name):
                 raise StructuralPreflightError(f"missing direct grant target {name}")
@@ -722,7 +897,10 @@ def prepare_checkpoint(
 
         before_queries, after_queries = _effect_queries(
             operation, index, checkpoint.schema, replace_existing_view=replace_existing_view,
+            staged_tables=frozenset(staged_names), staged_columns=frozenset(staged_columns),
         )
+        if kind == "ALTER_ADD_COLUMN":
+            staged_columns.update((str(operation.get("table", "")), str(item)) for item in operation.get("columns", ()))
         # Preconditions for same-checkpoint dependencies are evaluated inside the
         # write session before all payloads, so omit assertions that only become
         # true after an earlier payload in this checkpoint.
@@ -749,6 +927,12 @@ def prepare_checkpoint(
                 required_prior_names.add(value)
         if operation.get("kind") == "GRANT_OBJECT" and isinstance(operation.get("name"), str):
             required_prior_names.add(operation["name"])
+        if operation.get("kind") == "COMMENT_ON" and isinstance(operation.get("name"), str):
+            required_prior_names.add(operation["name"])
+        if operation.get("kind") == "ADD_CONSTRAINT":
+            for value in (operation.get("table"), operation.get("ref_table")):
+                if isinstance(value, str):
+                    required_prior_names.add(value)
         if operation.get("kind") == "CREATE_SYNONYM" and isinstance(operation.get("target_name"), str):
             required_prior_names.add(operation["target_name"])
         if operation.get("kind") == "CREATE_VIEW":
@@ -872,7 +1056,7 @@ def validate_plan_record(record: Mapping, checkpoint: FeatureCheckpoint, structu
     effects = record.get("priorEffects")
     if not isinstance(effects, list) or any(
         not isinstance(row, Mapping)
-        or set(row) - {"name", "kind", "table", "checkpoint", "columns", "grantees", "privileges"}
+        or set(row) - {"name", "kind", "table", "checkpoint", "columns", "grantees", "privileges", "constraint", "constraint_type"}
         or not {"name", "kind", "table", "checkpoint"}.issubset(row)
         or not isinstance(row.get("name"), str) or not isinstance(row.get("kind"), str)
         or not isinstance(row.get("table"), str) or type(row.get("checkpoint")) is not int
@@ -880,6 +1064,7 @@ def validate_plan_record(record: Mapping, checkpoint: FeatureCheckpoint, structu
         or ("columns" in row and (not isinstance(row["columns"], (list, tuple)) or any(not isinstance(value, str) for value in row["columns"])))
         or ("grantees" in row and (not isinstance(row["grantees"], (list, tuple)) or any(not isinstance(value, str) for value in row["grantees"])))
         or ("privileges" in row and not isinstance(row["privileges"], str))
+        or any(field in row and row[field] is not None and not isinstance(row[field], str) for field in ("constraint", "constraint_type"))
         for row in effects
     ):
         raise StructuralPreflightError("structural plan prior effects are malformed")
@@ -920,8 +1105,29 @@ def strip_prior_effects(structural: Mapping, prior_effects: Sequence[Mapping]) -
             if row.get("table_name") not in removed_table_columns
             and (str(row.get("table_name", "")), str(row.get("name", ""))) not in added_columns
         ]
+    added_constraints = [
+        row for row in prior_effects if isinstance(row, Mapping) and row.get("kind") == "ADD_CONSTRAINT"
+    ]
+
+    def _added(row: Mapping) -> bool:
+        for effect in added_constraints:
+            if str(row.get("table_name", "")) != str(effect.get("table", "")):
+                continue
+            if isinstance(effect.get("constraint"), str):
+                if row.get("name") == effect["constraint"]:
+                    return True
+            elif (
+                row.get("constraint_type") == effect.get("constraint_type")
+                and tuple(row.get("columns", ())) == tuple(effect.get("columns", ()))
+            ):
+                return True
+        return False
+
     if "constraints" in result:
-        result["constraints"] = [row for row in result["constraints"] if row.get("table_name") not in created_by_kind["CREATE_TABLE"]]
+        result["constraints"] = [
+            row for row in result["constraints"]
+            if row.get("table_name") not in created_by_kind["CREATE_TABLE"] and not _added(row)
+        ]
     if "triggers" in result:
         result["triggers"] = [
             row for row in result["triggers"]
@@ -930,6 +1136,12 @@ def strip_prior_effects(structural: Mapping, prior_effects: Sequence[Mapping]) -
         ]
     if "identity-columns" in result:
         result["identity-columns"] = [row for row in result["identity-columns"] if row.get("table_name") not in created_by_kind["CREATE_TABLE"]]
+    if "indexes" in result and added_constraints:
+        implicit = {
+            str(effect["constraint"]) for effect in added_constraints
+            if isinstance(effect.get("constraint"), str) and effect.get("constraint_type") in {"P", "U"}
+        }
+        result["indexes"] = [row for row in result["indexes"] if row.get("name") not in implicit]
     for section, kind, name_key in (
         ("views", "CREATE_VIEW", "name"), ("sequences", "CREATE_SEQUENCE", "name"),
         ("indexes", "CREATE_INDEX", "name"), ("synonyms", "CREATE_SYNONYM", "name"),

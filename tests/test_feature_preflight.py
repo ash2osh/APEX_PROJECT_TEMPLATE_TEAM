@@ -24,7 +24,7 @@ def _checkpoint(*sources: str, schema: str = "APP_CODE") -> FeatureCheckpoint:
     )
 
 
-def _state(*, tables=(), columns=(), indexes=(), views=(), synonyms=(), grants=(), invalid=(), synonym_access=()) -> dict:
+def _state(*, tables=(), columns=(), indexes=(), views=(), synonyms=(), grants=(), invalid=(), synonym_access=(), constraints=()) -> dict:
     return {
         "schema": "APP_CODE",
         "structural": {
@@ -36,7 +36,7 @@ def _state(*, tables=(), columns=(), indexes=(), views=(), synonyms=(), grants=(
             "object-grants": list(grants),
             "invalid-objects": list(invalid),
             "feature-synonym-access": list(synonym_access),
-            "constraints": [], "triggers": [], "sequences": [], "stored-code": [],
+            "constraints": list(constraints), "triggers": [], "sequences": [], "stored-code": [],
             "identity-columns": [], "feature-dependencies": [],
         },
         "coverage": {"ownerComplete": False, "selectedScopeComplete": True},
@@ -120,6 +120,129 @@ class FeaturePreflightTests(unittest.TestCase):
             feature_preflight.prepare_checkpoint(grants, _state(), ())
         with self.subTest(kind="synonym"), self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "MISSING"):
             feature_preflight.prepare_checkpoint(synonym, _state(), ())
+
+    def test_constraints_and_comments_get_catalog_checks_and_scope(self) -> None:
+        checkpoint = _checkpoint(
+            "ALTER TABLE APP_CODE.C ADD CONSTRAINT FK_C_P FOREIGN KEY (P_ID) REFERENCES APP_CODE.P (ID) ON DELETE CASCADE;\n"
+            "ALTER TABLE APP_CODE.C ADD UNIQUE (A, B);\n"
+            "COMMENT ON COLUMN APP_CODE.C.A IS 'it''s A';\n"
+            "COMMENT ON TABLE APP_CODE.C IS '';\n"
+        )
+        state = _state(
+            tables=("C", "P"), columns=(("C", "A"), ("C", "B"), ("C", "P_ID"), ("P", "ID")),
+        )
+        scope = feature_preflight.required_scope(checkpoint)
+        self.assertIn(ObjectKey("APP_CODE", "C", "TABLE"), scope.object_keys)
+        self.assertIn(ObjectKey("APP_CODE", "P", "TABLE"), scope.prerequisite_keys)
+
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+
+        before = "\n".join(check.sql for check in plan.preconditions)
+        after = "\n".join(check.sql for check in plan.postconditions)
+        self.assertIn("C.CONSTRAINT_NAME = 'FK_C_P'", before)
+        self.assertIn("NOT EXISTS (SELECT 1 FROM ALL_CONSTRAINTS C WHERE C.OWNER = :target_schema AND C.CONSTRAINT_NAME = 'FK_C_P')", before)
+        self.assertIn("C.CONSTRAINT_TYPE = 'R'", after)
+        self.assertIn("C.DELETE_RULE = 'CASCADE'", after)
+        self.assertIn("P.TABLE_NAME = 'P'", after)
+        self.assertIn("C.CONSTRAINT_TYPE IN ('P','U')", before, "an unnamed UNIQUE refuses an identical key")
+        self.assertIn("ALL_COL_COMMENTS", after)
+        self.assertIn("M.COMMENTS = 'it''s A'", after)
+        self.assertIn("M.COMMENTS IS NULL", after, "an empty comment clears the comment")
+        record = feature_preflight.plan_to_dict(plan)
+        feature_preflight.validate_plan_record(record, checkpoint, state["structural"])
+
+    def test_constraint_and_comment_targets_must_exist(self) -> None:
+        cases = {
+            "table": ("ALTER TABLE APP_CODE.C ADD CONSTRAINT PK PRIMARY KEY (ID);\n", _state()),
+            "column": ("ALTER TABLE APP_CODE.C ADD CONSTRAINT PK PRIMARY KEY (ID);\n", _state(tables=("C",), columns=(("C", "OTHER"),))),
+            "parent": (
+                "ALTER TABLE APP_CODE.C ADD CONSTRAINT FK FOREIGN KEY (A) REFERENCES APP_CODE.P (ID);\n",
+                _state(tables=("C",), columns=(("C", "A"),)),
+            ),
+            "comment table": ("COMMENT ON TABLE APP_CODE.GONE IS 'x';\n", _state()),
+            "comment column": ("COMMENT ON COLUMN APP_CODE.C.GONE IS 'x';\n", _state(tables=("C",), columns=(("C", "A"),))),
+        }
+        for label, (source, state) in cases.items():
+            with self.subTest(label=label), self.assertRaises(feature_preflight.StructuralPreflightError):
+                feature_preflight.prepare_checkpoint(_checkpoint(source), state, ())
+
+    def test_constraint_name_is_unique_and_a_key_name_also_takes_the_index_namespace(self) -> None:
+        state = _state(tables=("C",), columns=(("C", "ID"),), constraints=({"name": "PK_C", "table_name": "C"},))
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "PK_C"):
+            feature_preflight.prepare_checkpoint(
+                _checkpoint("ALTER TABLE APP_CODE.C ADD CONSTRAINT PK_C PRIMARY KEY (ID);\n"), state, (),
+            )
+        indexed = _state(tables=("C",), columns=(("C", "ID"),), indexes=(("UX", "C"),))
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "UX"):
+            feature_preflight.prepare_checkpoint(
+                _checkpoint("ALTER TABLE APP_CODE.C ADD CONSTRAINT UX UNIQUE (ID);\n"), indexed, (),
+            )
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "CK"):
+            feature_preflight.prepare_checkpoint(
+                _checkpoint(
+                    "ALTER TABLE APP_CODE.C ADD CONSTRAINT CK CHECK (ID > 0);\n",
+                    "ALTER TABLE APP_CODE.C ADD CONSTRAINT CK CHECK (ID > 1);\n",
+                ),
+                _state(tables=("C",), columns=(("C", "ID"),)), (),
+            )
+
+    def test_table_and_columns_created_in_the_same_checkpoint_are_not_demanded_before_it_runs(self) -> None:
+        checkpoint = _checkpoint(
+            "CREATE TABLE APP_CODE.N (ID NUMBER);\n"
+            "ALTER TABLE APP_CODE.E ADD (X NUMBER);\n"
+            "ALTER TABLE APP_CODE.N ADD CONSTRAINT PK_N PRIMARY KEY (ID);\n"
+            "ALTER TABLE APP_CODE.E ADD CONSTRAINT UX_E UNIQUE (X);\n"
+            "COMMENT ON TABLE APP_CODE.N IS 'new';\n"
+            "COMMENT ON COLUMN APP_CODE.E.X IS 'added here';\n"
+        )
+        state = _state(tables=("E",), columns=(("E", "ID"),))
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+
+        by_id = {check.id: check.sql for check in plan.preconditions}
+        # Statement 2 adds a column to an existing table, so it proves the table.
+        self.assertIn("ALL_TABLES", by_id["structural-before-0002-01"])
+        # Statement 3 constrains a table this checkpoint creates: nothing may demand it before it runs.
+        self.assertNotIn("ALL_TABLES", by_id["structural-before-0003"])
+        self.assertNotIn("ALL_TAB_COLUMNS", by_id["structural-before-0003"])
+        # Statement 4 constrains a column that statement 2 adds to an existing table: the table
+        # is still proved, the column is not demanded yet.
+        self.assertIn("ALL_TABLES", by_id["structural-before-0004"])
+        self.assertNotIn("ALL_TAB_COLUMNS", by_id["structural-before-0004"])
+        # The comment on the new table has nothing to prove beforehand; the one on the added
+        # column proves its existing table but not the column.
+        self.assertNotIn("structural-before-0005", by_id)
+        self.assertIn("ALL_OBJECTS", by_id["structural-before-0006"])
+        self.assertNotIn("ALL_TAB_COLUMNS", by_id["structural-before-0006"])
+        # Every effect still has its after-state proof.
+        after = {check.id for check in plan.postconditions}
+        for number in range(3, 7):
+            self.assertIn(f"structural-after-{number:04d}", after)
+
+    def test_earlier_checkpoint_constraint_is_removed_from_a_fresh_capture(self) -> None:
+        first = _checkpoint("ALTER TABLE APP_CODE.C ADD CONSTRAINT FK FOREIGN KEY (P_ID) REFERENCES APP_CODE.P (ID);\n"
+                            "ALTER TABLE APP_CODE.C ADD CONSTRAINT PK_C PRIMARY KEY (ID);\n"
+                            "ALTER TABLE APP_CODE.C ADD UNIQUE (A);\n")
+        state = _state(tables=("C", "P"), columns=(("C", "ID"), ("C", "P_ID"), ("C", "A"), ("P", "ID")))
+        first_plan = feature_preflight.prepare_checkpoint(first, state, ())
+        later = _checkpoint("COMMENT ON TABLE APP_CODE.C IS 'later';\n")
+        plan = feature_preflight.prepare_checkpoint(later, state, ({
+            "checkpoint": 1, "schema": "APP_CODE", "effects": first_plan, "effectsSha256": first_plan.effects_sha256,
+        },))
+        self.assertEqual((1,), plan.prior_checkpoints)
+
+        fresh = {
+            **state["structural"],
+            "constraints": [
+                {"name": "FK", "table_name": "C", "constraint_type": "R", "columns": ["P_ID"]},
+                {"name": "PK_C", "table_name": "C", "constraint_type": "P", "columns": ["ID"]},
+                {"name": "SYS_C001", "table_name": "C", "constraint_type": "U", "columns": ["A"]},
+                {"name": "KEEP", "table_name": "C", "constraint_type": "C", "columns": ["A"]},
+            ],
+            "indexes": [{"name": "PK_C", "table_name": "C"}, {"name": "IX_KEEP", "table_name": "C"}],
+        }
+        stripped = feature_preflight.strip_prior_effects(fresh, plan.prior_effects)
+        self.assertEqual(["KEEP"], [row["name"] for row in stripped["constraints"]])
+        self.assertEqual(["IX_KEEP"], [row["name"] for row in stripped["indexes"]])
 
     def test_invalid_required_dependent_refuses(self) -> None:
         checkpoint = _checkpoint("CREATE TABLE APP_CODE.T (ID NUMBER);\n")

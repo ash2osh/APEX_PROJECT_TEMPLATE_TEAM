@@ -42,6 +42,38 @@ and body as whole, ordered files. Checks use the existing schema-version 1
 and login. ORDS imports must use the actual REST owner named in the frozen
 export. Schema-version 1 keeps its explicit connection and expected-user fields.
 
+### DDL a feature checkpoint accepts
+
+`feature freeze` and `rollout --prepare` read a `ddl.sql` with the same rules
+(`scripts/feature_ddl_forms.py`), so a statement that freezes is also one that
+prepare can prove. Each form below names only objects of the checkpoint's own
+schema, and prepare generates a catalog check for it: a before-state check that
+refuses an occupied name or a missing prerequisite, and an after-state check
+that reads the effect back from the catalog.
+
+| Form | What the after-state check proves |
+| --- | --- |
+| `CREATE TABLE`, `CREATE SEQUENCE`, `CREATE [UNIQUE] INDEX`, `CREATE VIEW`, `ALTER TABLE ... ADD (column)` | The object, its columns or its index columns exist as written. |
+| `ALTER TABLE t ADD [CONSTRAINT n] PRIMARY KEY\|UNIQUE (cols)` | A constraint of that type exists on `t` with exactly those columns in that order, and its status and validation state. |
+| `ALTER TABLE t ADD CONSTRAINT n FOREIGN KEY (cols) REFERENCES p [(cols)] [ON DELETE CASCADE\|SET NULL]` | The constraint exists, its parent table (and parent columns, when written) and delete rule match. `p` must be in the same schema. |
+| `ALTER TABLE t ADD CONSTRAINT n CHECK (expr)` | A CHECK constraint of that name exists on `t` with the stated status. The expression text is not compared. |
+| `COMMENT ON TABLE\|COLUMN ... IS '...'` | The catalog comment equals the text (an empty text proves the comment is cleared). |
+| `CREATE [OR REPLACE] [PUBLIC] SYNONYM s FOR t` | The synonym exists and points at `t` in the same schema. |
+| `GRANT privilege ON schema.object TO grantee` | The grant exists. |
+
+Constraint options are limited to `ENABLE`, `DISABLE`, `VALIDATE` and
+`NOVALIDATE`. A named constraint must have a name that is free in the schema; a
+`PRIMARY KEY` or `UNIQUE` name also takes the index namespace. An unnamed
+`UNIQUE` or `PRIMARY KEY` is refused when an identical key already exists. Name
+every `CHECK`: an unnamed one has no catalog identity to prove.
+
+These stay refused and belong in a reviewed migration or workflow: `DROP`,
+`TRUNCATE`, `RENAME`, `ALTER TABLE ... MODIFY`, `DROP` or `ENABLE`/`DISABLE`
+of an existing object, `USING INDEX`, deferrable constraints, a parenthesised
+`ADD (...)` list that mixes columns and constraints, any reference to another
+schema, a `COMMENT ON` other than `TABLE` or `COLUMN`, and any statement the
+rules above do not describe.
+
 The object budget covers feature checkpoints only. A SQL-script is counted as
 the separate data phase only when every statement is lexically validated,
 top-level `INSERT`, `UPDATE`, `DELETE`, or `MERGE`, plus optional explicit

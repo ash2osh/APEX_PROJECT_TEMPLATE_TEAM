@@ -90,14 +90,18 @@ def _drop_if_present(kind: str, target: str, missing_codes: tuple[int, ...]) -> 
     )
 
 
+def _drop_synonym(name: str, *, public: bool = False) -> str:
+    return _drop_if_present("public synonym" if public else "synonym", name, (-1432,) if public else (-1434,))
+
+
 def _sweep_token(token: str) -> str:
     # Drops every package and table named with this run's token, on whichever database it runs against.
     return (
         "begin\n"
         "  for o in (select object_name, object_type from user_objects\n"
-        "            where object_type in ('PACKAGE', 'TABLE') and instr(object_name, '" + token + "') > 0) loop\n"
+        "            where object_type in ('PACKAGE', 'TABLE', 'SYNONYM') and instr(object_name, '" + token + "') > 0) loop\n"
         "    execute immediate 'drop ' || o.object_type || ' ' || o.object_name\n"
-        "      || case when o.object_type = 'TABLE' then ' purge' end;\n"
+        "      || case when o.object_type = 'TABLE' then ' cascade constraints purge' end;\n"
         "  end loop;\n"
         "end;\n/"
     )
@@ -394,6 +398,217 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing prerequisite table", result.stdout + result.stderr)
         self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{early}'", STAGING_DB), 0)
+
+    def _owns_public_synonym_privilege(self, connection: str) -> bool:
+        sql = "select count(*) from session_privs where privilege in ('CREATE PUBLIC SYNONYM', 'DROP PUBLIC SYNONYM')"
+        return self._count(sql, connection) == 2
+
+    def _expect_forms(self, connection: str, names: dict, public: bool) -> None:
+        """Read every modelled effect back from the catalog of one database."""
+        schema = SCHEMA
+        checks = {
+            "primary key on the new parent": f"select count(*) from user_constraints where table_name = '{names['parent']}' "
+                f"and constraint_name = 'PK_{names['parent']}' and constraint_type = 'P' and status = 'ENABLED' and validated = 'VALIDATED'",
+            "named unique key": f"select count(*) from user_constraints where constraint_name = 'UQ_{names['parent']}' "
+                "and constraint_type = 'U' and status = 'ENABLED'",
+            "named foreign key with its rule and parent": f"select count(*) from user_constraints f join user_constraints p "
+                f"on p.constraint_name = f.r_constraint_name where f.constraint_name = 'FK_{names['child']}' "
+                f"and f.delete_rule = 'CASCADE' and p.table_name = '{names['parent']}'",
+            "named check": f"select count(*) from user_constraints where constraint_name = 'CK_{names['child']}' "
+                "and constraint_type = 'C' and status = 'ENABLED'",
+            "unnamed unique key on two columns": f"select count(*) from (select c.constraint_name from user_constraints c "
+                f"join user_cons_columns k on k.constraint_name = c.constraint_name where c.table_name = '{names['child']}' "
+                "and c.constraint_type = 'U' and c.generated = 'GENERATED NAME' group by c.constraint_name having count(*) = 2)",
+            "primary key added to a table that already existed": f"select count(*) from user_constraints "
+                f"where table_name = '{names['existing']}' and constraint_type = 'P' and constraint_name = 'PK_{names['existing']}'",
+            "table comment with a quote": f"select count(*) from user_tab_comments where table_name = '{names['child']}' "
+                "and comments = 'children, it''s ok'",
+            "column comment": f"select count(*) from user_col_comments where table_name = '{names['child']}' "
+                "and column_name = 'FLAG' and comments = 'Y or N'",
+            "Arabic comment survives the hex check path": f"select count(*) from user_col_comments where table_name = '{names['existing']}' "
+                "and column_name = 'NOTE' and comments = unistr('\\0645\\0648\\0631\\062F')",
+            "private synonym": f"select count(*) from user_synonyms where synonym_name = '{names['alias']}' "
+                f"and table_name = '{names['child']}' and table_owner = '{schema}'",
+        }
+        if public:
+            checks["public synonym"] = (
+                f"select count(*) from all_synonyms where owner = 'PUBLIC' and synonym_name = '{names['public']}' "
+                f"and table_name = '{names['child']}' and table_owner = '{schema}'"
+            )
+        for label, sql in checks.items():
+            with self.subTest(database=connection, effect=label):
+                self.assertEqual(self._count(sql, connection), 1, label)
+
+    def test_constraints_comments_and_synonyms_ship_through_a_complete_capsule(self) -> None:
+        slug = self._name("forms")
+        token = self.token
+        names = {
+            "parent": f"LIVE_{token}_FP", "child": f"LIVE_{token}_FC", "existing": f"LIVE_{token}_FE",
+            "alias": f"LIVE_{token}_FA", "public": f"LIVE_{token}_FPUB",
+        }
+        public = self._owns_public_synonym_privilege(CONNECTION) and self._owns_public_synonym_privilege(STAGING_DB)
+        s = SCHEMA
+        # A table that exists on both databases before the release, which the release then alters.
+        self._sql_on_both(
+            f"create table {names['existing']} (id number not null, code varchar2(20), note varchar2(40));",
+            drops=(_drop_if_present("table", f"{names['existing']} cascade constraints purge", (-942,)),),
+        )
+        databases = [CONNECTION] if STAGING_DB == CONNECTION else [CONNECTION, STAGING_DB]
+        for connection in databases:
+            self._register_drops(
+                connection,
+                _drop_if_present("table", f"{names['parent']} cascade constraints purge", (-942,)),
+                _drop_if_present("table", f"{names['child']} cascade constraints purge", (-942,)),
+                _drop_synonym(names["alias"]),
+                *((_drop_synonym(names["public"], public=True),) if public else ()),
+            )
+        statements = [
+            f"CREATE TABLE {s}.{names['parent']} (ID NUMBER NOT NULL, CODE VARCHAR2(20) NOT NULL);",
+            f"CREATE TABLE {s}.{names['child']} (ID NUMBER NOT NULL, P_ID NUMBER, FLAG VARCHAR2(1), NOTE VARCHAR2(40));",
+            f"ALTER TABLE {s}.{names['parent']} ADD CONSTRAINT PK_{names['parent']} PRIMARY KEY (ID);",
+            f"ALTER TABLE {s}.{names['parent']} ADD CONSTRAINT UQ_{names['parent']} UNIQUE (CODE);",
+            f"ALTER TABLE {s}.{names['child']} ADD CONSTRAINT FK_{names['child']} FOREIGN KEY (P_ID) "
+            f"REFERENCES {s}.{names['parent']} (ID) ON DELETE CASCADE;",
+            f"ALTER TABLE {s}.{names['child']} ADD CONSTRAINT CK_{names['child']} CHECK (FLAG IN ('Y','N'));",
+            f"ALTER TABLE {s}.{names['child']} ADD UNIQUE (P_ID, NOTE);",
+            f"ALTER TABLE {s}.{names['existing']} ADD CONSTRAINT PK_{names['existing']} PRIMARY KEY (ID);",
+            f"COMMENT ON TABLE {s}.{names['child']} IS 'children, it''s ok';",
+            f"COMMENT ON COLUMN {s}.{names['child']}.FLAG IS 'Y or N';",
+            f"COMMENT ON COLUMN {s}.{names['existing']}.NOTE IS '\u0645\u0648\u0631\u062f';",
+            f"CREATE SYNONYM {s}.{names['alias']} FOR {s}.{names['child']};",
+        ]
+        if public:
+            statements.append(f"CREATE PUBLIC SYNONYM {names['public']} FOR {s}.{names['child']};")
+        self._feature(slug)
+        (self.project / "features" / slug / SCHEMA / "ddl.sql").write_text("\n".join(statements) + "\n", encoding="utf-8")
+        self._checks(
+            slug,
+            "SELECT CASE WHEN (SELECT COUNT(*) FROM user_constraints WHERE constraint_name IN "
+            f"('PK_{names['parent']}', 'FK_{names['child']}', 'CK_{names['child']}')) = 3 THEN 1 ELSE 0 END FROM dual",
+        )
+        self._manifest([{"type": "feature-migrate", "schema": SCHEMA, "inputs": [f"features/{slug}/{SCHEMA}/ddl.sql"]}])
+        _commit(self.project, "live checks: modelled DDL forms")
+        capsule = self._freeze()
+
+        staging = self._staged(capsule)
+        budget = staging["objectBudget"]
+        self.assertTrue(budget["coverageComplete"], "every statement is inside the feature checkpoint")
+        self.assertEqual(budget["excludedObjectSteps"], [])
+        self._expect_forms(STAGING_DB, names, public)
+
+        result, _ = self._rollout("prod", capsule=capsule, prepare=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(production["status"], "success")
+        self._expect_forms(CONNECTION, names, public)
+
+    def test_occupied_constraint_name_and_missing_parent_are_refused_at_prepare_before_any_write(self) -> None:
+        token = self.token
+        table, created = f"LIVE_{token}_OZ", f"LIVE_{token}_NEW"
+        self._sql_on_both(
+            f"create table {table} (id number not null, flag varchar2(1));\n"
+            f"alter table {table} add constraint CK_{table} check (flag in ('Y','N'));",
+            drops=(_drop_if_present("table", f"{table} cascade constraints purge", (-942,)),),
+        )
+        for label, extra, expected in (
+            ("occupied name", f"ALTER TABLE {SCHEMA}.{table} ADD CONSTRAINT CK_{table} CHECK (ID > 0);", f"CK_{table}"),
+            ("missing parent",
+             f"ALTER TABLE {SCHEMA}.{table} ADD CONSTRAINT FK_{table} FOREIGN KEY (ID) REFERENCES {SCHEMA}.LIVE_{token}_GONE (ID);",
+             "LIVE_" + token + "_GONE"),
+        ):
+            with self.subTest(case=label):
+                slug = self._name("refuse")
+                self._feature(slug)
+                (self.project / "features" / slug / SCHEMA / "ddl.sql").write_text(
+                    f"CREATE TABLE {SCHEMA}.{created}_{label[:3].upper()} (ID NUMBER);\n{extra}\n", encoding="utf-8",
+                )
+                self._checks(slug, f"SELECT CASE WHEN EXISTS (SELECT 1 FROM user_tables WHERE table_name = '{created}') THEN 1 ELSE 0 END FROM dual")
+                self._manifest([{"type": "feature-migrate", "schema": SCHEMA, "inputs": [f"features/{slug}/{SCHEMA}/ddl.sql"]}])
+                _commit(self.project, f"live checks: refusal {label}")
+                capsule = self._freeze()
+                result, _ = self._rollout("staging", capsule=capsule, prepare=True)
+                self.assertNotEqual(result.returncode, 0, label)
+                self.assertIn(expected, result.stdout + result.stderr)
+                self.assertEqual(
+                    self._count(f"select count(*) from user_tables where table_name like '{created}%'", STAGING_DB), 0,
+                    "prepare refused before any write",
+                )
+
+    def _generated(self, ddl: str, tables, columns):
+        """The generated before/after checks for DDL against a synthetic catalog of the named tables."""
+        import test_feature_preflight as fixtures  # noqa: PLC0415 - tests/ is on sys.path under discover
+        from scripts import feature_preflight  # noqa: PLC0415
+        state = fixtures._state(tables=tables, columns=columns)
+        plan = feature_preflight.prepare_checkpoint(fixtures._checkpoint(ddl), state, ())
+        return plan.preconditions, plan.postconditions
+
+    def _value(self, check) -> int:
+        return self._count(check.sql.replace(":target_schema", f"'{SCHEMA}'"))
+
+    def test_generated_constraint_and_comment_checks_tell_a_match_from_a_mismatch(self) -> None:
+        token = self.token
+        n = lambda tag: f"LIVE_{token}_{tag}"  # noqa: E731
+        parent, other, child = n("DP"), n("DO"), n("DC")
+        for table in (child, other, parent):
+            self._register_drops(CONNECTION, _drop_if_present("table", f"{table} cascade constraints purge", (-942,)))
+        self._sql(CONNECTION, f"""
+            create table {parent} (id number not null, constraint {n('DPPK')} primary key (id));
+            create table {other} (id number not null, constraint {n('DOPK')} primary key (id));
+            create table {child} (id number, p_id number, a number, b number, flag varchar2(1), note varchar2(20));
+            alter table {child} add constraint {n('DFK_NOACT')} foreign key (p_id) references {parent} (id);
+            alter table {child} add constraint {n('DUQ_AB')} unique (a, b);
+            alter table {child} add constraint {n('DCK_OFF')} check (flag in ('Y','N')) disable;
+            alter table {child} add constraint {n('DCK_NOVAL')} check (id > 0) enable novalidate;
+            comment on column {child}.note is 'exact text';
+        """)
+        columns = ((child, "ID"), (child, "P_ID"), (child, "A"), (child, "B"), (child, "FLAG"), (child, "NOTE"),
+                   (parent, "ID"), (other, "ID"))
+        tables = (child, parent, other)
+        alter = f"ALTER TABLE APP_CODE.{child} ADD CONSTRAINT"
+        # (what the DDL claims, what the database must answer to the generated after-check)
+        after_cases = [
+            ("foreign key: same rule and parent", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (P_ID) REFERENCES APP_CODE.{parent} (ID);", 1),
+            ("foreign key: rule differs", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (P_ID) REFERENCES APP_CODE.{parent} (ID) ON DELETE CASCADE;", 0),
+            ("foreign key: parent differs", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (P_ID) REFERENCES APP_CODE.{other} (ID);", 0),
+            ("foreign key: column differs", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (ID) REFERENCES APP_CODE.{parent} (ID);", 0),
+            ("unique: same ordered columns", f"{alter} {n('DUQ_AB')} UNIQUE (A, B);", 1),
+            ("unique: column order differs", f"{alter} {n('DUQ_AB')} UNIQUE (B, A);", 0),
+            ("unique: fewer columns", f"{alter} {n('DUQ_AB')} UNIQUE (A);", 0),
+            ("type differs (name is a unique key)", f"{alter} {n('DUQ_AB')} PRIMARY KEY (A, B);", 0),
+            ("disabled check claimed disabled", f"{alter} {n('DCK_OFF')} CHECK (FLAG IN ('Y','N')) DISABLE;", 1),
+            ("disabled check claimed enabled", f"{alter} {n('DCK_OFF')} CHECK (FLAG IN ('Y','N'));", 0),
+            ("novalidate claimed novalidate", f"{alter} {n('DCK_NOVAL')} CHECK (ID > 0) ENABLE NOVALIDATE;", 1),
+            ("novalidate claimed validated", f"{alter} {n('DCK_NOVAL')} CHECK (ID > 0);", 0),
+            ("absent constraint", f"{alter} {n('DNOPE')} CHECK (ID > 0);", 0),
+            ("comment: same text", f"COMMENT ON COLUMN APP_CODE.{child}.NOTE IS 'exact text';", 1),
+            ("comment: text differs", f"COMMENT ON COLUMN APP_CODE.{child}.NOTE IS 'exact tex';", 0),
+            ("comment: clearing claimed on a commented column", f"COMMENT ON COLUMN APP_CODE.{child}.NOTE IS '';", 0),
+            ("comment: clearing claimed on an uncommented column", f"COMMENT ON COLUMN APP_CODE.{child}.FLAG IS '';", 1),
+            ("table comment absent", f"COMMENT ON TABLE APP_CODE.{child} IS 'x';", 0),
+        ]
+        for label, ddl, expected in after_cases:
+            with self.subTest(after=label):
+                _, post = self._generated(ddl, tables, columns)
+                self.assertEqual(self._value(post[0]), expected, label)
+        # The before-state check must refuse an occupied name or an existing identical key.
+        before_cases = [
+            ("free constraint name", f"{alter} {n('DFRESH')} CHECK (ID > 0);", 1),
+            ("occupied constraint name", f"{alter} {n('DCK_OFF')} CHECK (ID > 5);", 0),
+            ("unnamed unique repeats an existing key", f"ALTER TABLE APP_CODE.{child} ADD UNIQUE (A, B);", 0),
+            ("unnamed unique on a new column set", f"ALTER TABLE APP_CODE.{child} ADD UNIQUE (A, FLAG);", 1),
+            ("primary key on a keyless table", f"ALTER TABLE APP_CODE.{child} ADD CONSTRAINT {n('DNEWPK')} PRIMARY KEY (ID);", 1),
+            ("primary key on a table that has one", f"ALTER TABLE APP_CODE.{parent} ADD CONSTRAINT {n('DPK2')} PRIMARY KEY (ID);", 0),
+            ("comment on a missing column", f"COMMENT ON COLUMN APP_CODE.{child}.NOSUCH IS 'x';", None),
+        ]
+        for label, ddl, expected in before_cases:
+            with self.subTest(before=label):
+                if expected is None:
+                    with self.assertRaises(Exception):  # noqa: B017 - the static plan refuses it first
+                        self._generated(ddl, tables, columns)
+                    continue
+                pre, _ = self._generated(ddl, tables, columns)
+                self.assertEqual(self._value(pre[0]), expected, label)
 
     def test_abrupt_termination_mid_apply_is_recovered_after_reconciliation(self) -> None:
         slug = self._name("kill")

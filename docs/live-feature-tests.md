@@ -53,6 +53,9 @@ The whole module takes about three to four minutes against a local container.
 | `test_ddl_with_a_missing_prerequisite_is_refused_at_prepare` | A missing prerequisite table stops preparation before any write. |
 | `test_abrupt_termination_mid_apply_is_recovered_after_reconciliation` | A SIGKILL mid-apply, then reconciliation, then recovery to success. |
 | `test_noop_checkpoint_is_refused_while_an_unresolved_attempt_occupies_the_scope` | An unchanged staging unit is a no-op. An unresolved attempt on the same target still refuses it at the checkpoint level, and nothing is written. |
+| `test_constraints_comments_and_synonyms_ship_through_a_complete_capsule` | A `ddl.sql` with primary, unique, foreign and check constraints, comments (one in Arabic), and private and public synonyms freezes, prepares, applies to staging and then to production with stage proof, with complete object coverage. Every effect is read back from the catalog of both databases. The public synonym part needs `CREATE PUBLIC SYNONYM` and `DROP PUBLIC SYNONYM` on the schema and runs only when both databases grant them. |
+| `test_occupied_constraint_name_and_missing_parent_are_refused_at_prepare_before_any_write` | An occupied constraint name and a missing foreign-key parent each stop preparation, and nothing is created. |
+| `test_generated_constraint_and_comment_checks_tell_a_match_from_a_mismatch` | Each generated after-state check returns 1 on a database that matches and 0 on one that differs (rule, parent, column, column order, type, status, validation, text), and each before-state check refuses an occupied name or an identical key. |
 | `test_two_schemas_on_one_database_apply_as_two_checkpoints` | Two schemas on one database, applied as two checkpoints. Needs the second schema. |
 
 ## Not covered
