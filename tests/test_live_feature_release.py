@@ -99,7 +99,7 @@ def _sweep_token(token: str) -> str:
     return (
         "begin\n"
         "  for o in (select object_name, object_type from user_objects\n"
-        "            where object_type in ('PACKAGE', 'TABLE', 'SYNONYM') and instr(object_name, '" + token + "') > 0) loop\n"
+        "            where object_type in ('PACKAGE', 'TABLE', 'SYNONYM', 'VIEW', 'SEQUENCE') and instr(object_name, '" + token + "') > 0) loop\n"
         "    execute immediate 'drop ' || o.object_type || ' ' || o.object_name\n"
         "      || case when o.object_type = 'TABLE' then ' cascade constraints purge' end;\n"
         "  end loop;\n"
@@ -428,6 +428,18 @@ class LiveFeatureReleaseTests(unittest.TestCase):
                 "and column_name = 'NOTE' and comments = unistr('\\0645\\0648\\0631\\062F')",
             "private synonym": f"select count(*) from user_synonyms where synonym_name = '{names['alias']}' "
                 f"and table_name = '{names['child']}' and table_owner = '{schema}'",
+            "view with CTE": f"select count(*) from user_views where view_name = '{names['view']}'",
+            "altered column data type and not null": f"select count(*) from user_tab_columns where table_name = '{names['existing']}' "
+                "and column_name = 'CODE' and data_type = 'VARCHAR2' and char_length = 50 and nullable = 'N'",
+            "altered column widened without null change": f"select count(*) from user_tab_columns where table_name = '{names['existing']}' "
+                "and column_name = 'NOTE' and data_type = 'VARCHAR2' and char_length = 100",
+            "expression index with expression count": f"select count(*) from user_indexes i "
+                f"join user_ind_expressions e on e.index_name = i.index_name "
+                f"where i.index_name = '{names['expr_ix']}' and i.table_name = '{names['child']}' and i.uniqueness = 'UNIQUE'",
+            "unqualified sequence grant": f"select count(*) from user_tab_privs where table_name = '{names['seq']}' "
+                "and privilege = 'SELECT' and grantee = 'PUBLIC'",
+            "direct table grant": f"select count(*) from user_tab_privs where table_name = '{names['parent']}' "
+                "and privilege = 'SELECT' and grantee = 'PUBLIC'",
         }
         if public:
             checks["public synonym"] = (
@@ -444,6 +456,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         names = {
             "parent": f"LIVE_{token}_FP", "child": f"LIVE_{token}_FC", "existing": f"LIVE_{token}_FE",
             "alias": f"LIVE_{token}_FA", "public": f"LIVE_{token}_FPUB",
+            "view": f"LIVE_{token}_FV", "expr_ix": f"IX_{token}_FEX", "seq": f"LIVE_{token}_FSEQ",
         }
         public = self._owns_public_synonym_privilege(CONNECTION) and self._owns_public_synonym_privilege(STAGING_DB)
         s = SCHEMA
@@ -458,12 +471,15 @@ class LiveFeatureReleaseTests(unittest.TestCase):
                 connection,
                 _drop_if_present("table", f"{names['parent']} cascade constraints purge", (-942,)),
                 _drop_if_present("table", f"{names['child']} cascade constraints purge", (-942,)),
+                _drop_if_present("view", names["view"], (-942,)),
+                _drop_if_present("sequence", names["seq"], (-2289,)),
                 _drop_synonym(names["alias"]),
                 *((_drop_synonym(names["public"], public=True),) if public else ()),
             )
         statements = [
             f"CREATE TABLE {s}.{names['parent']} (ID NUMBER NOT NULL, CODE VARCHAR2(20) NOT NULL);",
             f"CREATE TABLE {s}.{names['child']} (ID NUMBER NOT NULL, P_ID NUMBER, FLAG VARCHAR2(1), NOTE VARCHAR2(40));",
+            f"CREATE SEQUENCE {s}.{names['seq']};",
             f"ALTER TABLE {s}.{names['parent']} ADD CONSTRAINT PK_{names['parent']} PRIMARY KEY (ID);",
             f"ALTER TABLE {s}.{names['parent']} ADD CONSTRAINT UQ_{names['parent']} UNIQUE (CODE);",
             f"ALTER TABLE {s}.{names['child']} ADD CONSTRAINT FK_{names['child']} FOREIGN KEY (P_ID) "
@@ -471,10 +487,15 @@ class LiveFeatureReleaseTests(unittest.TestCase):
             f"ALTER TABLE {s}.{names['child']} ADD CONSTRAINT CK_{names['child']} CHECK (FLAG IN ('Y','N'));",
             f"ALTER TABLE {s}.{names['child']} ADD UNIQUE (P_ID, NOTE);",
             f"ALTER TABLE {s}.{names['existing']} ADD CONSTRAINT PK_{names['existing']} PRIMARY KEY (ID);",
+            f"ALTER TABLE {s}.{names['existing']} MODIFY (CODE VARCHAR2(50 BYTE) NOT NULL, NOTE VARCHAR2(100));",
+            f"CREATE UNIQUE INDEX {s}.{names['expr_ix']} ON {s}.{names['child']} (UPPER(NOTE), ID);",
+            f"CREATE VIEW {s}.{names['view']} AS WITH CTE AS (SELECT ID, CODE FROM {s}.{names['parent']}) SELECT ID, CODE FROM CTE;",
             f"COMMENT ON TABLE {s}.{names['child']} IS 'children, it''s ok';",
             f"COMMENT ON COLUMN {s}.{names['child']}.FLAG IS 'Y or N';",
             f"COMMENT ON COLUMN {s}.{names['existing']}.NOTE IS '\u0645\u0648\u0631\u062f';",
             f"CREATE SYNONYM {s}.{names['alias']} FOR {s}.{names['child']};",
+            f"GRANT SELECT ON {names['seq']} TO PUBLIC;",
+            f"GRANT SELECT ON {s}.{names['parent']} TO PUBLIC;",
         ]
         if public:
             statements.append(f"CREATE PUBLIC SYNONYM {names['public']} FOR {s}.{names['child']};")
@@ -534,11 +555,11 @@ class LiveFeatureReleaseTests(unittest.TestCase):
                     "prepare refused before any write",
                 )
 
-    def _generated(self, ddl: str, tables, columns):
+    def _generated(self, ddl: str, tables, columns, **kwargs):
         """The generated before/after checks for DDL against a synthetic catalog of the named tables."""
         import test_feature_preflight as fixtures  # noqa: PLC0415 - tests/ is on sys.path under discover
         from scripts import feature_preflight  # noqa: PLC0415
-        state = fixtures._state(tables=tables, columns=columns)
+        state = fixtures._state(tables=tables, columns=columns, **kwargs)
         plan = feature_preflight.prepare_checkpoint(fixtures._checkpoint(ddl), state, ())
         return plan.preconditions, plan.postconditions
 
@@ -551,6 +572,10 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         parent, other, child = n("DP"), n("DO"), n("DC")
         for table in (child, other, parent):
             self._register_drops(CONNECTION, _drop_if_present("table", f"{table} cascade constraints purge", (-942,)))
+        self._register_drops(CONNECTION,
+            _drop_if_present("view", n("DV_CTE"), (-942,)),
+            _drop_if_present("sequence", n("DSEQ"), (-2289,)),
+        )
         self._sql(CONNECTION, f"""
             create table {parent} (id number not null, constraint {n('DPPK')} primary key (id));
             create table {other} (id number not null, constraint {n('DOPK')} primary key (id));
@@ -560,10 +585,16 @@ class LiveFeatureReleaseTests(unittest.TestCase):
             alter table {child} add constraint {n('DCK_OFF')} check (flag in ('Y','N')) disable;
             alter table {child} add constraint {n('DCK_NOVAL')} check (id > 0) enable novalidate;
             comment on column {child}.note is 'exact text';
+            alter table {child} modify (flag varchar2(10));
+            create index {n('DIX_EXPR')} on {child} (upper(note));
+            create view {n('DV_CTE')} as with cte as (select id from {parent}) select id from cte;
+            create sequence {n('DSEQ')};
+            grant select on {n('DSEQ')} to public;
         """)
         columns = ((child, "ID"), (child, "P_ID"), (child, "A"), (child, "B"), (child, "FLAG"), (child, "NOTE"),
                    (parent, "ID"), (other, "ID"))
         tables = (child, parent, other)
+        sequences = (n("DSEQ"),)
         alter = f"ALTER TABLE APP_CODE.{child} ADD CONSTRAINT"
         # (what the DDL claims, what the database must answer to the generated after-check)
         after_cases = [
@@ -585,10 +616,21 @@ class LiveFeatureReleaseTests(unittest.TestCase):
             ("comment: clearing claimed on a commented column", f"COMMENT ON COLUMN APP_CODE.{child}.NOTE IS '';", 0),
             ("comment: clearing claimed on an uncommented column", f"COMMENT ON COLUMN APP_CODE.{child}.FLAG IS '';", 1),
             ("table comment absent", f"COMMENT ON TABLE APP_CODE.{child} IS 'x';", 0),
+            ("modify column: same type, length, nullability", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(10));", 1),
+            ("modify column: length differs", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(20));", 0),
+            ("modify column: nullability differs", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(10) NOT NULL);", 0),
+            ("expression index: same expression and uniqueness", f"CREATE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE));", 1),
+            ("expression index: uniqueness differs", f"CREATE UNIQUE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE));", 0),
+            ("expression index: column count differs", f"CREATE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE), ID);", 0),
+            ("view with CTE: view exists and valid", f"CREATE VIEW APP_CODE.{n('DV_CTE')} AS WITH CTE AS (SELECT ID FROM APP_CODE.{parent}) SELECT ID FROM CTE;", 1),
+            ("view with CTE: absent view", f"CREATE VIEW APP_CODE.{n('DNO_VIEW')} AS WITH CTE AS (SELECT ID FROM APP_CODE.{parent}) SELECT ID FROM CTE;", 0),
+            ("grant sequence: match", f"GRANT SELECT ON APP_CODE.{n('DSEQ')} TO PUBLIC;", 1),
+            ("grant sequence: privilege differs", f"GRANT ALTER ON APP_CODE.{n('DSEQ')} TO PUBLIC;", 0),
+            ("grant sequence: grantee differs", f"GRANT SELECT ON APP_CODE.{n('DSEQ')} TO APP_CODE;", 0),
         ]
         for label, ddl, expected in after_cases:
             with self.subTest(after=label):
-                _, post = self._generated(ddl, tables, columns)
+                _, post = self._generated(ddl, tables, columns, sequences=sequences)
                 self.assertEqual(self._value(post[0]), expected, label)
         # The before-state check must refuse an occupied name or an existing identical key.
         before_cases = [
@@ -599,14 +641,18 @@ class LiveFeatureReleaseTests(unittest.TestCase):
             ("primary key on a keyless table", f"ALTER TABLE APP_CODE.{child} ADD CONSTRAINT {n('DNEWPK')} PRIMARY KEY (ID);", 1),
             ("primary key on a table that has one", f"ALTER TABLE APP_CODE.{parent} ADD CONSTRAINT {n('DPK2')} PRIMARY KEY (ID);", 0),
             ("comment on a missing column", f"COMMENT ON COLUMN APP_CODE.{child}.NOSUCH IS 'x';", None),
+            ("modify: existing table and column", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(10));", 1),
+            ("expression index: free index name", f"CREATE INDEX APP_CODE.{n('DFRESH_IX')} ON APP_CODE.{child} (UPPER(NOTE));", 1),
+            ("expression index: occupied index name", f"CREATE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE));", 0),
+            ("view: dependencies available", f"CREATE VIEW APP_CODE.{n('DFRESH_V')} AS WITH CTE AS (SELECT ID FROM APP_CODE.{parent}) SELECT ID FROM CTE;", 1),
         ]
         for label, ddl, expected in before_cases:
             with self.subTest(before=label):
                 if expected is None:
                     with self.assertRaises(Exception):  # noqa: B017 - the static plan refuses it first
-                        self._generated(ddl, tables, columns)
+                        self._generated(ddl, tables, columns, sequences=sequences)
                     continue
-                pre, _ = self._generated(ddl, tables, columns)
+                pre, _ = self._generated(ddl, tables, columns, sequences=sequences)
                 self.assertEqual(self._value(pre[0]), expected, label)
 
     def test_abrupt_termination_mid_apply_is_recovered_after_reconciliation(self) -> None:

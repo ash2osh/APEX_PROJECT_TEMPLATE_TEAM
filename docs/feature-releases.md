@@ -53,13 +53,14 @@ that reads the effect back from the catalog.
 
 | Form | What the after-state check proves |
 | --- | --- |
-| `CREATE TABLE`, `CREATE SEQUENCE`, `CREATE [UNIQUE] INDEX`, `CREATE VIEW`, `ALTER TABLE ... ADD (column)` | The object, its columns or its index columns exist as written. |
+| `CREATE TABLE`, `CREATE SEQUENCE`, `CREATE [UNIQUE] [BITMAP] INDEX`, `CREATE [OR REPLACE] VIEW`, `ALTER TABLE ... ADD (column)` | The object, its columns or its index columns exist as written. `CREATE VIEW` supports CTEs (`WITH cte AS ...`), inline views, comma joins, and subqueries with scope-aware dependency extraction. Function-based / expression indexes prove uniqueness, total column count, and expression count in `ALL_IND_EXPRESSIONS`. |
+| `ALTER TABLE t MODIFY (column_spec, ...)` | Modified column data type, length/precision/scale (`VARCHAR2(n [BYTE\|CHAR])`, `NUMBER(p[,s])`, `DATE`, `TIMESTAMP`, `CLOB`), and nullability (`NULL` / `NOT NULL`) exist as stated. |
 | `ALTER TABLE t ADD [CONSTRAINT n] PRIMARY KEY\|UNIQUE (cols)` | A constraint of that type exists on `t` with exactly those columns in that order, and its status and validation state. |
 | `ALTER TABLE t ADD CONSTRAINT n FOREIGN KEY (cols) REFERENCES p [(cols)] [ON DELETE CASCADE\|SET NULL]` | The constraint exists, its parent table (and parent columns, when written) and delete rule match. `p` must be in the same schema. |
 | `ALTER TABLE t ADD CONSTRAINT n CHECK (expr)` | A CHECK constraint of that name exists on `t` with the stated status. The expression text is not compared. |
 | `COMMENT ON TABLE\|COLUMN ... IS '...'` | The catalog comment equals the text (an empty text proves the comment is cleared). |
 | `CREATE [OR REPLACE] [PUBLIC] SYNONYM s FOR t` | The synonym exists and points at `t` in the same schema. |
-| `GRANT privilege ON schema.object TO grantee` | The grant exists. |
+| `GRANT privilege ON [schema.]object TO grantee` | The grant exists. Accepts unqualified objects defaulting to the checkpoint schema, `EXECUTE` on packages/functions/procedures, and `SELECT` on sequences. |
 
 Constraint options are limited to `ENABLE`, `DISABLE`, `VALIDATE` and
 `NOVALIDATE`. A named constraint must have a name that is free in the schema; a
@@ -68,11 +69,13 @@ Constraint options are limited to `ENABLE`, `DISABLE`, `VALIDATE` and
 every `CHECK`: an unnamed one has no catalog identity to prove.
 
 These stay refused and belong in a reviewed migration or workflow: `DROP`,
-`TRUNCATE`, `RENAME`, `ALTER TABLE ... MODIFY`, `DROP` or `ENABLE`/`DISABLE`
-of an existing object, `USING INDEX`, deferrable constraints, a parenthesised
-`ADD (...)` list that mixes columns and constraints, any reference to another
-schema, a `COMMENT ON` other than `TABLE` or `COLUMN`, and any statement the
-rules above do not describe.
+`TRUNCATE`, `RENAME`, `DROP` or `ENABLE`/`DISABLE` of an existing object,
+`USING INDEX`, deferrable constraints, a parenthesised `ADD (...)` list that mixes
+columns and constraints, `MODIFY` clauses outside simple datatype/nullability
+(such as `DEFAULT`, `INVISIBLE`, `VIRTUAL`, inline constraints), any reference to another
+schema, a `COMMENT ON` other than `TABLE` or `COLUMN`, complex/uncertain view constructs
+(`@dblink`, `TABLE(`, `LATERAL`, `JSON_TABLE`, `XMLTABLE`, `AS OF`, `VERSIONS`, `SAMPLE`,
+`MODEL`, `PIVOT`, `UNPIVOT`), and any statement the rules above do not describe.
 
 The object budget covers feature checkpoints only. A SQL-script is counted as
 the separate data phase only when every statement is lexically validated,
