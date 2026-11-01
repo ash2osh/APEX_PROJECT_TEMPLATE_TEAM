@@ -87,6 +87,8 @@ def model_statement(statement: str, operation: Mapping, schema: str) -> dict | N
     its location fields (``file``, ``statement_index``) and adds ``supported``.
     """
     text = statement.strip()
+    if any(ord(char) < 32 and char not in "\n\r\t" for char in text):
+        raise FeatureDdlError("the statement contains a control character")
     kind = operation.get("kind")
     modelled: dict | None = None
     if kind == "REVIEWED_OPERATION" and text[:6].upper() == "GRANT ":
@@ -180,6 +182,8 @@ def _grant(text: str, schema: str) -> dict | None:
         idx += 1
         if idx < len(tokens) and tokens[idx].kind == "SYMBOL" and tokens[idx].value == ",":
             idx += 1
+            if idx >= len(tokens):
+                return None  # a comma needs another grantee
             continue
         break
 
@@ -730,6 +734,12 @@ def _extract_view_dependencies(query_toks: Sequence[_Token], default_schema: str
     }:
         return None
 
+    first = query_toks[0]
+    if not (
+        (first.kind == "WORD" and first.value in {"SELECT", "WITH"})
+        or (first.kind == "SYMBOL" and first.value == "(")
+    ):
+        return None
     return _scan_view_dependencies(query_toks, default_schema)
 
 
@@ -871,6 +881,10 @@ def _scan_view_dependencies(tokens: Sequence[_Token], default_schema: str) -> tu
                         continue
                     break
                 frame.query_start = False
+                if index >= count or not (
+                    is_word(index, "SELECT") or (tokens[index].kind == "SYMBOL" and tokens[index].value == "(")
+                ):
+                    return None  # a WITH clause needs its main query
                 continue
             frame.query_start = False
             if word == "FROM" and not frame.no_from:

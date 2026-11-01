@@ -27,6 +27,49 @@ BASE_STATEMENTS = [
 ]
 
 
+# Strict prefixes of a base statement that are themselves valid statements (a shorter name, an
+# omitted optional clause, SELECT without FROM in 23ai). Any other prefix being modelled is a bug.
+VALID_PREFIX_TAILS = {
+    'ALTER TABLE "APP_DATA"."T" ADD CONSTRAINT "FK_T" FOREIGN KEY ("P_ID") REFERENCES "APP_DATA"."P" ("ID") ON DELETE CASCADE': (
+        '."P" ("ID") ON DELETE CASCADE',
+        ' ("ID") ON DELETE CASCADE',
+        '("ID") ON DELETE CASCADE',
+        ' ON DELETE CASCADE',
+        'ON DELETE CASCADE',
+    ),
+    'CREATE PUBLIC SYNONYM "S" FOR "APP_DATA"."T"': (
+        '."T"',
+    ),
+    'CREATE SYNONYM "APP_DATA"."S" FOR "APP_DATA"."T"': (
+        '."T"',
+    ),
+    'CREATE VIEW "APP_DATA"."V" AS WITH CTE AS (SELECT "ID" FROM "APP_DATA"."T1") SELECT "ID" FROM CTE': (
+        ' FROM CTE',
+        'FROM CTE',
+        'ROM CTE',
+        'OM CTE',
+        'M CTE',
+        'TE',
+        'E',
+    ),
+    'GRANT SELECT ON "APP_DATA"."MY_SEQ" TO "RUNERP_USER", "REPORTER" WITH GRANT OPTION': (
+        ', "REPORTER" WITH GRANT OPTION',
+        ' WITH GRANT OPTION',
+        'WITH GRANT OPTION',
+    ),
+}
+
+
+def assert_stays_in_scope(test: unittest.TestCase, text: str, result: dict) -> None:
+    """Whatever the input, a modelled statement never names another schema or hides a control character."""
+    test.assertTrue(result.get("supported"), text)
+    test.assertIn(result["owner"], {SCHEMA, "PUBLIC"}, text)
+    for field in ("target_owner",):
+        if field in result:
+            test.assertEqual(SCHEMA, result[field], text)
+    test.assertFalse(any(ord(c) < 32 and c not in "\n\r\t" for c in text), f"control character modelled: {text!r}")
+
+
 class AdversarialDdlFormsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.rng = random.Random(42)
@@ -46,17 +89,13 @@ class AdversarialDdlFormsTests(unittest.TestCase):
                 self.assertIsNotNone(result, f"Failed to model base statement: {stmt}")
                 self.assertTrue(result.get("supported"))
 
-    def test_truncation_never_crashes_and_never_models_partially(self) -> None:
+    def test_truncation_is_never_modelled_unless_the_prefix_is_itself_valid_sql(self) -> None:
         for stmt, kind in BASE_STATEMENTS:
+            allowed = set(VALID_PREFIX_TAILS.get(stmt, ()))
             for length in range(1, len(stmt)):
-                truncated = stmt[:length]
-                # Must not raise unhandled exception
-                result = self._try_model(truncated, kind)
-                # If it's truncated, it should almost never be modelled (unless a prefix happened to be a valid statement).
-                # But none of our statements have a valid prefix of the same kind.
-                if result is not None:
-                    # If modelled, check if it's identical or what happened
-                    pass
+                if self._try_model(stmt[:length], kind) is not None:
+                    with self.subTest(stmt=stmt[:50], kept=stmt[:length][-40:]):
+                        self.assertIn(stmt[length:], allowed, f"partial statement modelled: {stmt[:length]!r}")
 
     def test_trailing_junk_is_never_modelled(self) -> None:
         junk_suffixes = [
@@ -102,8 +141,9 @@ class AdversarialDdlFormsTests(unittest.TestCase):
                 mutated_words = list(words)
                 mutated_words.insert(pos, inj)
                 mutated = " ".join(mutated_words)
-                # Must never raise an uncaught exception
-                self._try_model(mutated, kind)
+                result = self._try_model(mutated, kind)
+                if result is not None:
+                    assert_stays_in_scope(self, mutated, result)
 
     def test_seeded_random_character_mutations(self) -> None:
         # 2000 randomized mutated queries
@@ -132,8 +172,7 @@ class AdversarialDdlFormsTests(unittest.TestCase):
             # Must never raise unhandled exception
             result = self._try_model(mutated, kind)
             if result is not None:
-                self.assertTrue(result.get("supported"))
-                self.assertIn("kind", result)
+                assert_stays_in_scope(self, mutated, result)
 
 
 if __name__ == "__main__":
