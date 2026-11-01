@@ -655,6 +655,86 @@ class LiveFeatureReleaseTests(unittest.TestCase):
                 pre, _ = self._generated(ddl, tables, columns, sequences=sequences)
                 self.assertEqual(self._value(pre[0]), expected, label)
 
+    def test_view_dependencies_match_what_oracle_records(self) -> None:
+        """For many view shapes the extracted dependency set equals ALL_DEPENDENCIES, so no table is missed."""
+        from scripts import feature_ddl_forms as forms  # noqa: PLC0415
+
+        token, SCHEMA_NAME = self.token, SCHEMA
+        T = lambda name: f"LVT{token}_{name}"  # noqa: E731
+        adv = [
+         ("plain join", f"SELECT a.id FROM {T('A')} a JOIN {T('B')} b ON b.id=a.id"),
+         ("comma join 3", f"SELECT 1 x FROM {T('A')} a, {T('B')} b, {T('C')} c WHERE a.id=b.id"),
+         ("cte chain", f"WITH x AS (SELECT id FROM {T('A')}), y AS (SELECT x.id FROM x JOIN {T('B')} b ON b.id=x.id) SELECT id FROM y"),
+         ("cte shadows a real name", f"WITH {T('A')} AS (SELECT 1 id FROM {T('B')}) SELECT id FROM {T('A')}"),
+         ("inline view", f"SELECT v.id i1, b.id i2 FROM (SELECT id FROM {T('A')}) v JOIN {T('B')} b ON b.id=v.id"),
+         ("scalar subquery depth1", f"SELECT (SELECT MAX(id) FROM {T('B')}) m FROM {T('A')}"),
+         ("scalar subquery in NVL", f"SELECT NVL((SELECT MAX(id) FROM {T('B')}),0) m FROM {T('A')}"),
+         ("subquery depth 3 in functions", f"SELECT NVL(UPPER(TRIM((SELECT MAX(name) FROM {T('B')}))),'a') m FROM {T('A')}"),
+         ("subquery depth 4", f"SELECT COALESCE(LOWER(UPPER(SUBSTR((SELECT MAX(name) FROM {T('B')}),1,3))),'a') m FROM {T('A')}"),
+         ("subquery in CASE in function", f"SELECT NVL(CASE WHEN EXISTS (SELECT 1 FROM {T('B')}) THEN 1 END,0) m FROM {T('A')}"),
+         ("exists", f"SELECT id FROM {T('A')} a WHERE EXISTS (SELECT 1 FROM {T('B')} b WHERE b.id=a.id)"),
+         ("not in nested", f"SELECT id FROM {T('A')} WHERE id NOT IN (SELECT id FROM {T('B')} WHERE id IN (SELECT id FROM {T('C')}))"),
+         ("parenthesised join", f"SELECT a.id i1, b.id i2 FROM ({T('A')} a JOIN {T('B')} b ON a.id=b.id)"),
+         ("parenthesised join + more", f"SELECT a.id i1, b.id i2 FROM ({T('A')} a JOIN {T('B')} b ON a.id=b.id) JOIN {T('C')} c ON c.id=a.id"),
+         ("extract from", f"SELECT EXTRACT(YEAR FROM d) y FROM {T('A')}"),
+         ("trim from", f"SELECT TRIM(BOTH ' ' FROM name) n FROM {T('A')}"),
+         ("union all", f"SELECT id FROM {T('A')} UNION ALL SELECT id FROM {T('B')} UNION SELECT id FROM {T('C')}"),
+         ("union in parens", f"SELECT id FROM ((SELECT id FROM {T('A')}) UNION ALL (SELECT id FROM {T('B')}))"),
+         ("left join using", f"SELECT id, a.name n1, b.name n2 FROM {T('A')} a LEFT JOIN {T('B')} b USING (id)"),
+         ("cross join", f"SELECT a.id i1, b.id i2 FROM {T('A')} a CROSS JOIN {T('B')} b"),
+         ("analytic", f"SELECT id, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) rn FROM {T('A')}"),
+         ("subquery in ON", f"SELECT a.id i1, b.id i2 FROM {T('A')} a JOIN {T('B')} b ON b.id=a.id AND b.k IN (SELECT k FROM {T('C')})"),
+         ("subquery in select of cte", f"WITH x AS (SELECT (SELECT MAX(id) FROM {T('B')}) m FROM {T('A')}) SELECT m FROM x"),
+         ("having subquery", f"SELECT g, COUNT(*) c FROM {T('A')} GROUP BY g HAVING COUNT(*) > (SELECT COUNT(*) FROM {T('B')})"),
+         ("order by subquery", f"SELECT id FROM {T('A')} a ORDER BY (SELECT MAX(id) FROM {T('B')})"),
+         ("comma join with inline view", f"SELECT a.id i1, b.id i2 FROM {T('A')} a, (SELECT id FROM {T('B')}) b WHERE a.id=b.id"),
+         ("comma join after JOIN", f"SELECT a.id i1, b.id i2 FROM {T('A')} a JOIN {T('B')} b ON a.id=b.id, {T('C')} c"),
+         ("table alias with AS", f"SELECT x.id FROM {T('A')} x"),
+         ("schema qualified", f"SELECT a.id i1, b.id i2 FROM {SCHEMA_NAME}.{T('A')} a, {SCHEMA_NAME}.{T('B')} b"),
+         ("only dual", "SELECT 1 x FROM dual"),
+         ("subquery from dual + table", f"SELECT (SELECT 1 FROM dual) x, id FROM {T('A')}"),
+         ("keep: WITH inside subquery", f"SELECT q.id i1, b.id i2 FROM (WITH z AS (SELECT id FROM {T('A')}) SELECT id FROM z) q JOIN {T('B')} b ON b.id=q.id"),
+         ("paren join first table only", f"SELECT a.id FROM ({T('A')} a)"),
+         ("select depth 5", f"SELECT NVL(UPPER(TRIM(LOWER(SUBSTR((SELECT MAX(name) FROM {T('B')}),1,3)))),'a') m FROM {T('A')}"),
+         ("select inside case inside function inside function", f"SELECT NVL(TO_CHAR(CASE WHEN id > 0 THEN (SELECT MAX(id) FROM {T('B')}) END),'0') m FROM {T('A')}"),
+         ("in-list of function with subquery", f"SELECT id FROM {T('A')} WHERE id IN (NVL((SELECT MAX(id) FROM {T('B')}),0), 1)"),
+         ("nested parens select", f"SELECT * FROM {T('A')} WHERE id = ((SELECT MAX(id) FROM {T('B')}))"),
+         ("listagg within group", f"SELECT LISTAGG(name, ',') WITHIN GROUP (ORDER BY id) l FROM {T('A')}"),
+         ("scalar subq in function arg depth 2 wrapper", f"SELECT TO_CHAR(NVL((SELECT MAX(id) FROM {T('B')}),0)) t FROM {T('A')}"),
+         ("subquery in IN list expression", f"SELECT id FROM {T('A')} WHERE (id, g) IN (SELECT id, g FROM {T('B')})"),
+         ("decode with subquery", f"SELECT DECODE(g,1,(SELECT MAX(id) FROM {T('B')}),2,(SELECT MIN(id) FROM {T('C')}),0) d FROM {T('A')}"),
+        ]
+        tables = [T(name) for name in "ABC"]
+        views = [f"LVV{token}_{number}" for number in range(len(adv))]
+        for table in tables:
+            self._register_drops(CONNECTION, _drop_table(table))
+        for view in views:
+            self._register_drops(CONNECTION, _drop_if_present("view", view, (-942,)))
+        script = [f"create table {table} (id number, name varchar2(30), g number, d date, k number);" for table in tables]
+        script += [f"create or replace view {view} as {query};" for view, (_, query) in zip(views, adv, strict=True)]
+        self._sql(CONNECTION, "\n".join(script))
+        output = self._sql(
+            CONNECTION,
+            "set heading off feedback off pagesize 0 linesize 400\n"
+            f"select 'DEP|' || name || '|' || referenced_name from user_dependencies where name like 'LVV{token}%' "
+            "and referenced_type in ('TABLE', 'VIEW', 'SYNONYM');\n"
+            f"select 'OK|' || object_name from user_objects where object_name like 'LVV{token}%' and status = 'VALID';\n",
+        )
+        truth: dict[str, set[str]] = {}
+        valid: set[str] = set()
+        for line in output.splitlines():
+            parts = line.strip().split("|")
+            if parts[0] == "DEP" and len(parts) == 3 and parts[2] != "DUAL":
+                truth.setdefault(parts[1], set()).add(parts[2])
+            elif parts[0] == "OK":
+                valid.add(parts[1])
+        for view, (label, query) in zip(views, adv, strict=True):
+            with self.subTest(shape=label):
+                self.assertIn(view, valid, f"Oracle did not accept the shape: {label}")
+                modelled = forms._view(f"CREATE OR REPLACE VIEW X AS {query}", SCHEMA)
+                self.assertIsNotNone(modelled, f"a shape Oracle accepts was refused: {label}")
+                self.assertEqual(truth.get(view, set()), {name.upper() for _, name in modelled["dependencies"]}, label)
+
     def test_abrupt_termination_mid_apply_is_recovered_after_reconciliation(self) -> None:
         slug = self._name("kill")
         package = f"LIVE_{self.token}_KILL"

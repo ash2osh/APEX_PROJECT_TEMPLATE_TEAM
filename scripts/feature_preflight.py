@@ -531,7 +531,7 @@ def _modify_column_queries(
             terms.append(
                 f"EXISTS (SELECT 1 FROM ALL_TABLES T WHERE T.OWNER = :target_schema AND T.TABLE_NAME = {_literal(table)})"
             )
-        if (table, col_name) not in staged_columns:
+        if table not in staged_tables and (table, col_name) not in staged_columns:
             terms.append(
                 f"EXISTS (SELECT 1 FROM ALL_TAB_COLUMNS C WHERE C.OWNER = :target_schema "
                 f"AND C.TABLE_NAME = {_literal(table)} AND C.COLUMN_NAME = {_literal(col_name)})"

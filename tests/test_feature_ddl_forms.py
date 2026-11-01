@@ -304,5 +304,61 @@ class ExpressionIndexTests(unittest.TestCase):
         self.assertIsNone(model("CREATE INDEX IX ON T (A) GLOBAL PARTITION BY RANGE (A)", "UNKNOWN"))
 
 
+class ViewDependencyTests(unittest.TestCase):
+    """Dependency sets for view shapes, each checked against Oracle's ALL_DEPENDENCIES (see the live differential test)."""
+
+    def deps(self, query: str) -> set[str] | None:
+        modelled = forms._view(f"CREATE OR REPLACE VIEW V AS {query}", SCHEMA)
+        return None if modelled is None else {name for _, name in modelled["dependencies"]}
+
+    def test_sources_found_at_every_depth_and_in_every_clause(self) -> None:
+        cases = {
+            "SELECT NVL(UPPER(TRIM((SELECT MAX(n) FROM B))),'a') m FROM A": {"A", "B"},
+            "SELECT COALESCE(LOWER(UPPER(SUBSTR((SELECT MAX(n) FROM B),1,3))),'a') m FROM A": {"A", "B"},
+            "SELECT NVL(TO_CHAR(CASE WHEN id > 0 THEN (SELECT MAX(id) FROM B) END),'0') m FROM A": {"A", "B"},
+            "SELECT i FROM A WHERE i IN (NVL((SELECT MAX(id) FROM B),0), 1)": {"A", "B"},
+            "SELECT * FROM (A a JOIN B b ON a.id = b.id)": {"A", "B"},
+            "SELECT * FROM (A a JOIN B b ON a.id = b.id) JOIN C c ON c.id = a.id": {"A", "B", "C"},
+            "SELECT a.id FROM (A a)": {"A"},
+            "SELECT * FROM A a JOIN B b ON a.id = b.id, C c": {"A", "B", "C"},
+            "SELECT * FROM A a, B b, C c WHERE a.id = b.id": {"A", "B", "C"},
+            "SELECT id FROM A WHERE id NOT IN (SELECT id FROM B WHERE id IN (SELECT id FROM C))": {"A", "B", "C"},
+            "SELECT id FROM ((SELECT id FROM A) UNION ALL (SELECT id FROM B))": {"A", "B"},
+            "SELECT * FROM A a JOIN B b ON b.id = a.id AND b.k IN (SELECT k FROM C)": {"A", "B", "C"},
+            "SELECT g FROM A GROUP BY g HAVING COUNT(*) > (SELECT COUNT(*) FROM B)": {"A", "B"},
+            "SELECT id FROM A ORDER BY (SELECT MAX(id) FROM B)": {"A", "B"},
+            "SELECT * FROM A a, (SELECT id FROM B) b WHERE a.id = b.id": {"A", "B"},
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(expected, self.deps(query))
+
+    def test_cte_names_are_not_dependencies_and_a_cte_hides_a_table_of_the_same_name(self) -> None:
+        self.assertEqual({"A", "B"}, self.deps("WITH x AS (SELECT id FROM A), y AS (SELECT x.id FROM x JOIN B b ON b.id = x.id) SELECT id FROM y"))
+        self.assertEqual({"B"}, self.deps("WITH A AS (SELECT 1 id FROM B) SELECT id FROM A"))
+        self.assertEqual({"A", "B"}, self.deps("SELECT q.id FROM (WITH z AS (SELECT id FROM A) SELECT id FROM z) q JOIN B b ON b.id = q.id"))
+
+    def test_function_syntax_from_is_not_a_table_and_dual_is_ignored(self) -> None:
+        self.assertEqual({"A"}, self.deps("SELECT EXTRACT(YEAR FROM d) y, TRIM(BOTH ' ' FROM n) t FROM A"))
+        self.assertEqual({"A"}, self.deps("SELECT (SELECT 1 FROM dual) x, id FROM A"))
+
+    def test_anything_not_fully_understood_is_refused(self) -> None:
+        for query in (
+            "SELECT id FROM A@LINK",
+            "SELECT * FROM TABLE(fn())",
+            "SELECT * FROM A AS OF TIMESTAMP SYSDATE",
+            "SELECT * FROM A SAMPLE (10)",
+            "SELECT * FROM A, LATERAL (SELECT 1 FROM B)",
+            "SELECT * FROM JSON_TABLE(c, '$' COLUMNS (x PATH '$.x'))",
+            "SELECT * FROM A x y",
+            "SELECT * FROM A JOIN",
+            "SELECT * FROM (SELECT id FROM A",
+            "SELECT id FROM A) UNION SELECT 1 FROM B",
+            "SELECT * FROM A WHERE x = 1 DROP TABLE B",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.deps(query))
+
+
 if __name__ == "__main__":
     unittest.main()

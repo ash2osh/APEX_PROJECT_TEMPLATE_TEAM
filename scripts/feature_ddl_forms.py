@@ -730,186 +730,174 @@ def _extract_view_dependencies(query_toks: Sequence[_Token], default_schema: str
     }:
         return None
 
-    dependencies: list[tuple[str, str]] = []
+    return _scan_view_dependencies(query_toks, default_schema)
 
-    def scan_query(toks: Sequence[_Token], outer_ctes: set[str]) -> bool:
-        ctes_in_scope = set(outer_ctes)
-        idx = 0
 
-        if _word(toks, idx, "WITH"):
-            idx += 1
-            if _word(toks, idx, "RECURSIVE"):
-                idx += 1
-            while idx < len(toks):
-                if toks[idx].kind not in {"WORD", "QIDENT"}:
-                    return False
-                cte_name = _value(toks[idx]).upper()
-                idx += 1
-                if idx < len(toks) and toks[idx].value == "(":
-                    closing = _find_matching_paren(toks, idx)
-                    if closing is None:
-                        return False
-                    idx = closing + 1
-                if not _word(toks, idx, "AS"):
-                    return False
-                idx += 1
-                if idx >= len(toks) or toks[idx].value != "(":
-                    return False
-                closing = _find_matching_paren(toks, idx)
-                if closing is None:
-                    return False
-                if not scan_query(toks[idx + 1 : closing], ctes_in_scope):
-                    return False
-                ctes_in_scope.add(cte_name)
-                idx = closing + 1
-                if idx < len(toks) and toks[idx].value == ",":
-                    idx += 1
-                    continue
-                break
+_FROM_ENDERS = {
+    "WHERE", "GROUP", "HAVING", "ORDER", "UNION", "INTERSECT", "MINUS", "CONNECT", "START",
+    "FETCH", "OFFSET", "FOR", "WINDOW", "SELECT", "MODEL", "LIMIT",
+}
+_ITEM_FOLLOWERS = _FROM_ENDERS | {
+    "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL", "OUTER", "ON", "USING", "PARTITION",
+}
+_NO_FROM_OWNERS = {"EXTRACT", "TRIM"}  # FROM here is part of the function syntax, not a table list
+_NOT_A_TABLE = {"ONLY", "LATERAL", "SELECT", "WITH"}
 
-        p = idx
-        while p < len(toks):
-            tok = toks[p]
-            if tok.kind == "SYMBOL" and tok.value == "(":
-                closing = _find_matching_paren(toks, p)
-                if closing is None:
-                    return False
-                sub_toks = toks[p + 1 : closing]
-                first_word = next((t.value.upper() for t in sub_toks if t.kind == "WORD"), None)
-                if first_word in {"SELECT", "WITH"}:
-                    if not scan_query(sub_toks, ctes_in_scope):
-                        return False
-                else:
-                    inner_p = 0
-                    while inner_p < len(sub_toks):
-                        if sub_toks[inner_p].kind == "SYMBOL" and sub_toks[inner_p].value == "(":
-                            inner_close = _find_matching_paren(sub_toks, inner_p)
-                            if inner_close is not None:
-                                inner_sub = sub_toks[inner_p + 1 : inner_close]
-                                fw = next((t.value.upper() for t in inner_sub if t.kind == "WORD"), None)
-                                if fw in {"SELECT", "WITH"}:
-                                    if not scan_query(inner_sub, ctes_in_scope):
-                                        return False
-                                inner_p = inner_close + 1
-                                continue
-                        inner_p += 1
-                p = closing + 1
-                continue
 
-            if tok.kind == "WORD" and tok.value.upper() == "FROM":
-                p += 1
-                parsed_p = parse_table_references(toks, p, ctes_in_scope)
-                if parsed_p is None:
-                    return False
-                p = parsed_p
-                continue
-
-            if tok.kind == "WORD" and tok.value.upper() == "JOIN":
-                p += 1
-                parsed_p = parse_single_table_reference(toks, p, ctes_in_scope)
-                if parsed_p is None:
-                    return False
-                p = parsed_p
-                continue
-
-            p += 1
+def _table_item_ends_cleanly(tokens: Sequence[_Token], position: int) -> bool:
+    """What follows a FROM/JOIN item must be at most an alias, then a join word, a clause word, a comma, ')' or the end."""
+    if position < len(tokens) and tokens[position].kind in {"WORD", "QIDENT"} and not (
+        tokens[position].kind == "WORD" and tokens[position].value in _ITEM_FOLLOWERS
+    ):
+        position += 1
+    if position >= len(tokens):
         return True
+    token = tokens[position]
+    if token.kind == "SYMBOL" and token.value in {",", ")"}:
+        return True
+    return token.kind == "WORD" and token.value in _ITEM_FOLLOWERS
 
-    def parse_single_table_reference(toks: Sequence[_Token], p: int, ctes_in_scope: set[str]) -> int | None:
-        while p < len(toks) and toks[p].kind == "WORD" and toks[p].value.upper() in {
-            "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "NATURAL"
-        }:
-            p += 1
-        if p >= len(toks):
-            return None
-        if toks[p].value == "(":
-            closing = _find_matching_paren(toks, p)
-            if closing is None:
+
+def _scan_view_dependencies(tokens: Sequence[_Token], default_schema: str) -> tuple[tuple[str, str], ...] | None:
+    """Every table-like name a view query reads, found with one pass and an explicit paren stack.
+
+    A name is a dependency when it is the first token after FROM or JOIN, or after a comma
+    while a FROM list is open in the same parenthesis group. Names defined by a WITH clause
+    are not dependencies. The scan errs towards extra names (a CTE name is registered only
+    after its body) and returns None for anything it cannot place with certainty.
+    """
+
+    class Frame:
+        __slots__ = ("ctes", "in_from", "expect_table", "no_from", "query_start", "is_item")
+
+        def __init__(
+            self, ctes: frozenset, *, in_from: bool = False, no_from: bool = False, query_start: bool = False,
+            is_item: bool = False,
+        ):
+            self.is_item = is_item
+            self.ctes = set(ctes)
+            self.in_from = in_from
+            self.expect_table = in_from
+            self.no_from = no_from
+            self.query_start = query_start
+
+    dependencies: list[tuple[str, str]] = []
+    stack: list[Frame] = [Frame(frozenset(), query_start=True)]
+    index = 0
+    count = len(tokens)
+
+    def is_word(position: int, *values: str) -> bool:
+        return position < count and tokens[position].kind == "WORD" and tokens[position].value in values
+
+    while index < count:
+        token = tokens[index]
+        frame = stack[-1]
+
+        if token.kind == "SYMBOL" and token.value == "(":
+            nxt = index + 1
+            starts_query = is_word(nxt, "SELECT", "WITH")
+            joined = frame.expect_table and not starts_query
+            owner = tokens[index - 1].value if index and tokens[index - 1].kind == "WORD" else None
+            child = Frame(
+                frozenset(frame.ctes), in_from=joined, no_from=owner in _NO_FROM_OWNERS, query_start=starts_query,
+                is_item=frame.expect_table,
+            )
+            if frame.expect_table:
+                frame.expect_table = False  # this group is the table reference itself
+            stack.append(child)
+            index += 1
+            continue
+        if token.kind == "SYMBOL" and token.value == ")":
+            if len(stack) == 1:
                 return None
-            sub = toks[p + 1 : closing]
-            if not scan_query(sub, ctes_in_scope):
+            closed = stack.pop()
+            if closed.expect_table or (closed.is_item and not _table_item_ends_cleanly(tokens, index + 1)):
                 return None
-            p = closing + 1
-        else:
+            index += 1
+            continue
+        if token.kind == "SYMBOL" and token.value == ",":
+            if frame.in_from and not frame.no_from:
+                frame.expect_table = True
+            index += 1
+            continue
+        if token.kind not in {"WORD", "QIDENT"}:
+            index += 1
+            continue
+
+        if frame.expect_table:
+            if token.kind == "WORD" and token.value in _NOT_A_TABLE:
+                return None
             try:
-                owner, name, p = _parse_name(toks, p, default_schema)
+                owner_name, name, after = _parse_name(tokens, index, default_schema)
             except MigrationAnalysisError:
                 return None
-            uname = name.upper()
-            uowner = owner.upper()
-            if uname not in ctes_in_scope:
-                if uname != "DUAL" and uowner not in {"SYS", "SYSTEM"}:
-                    dependencies.append((owner, name))
-        if p < len(toks) and _word(toks, p, "PARTITION"):
-            p += 1
-            if p < len(toks) and toks[p].value == "(":
-                closing = _find_matching_paren(toks, p)
-                if closing is None:
-                    return None
-                p = closing + 1
-        if p < len(toks) and _word(toks, p, "AS"):
-            p += 1
-        if p < len(toks) and toks[p].kind in {"WORD", "QIDENT"}:
-            if toks[p].value.upper() not in {
-                "ON", "USING", "WHERE", "GROUP", "HAVING", "ORDER",
-                "UNION", "INTERSECT", "MINUS", "JOIN", "INNER", "LEFT",
-                "RIGHT", "FULL", "CROSS", "NATURAL",
-            }:
-                p += 1
-        if p < len(toks) and _word(toks, p, "USING"):
-            p += 1
-            if p < len(toks) and toks[p].value == "(":
-                closing = _find_matching_paren(toks, p)
-                if closing is None:
-                    return None
-                p = closing + 1
-        elif p < len(toks) and _word(toks, p, "ON"):
-            p += 1
-            while p < len(toks):
-                tok = toks[p]
-                if tok.kind == "SYMBOL" and tok.value == "(":
-                    closing = _find_matching_paren(toks, p)
+            if name not in frame.ctes and name.upper() != "DUAL" and owner_name.upper() not in {"SYS", "SYSTEM"}:
+                dependencies.append((owner_name, name))
+            frame.expect_table = False
+            if not _table_item_ends_cleanly(tokens, after):
+                return None
+            index = after
+            continue
+
+        if token.kind == "WORD":
+            word = token.value
+            if word == "WITH" and frame.query_start:
+                index += 1
+                if is_word(index, "RECURSIVE"):
+                    index += 1
+                while True:
+                    if index >= count or tokens[index].kind not in {"WORD", "QIDENT"}:
+                        return None
+                    cte_name = _value(tokens[index])
+                    index += 1
+                    if index < count and tokens[index].kind == "SYMBOL" and tokens[index].value == "(":
+                        closing = _find_matching_paren(tokens, index)
+                        if closing is None:
+                            return None
+                        index = closing + 1
+                    if not is_word(index, "AS") or index + 1 >= count or tokens[index + 1].value != "(":
+                        return None
+                    closing = _find_matching_paren(tokens, index + 1)
                     if closing is None:
                         return None
-                    sub = toks[p + 1 : closing]
-                    fw = next((t.value.upper() for t in sub if t.kind == "WORD"), None)
-                    if fw in {"SELECT", "WITH"}:
-                        if not scan_query(sub, ctes_in_scope):
-                            return None
-                    p = closing + 1
-                    continue
-                if tok.kind == "SYMBOL" and tok.value == ",":
+                    inner = _scan_view_dependencies_in(tokens[index + 2 : closing], default_schema, frame.ctes)
+                    if inner is None:
+                        return None
+                    dependencies.extend(inner)
+                    frame.ctes.add(cte_name)
+                    index = closing + 1
+                    if index < count and tokens[index].kind == "SYMBOL" and tokens[index].value == ",":
+                        index += 1
+                        continue
                     break
-                if tok.kind == "WORD" and tok.value.upper() in {
-                    "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL",
-                    "WHERE", "GROUP", "HAVING", "ORDER", "UNION", "INTERSECT", "MINUS",
-                }:
-                    break
-                p += 1
-        return p
-
-    def parse_table_references(toks: Sequence[_Token], p: int, ctes_in_scope: set[str]) -> int | None:
-        while p < len(toks):
-            parsed_p = parse_single_table_reference(toks, p, ctes_in_scope)
-            if parsed_p is None:
-                return None
-            p = parsed_p
-            if p < len(toks) and toks[p].value == ",":
-                p += 1
+                frame.query_start = False
                 continue
-            break
-        if p < len(toks) and toks[p].value != ")":
-            if toks[p].kind != "WORD" or toks[p].value.upper() not in {
-                "WHERE", "GROUP", "HAVING", "ORDER", "UNION", "INTERSECT", "MINUS",
-                "CONNECT", "START", "FETCH", "OFFSET", "FOR", "WINDOW", "WITH",
-                "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL",
-            }:
-                return None
-        return p
+            frame.query_start = False
+            if word == "FROM" and not frame.no_from:
+                frame.in_from = True
+                frame.expect_table = True
+            elif word == "JOIN" and not frame.no_from:
+                frame.in_from = True
+                frame.expect_table = True
+            elif word in _FROM_ENDERS:
+                frame.in_from = False
+        else:
+            frame.query_start = False
+        index += 1
 
-    if not scan_query(query_toks, set()):
+    if len(stack) != 1 or stack[0].expect_table:
         return None
     return tuple(dict.fromkeys(dependencies))
+
+
+def _scan_view_dependencies_in(
+    tokens: Sequence[_Token], default_schema: str, ctes: set,
+) -> tuple[tuple[str, str], ...] | None:
+    """Scan a CTE body; names defined earlier in the enclosing WITH clause are not dependencies."""
+    found = _scan_view_dependencies(tokens, default_schema)
+    if found is None:
+        return None
+    return tuple(item for item in found if item[1] not in ctes)
 
 
 def _view(text: str, schema: str) -> dict | None:
