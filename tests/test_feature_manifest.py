@@ -174,7 +174,7 @@ class FeatureManifestTests(unittest.TestCase):
     def test_destructive_and_stateful_ddl_stays_refused_even_beside_modelled_forms(self) -> None:
         for index, statement in enumerate((
             "DROP TABLE APP_CODE.T;",
-            "ALTER TABLE APP_CODE.T MODIFY (A NUMBER);",
+            "ALTER TABLE APP_CODE.T MODIFY (A NUMBER DEFAULT 1);",
             "ALTER TABLE APP_CODE.T DROP CONSTRAINT PK;",
             "ALTER TABLE APP_CODE.T ADD CONSTRAINT PK PRIMARY KEY (ID) USING INDEX IX;",
             "ALTER TABLE APP_CODE.T ADD CHECK (A > 0);",

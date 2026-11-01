@@ -24,7 +24,7 @@ def _checkpoint(*sources: str, schema: str = "APP_CODE") -> FeatureCheckpoint:
     )
 
 
-def _state(*, tables=(), columns=(), indexes=(), views=(), synonyms=(), grants=(), invalid=(), synonym_access=(), constraints=()) -> dict:
+def _state(*, tables=(), columns=(), indexes=(), views=(), synonyms=(), grants=(), invalid=(), synonym_access=(), constraints=(), sequences=()) -> dict:
     return {
         "schema": "APP_CODE",
         "structural": {
@@ -36,7 +36,9 @@ def _state(*, tables=(), columns=(), indexes=(), views=(), synonyms=(), grants=(
             "object-grants": list(grants),
             "invalid-objects": list(invalid),
             "feature-synonym-access": list(synonym_access),
-            "constraints": list(constraints), "triggers": [], "sequences": [], "stored-code": [],
+            "constraints": list(constraints), "triggers": [],
+            "sequences": [{"name": name} if isinstance(name, str) else name for name in sequences],
+            "stored-code": [],
             "identity-columns": [], "feature-dependencies": [],
         },
         "coverage": {"ownerComplete": False, "selectedScopeComplete": True},
@@ -324,6 +326,102 @@ class FeaturePreflightTests(unittest.TestCase):
             checkpoint, _state(synonyms=(external_synonym,), synonym_access=(access,)), (),
         )
         self.assertTrue(granted.postconditions)
+
+    def test_view_with_cte_and_subqueries_gets_dependencies_and_checks(self) -> None:
+        checkpoint = _checkpoint(
+            "CREATE VIEW APP_CODE.V_CTE AS WITH CTE AS (SELECT ID FROM APP_CODE.T1) SELECT ID FROM CTE;\n"
+        )
+        state = _state(tables=("T1",), columns=(("T1", "ID"),))
+        scope = feature_preflight.required_scope(checkpoint)
+        self.assertIn(ObjectKey("APP_CODE", "V_CTE", "VIEW"), scope.object_keys)
+        self.assertIn(ObjectKey("APP_CODE", "T1", "TABLE"), scope.prerequisite_keys)
+        self.assertNotIn(ObjectKey("APP_CODE", "CTE", "TABLE"), scope.prerequisite_keys)
+
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+        before = "\n".join(check.sql for check in plan.preconditions)
+        after = "\n".join(check.sql for check in plan.postconditions)
+        self.assertIn("ALL_OBJECTS", before)
+        self.assertIn("'T1'", before)
+        self.assertIn("ALL_OBJECTS", after)
+        self.assertIn("'VIEW'", after)
+        self.assertIn("'V_CTE'", after)
+
+    def test_alter_table_modify_column_gets_before_and_after_checks(self) -> None:
+        checkpoint = _checkpoint(
+            "ALTER TABLE APP_CODE.T MODIFY (NAME VARCHAR2(100 BYTE) NOT NULL, CNT NUMBER(10, 2));\n"
+        )
+        state = _state(tables=("T",), columns=(("T", "NAME"), ("T", "CNT")))
+        scope = feature_preflight.required_scope(checkpoint)
+        self.assertIn(ObjectKey("APP_CODE", "T", "TABLE"), scope.object_keys)
+
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+        before = "\n".join(check.sql for check in plan.preconditions)
+        after = "\n".join(check.sql for check in plan.postconditions)
+
+        self.assertIn("ALL_TABLES", before)
+        self.assertIn("ALL_TAB_COLUMNS", before)
+        self.assertIn("'NAME'", before)
+        self.assertIn("'CNT'", before)
+
+        self.assertIn("C.DATA_TYPE = 'VARCHAR2'", after)
+        self.assertIn("C.CHAR_LENGTH = 100", after)
+        self.assertIn("C.CHAR_USED = 'B'", after)
+        self.assertIn("C.NULLABLE = 'N'", after)
+        self.assertIn("C.DATA_TYPE = 'NUMBER'", after)
+        self.assertIn("C.DATA_PRECISION = 10 AND C.DATA_SCALE = 2", after)
+
+        record = feature_preflight.plan_to_dict(plan)
+        feature_preflight.validate_plan_record(record, checkpoint, state["structural"])
+
+    def test_alter_modify_missing_table_or_column_refuses(self) -> None:
+        checkpoint_missing_table = _checkpoint("ALTER TABLE APP_CODE.MISSING_T MODIFY (A NUMBER);\n")
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "MISSING_T"):
+            feature_preflight.prepare_checkpoint(checkpoint_missing_table, _state(), ())
+
+        checkpoint_missing_col = _checkpoint("ALTER TABLE APP_CODE.T MODIFY (MISSING_COL NUMBER);\n")
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "MISSING_COL"):
+            feature_preflight.prepare_checkpoint(checkpoint_missing_col, _state(tables=("T",), columns=(("T", "A"),)), ())
+
+    def test_expression_index_gets_before_and_after_checks(self) -> None:
+        checkpoint = _checkpoint(
+            "CREATE UNIQUE INDEX APP_CODE.IX_EXPR ON APP_CODE.T (UPPER(NAME), CNT);\n"
+        )
+        state = _state(tables=("T",), columns=(("T", "NAME"), ("T", "CNT")))
+        scope = feature_preflight.required_scope(checkpoint)
+        self.assertIn(ObjectKey("APP_CODE", "IX_EXPR", "INDEX"), scope.object_keys)
+
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+        before = "\n".join(check.sql for check in plan.preconditions)
+        after = "\n".join(check.sql for check in plan.postconditions)
+
+        self.assertIn("ALL_TABLES", before)
+        self.assertIn("NOT EXISTS (SELECT 1 FROM ALL_INDEXES I WHERE I.OWNER = :target_schema AND I.INDEX_NAME = 'IX_EXPR')", before)
+
+        self.assertIn("I.UNIQUENESS = 'UNIQUE'", after)
+        self.assertIn("COUNT(*) FROM ALL_IND_COLUMNS C WHERE C.INDEX_OWNER = :target_schema AND C.INDEX_NAME = 'IX_EXPR') = 2", after)
+        self.assertIn("COUNT(*) FROM ALL_IND_EXPRESSIONS E WHERE E.INDEX_OWNER = :target_schema AND E.INDEX_NAME = 'IX_EXPR') = 1", after)
+
+        record = feature_preflight.plan_to_dict(plan)
+        feature_preflight.validate_plan_record(record, checkpoint, state["structural"])
+
+    def test_unqualified_object_and_execute_grants(self) -> None:
+        checkpoint = _checkpoint(
+            "GRANT EXECUTE ON PKG TO REPORTER;\n"
+            "GRANT SELECT ON MY_SEQ TO REPORTER;\n"
+        )
+        state = _state()
+        state["structural"]["stored-code"] = [{"name": "PKG", "type": "PACKAGE"}]
+        state["structural"]["sequences"] = [{"name": "MY_SEQ"}]
+        scope = feature_preflight.required_scope(checkpoint)
+        self.assertIn(ObjectKey("APP_CODE", "PKG", "PACKAGE"), scope.prerequisite_keys)
+        self.assertIn(ObjectKey("APP_CODE", "MY_SEQ", "SEQUENCE"), scope.prerequisite_keys)
+
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+        after = "\n".join(check.sql for check in plan.postconditions)
+        self.assertIn("PRIVILEGE = 'EXECUTE'", after)
+        self.assertIn("TABLE_NAME = 'PKG'", after)
+        self.assertIn("PRIVILEGE = 'SELECT'", after)
+        self.assertIn("TABLE_NAME = 'MY_SEQ'", after)
 
 
 if __name__ == "__main__":

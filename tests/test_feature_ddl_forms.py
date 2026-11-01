@@ -119,7 +119,7 @@ class ConstraintTests(unittest.TestCase):
             "ALTER TABLE T ADD CONSTRAINT PK PRIMARY KEY (ID); DROP TABLE T",
             "ALTER TABLE T DROP CONSTRAINT PK",
             "ALTER TABLE T MODIFY CONSTRAINT PK DISABLE",
-            "ALTER TABLE T MODIFY (A NUMBER)",
+            "ALTER TABLE T MODIFY (A NUMBER DEFAULT 1)",
             "ALTER TABLE T RENAME TO U",
         ):
             with self.subTest(statement=statement):
@@ -140,6 +140,22 @@ class GrantAndGateTests(unittest.TestCase):
         with self.assertRaises(forms.FeatureDdlError):
             model("GRANT SELECT ON OTHER.T TO APP_CODE", "REVIEWED_OPERATION")
 
+    def test_unqualified_object_grant_defaults_to_checkpoint_schema(self) -> None:
+        grant = model("GRANT EXECUTE ON PKG TO APP_CODE", "REVIEWED_OPERATION")
+        self.assertEqual(("GRANT_OBJECT", "PKG", "EXECUTE", ("APP_CODE",)),
+                         (grant["kind"], grant["name"], grant["privileges"], grant["grantees"]))
+        self.assertEqual(SCHEMA, grant["owner"])
+
+    def test_execute_grant_and_sequence_grant(self) -> None:
+        exec_grant = model("GRANT EXECUTE ON APP_DATA.MY_PROC TO RUNERP_USER", "REVIEWED_OPERATION")
+        self.assertEqual(("GRANT_OBJECT", "MY_PROC", "EXECUTE", ("RUNERP_USER",)),
+                         (exec_grant["kind"], exec_grant["name"], exec_grant["privileges"], exec_grant["grantees"]))
+        seq_grant = model("GRANT SELECT ON APP_DATA.MY_SEQ TO RUNERP_USER", "REVIEWED_OPERATION")
+        self.assertEqual(("GRANT_OBJECT", "MY_SEQ", "SELECT", ("RUNERP_USER",)),
+                         (seq_grant["kind"], seq_grant["name"], seq_grant["privileges"], seq_grant["grantees"]))
+        multi = model("GRANT EXECUTE ON PKG TO U1, U2 WITH GRANT OPTION", "REVIEWED_OPERATION")
+        self.assertEqual(("U1", "U2"), multi["grantees"])
+
     def test_a_form_is_only_modelled_for_the_kind_the_analyzer_left_open(self) -> None:
         self.assertIsNone(model("COMMENT ON TABLE T IS 'x'", "REVIEWED_OPERATION"))
         self.assertIsNone(model("GRANT SELECT ON APP_DATA.T TO X", "OPAQUE"))
@@ -152,6 +168,140 @@ class GrantAndGateTests(unittest.TestCase):
             for kind in ("OPAQUE", "UNKNOWN", "REVIEWED_OPERATION"):
                 with self.subTest(statement=statement, kind=kind):
                     self.assertIsNone(model(statement, kind))
+
+
+class ViewTests(unittest.TestCase):
+    def test_cte_and_subquery_views_modelled_with_dependencies(self) -> None:
+        # Simple CTE
+        v1 = model("CREATE VIEW V1 AS WITH cte AS (SELECT ID FROM T1) SELECT ID FROM cte", "UNKNOWN")
+        self.assertEqual("CREATE_VIEW", v1["kind"])
+        self.assertEqual("V1", v1["name"])
+        self.assertIn((SCHEMA, "T1"), v1["dependencies"])
+        self.assertNotIn((SCHEMA, "CTE"), v1["dependencies"])
+
+        # Chained CTEs
+        v2 = model("CREATE VIEW V2 AS WITH c1 AS (SELECT ID FROM T1), c2 AS (SELECT ID FROM c1 JOIN T2 ON c1.ID = T2.ID) SELECT * FROM c2", "UNKNOWN")
+        self.assertEqual({(SCHEMA, "T1"), (SCHEMA, "T2")}, set(v2["dependencies"]))
+
+        # Shadowing: CTE named same as table -> CTE shadows table name in its scope
+        v3 = model("CREATE VIEW V3 AS WITH T1 AS (SELECT 1 AS ID FROM DUAL) SELECT ID FROM T1", "UNKNOWN")
+        self.assertEqual((), v3["dependencies"])
+
+        # Inline view
+        v4 = model("CREATE VIEW V4 AS SELECT * FROM (SELECT ID FROM T1) SUB", "UNKNOWN")
+        self.assertEqual({(SCHEMA, "T1")}, set(v4["dependencies"]))
+
+        # Comma join
+        v5 = model("CREATE VIEW V5 AS SELECT A.ID, B.ID FROM T1 A, T2 B", "UNKNOWN")
+        self.assertEqual({(SCHEMA, "T1"), (SCHEMA, "T2")}, set(v5["dependencies"]))
+
+        # Subqueries in SELECT and WHERE
+        v6 = model("CREATE VIEW V6 AS SELECT (SELECT VAL FROM T1) FROM T2 WHERE EXISTS (SELECT 1 FROM T3)", "UNKNOWN")
+        self.assertEqual({(SCHEMA, "T1"), (SCHEMA, "T2"), (SCHEMA, "T3")}, set(v6["dependencies"]))
+
+        # Exclusions: EXTRACT, TRIM, SUBSTRING
+        v7 = model("CREATE VIEW V7 AS SELECT EXTRACT(YEAR FROM DT), TRIM('x' FROM STR) FROM T1", "UNKNOWN")
+        self.assertEqual({(SCHEMA, "T1")}, set(v7["dependencies"]))
+
+    def test_unsupported_view_features_stay_refused(self) -> None:
+        for stmt in (
+            "CREATE VIEW V AS SELECT * FROM T@DBLINK",
+            "CREATE VIEW V AS SELECT * FROM TABLE(MY_FUNC())",
+            "CREATE VIEW V AS SELECT * FROM T, LATERAL(SELECT * FROM U WHERE U.ID = T.ID)",
+            "CREATE VIEW V AS SELECT * FROM T, JSON_TABLE(J, '$[*]' COLUMNS (X INT PATH '$.x'))",
+            "CREATE VIEW V AS SELECT * FROM T, XMLTABLE('/a' PASSING X COLUMNS Y INT PATH 'y')",
+            "CREATE VIEW V AS SELECT * FROM T AS OF TIMESTAMP SYSTIMESTAMP",
+            "CREATE VIEW V AS SELECT * FROM T VERSIONS BETWEEN SCN MINVALUE AND MAXVALUE",
+            "CREATE VIEW V AS SELECT * FROM T SAMPLE (10)",
+            "CREATE VIEW V AS SELECT * FROM T MODEL DIMENSION BY (ID) MEASURES (VAL) RULES ()",
+            "CREATE VIEW V AS SELECT * FROM T PIVOT (SUM(VAL) FOR CAT IN ('A', 'B'))",
+            "CREATE VIEW V AS SELECT * FROM T UNPIVOT (VAL FOR CAT IN (A, B))",
+        ):
+            with self.subTest(stmt=stmt):
+                self.assertIsNone(model(stmt, "UNKNOWN"))
+
+    def test_other_schema_view_is_an_error(self) -> None:
+        with self.assertRaises(forms.FeatureDdlError):
+            model("CREATE VIEW OTHER.V AS SELECT * FROM T", "UNKNOWN")
+
+
+class ModifyColumnTests(unittest.TestCase):
+    def test_modify_column_data_types_and_constraints(self) -> None:
+        stmt = "ALTER TABLE T MODIFY (A VARCHAR2(100 BYTE) NOT NULL, B NUMBER(10, 2), C DATE NULL, D CLOB)"
+        m = model(stmt, "UNKNOWN")
+        self.assertEqual("ALTER_MODIFY_COLUMN", m["kind"])
+        self.assertEqual("T", m["table"])
+        self.assertEqual(("A", "B", "C", "D"), m["columns"])
+        specs = {s["name"]: s for s in m["column_specs"]}
+
+        self.assertEqual("VARCHAR2", specs["A"]["data_type"])
+        self.assertEqual(100, specs["A"]["char_length"])
+        self.assertEqual("B", specs["A"]["char_used"])
+        self.assertFalse(specs["A"]["nullable"])
+
+        self.assertEqual("NUMBER", specs["B"]["data_type"])
+        self.assertEqual(10, specs["B"]["precision"])
+        self.assertEqual(2, specs["B"]["scale"])
+        self.assertIsNone(specs["B"]["nullable"])
+
+        self.assertEqual("DATE", specs["C"]["data_type"])
+        self.assertTrue(specs["C"]["nullable"])
+
+        self.assertEqual("CLOB", specs["D"]["data_type"])
+
+    def test_modify_column_without_parentheses(self) -> None:
+        m = model("ALTER TABLE T MODIFY A NUMBER", "UNKNOWN")
+        self.assertEqual("ALTER_MODIFY_COLUMN", m["kind"])
+        self.assertEqual(("A",), m["columns"])
+        self.assertEqual("NUMBER", m["column_specs"][0]["data_type"])
+
+    def test_unmodelled_modify_forms_stay_refused(self) -> None:
+        for stmt in (
+            "ALTER TABLE T MODIFY (A NUMBER DEFAULT 1)",
+            "ALTER TABLE T MODIFY (A INVISIBLE)",
+            "ALTER TABLE T MODIFY (A NUMBER, CONSTRAINT CK CHECK (A > 0))",
+            "ALTER TABLE T MODIFY (A RAW(100))",
+            "ALTER TABLE T MODIFY (A VARCHAR2(50) COLLATE BINARY_CI)",
+            "ALTER TABLE T MODIFY (A NUMBER GENERATED ALWAYS AS IDENTITY)",
+        ):
+            with self.subTest(stmt=stmt):
+                self.assertIsNone(model(stmt, "UNKNOWN"))
+
+    def test_other_schema_modify_is_an_error(self) -> None:
+        with self.assertRaises(forms.FeatureDdlError):
+            model("ALTER TABLE OTHER.T MODIFY (A NUMBER)", "UNKNOWN")
+
+
+class ExpressionIndexTests(unittest.TestCase):
+    def test_function_based_and_expression_indexes(self) -> None:
+        ix1 = model("CREATE INDEX IX_T ON T (UPPER(NAME))", "UNKNOWN")
+        self.assertEqual("CREATE_INDEX", ix1["kind"])
+        self.assertEqual("IX_T", ix1["name"])
+        self.assertEqual("T", ix1["table"])
+        self.assertTrue(ix1["has_expressions"])
+        self.assertEqual(1, ix1["total_columns"])
+        self.assertEqual(1, ix1["expression_count"])
+        self.assertFalse(ix1["unique"])
+
+        ix2 = model("CREATE UNIQUE INDEX IX_U ON T (CASE WHEN A = 1 THEN B END, C)", "UNKNOWN")
+        self.assertEqual("CREATE_INDEX", ix2["kind"])
+        self.assertEqual("IX_U", ix2["name"])
+        self.assertTrue(ix2["has_expressions"])
+        self.assertTrue(ix2["unique"])
+        self.assertEqual(2, ix2["total_columns"])
+        self.assertEqual(1, ix2["expression_count"])
+
+        ix3 = model("CREATE BITMAP INDEX IX_B ON T (TRUNC(DT))", "UNKNOWN")
+        self.assertEqual("CREATE_INDEX", ix3["kind"])
+        self.assertTrue(ix3["bitmap"])
+        self.assertTrue(ix3["has_expressions"])
+
+    def test_unmodelled_index_forms_stay_refused(self) -> None:
+        with self.assertRaises(forms.FeatureDdlError):
+            model("CREATE INDEX OTHER.IX ON T (UPPER(A))", "UNKNOWN")
+        with self.assertRaises(forms.FeatureDdlError):
+            model("CREATE INDEX IX ON OTHER.T (UPPER(A))", "UNKNOWN")
+        self.assertIsNone(model("CREATE INDEX IX ON T (A) GLOBAL PARTITION BY RANGE (A)", "UNKNOWN"))
 
 
 if __name__ == "__main__":

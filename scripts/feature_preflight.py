@@ -124,10 +124,10 @@ def _ddl_operations(checkpoint: FeatureCheckpoint) -> tuple[dict, ...]:
 
 def _effect_record(operation: Mapping) -> dict:
     fields = (
-        "kind", "owner", "name", "object_type", "table", "columns", "dependencies", "replace",
+        "kind", "owner", "name", "object_type", "table", "columns", "column_specs", "dependencies", "replace",
         "unique", "bitmap", "target_owner", "target_name", "privileges", "grantees",
         "column", "comment", "constraint", "constraint_type", "ref_table", "ref_columns",
-        "delete_rule", "status", "validated", "condition",
+        "delete_rule", "status", "validated", "condition", "total_columns", "expression_count", "has_expressions",
     )
     return {field: operation[field] for field in fields if field in operation}
 
@@ -144,11 +144,19 @@ def _keys_for(checkpoint: FeatureCheckpoint, operations: Sequence[Mapping]) -> t
                 objects.add(ObjectKey(owner, name, "INDEX"))
             elif kind == "CREATE_SYNONYM":
                 objects.add(ObjectKey(str(operation.get("owner", owner)), name, "SYNONYM"))
-            elif kind == "ALTER_ADD_COLUMN":
+            elif kind in {"ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"}:
                 objects.add(ObjectKey(owner, str(operation.get("table", name)), "TABLE"))
             elif kind == "GRANT_OBJECT":
-                prerequisites.add(ObjectKey(owner, name, "TABLE"))
-                prerequisites.add(ObjectKey(owner, name, "VIEW"))
+                privileges = str(operation.get("privileges", "")).upper()
+                if "EXECUTE" in privileges:
+                    for obj_type in ("PACKAGE", "FUNCTION", "PROCEDURE"):
+                        prerequisites.add(ObjectKey(owner, name, obj_type))
+                if "SELECT" in privileges or "ALL" in privileges:
+                    for obj_type in ("TABLE", "VIEW", "SEQUENCE"):
+                        prerequisites.add(ObjectKey(owner, name, obj_type))
+                if any(p in privileges for p in ("INSERT", "UPDATE", "DELETE", "ALTER", "INDEX", "REFERENCES")):
+                    for obj_type in ("TABLE", "VIEW"):
+                        prerequisites.add(ObjectKey(owner, name, obj_type))
             elif kind == "COMMENT_ON":
                 prerequisites.add(ObjectKey(owner, name, "TABLE"))
                 prerequisites.add(ObjectKey(owner, name, "VIEW"))
@@ -506,6 +514,79 @@ def _comment_queries(
     return before, after
 
 
+def _modify_column_queries(
+    operation: Mapping,
+    index: int,
+    staged_tables: frozenset[str],
+    staged_columns: frozenset[tuple[str, str]],
+) -> tuple[list[QueryCheck], list[QueryCheck]]:
+    table = str(operation.get("table", operation.get("name", "")))
+    specs = operation.get("column_specs", ())
+    before: list[QueryCheck] = []
+    after: list[QueryCheck] = []
+    for ordinal, col in enumerate(specs, 1):
+        col_name = str(col.get("name", ""))
+        terms = []
+        if table not in staged_tables:
+            terms.append(
+                f"EXISTS (SELECT 1 FROM ALL_TABLES T WHERE T.OWNER = :target_schema AND T.TABLE_NAME = {_literal(table)})"
+            )
+        if (table, col_name) not in staged_columns:
+            terms.append(
+                f"EXISTS (SELECT 1 FROM ALL_TAB_COLUMNS C WHERE C.OWNER = :target_schema "
+                f"AND C.TABLE_NAME = {_literal(table)} AND C.COLUMN_NAME = {_literal(col_name)})"
+            )
+        if terms:
+            before.append(_query(
+                f"structural-before-{index:04d}-{ordinal:02d}",
+                f"SELECT CASE WHEN {' AND '.join(terms)} THEN 1 ELSE 0 END FROM DUAL",
+            ))
+
+        predicates = [
+            "C.OWNER = :target_schema",
+            f"C.TABLE_NAME = {_literal(table)}",
+            f"C.COLUMN_NAME = {_literal(col_name)}",
+        ]
+        data_type = col.get("data_type")
+        if data_type == "VARCHAR2":
+            predicates.append("C.DATA_TYPE = 'VARCHAR2'")
+            char_length = col.get("char_length")
+            if char_length is not None:
+                predicates.append(f"C.CHAR_LENGTH = {char_length}")
+            char_used = col.get("char_used")
+            if char_used is not None:
+                predicates.append(f"C.CHAR_USED = {_literal(char_used)}")
+        elif data_type == "NUMBER":
+            predicates.append("C.DATA_TYPE = 'NUMBER'")
+            precision = col.get("precision")
+            scale = col.get("scale")
+            if precision is not None:
+                predicates.append(f"C.DATA_PRECISION = {precision} AND C.DATA_SCALE = {scale}")
+            else:
+                predicates.append("C.DATA_PRECISION IS NULL AND C.DATA_SCALE IS NULL")
+        elif data_type == "DATE":
+            predicates.append("C.DATA_TYPE = 'DATE'")
+        elif data_type == "TIMESTAMP":
+            predicates.append("C.DATA_TYPE LIKE 'TIMESTAMP%'")
+            scale = col.get("scale")
+            if scale is not None:
+                predicates.append(f"C.DATA_SCALE = {scale}")
+        elif data_type == "CLOB":
+            predicates.append("C.DATA_TYPE = 'CLOB'")
+
+        nullable = col.get("nullable")
+        if nullable is False:
+            predicates.append("C.NULLABLE = 'N'")
+        elif nullable is True:
+            predicates.append("C.NULLABLE = 'Y'")
+
+        after.append(_query(
+            f"structural-after-{index:04d}-{ordinal:02d}",
+            f"SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_COLUMNS C WHERE {' AND '.join(predicates)}) THEN 1 ELSE 0 END FROM DUAL",
+        ))
+    return before, after
+
+
 def _dependent_check(index: int, reference_name: str) -> QueryCheck:
     return _query(
         f"structural-dependent-{index:04d}",
@@ -535,6 +616,11 @@ def _effect_queries(
         before_constraint, after_constraint = _add_constraint_queries(operation, index, staged_tables, staged_columns)
         after_constraint.append(_dependent_check(index, name))
         return before_constraint, after_constraint
+    if kind == "ALTER_MODIFY_COLUMN":
+        before_mod, after_mod = _modify_column_queries(operation, index, staged_tables, staged_columns)
+        table = str(operation.get("table", name))
+        after_mod.append(_dependent_check(index, table))
+        return before_mod, after_mod
     before: list[QueryCheck] = []
     after: list[QueryCheck] = []
     if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE"}:
@@ -574,22 +660,33 @@ def _effect_queries(
         table = str(operation.get("table", ""))
         columns = tuple(str(item) for item in operation.get("columns", ()))
         before.append(_index_before_check(f"structural-before-{index:04d}", name, table, columns, table_present=True))
-        column_list = ",".join(_literal(item) for item in columns) or "NULL"
         unique_condition = "UNIQUE" if operation.get("unique") is True else "NONUNIQUE"
-        ordered_columns = " AND ".join(
-            f"EXISTS (SELECT 1 FROM ALL_IND_COLUMNS C{position} WHERE C{position}.INDEX_OWNER = :target_schema "
-            f"AND C{position}.INDEX_NAME = {_literal(name)} AND C{position}.COLUMN_POSITION = {position} "
-            f"AND C{position}.COLUMN_NAME = {_literal(column)})"
-            for position, column in enumerate(columns, 1)
-        ) or "1 = 1"
-        query = (
-            "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_INDEXES I WHERE I.OWNER = :target_schema "
-            f"AND I.INDEX_NAME = {_literal(name)} AND I.TABLE_NAME = {_literal(table)} AND I.UNIQUENESS = {_literal(unique_condition)}) "
-            f"AND (SELECT COUNT(*) FROM ALL_IND_COLUMNS C WHERE C.INDEX_OWNER = :target_schema AND C.INDEX_NAME = {_literal(name)} "
-            f"AND C.COLUMN_NAME IN ({column_list})) = {len(columns)} "
-            f"AND (SELECT COUNT(*) FROM ALL_IND_COLUMNS C WHERE C.INDEX_OWNER = :target_schema AND C.INDEX_NAME = {_literal(name)}) = {len(columns)} "
-            f"AND ({ordered_columns}) THEN 1 ELSE 0 END FROM DUAL"
-        )
+        if operation.get("has_expressions") is True:
+            total_columns = int(operation.get("total_columns", len(columns)))
+            expr_count = int(operation.get("expression_count", 0))
+            query = (
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_INDEXES I WHERE I.OWNER = :target_schema "
+                f"AND I.INDEX_NAME = {_literal(name)} AND I.TABLE_NAME = {_literal(table)} AND I.UNIQUENESS = {_literal(unique_condition)}) "
+                f"AND (SELECT COUNT(*) FROM ALL_IND_COLUMNS C WHERE C.INDEX_OWNER = :target_schema AND C.INDEX_NAME = {_literal(name)}) = {total_columns} "
+                f"AND (SELECT COUNT(*) FROM ALL_IND_EXPRESSIONS E WHERE E.INDEX_OWNER = :target_schema AND E.INDEX_NAME = {_literal(name)}) = {expr_count} "
+                "THEN 1 ELSE 0 END FROM DUAL"
+            )
+        else:
+            column_list = ",".join(_literal(item) for item in columns) or "NULL"
+            ordered_columns = " AND ".join(
+                f"EXISTS (SELECT 1 FROM ALL_IND_COLUMNS C{position} WHERE C{position}.INDEX_OWNER = :target_schema "
+                f"AND C{position}.INDEX_NAME = {_literal(name)} AND C{position}.COLUMN_POSITION = {position} "
+                f"AND C{position}.COLUMN_NAME = {_literal(column)})"
+                for position, column in enumerate(columns, 1)
+            ) or "1 = 1"
+            query = (
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_INDEXES I WHERE I.OWNER = :target_schema "
+                f"AND I.INDEX_NAME = {_literal(name)} AND I.TABLE_NAME = {_literal(table)} AND I.UNIQUENESS = {_literal(unique_condition)}) "
+                f"AND (SELECT COUNT(*) FROM ALL_IND_COLUMNS C WHERE C.INDEX_OWNER = :target_schema AND C.INDEX_NAME = {_literal(name)} "
+                f"AND C.COLUMN_NAME IN ({column_list})) = {len(columns)} "
+                f"AND (SELECT COUNT(*) FROM ALL_IND_COLUMNS C WHERE C.INDEX_OWNER = :target_schema AND C.INDEX_NAME = {_literal(name)}) = {len(columns)} "
+                f"AND ({ordered_columns}) THEN 1 ELSE 0 END FROM DUAL"
+            )
         after.append(_query(f"structural-after-{index:04d}", query))
     elif kind == "ALTER_ADD_COLUMN":
         table = str(operation.get("table", name))
@@ -642,8 +739,8 @@ def _effect_queries(
             f"AND S.TABLE_NAME = {_literal(target_name)} AND S.DB_LINK IS NULL) THEN 1 ELSE 0 END FROM DUAL",
         ))
     # Every selected effect is followed by a narrow invalid-dependent assertion.
-    if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE", "CREATE_INDEX", "ALTER_ADD_COLUMN"}:
-        reference_name = str(operation.get("table", name)) if kind in {"CREATE_INDEX", "ALTER_ADD_COLUMN"} else name
+    if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE", "CREATE_INDEX", "ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"}:
+        reference_name = str(operation.get("table", name)) if kind in {"CREATE_INDEX", "ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"} else name
         after.append(_dependent_check(index, reference_name))
     return before, after
 
@@ -664,7 +761,7 @@ def _scope_with_dependents(
     owner = scope.owner
     affected = {str(operation.get("name", "")) for operation in operations if operation.get("name")}
     for operation in operations:
-        if operation.get("kind") in {"CREATE_INDEX", "ALTER_ADD_COLUMN"} and isinstance(operation.get("table"), str):
+        if operation.get("kind") in {"CREATE_INDEX", "ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"} and isinstance(operation.get("table"), str):
             affected.add(operation["table"])
     keys = set(scope.object_keys)
     for row in structural["feature-dependencies"]:
@@ -827,6 +924,15 @@ def prepare_checkpoint(
             if overlap:
                 raise StructuralPreflightError(f"column namespace is occupied on {table}: {', '.join(overlap)}{OCCUPIED_HINT}")
             available.update(additions)
+        elif kind == "ALTER_MODIFY_COLUMN":
+            table = str(operation.get("table", ""))
+            available = columns.get(table)
+            if available is None:
+                raise StructuralPreflightError(f"missing prerequisite table {table} for ALTER TABLE MODIFY")
+            targets = {str(item) for item in operation.get("columns", ())}
+            missing = sorted(targets - available)
+            if missing:
+                raise StructuralPreflightError(f"missing column(s) on {table} for ALTER TABLE MODIFY: {', '.join(missing)}")
         elif kind == "CREATE_VIEW":
             pass
         elif kind == "COMMENT_ON":
@@ -921,7 +1027,7 @@ def prepare_checkpoint(
 
     required_prior_names: set[str] = set()
     for operation in operations:
-        if operation.get("kind") in {"CREATE_INDEX", "ALTER_ADD_COLUMN"}:
+        if operation.get("kind") in {"CREATE_INDEX", "ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"}:
             value = operation.get("table")
             if isinstance(value, str):
                 required_prior_names.add(value)
