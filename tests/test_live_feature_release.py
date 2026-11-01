@@ -137,7 +137,6 @@ def _env_text() -> str:
         f"STAGING_EXPECTED_USER={','.join(schemas)}",
         f"PROD_SCHEMA={','.join(schemas)}", f"PROD_SQLCL_CONNECTION={','.join(connections)}",
         f"PROD_EXPECTED_USER={','.join(schemas)}",
-        "INSTALL_UC_APX=false", "UC_APX_SKILLS_AGENT=universal",
         "AGENT_STYLE=standard", "AGENT_STYLE_LEARNING=on",
     ]) + "\n"
 
