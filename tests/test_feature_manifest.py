@@ -137,6 +137,53 @@ class FeatureManifestTests(unittest.TestCase):
         with self.assertRaises(self.feature_manifest.FeatureManifestError):
             self.load(self.step([wrong_owner]))
 
+    def test_comments_synonyms_and_constraints_are_accepted_for_the_checkpoint_schema(self) -> None:
+        source = (
+            "CREATE TABLE APP_CODE.P (ID NUMBER);\n"
+            "CREATE TABLE APP_CODE.C (ID NUMBER, P_ID NUMBER, FLAG VARCHAR2(1));\n"
+            "ALTER TABLE APP_CODE.P ADD CONSTRAINT PK_P PRIMARY KEY (ID);\n"
+            "ALTER TABLE APP_CODE.C ADD CONSTRAINT FK_C_P FOREIGN KEY (P_ID) REFERENCES APP_CODE.P (ID);\n"
+            "ALTER TABLE APP_CODE.C ADD CONSTRAINT CK_C_FLAG CHECK (FLAG IN ('Y','N'));\n"
+            "ALTER TABLE APP_CODE.C ADD UNIQUE (ID, P_ID);\n"
+            "COMMENT ON TABLE APP_CODE.C IS 'children';\n"
+            "COMMENT ON COLUMN APP_CODE.C.FLAG IS 'Y or N';\n"
+            "CREATE PUBLIC SYNONYM C FOR APP_CODE.C;\n"
+            "CREATE OR REPLACE SYNONYM P_ALIAS FOR APP_CODE.P;\n"
+        )
+        checkpoint = self.load(self.step([self.add_feature("modelled", source)]))
+
+        self.assertEqual("ddl", checkpoint.inputs[0].category)
+        # An unnamed constraint and the comments report their table, which is already listed.
+        self.assertEqual(
+            (("APP_CODE", "P"), ("APP_CODE", "C"), ("APP_CODE", "PK_P"), ("APP_CODE", "FK_C_P"),
+             ("APP_CODE", "CK_C_FLAG"), ("PUBLIC", "C"), ("APP_CODE", "P_ALIAS")),
+            checkpoint.object_keys,
+        )
+
+    def test_modelled_forms_naming_another_schema_are_refused(self) -> None:
+        for index, source in enumerate((
+            "COMMENT ON TABLE OTHER.T IS 'x';\n",
+            "CREATE SYNONYM S FOR OTHER.T;\n",
+            "ALTER TABLE OTHER.T ADD CONSTRAINT PK PRIMARY KEY (ID);\n",
+            "ALTER TABLE APP_CODE.T ADD CONSTRAINT FK FOREIGN KEY (A) REFERENCES OTHER.P (X);\n",
+        )):
+            path = self.add_feature(f"cross-schema-{index}", source)
+            with self.subTest(source=source), self.assertRaises(self.feature_manifest.FeatureManifestError):
+                self.load(self.step([path]))
+
+    def test_destructive_and_stateful_ddl_stays_refused_even_beside_modelled_forms(self) -> None:
+        for index, statement in enumerate((
+            "DROP TABLE APP_CODE.T;",
+            "ALTER TABLE APP_CODE.T MODIFY (A NUMBER DEFAULT 1);",
+            "ALTER TABLE APP_CODE.T DROP CONSTRAINT PK;",
+            "ALTER TABLE APP_CODE.T ADD CONSTRAINT PK PRIMARY KEY (ID) USING INDEX IX;",
+            "ALTER TABLE APP_CODE.T ADD CHECK (A > 0);",
+            "DROP PUBLIC SYNONYM S;",
+        )):
+            path = self.add_feature(f"unmodelled-{index}", f"COMMENT ON TABLE APP_CODE.T IS 'x';\n{statement}\n")
+            with self.subTest(statement=statement), self.assertRaises(self.feature_manifest.FeatureManifestError):
+                self.load(self.step([path]))
+
     def test_missing_default_checks_refuse_the_selected_feature(self) -> None:
         path = self.add_feature("dispatch", "CREATE TABLE APP_CODE.DISPATCH (ID NUMBER);\n", check_document=False)
 

@@ -90,14 +90,18 @@ def _drop_if_present(kind: str, target: str, missing_codes: tuple[int, ...]) -> 
     )
 
 
+def _drop_synonym(name: str, *, public: bool = False) -> str:
+    return _drop_if_present("public synonym" if public else "synonym", name, (-1432,) if public else (-1434,))
+
+
 def _sweep_token(token: str) -> str:
     # Drops every package and table named with this run's token, on whichever database it runs against.
     return (
         "begin\n"
         "  for o in (select object_name, object_type from user_objects\n"
-        "            where object_type in ('PACKAGE', 'TABLE') and instr(object_name, '" + token + "') > 0) loop\n"
+        "            where object_type in ('PACKAGE', 'TABLE', 'SYNONYM', 'VIEW', 'SEQUENCE') and instr(object_name, '" + token + "') > 0) loop\n"
         "    execute immediate 'drop ' || o.object_type || ' ' || o.object_name\n"
-        "      || case when o.object_type = 'TABLE' then ' purge' end;\n"
+        "      || case when o.object_type = 'TABLE' then ' cascade constraints purge' end;\n"
         "  end loop;\n"
         "end;\n/"
     )
@@ -133,7 +137,6 @@ def _env_text() -> str:
         f"STAGING_EXPECTED_USER={','.join(schemas)}",
         f"PROD_SCHEMA={','.join(schemas)}", f"PROD_SQLCL_CONNECTION={','.join(connections)}",
         f"PROD_EXPECTED_USER={','.join(schemas)}",
-        "INSTALL_UC_APX=false", "UC_APX_SKILLS_AGENT=universal",
         "AGENT_STYLE=standard", "AGENT_STYLE_LEARNING=on",
     ]) + "\n"
 
@@ -394,6 +397,343 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing prerequisite table", result.stdout + result.stderr)
         self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{early}'", STAGING_DB), 0)
+
+    def _owns_public_synonym_privilege(self, connection: str) -> bool:
+        sql = "select count(*) from session_privs where privilege in ('CREATE PUBLIC SYNONYM', 'DROP PUBLIC SYNONYM')"
+        return self._count(sql, connection) == 2
+
+    def _expect_forms(self, connection: str, names: dict, public: bool) -> None:
+        """Read every modelled effect back from the catalog of one database."""
+        schema = SCHEMA
+        checks = {
+            "primary key on the new parent": f"select count(*) from user_constraints where table_name = '{names['parent']}' "
+                f"and constraint_name = 'PK_{names['parent']}' and constraint_type = 'P' and status = 'ENABLED' and validated = 'VALIDATED'",
+            "named unique key": f"select count(*) from user_constraints where constraint_name = 'UQ_{names['parent']}' "
+                "and constraint_type = 'U' and status = 'ENABLED'",
+            "named foreign key with its rule and parent": f"select count(*) from user_constraints f join user_constraints p "
+                f"on p.constraint_name = f.r_constraint_name where f.constraint_name = 'FK_{names['child']}' "
+                f"and f.delete_rule = 'CASCADE' and p.table_name = '{names['parent']}'",
+            "named check": f"select count(*) from user_constraints where constraint_name = 'CK_{names['child']}' "
+                "and constraint_type = 'C' and status = 'ENABLED'",
+            "unnamed unique key on two columns": f"select count(*) from (select c.constraint_name from user_constraints c "
+                f"join user_cons_columns k on k.constraint_name = c.constraint_name where c.table_name = '{names['child']}' "
+                "and c.constraint_type = 'U' and c.generated = 'GENERATED NAME' group by c.constraint_name having count(*) = 2)",
+            "primary key added to a table that already existed": f"select count(*) from user_constraints "
+                f"where table_name = '{names['existing']}' and constraint_type = 'P' and constraint_name = 'PK_{names['existing']}'",
+            "table comment with a quote": f"select count(*) from user_tab_comments where table_name = '{names['child']}' "
+                "and comments = 'children, it''s ok'",
+            "column comment": f"select count(*) from user_col_comments where table_name = '{names['child']}' "
+                "and column_name = 'FLAG' and comments = 'Y or N'",
+            "Arabic comment survives the hex check path": f"select count(*) from user_col_comments where table_name = '{names['existing']}' "
+                "and column_name = 'NOTE' and comments = unistr('\\0645\\0648\\0631\\062F')",
+            "private synonym": f"select count(*) from user_synonyms where synonym_name = '{names['alias']}' "
+                f"and table_name = '{names['child']}' and table_owner = '{schema}'",
+            "view with CTE": f"select count(*) from user_views where view_name = '{names['view']}'",
+            "altered column data type and not null": f"select count(*) from user_tab_columns where table_name = '{names['existing']}' "
+                "and column_name = 'CODE' and data_type = 'VARCHAR2' and char_length = 50 and nullable = 'N'",
+            "altered column widened without null change": f"select count(*) from user_tab_columns where table_name = '{names['existing']}' "
+                "and column_name = 'NOTE' and data_type = 'VARCHAR2' and char_length = 100",
+            "expression index with expression count": f"select count(*) from user_indexes i "
+                f"join user_ind_expressions e on e.index_name = i.index_name "
+                f"where i.index_name = '{names['expr_ix']}' and i.table_name = '{names['child']}' and i.uniqueness = 'UNIQUE'",
+            "unqualified sequence grant": f"select count(*) from user_tab_privs where table_name = '{names['seq']}' "
+                "and privilege = 'SELECT' and grantee = 'PUBLIC'",
+            "direct table grant": f"select count(*) from user_tab_privs where table_name = '{names['parent']}' "
+                "and privilege = 'SELECT' and grantee = 'PUBLIC'",
+        }
+        if public:
+            checks["public synonym"] = (
+                f"select count(*) from all_synonyms where owner = 'PUBLIC' and synonym_name = '{names['public']}' "
+                f"and table_name = '{names['child']}' and table_owner = '{schema}'"
+            )
+        for label, sql in checks.items():
+            with self.subTest(database=connection, effect=label):
+                self.assertEqual(self._count(sql, connection), 1, label)
+
+    def test_constraints_comments_and_synonyms_ship_through_a_complete_capsule(self) -> None:
+        slug = self._name("forms")
+        token = self.token
+        names = {
+            "parent": f"LIVE_{token}_FP", "child": f"LIVE_{token}_FC", "existing": f"LIVE_{token}_FE",
+            "alias": f"LIVE_{token}_FA", "public": f"LIVE_{token}_FPUB",
+            "view": f"LIVE_{token}_FV", "expr_ix": f"IX_{token}_FEX", "seq": f"LIVE_{token}_FSEQ",
+        }
+        public = self._owns_public_synonym_privilege(CONNECTION) and self._owns_public_synonym_privilege(STAGING_DB)
+        s = SCHEMA
+        # A table that exists on both databases before the release, which the release then alters.
+        self._sql_on_both(
+            f"create table {names['existing']} (id number not null, code varchar2(20), note varchar2(40));",
+            drops=(_drop_if_present("table", f"{names['existing']} cascade constraints purge", (-942,)),),
+        )
+        databases = [CONNECTION] if STAGING_DB == CONNECTION else [CONNECTION, STAGING_DB]
+        for connection in databases:
+            self._register_drops(
+                connection,
+                _drop_if_present("table", f"{names['parent']} cascade constraints purge", (-942,)),
+                _drop_if_present("table", f"{names['child']} cascade constraints purge", (-942,)),
+                _drop_if_present("view", names["view"], (-942,)),
+                _drop_if_present("sequence", names["seq"], (-2289,)),
+                _drop_synonym(names["alias"]),
+                *((_drop_synonym(names["public"], public=True),) if public else ()),
+            )
+        statements = [
+            f"CREATE TABLE {s}.{names['parent']} (ID NUMBER NOT NULL, CODE VARCHAR2(20) NOT NULL);",
+            f"CREATE TABLE {s}.{names['child']} (ID NUMBER NOT NULL, P_ID NUMBER, FLAG VARCHAR2(1), NOTE VARCHAR2(40));",
+            f"CREATE SEQUENCE {s}.{names['seq']};",
+            f"ALTER TABLE {s}.{names['parent']} ADD CONSTRAINT PK_{names['parent']} PRIMARY KEY (ID);",
+            f"ALTER TABLE {s}.{names['parent']} ADD CONSTRAINT UQ_{names['parent']} UNIQUE (CODE);",
+            f"ALTER TABLE {s}.{names['child']} ADD CONSTRAINT FK_{names['child']} FOREIGN KEY (P_ID) "
+            f"REFERENCES {s}.{names['parent']} (ID) ON DELETE CASCADE;",
+            f"ALTER TABLE {s}.{names['child']} ADD CONSTRAINT CK_{names['child']} CHECK (FLAG IN ('Y','N'));",
+            f"ALTER TABLE {s}.{names['child']} ADD UNIQUE (P_ID, NOTE);",
+            f"ALTER TABLE {s}.{names['existing']} ADD CONSTRAINT PK_{names['existing']} PRIMARY KEY (ID);",
+            f"ALTER TABLE {s}.{names['existing']} MODIFY (CODE VARCHAR2(50 BYTE) NOT NULL, NOTE VARCHAR2(100));",
+            f"CREATE UNIQUE INDEX {s}.{names['expr_ix']} ON {s}.{names['child']} (UPPER(NOTE), ID);",
+            f"CREATE VIEW {s}.{names['view']} AS WITH CTE AS (SELECT ID, CODE FROM {s}.{names['parent']}) SELECT ID, CODE FROM CTE;",
+            f"COMMENT ON TABLE {s}.{names['child']} IS 'children, it''s ok';",
+            f"COMMENT ON COLUMN {s}.{names['child']}.FLAG IS 'Y or N';",
+            f"COMMENT ON COLUMN {s}.{names['existing']}.NOTE IS '\u0645\u0648\u0631\u062f';",
+            f"CREATE SYNONYM {s}.{names['alias']} FOR {s}.{names['child']};",
+            f"GRANT SELECT ON {names['seq']} TO PUBLIC;",
+            f"GRANT SELECT ON {s}.{names['parent']} TO PUBLIC;",
+        ]
+        if public:
+            statements.append(f"CREATE PUBLIC SYNONYM {names['public']} FOR {s}.{names['child']};")
+        self._feature(slug)
+        (self.project / "features" / slug / SCHEMA / "ddl.sql").write_text("\n".join(statements) + "\n", encoding="utf-8")
+        self._checks(
+            slug,
+            "SELECT CASE WHEN (SELECT COUNT(*) FROM user_constraints WHERE constraint_name IN "
+            f"('PK_{names['parent']}', 'FK_{names['child']}', 'CK_{names['child']}')) = 3 THEN 1 ELSE 0 END FROM dual",
+        )
+        self._manifest([{"type": "feature-migrate", "schema": SCHEMA, "inputs": [f"features/{slug}/{SCHEMA}/ddl.sql"]}])
+        _commit(self.project, "live checks: modelled DDL forms")
+        capsule = self._freeze()
+
+        staging = self._staged(capsule)
+        budget = staging["objectBudget"]
+        self.assertTrue(budget["coverageComplete"], "every statement is inside the feature checkpoint")
+        self.assertEqual(budget["excludedObjectSteps"], [])
+        self._expect_forms(STAGING_DB, names, public)
+
+        result, _ = self._rollout("prod", capsule=capsule, prepare=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(production["status"], "success")
+        self._expect_forms(CONNECTION, names, public)
+
+    def test_occupied_constraint_name_and_missing_parent_are_refused_at_prepare_before_any_write(self) -> None:
+        token = self.token
+        table, created = f"LIVE_{token}_OZ", f"LIVE_{token}_NEW"
+        self._sql_on_both(
+            f"create table {table} (id number not null, flag varchar2(1));\n"
+            f"alter table {table} add constraint CK_{table} check (flag in ('Y','N'));",
+            drops=(_drop_if_present("table", f"{table} cascade constraints purge", (-942,)),),
+        )
+        for label, extra, expected in (
+            ("occupied name", f"ALTER TABLE {SCHEMA}.{table} ADD CONSTRAINT CK_{table} CHECK (ID > 0);", f"CK_{table}"),
+            ("missing parent",
+             f"ALTER TABLE {SCHEMA}.{table} ADD CONSTRAINT FK_{table} FOREIGN KEY (ID) REFERENCES {SCHEMA}.LIVE_{token}_GONE (ID);",
+             "LIVE_" + token + "_GONE"),
+        ):
+            with self.subTest(case=label):
+                slug = self._name("refuse")
+                self._feature(slug)
+                (self.project / "features" / slug / SCHEMA / "ddl.sql").write_text(
+                    f"CREATE TABLE {SCHEMA}.{created}_{label[:3].upper()} (ID NUMBER);\n{extra}\n", encoding="utf-8",
+                )
+                self._checks(slug, f"SELECT CASE WHEN EXISTS (SELECT 1 FROM user_tables WHERE table_name = '{created}') THEN 1 ELSE 0 END FROM dual")
+                self._manifest([{"type": "feature-migrate", "schema": SCHEMA, "inputs": [f"features/{slug}/{SCHEMA}/ddl.sql"]}])
+                _commit(self.project, f"live checks: refusal {label}")
+                capsule = self._freeze()
+                result, _ = self._rollout("staging", capsule=capsule, prepare=True)
+                self.assertNotEqual(result.returncode, 0, label)
+                self.assertIn(expected, result.stdout + result.stderr)
+                self.assertEqual(
+                    self._count(f"select count(*) from user_tables where table_name like '{created}%'", STAGING_DB), 0,
+                    "prepare refused before any write",
+                )
+
+    def _generated(self, ddl: str, tables, columns, **kwargs):
+        """The generated before/after checks for DDL against a synthetic catalog of the named tables."""
+        import test_feature_preflight as fixtures  # noqa: PLC0415 - tests/ is on sys.path under discover
+        from scripts import feature_preflight  # noqa: PLC0415
+        state = fixtures._state(tables=tables, columns=columns, **kwargs)
+        plan = feature_preflight.prepare_checkpoint(fixtures._checkpoint(ddl), state, ())
+        return plan.preconditions, plan.postconditions
+
+    def _value(self, check) -> int:
+        return self._count(check.sql.replace(":target_schema", f"'{SCHEMA}'"))
+
+    def test_generated_constraint_and_comment_checks_tell_a_match_from_a_mismatch(self) -> None:
+        token = self.token
+        n = lambda tag: f"LIVE_{token}_{tag}"  # noqa: E731
+        parent, other, child = n("DP"), n("DO"), n("DC")
+        for table in (child, other, parent):
+            self._register_drops(CONNECTION, _drop_if_present("table", f"{table} cascade constraints purge", (-942,)))
+        self._register_drops(CONNECTION,
+            _drop_if_present("view", n("DV_CTE"), (-942,)),
+            _drop_if_present("sequence", n("DSEQ"), (-2289,)),
+        )
+        self._sql(CONNECTION, f"""
+            create table {parent} (id number not null, constraint {n('DPPK')} primary key (id));
+            create table {other} (id number not null, constraint {n('DOPK')} primary key (id));
+            create table {child} (id number, p_id number, a number, b number, flag varchar2(1), note varchar2(20));
+            alter table {child} add constraint {n('DFK_NOACT')} foreign key (p_id) references {parent} (id);
+            alter table {child} add constraint {n('DUQ_AB')} unique (a, b);
+            alter table {child} add constraint {n('DCK_OFF')} check (flag in ('Y','N')) disable;
+            alter table {child} add constraint {n('DCK_NOVAL')} check (id > 0) enable novalidate;
+            comment on column {child}.note is 'exact text';
+            alter table {child} modify (flag varchar2(10));
+            create index {n('DIX_EXPR')} on {child} (upper(note));
+            create view {n('DV_CTE')} as with cte as (select id from {parent}) select id from cte;
+            create sequence {n('DSEQ')};
+            grant select on {n('DSEQ')} to public;
+        """)
+        columns = ((child, "ID"), (child, "P_ID"), (child, "A"), (child, "B"), (child, "FLAG"), (child, "NOTE"),
+                   (parent, "ID"), (other, "ID"))
+        tables = (child, parent, other)
+        sequences = (n("DSEQ"),)
+        alter = f"ALTER TABLE APP_CODE.{child} ADD CONSTRAINT"
+        # (what the DDL claims, what the database must answer to the generated after-check)
+        after_cases = [
+            ("foreign key: same rule and parent", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (P_ID) REFERENCES APP_CODE.{parent} (ID);", 1),
+            ("foreign key: rule differs", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (P_ID) REFERENCES APP_CODE.{parent} (ID) ON DELETE CASCADE;", 0),
+            ("foreign key: parent differs", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (P_ID) REFERENCES APP_CODE.{other} (ID);", 0),
+            ("foreign key: column differs", f"{alter} {n('DFK_NOACT')} FOREIGN KEY (ID) REFERENCES APP_CODE.{parent} (ID);", 0),
+            ("unique: same ordered columns", f"{alter} {n('DUQ_AB')} UNIQUE (A, B);", 1),
+            ("unique: column order differs", f"{alter} {n('DUQ_AB')} UNIQUE (B, A);", 0),
+            ("unique: fewer columns", f"{alter} {n('DUQ_AB')} UNIQUE (A);", 0),
+            ("type differs (name is a unique key)", f"{alter} {n('DUQ_AB')} PRIMARY KEY (A, B);", 0),
+            ("disabled check claimed disabled", f"{alter} {n('DCK_OFF')} CHECK (FLAG IN ('Y','N')) DISABLE;", 1),
+            ("disabled check claimed enabled", f"{alter} {n('DCK_OFF')} CHECK (FLAG IN ('Y','N'));", 0),
+            ("novalidate claimed novalidate", f"{alter} {n('DCK_NOVAL')} CHECK (ID > 0) ENABLE NOVALIDATE;", 1),
+            ("novalidate claimed validated", f"{alter} {n('DCK_NOVAL')} CHECK (ID > 0);", 0),
+            ("absent constraint", f"{alter} {n('DNOPE')} CHECK (ID > 0);", 0),
+            ("comment: same text", f"COMMENT ON COLUMN APP_CODE.{child}.NOTE IS 'exact text';", 1),
+            ("comment: text differs", f"COMMENT ON COLUMN APP_CODE.{child}.NOTE IS 'exact tex';", 0),
+            ("comment: clearing claimed on a commented column", f"COMMENT ON COLUMN APP_CODE.{child}.NOTE IS '';", 0),
+            ("comment: clearing claimed on an uncommented column", f"COMMENT ON COLUMN APP_CODE.{child}.FLAG IS '';", 1),
+            ("table comment absent", f"COMMENT ON TABLE APP_CODE.{child} IS 'x';", 0),
+            ("modify column: same type, length, nullability", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(10));", 1),
+            ("modify column: length differs", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(20));", 0),
+            ("modify column: nullability differs", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(10) NOT NULL);", 0),
+            ("expression index: same expression and uniqueness", f"CREATE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE));", 1),
+            ("expression index: uniqueness differs", f"CREATE UNIQUE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE));", 0),
+            ("expression index: column count differs", f"CREATE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE), ID);", 0),
+            ("view with CTE: view exists and valid", f"CREATE VIEW APP_CODE.{n('DV_CTE')} AS WITH CTE AS (SELECT ID FROM APP_CODE.{parent}) SELECT ID FROM CTE;", 1),
+            ("view with CTE: absent view", f"CREATE VIEW APP_CODE.{n('DNO_VIEW')} AS WITH CTE AS (SELECT ID FROM APP_CODE.{parent}) SELECT ID FROM CTE;", 0),
+            ("grant sequence: match", f"GRANT SELECT ON APP_CODE.{n('DSEQ')} TO PUBLIC;", 1),
+            ("grant sequence: privilege differs", f"GRANT ALTER ON APP_CODE.{n('DSEQ')} TO PUBLIC;", 0),
+            ("grant sequence: grantee differs", f"GRANT SELECT ON APP_CODE.{n('DSEQ')} TO APP_CODE;", 0),
+        ]
+        for label, ddl, expected in after_cases:
+            with self.subTest(after=label):
+                _, post = self._generated(ddl, tables, columns, sequences=sequences)
+                self.assertEqual(self._value(post[0]), expected, label)
+        # The before-state check must refuse an occupied name or an existing identical key.
+        before_cases = [
+            ("free constraint name", f"{alter} {n('DFRESH')} CHECK (ID > 0);", 1),
+            ("occupied constraint name", f"{alter} {n('DCK_OFF')} CHECK (ID > 5);", 0),
+            ("unnamed unique repeats an existing key", f"ALTER TABLE APP_CODE.{child} ADD UNIQUE (A, B);", 0),
+            ("unnamed unique on a new column set", f"ALTER TABLE APP_CODE.{child} ADD UNIQUE (A, FLAG);", 1),
+            ("primary key on a keyless table", f"ALTER TABLE APP_CODE.{child} ADD CONSTRAINT {n('DNEWPK')} PRIMARY KEY (ID);", 1),
+            ("primary key on a table that has one", f"ALTER TABLE APP_CODE.{parent} ADD CONSTRAINT {n('DPK2')} PRIMARY KEY (ID);", 0),
+            ("comment on a missing column", f"COMMENT ON COLUMN APP_CODE.{child}.NOSUCH IS 'x';", None),
+            ("modify: existing table and column", f"ALTER TABLE APP_CODE.{child} MODIFY (FLAG VARCHAR2(10));", 1),
+            ("expression index: free index name", f"CREATE INDEX APP_CODE.{n('DFRESH_IX')} ON APP_CODE.{child} (UPPER(NOTE));", 1),
+            ("expression index: occupied index name", f"CREATE INDEX APP_CODE.{n('DIX_EXPR')} ON APP_CODE.{child} (UPPER(NOTE));", 0),
+            ("view: dependencies available", f"CREATE VIEW APP_CODE.{n('DFRESH_V')} AS WITH CTE AS (SELECT ID FROM APP_CODE.{parent}) SELECT ID FROM CTE;", 1),
+        ]
+        for label, ddl, expected in before_cases:
+            with self.subTest(before=label):
+                if expected is None:
+                    with self.assertRaises(Exception):  # noqa: B017 - the static plan refuses it first
+                        self._generated(ddl, tables, columns, sequences=sequences)
+                    continue
+                pre, _ = self._generated(ddl, tables, columns, sequences=sequences)
+                self.assertEqual(self._value(pre[0]), expected, label)
+
+    def test_view_dependencies_match_what_oracle_records(self) -> None:
+        """For many view shapes the extracted dependency set equals ALL_DEPENDENCIES, so no table is missed."""
+        from scripts import feature_ddl_forms as forms  # noqa: PLC0415
+
+        token, SCHEMA_NAME = self.token, SCHEMA
+        T = lambda name: f"LVT{token}_{name}"  # noqa: E731
+        adv = [
+         ("plain join", f"SELECT a.id FROM {T('A')} a JOIN {T('B')} b ON b.id=a.id"),
+         ("comma join 3", f"SELECT 1 x FROM {T('A')} a, {T('B')} b, {T('C')} c WHERE a.id=b.id"),
+         ("cte chain", f"WITH x AS (SELECT id FROM {T('A')}), y AS (SELECT x.id FROM x JOIN {T('B')} b ON b.id=x.id) SELECT id FROM y"),
+         ("cte shadows a real name", f"WITH {T('A')} AS (SELECT 1 id FROM {T('B')}) SELECT id FROM {T('A')}"),
+         ("inline view", f"SELECT v.id i1, b.id i2 FROM (SELECT id FROM {T('A')}) v JOIN {T('B')} b ON b.id=v.id"),
+         ("scalar subquery depth1", f"SELECT (SELECT MAX(id) FROM {T('B')}) m FROM {T('A')}"),
+         ("scalar subquery in NVL", f"SELECT NVL((SELECT MAX(id) FROM {T('B')}),0) m FROM {T('A')}"),
+         ("subquery depth 3 in functions", f"SELECT NVL(UPPER(TRIM((SELECT MAX(name) FROM {T('B')}))),'a') m FROM {T('A')}"),
+         ("subquery depth 4", f"SELECT COALESCE(LOWER(UPPER(SUBSTR((SELECT MAX(name) FROM {T('B')}),1,3))),'a') m FROM {T('A')}"),
+         ("subquery in CASE in function", f"SELECT NVL(CASE WHEN EXISTS (SELECT 1 FROM {T('B')}) THEN 1 END,0) m FROM {T('A')}"),
+         ("exists", f"SELECT id FROM {T('A')} a WHERE EXISTS (SELECT 1 FROM {T('B')} b WHERE b.id=a.id)"),
+         ("not in nested", f"SELECT id FROM {T('A')} WHERE id NOT IN (SELECT id FROM {T('B')} WHERE id IN (SELECT id FROM {T('C')}))"),
+         ("parenthesised join", f"SELECT a.id i1, b.id i2 FROM ({T('A')} a JOIN {T('B')} b ON a.id=b.id)"),
+         ("parenthesised join + more", f"SELECT a.id i1, b.id i2 FROM ({T('A')} a JOIN {T('B')} b ON a.id=b.id) JOIN {T('C')} c ON c.id=a.id"),
+         ("extract from", f"SELECT EXTRACT(YEAR FROM d) y FROM {T('A')}"),
+         ("trim from", f"SELECT TRIM(BOTH ' ' FROM name) n FROM {T('A')}"),
+         ("union all", f"SELECT id FROM {T('A')} UNION ALL SELECT id FROM {T('B')} UNION SELECT id FROM {T('C')}"),
+         ("union in parens", f"SELECT id FROM ((SELECT id FROM {T('A')}) UNION ALL (SELECT id FROM {T('B')}))"),
+         ("left join using", f"SELECT id, a.name n1, b.name n2 FROM {T('A')} a LEFT JOIN {T('B')} b USING (id)"),
+         ("cross join", f"SELECT a.id i1, b.id i2 FROM {T('A')} a CROSS JOIN {T('B')} b"),
+         ("analytic", f"SELECT id, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) rn FROM {T('A')}"),
+         ("subquery in ON", f"SELECT a.id i1, b.id i2 FROM {T('A')} a JOIN {T('B')} b ON b.id=a.id AND b.k IN (SELECT k FROM {T('C')})"),
+         ("subquery in select of cte", f"WITH x AS (SELECT (SELECT MAX(id) FROM {T('B')}) m FROM {T('A')}) SELECT m FROM x"),
+         ("having subquery", f"SELECT g, COUNT(*) c FROM {T('A')} GROUP BY g HAVING COUNT(*) > (SELECT COUNT(*) FROM {T('B')})"),
+         ("order by subquery", f"SELECT id FROM {T('A')} a ORDER BY (SELECT MAX(id) FROM {T('B')})"),
+         ("comma join with inline view", f"SELECT a.id i1, b.id i2 FROM {T('A')} a, (SELECT id FROM {T('B')}) b WHERE a.id=b.id"),
+         ("comma join after JOIN", f"SELECT a.id i1, b.id i2 FROM {T('A')} a JOIN {T('B')} b ON a.id=b.id, {T('C')} c"),
+         ("table alias with AS", f"SELECT x.id FROM {T('A')} x"),
+         ("schema qualified", f"SELECT a.id i1, b.id i2 FROM {SCHEMA_NAME}.{T('A')} a, {SCHEMA_NAME}.{T('B')} b"),
+         ("only dual", "SELECT 1 x FROM dual"),
+         ("subquery from dual + table", f"SELECT (SELECT 1 FROM dual) x, id FROM {T('A')}"),
+         ("keep: WITH inside subquery", f"SELECT q.id i1, b.id i2 FROM (WITH z AS (SELECT id FROM {T('A')}) SELECT id FROM z) q JOIN {T('B')} b ON b.id=q.id"),
+         ("paren join first table only", f"SELECT a.id FROM ({T('A')} a)"),
+         ("select depth 5", f"SELECT NVL(UPPER(TRIM(LOWER(SUBSTR((SELECT MAX(name) FROM {T('B')}),1,3)))),'a') m FROM {T('A')}"),
+         ("select inside case inside function inside function", f"SELECT NVL(TO_CHAR(CASE WHEN id > 0 THEN (SELECT MAX(id) FROM {T('B')}) END),'0') m FROM {T('A')}"),
+         ("in-list of function with subquery", f"SELECT id FROM {T('A')} WHERE id IN (NVL((SELECT MAX(id) FROM {T('B')}),0), 1)"),
+         ("nested parens select", f"SELECT * FROM {T('A')} WHERE id = ((SELECT MAX(id) FROM {T('B')}))"),
+         ("listagg within group", f"SELECT LISTAGG(name, ',') WITHIN GROUP (ORDER BY id) l FROM {T('A')}"),
+         ("scalar subq in function arg depth 2 wrapper", f"SELECT TO_CHAR(NVL((SELECT MAX(id) FROM {T('B')}),0)) t FROM {T('A')}"),
+         ("subquery in IN list expression", f"SELECT id FROM {T('A')} WHERE (id, g) IN (SELECT id, g FROM {T('B')})"),
+         ("decode with subquery", f"SELECT DECODE(g,1,(SELECT MAX(id) FROM {T('B')}),2,(SELECT MIN(id) FROM {T('C')}),0) d FROM {T('A')}"),
+        ]
+        tables = [T(name) for name in "ABC"]
+        views = [f"LVV{token}_{number}" for number in range(len(adv))]
+        for table in tables:
+            self._register_drops(CONNECTION, _drop_table(table))
+        for view in views:
+            self._register_drops(CONNECTION, _drop_if_present("view", view, (-942,)))
+        script = [f"create table {table} (id number, name varchar2(30), g number, d date, k number);" for table in tables]
+        script += [f"create or replace view {view} as {query};" for view, (_, query) in zip(views, adv, strict=True)]
+        self._sql(CONNECTION, "\n".join(script))
+        output = self._sql(
+            CONNECTION,
+            "set heading off feedback off pagesize 0 linesize 400\n"
+            f"select 'DEP|' || name || '|' || referenced_name from user_dependencies where name like 'LVV{token}%' "
+            "and referenced_type in ('TABLE', 'VIEW', 'SYNONYM');\n"
+            f"select 'OK|' || object_name from user_objects where object_name like 'LVV{token}%' and status = 'VALID';\n",
+        )
+        truth: dict[str, set[str]] = {}
+        valid: set[str] = set()
+        for line in output.splitlines():
+            parts = line.strip().split("|")
+            if parts[0] == "DEP" and len(parts) == 3 and parts[2] != "DUAL":
+                truth.setdefault(parts[1], set()).add(parts[2])
+            elif parts[0] == "OK":
+                valid.add(parts[1])
+        for view, (label, query) in zip(views, adv, strict=True):
+            with self.subTest(shape=label):
+                self.assertIn(view, valid, f"Oracle did not accept the shape: {label}")
+                modelled = forms._view(f"CREATE OR REPLACE VIEW X AS {query}", SCHEMA)
+                self.assertIsNotNone(modelled, f"a shape Oracle accepts was refused: {label}")
+                self.assertEqual(truth.get(view, set()), {name.upper() for _, name in modelled["dependencies"]}, label)
 
     def test_abrupt_termination_mid_apply_is_recovered_after_reconciliation(self) -> None:
         slug = self._name("kill")
