@@ -57,6 +57,12 @@ STEP_SUFFIX = {
 NAME_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 
 
+FEATURE_NOTE = (
+    "note: package source can also be captured as a feature release (scripts/team.sh feature capture), "
+    "but feature files have no DEV apply path yet; see docs/feature-releases.md"
+)
+
+
 class NewMigrationError(ValueError):
     """The migration cannot be started; nothing was written."""
 
@@ -236,6 +242,8 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
     for step in sorted(folder.glob("*.sql")):
         print(f"  {step.name}")
     print(f"Edit the steps, then: scripts/team.sh check-conflicts {relative} --env dev")
+    if any(parse_source(value)[0] in {"PACKAGE", "PACKAGE BODY"} for value in args.source):
+        print(FEATURE_NOTE, file=sys.stderr)
     return 0
 
 

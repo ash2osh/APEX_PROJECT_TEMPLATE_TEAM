@@ -5,6 +5,22 @@ package sources, compact Git diffs, and one frozen payload for staging and
 production. Existing dated migrations and schema-version 1 rollout manifests
 keep their current behavior.
 
+## Scope and revisit criteria
+
+Feature releases do not replace dated migrations yet. Today:
+
+- `feature capture --package` reads a package specification and body only. Views
+  go in the feature's `ddl.sql`. Triggers, procedures, functions and types stay
+  in dated migrations started with `scripts/team.sh new-migration --source`.
+- Feature files have no DEV apply path. `feature capture --env dev` reads DEV into
+  the repository and writes nothing to DEV. `rollout` refuses `--env dev` for a
+  feature capsule and runs only `--env staging` or `--env prod`.
+
+Revisit whether dated migrations can be retired for object work only when all of
+these hold: one feature release has moved through DEV, then staging, then
+production under a frozen capsule; a DEV apply path for feature files is
+documented; and the data-step rule for features is settled.
+
 ## Create and review feature source
 
 `feature init` is offline. It creates a shared README when one is absent and a
