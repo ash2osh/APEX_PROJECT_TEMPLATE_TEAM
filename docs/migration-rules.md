@@ -325,6 +325,28 @@ target identity cannot be verified. A SQL or identity error takes precedence
 over false results and returns 2.
 
 
+## Choosing a path
+
+Use a dated migration for seed rows, data fixes, and small one-off DDL or DML.
+Use a [feature release](feature-releases.md) for new object work that benefits
+from complete package sources and one frozen payload for staging and production.
+
+| Change | Path |
+|---|---|
+| Package specification or body | Feature, one mutable file per unit |
+| View | Feature, `CREATE OR REPLACE VIEW` in the feature's `ddl.sql` |
+| Trigger, procedure, function or type | Dated migration, started with `new-migration --source` |
+| DDL that belongs to a feature release | The feature's `ddl.sql` |
+| Seed rows, data fixes, small one-off DDL or DML | Dated migration |
+| Anything that must reach staging and production as one payload | Feature release |
+
+Feature capture reads only packages and package bodies, so triggers, procedures,
+functions and types stay in dated migrations until feature capture supports them.
+Feature files have no supported DEV apply path: `feature capture` only reads DEV,
+and `rollout` accepts only staging or production for a feature capsule. Check the
+current state of both in [feature releases](feature-releases.md) before choosing
+a path for a change that must be tested on DEV first.
+
 ## Starting a code migration from DEV
 
 A package, procedure, function, trigger or type change starts from the source that is

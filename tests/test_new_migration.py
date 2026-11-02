@@ -158,6 +158,17 @@ class NewMigrationTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("new-migration error: not found in APP on DEV: PACKAGE PKG", err.getvalue())
 
+    def test_package_source_points_to_the_feature_path_and_trigger_source_does_not(self):
+        units = {("PACKAGE BODY", "PKG"): BODY, ("PACKAGE", "PKG"): SPEC, ("TRIGGER", "TRG"): ["trigger trg\n", "end;"]}
+        for name, source, noted in (("pkg-note", "PACKAGE:PKG", True), ("trg-note", "TRIGGER:TRG", False)):
+            with self.subTest(source=source):
+                err = io.StringIO()
+                with patch.object(new_migration, "_capture", self.capture(units)), \
+                        contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    code = new_migration.main([name, "--source", source, "--env", "dev"], environ=ENV, repo_root=self.root)
+                self.assertEqual(code, 0)
+                self.assertEqual(new_migration.FEATURE_NOTE in err.getvalue(), noted, err.getvalue())
+
     def test_step_header_is_schema_qualified_only_when_the_first_line_names_the_object(self):
         self.assertEqual(new_migration.step_sql("APP", "PACKAGE BODY", "PKG", ['PACKAGE BODY "PKG" IS\n', "end;"]).splitlines()[0],
                          'CREATE OR REPLACE PACKAGE BODY "APP"."PKG" IS')
