@@ -16,7 +16,7 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-from . import baseline, new_migration
+from . import baseline, feature_claims, feature_compare, new_migration
 from .path_utils import relative_to_root
 
 
@@ -290,6 +290,85 @@ def _capture_sources(
     return tuple(records)
 
 
+def _unit_keys(schema: str, name: str) -> tuple[tuple[str, str, str], ...]:
+    return ((schema, "PACKAGE", name), (schema, "PACKAGE BODY", name))
+
+
+def _preview(lines: Sequence[str], limit: int = 10) -> str:
+    shown = "\n".join(f"    {line[:160]}" for line in lines[:limit])
+    more = f"\n    ... and {len(lines) - limit} more" if len(lines) > limit else ""
+    return shown + more
+
+
+def _unapplied_refusal(
+    action: str, label: str, comparison: feature_compare.Comparison, accepted: Mapping | None,
+) -> FeatureSourcesError:
+    decision = f"\n  an accepted difference is recorded for it: {accepted['decision']}" if accepted else ""
+    return FeatureSourcesError(
+        f"{action} refused: {label} has {len(comparison.only_feature)} line(s) that DEV does not have "
+        f"and the DEV capture would erase them:\n{_preview(comparison.only_feature)}{decision}\n"
+        "Apply them to DEV and repeat, pass --discard-unapplied to erase them knowingly, "
+        "or (with --move-from) pass --keep-file to move the file unchanged."
+    )
+
+
+def _check_names_unit(sql: str, units: set[tuple[str, str]]) -> bool:
+    return any(pair in units for pair in feature_claims.checked_objects(sql))
+
+
+def _json_bytes(document: object) -> bytes:
+    return (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _checks_without_units(
+    root: Path, feature: str, schema: str, units: set[tuple[str, str]],
+) -> tuple[bytes | None, list[str]]:
+    """New bytes of a feature's checks.json without the checks that name the moved units, and the removed ids."""
+    path = root / "features" / feature / schema / "checks.json"
+    raw = _ordinary_file(path, root)
+    if raw is None:
+        return None, []
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        return None, []
+    if not isinstance(document, dict):
+        return None, []
+    removed: list[str] = []
+    for section in ("preconditions", "postconditions"):
+        kept = []
+        for check in document.get(section, []):
+            if isinstance(check, dict) and isinstance(check.get("sql"), str) and _check_names_unit(check["sql"], units):
+                removed.append(str(check.get("id")))
+            else:
+                kept.append(check)
+        if section in document:
+            document[section] = kept
+    return (_json_bytes(document), removed) if removed else (None, [])
+
+
+def _accepted_list(root: Path, feature: str) -> tuple[Path, list]:
+    path = root / "features" / feature / "accepted-differences.json"
+    raw = _ordinary_file(path, root)
+    if raw is None:
+        return path, []
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as error:
+        raise FeatureSourcesError(f"accepted differences of {feature} are unreadable: {error}") from error
+    if not isinstance(document, list):
+        raise FeatureSourcesError(f"accepted differences of {feature} must be a list")
+    return path, document
+
+
+def _accepted_entry(root: Path, feature: str, key: tuple[str, str, str]) -> Mapping | None:
+    _path, entries = _accepted_list(root, feature)
+    for entry in entries:
+        if isinstance(entry, dict) and (entry.get("schema"), entry.get("type"), entry.get("name")) == key:
+            return entry
+    return None
+
+
 def capture_package(
     repo_root: Path,
     feature: str,
@@ -298,8 +377,17 @@ def capture_package(
     *,
     environ: Mapping[str, str],
     refresh: bool = False,
+    move_from: str | None = None,
+    discard_unapplied: bool = False,
+    keep_file: bool = False,
+    report: list[str] | None = None,
 ) -> tuple[Path, ...]:
-    """Capture the complete DEV package spec/body into stable feature source files."""
+    """Capture the complete DEV package spec/body into stable feature source files.
+
+    A package another feature holds is refused unless `move_from` names that feature. A move or a refresh first
+    compares the file it replaces with DEV and stops when the file has lines DEV lacks, unless `discard_unapplied`.
+    `keep_file` moves the old bytes unchanged instead of capturing from DEV.
+    """
     requested_root = Path(repo_root)
     if requested_root.is_symlink():
         raise FeatureSourcesError("repository root cannot be a symlink")
@@ -309,16 +397,69 @@ def capture_package(
         raise FeatureSourcesError(f"repository root is unavailable: {error}") from error
     feature_dir, scratch_dir = _feature_scope(root, feature, schema)
     name = _package_name(package)
-    if type(refresh) is not bool:
-        raise FeatureSourcesError("refresh must be a boolean")
+    if type(refresh) is not bool or type(discard_unapplied) is not bool or type(keep_file) is not bool:
+        raise FeatureSourcesError("refresh, discard_unapplied and keep_file must be booleans")
     if not isinstance(environ, Mapping):
         raise FeatureSourcesError("environment values must be a mapping")
+    if move_from is not None:
+        if not isinstance(move_from, str) or FEATURE_RE.fullmatch(move_from) is None:
+            raise FeatureSourcesError("move-from must be a lowercase hyphenated feature slug")
+        if move_from == feature:
+            raise FeatureSourcesError("move-from names the feature that receives the package")
+    if keep_file and move_from is None:
+        raise FeatureSourcesError("keep-file only applies to a move: pass --move-from")
+    messages = report if report is not None else []
+
+    # Ownership: a package another feature holds is not captured a second time.
+    claims, _notes = feature_claims.collect_claims(root)
+    keys = _unit_keys(schema, name)
+    other_claims = [claim for claim in claims if claim.key in keys and claim.feature != feature]
+    other_holders = sorted({claim.feature for claim in other_claims})
+    if other_holders and move_from is None:
+        raise FeatureSourcesError(
+            f"package {name} is held by feature {', '.join(other_holders)}; "
+            f"to take it over run the capture with --move-from {other_holders[0]}, or leave it there"
+        )
+    if move_from is not None:
+        if move_from not in other_holders:
+            raise FeatureSourcesError(f"feature {move_from} does not hold package {name} in {schema}")
+        if set(other_holders) - {move_from}:
+            raise FeatureSourcesError(
+                f"package {name} is also held by feature {', '.join(sorted(set(other_holders) - {move_from}))}; keep one owner first"
+            )
+    old_files = {claim.kind: root / PurePosixPath(claim.path) for claim in other_claims if claim.feature == move_from}
+
     _ensure_directory(scratch_dir, root)
     metadata_path = _capture_metadata_path(scratch_dir, name)
     old_metadata = _strict_capture_metadata(metadata_path, root)
     if old_metadata is not None:
         if (old_metadata["feature"], old_metadata["schema"], old_metadata["package"]) != (feature, schema, name):
             raise FeatureSourcesError("feature capture metadata scope does not match this package")
+
+    outputs: dict[Path, bytes] = {}
+    deletes: list[Path] = []
+
+    if keep_file:
+        # Move the old bytes unchanged; nothing is read from DEV.
+        source_paths = []
+        for object_type in ("PACKAGE", "PACKAGE BODY"):
+            old_path = old_files.get(object_type)
+            if old_path is None:
+                continue
+            raw = _ordinary_file(old_path, root)
+            if raw is None:
+                raise FeatureSourcesError(f"feature file to move is unreadable: {relative_to_root(old_path, root).as_posix()}")
+            target = _package_source_path(feature_dir, name, object_type)
+            if _ordinary_file(target, root) is not None:
+                raise FeatureSourcesError(f"feature already has a file at {relative_to_root(target, root).as_posix()}")
+            outputs[target] = raw
+            deletes.append(old_path)
+            source_paths.append(target)
+        moved_units = {(kind, name) for kind in old_files}
+        _finish_move(root, feature, move_from, schema, name, moved_units, outputs, deletes, messages, keep_file=True)
+        _atomic_group_write(root, outputs, deletes)
+        messages.append(f"moved {name} from {move_from} to {feature} unchanged; DEV was not read. Run a capture with --refresh after the file equals DEV to retain a DEV baseline")
+        return tuple(source_paths)
 
     capture_root = Path(tempfile.mkdtemp(prefix="capture-", dir=scratch_dir))
     try:
@@ -344,9 +485,13 @@ def capture_package(
         raise FeatureSourcesError(
             f"DEV package capture current schema {identity['current_schema']!r} does not match {schema}"
         )
-    records = _capture_sources(feature, schema, name, catalog)
+    try:
+        records = _capture_sources(feature, schema, name, catalog)
+    except FeatureSourcesError as error:
+        if move_from is not None:
+            raise FeatureSourcesError(f"{error}; pass --keep-file to move the old file without DEV") from error
+        raise
 
-    outputs: dict[Path, bytes] = {}
     snapshot_dir = scratch_dir / "captured"
     source_paths: list[Path] = []
     new_units: list[dict] = []
@@ -363,6 +508,25 @@ def capture_package(
             raise FeatureSourcesError(
                 f"captured feature source was removed; review it or use refresh: {record['path']}"
             )
+        # What the capture replaces: this feature's own file on a refresh, the old owner's file on a move.
+        replaced_label, replaced_bytes, replaced_feature = record["path"], old_bytes, feature
+        if move_from is not None:
+            replaced_path = old_files.get(record["type"])
+            replaced_bytes = _ordinary_file(replaced_path, root) if replaced_path is not None else None
+            replaced_label = relative_to_root(replaced_path, root).as_posix() if replaced_path is not None else record["path"]
+            replaced_feature = move_from
+        if replaced_bytes is not None and replaced_bytes != record["source"] and (move_from is not None or refresh):
+            comparison = feature_compare.compare(
+                replaced_bytes.decode("utf-8", errors="replace"), record["source"].decode("utf-8"),
+            )
+            if comparison.only_feature and not discard_unapplied:
+                accepted = _accepted_entry(root, replaced_feature, (schema, record["type"], record["name"]))
+                raise _unapplied_refusal("move" if move_from is not None else "refresh", replaced_label, comparison, accepted)
+            if move_from is not None:
+                messages.append(
+                    f"{record['type']} {name}: {comparison.state.lower()}, {len(comparison.only_live)} line(s) only on DEV "
+                    f"are taken, {len(comparison.only_feature)} line(s) only in the old file are dropped"
+                )
         baseline_bytes = _ordinary_file(snapshot_path, root)
         if old_metadata is None or refresh:
             outputs[snapshot_path] = record["source"]
@@ -377,7 +541,11 @@ def capture_package(
             "sha256": record["sha256"],
         })
 
-    deletes: list[Path] = []
+    if move_from is not None:
+        for old_path in old_files.values():
+            deletes.append(old_path)
+        _finish_move(root, feature, move_from, schema, name, {(kind, name) for kind in old_files}, outputs, deletes, messages, keep_file=False)
+
     if old_metadata is not None:
         current_keys = {(record["type"], record["name"]) for record in records}
         prior_keys = set()
@@ -421,6 +589,56 @@ def capture_package(
     outputs[metadata_path] = metadata_bytes
     _atomic_group_write(root, outputs, deletes)
     return tuple(source_paths)
+
+
+def _finish_move(
+    root: Path,
+    feature: str,
+    old_feature: str,
+    schema: str,
+    name: str,
+    units: set[tuple[str, str]],
+    outputs: dict[Path, bytes],
+    deletes: list[Path],
+    messages: list[str],
+    *,
+    keep_file: bool,
+) -> None:
+    """Everything else a move changes, written in the same atomic group: the old owner's checks, retained
+    baseline and accepted differences, and (for keep-file) the receiving feature's accepted differences."""
+    old_checks, removed = _checks_without_units(root, old_feature, schema, units)
+    if old_checks is not None:
+        outputs[root / "features" / old_feature / schema / "checks.json"] = old_checks
+        messages.append(f"removed {len(removed)} check(s) of {old_feature} that named {name}: {', '.join(removed)}")
+    messages.append(f"add a check for {name} to features/{feature}/{schema}/checks.json if the feature has none for it")
+    # Retained DEV baseline of the old owner.
+    old_scratch = root / "scratch" / "feature-source" / old_feature / schema
+    old_meta = _capture_metadata_path(old_scratch, name)
+    old_meta_data = _strict_capture_metadata(old_meta, root)
+    if old_meta_data is not None:
+        for unit in old_meta_data["units"]:
+            captured = old_scratch / "captured" / Path(str(unit.get("path", ""))).name
+            if _ordinary_file(captured, root) is not None:
+                deletes.append(captured)
+        deletes.append(old_meta)
+    # Accepted differences recorded for the moved units.
+    old_accepted_path, old_entries = _accepted_list(root, old_feature)
+    moving = [
+        entry for entry in old_entries
+        if isinstance(entry, dict) and entry.get("schema") == schema and entry.get("name") == name and entry.get("type") in {kind for kind, _ in units}
+    ]
+    if moving:
+        remaining = [entry for entry in old_entries if entry not in moving]
+        if remaining:
+            outputs[old_accepted_path] = _json_bytes(remaining)
+        else:
+            deletes.append(old_accepted_path)
+        if keep_file:
+            new_path, new_entries = _accepted_list(root, feature)
+            outputs[new_path] = _json_bytes([*new_entries, *moving])
+            messages.append(f"moved {len(moving)} accepted difference(s) of {name} to {feature}")
+        else:
+            messages.append(f"dropped {len(moving)} accepted difference(s) of {name}: the DEV capture replaces the file")
 
 
 def _validate_day(day: str) -> None:

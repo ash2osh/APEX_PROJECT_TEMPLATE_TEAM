@@ -9,13 +9,13 @@ import os
 import stat
 import sys
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections.abc import Mapping, Sequence
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import feature_sources, release_capsule, release_state, rollout
+from scripts import feature_claims, feature_doctor, feature_sources, release_capsule, release_state, rollout
 from scripts.feature_manifest import FEATURE_RE, SCHEMA_RE, FeatureManifestError, load_feature_checkpoint
 from scripts.path_utils import relative_to_root
 
@@ -110,6 +110,69 @@ def _init_feature(repo_root: Path, feature: str, schema: str) -> tuple[Path, ...
     return tuple(path for path, _identity in created)
 
 
+def _freeze_gate(
+    root: Path,
+    environ: Mapping[str, str],
+    steps: Sequence[Mapping],
+    no_live: str | None,
+) -> tuple[int | None, dict]:
+    """Ownership and DEV-drift checks before a capsule is built. Returns an exit code to stop with, or None."""
+    if no_live is not None and not no_live.strip():
+        raise FeatureCliError("--no-live needs a reason")
+    selected = {
+        PurePosixPath(path).parts[1]
+        for step in steps if step["type"] == "feature-migrate"
+        for path in step["inputs"] if len(PurePosixPath(path).parts) > 1 and PurePosixPath(path).parts[0] == "features"
+    }
+    claims, _notes = feature_claims.collect_claims(root)
+    record: dict = {"features": sorted(selected)}
+    findings = feature_doctor.ownership_findings(claims, selected)
+    record["ownership"] = "refused" if findings else "no object is held by two selected features"
+    live_schemas = sorted({
+        claim.schema for claim in claims
+        if claim.feature in selected and claim.kind in feature_doctor.STORED_PACKAGE_KINDS
+    })
+    if no_live is not None:
+        record["live"] = f"skipped: {no_live.strip()}"
+    elif not live_schemas:
+        record["live"] = "not run: no package files in the selected features"
+    else:
+        usable = [schema for schema in live_schemas if feature_doctor._dev_profile_available(environ, schema)]
+        skipped = sorted(set(live_schemas) - set(usable))
+        if not usable:
+            record["live"] = "not run: no DEV profile for " + ", ".join(skipped)
+            print(f"note: live comparison with DEV {record['live']}", file=sys.stderr)
+        else:
+            try:
+                live_list, compared, accepted = feature_doctor.live_findings(root, environ, claims, selected, set(usable))
+            except feature_doctor.FeatureDoctorError as error:
+                print(
+                    f"feature error: {error}\nfreeze did not compare package files with DEV; fix the connection or pass "
+                    "--no-live \"<reason>\"",
+                    file=sys.stderr,
+                )
+                return 2, record
+            findings.extend(live_list)
+            record["live"] = f"{compared} package file(s) compared with DEV, {accepted} accepted difference(s)"
+            if skipped:
+                record["live"] += "; not compared (no DEV profile): " + ", ".join(skipped)
+    if any(finding.level == feature_doctor.ERROR for finding in findings):
+        print(feature_doctor.render(findings, [f"freeze refused: {record['ownership']}; live: {record.get('live', 'not run')}"]))
+        return 1, record
+    return None, record
+
+
+def _write_freeze_record(capsule_root: Path, record: dict) -> None:
+    """Keep what the freeze checked beside the capsules (outside the capsule and its digest).
+
+    Not inside scratch/release-capsules: the rollout looks there for the entry named after a payload digest.
+    """
+    target = capsule_root.parent.parent / "freeze-checks" / f"{capsule_root.name}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Freeze checks: ownership - {record['ownership']}; live - {record['live']}")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, help=argparse.SUPPRESS)
@@ -125,6 +188,15 @@ def _parser() -> argparse.ArgumentParser:
     capture_parser.add_argument("--schema", required=True, help="uppercase Oracle schema")
     capture_parser.add_argument("--env", required=True, action="append", choices=("dev",), help="package capture is DEV-only")
     capture_parser.add_argument("--refresh", action="store_true", help="replace source and its retained DEV baseline after review")
+    capture_parser.add_argument("--move-from", metavar="FEATURE", help="take the package over from the feature that holds it")
+    capture_parser.add_argument(
+        "--discard-unapplied", action="store_true",
+        help="allow a refresh or move to erase lines the file has and DEV does not",
+    )
+    capture_parser.add_argument(
+        "--keep-file", action="store_true",
+        help="with --move-from, move the old file unchanged instead of capturing from DEV",
+    )
 
     diff_parser = subparsers.add_parser("diff", help="write package diffs against the retained DEV capture")
     diff_parser.add_argument("feature", help="lowercase feature slug")
@@ -133,6 +205,14 @@ def _parser() -> argparse.ArgumentParser:
 
     freeze_parser = subparsers.add_parser("freeze", help="validate committed inputs and build a frozen release capsule")
     freeze_parser.add_argument("manifest", type=Path, help="schema-version 2 rollout manifest")
+    freeze_parser.add_argument(
+        "--no-live", metavar="REASON",
+        help="skip the comparison of package files with DEV; the reason is recorded next to the capsule",
+    )
+
+    doctor_parser = subparsers.add_parser("doctor", help="check feature ownership, orphan checks and, with --live, drift against DEV")
+    doctor_parser.add_argument("--feature", help="limit the checks to one feature slug")
+    doctor_parser.add_argument("--live", action="store_true", help="compare package files with the DEV source (read-only)")
 
     clean_parser = subparsers.add_parser("clean-capsule", help="preview or remove an eligible local capsule")
     clean_parser.add_argument("payload_digest", help="64-character capsule payload digest")
@@ -163,13 +243,23 @@ def main(
         if args.command == "capture":
             if len(args.env) != 1:
                 raise FeatureCliError("feature capture accepts only one --env value")
+            report: list[str] = []
             paths = feature_sources.capture_package(
                 root, args.feature, args.schema, args.package,
-                environ=environment, refresh=args.refresh,
+                environ=environment, refresh=args.refresh, move_from=args.move_from,
+                discard_unapplied=args.discard_unapplied, keep_file=args.keep_file, report=report,
             )
             for path in paths:
                 print(f"Captured {relative_to_root(path, root).as_posix()}")
+            for line in report:
+                print(line)
             return 0
+        if args.command == "doctor":
+            if args.feature is not None and FEATURE_RE.fullmatch(args.feature) is None:
+                raise FeatureCliError("feature must be a lowercase hyphenated slug")
+            findings, summary = feature_doctor.doctor(root, environment, feature=args.feature, live=args.live)
+            print(feature_doctor.render(findings, summary))
+            return feature_doctor.exit_code(findings)
         if args.command == "diff":
             artifacts = feature_sources.diff_captured_package(
                 root, args.feature, args.schema, day=args.day,
@@ -184,7 +274,11 @@ def main(
                 for step in manifest.steps
                 if step["type"] == "feature-migrate"
             )
+            refused, record = _freeze_gate(root, environment, manifest.steps, args.no_live)
+            if refused is not None:
+                return refused
             capsule = release_capsule.build_capsule(root, manifest.path, checkpoints, {})
+            _write_freeze_record(capsule.root, record)
             print(f"Payload SHA-256: {capsule.payload_digest}")
             print(f"Workflow engine SHA-256: {capsule.engine_digest}")
             print(f"Source commit: {capsule.source_commit}")
@@ -196,7 +290,7 @@ def main(
             return 0
         raise FeatureCliError(f"unsupported feature command: {args.command}")
     except (
-        FeatureCliError, feature_sources.FeatureSourcesError, FeatureManifestError,
+        FeatureCliError, feature_sources.FeatureSourcesError, FeatureManifestError, feature_doctor.FeatureDoctorError,
         release_state.ReleaseStateError, release_capsule.ReleaseCapsuleError, rollout.RolloutError,
     ) as error:
         print(f"feature error: {error}", file=sys.stderr)

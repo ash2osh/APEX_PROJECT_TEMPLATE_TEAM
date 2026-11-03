@@ -41,7 +41,7 @@ Commands:
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare]
          [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
                                               Confirm and execute a frozen deployment manifest
-  feature <init|capture|diff|freeze|clean-capsule> ...
+  feature <init|capture|diff|doctor|freeze|clean-capsule> ...
                                               Create mutable feature sources and freeze version-2 release capsules
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
@@ -375,14 +375,33 @@ case "$command_name" in
       exec "$REPO_ROOT/scripts/rollout.sh" "$@"
     ;;
   feature)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh feature <init|capture|diff|freeze|clean-capsule> [arguments]"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh feature <init|capture|diff|doctor|freeze|clean-capsule> [arguments]"
     if [ "$1" = --help ] || [ "$1" = -h ]; then
       cd "$REPO_ROOT"
       exec python3 -m scripts.feature_cli --help
     fi
     feature_command="$1"
     case "$feature_command" in
-      init|diff|freeze|clean-capsule) ;;
+      init|diff|clean-capsule) ;;
+      freeze|doctor)
+        # The comparison with DEV is optional: load the project file only when it exists
+        # (and, for doctor, only for --live), so an offline freeze or doctor needs no .env.
+        feature_load_env=false
+        if [ "$feature_command" = freeze ]; then feature_load_env=true; fi
+        for feature_argument in "$@"; do
+          case "$feature_argument" in
+            --live) feature_load_env=true ;;
+            --help|-h) feature_load_env=false; break ;;
+          esac
+        done
+        if [ "$feature_load_env" = true ]; then
+          PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+          if [ -f "$PROJECT_ENV_FILE" ] || [ -f "$REPO_ROOT/$PROJECT_ENV_FILE" ]; then
+            # shellcheck source=load_env.sh
+            source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+          fi
+        fi
+        ;;
       capture)
         [ "$#" -ge 2 ] || fail "usage: scripts/team.sh feature capture <slug> --package NAME --schema SCHEMA --env dev [--refresh]"
         feature_help=false
@@ -415,7 +434,7 @@ case "$command_name" in
           source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
         fi
         ;;
-      *) fail "unknown feature command '$feature_command'; use init, capture, diff, freeze, or clean-capsule" ;;
+      *) fail "unknown feature command '$feature_command'; use init, capture, diff, doctor, freeze, or clean-capsule" ;;
     esac
     feature_root="$REPO_ROOT"
     case "$(uname -s 2>/dev/null)" in

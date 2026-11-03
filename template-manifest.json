@@ -33,6 +33,7 @@
     "docs/dev-test-examples/**",
     "docs/EXAMPLES.md",
     "docs/feature-release.example.json",
+    "docs/feature-ownership.md",
     "docs/feature-releases.md",
     "docs/GETTING_STARTED.md",
     "docs/TROUBLESHOOTING.md",

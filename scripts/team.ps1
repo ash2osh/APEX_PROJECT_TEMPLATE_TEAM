@@ -85,7 +85,7 @@ Commands:
   rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare]
          [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
                                               Confirm and execute a frozen deployment manifest
-  feature <init|capture|diff|freeze|clean-capsule> ...
+  feature <init|capture|diff|doctor|freeze|clean-capsule> ...
                                               Create mutable feature sources and freeze version-2 release capsules
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
@@ -527,7 +527,7 @@ try {
       Invoke-TeamBash -ScriptName "rollout.sh" -ScriptArguments $rolloutArguments
     }
     "feature" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 feature <init|capture|diff|freeze|clean-capsule> [arguments]" }
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 feature <init|capture|diff|doctor|freeze|clean-capsule> [arguments]" }
       $featureArguments = @($Arguments)
       if ($featureArguments[0] -ceq "freeze" -and $featureArguments.Count -gt 1) {
         $featureArguments[1] = ConvertTo-MigrationFolderArgument ([string] $featureArguments[1])
