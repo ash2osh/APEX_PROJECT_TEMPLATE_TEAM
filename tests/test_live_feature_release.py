@@ -355,6 +355,71 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(cleanup.returncode, 0, cleanup.stdout + cleanup.stderr)
         self.assertTrue(json.loads(cleanup.stdout)["eligible"])
 
+    def test_ownership_move_refresh_and_doctor_against_a_real_schema(self) -> None:
+        first, second, third = self._name("own"), self._name("mov"), self._name("dup")
+        package = f"LIVE_{self.token}_OWN"
+        spec = f"create or replace package {package} as\n  function ping return number;\n{{extra}}end {package};\n/\n"
+        body = (f"create or replace package body {package} as\n  function ping return number is begin return 1; end;\n{{extra}}"
+                f"end {package};\n/\n")
+        self._sql(CONNECTION, spec.format(extra="") + body.format(extra=""), drops=(_drop_package(package),))
+        self._feature(first)
+        captured = self._capture(first, package)
+        capture_args = ["feature", "capture", second, "--package", package, "--schema", SCHEMA, "--env", "dev"]
+
+        # The file equals DEV: the live doctor compares both files and finds nothing.
+        result = self._team("feature", "doctor", "--live", "--feature", first)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("2 package file(s) compared with DEV", result.stdout)
+
+        # A teammate compiles a new function on DEV: the file is now behind DEV.
+        self._sql(CONNECTION, spec.format(extra="  function pong return number;\n")
+                  + body.format(extra="  function pong return number is begin return 2; end;\n"))
+        result = self._team("feature", "doctor", "--live", "--feature", first)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("BEHIND DEV", result.stdout)
+        self.assertEqual(self._team("feature", "doctor", "--feature", first).returncode, 0)
+
+        # Another feature cannot capture the package silently; a move takes the DEV version.
+        self._feature(second)
+        result = self._team(*capture_args)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(f"--move-from {first}", result.stderr)
+        result = self._team(*capture_args, "--move-from", first)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for relative in captured:
+            self.assertFalse((self.project / relative).exists(), relative)
+        moved = self.project / "features" / second / SCHEMA / "packages" / f"{package.lower()}.pkb.sql"
+        self.assertIn("function pong", moved.read_text(encoding="utf-8").lower())
+        result = self._team("feature", "doctor", "--live", "--feature", second)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        # An edit DEV does not have stops a refresh and a move, and --discard-unapplied erases it knowingly.
+        moved.write_text(moved.read_text(encoding="utf-8").replace("return 1;", "null; return 1;", 1), encoding="utf-8")
+        result = self._team("feature", "doctor", "--live", "--feature", second)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("AHEAD OF DEV", result.stdout)
+        result = self._team(*capture_args, "--refresh")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("DEV does not have", result.stderr)
+        self.assertIn("null; return 1;", moved.read_text(encoding="utf-8"))
+        result = self._team(*capture_args, "--refresh", "--discard-unapplied")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("null; return 1;", moved.read_text(encoding="utf-8"))
+
+        # The same package in a second feature is reported, and a freeze that selects it stops before a capsule exists.
+        shutil.copytree(self.project / "features" / second, self.project / "features" / third)
+        result = self._team("feature", "doctor", "--feature", third)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("DOUBLE OWNERSHIP", result.stdout)
+        inputs = [f"features/{third}/{SCHEMA}/packages/{package.lower()}.pks.sql", f"features/{third}/{SCHEMA}/packages/{package.lower()}.pkb.sql"]
+        self._checks(third, self._valid_body_check(package))
+        self._manifest([{"type": "feature-migrate", "schema": SCHEMA, "inputs": inputs}])
+        _commit(self.project, "live checks: duplicate ownership")
+        result = self._team("feature", "freeze", "releases/current.json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("DOUBLE OWNERSHIP", result.stdout)
+        self.assertNotIn("Capsule:", result.stdout)
+
     def test_production_refuses_without_a_capsule_or_stage_proof(self) -> None:
         slug = self._name("refuse")
         log = f"LIVE_{self.token}_REFUSE"

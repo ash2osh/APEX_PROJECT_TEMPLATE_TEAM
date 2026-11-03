@@ -113,6 +113,23 @@ statements; it cannot rule out trigger, autonomous-transaction, or external
 effects. Keep data repair that needs object-level checks in a separately
 reviewed migration or workflow.
 
+## Ownership and DEV drift
+
+A capsule installs the feature file, not DEV. Two checks protect that, both described in
+[feature ownership and DEV drift](feature-ownership.md):
+
+```bash
+scripts/team.sh feature doctor                 # offline: a unit claimed by two features, orphan checks
+scripts/team.sh feature doctor --live          # also compares package files with the DEV source (read-only)
+scripts/team.sh feature capture orders --package ITEM_LOOKUP --schema APP_CODE --env dev --move-from inventory
+```
+
+`feature capture` refuses a package another feature holds; `--move-from` names the feature it is taken from. A move
+or a `--refresh` stops when the file it replaces has lines DEV does not have (`--discard-unapplied` erases them,
+`--keep-file` moves the old file unchanged). `feature freeze` refuses a unit held by two selected features and
+compares the selected package files with DEV when a DEV profile is configured (`--no-live "<reason>"` skips it;
+the reason is kept in `scratch/freeze-checks/`).
+
 ## Freeze and prepare
 
 Copy [the example release manifest](feature-release.example.json) to

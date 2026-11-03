@@ -160,8 +160,14 @@ class FeatureSourcesTests(unittest.TestCase):
             with self.assertRaisesRegex(self.feature_sources.FeatureSourcesError, "refresh"):
                 self.feature_sources.capture_package(self.root, "dispatch", "APP_CODE", "PKG", environ=ENVIRON)
             self.assertEqual(path.read_bytes(), edited)
+            # A refresh would erase a line DEV does not have: it stops unless the developer discards it knowingly.
+            with self.assertRaisesRegex(self.feature_sources.FeatureSourcesError, "(?s)refresh refused.*PROCEDURE EDITED"):
+                self.feature_sources.capture_package(
+                    self.root, "dispatch", "APP_CODE", "PKG", environ=ENVIRON, refresh=True,
+                )
+            self.assertEqual(path.read_bytes(), edited)
             refreshed = self.feature_sources.capture_package(
-                self.root, "dispatch", "APP_CODE", "PKG", environ=ENVIRON, refresh=True,
+                self.root, "dispatch", "APP_CODE", "PKG", environ=ENVIRON, refresh=True, discard_unapplied=True,
             )
 
         self.assertEqual(refreshed, (path,))
