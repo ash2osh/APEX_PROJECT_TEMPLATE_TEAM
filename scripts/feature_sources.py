@@ -411,7 +411,7 @@ def capture_package(
     messages = report if report is not None else []
 
     # Ownership: a package another feature holds is not captured a second time.
-    claims, _notes = feature_claims.collect_claims(root)
+    claims, _unanalysed = feature_claims.collect_claims(root)
     keys = _unit_keys(schema, name)
     other_claims = [claim for claim in claims if claim.key in keys and claim.feature != feature]
     other_holders = sorted({claim.feature for claim in other_claims})

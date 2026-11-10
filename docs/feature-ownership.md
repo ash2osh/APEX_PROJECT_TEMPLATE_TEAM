@@ -15,7 +15,9 @@ version of a stored unit into a release without any command complaining:
 | --- | --- |
 | A release selects both copies of a package | `feature freeze` refuses: `duplicate stored unit identity across selected release checkpoints` |
 | A release selects only the older copy | `feature freeze` succeeds and the capsule installs the older package |
-| A second feature runs `feature capture` for a package another feature holds | Allowed, nothing is reported |
+| Two files of one feature define the same object | `feature doctor` reports `DUPLICATE FILE` (error); `feature freeze` refuses it for a selected feature, with a clear message; the loader already refuses two selected copies of one stored unit |
+| A feature SQL file cannot be analysed (CRLF line endings, a BOM, non-UTF-8 bytes, SQL the analyser cannot read) | `feature doctor` reports `NOT ANALYSED` (error, exit 1); `feature freeze` refuses before any DEV read, for any feature under `features/`. Before, the doctor printed a note and exited 0 |
+| A second feature runs `feature capture` for a package another feature holds | Refused, unless `--move-from` names the holder |
 | `feature capture --refresh` over a file that has lines DEV does not have | Overwrites without showing what disappears |
 | A feature file is older than DEV | Not detected: `freeze` and `rollout --prepare` compare the capsule with the *target*, never with DEV |
 | An owner decides a feature file keeps a line DEV lacks | There is nowhere to record it |
@@ -30,14 +32,32 @@ Offline checks (always):
 
 - **Ownership.** Every claim is a stored-unit file (identity from the template's own source analysis:
   schema, type, name; spec and body are separate units) or an object created in a `ddl.sql`. A claim made by more
-  than one feature is an error. `ALTER TABLE ... ADD COLUMN c` claims the pair (table, column), so two features may
+  than one feature is an error (`DOUBLE OWNERSHIP`). `ALTER TABLE ... ADD COLUMN c` claims the pair (table, column), so two features may
   add different columns to one table.
+- **Same feature, two files.** Two different files of one feature that define the same object (for example two files
+  that both create package `P`, or two `ddl.sql` files that both create table `T`) are an error (`DUPLICATE FILE`). One
+  file that names an object twice is not reported here; the database rejects that when the file runs.
+- **Unanalysed files.** A SQL file under `features/` whose objects cannot be determined (CRLF line endings, a BOM,
+  non-UTF-8 bytes, or SQL the analyser cannot read) is an error (`NOT ANALYSED`) that names the file and the reason.
+  Its objects are unknown, so an ownership conflict inside it cannot be seen. Before this check it was only a note, and
+  the doctor still exited 0. Fix the file (LF line endings, UTF-8 without a BOM, SQL the analyser reads), or move it out
+  of `features/`.
 - **Orphan checks.** A check in a feature's `checks.json` that names a stored unit (`OBJECT_NAME`/`OBJECT_TYPE`)
   whose file is not in that feature is reported as a warning. After a move, this is how a forgotten check shows up.
-- Exit code 0 clean, 1 findings, 2 could not run.
+- Exit code 0 clean, 1 findings, 2 could not run. `--feature <slug>` limits every check, including `NOT ANALYSED`, to that feature.
 
-`feature freeze` runs the ownership check first and refuses when an object is held by two features and one of them is
-selected by the manifest. A duplicate between features the release does not select is left to `feature doctor`.
+`feature freeze` runs the ownership checks first and refuses (exit 1) when:
+
+- an object is held by two features and one of them is selected by the manifest (a duplicate between features the
+  release does not select is left to `feature doctor`);
+- a selected feature defines one object in two of its files (`DUPLICATE FILE`);
+- any SQL file under `features/` cannot be analysed (`NOT ANALYSED`). This applies to every feature, not only the selected
+  ones, because a file whose objects are unknown makes every claim set incomplete. The freeze stops before any DEV read.
+  A selected input that the manifest loader rejects outright (for example CRLF line endings) is refused earlier, with
+  exit 2 and the loader's message.
+
+When the checks pass, the freeze record in `scratch/freeze-checks/` states `analysis - every feature SQL file was analysed`.
+A refused freeze writes no record, because no capsule is built.
 
 ### D2. What counts as a claim
 
@@ -90,7 +110,9 @@ Only errors stop a freeze or give `feature doctor` a non-zero exit.
 `--no-live "<reason>"` skips it. What the freeze checked, or why it did not, is written to
 `scratch/freeze-checks/<capsule directory name>.json` (outside the capsule and its digest). Without a DEV profile
 the freeze says the comparison did not run; if a profile exists but DEV cannot be read, the freeze stops (exit 2)
-and names `--no-live`. A schema without a DEV profile is reported by `doctor --live` as `LIVE SKIPPED`.
+and names `--no-live`. A schema without a DEV profile is reported by `doctor --live` as `LIVE SKIPPED`. When some selected
+schemas have a DEV profile and others do not, the freeze prints a `note:` line naming the schemas it did not compare, and
+the freeze record lists them under `not compared (no DEV profile)`.
 
 ### D5. Differences the owner decided on: `features/<slug>/accepted-differences.json`
 

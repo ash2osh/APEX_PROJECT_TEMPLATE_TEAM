@@ -47,6 +47,32 @@ jobs:
           python3 -c 'import json; from pathlib import Path; [json.loads(p.read_text()) for p in Path("apps").rglob("*.json")]'
           ! grep -RIl $'\r' --include='*.apx' --include='*.sql' --include='*.json' --include='*.sh' --include='*.ps1' .
 
+  # A second Linux run on the newest Python 3.x, beside the required `offline` job (3.10), so that a newer
+  # interpreter cannot break the suite unnoticed. It is kept out of a matrix so that `offline` keeps its name.
+  offline-latest-python:
+    name: offline (latest Python 3.x)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.x'
+      - name: Python syntax
+        run: |
+          python3 -m compileall -q scripts/ tools/ tests/
+      - name: Install Ruff
+        # Lint runs in `offline`. Ruff is installed here only because tests/test_pre_push_check.py runs
+        # scripts/pre_push_check.py, which fails without it.
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-input 'ruff>=0.5'
+      - name: Behavioral tests
+        env:
+          CI_TEST_JOBS: '4'
+        run: python3 scripts/ci_run_tests.py
+
   windows-offline:
     runs-on: windows-latest
     steps:

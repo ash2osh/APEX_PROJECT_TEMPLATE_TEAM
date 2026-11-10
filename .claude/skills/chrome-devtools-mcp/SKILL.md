@@ -1,6 +1,6 @@
 ---
 name: chrome-devtools-mcp
-description: Use when inspecting or interacting with a web application through the project's persistent Chrome DevTools MCP daemon.
+description: Use when inspecting or interacting with a web application in Chrome through the selected project MCP or the explicitly authorized Chrome daemon fallback.
 ---
 
 # Chrome DevTools MCP

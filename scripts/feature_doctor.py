@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import baseline, feature_compare, feature_sources
 from .db_targets import TargetResolutionError, resolve_target
-from .feature_claims import Claim, checked_objects, collect_claims, duplicates, feature_schema_dirs
+from .feature_claims import Claim, Unanalysed, checked_objects, collect_claims, duplicates, feature_schema_dirs, same_feature_duplicates
 from .feature_compare import compare
 
 
@@ -82,6 +82,32 @@ def ownership_findings(claims: Sequence[Claim], selected: set[str] | None = None
             f"held by {', '.join(features)}; keep one owner ({paths})",
         ))
     return findings
+
+
+def same_feature_findings(claims: Sequence[Claim], selected: set[str] | None = None) -> list[Finding]:
+    """An object defined by two different files of one feature. With `selected`, only those features."""
+    findings: list[Finding] = []
+    for (feature, (schema, kind, name)), values in sorted(same_feature_duplicates(claims).items()):
+        if selected is not None and feature not in selected:
+            continue
+        paths = ", ".join(sorted({claim.path for claim in values}))
+        findings.append(Finding(
+            ERROR, "DUPLICATE FILE", f"{schema} {kind} {name}",
+            f"two files of feature {feature} define it; keep one ({paths})",
+        ))
+    return findings
+
+
+def unanalysed_findings(unanalysed: Sequence[Unanalysed], feature: str | None = None) -> list[Finding]:
+    """A SQL file whose objects are unknown. Its ownership cannot be checked, so it is an error, not a note."""
+    return [
+        Finding(
+            ERROR, "NOT ANALYSED", item.path,
+            f"the objects this file defines are unknown, so ownership cannot be checked: {item.reason}",
+        )
+        for item in unanalysed
+        if feature is None or item.feature == feature
+    ]
 
 
 def orphan_check_findings(root: Path, claims: Sequence[Claim], feature: str | None = None) -> list[Finding]:
@@ -219,13 +245,14 @@ def doctor(
     live: bool = False,
 ) -> tuple[list[Finding], list[str]]:
     """Run the checks. Returns findings and plain summary lines (what was and was not checked)."""
-    claims, notes = collect_claims(root)
-    findings = ownership_findings(claims, {feature} if feature else None)
+    claims, unanalysed = collect_claims(root)
+    selected = {feature} if feature else None
+    findings = ownership_findings(claims, selected)
+    findings.extend(same_feature_findings(claims, selected))
+    findings.extend(unanalysed_findings(unanalysed, feature))
     findings.extend(orphan_check_findings(root, claims, feature))
     summary = [f"ownership: {len(claims)} claim(s) in {len({claim.feature for claim in claims})} feature(s)"]
-    summary.extend(f"note: {note}" for note in notes)
     if live:
-        selected = {feature} if feature else None
         schemas = sorted({claim.schema for claim in claims if claim.kind in STORED_PACKAGE_KINDS and (selected is None or claim.feature in selected)})
         if not schemas:
             summary.append("live: no package files selected, nothing to compare with DEV")

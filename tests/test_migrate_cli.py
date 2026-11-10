@@ -261,6 +261,16 @@ class MigrateCliTests(unittest.TestCase):
                 self.assertFalse(any(call[0] == "apply" for call in fake.calls))
                 self.assertFalse((folder / f"status.{environment}.json").exists())
 
+    def test_no_folder_prints_a_usage_line_with_the_verbose_and_rehearse_options(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status = main([])
+        self.assertEqual(status, 2)
+        usage = stderr.getvalue()
+        self.assertIn("usage: scripts/team.sh migrate <migration-folder>", usage)
+        for option in ("[--verbose]", "[--rehearse]", "[--report <file>]"):
+            self.assertIn(option, usage)
+
     def test_second_file_failure_stops_third_and_later_folder_without_receipt(self):
         first = self.add_folder("2026-09-28_create-first-r001", {
             "001-create-a.sql": "CREATE TABLE A (ID NUMBER);\n",

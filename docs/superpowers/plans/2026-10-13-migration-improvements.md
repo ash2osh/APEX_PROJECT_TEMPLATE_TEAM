@@ -97,7 +97,7 @@ The report plan provides durable 26.1 evidence and the shared SQLcl runtime guar
 
 ### Task 4: Qualify each branch and its CI separately
 
-**Files:** modify .github/workflows/database-checks.yml on 26.1 to add the current project's Windows offline job adapted to that branch; extend tests/test_windows_support.py and tests/test_documentation_contract.py as needed; create docs/superpowers/plans/results/RESULT_migration-improvements.md during implementation.
+**Files:** modify .github/workflows/template-checks.yml (formerly database-checks.yml) on 26.1 to add the current project's Windows offline job adapted to that branch; extend tests/test_windows_support.py and tests/test_documentation_contract.py as needed; create docs/superpowers/plans/results/RESULT_migration-improvements.md during implementation.
 
 **Interfaces:** same public commands/report contract and equivalent generated results across branch/platform matrices. Preserve Linux CI and existing action permissions/pinned revisions. Do not replace 26.1 qualification evidence with 26.2 evidence.
 

@@ -38,6 +38,15 @@ class Claim:
         return (self.schema, self.kind, self.name)
 
 
+@dataclass(frozen=True)
+class Unanalysed:
+    """A SQL file under features/ whose objects could not be determined, so its claims are unknown."""
+
+    feature: str
+    path: str
+    reason: str
+
+
 def feature_schema_dirs(root: Path, feature: str | None = None) -> list[tuple[str, str, Path]]:
     """Every features/<slug>/<SCHEMA> directory, in name order."""
     found: list[tuple[str, str, Path]] = []
@@ -75,10 +84,13 @@ def _claims_for_file(feature: str, schema: str, relative: str, source: bytes) ->
     return claims
 
 
-def collect_claims(root: Path, feature: str | None = None) -> tuple[list[Claim], list[str]]:
-    """Return every claim under features/ and a note for each SQL file that could not be analysed."""
+def collect_claims(root: Path, feature: str | None = None) -> tuple[list[Claim], list[Unanalysed]]:
+    """Return every claim under features/ and each SQL file whose objects could not be determined.
+
+    A file in the second list contributes no claims, so callers must treat the claim set as incomplete.
+    """
     claims: list[Claim] = []
-    notes: list[str] = []
+    unanalysed: list[Unanalysed] = []
     for slug, schema, schema_dir in feature_schema_dirs(root, feature):
         for path in sorted(schema_dir.rglob("*.sql")):
             relative = relative_to_root(path, root).as_posix()
@@ -88,8 +100,8 @@ def collect_claims(root: Path, feature: str | None = None) -> tuple[list[Claim],
                 source = _read_feature_source(path, relative)
                 claims.extend(_claims_for_file(slug, schema, relative, source))
             except (FeatureManifestError, MigrationAnalysisError, ValueError, UnicodeError) as error:
-                notes.append(f"{relative}: not analysed ({error})")
-    return claims, notes
+                unanalysed.append(Unanalysed(slug, relative, str(error)))
+    return claims, unanalysed
 
 
 def holders(claims: Iterable[Claim], key: tuple[str, str, str]) -> set[str]:
@@ -102,6 +114,14 @@ def duplicates(claims: Iterable[Claim]) -> dict[tuple[str, str, str], list[Claim
     for claim in claims:
         by_key[claim.key].append(claim)
     return {key: values for key, values in by_key.items() if len({claim.feature for claim in values}) > 1}
+
+
+def same_feature_duplicates(claims: Iterable[Claim]) -> dict[tuple[str, tuple[str, str, str]], list[Claim]]:
+    """Objects that two different files of one feature both define, keyed by (feature, object)."""
+    by_key: dict[tuple[str, tuple[str, str, str]], list[Claim]] = defaultdict(list)
+    for claim in claims:
+        by_key[(claim.feature, claim.key)].append(claim)
+    return {key: values for key, values in by_key.items() if len({claim.path for claim in values}) > 1}
 
 
 CHECK_OBJECT_RE = re.compile(

@@ -290,9 +290,12 @@ class TemplateManifestTests(unittest.TestCase):
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn("@AGENTS.md", claude)
         self.assertIn("@AGENTS.project.md", claude)
+        # The feature-release guide is linked from AGENTS.md, not imported: an import loads it into every conversation.
+        self.assertNotIn("@docs/feature-releases.md", claude)
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("AGENTS.project.md", agents)
         self.assertIn(".agents/rules/project.md", agents)
+        self.assertIn("docs/feature-releases.md", agents)
 
 
 if __name__ == "__main__":

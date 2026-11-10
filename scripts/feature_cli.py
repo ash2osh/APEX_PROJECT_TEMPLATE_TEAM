@@ -124,15 +124,24 @@ def _freeze_gate(
         for step in steps if step["type"] == "feature-migrate"
         for path in step["inputs"] if len(PurePosixPath(path).parts) > 1 and PurePosixPath(path).parts[0] == "features"
     }
-    claims, _notes = feature_claims.collect_claims(root)
+    claims, unanalysed = feature_claims.collect_claims(root)
     record: dict = {"features": sorted(selected)}
-    findings = feature_doctor.ownership_findings(claims, selected)
-    record["ownership"] = "refused" if findings else "no object is held by two selected features"
+    ownership = feature_doctor.ownership_findings(claims, selected) + feature_doctor.same_feature_findings(claims, selected)
+    findings = list(ownership)
+    record["ownership"] = "refused" if ownership else "no object is held by two selected features or defined twice by one of them"
+    # A file that cannot be analysed has unknown objects, so no claim set built from the features can be trusted.
+    analysis = feature_doctor.unanalysed_findings(unanalysed)
+    findings.extend(analysis)
+    record["analysis"] = (
+        f"refused: {len(analysis)} feature file(s) could not be analysed" if analysis else "every feature SQL file was analysed"
+    )
     live_schemas = sorted({
         claim.schema for claim in claims
         if claim.feature in selected and claim.kind in feature_doctor.STORED_PACKAGE_KINDS
     })
-    if no_live is not None:
+    if analysis:
+        record["live"] = "not run: a feature file could not be analysed"
+    elif no_live is not None:
         record["live"] = f"skipped: {no_live.strip()}"
     elif not live_schemas:
         record["live"] = "not run: no package files in the selected features"
@@ -156,8 +165,14 @@ def _freeze_gate(
             record["live"] = f"{compared} package file(s) compared with DEV, {accepted} accepted difference(s)"
             if skipped:
                 record["live"] += "; not compared (no DEV profile): " + ", ".join(skipped)
+                print(
+                    f"note: no DEV profile for {', '.join(skipped)}; their package files were not compared with DEV",
+                    file=sys.stderr,
+                )
     if any(finding.level == feature_doctor.ERROR for finding in findings):
-        print(feature_doctor.render(findings, [f"freeze refused: {record['ownership']}; live: {record.get('live', 'not run')}"]))
+        print(feature_doctor.render(findings, [
+            f"freeze refused: ownership - {record['ownership']}; analysis - {record['analysis']}; live - {record.get('live', 'not run')}",
+        ]))
         return 1, record
     return None, record
 
@@ -170,7 +185,7 @@ def _write_freeze_record(capsule_root: Path, record: dict) -> None:
     target = capsule_root.parent.parent / "freeze-checks" / f"{capsule_root.name}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"Freeze checks: ownership - {record['ownership']}; live - {record['live']}")
+    print(f"Freeze checks: ownership - {record['ownership']}; analysis - {record['analysis']}; live - {record['live']}")
 
 
 def _parser() -> argparse.ArgumentParser:

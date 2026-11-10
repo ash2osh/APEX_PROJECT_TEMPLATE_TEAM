@@ -11,8 +11,9 @@ agreed way to stop that.
 - On every push to `main`, and by hand (`workflow_dispatch`).
 - A branch pushed without a pull request runs nothing: open the pull request to get a result.
 
-The jobs are `offline` (Linux), `windows-offline` and `macos-installer`. The full suite takes about 10 minutes on
-Linux and 20 to 30 on Windows.
+The jobs are `offline` (Linux, Python 3.10), `offline (latest Python 3.x)` (Linux, the newest Python 3.x, with the same
+compile and behavioural-test steps but not lint or the other checks), `windows-offline` and `macos-installer`. The full
+suite takes about 10 minutes on Linux and 20 to 30 on Windows.
 
 ## Before you push
 
@@ -62,7 +63,9 @@ CI therefore does not cover a short temp path; code that compares paths still re
 Set these in GitHub (Settings, Branches), they are not in the repository:
 
 - Require a pull request before merging into `main`.
-- Require the status checks `offline`, `windows-offline` and `macos-installer` to pass.
+- Require the status checks `offline`, `offline (latest Python 3.x)`, `windows-offline` and `macos-installer` to pass.
+  GitHub lists a check as a requirement only after it has run once, so add `offline (latest Python 3.x)` after the
+  first run of the workflow that contains it.
 - Do not allow administrators to bypass these rules, so no pull request merges before its checks pass.
 - Allow auto-merge and turn it on for each pull request (`gh pr merge --auto --merge`): GitHub merges it when the
   checks pass, and nobody has to wait for the run.

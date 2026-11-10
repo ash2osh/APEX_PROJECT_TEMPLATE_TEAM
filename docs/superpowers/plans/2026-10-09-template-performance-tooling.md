@@ -92,7 +92,7 @@ package/dependency versions chosen during this task, not an open version range.
 `tests/test_template_qualification.py`, `docs/local-qualification.md`.
 Modify `tools/probe_apex_26_2.py`, `tests/test_apex_26_2_probe.py`,
 `template-manifest.json`, `docs/apex-26.2-qualification.md`,
-`.github/workflows/database-checks.yml` only to run offline runner tests.
+`.github/workflows/template-checks.yml` (formerly `database-checks.yml`) only to run offline runner tests.
 Use `docs/local-qualification.md` for both release-appropriate modes; do not
 execute live database commands from routine CI.
 
