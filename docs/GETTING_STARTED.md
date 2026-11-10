@@ -60,7 +60,7 @@ Check each row. The command in the last column prints the version.
 | **SQLcl** for APEX operations | 26.3.0.0 or newer | `sql -V` |
 | **Git** | any recent | `git --version` |
 | **Python** | 3.10 or newer | `python3 --version` (Windows: `py -3 --version`) |
-| **Bash** | 4.3 or newer | `bash --version` |
+| **Bash** | 4.4 or newer | `bash --version` |
 
 Notes:
 

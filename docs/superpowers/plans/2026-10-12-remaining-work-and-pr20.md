@@ -589,7 +589,7 @@ it neither manufactures approvals nor duplicates stale historical completion cla
 
 ### Task 12: Qualify native Windows behavior
 
-**Files:** Modify `.github/workflows/database-checks.yml` for a Windows offline
+**Files:** Modify `.github/workflows/template-checks.yml` (formerly `database-checks.yml`) for a Windows offline
 job as part of the accepted task; tests/fake launchers only for observed portability failures;
 update `scripts/windows_job.py`, PowerShell wrappers or SQLcl helpers only from
 reproduced faults. Record results in platform qualification docs.

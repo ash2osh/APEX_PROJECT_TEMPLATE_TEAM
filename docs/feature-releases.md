@@ -145,10 +145,15 @@ scripts/team.sh rollout releases/current.json --env staging --prepare --capsule 
 ```
 
 `feature freeze` validates the version-2 manifest, hashes its selected sources,
-checks that those bytes are committed, and creates an environment-neutral
-capsule under `scratch/release-capsules/`. It is offline and requires no `.env`,
-SQLcl, or network. Save the capsule path it prints and pass that same path to
-every later command.
+checks that those bytes are committed, runs the ownership and analysis checks,
+and creates an environment-neutral capsule under `scratch/release-capsules/`.
+It needs no `.env`, SQLcl, or network unless a DEV profile is configured. When
+one is, freeze also compares the selected package files with DEV (read-only),
+and stops with exit 2 if DEV cannot be read, unless `--no-live "<reason>"` is
+given; the reason is recorded. A file that a release would undo on DEV also
+stops it, with exit 1. The [feature ownership and DEV drift](feature-ownership.md)
+guide lists each check. Save the capsule path it prints and pass that same path
+to every later command.
 
 `--dry-run` checks only local source, manifest, capsule, and hashes. `--prepare`
 uses the selected environment's guarded read-only capture to make exact

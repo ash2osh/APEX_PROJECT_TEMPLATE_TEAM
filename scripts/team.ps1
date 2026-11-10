@@ -464,7 +464,7 @@ try {
       Invoke-TeamBash -ScriptName "dev_test.sh" -ScriptArguments $Arguments
     }
     "migrate" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod [--rehearse] [--report <file>]" }
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]" }
       $migrateArguments = @($Arguments)
       for ($migrateIndex = 0; $migrateIndex -lt $migrateArguments.Count; $migrateIndex++) {
         if ($migrateArguments[$migrateIndex] -ceq "--report" -and $migrateIndex + 1 -lt $migrateArguments.Count) {

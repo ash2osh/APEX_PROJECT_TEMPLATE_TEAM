@@ -104,12 +104,27 @@ class ClaimTests(FeatureTree):
         claims, _notes = feature_claims.collect_claims(self.root)
         self.assertEqual(list(feature_claims.duplicates(claims)), [("APP_DATA", "COLUMN", "ITEMS.COLOR")])
 
-    def test_a_file_that_cannot_be_analysed_is_noted_not_fatal(self) -> None:
+    def test_a_file_that_cannot_be_analysed_is_listed_with_its_feature_and_path(self) -> None:
         self.write("features/one/APP_DATA/ddl.sql", "THIS IS NOT SQL AT ALL (\n")
-        claims, notes = feature_claims.collect_claims(self.root)
+        claims, unanalysed = feature_claims.collect_claims(self.root)
         self.assertEqual(claims, [])
-        self.assertEqual(len(notes), 1)
-        self.assertIn("not analysed", notes[0])
+        self.assertEqual([(item.feature, item.path) for item in unanalysed], [("one", "features/one/APP_DATA/ddl.sql")])
+        self.assertTrue(unanalysed[0].reason)
+
+    def test_two_files_of_one_feature_that_define_the_same_package_are_a_same_feature_duplicate(self) -> None:
+        self.capture("dispatch")
+        spec = self.root / "features/dispatch/APP_CODE/packages/pkg.pks.sql"
+        self.write("features/dispatch/APP_CODE/packages/pkg-copy.pks.sql", spec.read_text(encoding="utf-8"))
+
+        claims, _unanalysed = feature_claims.collect_claims(self.root)
+
+        self.assertEqual(list(feature_claims.same_feature_duplicates(claims)), [("dispatch", ("APP_CODE", "PACKAGE", "PKG"))])
+        self.assertEqual(feature_claims.duplicates(claims), {})
+
+    def test_one_file_listing_the_same_object_twice_is_not_a_same_feature_duplicate(self) -> None:
+        self.write("features/one/APP_DATA/ddl.sql", "CREATE TABLE ITEMS (ID NUMBER);\nCREATE TABLE ITEMS (ID NUMBER);\n")
+        claims, _unanalysed = feature_claims.collect_claims(self.root)
+        self.assertEqual(feature_claims.same_feature_duplicates(claims), {})
 
     def test_checked_objects_reads_both_orders_of_the_catalog_columns(self) -> None:
         sql = "SELECT 1 FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE' AND OBJECT_NAME = 'PKG'"
@@ -184,6 +199,51 @@ class DoctorTests(FeatureTree):
         self.assertEqual(status, 0)
         status, _output = self.run_doctor("--feature", "pickup")
         self.assertEqual(status, 1)
+
+    def test_a_file_the_doctor_cannot_read_is_an_error_so_a_double_ownership_hidden_in_it_fails_the_check(self) -> None:
+        self.capture("dispatch")
+        spec = self.root / "features/dispatch/APP_CODE/packages/pkg.pks.sql"
+        hidden = self.root / "features/pickup/APP_CODE/packages/pkg.pks.sql"
+        hidden.parent.mkdir(parents=True)
+        hidden.write_bytes(spec.read_bytes().replace(b"\n", b"\r\n"))
+
+        status, output = self.run_doctor()
+
+        self.assertEqual(status, 1, output)
+        self.assertIn("NOT ANALYSED", output)
+        self.assertIn("features/pickup/APP_CODE/packages/pkg.pks.sql: the objects this file defines are unknown", output)
+        self.assertIn("LF line endings", output)
+        self.assertNotIn("note:", output)
+        self.assertIn("result: 1 error(s), 0 warning(s)", output)
+
+    def test_a_file_with_bytes_that_are_not_utf8_is_an_error(self) -> None:
+        self.capture("dispatch")
+        bad = self.root / "features/pickup/APP_DATA/ddl.sql"
+        bad.parent.mkdir(parents=True)
+        bad.write_bytes(b"CREATE TABLE ITEMS (\xff NUMBER);\n")
+        status, output = self.run_doctor()
+        self.assertEqual(status, 1)
+        self.assertIn("NOT ANALYSED", output)
+        self.assertIn("features/pickup/APP_DATA/ddl.sql", output)
+
+    def test_the_feature_option_limits_unanalysed_files_to_that_feature(self) -> None:
+        self.write("features/other/APP_DATA/ddl.sql", "THIS IS NOT SQL AT ALL (\n")
+        status, _output = self.run_doctor("--feature", "pickup")
+        self.assertEqual(status, 0)
+        status, output = self.run_doctor("--feature", "other")
+        self.assertEqual(status, 1)
+        self.assertIn("NOT ANALYSED", output)
+
+    def test_two_files_of_one_feature_defining_the_same_object_are_a_duplicate_file_error(self) -> None:
+        self.write("features/dispatch/APP_DATA/ddl.sql", "CREATE TABLE ITEMS (ID NUMBER);\n")
+        self.write("features/dispatch/APP_DATA/ddl-again.sql", "CREATE TABLE ITEMS (ID NUMBER);\n")
+        status, output = self.run_doctor()
+        self.assertEqual(status, 1)
+        self.assertIn("DUPLICATE FILE", output)
+        self.assertIn("two files of feature dispatch define it; keep one", output)
+        self.assertIn("features/dispatch/APP_DATA/ddl-again.sql", output)
+        status, _output = self.run_doctor("--feature", "pickup")
+        self.assertEqual(status, 0)
 
     def test_orphan_check_is_a_warning_not_an_error(self) -> None:
         self.capture("dispatch")
@@ -501,6 +561,55 @@ class FreezeGateTests(FeatureTree):
         self.assertEqual(status, 0)
         self.build.assert_called_once()
         self.assertIn("not run", self.record()["live"])
+
+    def test_a_file_that_cannot_be_analysed_refuses_the_freeze_even_when_its_feature_is_not_selected(self) -> None:
+        self.capture("pickup")
+        self.write("features/dispatch/APP_DATA/ddl.sql", "THIS IS NOT SQL AT ALL (\n")
+        with patch.object(baseline, "_capture") as read:
+            status, output = self.freeze(environ=LIVE_ENVIRON)
+        self.assertEqual(status, 1)
+        self.assertIn("NOT ANALYSED", output)
+        self.assertIn("features/dispatch/APP_DATA/ddl.sql", output)
+        self.assertIn("analysis - refused", output)
+        read.assert_not_called()
+        self.build.assert_not_called()
+        self.assertFalse((self.root / "scratch/freeze-checks/example.json").exists())
+
+    def test_two_files_of_a_selected_feature_that_define_one_object_refuse_the_freeze(self) -> None:
+        self.capture("pickup")
+        self.write("features/pickup/APP_DATA/ddl.sql", "CREATE TABLE ITEMS (ID NUMBER);\n")
+        self.write("features/pickup/APP_DATA/ddl-again.sql", "CREATE TABLE ITEMS (ID NUMBER);\n")
+        status, output = self.freeze()
+        self.assertEqual(status, 1)
+        self.assertIn("DUPLICATE FILE", output)
+        self.assertIn("features/pickup/APP_DATA/ddl-again.sql", output)
+        self.build.assert_not_called()
+
+    def test_a_same_feature_duplicate_in_an_unselected_feature_does_not_stop_the_freeze(self) -> None:
+        self.capture("pickup")
+        self.write("features/legacy/APP_DATA/ddl.sql", "CREATE TABLE ITEMS (ID NUMBER);\n")
+        self.write("features/legacy/APP_DATA/ddl-again.sql", "CREATE TABLE ITEMS (ID NUMBER);\n")
+        status, output = self.freeze()
+        self.assertEqual(status, 0, output)
+        self.build.assert_called_once()
+
+    def test_a_freeze_that_passes_records_that_every_feature_file_was_analysed(self) -> None:
+        self.capture("pickup")
+        status, output = self.freeze()
+        self.assertEqual(status, 0, output)
+        self.assertEqual(self.record()["analysis"], "every feature SQL file was analysed")
+        self.assertIn("analysis - every feature SQL file was analysed", output)
+
+    def test_a_partial_live_comparison_prints_which_schema_was_not_compared(self) -> None:
+        self.capture("pickup")
+        package = self.root / "features/pickup/APP_DATA/packages/pkg2.pks.sql"
+        package.parent.mkdir(parents=True)
+        package.write_text("CREATE OR REPLACE PACKAGE PKG2 AS\n  PROCEDURE RUN;\nEND PKG2;\n/\n", encoding="utf-8")
+        with patch.object(baseline, "_capture", return_value=capture_catalog(units())):
+            status, output = self.freeze(environ=LIVE_ENVIRON)
+        self.assertEqual(status, 0, output)
+        self.assertIn("note: no DEV profile for APP_DATA; their package files were not compared with DEV", output)
+        self.assertEqual(self.record()["live"], "2 package file(s) compared with DEV, 0 accepted difference(s); not compared (no DEV profile): APP_DATA")
 
     def test_without_a_dev_profile_the_freeze_says_the_live_comparison_did_not_run(self) -> None:
         self.capture("pickup")

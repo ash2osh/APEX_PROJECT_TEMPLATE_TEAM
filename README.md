@@ -140,7 +140,7 @@ Choose Chrome, Firefox, both, or none for this checkout with scripts/team.sh mcp
 
 New here? Follow [Getting started](docs/GETTING_STARTED.md): it walks through
 everything below with the output you should see. You need SQLcl 26.3.0.0 or newer,
-Git, Python 3.10 or newer, Bash 4.3 or newer, and an Oracle database with
+Git, Python 3.10 or newer, Bash 4.4 or newer, and an Oracle database with
 APEX 26.2. To practice locally, the
 [United Codes `uc-local-apex-dev`](https://github.com/United-Codes/uc-local-apex-dev)
 containers give you one.
@@ -633,6 +633,11 @@ scripts/team.sh feature freeze releases/current.json
 scripts/team.sh rollout releases/current.json --env staging --dry-run --capsule <capsule-dir>
 scripts/team.sh rollout releases/current.json --env staging --prepare --capsule <capsule-dir> --report scratch/staging-prepare.json
 ```
+
+`feature freeze` is offline unless a DEV profile is configured. Then it reads
+the selected package files from DEV, read-only, and stops (exit 2) if that
+read fails; pass `--no-live "<reason>"` to skip the read with a recorded reason.
+See [feature ownership and DEV drift](docs/feature-ownership.md).
 
 Keep existing dated migrations and schema-version 1 rollout manifests on their
 current path. Capsule runs use a separate target plan and local attempt state;

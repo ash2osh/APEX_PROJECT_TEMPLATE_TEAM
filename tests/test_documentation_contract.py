@@ -338,14 +338,32 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("another repository", limitations)
 
     def test_ci_runs_behavioral_unittest_suite(self) -> None:
-        workflow = (ROOT / ".github" / "workflows" / "database-checks.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github" / "workflows" / "template-checks.yml").read_text(encoding="utf-8")
         self.assertIn("python3 scripts/ci_run_tests.py", workflow)
         self.assertIn("python scripts/ci_run_tests.py", workflow)
-        linux_job = workflow.split("  offline:", 1)[1].split("  windows-offline:", 1)[0]
+        linux_job = workflow.split("  offline:", 1)[1].split("  offline-latest-python:", 1)[0]
         windows_job = workflow.split("  windows-offline:", 1)[1].split("  macos-installer:", 1)[0]
         self.assertIn("CI_TEST_JOBS: '4'", linux_job)
         self.assertIn("CI_TEST_JOBS: '2'", windows_job)
         self.assertIn('"discover", "-s", "tests", "-v"', (ROOT / "scripts" / "ci_run_tests.py").read_text(encoding="utf-8"))
+
+    def test_ci_runs_the_suite_on_the_oldest_and_the_newest_linux_python(self) -> None:
+        # `offline` keeps its name (a required check) on the oldest supported Python; the newest 3.x runs beside it.
+        workflow = (ROOT / ".github" / "workflows" / "template-checks.yml").read_text(encoding="utf-8")
+        headers = [(match.start(), match.group(1)) for match in re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):$", workflow)]
+        jobs = {}
+        for index, (start, name) in enumerate(headers):
+            end = headers[index + 1][0] if index + 1 < len(headers) else len(workflow)
+            jobs[name] = workflow[start:end]
+        self.assertIn("python-version: '3.10'", jobs["offline"])
+        self.assertIn("runs-on: ubuntu-latest", jobs["offline-latest-python"])
+        self.assertIn("python-version: '3.x'", jobs["offline-latest-python"])
+        self.assertIn("python3 -m compileall -q scripts/ tools/ tests/", jobs["offline-latest-python"])
+        self.assertIn("python3 scripts/ci_run_tests.py", jobs["offline-latest-python"])
+        self.assertIn("CI_TEST_JOBS: '4'", jobs["offline-latest-python"])
+        self.assertNotRegex(jobs["offline"], r"(?m)^    (strategy|matrix):")
+        self.assertIn("actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0", jobs["offline-latest-python"])
+        self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", jobs["offline-latest-python"])
 
     def test_active_markdown_links_resolve(self) -> None:
         for path in DOCS:

@@ -74,6 +74,31 @@ class ChromeDevToolsDocumentationTests(unittest.TestCase):
             with self.subTest(source=source.name, target=relative):
                 self.assertTrue((source.parent / relative).resolve().is_file())
 
+    def test_project_browser_rules_follow_the_checkout_selection_not_the_daemon(self):
+        # The daemon is a fallback: the shipped rules must send the agent to the selection first.
+        project_rule = (ROOT / ".agents/rules/project.md").read_text(encoding="utf-8")
+        project_agents = (ROOT / "AGENTS.project.md").read_text(encoding="utf-8")
+        for name, text in ((".agents/rules/project.md", project_rule), ("AGENTS.project.md", project_agents)):
+            with self.subTest(file=name):
+                self.assertIn("scripts/team.sh mcp status", text)
+                self.assertIn("docs/browser-mcp.md", text)
+                self.assertNotIn("Route browser calls through", text)
+                self.assertNotIn("persistent Chrome DevTools MCP daemon", text)
+        # The rule file stays project-owned: its header comment must keep saying so.
+        self.assertIn("Project-specific agent rules. The template upgrade never overwrites this file.", project_rule)
+        self.assertIn("explicit startup authorization", project_rule)
+        self.assertIn("do not also use the daemon", project_rule)
+
+    def test_claude_browser_skill_description_matches_the_canonical_skill(self):
+        def description(path: Path) -> str:
+            frontmatter = path.read_text(encoding="utf-8").split("---", 2)[1]
+            return next(line.split(":", 1)[1].strip() for line in frontmatter.splitlines() if line.startswith("description:"))
+
+        canonical = description(ROOT / ".agents/skills/chrome-devtools-mcp/SKILL.md")
+        mirrored = description(ROOT / ".claude/skills/chrome-devtools-mcp/SKILL.md")
+        self.assertEqual(canonical, mirrored)
+        self.assertIn("selected project MCP", mirrored)
+
     def test_browser_mcp_selection_guide_covers_both_clients_and_safe_setup(self):
         path = ROOT / "docs/browser-mcp.md"
         self.assertTrue(path.is_file(), "the per-checkout browser MCP guide must ship with the template")
