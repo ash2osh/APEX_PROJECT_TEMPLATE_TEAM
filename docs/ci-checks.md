@@ -15,6 +15,14 @@ The jobs are `offline` (Linux, Python 3.10), `offline (latest Python 3.x)` (Linu
 compile and behavioural-test steps but not lint or the other checks), `windows-offline` and `macos-installer`. The full
 suite takes about 10 minutes on Linux and 20 to 30 on Windows.
 
+The `offline` job also runs these two checks, after the shell syntax check and before its tests:
+
+- **ShellCheck (error severity)** on `scripts/*.sh`. ShellCheck is preinstalled on `ubuntu-latest`. Only error-level
+  findings fail the job; warnings are not gated.
+- **PowerShell parse** of every `scripts/*.ps1`, with `[System.Management.Automation.Language.Parser]::ParseFile`. It
+  finds syntax errors only, not runtime errors. It fails when a file has a parse error or when no `.ps1` file is found.
+  `windows-offline` runs the same parse step.
+
 ## Before you push
 
 ```bash
@@ -23,11 +31,43 @@ python3 scripts/pre_push_check.py --all    # everything CI lints
 ```
 
 By default it checks only the files you changed (against the upstream branch or `origin/main`, plus uncommitted and
-untracked files): Python syntax, Ruff, shell syntax and the test files you changed, in about a second to a minute. Existing
-problems in other files do not block you, so it also works in a project created from the template. `--all` checks every
-file under `scripts/`, `tools/` and `tests/`, as CI does; use it before opening a pull request for a broad change. It does not
-run the whole suite or any Windows check. `python3 scripts/pre_push_check.py --install-hook` runs it on every `git push`
-(it never replaces an existing hook). Install Ruff once with `python3 -m pip install 'ruff>=0.5'`.
+untracked files): Python syntax, Ruff, shell syntax, ShellCheck (error severity), the PowerShell parse and the test files
+you changed, in about a second to a minute. Existing problems in other files do not block you, so it also works in a
+project created from the template. `--all` checks every file under `scripts/`, `tools/` and `tests/`, as CI does; use it
+before opening a pull request for a broad change. It does not run the whole suite or any Windows check.
+
+ShellCheck runs only when `shellcheck` is on `PATH`, and the PowerShell parse only when `pwsh` is on `PATH`. When a tool
+is missing, the check prints a one-line note and does not fail, so the local check stays usable on a machine without it;
+CI still runs both. When a step fails, the output ends with `CHECKS FAILED:` and the names of the failed steps.
+
+`python3 scripts/pre_push_check.py --install-hook` runs it on every `git push` (it never replaces an existing hook).
+Install Ruff once with `python3 -m pip install 'ruff>=0.5'`.
+
+## Skips that fail the run
+
+Some tests skip when a tool is missing. On a CI runner that tool is always present, so a skip there means the check did
+not run. `scripts/ci_run_tests.py --forbid-skip REGEX` (or the `CI_FORBID_SKIP` variable, which is the default; unset or
+empty means off) fails the run when the reason of any skipped test matches `REGEX`, even when every test passed. It
+prints the matching lines. The known-flaky rerun is checked too, so a rerun cannot hide a forbidden skip. The variable is
+not passed to the test modules that the parallel run starts.
+
+| Job | `CI_FORBID_SKIP` |
+| --- | --- |
+| `offline` | `PowerShell .*(not installed\|required)\|needs PowerShell\|requires PowerShell\|no PowerShell found` |
+| `offline (latest Python 3.x)` | the same |
+| `windows-offline` | `PowerShell .*(not installed\|required)\|needs PowerShell\|requires PowerShell\|no PowerShell found` |
+
+Limits, by design:
+
+- The pattern matches the reason text unittest prints (`skipped '<reason>'`), so it must match the message.
+- `PowerShell Core is not installed` comes from a 30-second start probe of `pwsh` (`tests/_test_subprocess_safety.py`).
+  On a slow runner that probe can fail, and then the job fails instead of skipping. Rerun the job before you act on it.
+- The pattern covers every reason a test gives for a missing PowerShell ("... is not installed", "... is required", "needs PowerShell", "requires PowerShell").
+- `no PowerShell found` comes only from Windows-only tests, where `powershell.exe` is always present.
+- `PowerShell is not installed outside the sandbox-blocked snap launcher` is not in the list. It only fires when no
+  `powershell.exe` and no `pwsh` outside `/snap/` exists, and the runner always has one. The `PowerShell 7 is not installed`,
+  `needs PowerShell 7` and `requires PowerShell Core` reasons are also not in the list, so a missing `pwsh` there still skips
+  silently. Add them to the pattern when you want them to fail too.
 
 ## Known flaky tests
 

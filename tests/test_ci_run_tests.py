@@ -10,10 +10,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
-from scripts.ci_run_tests import failed_test_ids, load_known, main, ordered_modules, parse_jobs, run_parallel, run_unittest
+from scripts.ci_run_tests import failed_test_ids, forbidden_skips, load_known, main, ordered_modules, parse_forbid_skip, parse_jobs, run_parallel, run_unittest
 
 KNOWN_TEXT = "# comment\n\nmod_a.ClassA.test_one  # reason\nmod_b.ClassB.test_two\n"
 FAIL_ONE = "FAIL: test_one (mod_a.ClassA)\n----\nFAILED (failures=1)\n"
+# The lines unittest -v prints for a method skip, a module-level SkipTest, and the summary of such a run.
+SKIP_METHOD = "test_one (mod_a.ClassA.test_one) ... skipped 'PowerShell Core is not installed'\n"
+SKIP_MODULE = "test_b (unittest.loader.ModuleSkipped.test_b) ... skipped 'no PowerShell found'\n"
+OK_SKIPPED = "Ran 1 test in 0.0s\n\nOK (skipped=1)\n"
 
 
 class Runner:
@@ -33,6 +37,7 @@ class CiRunTestsTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop("CI_TEST_JOBS", None)
+        os.environ.pop("CI_FORBID_SKIP", None)
         self.temporary = tempfile.TemporaryDirectory()
         self.known = Path(self.temporary.name) / "known_flaky.txt"
         self.known.write_text(KNOWN_TEXT, encoding="utf-8")
@@ -316,6 +321,106 @@ class JobsFromEnvironmentTests(unittest.TestCase):
             run_modules(["test_x", "test_y"])
         self.assertIn("import _no_real_sqlcl", commands[0][2])
         self.assertEqual(commands[0][3:], ["-v", "test_x", "test_y"])
+
+
+class ForbiddenSkipTests(unittest.TestCase):
+    def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("CI_TEST_JOBS", None)
+        os.environ.pop("CI_FORBID_SKIP", None)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.known = Path(self.temporary.name) / "known.txt"
+        self.known.write_text("mod_a.ClassA.test_one\n", encoding="utf-8")
+
+    def run_main(self, args, *results, parallel=None):
+        runner = Runner(*results)
+        kwargs = {"runner": runner, "known_path": self.known}
+        if parallel is not None:
+            kwargs["parallel"] = parallel
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            code = main(args, **kwargs)
+        return code, runner, printed.getvalue()
+
+    def test_a_matching_skip_fails_a_run_where_every_test_passed(self):
+        code, runner, printed = self.run_main(
+            ["--forbid-skip", "PowerShell Core is not installed"], (0, SKIP_METHOD + OK_SKIPPED))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(runner.calls), 1)
+        self.assertIn("Forbidden skip", printed)
+        self.assertIn(SKIP_METHOD.strip(), printed)
+
+    def test_a_skip_that_does_not_match_leaves_the_run_passing(self):
+        code, _, printed = self.run_main(["--forbid-skip", "no PowerShell found"], (0, SKIP_METHOD + OK_SKIPPED))
+        self.assertEqual(code, 0)
+        self.assertNotIn("Forbidden skip", printed)
+
+    def test_the_option_changes_nothing_when_unset_or_empty(self):
+        self.assertEqual(self.run_main([], (0, SKIP_METHOD + SKIP_MODULE + OK_SKIPPED))[0], 0)
+        os.environ["CI_FORBID_SKIP"] = ""
+        self.assertEqual(self.run_main([], (0, SKIP_METHOD + OK_SKIPPED))[0], 0)
+
+    def test_the_environment_variable_is_the_default_and_the_argument_overrides_it(self):
+        os.environ["CI_FORBID_SKIP"] = "PowerShell Core"
+        self.assertEqual(self.run_main([], (0, SKIP_METHOD + OK_SKIPPED))[0], 1)
+        self.assertEqual(self.run_main(["--forbid-skip=no PowerShell found"], (0, SKIP_METHOD + OK_SKIPPED))[0], 0)
+
+    def test_a_module_level_skip_line_is_matched(self):
+        code, _, printed = self.run_main(["--forbid-skip", "no PowerShell found"], (0, SKIP_MODULE + OK_SKIPPED))
+        self.assertEqual(code, 1)
+        self.assertIn(SKIP_MODULE.strip(), printed)
+
+    def test_the_reason_is_decoded_before_it_is_matched(self):
+        line = "setUpClass (mod_c.C) ... skipped 'it\\'s a PowerShell reason'\n"
+        self.assertEqual(forbidden_skips(line, parse_forbid_skip(["--forbid-skip", "it's a PowerShell"])[0]), [line.rstrip("\n")])
+
+    def test_a_known_flaky_rerun_does_not_hide_a_forbidden_skip(self):
+        code, runner, _ = self.run_main(
+            ["--forbid-skip", "PowerShell Core"], (1, SKIP_METHOD + FAIL_ONE), (0, ""))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(runner.calls), 2)
+
+    def test_a_forbidden_skip_in_the_flaky_rerun_fails_the_job(self):
+        code, runner, printed = self.run_main(
+            ["--forbid-skip", "PowerShell Core"], (1, FAIL_ONE), (0, SKIP_METHOD + OK_SKIPPED))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn(SKIP_METHOD.strip(), printed)
+
+    def test_a_failure_keeps_its_exit_code_and_still_lists_the_forbidden_skip(self):
+        code, _, printed = self.run_main(["--forbid-skip", "PowerShell Core"], (3, SKIP_METHOD + "Traceback ...\n"))
+        self.assertEqual(code, 3)
+        self.assertIn(SKIP_METHOD.strip(), printed)
+
+    def test_a_forbidden_skip_in_a_parallel_run_fails_the_run(self):
+        code, _, printed = self.run_main(
+            ["--jobs", "2", "--forbid-skip", "no PowerShell found"], parallel=lambda jobs: (0, SKIP_MODULE + OK_SKIPPED))
+        self.assertEqual(code, 1)
+        self.assertIn(SKIP_MODULE.strip(), printed)
+
+    def test_an_option_without_a_usable_pattern_is_refused(self):
+        for bad in (["--forbid-skip"], ["--forbid-skip="], ["--forbid-skip", "("]):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                parse_forbid_skip(bad)
+        os.environ["CI_FORBID_SKIP"] = "("
+        with self.assertRaises(SystemExit):
+            parse_forbid_skip([])
+
+    def test_child_processes_do_not_inherit_the_forbidden_skip_list(self):
+        seen = {}
+        class Done:
+            returncode, stdout = 0, ""
+        def fake_run(command, **kwargs):
+            seen.update(kwargs["env"])
+            return Done()
+        os.environ["CI_FORBID_SKIP"] = "PowerShell Core"
+        with patch("scripts.ci_run_tests.subprocess.run", fake_run):
+            from scripts.ci_run_tests import run_modules
+            run_modules(["test_x"])
+        self.assertNotIn("CI_FORBID_SKIP", seen)
+        self.assertEqual(seen["CI_TEST_JOBS"], "1")
 
 
 class UnittestRunnerSafetyTests(unittest.TestCase):

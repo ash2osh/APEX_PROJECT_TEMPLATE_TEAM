@@ -162,6 +162,20 @@ class MigrationArchiveTests(unittest.TestCase):
         self.assertEqual(record["destination"], plan.entries[0].relative_destination)
         self.assertRegex(record["archivedAt"], r"^\d{4}-\d{2}-\d{2}$")
 
+    def test_short_yes_alias_moves_the_folder_from_the_command_line(self) -> None:
+        api = self.require_archive()
+        name = "migrations/APP_ONE/2026-10-02_archive-alias-r001"
+        folder = add_folder(self.root, name)
+        migration = api.load_migration(self.root, name)
+        (folder / "status.dev.json").write_text(json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8")
+        add_attempt_event(folder, name, migration)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = api.main([name, "-y"], repo_root=self.root)
+
+        self.assertEqual(status, 0)
+        self.assertFalse(folder.exists())
+
     def test_custom_destination_is_used_and_the_index_extends_on_later_archives(self) -> None:
         api = self.require_archive()
         first = add_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")

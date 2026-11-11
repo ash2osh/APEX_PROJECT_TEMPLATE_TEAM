@@ -225,20 +225,20 @@ class LoginDiffersFromSchemaTests(unittest.TestCase):
                 )
 
                 result = subprocess.run(
-                    [BASH, str(runner), "100", "--env", "staging"],
+                    [BASH, str(runner), "100", "--env", "staging", "-y"],
                     cwd=root,
                     env=environment,
-                    input=b"y\n",
+                    input=b"",
                     capture_output=True,
                     check=False,
                 )
                 output = result.stdout.decode("utf-8", "replace") + result.stderr.decode("utf-8", "replace")
 
                 self.assertEqual(result.returncode, 0, output)
-                self.assertIn("Deploying to STAGING. Proceed? [y/N]: ", output)
+                self.assertIn("Confirmed by --yes; the interactive prompt was skipped.", output)
                 if expected_user == "APP_LOGIN":
                     self.assertEqual(output.count(banner), 1)
-                    self.assertLess(output.index(banner), output.index("Deploying to STAGING. Proceed? [y/N]: "))
+                    self.assertLess(output.index(banner), output.index("Confirmed by --yes; the interactive prompt was skipped."))
                 else:
                     self.assertNotIn(banner, output)
 

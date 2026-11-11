@@ -21,7 +21,7 @@ record keeps the readable diff and the day's evidence in one dated folder.
   the mirror from a commit. `--date` sets another dated folder. It reads only local files.
 - Other changes (APEX pages, scripts, documents) go into the same folder as `git diff`
   output.
-- `scripts/team.sh feature diff <slug> --schema <SCHEMA>` writes complete package
+- `scripts/team.sh feature diff <slug> --schema <SCHEMA>` writes complete stored-unit
   source diffs and review metadata under
   `ai_generate/YYYY-MM-DD/feature-diffs/`. Add those generated diffs and the
   command result to the day's one `WALKTHROUGH.md`; the retained DEV capture is

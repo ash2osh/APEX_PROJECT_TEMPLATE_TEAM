@@ -10,9 +10,14 @@ failing test, or a failed rerun fails the job exactly as before. A rerun is repo
 `--jobs N` (default: the CI_TEST_JOBS variable, else 1) runs each test module in its own
 process, N at a time, largest module first. Each module's output is printed whole, in
 that order, and the job fails when any module fails.
+
+`--forbid-skip REGEX` (default: the CI_FORBID_SKIP variable; unset or empty means off) fails the run when the
+reason of any skipped test matches REGEX, even if every test passed. Every run this script makes is checked,
+including the flaky rerun, so a rerun cannot hide a forbidden skip.
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -27,6 +32,8 @@ FAILURE = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
 FAILED_SUMMARY = re.compile(r"^FAILED \([^\r\n]+\)\s*\Z", re.MULTILINE)
 RAN_SUMMARY = re.compile(r"^Ran (\d+) tests? in [\d.]+s$", re.MULTILINE)
 OUTCOME_SUMMARY = re.compile(r"^(OK|FAILED)(?: \(([^\r\n]*)\))?$", re.MULTILINE)
+# unittest -v prints `... skipped '<repr of reason>'`, for a method, a setUpClass or a module-level SkipTest.
+SKIPPED_REASON = re.compile(r"""\bskipped ('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\s*\Z""")
 Runner = Callable[[Sequence[str]], tuple[int, str]]
 
 
@@ -47,6 +54,30 @@ def failed_test_ids(output: str) -> set[str]:
 def completed_failure(output: str) -> bool:
     """Whether unittest finished reporting a named failure, rather than crashing mid-run."""
     return bool(failed_test_ids(output) and FAILED_SUMMARY.search(output))
+
+
+def skip_reason(line: str) -> str | None:
+    """The decoded reason of a `skipped '...'` line, or None when the line is not a skip."""
+    match = SKIPPED_REASON.search(line)
+    if not match:
+        return None
+    try:
+        reason = ast.literal_eval(match.group(1))
+    except (ValueError, SyntaxError):
+        return match.group(1)
+    return reason if isinstance(reason, str) else match.group(1)
+
+
+def forbidden_skips(output: str, pattern: re.Pattern[str] | None) -> list[str]:
+    """Output lines whose skip reason matches the forbidden pattern; always empty when the option is off."""
+    if pattern is None:
+        return []
+    matches = []
+    for line in output.splitlines():
+        reason = skip_reason(line)
+        if reason is not None and pattern.search(reason):
+            matches.append(line)
+    return matches
 
 
 def load_known(path: Path) -> set[str]:
@@ -111,6 +142,8 @@ def run_modules(modules: Sequence[str]) -> tuple[int, str]:
     environment = dict(os.environ)
     # A module that runs this script again (its own tests) must not start a second parallel run.
     environment["CI_TEST_JOBS"] = "1"
+    # The forbidden-skip list belongs to the outer run, which checks the skip lines these children print.
+    environment.pop("CI_FORBID_SKIP", None)
     environment["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(ROOT / "tests"), str(ROOT), environment.get("PYTHONPATH", "")) if part)
     # `discover -s tests` imports every module into one process, so the guard that keeps tests away from a
@@ -184,25 +217,60 @@ def parse_jobs(args: list[str]) -> tuple[int, list[str]]:
     return int(jobs), rest
 
 
+def parse_forbid_skip(args: list[str]) -> tuple[re.Pattern[str] | None, list[str]]:
+    """Take `--forbid-skip REGEX` out of the arguments; the default comes from CI_FORBID_SKIP, where unset or empty means off."""
+    pattern = os.environ.get("CI_FORBID_SKIP", "")
+    rest = []
+    iterator = iter(args)
+    for argument in iterator:
+        if argument == "--forbid-skip":
+            pattern = next(iterator, "")
+        elif argument.startswith("--forbid-skip="):
+            pattern = argument.split("=", 1)[1]
+        else:
+            rest.append(argument)
+            continue
+        if not pattern:
+            raise SystemExit("--forbid-skip needs a regular expression")
+    if not pattern:
+        return None, rest
+    try:
+        return re.compile(pattern), rest
+    except re.error as error:
+        raise SystemExit(f"--forbid-skip needs a valid regular expression: {error}") from error
+
+
+def report_forbidden(lines: Sequence[str], code: int = 0) -> int:
+    """Print each forbidden skip line. Any of them fails the run, whatever the tests' own result was."""
+    if not lines:
+        return code
+    print(f"::error title=Forbidden skip::{len(lines)} skipped test line(s) match the forbidden-skip pattern", flush=True)
+    for line in lines:
+        print(line, flush=True)
+    return code or 1
+
+
 def main(argv: Sequence[str] | None = None, *, runner: Runner = run_unittest, known_path: Path = KNOWN_FLAKY,
          parallel: Callable[[int], tuple[int, str]] = run_parallel) -> int:
-    jobs, args = parse_jobs(list(argv) if argv is not None else sys.argv[1:])
+    forbid, rest = parse_forbid_skip(list(argv) if argv is not None else sys.argv[1:])
+    jobs, args = parse_jobs(rest)
     parallel_run = jobs > 1 and not args
     if parallel_run:
         code, output = parallel(jobs)
     else:
         code, output = runner(["discover", "-s", "tests", "-v", *args])
+    forbidden = forbidden_skips(output, forbid)
     if code == 0:
-        return 0
+        return report_forbidden(forbidden)
     # unittest reports ordinary failures with exit 1. Signals, fatal teardown
     # errors and incomplete output are never eligible for the flaky retry.
     # Parallel children were individually checked before aggregation above.
     if code != 1 or (not parallel_run and not completed_failure(output)):
-        return code
+        return report_forbidden(forbidden, code)
     failed = failed_test_ids(output)
     known = load_known(known_path)
     if not failed or not failed <= known:
-        return code
+        return report_forbidden(forbidden, code)
     names = sorted(failed)
     print(f"::warning title=Known flaky test failed::{', '.join(names)}; rerunning once", flush=True)
     # -k matches substrings of method names, and method names repeat across modules, so each
@@ -214,12 +282,14 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = run_unittest, kn
         for test_id in names:
             if test_id.split(".", 1)[0] == module:
                 rerun += ["-k", test_id.rsplit(".", 1)[1]]
-        code, _ = runner(rerun)
+        code, rerun_output = runner(rerun)
+        # The rerun's skips count as well: a known flaky test must not hide a forbidden skip.
+        forbidden += forbidden_skips(rerun_output, forbid)
         if code != 0:
             rerun_code = code
     if rerun_code == 0:
         print("::warning title=Known flaky test passed on rerun::" + ", ".join(names), flush=True)
-    return rerun_code
+    return report_forbidden(forbidden, rerun_code)
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ def _launcher_works(executable: str) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=5,
+            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return False

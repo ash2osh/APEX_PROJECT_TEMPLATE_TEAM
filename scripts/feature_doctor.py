@@ -263,7 +263,7 @@ def doctor(
     if live:
         schemas = sorted({claim.schema for claim in claims if claim.kind in STORED_SOURCE_KINDS and (selected is None or claim.feature in selected)})
         if not schemas:
-            summary.append("live: no package files selected, nothing to compare with DEV")
+            summary.append("live: no stored source files selected, nothing to compare with DEV")
         else:
             usable = [schema for schema in schemas if _dev_profile_available(environ, schema)]
             if not usable:
@@ -272,12 +272,12 @@ def doctor(
                     + " (set DB_ENVIRONMENT and the CODE_* profile); the live check did not run"
                 )
             for schema in sorted(set(schemas) - set(usable)):
-                findings.append(Finding(WARNING, "LIVE SKIPPED", schema, "no DEV profile for this schema; its package files were not compared"))
+                findings.append(Finding(WARNING, "LIVE SKIPPED", schema, "no DEV profile for this schema; its stored source files were not compared"))
             live_list, compared, accepted = live_findings(root, environ, claims, selected, set(usable))
             findings.extend(live_list)
-            summary.append(f"live: {compared} package file(s) compared with DEV, {accepted} accepted difference(s)")
+            summary.append(f"live: {compared} stored source file(s) compared with DEV, {accepted} accepted difference(s)")
     else:
-        summary.append("live: not run (use --live to compare package files with DEV)")
+        summary.append("live: not run (use --live to compare stored source files with DEV)")
     return findings, summary
 
 

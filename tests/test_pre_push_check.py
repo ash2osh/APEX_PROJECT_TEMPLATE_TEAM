@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -5,8 +7,12 @@ import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.pre_push_check import HOOK, changed_python_files, changed_shell_scripts, changed_test_files, existing
+from scripts import pre_push_check
+from scripts.pre_push_check import (
+    HOOK, changed_powershell_scripts, changed_python_files, changed_shell_scripts, changed_test_files, existing, powershell_parse_command,
+)
 
 
 class PrePushCheckTests(unittest.TestCase):
@@ -89,6 +95,101 @@ class PrePushCheckTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("check skipped", result.stderr)
         self.assertIn("exec python3 scripts/pre_push_check.py", HOOK)
+
+
+class ToolStepTests(unittest.TestCase):
+    """Failed steps are named, and ShellCheck and the PowerShell parse run only when their tool is present."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        for name in ("scripts/a.py", "scripts/run.sh", "scripts/b.ps1"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        self.calls = []
+
+    def run_check(self, args, paths, tools, step=None):
+        """Run main() on a fake repository with fake tools; return (exit code, printed output)."""
+        def fake_step(label, command):
+            self.calls.append((label, list(command)))
+            return True
+
+        output = io.StringIO()
+        with patch.object(pre_push_check, "ROOT", self.root), \
+                patch.object(pre_push_check, "changed_paths", return_value=paths), \
+                patch.object(pre_push_check, "step", step or fake_step), \
+                patch.object(pre_push_check.shutil, "which", new=lambda name: tools.get(name)), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            code = pre_push_check.main(args)
+        return code, output.getvalue()
+
+    def test_changed_powershell_scripts_keeps_existing_top_level_scripts(self):
+        (self.root / "scripts/sub").mkdir()
+        (self.root / "scripts/sub/x.ps1").write_text("", encoding="utf-8")
+        paths = ["scripts/b.ps1", "scripts/b.ps1", "scripts/sub/x.ps1", "scripts/gone.ps1", "docs/x.ps1", "scripts/run.sh"]
+        self.assertEqual(changed_powershell_scripts(paths, self.root), ["scripts/b.ps1"])
+
+    def test_powershell_parse_command_quotes_each_path_and_exits_one_on_an_error(self):
+        command = powershell_parse_command("/usr/bin/pwsh", ["scripts/a'b.ps1", "scripts/c.ps1"])
+        self.assertEqual(command[:3], ["/usr/bin/pwsh", "-NoProfile", "-Command"])
+        script = command[3]
+        self.assertIn("'scripts/a''b.ps1', 'scripts/c.ps1'", script)
+        self.assertIn("ParseFile", script)
+        self.assertIn("exit 1", script)
+
+    def test_shellcheck_and_the_powershell_parse_run_on_changed_scripts_when_their_tools_exist(self):
+        tools = {"bash": "/fake/bash", "shellcheck": "/fake/shellcheck", "pwsh": "/fake/pwsh"}
+        code, output = self.run_check([], ["scripts/run.sh", "scripts/b.ps1"], tools)
+        self.assertEqual(code, 0)
+        self.assertIn(("ShellCheck (error severity)", ["/fake/shellcheck", "--severity=error", "scripts/run.sh"]), self.calls)
+        parse = [command for label, command in self.calls if label == "PowerShell parse"]
+        self.assertEqual(len(parse), 1)
+        self.assertEqual(parse[0][:3], ["/fake/pwsh", "-NoProfile", "-Command"])
+        self.assertIn("'scripts/b.ps1'", parse[0][3])
+        self.assertIn("all checks passed", output)
+
+    def test_a_missing_shellcheck_or_pwsh_prints_one_note_each_and_does_not_fail(self):
+        tools = {"bash": "/fake/bash"}
+        code, output = self.run_check([], ["scripts/run.sh", "scripts/b.ps1"], tools)
+        self.assertEqual(code, 0)
+        self.assertIn("note: shellcheck is not on PATH", output)
+        self.assertIn("note: pwsh is not on PATH", output)
+        self.assertEqual([label for label, _ in self.calls], ["Shell syntax scripts/run.sh"])
+
+    def test_all_mode_checks_every_shell_and_powershell_script(self):
+        tools = {"bash": "/fake/bash", "ruff": "/fake/ruff", "shellcheck": "/fake/shellcheck", "pwsh": "/fake/pwsh"}
+        code, _ = self.run_check(["--all"], [], tools)
+        self.assertEqual(code, 0)
+        shellcheck = [command for label, command in self.calls if label.startswith("ShellCheck")]
+        self.assertEqual(shellcheck, [["/fake/shellcheck", "--severity=error", "scripts/run.sh"]])
+        parse = [command for label, command in self.calls if label == "PowerShell parse"]
+        self.assertIn("'scripts/b.ps1'", parse[0][3])
+
+    def test_every_failed_step_is_named_on_the_last_line(self):
+        tools = {"bash": "/fake/bash", "ruff": "/fake/ruff", "shellcheck": "/fake/shellcheck"}
+
+        def failing_step(label, command):
+            return False
+
+        code, output = self.run_check([], ["scripts/a.py", "scripts/run.sh"], tools, step=failing_step)
+        lines = output.splitlines()
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[-1], "CHECKS FAILED: Python syntax; Ruff; Shell syntax scripts/run.sh; ShellCheck (error severity)")
+        self.assertIn("fix them before pushing", lines[-2])
+
+    def test_a_real_syntax_error_names_its_step_on_the_last_line(self):
+        (self.root / "scripts/bad.py").write_text("def broken(:\n", encoding="utf-8")
+        output = io.StringIO()
+        with patch.object(pre_push_check, "ROOT", self.root), \
+                patch.object(pre_push_check, "changed_paths", return_value=["scripts/bad.py"]), \
+                contextlib.redirect_stdout(output):
+            code = pre_push_check.main([])
+        last = output.getvalue().splitlines()[-1]
+        self.assertEqual(code, 1)
+        self.assertTrue(last.startswith("CHECKS FAILED: "), last)
+        self.assertIn("Python syntax", last)
 
 
 if __name__ == "__main__":

@@ -65,9 +65,19 @@ with one database and two schemas (19 tests, two skipped). Run one test with `-k
 | `test_migration_only_capsule_ships_through_staging_and_production_and_refuses_recover` | A release made of one `migrate` step and no feature checkpoint. Freeze records `migrationOnly`. Staging, then production with stage proof, apply it: `includedCheckpoints` is `[]` and `includedMigrationSteps` is `[1]`, and the table is read back on both databases. `--recover` is refused and writes nothing, and `clean-capsule` finds the capsule eligible. Needs the staging database; skips otherwise. |
 | `test_migrate_step_refused_before_its_write_leaves_the_target_free` | A migrate step whose precondition holds at prepare and fails at apply. The run ends failed, the step reports `no-write-attempted`, `databaseState` is `not-started`, and the table is absent. When the precondition holds again, the same capsule is prepared and runs to success. |
 | `test_unknown_run_without_a_checkpoint_is_reconciled_then_frees_the_target` | A no-op package checkpoint, then a SQL script that fails on a row another session left. The run ends `unknown`, with no checkpoint to recover, and the next run is refused. `feature reconcile-run` refuses a wrong acknowledgment (exit 1, nothing changed), then closes the run with `RECONCILE-RUN <run-id>` supplied on standard input by the test, which acts as the operator in this disposable copy. The closed run stays not cleanup-eligible and production refuses the report it left. After the blocking row is removed, the same capsule is refused before any write because step 1 already has a rollout receipt; a continuation manifest frozen as a new capsule runs to success on staging, and on production too when there are two databases. |
-| `test_standalone_procedure_and_function_capture_refresh_move_and_doctor_drift` | `--procedure` and `--function` capture. A refresh refuses an edit that DEV lacks, and `--discard-unapplied` erases it. A DEV change to a function is reported by `feature doctor --live` with exit 1. A refresh stops on the line DEV no longer has, and succeeds with `--discard-unapplied`. A procedure moves to a second feature only with `--move-from`. |
+| `test_standalone_procedure_and_function_capture_refresh_move_and_doctor_drift` | `--procedure` and `--function` capture. A refresh refuses an edit that DEV lacks, and `--discard-unapplied` erases it. A DEV change to an unedited function is reported by `feature doctor --live` with exit 1, and a refresh replaces the unedited file without `--discard-unapplied`, because the file equals its retained DEV baseline. A procedure moves to a second feature only with `--move-from`. |
 | `test_disabled_trigger_is_refused_at_prepare_and_rechecked_before_apply` | A trigger DISABLED on the staging database, which the release would replace, is refused at prepare. It stays disabled, its source is unchanged, and no plan is written. Enabled at prepare and disabled again before apply, it is refused by the apply precondition, and nothing is written. |
 | `test_convert_plan_reads_dated_migration_folders_offline` | `feature convert-plan` on three dated folders in the copy. Text and JSON output both exit 0, and no file in the copy changes. No database is used. |
+
+## Confirmations and acknowledgments
+
+The module confirms its rollouts with `-y`, and a production rollout also passes `--confirm-target`
+with the name the module reads once at class setup through `SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME')`.
+The production profile is the same database as DEV, so one name serves both. If
+`TEMPLATE_LIVE_SECOND_CONNECTION` is a different database, a production rollout that writes to both is
+refused by the name rule. The two typed acknowledgments (`RECONCILE` and `RECONCILE-RUN`) read their
+answers from redirected input only when the child environment sets `TEAM_ACK_FROM_STDIN=1`; only this
+module sets it. Piped `y` answers are no longer accepted by any prompt.
 
 ## Not covered
 
@@ -78,10 +88,8 @@ with one database and two schemas (19 tests, two skipped). Run one test with `-k
   feature-release guide requires a separately authorized disposable rehearsal
   before any measured claim.
 - A `migrate` step killed mid-apply. The kill check covers a feature checkpoint only.
-- A refresh that compares with the retained DEV baseline. The refresh guard compares with DEV only,
-  as the feature-release guide documents; see the open decision in `TODO.md`.
-- A type specification re-created while its body is not in the release. The body stays INVALID and no
-  check reports it; see `TODO.md`.
+- The prepare refusal for a replaced specification whose body is not in the release, and cleanup after a
+  superseded reconciled run. Both are covered offline only.
 
 ## The kill check and the database's timing
 

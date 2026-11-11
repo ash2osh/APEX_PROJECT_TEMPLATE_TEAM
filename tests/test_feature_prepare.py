@@ -1403,5 +1403,76 @@ class FeaturePrepareTests(unittest.TestCase):
             self._prepare(checkpoint, self._trigger_state(checkpoint, status=None, same_source=False))
 
 
+    # A replaced specification invalidates its body. The release must carry a body that the target has.
+    def _dispatch_body_item(self) -> FeatureInput:
+        header = self.source[: self.source.index(b"CREATE OR REPLACE")]
+        sql = header + b"CREATE OR REPLACE PACKAGE BODY APP_CODE.DISPATCH AS\n  PROCEDURE RUN IS BEGIN NULL; END;\nEND DISPATCH;\n/\n"
+        return FeatureInput(
+            "features/dispatch/APP_CODE/packages/dispatch.pkb.sql", sql, hashlib.sha256(sql).hexdigest(),
+            ("APP_CODE", "PACKAGE BODY", "DISPATCH"), "stored-source",
+        )
+
+    def _dispatch_stored_code(self, *, body: bool) -> list[dict]:
+        rows = [{"name": "DISPATCH", "type": "PACKAGE", "status": "VALID"}]
+        if body:
+            rows.append({"name": "DISPATCH", "type": "PACKAGE BODY", "status": "VALID"})
+        return rows
+
+    def test_a_replaced_specification_whose_body_is_on_the_target_but_not_in_the_release_is_refused(self) -> None:
+        from scripts import feature_release
+
+        state = self._state(environment="stage", lines=["PACKAGE DISPATCH AS\n", "  PROCEDURE OLD;\n", "END DISPATCH;\n"])
+        state["structural"]["stored-code"] = self._dispatch_stored_code(body=True)
+
+        with self.assertRaisesRegex(
+            feature_release.FeatureReleaseError,
+            r"package DISPATCH is replaced by this release, but its PACKAGE BODY exists on staging.*"
+            r"--package DISPATCH --schema APP_CODE --env dev",
+        ):
+            self._prepare(self.checkpoint, state)
+        self.assertFalse((self.root / "scratch/feature-release-plans/staging" / f"{self.payload_digest}.json").exists())
+
+    def test_a_replaced_specification_is_allowed_when_its_body_is_in_the_same_release(self) -> None:
+        from scripts.migration_manifest import QueryCheck
+
+        body = self._dispatch_body_item()
+        checkpoint = FeatureCheckpoint(
+            "APP_CODE", (self.item, body), (), (QueryCheck("after-package", "SELECT 1 FROM dual", 1),), (("APP_CODE", "DISPATCH"),),
+        )
+        state = self._state(environment="stage", lines=["PACKAGE DISPATCH AS\n", "  PROCEDURE OLD;\n", "END DISPATCH;\n"])
+        state["sourceUnits"]["PACKAGE BODY:DISPATCH"] = {
+            "lines": ["PACKAGE BODY DISPATCH AS\n", "  PROCEDURE RUN IS BEGIN NULL; NULL; END;\n", "END DISPATCH;\n"],
+            "settings": dict(SETTINGS), "valid": True,
+        }
+        state["structural"]["stored-code"] = self._dispatch_stored_code(body=True)
+
+        plan = self._prepare(checkpoint, state)
+
+        guards = {guard["unit"]["type"]: guard for guard in plan.checkpoint_guards[0]["sourceGuards"]}
+        self.assertFalse(guards["PACKAGE"]["noOp"])
+        self.assertFalse(guards["PACKAGE BODY"]["noOp"])
+
+    def test_a_replaced_specification_is_allowed_when_the_target_has_no_body(self) -> None:
+        state = self._state(environment="stage", lines=["PACKAGE DISPATCH AS\n", "  PROCEDURE OLD;\n", "END DISPATCH;\n"])
+        state["structural"]["stored-code"] = self._dispatch_stored_code(body=False)
+
+        plan = self._prepare(self.checkpoint, state)
+
+        guard = plan.checkpoint_guards[0]["sourceGuards"][0]
+        self.assertTrue(guard["targetExists"])
+        self.assertFalse(guard["noOp"])
+
+    def test_an_unchanged_specification_is_allowed_while_its_body_is_on_the_target(self) -> None:
+        # The no-op comparison of the same identical, valid unit (see test_only_identical_valid_stored_unit_is_marked_noop).
+        exact_lines = ["PACKAGE" + " " * 10 + "DISPATCH AS\n", "  PROCEDURE RUN;\n", "END DISPATCH;\n"]
+        state = self._state(environment="stage", lines=exact_lines, valid=True)
+        state["sourceUnits"]["PACKAGE:DISPATCH"]["settings"] = dict(SETTINGS)
+        state["structural"]["stored-code"] = self._dispatch_stored_code(body=True)
+
+        plan = self._prepare(self.checkpoint, state)
+
+        self.assertTrue(plan.checkpoint_guards[0]["sourceGuards"][0]["noOp"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,7 @@ from scripts.db_targets import Target, TargetResolutionError, resolve_target
 from scripts.deployment_descriptor import DescriptorError, read_descriptor
 from scripts.local_config import ConfigError, read_project_env
 from scripts.read_only_query import QueryError, resolve_query_target
+from scripts import terminal_confirm
 from scripts.sqlcl_session import SqlclError, run_sqlcl
 
 
@@ -654,10 +655,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             print(f"Type exactly {confirmation!r} to continue: ", end="", file=sys.stderr, flush=True)
-            try:
-                entered = input().strip()
-            except EOFError:
-                entered = ""
+            # A typed acknowledgment: redirected input is refused (no flag replaces it), so a piped line cannot run an action.
+            entered = ""
+            if terminal_confirm.may_read_acknowledgment():
+                try:
+                    entered = input().strip()
+                except EOFError:
+                    entered = ""
             if entered != confirmation:
                 report = _action_result(
                     args.action, "refused", scope, selected_row["staticId"],

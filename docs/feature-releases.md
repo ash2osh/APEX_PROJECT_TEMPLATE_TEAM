@@ -45,7 +45,12 @@ under ignored `scratch/`. It uses the `CODE_*` profile, not `MIGRATION_*`. A fea
 needs every DEV schema listed in `CODE_SCHEMA`, with aligned `CODE_SQLCL_CONNECTION`
 and `CODE_EXPECTED_USER` values; otherwise the second schema's capture is refused. It
 refuses to replace edited source; use `--refresh` only after reviewing the live
-change and reconciling the source. `diff` is offline and writes source diffs and
+change and reconciling the source. A `--refresh` of a file that equals its retained
+DEV baseline has no local edits, so it replaces the file with the current DEV source
+without `--discard-unapplied`, even when DEV changed a line. This holds for every
+stored unit group. A file that differs from its baseline, a missing or unreadable
+baseline, or an accepted difference recorded for the file keeps the stop described in
+[ownership and DEV drift](#ownership-and-dev-drift). `diff` is offline and writes source diffs and
 review metadata under `ai_generate/YYYY-MM-DD/feature-diffs/`. Add its output to
 the day's single `WALKTHROUGH.md` as described in
 [daily change records](daily-change-record.md).
@@ -133,10 +138,13 @@ scripts/team.sh feature capture orders --package ITEM_LOOKUP --schema APP_CODE -
 ```
 
 `feature capture` refuses a unit another feature holds; `--move-from` names the feature it is taken from. A move
-or a `--refresh` stops when the file it replaces has lines DEV does not have (`--discard-unapplied` erases them,
-`--keep-file` moves the old file unchanged). `feature freeze` refuses a unit held by two selected features and
-compares the selected stored-unit files with DEV when a DEV profile is configured (`--no-live "<reason>"` skips it;
-the reason is kept in `scratch/freeze-checks/`).
+stops when the file it replaces has lines DEV does not have (`--discard-unapplied` erases them, `--keep-file`
+moves the old file unchanged). A `--refresh` stops the same way only when the file differs from its retained DEV
+baseline, the DEV capture the file was taken from. A file equal to that baseline is replaced without the flag; a
+missing or unreadable baseline, or an accepted difference recorded for the file, keeps the stop.
+
+`feature freeze` refuses a unit held by two selected features and compares the selected stored-unit files with DEV
+when a DEV profile is configured (`--no-live "<reason>"` skips it; the reason is kept in `scratch/freeze-checks/`).
 
 ## Freeze and prepare
 
@@ -173,7 +181,24 @@ would replace it: `CREATE OR REPLACE TRIGGER` leaves it enabled. The refusal nam
 the trigger. Enable or disable it in a reviewed migration instead, and keep it out
 of the release. A trigger the release leaves unchanged is not replaced, so it is
 allowed in any state. Apply rechecks that a replaced trigger is still ENABLED before
-it writes. The capsule payload digest is
+it writes.
+
+A replaced `PACKAGE` or `TYPE` specification is also a refusal at prepare when the target has its
+`PACKAGE BODY` or `TYPE BODY` of the same name and the release does not carry that body. Creating a
+specification invalidates its body, and the body is re-created only in the same checkpoint, so a body left
+out would stay INVALID and no check of the release would report it. The refusal names the unit and the fix:
+
+```bash
+scripts/team.sh feature capture <feature> --package ITEM_LOOKUP --schema APP_CODE --env dev   # or --type NAME
+```
+
+Capturing from DEV stores the specification and its body together, so the body ships with it. The
+refusal does not apply when the specification is unchanged on the target (nothing is replaced), when
+the target has no body, or when the body is a unit of the same checkpoint. The body's existence comes
+from the read-only catalog capture that prepare already makes, so the check adds no connection and no
+write.
+
+The capsule payload digest is
 shared by staging and production; the target-plan digest is specific to each
 environment. Re-run `feature freeze` and prepare again if selected source or
 the manifest changes.
@@ -286,6 +311,18 @@ scripts/team.sh feature clean-capsule <payload-sha256>
 A manifest with neither a feature step nor a migrate step is refused at freeze. The
 freeze record under `scratch/freeze-checks/` states `migrationOnly` and `migrationSteps`.
 
+### Confirming a rollout without a prompt
+
+`rollout` prints every step hash and asks `Continue with this rollout? [y/N]` for staging and
+production. `-y` / `--yes` accepts that question. Production also needs
+`--confirm-target <db_unique_name>`: `-y` alone is refused before any step runs, and a name that
+differs from the observed `db_unique_name` of any database the rollout writes to refuses before the
+first write (the check only reads). `--confirm-target` alone is accepted too, as it is for `migrate`.
+`--yes` and `--confirm-target` do not apply to `--dry-run` or `--prepare`, and piped input is refused.
+The rollout report and `rollout-confirmation.json` record `confirmedBy`. An app-deploy step runs
+`deploy.sh` with `--yes` and, on production, the name; it never receives a piped answer. `-y` does
+not cover the typed `RECONCILE` acknowledgments, the `Press Enter` pause, or `--recover`.
+
 ## Closing a run that has no checkpoint to recover
 
 A run that ended unknown, with no checkpoint attempt to recover, keeps its target
@@ -314,8 +351,9 @@ The acknowledgment asserts that the original process and the database operation 
 ended. A free lease alone does not establish that. On success, a running run becomes
 `unknown` with a finish time, the row gains a `reconciliation` record with the
 acknowledgment and the prior state, and the database state is left as it was. The run
-then no longer occupies its targets. It is never proof of completion, and it keeps its
-capsule ineligible for cleanup.
+then no longer occupies its targets. It is never proof of completion. It keeps its capsule
+ineligible for cleanup until a later verified run of the same environment supersedes it (see
+[timing, attempts, and cleanup](#timing-attempts-and-cleanup)).
 
 Exit codes: 0 reconciled; 1 declined, or the acknowledgment was wrong; 2 refused or an
 error.
@@ -352,8 +390,11 @@ scripts/team.sh feature clean-capsule <payload-sha256> --yes
 ```
 
 Apply cleanup only after verified production and when no unresolved attempt
-references the capsule. It removes generated capsule and plan artifacts, keeps
-compact receipts and review diffs, and records which paths were removed.
+references the capsule. A run closed by `feature reconcile-run` (its state stays `unknown`) blocks
+cleanup unless a later verified run of the same environment supersedes it; the production run must still be
+complete and verified either way. A verified run of the other environment does not supersede it, and neither
+does a verified run that started earlier (runs are ordered by start time). Cleanup removes generated capsule and
+plan artifacts, keeps compact receipts and review diffs, and records which paths were removed.
 
 ## Converting an existing project later
 

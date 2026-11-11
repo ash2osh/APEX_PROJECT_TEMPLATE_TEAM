@@ -67,19 +67,6 @@ class FeatureDdlError(ValueError):
     """A recognised statement names something outside the checkpoint's scope."""
 
 
-def unquote_identifier(value: str) -> str:
-    if value.startswith('"') and value.endswith('"'):
-        return value[1:-1].replace('""', '"')
-    return value.upper()
-
-
-def static_grant_object(statement: str, schema: str) -> tuple[str, str] | None:
-    grant = _grant(statement.strip(), schema)
-    if grant is None:
-        return None
-    return str(grant["owner"]), str(grant["name"])
-
-
 def model_statement(statement: str, operation: Mapping, schema: str) -> dict | None:
     """Return the modelled operation for a statement the analyzer left open, or None.
 

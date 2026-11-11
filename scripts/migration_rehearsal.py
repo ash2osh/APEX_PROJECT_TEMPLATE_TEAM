@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from . import migrate as migration_runner
+from . import terminal_confirm
 from .db_targets import Target, TargetResolutionError
 from .migration_checks import (
     CheckReport,
@@ -901,11 +902,15 @@ def rehearse_batch(
     run_session_fn: Callable | None = None,
     run_checks_fn: Callable | None = None,
     report_path: Path | str | None = None,
+    yes: bool = False,
 ) -> int:
     """Run rehearsable data files in order, roll back, then verify preconditions."""
     repo_root = Path(repo_root).resolve()
     if not migrations:
         print("migration error: select one or more folders in execution order", file=sys.stderr)
+        return 2
+    if yes and target.environment == "prod":
+        print("migration error: --yes does not apply to production --rehearse; answer its prompt at a terminal", file=sys.stderr)
         return 2
     inventory_runner = capture_inventory_fn or capture_inventory
     session_runner = run_session_fn or run_sqlcl
@@ -920,6 +925,7 @@ def rehearse_batch(
         "target": None,
         "folders": [],
         "rollbackProof": {"status": "not needed", "method": "no data-changing statement executed", "explicitRollback": False},
+        "confirmedBy": None,
         "errors": [],
     }
     requested_report: Path | None = None
@@ -941,11 +947,17 @@ def rehearse_batch(
 
         if target.environment in {"staging", "prod"}:
             migration_runner._print_target_summary(target, expected_identity, frozen)
-            prompt = f"Rehearsing against {target.environment.upper()}. Proceed? [y/N]"
-            try:
-                approved = bool(confirm(prompt))
-            except (EOFError, OSError):
-                approved = False
+            if yes:
+                approved = True
+                print(terminal_confirm.confirmed_line(True, None))
+            else:
+                prompt = f"Rehearsing against {target.environment.upper()}. Proceed? [y/N]"
+                try:
+                    approved = bool(confirm(prompt))
+                except (EOFError, OSError):
+                    approved = False
+            if approved:
+                report["confirmedBy"] = terminal_confirm.confirmed_by(yes, None)
             if not approved:
                 report["status"] = "declined"
                 print(f"Rehearsal against {target.environment.upper()} declined; no data changes were attempted.")

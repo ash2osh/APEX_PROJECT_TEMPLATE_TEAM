@@ -60,6 +60,7 @@ ENGINE_HELPER_FILES = (
     "scripts/windows_job.py",
     "scripts/sqlcl_transport.py",
     "scripts/path_utils.py",
+    "scripts/terminal_confirm.py",
     "scripts/directory_install.py",
     "scripts/deployment_descriptor.py",
     "scripts/validate_app_source.py",

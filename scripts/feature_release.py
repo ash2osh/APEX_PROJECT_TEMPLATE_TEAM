@@ -994,6 +994,37 @@ def _refuse_disabled_triggers(
             )
 
 
+def _refuse_body_outside_release(
+    checkpoint: FeatureCheckpoint, state: Mapping, source_guards: Sequence[Mapping], environment: str,
+) -> None:
+    """Refuse a replaced PACKAGE or TYPE specification whose body on the target is not in this checkpoint.
+
+    Creating a specification invalidates its body, and the body is re-created only when the same checkpoint
+    carries it. A body left out stays INVALID, and no check of the release reports it. The body's existence
+    comes from the target's stored-code rows that prepare already reads (ALL_SOURCE for selected names).
+    """
+    selected = {(guard["unit"]["type"], guard["unit"]["name"]) for guard in source_guards}
+    on_target = {
+        (row.get("type"), row.get("name"))
+        for row in state["structural"]["stored-code"]
+        if isinstance(row, Mapping)
+    }
+    for guard in source_guards:
+        unit = guard["unit"]
+        if unit["type"] not in {"PACKAGE", "TYPE"} or not guard["targetExists"] or guard["noOp"]:
+            continue
+        body = (f"{unit['type']} BODY", unit["name"])
+        if body not in on_target or body in selected:
+            continue
+        flag = "package" if unit["type"] == "PACKAGE" else "type"
+        raise FeatureReleaseError(
+            f"{unit['type'].lower()} {unit['name']} is replaced by this release, but its {body[0]} exists on {environment} "
+            "and is not in this checkpoint; applying the specification would leave the body INVALID. "
+            f"Capture the body into the feature so it ships with its specification: "
+            f"scripts/team.sh feature capture <feature> --{flag} {unit['name']} --schema {checkpoint.schema} --env dev"
+        )
+
+
 def prepare_target(
     repo_root: Path,
     capsule: release_capsule.ReleaseCapsule,
@@ -1071,6 +1102,7 @@ def prepare_target(
         state = dict(state, identity=identity, environment=environment)
         source_guards = _source_guards(checkpoint, state, checkpoint_number)
         _refuse_disabled_triggers(checkpoint, state, source_guards, environment)
+        _refuse_body_outside_release(checkpoint, state, source_guards, environment)
         selected_review_specs = _review_specs(root, checkpoint, state, capsule.payload_digest)
         review_specs.extend(selected_review_specs)
         structural = state["structural"]

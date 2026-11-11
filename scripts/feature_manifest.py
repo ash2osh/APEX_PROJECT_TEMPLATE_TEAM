@@ -220,17 +220,6 @@ def _source_unit(item: FeatureInput, schema: str) -> tuple[str, str, str] | None
     return owner, object_type, name
 
 
-def _unquote_identifier(value: str) -> str:
-    return feature_ddl_forms.unquote_identifier(value)
-
-
-def _static_grant_object(statement: str, schema: str) -> tuple[str, str] | None:
-    try:
-        return feature_ddl_forms.static_grant_object(statement, schema)
-    except feature_ddl_forms.FeatureDdlError as error:
-        raise FeatureManifestError(str(error)) from error
-
-
 def _validate_ddl(item: FeatureInput, schema: str) -> tuple[tuple[str, str], ...]:
     text = item.source.decode("utf-8")
     migration = _analysis_migration((item,), schema)

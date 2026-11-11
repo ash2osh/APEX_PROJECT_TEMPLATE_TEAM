@@ -1245,6 +1245,36 @@ exit 17
                     process.communicate()
             self.assertEqual(process.returncode, 2)
 
+    def test_yes_and_confirm_target_reach_their_helpers_and_both_usage_screens_list_them(self) -> None:
+        # Production refusals come from the helpers before any connection; the wrappers must pass the flags through.
+        pwsh = _test_subprocess_safety.working_pwsh()
+        entries = [("team.sh", [BASH, str(ROOT / "scripts" / "team.sh")])]
+        if pwsh:
+            entries.append(("team.ps1", [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")]))
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env"
+            env_file.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PROJECT_ENV_FILE"] = str(env_file)
+            for name, command in entries:
+                for argv in (
+                    ["migrate", "migrations/none", "--env", "prod", "-y"],
+                    ["rollout", "rollout/none.json", "--env", "prod", "-y"],
+                    ["deploy", "100", "--env", "prod", "-y"],
+                ):
+                    with self.subTest(wrapper=name, command=argv[0]):
+                        result = subprocess.run([*command, *argv], text=True, capture_output=True, check=False, cwd=ROOT,
+                                                env=environment, stdin=subprocess.DEVNULL, timeout=120)
+                        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
+                        self.assertNotEqual(result.returncode, 0, output)
+                        self.assertIn("production also needs --confirm-target <db_unique_name>", re.sub(r"[\s|]+", " ", output), output)
+        for name, command in entries:
+            with self.subTest(usage=name):
+                usage = subprocess.run([*command, "--help"], text=True, capture_output=True, check=False, cwd=ROOT).stdout
+                for option in ("migrate", "rollout", "deploy"):
+                    self.assertIn("[--yes|-y]", usage.split(f"  {option} ", 1)[1].split("\n\n", 1)[0] + usage.split(f"  {option} ", 1)[1][:400])
+                self.assertIn("[--confirm-target <db_unique_name>]", usage)
+
     def test_the_two_usage_screens_match_apart_from_the_script_name(self) -> None:
         # The PowerShell screen once left out `--help`, an option it accepts.
         pwsh = _test_subprocess_safety.working_pwsh()
@@ -1667,7 +1697,7 @@ exit 17
                 self.assertEqual(process.returncode, 130, screen)
                 self.assertEqual(sorted(path.name for path in (root / "scratch").glob("sqlcl-doctor*")), [])
 
-    def make_deploy_checkout(self, root: Path, configure_profile: bool = True) -> tuple[Path, Path]:
+    def make_deploy_checkout(self, root: Path, configure_profile: bool = True, with_lifecycle: bool = False) -> tuple[Path, Path]:
         scripts = root / "scripts"
         scripts.mkdir()
         for name in (
@@ -1689,6 +1719,12 @@ exit 17
             source = ROOT / "scripts" / name
             if source.exists():
                 shutil.copy2(source, scripts / name)
+        if with_lifecycle:
+            # The identity reader --confirm-target compares against; a stand-in that reports PRODDB_UNIQUE.
+            from test_publish_cli import PublishAppCliTests
+
+            (scripts / "application_lifecycle.py").write_text(PublishAppCliTests.FAKE_LIFECYCLE, encoding="utf-8")
+            (scripts / "application_lifecycle.sql").write_text("-- test stand-in\n", encoding="utf-8")
         env_text = (ROOT / ".env.example").read_text(encoding="utf-8")
         if configure_profile:
             env_text += "\nPROD_SQLCL_CONNECTION=prod-db\nPROD_EXPECTED_USER=PROD_DEPLOYER\n"
@@ -1856,15 +1892,48 @@ exit 17
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Deploying to PROD. Proceed? [y/N]", result.stdout)
+            self.assertIn("piped or redirected answers are not accepted", result.stderr)
             self.assertFalse(sql_log.exists(), "a declined deployment must not invoke SQLcl")
 
-    def test_confirmed_deploy_uses_the_production_descriptor(self) -> None:
+    def test_piped_yes_is_refused_for_a_production_deployment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            script, sql_log = self.make_deploy_checkout(Path(temporary))
+            script, sql_log = self.make_deploy_checkout(Path(temporary), with_lifecycle=True)
 
             result = self.run_deploy(script, sql_log, input_text="y\n")
 
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--yes", result.stderr)
+            self.assertFalse(sql_log.exists(), "a piped answer must not confirm a production import")
+
+    def test_yes_alone_is_refused_for_production_before_any_sqlcl_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary), with_lifecycle=True)
+
+            result = self.run_deploy(script, sql_log, "-y")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("production also needs --confirm-target <db_unique_name>", result.stderr)
+            self.assertFalse(sql_log.exists())
+
+    def test_manual_deploy_takes_neither_yes_nor_confirm_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary))
+
+            for flags in (("--manual", "-y"), ("--manual", "--confirm-target", "PRODDB_UNIQUE")):
+                with self.subTest(flags=flags):
+                    result = self.run_deploy(script, sql_log, *flags)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("do not apply to --manual", result.stderr)
+            self.assertFalse(sql_log.exists())
+
+    def test_confirmed_deploy_uses_the_production_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script, sql_log = self.make_deploy_checkout(Path(temporary), with_lifecycle=True)
+
+            result = self.run_deploy(script, sql_log, "-y", "--confirm-target", "PRODDB_UNIQUE")
+
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Confirmed by --yes and --confirm-target PRODDB_UNIQUE; the interactive prompt was skipped.", result.stdout)
             args = sql_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("-name", args)
             self.assertIn("prod-db", args)
@@ -1873,14 +1942,14 @@ exit 17
     def test_confirmed_deploy_restores_automations_and_optout_skips_restore(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             script, sql_log = self.make_deploy_checkout(Path(temporary))
-            result = self.run_deploy(script, sql_log, input_text="y\n")
+            result = self.run_deploy(script, sql_log, "-y", "--confirm-target", "TESTDB")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("AUTO | ACTIVE | ACTIVE", result.stdout)
             self.assertEqual((script.parents[1] / "automation-calls.txt").read_text().splitlines(), ["4155544F"])
 
         with tempfile.TemporaryDirectory() as temporary:
             script, sql_log = self.make_deploy_checkout(Path(temporary))
-            result = self.run_deploy(script, sql_log, "--no-restore-automations", input_text="y\n")
+            result = self.run_deploy(script, sql_log, "--no-restore-automations", "-y", "--confirm-target", "TESTDB")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse((script.parents[1] / "automation-calls.txt").exists())
 
@@ -1888,7 +1957,7 @@ exit 17
         with tempfile.TemporaryDirectory() as temporary:
             script, sql_log = self.make_deploy_checkout(Path(temporary))
 
-            result = self.run_deploy(script, sql_log, "--strict-bytes", input_text="y\n")
+            result = self.run_deploy(script, sql_log, "--strict-bytes", "-y", "--confirm-target", "TESTDB")
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("APEX_PUBLISH_SOURCE_VERIFIED:100", result.stdout)

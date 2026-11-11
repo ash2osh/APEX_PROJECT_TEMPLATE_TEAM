@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Run the quick CI checks locally before a push: syntax, Ruff, shell syntax and the tests you changed.
+"""Run the quick CI checks locally before a push: syntax, Ruff, shell syntax, ShellCheck, PowerShell parsing and the tests you changed.
 
 By default it checks only the files you changed (against the upstream branch or origin/main, plus uncommitted and
 untracked files), so existing problems elsewhere in a project do not block you. `--all` checks every file under
 scripts/, tools/ and tests/, as CI does; use it before opening a pull request for a broad change.
+
+ShellCheck (error severity) runs when `shellcheck` is on PATH and the PowerShell parse runs when `pwsh` is on PATH;
+a missing tool prints a one-line note and does not fail the check.
 
 CI runs the full suite on Linux, Windows and macOS, which takes 10 to 30 minutes. Most failed runs were lint errors or a
 changed test that fails on Linux, both caught here in seconds. This does not run the whole suite or any Windows check.
@@ -49,6 +52,24 @@ def changed_python_files(paths: Sequence[str], root: Path = ROOT) -> list[str]:
 def changed_shell_scripts(paths: Sequence[str], root: Path = ROOT) -> list[str]:
     """Changed `scripts/*.sh` files that still exist, sorted, each once."""
     return sorted({p for p in paths if p.startswith("scripts/") and "/" not in p[len("scripts/"):] and p.endswith(".sh") and (root / p).is_file()})
+
+
+def changed_powershell_scripts(paths: Sequence[str], root: Path = ROOT) -> list[str]:
+    """Changed `scripts/*.ps1` files that still exist, sorted, each once."""
+    return sorted({p for p in paths if p.startswith("scripts/") and "/" not in p[len("scripts/"):] and p.endswith(".ps1") and (root / p).is_file()})
+
+
+def powershell_parse_command(pwsh: str, files: Sequence[str]) -> list[str]:
+    """A `pwsh` command that parses each file without running it, and exits 1 when any file has a parse error."""
+    quoted = ", ".join("'" + name.replace("'", "''") + "'" for name in files)
+    script = (
+        f"$bad = 0; foreach ($file in @({quoted})) {{ "
+        "$tokens = $null; $errors = $null; "
+        "[void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors); "
+        "foreach ($problem in $errors) { Write-Host ($file + ':' + $problem.Extent.StartLineNumber + ': ' + $problem.Message); $bad++ } "
+        "}; if ($bad -gt 0) { exit 1 }"
+    )
+    return [pwsh, "-NoProfile", "-Command", script]
 
 
 def changed_test_files(paths: Sequence[str]) -> list[str]:
@@ -107,32 +128,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         os.environ.pop(name, None)
     paths = changed_paths()
     if args.all:
-        python_targets = existing(CODE_DIRS)
+        python_targets = existing(CODE_DIRS, ROOT)
         shell_targets = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "scripts").glob("*.sh"))
+        powershell_targets = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "scripts").glob("*.ps1"))
         print("mode: all files")
     else:
-        python_targets = changed_python_files(paths)
-        shell_targets = changed_shell_scripts(paths)
-        print(f"mode: changed files ({len(python_targets)} Python, {len(shell_targets)} shell); --all checks everything")
-    results = []
+        python_targets = changed_python_files(paths, ROOT)
+        shell_targets = changed_shell_scripts(paths, ROOT)
+        powershell_targets = changed_powershell_scripts(paths, ROOT)
+        print(f"mode: changed files ({len(python_targets)} Python, {len(shell_targets)} shell, "
+              f"{len(powershell_targets)} PowerShell); --all checks everything")
+    results: list[tuple[str, bool]] = []
     if python_targets:
-        results.append(step("Python syntax", [sys.executable, "-m", "compileall", "-q", *python_targets]))
+        results.append(("Python syntax", step("Python syntax", [sys.executable, "-m", "compileall", "-q", *python_targets])))
         ruff = shutil.which("ruff")
         if ruff:
-            results.append(step("Ruff", [ruff, "check", *python_targets]))
+            results.append(("Ruff", step("Ruff", [ruff, "check", *python_targets])))
         else:
             print("== Ruff\n   MISSING: install it with: python3 -m pip install 'ruff>=0.5'", file=sys.stderr)
-            results.append(False)
+            results.append(("Ruff", False))
     bash = shutil.which("bash")
     if bash:
         for name in shell_targets:
-            results.append(step(f"Shell syntax {name}", [bash, "-n", name]))
+            label = f"Shell syntax {name}"
+            results.append((label, step(label, [bash, "-n", name])))
+    if shell_targets:
+        shellcheck = shutil.which("shellcheck")
+        if shellcheck:
+            label = "ShellCheck (error severity)"
+            results.append((label, step(label, [shellcheck, "--severity=error", *shell_targets])))
+        else:
+            print("note: shellcheck is not on PATH, so ShellCheck was not run (CI runs it on Linux)", flush=True)
+    if powershell_targets:
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            label = "PowerShell parse"
+            results.append((label, step(label, powershell_parse_command(pwsh, powershell_targets))))
+        else:
+            print("note: pwsh is not on PATH, so the PowerShell parse was not run (CI runs it on Linux and Windows)", flush=True)
     for test in changed_test_files(paths):
-        results.append(step(f"Changed test {test}", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", Path(test).name, "-v"]))
+        label = f"Changed test {test}"
+        results.append((label, step(label, [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", Path(test).name, "-v"])))
     if not results:
-        print("nothing to check: no changed Python, shell or test files")
-    print("all checks passed; CI also runs the full suite on Linux, Windows and macOS" if all(results) else "CHECKS FAILED: fix them before pushing", flush=True)
-    return 0 if all(results) else 1
+        print("nothing to check: no changed Python, shell, PowerShell or test files")
+    failed = [label for label, ok in results if not ok]
+    if failed:
+        print("some checks failed; fix them before pushing", flush=True)
+        print("CHECKS FAILED: " + "; ".join(failed), flush=True)
+        return 1
+    print("all checks passed; CI also runs the full suite on Linux, Windows and macOS", flush=True)
+    return 0
 
 
 if __name__ == "__main__":

@@ -631,7 +631,7 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
     parser.add_argument("--destination", default=DEFAULT_DESTINATION, help=f"archive directory (default: {DEFAULT_DESTINATION}/)")
     parser.add_argument("--reason", help=f"one-line archive reason (default: {DEFAULT_REASON})")
     parser.add_argument("--allow-unverified-attempts", action="store_true", help="also archive folders with an attempt record but no verified receipt (failed or abandoned attempts)")
-    parser.add_argument("--yes", action="store_true", help="move folders and update the archived index")
+    parser.add_argument("-y", "--yes", action="store_true", help="move folders and update the archived index")
     parser.add_argument("--repo-root", type=Path, default=repo_root or Path(__file__).resolve().parents[1], help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     try:

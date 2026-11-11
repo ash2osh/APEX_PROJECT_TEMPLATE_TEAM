@@ -104,10 +104,6 @@ def collect_claims(root: Path, feature: str | None = None) -> tuple[list[Claim],
     return claims, unanalysed
 
 
-def holders(claims: Iterable[Claim], key: tuple[str, str, str]) -> set[str]:
-    return {claim.feature for claim in claims if claim.key == key}
-
-
 def duplicates(claims: Iterable[Claim]) -> dict[tuple[str, str, str], list[Claim]]:
     """Objects claimed by more than one feature."""
     by_key: dict[tuple[str, str, str], list[Claim]] = defaultdict(list)

@@ -534,7 +534,7 @@ rejected before connecting.
 For staging or production, configure the existing connection and expected
 user plus `STAGING_SCHEMA` or `PROD_SCHEMA`. The migration schema can differ
 between environments, so these settings are explicit and never inferred from
-DEV. Direct staging and production applies require interactive confirmation.
+DEV. Direct staging and production applies require interactive confirmation, unless the operator passes `--confirm-target <db_unique_name>` with the observed database name. `--confirm-target <db_unique_name>` skips that prompt only when the value equals the observed `db_unique_name` exactly. A mismatch refuses before any write. `-y` / `--yes` accepts the same prompt on DEV and staging; on production it is refused unless `--confirm-target` also matches the observed name. `migrate`, `rollout`, `publish` and `deploy` take these flags. A `[y/N]` prompt is answered at a terminal or by a flag: piped or redirected answers are refused. `-y` never replaces the typed `RECONCILE` and `RECONCILE-RUN` acknowledgments, the `Press Enter` pause, `publish --force` or the browser MCP menu.
 
 Compare selected live object names or prefixes with `compare-schema`:
 
@@ -669,7 +669,9 @@ scripts/team.sh deploy 100 --env prod
 ```
 
 Direct staging and production imports require `Deploying to <ENV>. Proceed?
-[y/N]`. To prepare a DBA handoff without opening a database connection, use:
+[y/N]`, answered at a terminal; piped answers are refused. `-y` / `--yes` accepts it on staging. On production
+it also needs `--confirm-target <db_unique_name>` with the observed name; see
+[publish rules](docs/publish-rules.md#staging-and-production-confirmation). To prepare a DBA handoff without opening a database connection, use:
 
 ```bash
 scripts/team.sh deploy 100 --env prod --manual
@@ -841,14 +843,14 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh check-conflicts <folder> [...] --env <env>` | Preflight selected migrations against a live schema. |
 | `scripts/team.sh check-conflicts <folder> [...] --local` | Analyze selected migrations without a connection. |
 | `scripts/team.sh migration-plan [<folder> ...] [--live --env <env>] [--schema NAME] [--format text\|json\|markdown]` | Inventory local migrations or report an explicitly selected guarded live preflight; see [migration planning](docs/migration-planning.md). |
-| `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. |
+| `scripts/team.sh migrate <folder> [...] --env <env> [--verbose] [--rehearse] [--report <file>] [--confirm-target <db_unique_name>] [--yes\|-y]` | Verify and apply selected migration folders, or rehearse eligible DML in one transaction and roll it back; `--report` writes rehearsal JSON. `--confirm-target` replaces the staging or production prompt only with the exact observed database name. `--yes` / `-y` accepts the prompt on DEV and staging; production also needs `--confirm-target`. |
 | `scripts/team.sh new-migration <name> --source TYPE:NAME [...] --env dev [--schema NAME]` | Start `migrations/<SCHEMA>/<today>_<name>-r001/` from the source live on DEV: one editable step per object, preconditions that refuse the apply if that source changes first, postconditions that each object is VALID. Read-only. |
 | `scripts/team.sh revise <folder> [--reason TEXT]` | Copy a migration to its next revision; the old folder stays unchanged. |
 | `scripts/team.sh revise --check <folder>` | Report whether local receipt or attempt evidence locks a migration folder; exit 0/1/2 for unlocked/locked/unknown. |
-| `scripts/team.sh archive-migrations <folder> [...] [--schema NAME] [--destination DIR] [--reason TEXT] [--yes]` | Preview archiving released folders; `--yes` moves them and updates the archived revision index. Use `--all [--keep <folder>...]` to select by schema scope. |
+| `scripts/team.sh archive-migrations <folder> [...] [--schema NAME] [--destination DIR] [--reason TEXT] [--yes\|-y]` | Preview archiving released folders; `--yes` moves them and updates the archived revision index. Use `--all [--keep <folder>...]` to select by schema scope. |
 | `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
 | `scripts/team.sh feature <init\|capture\|diff\|doctor\|freeze\|clean-capsule\|reconcile-run\|convert-plan> ...` | Create and review mutable feature sources, check ownership (and DEV drift with `--live`), freeze committed schema-version 2 inputs, preview/apply eligible local capsule cleanup, close an unfinished run that has no checkpoint to recover (`reconcile-run`, typed acknowledgment), or plan offline and read-only how to move dated migration folders into feature files (`convert-plan`). |
-| `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare] [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]` | Run a schema-version 1 ordered rollout or prepare, execute and promote a feature capsule; production capsule execution requires staging proof. |
+| `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare] [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>] [--yes\|-y] [--confirm-target <db_unique_name>]` | Run a schema-version 1 ordered rollout or prepare, execute and promote a feature capsule; production capsule execution requires staging proof. `--yes` / `-y` accepts the rollout confirmation; production also needs `--confirm-target`. |
 | `scripts/team.sh compare-schema --env <env> --object <name>` | Compare selected live schema objects read-only. |
 | `scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [--format text\|json\|markdown] [--emit-dba-script <file>]` | Compare complete, paged environment catalogs by object name; see [compare-env](docs/compare-env.md). |
 | `scripts/team.sh baseline export-source --from <env>` | Export configured exact stored source, compiler settings and view text to scratch. |
@@ -858,7 +860,7 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>` | Remove complete named modules from an ORDS export for a rollout import step. |
 | `scripts/team.sh backup-db` | Refresh local table and code metadata mirrors (and ORDS, when configured). |
 | `scripts/team.sh backup-ords` | Export ORDS (REST) metadata read-only to `database/<SCHEMA>/ords/schema.sql`. |
-| `scripts/team.sh deploy <id> --env <staging\|prod> [--manual] [--strict-bytes] [--no-restore-automations]` | Confirm a promotion or print a DBA runbook with the automation restore step. |
+| `scripts/team.sh deploy <id> --env <staging\|prod> [--manual] [--strict-bytes] [--no-restore-automations] [--yes\|-y] [--confirm-target <db_unique_name>]` | Confirm a promotion or print a DBA runbook with the automation restore step. `--yes` / `-y` accepts the prompt on staging; production needs `--confirm-target` with it. `--manual` takes neither flag. |
 | `scripts/team.sh upgrade-template [--dry-run]` | Update template-owned files; never overwrites project files. |
 | `scripts/team.sh verify-local [--format text\|json] [--live]` | Validate local environment, lock, apps and skills read-only. |
 | `scripts/team.sh skills setup none\|superpowers\|mattpocock\|both [--primary superpowers\|mattpocock]` | Set up optional, pinned workflow packs locally. |

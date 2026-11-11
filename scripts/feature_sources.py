@@ -373,6 +373,20 @@ def _unapplied_refusal(
     )
 
 
+def _unedited_refresh(root: Path, refresh: bool, move_from: str | None, file_bytes: bytes | None, snapshot_path: Path) -> bool:
+    """True when a refresh replaces a file equal to its retained DEV baseline, so the file has no local edits.
+
+    A missing or unreadable baseline is not a match: the caller then keeps the unapplied-lines refusal.
+    """
+    if not refresh or move_from is not None or file_bytes is None:
+        return False
+    try:
+        retained = _ordinary_file(snapshot_path, root)
+    except FeatureSourcesError:
+        return False
+    return retained is not None and retained == file_bytes
+
+
 def _check_names_unit(sql: str, units: set[tuple[str, str]]) -> bool:
     return any(pair in units for pair in feature_claims.checked_objects(sql))
 
@@ -469,6 +483,8 @@ def capture_unit(
 
     A unit another feature holds is refused unless `move_from` names that feature. A move or a refresh first
     compares the file it replaces with DEV and stops when the file has lines DEV lacks, unless `discard_unapplied`.
+    A refresh of a file equal to its retained DEV baseline has no local edits and proceeds (no accepted difference
+    recorded for it); a missing or unreadable baseline keeps the stop.
     `keep_file` moves the old bytes unchanged instead of capturing from DEV.
     """
     unit_group = _unit_group(group)
@@ -606,7 +622,11 @@ def capture_unit(
             )
             if comparison.only_feature and not discard_unapplied:
                 accepted = _accepted_entry(root, replaced_feature, (schema, record["type"], record["name"]))
-                raise _unapplied_refusal("move" if move_from is not None else "refresh", replaced_label, comparison, accepted)
+                # A refresh of a file equal to its retained DEV baseline erases no local edit. An owner's accepted
+                # difference still stops it: that decision names lines the refresh would silently drop.
+                unedited = accepted is None and _unedited_refresh(root, refresh, move_from, old_bytes, snapshot_path)
+                if not unedited:
+                    raise _unapplied_refusal("move" if move_from is not None else "refresh", replaced_label, comparison, accepted)
             if move_from is not None:
                 messages.append(
                     f"{record['type']} {name}: {comparison.state.lower()}, {len(comparison.only_live)} line(s) only on DEV "
@@ -864,7 +884,7 @@ def _read_text(path: Path, root: Path, label: str) -> str:
 
 
 def diff_captured_package(repo_root: Path, feature: str, schema: str, *, day: str) -> tuple[Path, ...]:
-    """Compare edited feature package files with their captured DEV source."""
+    """Compare edited feature stored source files with their captured DEV source."""
     requested_root = Path(repo_root)
     if requested_root.is_symlink():
         raise FeatureSourcesError("repository root cannot be a symlink")

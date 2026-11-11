@@ -84,7 +84,7 @@ Ways forward after a refusal: apply the lines to DEV and repeat; `--discard-unap
 
 ### D4. Drift against DEV: `feature doctor --live`
 
-Read-only. Reads the DEV spec and body of every package file of the selected features with the same guarded DEV
+Read-only. Reads the DEV source of every stored source file of the selected features with the same guarded DEV
 capture `feature capture` uses (the `CODE_*` profile, identity check, one session per schema), and compares each
 file with it, ignoring comments, blank lines, whitespace and letter case. Each file is equal, `BEHIND DEV`,
 `AHEAD OF DEV`, `DIVERGED`, `NOT ON DEV` or `ACCEPTED`.
@@ -100,13 +100,13 @@ from a DEV change, so an edited line shows as `DIVERGED` until a capture with `-
 | --- | --- | --- |
 | `BEHIND DEV` | DEV changed since the capture and the file lacks or still holds those lines; a release would undo them | error |
 | `DIVERGED` | the same, and the file also has edits of its own (or, without a baseline, both sides differ) | error |
-| `NOT ON DEV` | the package is not in the schema on DEV | error |
+| `NOT ON DEV` | the stored unit is not in the schema on DEV | error |
 | `AHEAD OF DEV` | the file has edits or additions DEV lacks and DEV has not changed since the capture: new work not compiled yet (the template has no DEV apply path, so this is normal) | warning |
 | `ACCEPTED` | the differing lines are exactly those recorded in `accepted-differences.json` | info |
 
 Only errors stop a freeze or give `feature doctor` a non-zero exit.
 
-`feature freeze` runs the comparison for the packages of the selected features when a DEV profile is configured.
+`feature freeze` runs the comparison for the stored source files of the selected features when a DEV profile is configured.
 `--no-live "<reason>"` skips it. What the freeze checked, or why it did not, is written to
 `scratch/freeze-checks/<capsule directory name>.json` (outside the capsule and its digest). Without a DEV profile
 the freeze says the comparison did not run; if a profile exists but DEV cannot be read, the freeze stops (exit 2)
@@ -128,8 +128,12 @@ A move with `--keep-file` carries the entry to the receiving feature; a move tha
 
 ### D6. `feature capture --refresh`
 
-`--refresh` applies the D3 table to the file it replaces: lines the file has and DEV does not (unapplied edits, or an
-accepted difference) stop the refresh unless `--discard-unapplied` is given.
+`--refresh` compares the file it replaces with its retained DEV baseline, the DEV capture the file was taken from. A
+file equal to that baseline has no local edits, so the refresh replaces it with the current DEV source, even when DEV
+changed a line since the capture, and needs no flag. A file that differs from its baseline applies the D3 rule: lines
+the file has and DEV does not (unapplied edits, or an accepted difference) stop the refresh unless
+`--discard-unapplied` is given. A missing or unreadable baseline, or an accepted difference recorded for the file,
+keeps that stop even for an otherwise unedited file.
 
 ## Examples
 
