@@ -134,6 +134,37 @@ class FeatureCliTests(unittest.TestCase):
         self.assertTrue(capture.call_args.kwargs["refresh"])
         self.assertFalse((self.root / ".env").exists())
 
+    def test_capture_takes_exactly_one_unit_option_and_routes_each_group(self) -> None:
+        source_path = self.root / "features/staff-scheduling/APP_CODE/triggers/orders_trg.trg.sql"
+        for option, group in (("--trigger", "trigger"), ("--procedure", "procedure"), ("--function", "function"), ("--type", "type")):
+            with self.subTest(option=option), patch.object(feature_cli.feature_sources, "capture_unit", return_value=(source_path,)) as unit, \
+                 patch.object(feature_cli.feature_sources, "capture_package") as package:
+                status = feature_cli.main(
+                    ["capture", "staff-scheduling", option, "NAME_X", "--schema", "APP_CODE", "--env", "dev"],
+                    repo_root=self.root,
+                    environ={"DEV_SCHEMA": "APP_CODE"},
+                )
+                self.assertEqual(status, 0)
+                package.assert_not_called()
+                self.assertEqual(unit.call_args.args[:5], (self.root, "staff-scheduling", "APP_CODE", group, "NAME_X"))
+                self.assertEqual(unit.call_args.kwargs["environ"], {"DEV_SCHEMA": "APP_CODE"})
+
+        with patch.object(feature_cli.feature_sources, "capture_unit") as unit, \
+             patch.object(feature_cli.feature_sources, "capture_package") as package:
+            for arguments in (
+                ["--package", "P", "--trigger", "T"],
+                ["--trigger", "T", "--function", "F"],
+                [],
+            ):
+                status = feature_cli.main(
+                    ["capture", "staff-scheduling", *arguments, "--schema", "APP_CODE", "--env", "dev"],
+                    repo_root=self.root,
+                    environ={},
+                )
+                self.assertEqual(status, 2)
+            unit.assert_not_called()
+            package.assert_not_called()
+
     def test_diff_and_cleanup_are_offline_and_cleanup_is_dry_run_without_yes(self) -> None:
         diff_paths = (self.root / "ai_generate/2026-10-27/feature-diffs/package.diff",)
         with patch.object(feature_cli.feature_sources, "diff_captured_package", return_value=diff_paths) as diff, \
@@ -179,6 +210,107 @@ class FeatureCliTests(unittest.TestCase):
         load_checkpoint.assert_called_once_with(self.root, manifest.steps[0])
         build_capsule.assert_called_once_with(self.root, manifest_path, (checkpoint,), {})
         self.assertFalse((self.root / ".env").exists())
+
+    def test_migration_only_freeze_record_says_the_release_has_no_feature_checkpoint(self) -> None:
+        manifest_path = self.root / "releases/current.json"
+        capsule = SimpleNamespace(
+            payload_digest="a" * 64,
+            engine_digest="b" * 64,
+            source_commit="c" * 40,
+            root=self.root / "scratch/release-capsules/example",
+        )
+        manifest = SimpleNamespace(
+            path=manifest_path,
+            steps=({"type": "migrate", "folders": ["migrations/APP_CODE/2026-01-01_legacy-r001"]},),
+        )
+        with patch.object(feature_cli.rollout, "load_manifest", return_value=manifest), \
+             patch.object(feature_cli.release_capsule, "build_capsule", return_value=capsule) as build_capsule:
+            status = feature_cli.main(["freeze", str(manifest_path)], repo_root=self.root, environ={})
+
+        self.assertEqual(status, 0)
+        build_capsule.assert_called_once_with(self.root, manifest_path, (), {})
+        record = json.loads((self.root / "scratch/freeze-checks/example.json").read_text(encoding="utf-8"))
+        self.assertTrue(record["migrationOnly"])
+        self.assertEqual(record["migrationSteps"], 1)
+
+    def _unknown_run(self) -> str:
+        """A staging run finished unknown with no checkpoint attempt, written through the real state layer."""
+        from scripts import release_state
+
+        identity = {
+            "session_user": "APP_CODE", "current_schema": "APP_CODE", "db_name": "STAGE", "db_unique_name": "STAGE_UNIQUE",
+            "service_name": "stage.example.invalid", "container_id": "3", "container_name": "STAGEPDB",
+            "edition": "ORA$BASE", "database_version": "19.0.0.0",
+        }
+        capsule = SimpleNamespace(
+            root=self.root / "scratch" / "release-capsules" / "capsule", manifest_sha256="c" * 64,
+            payload_digest="a" * 64, engine_digest="b" * 64, source_commit="d" * 40,
+            checkpoints=(SimpleNamespace(schema="APP_CODE", inputs=()), SimpleNamespace(schema="APP_CODE", inputs=())),
+            input_hashes=({"path": "features/x/APP_CODE/ddl.sql", "sha256": "e" * 64},),
+            database_object_budget_seconds=120,
+        )
+        target = {
+            "environment": "staging", "connection": "stage-alias", "expectedUser": "APP_CODE", "schema": "APP_CODE",
+            "classification": "service", "observed": identity,
+        }
+        guards = tuple({
+            "checkpoint": number, "schema": "APP_CODE", "targetKey": "schema:APP_CODE", "targetIdentity": identity,
+        } for number in (1, 2))
+        plan = SimpleNamespace(
+            environment="staging", payload_digest="a" * 64, plan_digest="f" * 64,
+            targets={"schema:APP_CODE": target}, checkpoint_guards=guards, recovery_attempt=None, recovery_binding=None,
+        )
+        with patch.object(release_state.release_capsule, "load_capsule", return_value=capsule):
+            run_id = release_state.start_rollout(self.root, capsule, plan)
+        release_state.finish_rollout(
+            self.root, run_id,
+            outcome={
+                "state": "unknown", "databaseState": "unknown", "steps": [], "checkpointVerificationIds": [],
+                "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                "finalReportPath": None, "finalReportSha256": None,
+            },
+        )
+        return run_id
+
+    def _run_row(self, run_id: str) -> dict:
+        index = json.loads((self.root / "releases" / ".local-state.json").read_text(encoding="utf-8"))
+        return next(row for row in index["rollouts"] if row["runId"] == run_id)
+
+    def test_reconcile_run_closes_an_unknown_run_only_after_the_typed_acknowledgment(self) -> None:
+        run_id = self._unknown_run()
+        prompts: list[str] = []
+
+        def answer(text):
+            def read(expected: str) -> str:
+                prompts.append(expected)
+                return text
+            return read
+
+        status = feature_cli.main(["reconcile-run", run_id, "--env", "staging"], repo_root=self.root, environ={}, read_acknowledgment=answer("yes"))
+        self.assertEqual(status, 1)
+        self.assertEqual(prompts, [f"RECONCILE-RUN {run_id}"])
+        self.assertNotIn("reconciliation", self._run_row(run_id))
+        self.assertEqual(feature_cli.main(["reconcile-run", run_id, "--env", "staging"], repo_root=self.root, environ={}, read_acknowledgment=answer("")), 1)
+        self.assertNotIn("reconciliation", self._run_row(run_id))
+
+        status = feature_cli.main(
+            ["reconcile-run", run_id, "--env", "staging"], repo_root=self.root, environ={},
+            read_acknowledgment=answer(f"RECONCILE-RUN {run_id}"),
+        )
+        self.assertEqual(status, 0)
+        row = self._run_row(run_id)
+        self.assertEqual(row["reconciliation"]["acknowledgment"], f"RECONCILE-RUN {run_id}")
+        self.assertEqual((row["state"], row["databaseState"]), ("unknown", "unknown"))
+
+    def test_reconcile_run_refuses_an_unknown_run_or_the_wrong_environment_with_exit_two(self) -> None:
+        run_id = self._unknown_run()
+        never = lambda expected: self.fail("the acknowledgment must not be requested for a refused run")  # noqa: E731
+        self.assertEqual(
+            feature_cli.main(["reconcile-run", "0" * 8 + "-0000-4000-8000-" + "0" * 12, "--env", "staging"], repo_root=self.root, environ={}, read_acknowledgment=never),
+            2,
+        )
+        self.assertEqual(feature_cli.main(["reconcile-run", run_id, "--env", "prod"], repo_root=self.root, environ={}, read_acknowledgment=never), 2)
+        self.assertNotIn("reconciliation", self._run_row(run_id))
 
     def test_cleanup_requires_explicit_yes_to_apply_and_reports_blocked_gate(self) -> None:
         with patch.object(feature_cli.release_state, "cleanup_capsule", return_value={"state": "complete"}) as cleanup:

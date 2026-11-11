@@ -118,6 +118,47 @@ class ReleasePromotionTests(unittest.TestCase):
         shutil.rmtree(old_root, ignore_errors=True)
         self.write_capsule_manifest()
 
+    def add_migration_step(self) -> None:
+        """Insert one frozen migrate step between the two checkpoints and rebuild the capsule."""
+        old_root = self.capsule.root
+        self.payload_definition["steps"].insert(1, {
+            "type": "migrate", "folders": ["migrations/APP_CODE/2026-01-01_legacy-r001"],
+        })
+        self.payload_digest = digest(canonical(self.payload_definition))
+        self.capsule = SimpleNamespace(
+            root=self.root / "scratch" / "release-capsules" / f"{self.payload_digest}-{self.source_commit[:12]}",
+            manifest_sha256=digest(b"capsule manifest"),
+            payload_digest=self.payload_digest,
+            engine_digest=self.engine_digest,
+            source_commit=self.source_commit,
+            input_hashes=self.input_hashes,
+            checkpoints=(SimpleNamespace(schema="APP_CODE", inputs=()), SimpleNamespace(schema="APP_CODE", inputs=())),
+            database_object_budget_seconds=120,
+        )
+        shutil.rmtree(old_root, ignore_errors=True)
+        self.write_capsule_manifest()
+
+    def use_migration_only_capsule(self, steps=None) -> None:
+        """Replace the feature checkpoints with one frozen migrate step and rebuild the capsule without checkpoints."""
+        old_root = self.capsule.root
+        self.payload_definition["steps"] = steps or [
+            {"type": "migrate", "folders": ["migrations/APP_CODE/2026-01-01_legacy-r001"]},
+        ]
+        self.payload_definition["checkpoints"] = []
+        self.payload_digest = digest(canonical(self.payload_definition))
+        self.capsule = SimpleNamespace(
+            root=self.root / "scratch" / "release-capsules" / f"{self.payload_digest}-{self.source_commit[:12]}",
+            manifest_sha256=digest(b"capsule manifest"),
+            payload_digest=self.payload_digest,
+            engine_digest=self.engine_digest,
+            source_commit=self.source_commit,
+            input_hashes=self.input_hashes,
+            checkpoints=(),
+            database_object_budget_seconds=120,
+        )
+        shutil.rmtree(old_root, ignore_errors=True)
+        self.write_capsule_manifest()
+
     def state_module(self):
         try:
             from scripts import release_state
@@ -130,8 +171,10 @@ class ReleasePromotionTests(unittest.TestCase):
         return report
 
     def make_prod_plan(
-        self, *, environment: str = "prod", checkpoint_count: int = 2, plan_digest: str | None = None,
+        self, *, environment: str = "prod", checkpoint_count: int | None = None, plan_digest: str | None = None,
     ):
+        if checkpoint_count is None:
+            checkpoint_count = len(self.capsule.checkpoints)
         identity = {
             "session_user": "APP_CODE", "current_schema": "APP_CODE", "db_name": environment.upper(),
             "db_unique_name": f"{environment.upper()}_UNIQUE", "service_name": f"{environment}.example.invalid",
@@ -150,14 +193,23 @@ class ReleasePromotionTests(unittest.TestCase):
             "schema": "APP_CODE", "classification": "service", "observed": identity,
         }}
         for number, definition in enumerate(self.payload_definition["steps"], start=1):
-            if definition.get("type") != "sql-script":
+            if definition.get("type") not in {"sql-script", "migrate"}:
                 continue
-            targets[f"step:{number}"] = {
+            record = {
                 "environment": environment, "operation": "migration",
-                "logicalSchema": definition["schema"], "connection": f"{environment}-alias",
+                "logicalSchema": definition.get("schema", "APP_CODE"), "connection": f"{environment}-alias",
                 "expectedUser": "APP_CODE", "schema": "APP_CODE", "classification": "staging" if environment == "staging" else "production",
                 "observed": identity,
             }
+            if definition["type"] == "migrate":
+                record["folders"] = [
+                    {"path": folder, "payloadDigest": digest(b"folder payload"), "checksSha256": digest(b"folder checks")}
+                    for folder in definition["folders"]
+                ]
+                record["preflight"] = {
+                    "state": "clear", "exitCode": 0, "conflicts": [], "errors": [], "reportSha256": digest(b"preflight"),
+                }
+            targets[f"step:{number}"] = record
         return SimpleNamespace(
             environment=environment,
             payload_digest=self.payload_digest,
@@ -251,6 +303,14 @@ class ReleasePromotionTests(unittest.TestCase):
                     "classificationReason": rollout._auxiliary_classification_reason(definition["type"], phase),
                     "phaseSeconds": 1.0,
                 })
+            if definition.get("type") == "migrate":
+                from scripts import rollout
+
+                report_steps[-1].update({
+                    "phase": "migration",
+                    "classificationReason": rollout._auxiliary_classification_reason("migrate", "migration"),
+                    "objectSeconds": 1.0,
+                })
             step_outcomes.append({
                 "step": number, "status": "verified", "receiptPath": receipt_path,
                 "receiptSha256": receipt_hash,
@@ -265,7 +325,12 @@ class ReleasePromotionTests(unittest.TestCase):
             "objectBudget": {
                 "seconds": 120, "elapsedSeconds": budget["elapsedSeconds"],
                 "coverageComplete": True, "withinBudget": True,
-                "includedCheckpoints": list(range(1, len(modes) + 1)), "excludedObjectSteps": [],
+                "includedCheckpoints": list(range(1, len(modes) + 1)),
+                "includedMigrationSteps": [
+                    number for number, definition in enumerate(self.payload_definition["steps"], start=1)
+                    if definition.get("type") == "migrate"
+                ],
+                "excludedObjectSteps": [],
             },
             "dataSeconds": sum(step.get("phaseSeconds", 0.0) for step in report_steps if step.get("phase") == "data"),
             "ordsSeconds": sum(step.get("phaseSeconds", 0.0) for step in report_steps if step.get("phase") == "ords"),
@@ -359,6 +424,7 @@ class ReleasePromotionTests(unittest.TestCase):
             ("withinBudget", False),
             ("elapsedSeconds", 120.01),
             ("includedCheckpoints", [1]),
+            ("includedMigrationSteps", [1]),
             ("excludedObjectSteps", ["legacy-sql"]),
         )
         for field, value in mutations:
@@ -389,6 +455,63 @@ class ReleasePromotionTests(unittest.TestCase):
             tampered["steps"][1][field] = value
             with self.subTest(field=field), self.assertRaisesRegex(state.ReleaseStateError, "phase"):
                 state.validate_stage_proof(self.capsule, tampered)
+
+    def test_migration_step_is_covered_by_the_stage_proof(self) -> None:
+        state = self.state_module()
+        self.add_migration_step()
+        report = self.stage_report()
+        self.assertEqual(report["objectBudget"]["includedMigrationSteps"], [2])
+        state.validate_stage_proof(self.capsule, report)
+
+    def test_stage_report_must_name_every_migration_step_in_order(self) -> None:
+        state = self.state_module()
+        self.add_migration_step()
+        for label, value in (("missing", None), ("empty", []), ("other step", [3]), ("not integers", ["2"])):
+            with self.subTest(label=label):
+                report = self.stage_report()
+                if value is None:
+                    del report["objectBudget"]["includedMigrationSteps"]
+                else:
+                    report["objectBudget"]["includedMigrationSteps"] = value
+                with self.assertRaises(state.ReleaseStateError):
+                    state.validate_stage_proof(self.capsule, report)
+
+    def test_migration_binding_must_match_its_frozen_folders_and_schema(self) -> None:
+        state = self.state_module()
+        self.add_migration_step()
+        changes = (
+            ("missing binding", lambda plan: plan.targets.pop("step:2")),
+            ("folder path", lambda plan: plan.targets["step:2"]["folders"][0].update(
+                path="migrations/APP_CODE/2026-01-02_other-r001")),
+            ("logical schema", lambda plan: plan.targets["step:2"].update(logicalSchema="OTHER_CODE")),
+        )
+        for label, change in changes:
+            with self.subTest(label=label):
+                plan = self.make_prod_plan()
+                change(plan)
+                with patch.object(state.release_capsule, "load_capsule", return_value=self.capsule), \
+                        self.assertRaises(state.ReleaseStateError):
+                    state.start_rollout(self.root, self.capsule, plan)
+
+    def test_migration_only_release_completes_and_is_cleanup_eligible(self) -> None:
+        state = self.state_module()
+        self.use_migration_only_capsule()
+        stage, _stage_run, _stage_plan = self.complete_rollout(environment="staging", modes=())
+        state.validate_stage_proof(self.capsule, stage)
+        report, _run_id, _plan = self.complete_rollout(environment="prod", modes=())
+
+        self.assertEqual(report["objectBudget"]["includedCheckpoints"], [])
+        self.assertEqual(report["objectBudget"]["includedMigrationSteps"], [1])
+        self.assertTrue(report["objectBudget"]["coverageComplete"])
+        with patch.object(state.release_capsule, "load_capsule", return_value=self.capsule):
+            result = state.cleanup_capsule(self.root, self.payload_digest)
+        self.assertTrue(result["eligible"], result.get("blockers"))
+
+    def test_cleanup_refuses_a_capsule_with_neither_checkpoint_nor_migration(self) -> None:
+        state = self.state_module()
+        self.use_migration_only_capsule(steps=[{"type": "pause", "message": "review"}])
+        with self.assertRaisesRegex(state.ReleaseStateError, "feature checkpoint or a migrate step"):
+            state._capsule_for_cleanup(self.root, self.capsule.root, self.payload_digest)
 
     def test_stage_and_production_use_distinct_valid_target_plan_digests(self) -> None:
         state = self.state_module()

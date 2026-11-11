@@ -20,13 +20,13 @@ from . import baseline, compare_schema, deployment_descriptor, feature_manifest,
 from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target
 from .feature_manifest import FeatureCheckpoint, FeatureInput
 from .migration_checks import complete_observed_identity
-from .migration_manifest import QueryCheck
+from .migration_manifest import MigrationManifestError, QueryCheck, load_batch
 from .path_utils import relative_to_root
 from .schema_catalog import CatalogError
 from .validate_migration import statement_spans
 
 
-PLAN_SCHEMA_VERSION = 3
+PLAN_SCHEMA_VERSION = 4
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 PLAN_ENVIRONMENTS = {"staging", "prod"}
 STRUCTURAL_SECTIONS = (
@@ -312,8 +312,9 @@ def _stored_source(item: FeatureInput) -> tuple[dict, dict[str, str]]:
     actual_owner, actual_name = (first, second) if second is not None else (None, first)
     if actual_name != name or actual_owner not in {None, owner}:
         raise FeatureReleaseError(f"stored source header does not match validated unit {object_type} {name}: {item.path}")
-    if actual_owner is not None:
-        # ALL_SOURCE blanks the owner qualifier and keeps its columns, so the expected header does too.
+    if actual_owner is not None and object_type != "TRIGGER":
+        # ALL_SOURCE blanks the owner qualifier of a function, procedure, package or type header, and keeps its
+        # columns, so the expected header does too. A trigger header keeps the qualifier as written (live check, 23ai).
         owner_start, name_start = header.start("first"), header.start("second")
         lines[0] = lines[0][:owner_start] + " " * (name_start - owner_start) + lines[0][name_start:]
     overrides: dict[str, str] = {}
@@ -373,21 +374,40 @@ def _guard_query(query: Mapping) -> dict:
 
 
 def _header_tokens(line: str) -> list[str]:
-    tokens = re.findall(r'"(?:[^"]|"")*"|[^\s"]+', line)
-    return [token[1:-1].replace('""', '"') if token.startswith('"') else token.upper() for token in tokens]
+    tokens = [
+        token[1:-1].replace('""', '"') if token.startswith('"') else token.upper()
+        for token in re.findall(r'"(?:[^"]|"")*"|[^\s"]+', line)
+    ]
+    # A qualified header is KEYWORD [BODY] OWNER . NAME. Drop that one owner, so a trigger that the live text
+    # names without its owner still matches the captured header, and the reverse. Any later qualifier
+    # (for example the owner of a trigger's table) is part of the unit and must still match.
+    dot = 3 if len(tokens) > 1 and tokens[1] == "BODY" else 2
+    if len(tokens) > dot + 1 and tokens[dot] == ".":
+        del tokens[dot - 1:dot + 1]
+    return tokens
+
+
+def _with_final_newline(lines: list[str]) -> list[str]:
+    """The last stored line may lack its newline, because the terminator follows it. A captured file always has one."""
+    if lines and not lines[-1].endswith("\n"):
+        return [*lines[:-1], lines[-1] + "\n"]
+    return list(lines)
 
 
 def _same_stored_source(live_lines: list[str], expected_lines: list[str]) -> bool:
     """Compare captured source with the live text.
 
     The header names the unit, so its keywords may differ in case, its name may be quoted or
-    not, and blanks may stand where an owner qualifier was. The body must match exactly.
+    not, and blanks may stand where an owner qualifier was. The body must match exactly, and
+    the final line's newline is not significant, as in the exact SQL check of the same source.
     """
-    if not live_lines or len(live_lines) != len(expected_lines):
-        return live_lines == expected_lines
+    live = _with_final_newline(live_lines)
+    expected = _with_final_newline(expected_lines)
+    if not live or len(live) != len(expected):
+        return live == expected
     return (
-        _header_tokens(live_lines[0]) == _header_tokens(expected_lines[0])
-        and live_lines[1:] == expected_lines[1:]
+        _header_tokens(live[0]) == _header_tokens(expected[0])
+        and live[1:] == expected[1:]
     )
 
 
@@ -469,6 +489,17 @@ def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_num
             before_settings is not None and _same_settings(apply_settings, before_settings)
         )
         no_op = actual is not None and expected_matches and settings_match and expected_valid
+        if actual is not None and object_type == "TRIGGER" and not no_op:
+            # CREATE OR REPLACE re-creates a trigger enabled. The apply must find it still ENABLED, not disabled since prepare.
+            preconditions.append({
+                "id": f"enabled-{checkpoint_number:03d}-{len(result) + 1:03d}",
+                "sql": (
+                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TRIGGERS "
+                    f"WHERE OWNER = '{checkpoint.schema}' AND TRIGGER_NAME = {_sql_literal(name)} AND STATUS = 'ENABLED') "
+                    "THEN 1 ELSE 0 END FROM DUAL"
+                ),
+                "expected": 1,
+            })
         if not isinstance(apply_settings, Mapping):
             raise FeatureReleaseError(f"compiler settings are missing for {object_type} {name}")
         settings_prologue, settings_prologue_sha256 = _settings_prologue(name, object_type, apply_settings)
@@ -490,6 +521,17 @@ def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_num
             "preconditions": preconditions,
             "sourceVerification": source_checks,
         })
+    # Creating a type or package specification invalidates its body, even when the body text is unchanged. A body
+    # whose specification is re-created must be re-created too, or the release leaves it INVALID (live check, 23ai,
+    # for a type; the same Oracle rule applies to a package).
+    replaced_specs = {
+        (guard["unit"]["type"], guard["unit"]["name"]) for guard in result
+        if guard["unit"]["type"] in {"TYPE", "PACKAGE"} and guard["targetExists"] and guard["noOp"] is False
+    }
+    for guard in result:
+        unit_type = guard["unit"]["type"]
+        if unit_type in {"TYPE BODY", "PACKAGE BODY"} and (unit_type[:-5], guard["unit"]["name"]) in replaced_specs and guard["noOp"] is True:
+            guard["noOp"] = False
     return result
 
 
@@ -637,10 +679,106 @@ def _app_targets(root: Path, steps: Sequence[Mapping], environment: str, environ
     return targets
 
 
+def _preflight_state(
+    exit_code: int, conflicts: Sequence[Mapping], errors: Sequence[Mapping], resolved_schema: str,
+    earlier_resolved_schemas: Sequence[str],
+) -> str | None:
+    """Classify a migrate step's live preflight; None means the prepare must refuse.
+
+    ``resolved_schema`` is the migration's resolved target schema, and
+    ``earlier_resolved_schemas`` holds the resolved target schema of each earlier feature
+    or migrate step. Logical names are not compared: a flat migration folder has no logical
+    schema, and one DEV schema may map to a differently named staging schema. Only
+    prerequisites the analyser reports as missing are deferred, and only when an earlier
+    step on the same resolved schema creates them later in this release; the apply-time
+    preflight decides. Any other conflict or error refuses.
+    """
+    if exit_code == 0 and not conflicts and not errors:
+        return "clear"
+    if (
+        exit_code == 1 and conflicts and not errors
+        and all(conflict.get("code") == "MISSING_PREREQUISITE" for conflict in conflicts)
+        and any(schema == resolved_schema for schema in earlier_resolved_schemas)
+    ):
+        return "deferred"
+    return None
+
+
+def _preflight_summary(report: migration_checks.PreflightReport) -> str:
+    parts = [f"{item.get('code')}: {item.get('name') or item.get('message') or item}" for item in report.conflicts]
+    parts.extend(f"{item.get('code')}: {item.get('message') or item}" for item in report.errors)
+    return "; ".join(parts) or f"exit {report.exit_code}"
+
+
+def _resolved_checkpoint_schema(number: int, step: Mapping, environment: str, environ: Mapping[str, str]) -> str:
+    """The resolved target schema of a feature step, resolved as prepare_target resolves its checkpoint."""
+    try:
+        return resolve_target(environ, environment, "migration", schema=step.get("schema")).schema
+    except TargetResolutionError as error:
+        raise FeatureReleaseError(f"cannot resolve {environment} schema for step {number}: {error}") from error
+
+
+def _migration_auxiliary_target(
+    root: Path, number: int, step: Mapping, environment: str, environ: Mapping[str, str], earlier_resolved_schemas: Sequence[str],
+) -> dict:
+    """Bind one migrate step to its target and record the read-only live preflight outcome."""
+    folders = step["folders"]
+    try:
+        logical_schema, target, migrations = rollout._migration_step_target(root, folders, environment, environ)
+    except rollout.RolloutError as error:
+        raise FeatureReleaseError(f"step {number}: {error}") from error
+    run_dir = root / "scratch" / "feature-release-prepare" / environment / f"step-{number:03d}-identity"
+    try:
+        identity = _identity(target, rollout._observe_target_identity(target, run_dir))
+    except (OSError, rollout.RolloutError, TargetResolutionError) as error:
+        raise FeatureReleaseError(f"cannot capture complete target identity for step {number}: {error}") from error
+    report = migration_checks._with_applied_source_conflicts(
+        migration_checks._live_report(migrations, environment, root, None, values=environ), root, migrations, environment,
+    )
+    preflight_identity = report.coverage.get("observedIdentity")
+    if isinstance(preflight_identity, Mapping) and any(
+        field in preflight_identity and preflight_identity[field] != identity[field] for field in identity
+    ):
+        raise FeatureReleaseError(f"step {number} preflight observed a different target identity than its binding")
+    state = _preflight_state(report.exit_code, report.conflicts, report.errors, target.schema, earlier_resolved_schemas)
+    if state is None:
+        raise FeatureReleaseError(f"step {number} migration preflight refused preparation: {_preflight_summary(report)}")
+    return {
+        "environment": environment,
+        "operation": "migration",
+        "logicalSchema": logical_schema,
+        "connection": target.connection,
+        "expectedUser": target.expected_user,
+        "schema": target.schema,
+        "classification": target.classification,
+        "observed": identity,
+        "folders": rollout.migration_folder_rows(folders, migrations),
+        "preflight": {
+            "state": state,
+            "exitCode": report.exit_code,
+            "conflicts": [dict(item) for item in report.conflicts],
+            "errors": [dict(item) for item in report.errors],
+            "reportSha256": _sha256(_canonical_bytes(report.to_dict())),
+        },
+    }
+
+
 def _auxiliary_targets(root: Path, steps: Sequence[Mapping], environment: str, environ: Mapping[str, str]) -> dict[str, dict]:
-    """Capture read-only identities for schema-2 SQL and ORDS target bindings."""
+    """Capture read-only identities for schema-2 SQL, ORDS and migration target bindings."""
     targets: dict[str, dict] = {}
+    earlier_resolved_schemas: list[str] = []
+    # Feature steps are resolved only for a release with a migrate step, which is the only consumer.
+    needs_resolved_schemas = any(step.get("type") == "migrate" for step in steps)
     for number, step in enumerate(steps, start=1):
+        if step.get("type") == "feature-migrate":
+            if needs_resolved_schemas:
+                earlier_resolved_schemas.append(_resolved_checkpoint_schema(number, step, environment, environ))
+            continue
+        if step.get("type") == "migrate":
+            record = _migration_auxiliary_target(root, number, step, environment, environ, earlier_resolved_schemas)
+            targets[f"step:{number}"] = record
+            earlier_resolved_schemas.append(record["schema"])
+            continue
         if step.get("type") not in {"sql-script", "ords-import"}:
             continue
         logical_schema = step.get("schema")
@@ -690,6 +828,8 @@ def _manifest_steps(capsule: release_capsule.ReleaseCapsule) -> list[dict]:
         for checkpoint in capsule.checkpoints
     ]
     if not steps:
+        if not capsule.checkpoints:
+            raise FeatureReleaseError("capsule rollout step list is unavailable, so its migrate steps cannot be checked")
         return feature_steps
     if sum(1 for step in steps if isinstance(step, dict) and step.get("type") == "feature-migrate") != len(capsule.checkpoints):
         raise FeatureReleaseError("capsule feature steps do not match its validated checkpoints")
@@ -829,6 +969,31 @@ def _write_plan(root: Path, environment: str, payload_digest: str, document: dic
     return destination
 
 
+def _refuse_disabled_triggers(
+    checkpoint: FeatureCheckpoint, state: Mapping, source_guards: Sequence[Mapping], environment: str,
+) -> None:
+    """Refuse a trigger the release would re-create while the target has it DISABLED.
+
+    `CREATE OR REPLACE TRIGGER` leaves the trigger enabled. A unit that is already current is not replaced, so it
+    is allowed. A replaced trigger whose enablement the catalog does not show is refused as well.
+    """
+    rows = {row.get("name"): row for row in state["structural"].get("triggers", []) if isinstance(row, Mapping)}
+    for guard in source_guards:
+        unit = guard["unit"]
+        if unit["type"] != "TRIGGER" or not guard["targetExists"] or guard["noOp"]:
+            continue
+        status = str(rows.get(unit["name"], {}).get("status", "")).upper()
+        if status == "DISABLED":
+            raise FeatureReleaseError(
+                f"trigger {unit['name']} is DISABLED on {environment}; applying this feature file would re-create it enabled. "
+                "Handle the trigger in a reviewed migration (new-migration) and keep it out of this release."
+            )
+        if status != "ENABLED":
+            raise FeatureReleaseError(
+                f"enablement state is unavailable for selected TRIGGER {unit['name']} on {environment}; preparation stopped"
+            )
+
+
 def prepare_target(
     repo_root: Path,
     capsule: release_capsule.ReleaseCapsule,
@@ -847,6 +1012,8 @@ def prepare_target(
     capsule = _validated_capsule(root, capsule)
     if recovery_attempt is not None and (not isinstance(recovery_attempt, str) or not recovery_attempt.strip()):
         raise FeatureReleaseError("recovery attempt must be a nonempty identifier or None")
+    if recovery_attempt is not None and not capsule.checkpoints:
+        raise FeatureReleaseError("recovery preparation is refused: the capsule has no feature checkpoint to recover")
     recovery_record = None
     if recovery_attempt is not None:
         try:
@@ -903,6 +1070,7 @@ def prepare_target(
         shared_identity[scope_key] = identity
         state = dict(state, identity=identity, environment=environment)
         source_guards = _source_guards(checkpoint, state, checkpoint_number)
+        _refuse_disabled_triggers(checkpoint, state, source_guards, environment)
         selected_review_specs = _review_specs(root, checkpoint, state, capsule.payload_digest)
         review_specs.extend(selected_review_specs)
         structural = state["structural"]
@@ -993,6 +1161,47 @@ def prepare_target(
     )
 
 
+def _plan_checkpoint_schema(plan: TargetPlan, number: int, step: Mapping) -> str:
+    """The resolved schema a stored plan binds to a feature step, read from that plan's own schema binding."""
+    record = plan.targets.get(f"schema:{step.get('schema')}")
+    schema = record.get("schema") if isinstance(record, Mapping) else None
+    if not isinstance(schema, str) or not schema:
+        raise FeatureReleaseError(f"target plan has no resolved schema binding for feature step {number}")
+    return schema
+
+
+def _validate_migration_binding(
+    root: Path, number: int, step: Mapping, record: Mapping, earlier_resolved_schemas: Sequence[str],
+) -> None:
+    """Check a migrate binding against its frozen folders, the current folder bytes and its recorded preflight.
+
+    The recorded state is re-derived from the plan's own bindings: the migration's resolved
+    ``schema`` against the resolved schemas of its earlier steps.
+    """
+    key = f"step:{number}"
+    try:
+        release_state.migration_schema_consistent(step.get("folders"), record["logicalSchema"])
+    except release_state.ReleaseStateError as error:
+        raise FeatureReleaseError(f"target plan migration binding {key} differs from its frozen step: {error}") from error
+    try:
+        migrations = load_batch(root, step["folders"])
+    except (MigrationManifestError, OSError) as error:
+        raise FeatureReleaseError(f"target plan migration binding {key} cannot load its frozen folders: {error}") from error
+    if record.get("folders") != rollout.migration_folder_rows(step["folders"], migrations):
+        raise FeatureReleaseError(f"target plan migration binding {key} differs from the current migration folders")
+    preflight = record.get("preflight")
+    if not isinstance(preflight, Mapping) or set(preflight) != {"state", "exitCode", "conflicts", "errors", "reportSha256"}:
+        raise FeatureReleaseError(f"target plan migration preflight {key} is malformed")
+    conflicts, errors = preflight["conflicts"], preflight["errors"]
+    if (
+        type(preflight["exitCode"]) is not int or not isinstance(conflicts, list) or not isinstance(errors, list)
+        or any(not isinstance(item, Mapping) or not isinstance(item.get("code"), str) for item in (*conflicts, *errors))
+        or not isinstance(preflight["reportSha256"], str) or HASH_RE.fullmatch(preflight["reportSha256"]) is None
+        or _preflight_state(preflight["exitCode"], conflicts, errors, record["schema"], earlier_resolved_schemas) != preflight["state"]
+    ):
+        raise FeatureReleaseError(f"target plan migration preflight {key} is inconsistent with its recorded outcome")
+
+
 def load_target_plan(repo_root: Path, capsule: release_capsule.ReleaseCapsule, environment: str) -> TargetPlan:
     """Load only a canonical target plan bound to this capsule and environment."""
     root = _root(repo_root)
@@ -1033,29 +1242,41 @@ def load_target_plan(repo_root: Path, capsule: release_capsule.ReleaseCapsule, e
     )
     steps = _manifest_steps(capsule)
     expected_step_targets = {
-        f"step:{number}": step
+        f"step:{number}"
         for number, step in enumerate(steps, start=1)
-        if step.get("type") in {"sql-script", "ords-import"}
+        if step.get("type") in {"sql-script", "ords-import", "migrate"}
     }
     supplied_step_targets = {key for key in loaded.targets if isinstance(key, str) and key.startswith("step:")}
-    if supplied_step_targets != set(expected_step_targets):
-        raise FeatureReleaseError("target plan does not bind every SQL/ORDS step exactly once")
+    if supplied_step_targets != expected_step_targets:
+        raise FeatureReleaseError("target plan does not bind every SQL, ORDS or migration step exactly once")
     target_fields = {
         "environment", "operation", "logicalSchema", "connection", "expectedUser",
         "schema", "classification", "observed",
     }
-    for key, step in expected_step_targets.items():
+    earlier_resolved_schemas: list[str] = []
+    for number, step in enumerate(steps, start=1):
+        if step.get("type") == "feature-migrate":
+            earlier_resolved_schemas.append(_plan_checkpoint_schema(loaded, number, step))
+            continue
+        key = f"step:{number}"
+        if key not in expected_step_targets:
+            continue
         record = loaded.targets.get(key)
-        if not isinstance(record, Mapping) or set(record) != target_fields:
+        migration = step.get("type") == "migrate"
+        if not isinstance(record, Mapping) or set(record) != (release_state.MIGRATION_TARGET_FIELDS if migration else target_fields):
             raise FeatureReleaseError(f"target plan auxiliary binding {key} is malformed")
         if (
             record.get("environment") != environment
             or record.get("operation") != "migration"
-            or record.get("logicalSchema") != step.get("schema")
             or not all(isinstance(record.get(field), str) and record[field] for field in (
                 "connection", "expectedUser", "schema", "classification",
             ))
         ):
+            raise FeatureReleaseError(f"target plan auxiliary binding {key} differs from its frozen step")
+        if migration:
+            _validate_migration_binding(root, number, step, record, earlier_resolved_schemas)
+            earlier_resolved_schemas.append(record["schema"])
+        elif record.get("logicalSchema") != step.get("schema"):
             raise FeatureReleaseError(f"target plan auxiliary binding {key} differs from its frozen step")
         if step.get("type") == "ords-import" and record["expectedUser"] != record["schema"]:
             raise FeatureReleaseError(f"target plan ORDS binding {key} is not logged in as its REST owner")

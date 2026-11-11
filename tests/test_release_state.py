@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -642,3 +643,373 @@ class ReleaseStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(state.ReleaseStateError, "checkpoint|recovery"):
             self.record(plan=recovery_plan, checkpoint=2)
+
+    MIGRATION_FOLDER = "migrations/APP_CODE/2026-01-01_legacy-r001"
+    FLAT_FOLDER = "migrations/2026-01-01_x-r001"
+    MIGRATION_IDENTITY = dict(
+        IDENTITY, db_name="MIGRATE", db_unique_name="MIGRATE_UNIQUE",
+        service_name="migrate.example.invalid", container_id="9", container_name="MIGRATEPDB",
+    )
+
+    def make_migration_capsule(self):
+        """One feature checkpoint and one frozen migrate step, with the capsule.json the state layer reads."""
+        base = self.make_capsule()
+        capsule = SimpleNamespace(**{**vars(base), "checkpoints": (SimpleNamespace(schema="APP_CODE", inputs=()),)})
+        capsule.root.mkdir(parents=True, exist_ok=True)
+        steps = [
+            {"type": "feature-migrate", "schema": "APP_CODE", "inputs": ["features/dispatch/APP_CODE/ddl.sql"]},
+            {"type": "migrate", "folders": [self.MIGRATION_FOLDER]},
+        ]
+        document = {"payloadDefinition": {"steps": steps}}
+        (capsule.root / "capsule.json").write_text(
+            json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8",
+        )
+        return capsule
+
+    def migration_binding(self, *, identity=None, folder=None, logical="APP_CODE", schema="APP_CODE"):
+        return {
+            "environment": "staging", "operation": "migration", "logicalSchema": logical,
+            "connection": "stage-alias-two", "expectedUser": "APP_CODE", "schema": schema,
+            "classification": "service", "observed": dict(identity or self.MIGRATION_IDENTITY),
+            "folders": [{"path": folder or self.MIGRATION_FOLDER, "payloadDigest": "1" * 64, "checksSha256": "2" * 64}],
+            "preflight": {"state": "clear", "exitCode": 0, "conflicts": [], "errors": [], "reportSha256": "3" * 64},
+        }
+
+    def one_guard_plan(self):
+        """A plan for the one-checkpoint migration capsule: one prepared guard, not two."""
+        plan = self.make_plan()
+        plan.checkpoint_guards = plan.checkpoint_guards[:1]
+        return plan
+
+    def migration_plan(self, **binding_kwargs):
+        plan = self.one_guard_plan()
+        plan.targets["step:2"] = self.migration_binding(**binding_kwargs)
+        return plan
+
+    def test_start_rollout_requires_a_binding_for_every_migrate_step(self) -> None:
+        state = self.state_module()
+        capsule = self.make_migration_capsule()
+        with self.assertRaisesRegex(state.ReleaseStateError, "every SQL, ORDS or migration step"):
+            self.start_rollout(capsule, self.one_guard_plan())
+
+        run_id = self.start_rollout(capsule, self.migration_plan())
+        run = next(row for row in self.index()["rollouts"] if row["runId"] == run_id)
+        self.assertIn(state.target_scope_from_identity(self.MIGRATION_IDENTITY), run["targetScopes"])
+
+    def test_auxiliary_target_scope_refuses_a_migrate_binding_that_is_not_the_frozen_one(self) -> None:
+        state = self.state_module()
+        step = {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}
+        plain = self.migration_binding()
+        plain.pop("folders")
+        plain.pop("preflight")
+        plain_plan = self.make_plan()
+        plain_plan.targets["step:2"] = plain
+        for label, plan in (
+            ("plain eight-field shape", plain_plan),
+            ("folder path differs", self.migration_plan(folder="migrations/APP_CODE/2026-01-02_other-r001")),
+            ("logical schema differs from its schema-scoped folder", self.migration_plan(logical="OTHER_CODE", schema="APP_CODE")),
+        ):
+            with self.subTest(label=label), self.assertRaises(state.ReleaseStateError):
+                state._auxiliary_target_scope(plan, 2, step)
+
+        self.assertEqual(
+            state._auxiliary_target_scope(self.migration_plan(), 2, step),
+            state.target_scope_from_identity(self.MIGRATION_IDENTITY),
+        )
+
+    def test_assert_auxiliary_step_allowed_accepts_a_migrate_step_only_under_its_lease(self) -> None:
+        from scripts import release_ownership
+
+        state = self.state_module()
+        capsule = self.make_migration_capsule()
+        plan = self.migration_plan()
+        run_id = self.start_rollout(capsule, plan)
+        scope = state.target_scope_from_identity(self.MIGRATION_IDENTITY)
+        execution = {"purpose": "rollout-auxiliary-step", "runId": run_id, "step": 2, "planDigest": plan.plan_digest}
+
+        with release_ownership.target_writer_lease(self.root, scope, execution) as lease:
+            state.assert_auxiliary_step_allowed(self.root, capsule, plan, 2, run_id=run_id, lease=lease)
+        with release_ownership.target_writer_lease(self.root, scope, dict(execution, step=1)) as wrong_step:
+            with self.assertRaisesRegex(state.ReleaseStateError, "writer lease"):
+                state.assert_auxiliary_step_allowed(self.root, capsule, plan, 2, run_id=run_id, lease=wrong_step)
+        with self.assertRaisesRegex(state.ReleaseStateError, "writer lease"):
+            state.assert_auxiliary_step_allowed(self.root, capsule, plan, 2, run_id=run_id, lease=None)
+
+    def test_migration_schema_consistent_accepts_and_refuses_the_documented_shapes(self) -> None:
+        state = self.state_module()
+        scoped = self.MIGRATION_FOLDER
+        flat = self.FLAT_FOLDER
+        accepted = (
+            ([scoped], "APP_CODE"),
+            ([flat], None),
+            ([flat], "APP_CODE"),
+            ([flat, "migrations/2026-01-02_y-r001"], None),
+        )
+        refused = (
+            ([scoped], None),
+            ([scoped], "OTHER_CODE"),
+            ([flat], ""),
+            ([scoped, flat], "APP_CODE"),
+            ([scoped, "migrations/OTHER_CODE/2026-01-01_b-r001"], "APP_CODE"),
+            (["features/dispatch/APP_CODE/ddl.sql"], "APP_CODE"),
+            (["migrations/APP_CODE/2026-01-01_a/b-r001"], "APP_CODE"),
+            ([], "APP_CODE"),
+        )
+        for folders, logical in accepted:
+            with self.subTest(folders=folders, logical=logical):
+                state.migration_schema_consistent(folders, logical)
+        for folders, logical in refused:
+            with self.subTest(folders=folders, logical=logical), self.assertRaises(state.ReleaseStateError):
+                state.migration_schema_consistent(folders, logical)
+
+    def make_capsule_without_checkpoints(self, steps):
+        """A capsule with no feature checkpoint and the given frozen steps, in the canonical capsule.json form."""
+        base = self.make_capsule()
+        capsule = SimpleNamespace(**{**vars(base), "checkpoints": ()})
+        capsule.root.mkdir(parents=True, exist_ok=True)
+        (capsule.root / "capsule.json").write_text(
+            json.dumps({"payloadDefinition": {"steps": steps}}, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return capsule
+
+    def test_a_capsule_with_neither_checkpoint_nor_migration_is_refused_by_every_guard(self) -> None:
+        state = self.state_module()
+        pause_only = self.make_capsule_without_checkpoints([{"type": "pause", "message": "review"}])
+        no_guards = self.make_plan()
+        no_guards.checkpoint_guards = ()
+        with self.assertRaisesRegex(state.ReleaseStateError, "feature checkpoint or a migrate step"):
+            state._capsule_step_count(pause_only)
+        with self.assertRaisesRegex(state.ReleaseStateError, "feature checkpoint or a migrate step"):
+            self.start_rollout(pause_only, no_guards)
+
+        truncated = SimpleNamespace(**{**vars(self.make_capsule()), "checkpoints": (), "root": self.root / "scratch" / "no-capsule-json"})
+        with self.assertRaisesRegex(state.ReleaseStateError, "at least one checkpoint"):
+            state._capsule_step_count(truncated)
+        with self.assertRaisesRegex(state.ReleaseStateError, "feature checkpoint or a migrate step"):
+            self.start_rollout(truncated, no_guards)
+
+    def test_a_migration_only_capsule_starts_with_its_migration_scope_alone(self) -> None:
+        state = self.state_module()
+        capsule = self.make_capsule_without_checkpoints([{"type": "migrate", "folders": [self.MIGRATION_FOLDER]}])
+        plan = self.one_guard_plan()
+        plan.checkpoint_guards = ()
+        plan.targets["step:1"] = self.migration_binding()
+
+        run_id = self.start_rollout(capsule, plan)
+        run = next(row for row in self.index()["rollouts"] if row["runId"] == run_id)
+        self.assertEqual(run["targetScopes"], [state.target_scope_from_identity(self.MIGRATION_IDENTITY)])
+        self.assertEqual(run["expectedCheckpointCount"], 0)
+        self.assertEqual(run["expectedStepCount"], 1)
+
+    def test_a_run_finished_unknown_without_a_checkpoint_still_blocks_its_target(self) -> None:
+        """Characterization: with no checkpoint attempt, nothing retires an unknown run, so its target stays blocked."""
+        state = self.state_module()
+        run_id = self.start_rollout(self.capsule, self.make_plan())
+        state.finish_rollout(
+            self.root, run_id,
+            outcome={
+                "state": "unknown", "databaseState": "unknown", "steps": [],
+                "checkpointVerificationIds": [],
+                "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                "finalReportPath": None, "finalReportSha256": None,
+            },
+        )
+        with self.assertRaisesRegex(state.ReleaseStateError, "a running or unresolved rollout owns one of these target scopes"):
+            self.start_rollout(self.capsule, self.make_plan())
+
+    def finish_unknown(self, run_id: str) -> None:
+        self.state_module().finish_rollout(
+            self.root, run_id,
+            outcome={
+                "state": "unknown", "databaseState": "unknown", "steps": [],
+                "checkpointVerificationIds": [],
+                "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                "finalReportPath": None, "finalReportSha256": None,
+            },
+        )
+
+    def finish_not_started(self, run_id: str) -> None:
+        self.state_module().finish_rollout(
+            self.root, run_id,
+            outcome={
+                "state": "failed", "databaseState": "not-started", "steps": [],
+                "checkpointVerificationIds": [],
+                "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                "finalReportPath": None, "finalReportSha256": None,
+            },
+        )
+
+    def rewrite_run(self, run_id: str, **fields) -> None:
+        def update(index: dict) -> dict:
+            row = next(item for item in index["rollouts"] if item["runId"] == run_id)
+            row.update(fields)
+            return index
+
+        self.state_module()._atomic_update(self.root, update)
+
+    def reconcile(self, run_id: str) -> dict:
+        state = self.state_module()
+        with state.run_reconciliation(self.root, run_id, "staging") as session:
+            return session.reconcile(f"RECONCILE-RUN {run_id}")
+
+    def test_reconciled_unknown_run_no_longer_blocks_start_rollout(self) -> None:
+        state = self.state_module()
+        run_id = self.start_rollout(self.capsule, self.make_plan())
+        self.finish_unknown(run_id)
+        with self.assertRaisesRegex(state.ReleaseStateError, "owns one of these target scopes"):
+            self.start_rollout(self.capsule, self.make_plan())
+
+        closed = self.reconcile(run_id)
+        self.assertEqual(closed["state"], "unknown")
+        self.assertNotEqual(self.start_rollout(self.capsule, self.make_plan()), run_id)
+
+    def test_reconciled_run_no_longer_blocks_an_auxiliary_write_while_an_unreconciled_one_does(self) -> None:
+        from scripts import release_ownership
+
+        state = self.state_module()
+        capsule = self.make_migration_capsule()
+        earlier = self.start_rollout(capsule, self.migration_plan())
+        self.finish_not_started(earlier)
+        current_plan = self.migration_plan()
+        current = self.start_rollout(capsule, current_plan)
+        self.rewrite_run(earlier, state="unknown", databaseState="unknown")
+        scope = state.target_scope_from_identity(self.MIGRATION_IDENTITY)
+        identity = {"purpose": "rollout-auxiliary-step", "runId": current, "step": 2, "planDigest": current_plan.plan_digest}
+        with release_ownership.target_writer_lease(self.root, scope, identity) as lease:
+            with self.assertRaisesRegex(state.ReleaseStateError, "owns this physical target"):
+                state.assert_auxiliary_step_allowed(self.root, capsule, current_plan, 2, run_id=current, lease=lease)
+
+        self.reconcile(earlier)
+        with release_ownership.target_writer_lease(self.root, scope, identity) as lease:
+            state.assert_auxiliary_step_allowed(self.root, capsule, current_plan, 2, run_id=current, lease=lease)
+
+    def test_reconciled_run_no_longer_blocks_a_checkpoint_while_an_unreconciled_one_does(self) -> None:
+        from scripts import release_ownership
+
+        state = self.state_module()
+        earlier = self.start_rollout(self.capsule, self.make_plan())
+        self.finish_not_started(earlier)
+        current_plan = self.make_plan()
+        current = self.start_rollout(self.capsule, current_plan)
+        self.rewrite_run(earlier, state="unknown", databaseState="unknown")
+        scope = state.target_scope_from_identity(current_plan.checkpoint_guards[0]["targetIdentity"])
+        identity = {
+            "runId": current, "environment": "staging", "payloadDigest": self.capsule.payload_digest,
+            "engineDigest": self.capsule.engine_digest, "planDigest": current_plan.plan_digest,
+            "checkpoint": 1, "recoveryAttempt": None,
+        }
+        with release_ownership.target_writer_lease(self.root, scope, identity) as lease:
+            with self.assertRaisesRegex(state.ReleaseStateError, "owns this physical target"):
+                state.record_attempt(self.root, self.capsule, current_plan, 1, run_id=current, lease=lease)
+
+        self.reconcile(earlier)
+        with release_ownership.target_writer_lease(self.root, scope, identity) as lease:
+            self.assertIsInstance(state.record_attempt(self.root, self.capsule, current_plan, 1, run_id=current, lease=lease), str)
+
+    def test_reconciliation_session_refuses_what_it_must_and_changes_nothing(self) -> None:
+        import uuid
+
+        from scripts import release_ownership
+
+        state = self.state_module()
+        with self.assertRaisesRegex(state.ReleaseStateError, "no rollout run has this run id"):
+            with state.run_reconciliation(self.root, str(uuid.uuid4()), "staging"):
+                pass
+
+        finished_safely = self.start_rollout(self.capsule, self.make_plan())
+        self.finish_not_started(finished_safely)
+        with self.assertRaisesRegex(state.ReleaseStateError, "nothing to reconcile"):
+            with state.run_reconciliation(self.root, finished_safely, "staging"):
+                pass
+
+        run_id = self.start_rollout(self.capsule, self.make_plan())
+        self.finish_unknown(run_id)
+        with self.assertRaisesRegex(state.ReleaseStateError, "belongs to staging"):
+            with state.run_reconciliation(self.root, run_id, "prod"):
+                pass
+        scope = state.target_scope_from_identity(IDENTITY)
+        with release_ownership.target_writer_lease(self.root, scope, {"purpose": "other-writer"}):
+            with self.assertRaisesRegex(state.ReleaseStateError, "a target writer may still be active"):
+                with state.run_reconciliation(self.root, run_id, "staging"):
+                    pass
+
+        with state.run_reconciliation(self.root, run_id, "staging") as session:
+            with self.assertRaises(state.AcknowledgmentError):
+                session.reconcile("RECONCILE-RUN " + str(uuid.uuid4()))
+            with self.assertRaises(state.AcknowledgmentError):
+                session.reconcile("")
+        row = next(item for item in self.index()["rollouts"] if item["runId"] == run_id)
+        self.assertNotIn("reconciliation", row)
+        self.assertEqual(row["state"], "unknown")
+
+        self.reconcile(run_id)
+        with self.assertRaisesRegex(state.ReleaseStateError, "already has a reconciliation record"):
+            with state.run_reconciliation(self.root, run_id, "staging"):
+                pass
+
+    def test_reconciliation_refuses_while_a_checkpoint_attempt_is_unresolved(self) -> None:
+        state = self.state_module()
+        self.record()
+        run_id = self.index()["rollouts"][-1]["runId"]
+        with self.assertRaisesRegex(state.ReleaseStateError, "rollout --prepare --recover"):
+            with state.run_reconciliation(self.root, run_id, "staging"):
+                pass
+
+    def test_failed_run_with_unknown_database_state_is_reconciled_and_stays_failed(self) -> None:
+        state = self.state_module()
+        run_id = self.start_rollout(self.capsule, self.make_plan())
+        state.finish_rollout(
+            self.root, run_id,
+            outcome={
+                "state": "failed", "databaseState": "unknown", "steps": [], "checkpointVerificationIds": [],
+                "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                "finalReportPath": None, "finalReportSha256": None,
+            },
+        )
+        closed = self.reconcile(run_id)
+        self.assertEqual((closed["state"], closed["databaseState"]), ("failed", "unknown"))
+        self.assertEqual(closed["reconciliation"]["priorState"], "failed")
+        self.assertNotEqual(self.start_rollout(self.capsule, self.make_plan()), run_id)
+
+    def test_index_written_before_reconciliation_still_validates(self) -> None:
+        state = self.state_module()
+        run_id = self.start_rollout(self.capsule, self.make_plan())
+        self.finish_unknown(run_id)
+        index = json.loads(json.dumps(state._load_index(self.root)))
+        row = next(item for item in index["rollouts"] if item["runId"] == run_id)
+        self.assertNotIn("reconciliation", row)
+        state._validate_index(index)
+
+    def test_reconciliation_record_is_strictly_validated(self) -> None:
+        state = self.state_module()
+        run_id = self.start_rollout(self.capsule, self.make_plan())
+        self.finish_unknown(run_id)
+        self.reconcile(run_id)
+        valid = copy.deepcopy(next(item for item in self.index()["rollouts"] if item["runId"] == run_id))
+        state._validate_rollout(valid)
+        other = "RECONCILE-RUN " + "0" * 8 + "-0000-4000-8000-" + "0" * 12
+        mutations = (
+            ("missing field", lambda row: row["reconciliation"].pop("priorState")),
+            ("extra field", lambda row: row["reconciliation"].update(extra=1)),
+            ("foreign acknowledgment", lambda row: row["reconciliation"].update(acknowledgment=other)),
+            ("prior state verified", lambda row: row["reconciliation"].update(priorState="verified")),
+            ("bad timestamp", lambda row: row["reconciliation"].update(acknowledgedAt="yesterday")),
+            ("running state", lambda row: row.update(state="running", finishedAt=None)),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                row = copy.deepcopy(valid)
+                mutate(row)
+                with self.assertRaises(state.ReleaseStateError):
+                    state._validate_rollout(row)
+
+    def test_a_killed_running_run_is_closed_as_unknown_with_its_prior_state_recorded(self) -> None:
+        run_id = self.start_rollout(self.capsule, self.make_plan())
+        self.reconcile(run_id)
+        row = next(item for item in self.index()["rollouts"] if item["runId"] == run_id)
+        self.assertEqual(row["state"], "unknown")
+        self.assertIsNotNone(row["finishedAt"])
+        self.assertEqual(row["reconciliation"]["priorState"], "running")
+        self.assertEqual(row["reconciliation"]["priorDatabaseState"], "not-started")
+        self.assertNotEqual(self.start_rollout(self.capsule, self.make_plan()), run_id)

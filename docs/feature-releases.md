@@ -1,7 +1,7 @@
 # Feature-oriented releases
 
 Use mutable feature files for new object work that benefits from complete
-package sources, compact Git diffs, and one frozen payload for staging and
+stored-unit sources, compact Git diffs, and one frozen payload for staging and
 production. Existing dated migrations and schema-version 1 rollout manifests
 keep their current behavior.
 
@@ -9,9 +9,11 @@ keep their current behavior.
 
 Feature releases do not replace dated migrations yet. Today:
 
-- `feature capture --package` reads a package specification and body only. Views
-  go in the feature's `ddl.sql`. Triggers, procedures, functions and types stay
-  in dated migrations started with `scripts/team.sh new-migration --source`.
+- `feature capture` reads one stored unit: a package or type (specification and
+  body), or a single trigger, procedure or function. Views go in the feature's
+  `ddl.sql`. Destructive DDL (`DROP`, `RENAME`, `TRUNCATE`) and anything the DDL
+  forms refuse stay in dated migrations started with
+  `scripts/team.sh new-migration --source`.
 - Feature files have no DEV apply path. `feature capture --env dev` reads DEV into
   the repository and writes nothing to DEV. `rollout` refuses `--env dev` for a
   feature capsule and runs only `--env staging` or `--env prod`.
@@ -32,12 +34,14 @@ meaningful condition before including that schema in a release.
 ```bash
 scripts/team.sh feature init inventory --schema APP_CODE
 scripts/team.sh feature capture inventory --package ITEM_LOOKUP --schema APP_CODE --env dev
+scripts/team.sh feature capture inventory --trigger ORDERS_TRG --schema APP_CODE --env dev
 scripts/team.sh feature diff inventory --schema APP_CODE
 ```
 
-Capture reads the complete live DEV package specification and body, when a body
-exists, and stores a retained source baseline under ignored `scratch/`. It uses the
-`CODE_*` profile, not `MIGRATION_*`. A feature that touches more than one schema
+Capture takes exactly one unit option. `--package` and `--type` read the complete
+live DEV specification and body, when a body exists; `--trigger`, `--procedure` and
+`--function` read the single unit. Each capture stores a retained source baseline
+under ignored `scratch/`. It uses the `CODE_*` profile, not `MIGRATION_*`. A feature that touches more than one schema
 needs every DEV schema listed in `CODE_SCHEMA`, with aligned `CODE_SQLCL_CONNECTION`
 and `CODE_EXPECTED_USER` values; otherwise the second schema's capture is refused. It
 refuses to replace edited source; use `--refresh` only after reviewing the live
@@ -51,9 +55,13 @@ for longer quoted identifiers; metadata and review files retain the full
 case-sensitive identifier and source hashes.
 
 One-time DDL may live in `features/<slug>/<SCHEMA>/ddl.sql`. Complete stored
-units live under `features/<slug>/<SCHEMA>/packages/`; keep each package spec
-and body as whole, ordered files. Checks use the existing schema-version 1
-`checks.json` format. Version-2 SQL-script and ORDS steps name a logical
+units live under `features/<slug>/<SCHEMA>/`, one directory per unit group:
+`packages/` (`.pks.sql`, `.pkb.sql`), `types/` (`.tps.sql`, `.tpb.sql`),
+`triggers/` (`.trg.sql`), `procedures/` (`.prc.sql`) and `functions/`
+(`.fnc.sql`). Keep each specification and body as whole, ordered files. Creating a type or package
+specification invalidates its body, so a release that re-creates a specification also
+re-creates its body in the same checkpoint, even when the body text is unchanged. Checks use
+the existing schema-version 1 `checks.json` format. Version-2 SQL-script and ORDS steps name a logical
 `schema`; the selected environment's migration profile supplies the connection
 and login. ORDS imports must use the actual REST owner named in the frozen
 export. Schema-version 1 keeps its explicit connection and expected-user fields.
@@ -102,7 +110,7 @@ schema, a `COMMENT ON` other than `TABLE` or `COLUMN`, complex/uncertain view co
 (`@dblink`, `TABLE(`, `LATERAL`, `JSON_TABLE`, `XMLTABLE`, `AS OF`, `VERSIONS`, `SAMPLE`,
 `MODEL`, `PIVOT`, `UNPIVOT`), and any statement the rules above do not describe.
 
-The object budget covers feature checkpoints only. A SQL-script is counted as
+The object budget covers feature checkpoints and `migrate` steps. A SQL-script is counted as
 the separate data phase only when every statement is lexically validated,
 top-level `INSERT`, `UPDATE`, `DELETE`, or `MERGE`, plus optional explicit
 `COMMIT`/`ROLLBACK`. DDL, PL/SQL blocks, calls, queries, and other forms remain
@@ -120,14 +128,14 @@ A capsule installs the feature file, not DEV. Two checks protect that, both desc
 
 ```bash
 scripts/team.sh feature doctor                 # offline: a unit claimed by two features, orphan checks
-scripts/team.sh feature doctor --live          # also compares package files with the DEV source (read-only)
+scripts/team.sh feature doctor --live          # also compares every captured stored unit with the DEV source (read-only)
 scripts/team.sh feature capture orders --package ITEM_LOOKUP --schema APP_CODE --env dev --move-from inventory
 ```
 
-`feature capture` refuses a package another feature holds; `--move-from` names the feature it is taken from. A move
+`feature capture` refuses a unit another feature holds; `--move-from` names the feature it is taken from. A move
 or a `--refresh` stops when the file it replaces has lines DEV does not have (`--discard-unapplied` erases them,
 `--keep-file` moves the old file unchanged). `feature freeze` refuses a unit held by two selected features and
-compares the selected package files with DEV when a DEV profile is configured (`--no-live "<reason>"` skips it;
+compares the selected stored-unit files with DEV when a DEV profile is configured (`--no-live "<reason>"` skips it;
 the reason is kept in `scratch/freeze-checks/`).
 
 ## Freeze and prepare
@@ -148,7 +156,7 @@ scripts/team.sh rollout releases/current.json --env staging --prepare --capsule 
 checks that those bytes are committed, runs the ownership and analysis checks,
 and creates an environment-neutral capsule under `scratch/release-capsules/`.
 It needs no `.env`, SQLcl, or network unless a DEV profile is configured. When
-one is, freeze also compares the selected package files with DEV (read-only),
+one is, freeze also compares the selected stored-unit files with DEV (read-only),
 and stops with exit 2 if DEV cannot be read, unless `--no-live "<reason>"` is
 given; the reason is recorded. A file that a release would undo on DEV also
 stops it, with exit 1. The [feature ownership and DEV drift](feature-ownership.md)
@@ -158,7 +166,14 @@ to every later command.
 `--dry-run` checks only local source, manifest, capsule, and hashes. `--prepare`
 uses the selected environment's guarded read-only capture to make exact
 before-state, compiler-setting, structural, and descriptor checks. Review the
-target plan and generated diffs before execution. The capsule payload digest is
+target plan and generated diffs before execution.
+
+A trigger that the target has DISABLED is a refusal at prepare when the release
+would replace it: `CREATE OR REPLACE TRIGGER` leaves it enabled. The refusal names
+the trigger. Enable or disable it in a reviewed migration instead, and keep it out
+of the release. A trigger the release leaves unchanged is not replaced, so it is
+allowed in any state. Apply rechecks that a replaced trigger is still ENABLED before
+it writes. The capsule payload digest is
 shared by staging and production; the target-plan digest is specific to each
 environment. Re-run `feature freeze` and prepare again if selected source or
 the manifest changes.
@@ -193,6 +208,8 @@ duplicate data changes or overwrite intervening application work. The refusal
 keeps the attempt, receipt, and capsule intact. Do not rerun that capsule; retain
 the evidence while preparing a separately reviewed recovery plan that does not
 repeat the completed writes. The runner will not infer that replay is safe.
+A `migrate` step counts as a writing step here too: a parent killed before it ran
+can be recovered, and a parent whose migration verified cannot.
 
 A rollout killed mid-step may record no outcome for that step or any later one.
 Recovery accepts such a parent, provided every earlier writing step has a
@@ -209,28 +226,119 @@ scripts/team.sh rollout releases/current.json --env prod --capsule <capsule-dir>
 ```
 
 Production validates the staging report's payload and engine digests, shared
-source hashes, complete in-budget feature-checkpoint coverage, and matching
-data/ORDS phase classifications before it asks for confirmation. It uses the
-staged capsule payload and independently revalidates the production target plan
-and app descriptors. SQL/ORDS targets are observed during preparation and
+source hashes, complete in-budget coverage of every feature checkpoint and every
+`migrate` step (`includedMigrationSteps`), and matching data/ORDS phase
+classifications before it asks for confirmation. It uses the staged capsule
+payload and independently revalidates the production target plan and app
+descriptors. SQL, ORDS and migration targets are observed during preparation and
 must still match before their run-bound writer lease allows a write. A changed
-capsule, target profile, or source blocks success receipts.
+capsule, target profile, migration folder, or source blocks success receipts.
+
+A `migrate` step in a schema-version 2 manifest is a prepared checkpoint. Prepare
+binds it to its target like a SQL or ORDS step, records the payload and check
+digests of its folders, and runs the read-only live migration preflight. A clear
+preflight is recorded as `clear`. When the only conflicts are missing prerequisites
+that an earlier feature or migrate step of the same schema creates, it is recorded
+as `deferred`, with those conflicts, and the apply-time preflight inside `migrate`
+decides. Only prerequisites the analyser reports as missing are deferred, and the
+comparison uses the resolved target schema, not the logical name, so a flat migration
+folder and a DEV schema mapped to a differently named staging schema both defer. Any
+other conflict or error refuses preparation. A failing explicit precondition in the
+migration's own `checks.json` (code `CHECK_FAILED`) refuses preparation even when an
+earlier step would make it pass, so write such a condition to hold before the release,
+or make it a postcondition. At execution the step
+takes the target writer lease only after the binding, target identity and folder
+digests match the prepared plan. `migrate` still runs its own preflight, verification
+and receipt.
 
 The engine digest binds the ordered release modules and their runtime helpers,
 including SQLcl transport, target/source checks, trusted SQL templates, and the
 existing APEX deploy-and-verify path. Capsule preparation refuses if a required
 engine file is missing; a helper change makes an older capsule unusable.
 
+## Migration-only releases
+
+A schema-version 2 release may contain no `feature-migrate` step, as long as it has at
+least one `migrate` step. Such a release freezes the migration folders' bytes and runs
+them as prepared checkpoints, as in a mixed release. It has no feature checkpoint, so:
+
+- `includedCheckpoints` is `[]`, and no checkpoint verification is recorded.
+- The target scopes come from the migration bindings only.
+- `--recover` is refused, because there is no checkpoint attempt to recover. A
+  migration step that refused before its write leaves the target free: once the cause
+  is fixed and the target is prepared again, the same capsule can be run again, provided no step of it has a
+  rollout receipt for that environment yet (receipts are never replaced; see below). A
+  migration step whose outcome is unknown is reconciled live as
+  [migration rules](migration-rules.md) describe. The run is then closed with
+  `feature reconcile-run` (see below), the interrupted folder stays locked by the
+  migration rules, and the follow-up goes into the next revision folder (`revise`)
+  with a new capsule.
+
+```bash
+scripts/team.sh feature freeze releases/current.json
+scripts/team.sh rollout releases/current.json --env staging --prepare --capsule <capsule-dir> --report scratch/staging-prepare.json
+scripts/team.sh rollout releases/current.json --env staging --capsule <capsule-dir> --report scratch/staging-rollout.json
+scripts/team.sh rollout releases/current.json --env prod --prepare --capsule <capsule-dir> --report scratch/prod-prepare.json
+scripts/team.sh rollout releases/current.json --env prod --capsule <capsule-dir> --stage-report scratch/staging-rollout.json --report scratch/prod-rollout.json
+scripts/team.sh feature clean-capsule <payload-sha256>
+```
+
+A manifest with neither a feature step nor a migrate step is refused at freeze. The
+freeze record under `scratch/freeze-checks/` states `migrationOnly` and `migrationSteps`.
+
+## Closing a run that has no checkpoint to recover
+
+A run that ended unknown, with no checkpoint attempt to recover, keeps its target
+occupied until an operator closes it. This also applies to a failed SQL-script or ORDS
+step, whose unknown outcome blocks the target in the same way.
+
+```bash
+scripts/team.sh feature reconcile-run <run-id> --env staging
+```
+
+The command reads only `releases/.local-state.json`. It needs no capsule, manifest,
+`.env` or database. It shows the run id, environment, payload and plan digests, state,
+database state, start and finish times, each target scope, each recorded step outcome,
+and the evidence location (`scratch/rollout-runs/`). It then asks for the typed
+acknowledgment `RECONCILE-RUN <run-id>`. No flag supplies it, and an empty answer or a
+closed input is a refusal.
+
+It refuses, and changes nothing, when the run id is unknown, when `--env` differs from
+the run's environment, when the run is verified or failed with a database state other
+than unknown, when the run already has a reconciliation record, when a checkpoint
+attempt is still unresolved (recover that with `rollout --prepare --recover <attempt-id>`
+instead), or when a target writer lease cannot be taken for every target scope, because
+a process may still be writing.
+
+The acknowledgment asserts that the original process and the database operation have
+ended. A free lease alone does not establish that. On success, a running run becomes
+`unknown` with a finish time, the row gains a `reconciliation` record with the
+acknowledgment and the prior state, and the database state is left as it was. The run
+then no longer occupies its targets. It is never proof of completion, and it keeps its
+capsule ineligible for cleanup.
+
+Exit codes: 0 reconciled; 1 declined, or the acknowledgment was wrong; 2 refused or an
+error.
+
+Rollout receipts are never replaced. When an earlier step of the closed run succeeded, it
+has a receipt under `scratch/rollout-receipts/<manifest-sha256>/<env>/`, and a new run of
+the same capsule on that environment is refused before any
+write. Keep the receipts and evidence, inspect the target, and continue with a reviewed
+continuation manifest (a changed manifest, frozen as a new capsule), as
+[migration rules](migration-rules.md) describe for rollout receipts.
+
 ## Timing, attempts, and cleanup
 
 Reports separate preparation, selected feature database-object time, APEX app
 imports, ORDS imports, and data scripts. Object time covers checkpoint
-revalidation, preconditions, apply, and postconditions. It is not a hard stop:
-Oracle DDL may commit before the command can report a budget overrun. Data,
-ORDS, preparation, and manual pauses have separate times. Legacy migrations and
-unclassified object scripts are listed as excluded; they make object coverage
-incomplete, so coverage is incomplete. A complete, within-budget report covers every capsule checkpoint
-and every classified phase, not the whole database or deployment window.
+revalidation, preconditions, apply, and postconditions for feature checkpoints,
+and the elapsed time of each `migrate` step, which counts toward the same budget.
+It is not a hard stop: Oracle DDL may commit before the command can report a
+budget overrun. Data, ORDS, preparation, and manual pauses have separate times.
+Unclassified SQL-script object work is listed as excluded, and its presence means
+coverage is incomplete. A complete, within-budget report covers every capsule
+checkpoint, every `migrate` step (`includedMigrationSteps`) and every classified
+phase, not the whole database or deployment window.
 
 Attempt state is local in `releases/.local-state.json`; it is not a shared
 database ledger and cannot see another developer's repository. Its schema-2
@@ -258,6 +366,35 @@ index only together with its entire converted legacy tree. Never leave active
 revision families pointing into a removed archive. Keep the archive and
 conversion review in project-owned paths; do not put customer source in this
 template guide or example.
+
+### Plan the conversion offline
+
+`feature convert-plan` reads the named migration folders and prints, per folder, the stored units with the
+`feature capture` command that takes their current DEV source, every statement with its verdict (accepted by the DDL
+forms, refused with the reason, or data), the data-only files, and whether local receipt or attempt evidence locks the
+folder. Each folder is convertible, partly convertible, or kept as a migration. It writes nothing, reads no database,
+and needs no `.env`:
+
+```bash
+scripts/team.sh feature convert-plan migrations/APP_CODE/2026-01-05_items-r001 migrations/APP_CODE/2026-01-06_orders-r001 --feature inventory
+scripts/team.sh feature convert-plan migrations/APP_CODE/2026-01-05_items-r001 --format json
+```
+
+Exit 0 when every folder was analysed; 2 when any could not be, including a folder whose local evidence is unreadable.
+Read the plan with these rules:
+
+- Reconcile every old attempt first (`scripts/team.sh revise --check <folder>`).
+- A folder with local receipt or attempt evidence has been applied or attempted: its one-time DDL is archived, not copied into a
+  feature. Its stored units are still captured from DEV.
+- Capture reads DEV when it runs. Run it after the folder's change is applied to DEV, or the captured source is older
+  than the migration.
+- A partly convertible folder stays in `migrations/`, because folders are not split. Anything copied or captured from it
+  would also run from the migration.
+- A flat `migrations/` folder's schema is unknown offline. Its verdict is provisional and its capture commands show
+  `<SCHEMA>`.
+- The plan ends with the `archive-migrations` command for the fully convertible folders. `archive-migrations` archives
+  only a contiguous low prefix of each family, so a later revision is left out while an earlier one stays a migration.
+  It is a dry run unless `--yes` is added.
 
 Offline tests and hosted CI do not prove live staging performance. A measured
 claim needs a separately authorized disposable staging rehearsal with the

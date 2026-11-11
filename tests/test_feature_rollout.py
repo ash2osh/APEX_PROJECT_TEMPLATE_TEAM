@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -10,8 +12,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import rollout
+from scripts.db_targets import Target
 from scripts.feature_manifest import FeatureCheckpoint
 from scripts.release_capsule import ReleaseCapsule
+
+MIGRATION_FOLDER = "migrations/APP_CODE/2026-01-01_legacy-r001"
+MIGRATION_PAYLOAD = hashlib.sha256(b"legacy migration payload").hexdigest()
+MIGRATION_CHECKS = hashlib.sha256(b"legacy migration checks").hexdigest()
 
 
 class FeatureRolloutTests(unittest.TestCase):
@@ -96,10 +103,35 @@ class FeatureRolloutTests(unittest.TestCase):
                 "appDeploySourceSchemaSelector": None,
             }
             if step["type"] == "migrate":
-                item["phase"] = "uncovered-object"
-                item["classificationReason"] = rollout._auxiliary_classification_reason("migrate", "uncovered-object")
+                item["phase"] = "migration"
+                item["classificationReason"] = rollout._auxiliary_classification_reason("migrate", "migration")
             result.append(item)
         return result
+
+    def _migration_target(self, environment: str, *, connection: str | None = None, payload: str = MIGRATION_PAYLOAD):
+        """What the live migration target resolution returns for a schema-scoped migration folder."""
+        target = Target(
+            environment, connection or f"{environment}-conn", "APP_CODE", "APP_CODE",
+            "production" if environment == "prod" else "staging",
+        )
+        migration = SimpleNamespace(payload_digest=payload, checks_sha256=MIGRATION_CHECKS, schema="APP_CODE")
+        return ("APP_CODE", target, (migration,))
+
+    def _migration_binding(self, target_plan, folder: str = MIGRATION_FOLDER) -> dict:
+        """The prepared binding a migrate step carries in the target plan."""
+        identity = target_plan.targets["schema:APP_CODE"]["observed"]
+        return {
+            "environment": target_plan.environment,
+            "operation": "migration",
+            "logicalSchema": "APP_CODE",
+            "connection": f"{target_plan.environment}-conn",
+            "expectedUser": "APP_CODE",
+            "schema": "APP_CODE",
+            "classification": "production" if target_plan.environment == "prod" else "staging",
+            "observed": identity,
+            "folders": [{"path": folder, "payloadDigest": MIGRATION_PAYLOAD, "checksSha256": MIGRATION_CHECKS}],
+            "preflight": {"state": "clear", "exitCode": 0, "conflicts": [], "errors": [], "reportSha256": "3" * 64},
+        }
 
     def _target_plan(self, environment: str, checkpoint_count: int, plan_digest: str):
         database = environment.upper()
@@ -140,6 +172,9 @@ class FeatureRolloutTests(unittest.TestCase):
             environment, len(self.capsule.checkpoints),
             "1" * 64 if environment == "staging" else "2" * 64,
         )
+        for number, step in enumerate(actual_steps, start=1):
+            if step["type"] == "migrate":
+                target_plan.targets[f"step:{number}"] = self._migration_binding(target_plan, step["folders"][0])
         return (
             patch.object(release_capsule, "load_capsule", return_value=self.capsule),
             patch.object(release_capsule, "_read_capsule_json", return_value=(self.capsule_document, b"capsule")),
@@ -244,6 +279,23 @@ class FeatureRolloutTests(unittest.TestCase):
             "connection": "stage-migration", "expectedUser": "APP_CODE", "schema": "APP_CODE",
             "classification": "staging",
         })
+
+    def test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema(self) -> None:
+        from unittest.mock import patch
+
+        # A schema-version 1 rollout hashes this binding into its step digest and receipts, so it must not change.
+        step = {"type": "migrate", "folders": ["migrations/2026-05-10_example-r001"]}
+        target = rollout.Target("staging", "stage-migration", "APP_CODE", "APP_CODE", "staging")
+        with patch.object(rollout, "_target_for_step", return_value=target), \
+             patch.object(rollout, "_migration_step_target", return_value=("APP_CODE", target, ())):
+            legacy = rollout._target_binding(step, self.root, "staging")
+            capsule = rollout._target_binding(step, self.root, "staging", capsule=True)
+
+        self.assertEqual(legacy, {
+            "environment": "staging", "connection": "stage-migration", "expectedUser": "APP_CODE",
+            "schema": "APP_CODE", "classification": "staging",
+        })
+        self.assertEqual(capsule, {**legacy, "operation": "migration", "logicalSchema": "APP_CODE"})
 
     def test_capsule_dry_run_is_offline_and_does_not_require_a_prepared_target_plan(self) -> None:
         from scripts import feature_release
@@ -707,41 +759,288 @@ class FeatureRolloutTests(unittest.TestCase):
         self.assertNotIn("targetBinding", app_receipt)
         self.assertNotIn("observedIdentity", app_receipt)
 
-    def test_legacy_database_step_is_reported_outside_checkpoint_coverage(self) -> None:
+    def _observed_identity(self, environment: str = "staging") -> dict:
+        return self._target_plan(environment, 1, "1" * 64).targets["schema:APP_CODE"]["observed"]
+
+    def _migration_release_patches(self, *, target=None, observed=None, environment: str = "staging") -> list:
+        return [
+            patch.object(rollout, "_migration_step_target", return_value=target or self._migration_target(environment)),
+            patch.object(rollout, "_observe_target_identity", return_value=observed or self._observed_identity(environment)),
+        ]
+
+    def _run_migration_release(
+        self, extra_patches, *, migrate_seconds: float = 25.0, budget_seconds: int = 120, label: str = "release",
+        migration_only: bool = False, environment: str = "staging", stage_report_path=None, migrate_effect=None,
+    ):
+        from scripts import feature_release
+
+        (self.root / MIGRATION_FOLDER).mkdir(parents=True, exist_ok=True)
+
+        if migration_only:
+            checkpoints = ()
+            self.steps = [{"type": "migrate", "folders": [MIGRATION_FOLDER]}]
+        else:
+            checkpoints = (self.checkpoints[0],)
+            self.steps = [self.steps[0], {"type": "migrate", "folders": [MIGRATION_FOLDER]}]
+        self.capsule = ReleaseCapsule(
+            self.capsule.root, self.capsule.manifest_sha256, self.capsule.payload_digest,
+            self.capsule.engine_digest, self.capsule.source_commit, checkpoints,
+            self.capsule.input_hashes[:2], budget_seconds,
+        )
+        self._enter(list(self._patches(environment=environment, steps=self.steps)) + list(extra_patches))
+        clock = [0.0]
+
+        def fake_checkpoint(*args, **kwargs):
+            started = clock[0]
+            clock[0] += 10.0
+            return self._fake_checkpoint_result(
+                args, kwargs, object_seconds=clock[0] - started, session_count=3, message="checkpoint verified",
+            )
+
+        def fake_migrate(*args, **kwargs):
+            clock[0] += migrate_seconds
+            if migrate_effect is not None:
+                return migrate_effect(*args, **kwargs)
+            return rollout.StepResult(0, (), "migration applied")
+
+        report_base = self.root / "scratch" / f"{label}-report"
+        with patch.object(rollout.time, "perf_counter", side_effect=lambda: clock[0]), \
+             patch.object(feature_release, "execute_checkpoint", side_effect=fake_checkpoint), \
+             patch.object(rollout, "_snapshot"), \
+             patch.object(rollout, "execute_step", side_effect=fake_migrate) as migrate:
+            status = rollout.run_rollout(
+                self.manifest_path, environment, repo_root=self.root, capsule_path=self.capsule_path,
+                report_path=report_base, confirm=lambda _prompt: True, stage_report_path=stage_report_path,
+            )
+        # A refusal before confirmation raises before any report file is written.
+        report_path = report_base.with_suffix(".json")
+        report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else None
+        return status, report, migrate
+
+    def test_prepared_migration_step_is_a_covered_checkpoint_in_a_verified_release(self) -> None:
+        status, report, migrate = self._run_migration_release(self._migration_release_patches(), label="covered-migration")
+
+        self.assertEqual(status, 0, report.get("error"))
+        migrate.assert_called_once()
+        self.assertNotIn("connection", migrate.call_args.args[0])
+        budget = report["objectBudget"]
+        self.assertTrue(budget["coverageComplete"])
+        self.assertEqual(budget["includedCheckpoints"], [1])
+        self.assertEqual(budget["includedMigrationSteps"], [2])
+        self.assertEqual(budget["excludedObjectSteps"], [])
+        self.assertEqual(report["objectPhaseSeconds"], 35.0)
+        self.assertEqual(report["steps"][1]["phase"], "migration")
+        self.assertEqual(report["steps"][1]["objectSeconds"], 25.0)
+
+    def test_migration_step_stops_before_the_write_when_profile_identity_or_folders_changed(self) -> None:
+        cases = (
+            (
+                "profile", "migration profile changed after target preparation",
+                self._migration_release_patches(target=self._migration_target("staging", connection="other-conn")),
+            ),
+            (
+                "identity", "target identity changed after preparation",
+                self._migration_release_patches(observed=dict(self._observed_identity(), db_unique_name="OTHER_UNIQUE")),
+            ),
+            (
+                "folder digest", "migration folders changed after target preparation",
+                self._migration_release_patches(target=self._migration_target("staging", payload="f" * 64)),
+            ),
+        )
+        for label, expected, patches in cases:
+            with self.subTest(label=label):
+                captured = io.StringIO()
+                with contextlib.redirect_stderr(captured):
+                    status, report, migrate = self._run_migration_release(patches, label=f"changed-{label.replace(' ', '-')}")
+                self.assertEqual(status, 2)
+                migrate.assert_not_called()
+                refusal = captured.getvalue() + (report or {}).get("error", "")
+                self.assertIn(expected, refusal)
+
+    def test_migration_step_over_budget_fails_with_verified_database_state(self) -> None:
+        status, report, migrate = self._run_migration_release(
+            self._migration_release_patches(), migrate_seconds=200.0, label="migration-over-budget",
+        )
+
+        self.assertEqual(status, 2)
+        migrate.assert_called_once()
+        self.assertEqual(report["databaseState"], "verified")
+        self.assertIn("after a verified feature or migration checkpoint", report["error"])
+        self.assertEqual(report["objectBudget"]["includedMigrationSteps"], [2])
+        self.assertFalse(report["objectBudget"]["withinBudget"])
+
+    def test_migration_only_release_runs_staging_as_covered_migration_checkpoints(self) -> None:
+        status, report, migrate = self._run_migration_release(
+            self._migration_release_patches(), migration_only=True, label="migration-only-staging",
+        )
+
+        self.assertEqual(status, 0, report.get("error"))
+        migrate.assert_called_once()
+        budget = report["objectBudget"]
+        self.assertTrue(budget["coverageComplete"])
+        self.assertEqual(budget["includedCheckpoints"], [])
+        self.assertEqual(budget["includedMigrationSteps"], [1])
+        self.assertEqual(report["objectPhaseSeconds"], 25.0)
+
+    def test_migration_only_release_reaches_production_only_with_a_stage_proof(self) -> None:
+        from scripts import release_state
+
+        stage_path = self.root / "scratch" / "migration-only-staging.json"
+        stage_path.parent.mkdir(parents=True, exist_ok=True)
+        stage_path.write_text('{"status":"success"}\n', encoding="utf-8")
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
+            migration_only=True, environment="prod", stage_report_path=stage_path, label="migration-only-prod",
+        )
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertEqual(report["objectBudget"]["includedMigrationSteps"], [1])
+
+        status, _report, migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod"), migration_only=True, environment="prod",
+            stage_report_path=None, label="migration-only-prod-unstaged",
+        )
+        self.assertEqual(status, 2)
+        migrate.assert_not_called()
+
+    def test_recovery_is_refused_for_a_capsule_with_no_feature_checkpoint(self) -> None:
         from scripts import feature_release
 
         self.capsule = ReleaseCapsule(
             self.capsule.root, self.capsule.manifest_sha256, self.capsule.payload_digest,
-            self.capsule.engine_digest, self.capsule.source_commit, (self.checkpoints[0],),
-            self.capsule.input_hashes[:2], 120,
+            self.capsule.engine_digest, self.capsule.source_commit, (), self.capsule.input_hashes[:2], 120,
         )
-        self.steps = [self.steps[0], {"type": "migrate", "folders": ["migrations/APP_CODE/2026-01-01_legacy-r001"]}]
-        patches = self._patches(steps=self.steps)
-        self._enter(patches)
-        clock = [0.0]
-
-        def fake_checkpoint(*_args, **_kwargs):
-            started = clock[0]
-            clock[0] += 10.0
-            return self._fake_checkpoint_result(
-                _args, _kwargs, object_seconds=clock[0] - started, session_count=3,
-                message="checkpoint verified",
-            )
-
-        report_base = self.root / "scratch" / "legacy-step-report"
-        with patch.object(rollout.time, "perf_counter", side_effect=lambda: clock[0]), \
-             patch.object(feature_release, "execute_checkpoint", side_effect=fake_checkpoint), \
-             patch.object(rollout, "_snapshot"), \
-             patch.object(rollout, "execute_step", return_value=rollout.StepResult(0, (), "legacy script complete")):
+        self.steps = [{"type": "migrate", "folders": [MIGRATION_FOLDER]}]
+        self._enter(list(self._patches(steps=self.steps)) + self._migration_release_patches())
+        captured = io.StringIO()
+        with patch.object(feature_release, "prepare_target") as prepare, contextlib.redirect_stderr(captured):
             status = rollout.run_rollout(
                 self.manifest_path, "staging", repo_root=self.root, capsule_path=self.capsule_path,
-                report_path=report_base, confirm=lambda _prompt: True,
+                prepare_only=True, recovery_attempt="attempt-1", recovery_confirm=lambda _prompt: "RECONCILE attempt-1",
             )
 
-        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
-        self.assertEqual(status, 2, report.get("error"))
-        self.assertFalse(report["objectBudget"]["coverageComplete"])
-        self.assertEqual(report["objectBudget"]["excludedObjectSteps"], ["step-002:migrate"])
+        self.assertEqual(status, 2)
+        prepare.assert_not_called()
+        self.assertIn("--recover is refused", captured.getvalue())
+        self.assertIn("docs/migration-rules.md", captured.getvalue())
+
+    def _attempt_event(self, state: str, attempt_id: str, predecessor: str | None = None, evidence=None) -> dict:
+        """A schema-valid attempt event for the migration folder, as migrate writes it."""
+        import uuid
+        from datetime import datetime, timezone
+
+        return {
+            "schemaVersion": 1,
+            "eventId": str(uuid.uuid4()),
+            "attemptId": attempt_id,
+            "runId": "migration-attempt-rollout-test",
+            "predecessorEventId": predecessor,
+            "recordedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "migrationPath": MIGRATION_FOLDER,
+            "environment": "staging",
+            "target": {
+                "environment": "staging", "connection": "stage-data-alias",
+                "expected_user": "APP_CODE", "current_schema": "APP_CODE",
+            },
+            "identity": None,
+            "files": [{"name": "001-create-legacy.sql", "sequence": 1, "sha256": "a" * 64}],
+            "checksSha256": "b" * 64,
+            "payloadDigest": MIGRATION_PAYLOAD,
+            "state": state,
+            "writeAttempted": state != "apply-not-started",
+            "evidence": evidence or [],
+        }
+
+    def _install_attempt_event(self, event: dict) -> None:
+        path = self.root / MIGRATION_FOLDER / f"attempt-event.{event['eventId']}.json"
+        path.write_text(json.dumps(event, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    def _start_again_on_the_same_target(self) -> str:
+        """Start a later migration-only run on the same physical target, as a new checkout run would."""
+        from scripts import release_state
+
+        plan = self._target_plan("staging", 0, "3" * 64)
+        plan.targets["step:1"] = self._migration_binding(plan)
+        return release_state.start_rollout(self.root, self.capsule, plan)
+
+    def _finished_run(self) -> dict:
+        return json.loads((self.root / "releases" / ".local-state.json").read_text(encoding="utf-8"))["rollouts"][-1]
+
+    def test_migration_refused_before_its_write_leaves_the_target_free_for_a_later_run(self) -> None:
+        mismatched = dict(self._observed_identity(), db_unique_name="OTHER_UNIQUE")
+        status, report, migrate = self._run_migration_release(
+            self._migration_release_patches(observed=mismatched), migration_only=True, label="refused-before-write",
+        )
+
+        self.assertEqual(status, 2)
+        migrate.assert_not_called()
+        self.assertNotEqual(report["databaseState"], "unknown")
+        run = self._finished_run()
+        self.assertEqual(run["state"], "failed")
+        self.assertNotEqual(run["databaseState"], "unknown")
+        self.assertIsInstance(self._start_again_on_the_same_target(), str)
+
+    def test_migration_that_left_a_pending_attempt_finishes_unknown_and_still_blocks(self) -> None:
+        from scripts import release_state
+
+        def pending_then_fail(*_args, **_kwargs):
+            self._install_attempt_event(self._attempt_event("pending", attempt_id="a" * 8 + "-0000-4000-8000-" + "0" * 12))
+            return rollout.StepResult(2, (), "apply failed after its pending event")
+
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(), migration_only=True, label="pending-only", migrate_effect=pending_then_fail,
+        )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report["steps"][0]["writeState"], "unknown")
+        self.assertEqual(report["databaseState"], "unknown")
+        self.assertEqual(self._finished_run()["state"], "unknown")
+        with self.assertRaisesRegex(release_state.ReleaseStateError, "owns one of these target scopes"):
+            self._start_again_on_the_same_target()
+
+    def test_migration_write_state_is_read_from_the_attempt_events_that_appeared(self) -> None:
+        from scripts import rollout
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            folder = repo / MIGRATION_FOLDER
+            folder.mkdir(parents=True)
+            folders = [MIGRATION_FOLDER]
+
+            self.assertEqual(rollout._migration_write_state(set(), folders, repo), "no-write-attempted")
+            self.assertEqual(rollout._migration_write_state(None, folders, repo), "unknown")
+
+            pending = self._attempt_event("pending", attempt_id="1" * 8 + "-0000-4000-8000-" + "0" * 12)
+            self._install_attempt_event_at(repo, pending)
+            self.assertEqual(rollout._migration_write_state(set(), folders, repo), "unknown")
+            baseline = {pending["eventId"]}
+            self.assertEqual(rollout._migration_write_state(baseline, folders, repo), "no-write-attempted")
+
+            verified = self._attempt_event("verified", attempt_id=pending["attemptId"], predecessor=pending["eventId"])
+            self._install_attempt_event_at(repo, verified)
+            self.assertEqual(rollout._migration_write_state(baseline, folders, repo), "partially-verified")
+
+            other = self._attempt_event("pending", attempt_id="2" * 8 + "-0000-4000-8000-" + "0" * 12)
+            self._install_attempt_event_at(repo, other)
+            self.assertEqual(rollout._migration_write_state(baseline, folders, repo), "unknown")
+
+    def _install_attempt_event_at(self, repo: Path, event: dict) -> None:
+        path = repo / MIGRATION_FOLDER / f"attempt-event.{event['eventId']}.json"
+        path.write_text(json.dumps(event, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    def test_recovery_replays_nothing_that_a_migration_step_already_verified(self) -> None:
+        steps = [self.steps[0], {"type": "migrate", "folders": [MIGRATION_FOLDER]}, self.steps[0]]
+        plan = self._plan(steps)
+        target_plan = SimpleNamespace(recovery_binding={"checkpoint": 2})
+        verified = [{"step": 1, "status": "verified"}, {"step": 2, "status": "verified"}]
+        with self.assertRaisesRegex(rollout.RolloutError, "previously verified writing step"):
+            rollout._assert_recovery_will_not_replay_prior_writes(plan, target_plan, {"steps": verified})
+        unknown_migration = [{"step": 1, "status": "verified"}]
+        with self.assertRaisesRegex(rollout.RolloutError, "no recorded outcome for earlier writing step 2"):
+            rollout._assert_recovery_will_not_replay_prior_writes(plan, target_plan, {"steps": unknown_migration})
+        # A parent killed before the migration ran has no migration outcome; recovering the first checkpoint replays nothing.
+        rollout._assert_recovery_will_not_replay_prior_writes(
+            plan, SimpleNamespace(recovery_binding={"checkpoint": 1}), {"steps": []},
+        )
 
     def test_capsule_tampering_after_confirmation_stops_before_checkpoint_write(self) -> None:
         from scripts import feature_release, release_capsule

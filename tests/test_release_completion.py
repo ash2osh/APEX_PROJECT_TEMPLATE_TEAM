@@ -264,6 +264,49 @@ class ReleaseCompletionTests(unittest.TestCase):
                 state.start_rollout(fixture.root, fixture.capsule, fixture.make_prod_plan())
         self.assertEqual(state._load_index(fixture.root)["rollouts"], [])
 
+    def test_migration_step_in_a_completion_proof_must_name_and_phase_match(self) -> None:
+        state = self.fixture.state_module()
+        self.fixture.add_migration_step()
+        report = self.fixture.stage_report()
+        state._validate_completion_proof(self.fixture.capsule, report, environment="staging")
+
+        for label, mutation, pattern in (
+            ("includedMigrationSteps wrong", lambda value: value["objectBudget"].update(includedMigrationSteps=[1]), "budget"),
+            ("includedMigrationSteps missing", lambda value: value["objectBudget"].pop("includedMigrationSteps"), "budget"),
+            ("migrate step phase uncovered-object", lambda value: value["steps"][1].update(phase="uncovered-object"), "phase"),
+        ):
+            changed = copy.deepcopy(report)
+            mutation(changed)
+            with self.subTest(label=label), self.assertRaisesRegex(state.ReleaseStateError, pattern):
+                state._validate_completion_proof(self.fixture.capsule, changed, environment="staging")
+
+    def test_a_reconciled_run_is_never_completion_proof_or_cleanup_eligible(self) -> None:
+        state = self.fixture.state_module()
+        with patch.object(state.release_capsule, "load_capsule", return_value=self.fixture.capsule):
+            run_id = state.start_rollout(self.fixture.root, self.fixture.capsule, self.fixture.make_prod_plan())
+        state.finish_rollout(
+            self.fixture.root, run_id,
+            outcome={
+                "state": "unknown", "databaseState": "unknown", "steps": [], "checkpointVerificationIds": [],
+                "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                "finalReportPath": None, "finalReportSha256": None,
+            },
+        )
+        with state.run_reconciliation(self.fixture.root, run_id, "prod") as session:
+            session.reconcile("RECONCILE-RUN " + run_id)
+
+        with self.assertRaisesRegex(state.ReleaseStateError, "already terminal"):
+            state.finish_rollout(
+                self.fixture.root, run_id,
+                outcome={
+                    "state": "unknown", "databaseState": "unknown", "steps": [], "checkpointVerificationIds": [],
+                    "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                    "finalReportPath": None, "finalReportSha256": None,
+                },
+            )
+        report = state.cleanup_capsule(self.fixture.root, self.fixture.payload_digest)
+        self.assertFalse(report["eligible"])
+        self.assertTrue(any("closed by reconciliation" in blocker for blocker in report["blockers"]), report["blockers"])
 
 if __name__ == "__main__":
     unittest.main()

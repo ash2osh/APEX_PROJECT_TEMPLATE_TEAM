@@ -13,10 +13,12 @@ from . import baseline, feature_compare, feature_sources
 from .db_targets import TargetResolutionError, resolve_target
 from .feature_claims import Claim, Unanalysed, checked_objects, collect_claims, duplicates, feature_schema_dirs, same_feature_duplicates
 from .feature_compare import compare
+from .feature_manifest import STORED_SOURCE_TYPES
 
 
 ACCEPTED_FILE = "accepted-differences.json"
-STORED_PACKAGE_KINDS = ("PACKAGE", "PACKAGE BODY")
+# Every stored unit a feature can hold; the live comparison reads each of them from DEV.
+STORED_SOURCE_KINDS = frozenset(STORED_SOURCE_TYPES)
 ERROR = "error"
 WARNING = "warning"
 INFO = "info"
@@ -128,7 +130,7 @@ def orphan_check_findings(root: Path, claims: Sequence[Claim], feature: str | No
                 if not isinstance(sql, str):
                     continue
                 for kind, name in checked_objects(sql):
-                    if kind in {"PACKAGE", "PACKAGE BODY", "TRIGGER", "FUNCTION", "PROCEDURE", "TYPE", "TYPE BODY"} and (slug, schema, kind, name.upper()) not in held:
+                    if kind in STORED_SOURCE_KINDS and (slug, schema, kind, name.upper()) not in held:
                         findings.append(Finding(
                             WARNING, "ORPHAN CHECK", f"{slug}/{schema}",
                             f"check {check.get('id')!r} names {kind} {name}, which no file of this feature holds",
@@ -144,29 +146,35 @@ def _dev_profile_available(environ: Mapping[str, str], schema: str) -> bool:
     return True
 
 
-def read_dev_packages(
+def read_dev_units(
     environ: Mapping[str, str], schema: str, names: Sequence[str],
-) -> tuple[dict[tuple[str, str], str], set[str]]:
-    """Read the DEV spec and body of the named packages (one session). Returns sources by (type, name) and the missing names."""
+) -> tuple[dict[tuple[str, str], str], set[tuple[str, str]]]:
+    """Read every stored unit of the named objects from DEV (one session).
+
+    Returns the DEV source by (type, name), and the (type, name) keys whose unit group is absent or incomplete.
+    """
     simple = all(name == name.upper() and name.replace("_", "").replace("$", "").replace("#", "").isalnum() for name in names)
     sections = ("baseline-source", "baseline-settings")
     with tempfile.TemporaryDirectory(prefix="feature-doctor-") as scratch:
         try:
             catalog = baseline._capture(environ, "dev", schema, sections, Path(scratch), baseline_prefixes=list(names) if simple else [])
             baseline._complete(catalog, sections)
-            identity = baseline._source_identity(catalog.get("identity"), "DEV package read")
+            identity = baseline._source_identity(catalog.get("identity"), "DEV stored-source read")
         except (baseline.BaselineError, OSError, ValueError) as error:
-            raise FeatureDoctorError(f"DEV package read failed: {error}") from error
+            raise FeatureDoctorError(f"DEV stored-source read failed: {error}") from error
     if identity["current_schema"].upper() != schema:
-        raise FeatureDoctorError(f"DEV package read current schema {identity['current_schema']!r} does not match {schema}")
+        raise FeatureDoctorError(f"DEV stored-source read current schema {identity['current_schema']!r} does not match {schema}")
     sources: dict[tuple[str, str], str] = {}
-    missing: set[str] = set()
+    missing: set[tuple[str, str]] = set()
     for name in names:
-        try:
-            for record in feature_sources._capture_sources("doctor", schema, name, catalog):
+        for group in feature_sources.UNIT_GROUPS:
+            try:
+                records = feature_sources._capture_sources("doctor", schema, name, catalog, group=group.name)
+            except feature_sources.FeatureSourcesError:
+                missing.update((kind, name) for kind in group.kinds)
+                continue
+            for record in records:
                 sources[(record["type"], record["name"])] = record["source"].decode("utf-8")
-        except feature_sources.FeatureSourcesError:
-            missing.add(name)
     return sources, missing
 
 
@@ -177,10 +185,10 @@ def live_findings(
     features: set[str] | None = None,
     schemas: set[str] | None = None,
 ) -> tuple[list[Finding], int, int]:
-    """Compare the package files of the selected features with DEV. Returns findings, files compared, files accepted."""
+    """Compare the stored-unit files of the selected features with DEV. Returns findings, files compared, files accepted."""
     stored = [
         claim for claim in claims
-        if claim.kind in STORED_PACKAGE_KINDS
+        if claim.kind in STORED_SOURCE_KINDS
         and (features is None or claim.feature in features)
         and (schemas is None or claim.schema in schemas)
     ]
@@ -190,10 +198,10 @@ def live_findings(
     for schema in sorted({claim.schema for claim in stored}):
         in_schema = [claim for claim in stored if claim.schema == schema]
         names = sorted({claim.name for claim in in_schema})
-        sources, missing = read_dev_packages(environ, schema, names)
+        sources, missing = read_dev_units(environ, schema, names)
         for claim in sorted(in_schema, key=lambda item: item.path):
             subject = f"{claim.path}"
-            if claim.name in missing or (claim.kind, claim.name) not in sources:
+            if (claim.kind, claim.name) in missing or (claim.kind, claim.name) not in sources:
                 findings.append(Finding(ERROR, "NOT ON DEV", subject, f"{claim.kind} {claim.name} was not found in {schema} on DEV"))
                 continue
             compared += 1
@@ -253,7 +261,7 @@ def doctor(
     findings.extend(orphan_check_findings(root, claims, feature))
     summary = [f"ownership: {len(claims)} claim(s) in {len({claim.feature for claim in claims})} feature(s)"]
     if live:
-        schemas = sorted({claim.schema for claim in claims if claim.kind in STORED_PACKAGE_KINDS and (selected is None or claim.feature in selected)})
+        schemas = sorted({claim.schema for claim in claims if claim.kind in STORED_SOURCE_KINDS and (selected is None or claim.feature in selected)})
         if not schemas:
             summary.append("live: no package files selected, nothing to compare with DEV")
         else:
