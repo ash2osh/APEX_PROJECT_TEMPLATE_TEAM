@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline feature scaffolding, DEV package capture, review diffs, and capsule cleanup."""
+"""Offline feature scaffolding, DEV stored-unit capture, review diffs, and capsule cleanup."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ import stat
 import sys
 from datetime import date
 from pathlib import Path, PurePosixPath
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import feature_claims, feature_doctor, feature_sources, release_capsule, release_state, rollout
+from scripts import feature_claims, feature_convert, feature_doctor, feature_sources, release_capsule, release_state, rollout
 from scripts.feature_manifest import FEATURE_RE, SCHEMA_RE, FeatureManifestError, load_feature_checkpoint
 from scripts.path_utils import relative_to_root
 
@@ -137,7 +137,7 @@ def _freeze_gate(
     )
     live_schemas = sorted({
         claim.schema for claim in claims
-        if claim.feature in selected and claim.kind in feature_doctor.STORED_PACKAGE_KINDS
+        if claim.feature in selected and claim.kind in feature_doctor.STORED_SOURCE_KINDS
     })
     if analysis:
         record["live"] = "not run: a feature file could not be analysed"
@@ -197,13 +197,18 @@ def _parser() -> argparse.ArgumentParser:
     init_parser.add_argument("feature", help="lowercase feature slug")
     init_parser.add_argument("--schema", required=True, help="uppercase Oracle schema")
 
-    capture_parser = subparsers.add_parser("capture", help="capture a complete package from DEV")
+    capture_parser = subparsers.add_parser("capture", help="capture a complete stored unit from DEV")
     capture_parser.add_argument("feature", help="lowercase feature slug")
-    capture_parser.add_argument("--package", required=True, help="package identifier")
+    unit_parser = capture_parser.add_mutually_exclusive_group(required=True)
+    unit_parser.add_argument("--package", metavar="NAME", help="package specification and body")
+    unit_parser.add_argument("--trigger", metavar="NAME", help="trigger")
+    unit_parser.add_argument("--procedure", metavar="NAME", help="standalone procedure")
+    unit_parser.add_argument("--function", metavar="NAME", help="standalone function")
+    unit_parser.add_argument("--type", metavar="NAME", help="object type specification and optional body")
     capture_parser.add_argument("--schema", required=True, help="uppercase Oracle schema")
-    capture_parser.add_argument("--env", required=True, action="append", choices=("dev",), help="package capture is DEV-only")
+    capture_parser.add_argument("--env", required=True, action="append", choices=("dev",), help="stored-unit capture is DEV-only")
     capture_parser.add_argument("--refresh", action="store_true", help="replace source and its retained DEV baseline after review")
-    capture_parser.add_argument("--move-from", metavar="FEATURE", help="take the package over from the feature that holds it")
+    capture_parser.add_argument("--move-from", metavar="FEATURE", help="take the unit over from the feature that holds it")
     capture_parser.add_argument(
         "--discard-unapplied", action="store_true",
         help="allow a refresh or move to erase lines the file has and DEV does not",
@@ -232,7 +237,69 @@ def _parser() -> argparse.ArgumentParser:
     clean_parser = subparsers.add_parser("clean-capsule", help="preview or remove an eligible local capsule")
     clean_parser.add_argument("payload_digest", help="64-character capsule payload digest")
     clean_parser.add_argument("--yes", action="store_true", help="apply eligible local cleanup")
+    reconcile_parser = subparsers.add_parser(
+        "reconcile-run",
+        help="close an unfinished rollout run that has no checkpoint to recover, after a typed acknowledgment",
+    )
+    reconcile_parser.add_argument("run_id", help="rollout run id from the local release state")
+    reconcile_parser.add_argument("--env", required=True, choices=("staging", "prod"), help="the run's environment")
+    convert_parser = subparsers.add_parser(
+        "convert-plan",
+        help="offline, read-only plan for moving dated migration folders into feature files",
+    )
+    convert_parser.add_argument("folders", nargs="+", metavar="migration-folder", help="migrations/<dated-folder> or migrations/<SCHEMA>/<dated-folder>")
+    convert_parser.add_argument("--feature", metavar="SLUG", help="feature slug to print in the capture commands (default: <slug>)")
+    convert_parser.add_argument("--format", choices=("text", "json"), default="text", help="output format")
     return parser
+
+
+def _reconcile_ack_from_terminal(expected: str) -> str:
+    print(
+        f"Type {expected} to acknowledge that the original process and database operation have ended. "
+        "Only the developer types it; nothing else closes the run.",
+        file=sys.stderr,
+    )
+    try:
+        return input("Acknowledgment: ")
+    except (EOFError, OSError):
+        return ""
+
+
+def _render_run(run: Mapping) -> str:
+    lines = [
+        f"Run {run['runId']} ({run['environment']})",
+        f"  payload SHA-256: {run['payloadDigest']}",
+        f"  plan SHA-256: {run['planDigest']}",
+        f"  state: {run['state']}; databaseState: {run['databaseState']}",
+        f"  started: {run['startedAt']}; finished: {run['finishedAt'] or 'not finished'}",
+    ]
+    lines.extend(f"  target scope: {json.dumps(scope, ensure_ascii=False, sort_keys=True)}" for scope in run["targetScopes"])
+    for step in run["steps"]:
+        receipt = f"; receipt {step['receiptPath']}" if step.get("receiptPath") else ""
+        lines.append(f"  step {step['step']}: {step['status']}{receipt}")
+    lines.append("  per-run evidence is under scratch/rollout-runs/, and the run's report is named in the rollout output")
+    return "\n".join(lines)
+
+
+def _reconcile_run(
+    root: Path, run_id: str, environment: str, read_acknowledgment: Callable[[str], str],
+) -> int:
+    """Close an unfinished run after the typed acknowledgment: 0 closed, 1 declined or wrong, 2 refused or error."""
+    try:
+        with release_state.run_reconciliation(root, run_id, environment) as session:
+            print(_render_run(session.run))
+            closed = session.reconcile(read_acknowledgment(release_state.RUN_RECONCILE_PREFIX + run_id) or "")
+    except release_state.AcknowledgmentError as error:
+        print(f"feature error: {error}", file=sys.stderr)
+        return 1
+    except release_state.ReleaseStateError as error:
+        print(f"feature error: {error}", file=sys.stderr)
+        return 2
+    print(
+        f"Reconciled run {run_id}: state {closed['state']}, databaseState {closed['databaseState']}. "
+        "It no longer occupies its targets, and it is not proof of completion.",
+    )
+    return 0
 
 
 def main(
@@ -240,6 +307,7 @@ def main(
     *,
     repo_root: Path,
     environ: Mapping[str, str] | None = None,
+    read_acknowledgment: Callable[[str], str] | None = None,
 ) -> int:
     parser = _parser()
     try:
@@ -259,11 +327,19 @@ def main(
             if len(args.env) != 1:
                 raise FeatureCliError("feature capture accepts only one --env value")
             report: list[str] = []
-            paths = feature_sources.capture_package(
-                root, args.feature, args.schema, args.package,
-                environ=environment, refresh=args.refresh, move_from=args.move_from,
-                discard_unapplied=args.discard_unapplied, keep_file=args.keep_file, report=report,
-            )
+            options = {
+                "refresh": args.refresh, "move_from": args.move_from, "discard_unapplied": args.discard_unapplied,
+                "keep_file": args.keep_file, "report": report,
+            }
+            if args.package is not None:
+                paths = feature_sources.capture_package(root, args.feature, args.schema, args.package, environ=environment, **options)
+            else:
+                group, unit = next(
+                    (name, value) for name, value in (
+                        ("trigger", args.trigger), ("procedure", args.procedure), ("function", args.function), ("type", args.type),
+                    ) if value is not None
+                )
+                paths = feature_sources.capture_unit(root, args.feature, args.schema, group, unit, environ=environment, **options)
             for path in paths:
                 print(f"Captured {relative_to_root(path, root).as_posix()}")
             for line in report:
@@ -293,6 +369,8 @@ def main(
             if refused is not None:
                 return refused
             capsule = release_capsule.build_capsule(root, manifest.path, checkpoints, {})
+            record["migrationOnly"] = not checkpoints
+            record["migrationSteps"] = sum(step["type"] == "migrate" for step in manifest.steps)
             _write_freeze_record(capsule.root, record)
             print(f"Payload SHA-256: {capsule.payload_digest}")
             print(f"Workflow engine SHA-256: {capsule.engine_digest}")
@@ -303,6 +381,14 @@ def main(
             result = release_state.cleanup_capsule(root, args.payload_digest, apply=args.yes)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
             return 0
+        if args.command == "reconcile-run":
+            return _reconcile_run(root, args.run_id, args.env, read_acknowledgment or _reconcile_ack_from_terminal)
+        if args.command == "convert-plan":
+            if args.feature is not None and FEATURE_RE.fullmatch(args.feature) is None:
+                raise FeatureCliError("feature must be a lowercase hyphenated slug")
+            report = feature_convert.convert_plan(root, args.folders, feature=args.feature)
+            print(feature_convert.render(report, args.format))
+            return feature_convert.exit_code(report)
         raise FeatureCliError(f"unsupported feature command: {args.command}")
     except (
         FeatureCliError, feature_sources.FeatureSourcesError, FeatureManifestError, feature_doctor.FeatureDoctorError,

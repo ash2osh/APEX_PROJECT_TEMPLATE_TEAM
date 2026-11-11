@@ -71,6 +71,10 @@ ROLLOUT_FIELDS = {
     "expectedStepCount", "steps", "checkpointVerificationIds", "budget", "finalReportPath", "finalReportSha256",
 }
 ROLLOUT_STATES = {"running", "verified", "failed", "unknown", "not-started"}
+ROLLOUT_OPTIONAL_FIELDS = {"reconciliation"}
+RECONCILIATION_FIELDS = {"acknowledgedAt", "acknowledgment", "priorState", "priorDatabaseState"}
+RECONCILIATION_PRIOR_STATES = {"running", "unknown", "failed"}
+RUN_RECONCILE_PREFIX = "RECONCILE-RUN "
 STEP_OUTCOME_FIELDS = {"step", "status", "receiptPath", "receiptSha256"}
 STEP_OUTCOME_STATES = {"verified", "failed", "unknown", "not-started"}
 MIGRATION_PROVENANCE_FIELDS = {"schema1Sha256", "retainedPath", "migratedAt"}
@@ -85,8 +89,12 @@ REPORT_FIELDS = {
 }
 OBJECT_BUDGET_FIELDS = {
     "seconds", "elapsedSeconds", "coverageComplete", "withinBudget",
-    "includedCheckpoints", "excludedObjectSteps",
+    "includedCheckpoints", "includedMigrationSteps", "excludedObjectSteps",
 }
+AUXILIARY_TARGET_FIELDS = {
+    "environment", "operation", "logicalSchema", "connection", "expectedUser", "schema", "classification", "observed",
+}
+MIGRATION_TARGET_FIELDS = {*AUXILIARY_TARGET_FIELDS, "folders", "preflight"}
 PAYLOAD_MARKERS = (
     "MIGRATION_PAYLOAD_STARTED:", "ROLLOUT_PAYLOAD_STARTED:",
     "FEATURE_RELEASE_PAYLOAD_STARTED:", "FEATURE_PAYLOAD_STARTED:",
@@ -524,8 +532,24 @@ def _validate_step_outcome(row: object) -> dict:
     return result
 
 
+def _validate_reconciliation(value: object, row: Mapping) -> dict:
+    """An operator's closure of a run that had no checkpoint to recover; it is never proof of completion."""
+    if not isinstance(value, Mapping) or set(value) != RECONCILIATION_FIELDS:
+        raise ReleaseStateError("rollout reconciliation has unsupported or missing fields")
+    _timestamp(value["acknowledgedAt"], "rollout reconciliation acknowledgedAt")
+    if value["acknowledgment"] != RUN_RECONCILE_PREFIX + row["runId"]:
+        raise ReleaseStateError("rollout reconciliation acknowledgment does not name this run")
+    if value["priorState"] not in RECONCILIATION_PRIOR_STATES:
+        raise ReleaseStateError("rollout reconciliation priorState is invalid")
+    if value["priorDatabaseState"] not in {"not-started", "verified", "unknown", "failed"}:
+        raise ReleaseStateError("rollout reconciliation priorDatabaseState is invalid")
+    if row["state"] in {"running", "verified"}:
+        raise ReleaseStateError("a reconciled rollout must be closed, not running or verified")
+    return {field: value[field] for field in RECONCILIATION_FIELDS}
+
+
 def _validate_rollout(row: object) -> dict:
-    if not isinstance(row, Mapping) or set(row) != ROLLOUT_FIELDS:
+    if not isinstance(row, Mapping) or not ROLLOUT_FIELDS <= set(row) or set(row) - ROLLOUT_FIELDS - ROLLOUT_OPTIONAL_FIELDS:
         raise ReleaseStateError("rollout record has unsupported or missing fields")
     result = dict(row)
     result["runId"] = _uuid(result["runId"], "rollout runId")
@@ -550,9 +574,10 @@ def _validate_rollout(row: object) -> dict:
         raise ReleaseStateError("running rollout cannot have finishedAt")
     if result["state"] != "running" and (finished is None or finished < started):
         raise ReleaseStateError("terminal rollout must have a valid finishedAt")
-    for field in ("expectedCheckpointCount", "expectedStepCount"):
-        if type(result[field]) is not int or result[field] < 1:
-            raise ReleaseStateError(f"rollout {field} must be a positive integer")
+    if type(result["expectedCheckpointCount"]) is not int or result["expectedCheckpointCount"] < 0:
+        raise ReleaseStateError("rollout expectedCheckpointCount must be a nonnegative integer")
+    if type(result["expectedStepCount"]) is not int or result["expectedStepCount"] < 1:
+        raise ReleaseStateError("rollout expectedStepCount must be a positive integer")
     if not isinstance(result["steps"], list):
         raise ReleaseStateError("rollout steps must be an array")
     result["steps"] = [_validate_step_outcome(item) for item in result["steps"]]
@@ -580,6 +605,8 @@ def _validate_rollout(row: object) -> dict:
             or result["finalReportSha256"] is None
         ):
             raise ReleaseStateError("verified rollout lacks complete checkpoint, step, budget, or report evidence")
+    if "reconciliation" in result:
+        result["reconciliation"] = _validate_reconciliation(result["reconciliation"], result)
     return result
 
 
@@ -1054,7 +1081,7 @@ def _assert_checkpoint_allowed_index(
         raise ReleaseStateError("this checkpoint already has a durable verification in the active rollout")
     matching = [
         row for row in index["rollouts"]
-        if row["state"] == "running" and row["runId"] != run_id and scope in row["targetScopes"]
+        if _run_blocks_target(row) and row["runId"] != run_id and scope in row["targetScopes"]
         and not _rollout_retired(index, row, capsule, plan)
     ]
     if matching:
@@ -1188,7 +1215,7 @@ def assert_auxiliary_step_allowed(
     run_id: str,
     lease: release_ownership.TargetWriterLease,
 ) -> None:
-    """Require the active rollout, prepared target, and writer lease for SQL/ORDS writes."""
+    """Require the active rollout, prepared target, and writer lease for SQL, ORDS or migration writes."""
     root = _root(repo_root)
     _uuid(run_id, "rollout runId")
     if type(step_number) is not int or step_number < 1:
@@ -1197,8 +1224,8 @@ def assert_auxiliary_step_allowed(
     if step_number > len(step_definitions):
         raise ReleaseStateError("auxiliary rollout step is outside the frozen step list")
     step = step_definitions[step_number - 1]
-    if step.get("type") not in {"sql-script", "ords-import"}:
-        raise ReleaseStateError("writer lease was requested for a non-SQL/ORDS step")
+    if step.get("type") not in {"sql-script", "ords-import", "migrate"}:
+        raise ReleaseStateError("writer lease was requested for a non-SQL, ORDS or migration step")
     scope = _auxiliary_target_scope(plan, step_number, step)
     execution_identity = {
         "purpose": "rollout-auxiliary-step",
@@ -1211,7 +1238,7 @@ def assert_auxiliary_step_allowed(
         or lease.root != root or lease.target_scope != scope or lease._fd is None
         or lease.execution_identity != execution_identity
     ):
-        raise ReleaseStateError("SQL/ORDS operation requires its active run-bound target writer lease")
+        raise ReleaseStateError("SQL, ORDS or migration operation requires its active run-bound target writer lease")
 
     def update(index: dict) -> dict:
         run = next((row for row in index["rollouts"] if row["runId"] == run_id), None)
@@ -1224,9 +1251,9 @@ def assert_auxiliary_step_allowed(
             or run["planDigest"] != plan.plan_digest
             or scope not in run["targetScopes"]
         ):
-            raise ReleaseStateError("SQL/ORDS step does not belong to the active rollout and prepared target")
+            raise ReleaseStateError("SQL, ORDS or migration step does not belong to the active rollout and prepared target")
         if any(
-            row["runId"] != run_id and row["state"] == "running" and scope in row["targetScopes"]
+            row["runId"] != run_id and _run_blocks_target(row) and scope in row["targetScopes"]
             and not _rollout_retired(index, row, capsule, plan)
             for row in index["rollouts"]
         ):
@@ -1580,6 +1607,11 @@ def finish_attempt(
     _atomic_update(root, update)
 
 
+def _has_checkpoint_or_migration(steps: Sequence[object]) -> bool:
+    """A release has feature checkpoints, migrate steps, or both; a release with neither is never valid."""
+    return any(isinstance(step, Mapping) and step.get("type") in {"feature-migrate", "migrate"} for step in steps)
+
+
 def _capsule_step_count(capsule: ReleaseCapsule) -> int:
     checkpoint_count = len(getattr(capsule, "checkpoints", ()))
     root = Path(getattr(capsule, "root", "."))
@@ -1592,9 +1624,11 @@ def _capsule_step_count(capsule: ReleaseCapsule) -> int:
             raise ReleaseStateError("capsule rollout step list is missing")
         if sum(1 for step in steps if isinstance(step, Mapping) and step.get("type") == "feature-migrate") != checkpoint_count:
             raise ReleaseStateError("capsule rollout steps do not match the selected feature checkpoints")
+        if not _has_checkpoint_or_migration(steps):
+            raise ReleaseStateError("rollout must contain a feature checkpoint or a migrate step")
         return len(steps)
     if checkpoint_count < 1:
-        raise ReleaseStateError("rollout must contain at least one checkpoint")
+        raise ReleaseStateError("rollout must contain at least one checkpoint; capsule.json is needed to show a migrate step")
     return checkpoint_count
 
 
@@ -1726,33 +1760,83 @@ def _rollout_is_reconciled(index: Mapping, run: Mapping, capsule: ReleaseCapsule
     return _run_uncertainty_is_checkpoint_only(run, capsule, recovered)
 
 
+def _run_blocks_target(row: Mapping) -> bool:
+    """A run occupies its target while it is running or unknown, or while its database state is unknown."""
+    return row["state"] in {"running", "unknown"} or row["databaseState"] == "unknown"
+
+
+def _rollout_is_operator_reconciled(run: Mapping) -> bool:
+    """An operator closed this run with the typed RECONCILE-RUN acknowledgment; it no longer occupies its target."""
+    return run.get("reconciliation") is not None
+
+
 def _rollout_retired(index: Mapping, run: Mapping, capsule: ReleaseCapsule, plan: TargetPlan) -> bool:
     """Whether a run still marked running no longer occupies its target.
 
     That holds once an acknowledged recovery has reconciled it, or when it is the parent
     of the recovery plan being used. Every occupancy check uses this one rule.
     """
-    return _rollout_is_reconciled(index, run, capsule) or _rollout_is_recovery_parent(index, run, capsule, plan)
+    return (
+        _rollout_is_reconciled(index, run, capsule)
+        or _rollout_is_recovery_parent(index, run, capsule, plan)
+        or _rollout_is_operator_reconciled(run)
+    )
+
+
+def migration_schema_consistent(folders: object, logical_schema: object) -> None:
+    """Require a migrate step's logical schema to be the schema its frozen folders name.
+
+    Schema-scoped folders (migrations/<SCHEMA>/<folder>) name it. A flat folder takes its schema
+    from the profile's PROJECT_SCHEMA when the target is prepared, so only its shape can be checked here.
+    """
+    if not isinstance(folders, (list, tuple)) or not folders or any(not isinstance(folder, str) for folder in folders):
+        raise ReleaseStateError("migration step folders are malformed")
+    named: set[str | None] = set()
+    for folder in folders:
+        parts = folder.split("/")
+        if len(parts) == 3 and parts[0] == "migrations":
+            named.add(parts[1])
+        elif len(parts) == 2 and parts[0] == "migrations":
+            named.add(None)
+        else:
+            raise ReleaseStateError(f"migration step folder is outside migrations/: {folder}")
+    if len(named) != 1:
+        raise ReleaseStateError("migration step folders must select one schema")
+    (derived,) = named
+    if derived is not None:
+        if logical_schema != derived:
+            raise ReleaseStateError(f"logical schema {logical_schema!r} differs from its folder schema {derived}")
+    elif logical_schema is not None and (not isinstance(logical_schema, str) or not logical_schema):
+        raise ReleaseStateError("a flat migration folder's logical schema must be null or a schema name")
 
 
 def _auxiliary_target_scope(plan, number: int, step: Mapping) -> dict:
     targets = getattr(plan, "targets", None)
     key = f"step:{number}"
     target = targets.get(key) if isinstance(targets, Mapping) else None
-    fields = {
-        "environment", "operation", "logicalSchema", "connection", "expectedUser",
-        "schema", "classification", "observed",
-    }
+    migration = step.get("type") == "migrate"
+    fields = MIGRATION_TARGET_FIELDS if migration else AUXILIARY_TARGET_FIELDS
     if not isinstance(target, Mapping) or set(target) != fields:
         raise ReleaseStateError(f"rollout plan is missing the prepared target binding for step {number}")
     if (
         target.get("environment") != getattr(plan, "environment", None)
         or target.get("operation") != "migration"
-        or target.get("logicalSchema") != step.get("schema")
         or not all(isinstance(target.get(field), str) and target[field] for field in (
             "connection", "expectedUser", "schema", "classification",
         ))
     ):
+        raise ReleaseStateError(f"rollout plan target binding differs from frozen step {number}")
+    if migration:
+        folder_rows = target.get("folders")
+        try:
+            migration_schema_consistent(step.get("folders"), target.get("logicalSchema"))
+        except ReleaseStateError as error:
+            raise ReleaseStateError(f"rollout plan target binding differs from frozen step {number}: {error}") from error
+        if not isinstance(folder_rows, list) or [
+            row.get("path") if isinstance(row, Mapping) else None for row in folder_rows
+        ] != list(step["folders"]):
+            raise ReleaseStateError(f"rollout plan target binding differs from frozen step {number}")
+    elif target.get("logicalSchema") != step.get("schema"):
         raise ReleaseStateError(f"rollout plan target binding differs from frozen step {number}")
     identity = complete_observed_identity(target.get("observed"))
     if identity is None or identity["session_user"].upper() != target["expectedUser"].upper() or identity["current_schema"].upper() != target["schema"].upper():
@@ -1779,26 +1863,28 @@ def start_rollout(repo_root: Path, capsule: ReleaseCapsule, plan) -> str:
     source_commit = _commit(getattr(capsule, "source_commit", None))
     checkpoints = getattr(capsule, "checkpoints", None)
     guards = getattr(plan, "checkpoint_guards", None)
-    if not isinstance(checkpoints, (tuple, list)) or not checkpoints or not isinstance(guards, (tuple, list)):
+    if not isinstance(checkpoints, (tuple, list)) or not isinstance(guards, (tuple, list)) or len(guards) != len(checkpoints):
         raise ReleaseStateError("rollout capsule checkpoints or prepared guards are malformed")
     scopes = []
     for number in range(1, len(checkpoints) + 1):
         scope, _target, _details = _attempt_plan(capsule, plan, number)
         scopes.append(scope)
     step_definitions = _capsule_step_definitions(capsule)
+    if not checkpoints and not _has_checkpoint_or_migration(step_definitions):
+        raise ReleaseStateError("rollout must contain a feature checkpoint or a migrate step")
     expected_auxiliary = {
         f"step:{number}"
         for number, step in enumerate(step_definitions, start=1)
-        if step.get("type") in {"sql-script", "ords-import"}
+        if step.get("type") in {"sql-script", "ords-import", "migrate"}
     }
     supplied_auxiliary = {
         key for key in getattr(plan, "targets", {})
         if isinstance(key, str) and key.startswith("step:")
     }
     if supplied_auxiliary != expected_auxiliary:
-        raise ReleaseStateError("rollout target plan must bind every SQL/ORDS step exactly once")
+        raise ReleaseStateError("rollout target plan must bind every SQL, ORDS or migration step exactly once")
     for number, step in enumerate(step_definitions, start=1):
-        if step.get("type") in {"sql-script", "ords-import"}:
+        if step.get("type") in {"sql-script", "ords-import", "migrate"}:
             scopes.append(_auxiliary_target_scope(plan, number, step))
     unique_scopes = {_canonical_bytes(scope): scope for scope in scopes}
     target_scopes = [unique_scopes[key] for key in sorted(unique_scopes)]
@@ -1851,7 +1937,7 @@ def start_rollout(repo_root: Path, capsule: ReleaseCapsule, plan) -> str:
                 {_canonical_bytes(scope) for scope in existing["targetScopes"]} & target_scope_keys
             )
             if not overlaps or not (
-                existing["state"] in {"running", "unknown"} or existing["databaseState"] == "unknown"
+                _run_blocks_target(existing)
             ):
                 continue
             if _rollout_retired(index, existing, capsule, plan):
@@ -1945,6 +2031,93 @@ def finish_rollout(repo_root: Path, run_id: str, *, outcome: Mapping) -> None:
         return index
 
     _atomic_update(root, update)
+
+
+class AcknowledgmentError(ReleaseStateError):
+    """The typed RECONCILE-RUN acknowledgment is missing or wrong; nothing was changed."""
+
+
+def _reconcile_refusal(index: Mapping, run: Mapping | None, environment: str) -> str | None:
+    """Why this run cannot be closed by reconciliation now, or None when it can."""
+    if run is None:
+        return "no rollout run has this run id"
+    if run["environment"] != environment:
+        return f"the run belongs to {run['environment']}, not {environment}"
+    if run.get("reconciliation") is not None:
+        return "the run already has a reconciliation record"
+    if run["state"] in {"verified", "not-started"} or (run["state"] == "failed" and run["databaseState"] != "unknown"):
+        return f"the run is {run['state']} with databaseState {run['databaseState']}, so there is nothing to reconcile"
+    for attempt in index["attempts"]:
+        if _attempt_matches_rollout(attempt, run) and _is_unresolved(
+            attempt, index["attempts"], index["recoveryLinks"], index["checkpointVerifications"],
+        ):
+            return (
+                f"checkpoint attempt {attempt['attemptId']} is unresolved; recover it with "
+                f"rollout --prepare --recover {attempt['attemptId']} instead"
+            )
+    return None
+
+
+class ReconciliationSession:
+    """One operator's closure of an unfinished run, while every target writer lease of the run is held."""
+
+    def __init__(self, root: Path, run_id: str, environment: str, run: Mapping) -> None:
+        self.root = root
+        self.run_id = run_id
+        self.environment = environment
+        self.run = dict(run)
+
+    def reconcile(self, acknowledgment: str) -> dict:
+        """Close the run if the acknowledgment is exactly RECONCILE-RUN <run id>; otherwise change nothing."""
+        if acknowledgment != RUN_RECONCILE_PREFIX + self.run_id:
+            raise AcknowledgmentError("the acknowledgment does not match RECONCILE-RUN for this run; nothing was changed")
+        closed: dict = {}
+
+        def update(index: dict) -> dict:
+            row = next((item for item in index["rollouts"] if item["runId"] == self.run_id), None)
+            reason = _reconcile_refusal(index, row, self.environment)
+            if reason is not None:
+                raise ReleaseStateError(f"run {self.run_id} cannot be reconciled: {reason}")
+            prior_state, prior_database = row["state"], row["databaseState"]
+            if prior_state == "running":
+                row["state"] = "unknown"
+                row["finishedAt"] = _utc_now()
+            row["reconciliation"] = _validate_reconciliation({
+                "acknowledgedAt": _utc_now(), "acknowledgment": acknowledgment,
+                "priorState": prior_state, "priorDatabaseState": prior_database,
+            }, row)
+            closed.update(runId=row["runId"], state=row["state"], databaseState=row["databaseState"],
+                          reconciliation=row["reconciliation"])
+            return index
+
+        _atomic_update(self.root, update)
+        return closed
+
+
+@contextlib.contextmanager
+def run_reconciliation(repo_root: Path, run_id: str, environment: str) -> Iterator[ReconciliationSession]:
+    """Hold every target writer lease of an unfinished run, then yield the session that may close it.
+
+    The leases are the proof that no process is still writing for those targets; a held lease refuses.
+    """
+    root = _root(repo_root)
+    _uuid(run_id, "rollout runId")
+    index = _load_index(root)
+    run = next((row for row in index["rollouts"] if row["runId"] == run_id), None)
+    reason = _reconcile_refusal(index, run, environment)
+    if reason is not None:
+        raise ReleaseStateError(f"run {run_id} cannot be reconciled: {reason}")
+    with contextlib.ExitStack() as stack:
+        for scope in run["targetScopes"]:
+            try:
+                stack.enter_context(
+                    release_ownership.target_writer_lease(root, scope, {"purpose": "run-reconciliation", "runId": run_id}),
+                )
+            except release_ownership.ReleaseOwnershipError as error:
+                raise ReleaseStateError(
+                    f"run {run_id} cannot be reconciled: a target writer may still be active: {error}",
+                ) from error
+        yield ReconciliationSession(root, run_id, environment, run)
 
 
 def _completion_core_hash(report: Mapping) -> str:
@@ -2106,11 +2279,10 @@ def _validate_completion_proof(capsule: ReleaseCapsule, report: Mapping, *, envi
             elif expected_phase == "ords":
                 expected_ords_seconds += _number(report_step.get("phaseSeconds"), f"step {number} phaseSeconds")
         elif step_type == "migrate":
-            expected_phase = "uncovered-object"
+            expected_phase = "migration"
             from . import rollout
 
             expected_reason = rollout._auxiliary_classification_reason("migrate", expected_phase)
-            expected_excluded.append(f"step-{number:03d}:{step_type}")
         if expected_phase is not None and (
             report_step.get("phase") != expected_phase
             or report_step.get("classificationReason") != expected_reason
@@ -2123,6 +2295,7 @@ def _validate_completion_proof(capsule: ReleaseCapsule, report: Mapping, *, envi
     clean_budget = _validate_budget(budget)
     report_budget = report.get("objectBudget")
     expected_seconds = getattr(capsule, "database_object_budget_seconds", None)
+    expected_migrations = [number for number, step in enumerate(step_definitions, start=1) if step.get("type") == "migrate"]
     if (
         clean_budget["seconds"] != expected_seconds or clean_budget["coverageComplete"] is not True
         or clean_budget["passed"] is not True or clean_budget["elapsedSeconds"] is None
@@ -2133,6 +2306,7 @@ def _validate_completion_proof(capsule: ReleaseCapsule, report: Mapping, *, envi
         or report_budget.get("coverageComplete") is not True
         or report_budget.get("withinBudget") is not True
         or report_budget.get("includedCheckpoints") != checkpoints
+        or report_budget.get("includedMigrationSteps") != expected_migrations
         or report_budget.get("excludedObjectSteps") != expected_excluded
         or expected_excluded != []
     ):
@@ -2195,6 +2369,15 @@ def validate_stage_proof(capsule: ReleaseCapsule, report: Mapping) -> None:
         or included != checkpoints or not isinstance(excluded, list) or excluded != []
     ):
         raise ReleaseStateError("stage report object budget does not cover every capsule checkpoint")
+    included_migrations = budget.get("includedMigrationSteps")
+    expected_migrations = [
+        number for number, step in enumerate(_capsule_step_definitions(capsule), start=1) if step.get("type") == "migrate"
+    ]
+    if (
+        not isinstance(included_migrations, list) or any(type(item) is not int for item in included_migrations)
+        or included_migrations != expected_migrations
+    ):
+        raise ReleaseStateError("stage report object budget does not cover every capsule migration step")
     _validate_completion_proof(capsule, report, environment="staging")
 
 
@@ -2272,8 +2455,15 @@ def _capsule_for_cleanup(root: Path, directory: Path, payload_digest: str) -> di
     ):
         raise ReleaseStateError("generated capsule rollout metadata or budget is malformed")
     checkpoints = document["checkpoints"]
-    if not isinstance(checkpoints, list) or not checkpoints or definition.get("checkpoints") != checkpoints:
+    steps = definition.get("steps")
+    if not isinstance(checkpoints, list) or definition.get("checkpoints") != checkpoints:
         raise ReleaseStateError("generated capsule checkpoint list is malformed")
+    if not isinstance(steps, list) or not steps or any(not isinstance(step, Mapping) for step in steps):
+        raise ReleaseStateError("generated capsule step list is malformed")
+    if sum(1 for step in steps if step.get("type") == "feature-migrate") != len(checkpoints):
+        raise ReleaseStateError("generated capsule steps do not match its checkpoint list")
+    if not _has_checkpoint_or_migration(steps):
+        raise ReleaseStateError("generated capsule must contain a feature checkpoint or a migrate step")
     for field in ("files", "sourceInputs"):
         if not isinstance(document[field], list) or definition.get(field) != document[field]:
             raise ReleaseStateError(f"generated capsule {field} list does not match its payload")
@@ -2435,6 +2625,8 @@ def _cleanup_report(root: Path, index: Mapping, payload_digest: str) -> dict:
     payload_runs = [row for row in index["rollouts"] if row["payloadDigest"] == payload_digest]
     if any(row["state"] in {"running", "unknown", "not-started"} for row in payload_runs):
         blockers.append("a rollout remains running or unresolved for this payload")
+    if any(row.get("reconciliation") is not None for row in payload_runs):
+        blockers.append("a rollout for this payload was closed by reconciliation, not by verification")
     for capsule in capsule_rows:
         candidates = [row for row in payload_runs if (
             row["environment"] == "prod" and row["engineDigest"] == capsule["engineDigest"]

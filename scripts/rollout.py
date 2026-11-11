@@ -24,16 +24,17 @@ from collections.abc import Callable, Mapping, Sequence
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import migrate, verify_checks
+from scripts import migrate, migration_attempts, verify_checks
 from scripts.db_targets import (
     Target,
     TargetResolutionError,
     batch_schema,
+    flat_migrations_apply,
     looks_like_production_identity,
     resolve_target,
 )
 from scripts.deployment_descriptor import read_descriptor
-from scripts.migration_manifest import MigrationManifestError, load_batch, validate_receipt as validate_migration_receipt
+from scripts.migration_manifest import MigrationManifestError, assert_single_layout, load_batch, validate_receipt as validate_migration_receipt
 from scripts.local_config import ALLOWED_KEYS, ConfigError, read_project_env
 from scripts.path_utils import relative_to_root
 from scripts.ords_export import OrdsExportError, check_no_oauth, check_structure, mask_sql
@@ -543,7 +544,94 @@ def _target_for_step(step: dict, repo_root: Path, environment: str) -> Target | 
     raise RolloutError(f"unsupported rollout step type {kind!r}")
 
 
-def _target_binding(step: dict, repo_root: Path, environment: str) -> dict | None:
+def _migration_step_target(
+    repo_root: Path, folders: Sequence[str], environment: str, values: Mapping[str, str],
+) -> tuple[str | None, Target, tuple]:
+    """Derive a migrate step's logical schema and target exactly as migrate.main does."""
+    try:
+        migrations = load_batch(repo_root, folders)
+        logical_schema = batch_schema(
+            [migration.schema for migration in migrations], values.get("PROJECT_SCHEMA") or None, values, environment,
+        )
+        target = resolve_target(values, environment, "migration", schema=logical_schema)
+        assert_single_layout(repo_root, migrations, target.schema, flat_folders_apply=flat_migrations_apply(values, environment))
+    except (MigrationManifestError, TargetResolutionError, KeyError, OSError) as error:
+        raise RolloutError(f"cannot resolve {environment} migration target for {', '.join(folders)}: {error}") from error
+    return logical_schema, target, tuple(migrations)
+
+
+def migration_folder_rows(folders: Sequence[str], migrations: Sequence) -> list[dict]:
+    """Payload and check digests of a migrate step's folders, in step order."""
+    return [
+        {"path": folder, "payloadDigest": migration.payload_digest, "checksSha256": migration.checks_sha256}
+        for folder, migration in zip(folders, migrations, strict=True)
+    ]
+
+
+def _migration_attempt_events(folders: Sequence[str], repo_root: Path) -> dict[str, dict]:
+    """Every attempt-event sidecar in these migration folders, keyed by eventId."""
+    events: dict[str, dict] = {}
+    for folder in folders:
+        _relative, path = _repo_file(folder, repo_root, "migration folder", kind="directory")
+        for event in migration_attempts.read_attempt_events(path):
+            events[event["eventId"]] = event
+    return events
+
+
+def _migration_write_state(baseline: set[str] | None, folders: Sequence[str], repo_root: Path) -> str:
+    """What a migrate step wrote, read from the attempt events that appeared while it ran.
+
+    ``no-write-attempted``: no new attempt, or every new attempt ended apply-not-started with
+    retained no-write evidence. ``partially-verified``: at least one new attempt verified and
+    none is unknown. Anything else, including any read or validation error, is ``unknown``.
+    """
+    if baseline is None:
+        return "unknown"
+    try:
+        events = _migration_attempt_events(folders, repo_root)
+        touched = {event["attemptId"] for event_id, event in events.items() if event_id not in baseline}
+        outcomes = []
+        for attempt_id in sorted(touched):
+            chain = [event for event in events.values() if event["attemptId"] == attempt_id]
+            migration_attempts.reduce_attempt_events(chain)
+            terminal = [event for event in chain if event["state"] != "pending"]
+            if len(terminal) != 1:
+                outcomes.append("unknown")
+            elif terminal[0]["state"] == "verified":
+                outcomes.append("verified")
+            elif terminal[0]["state"] == "apply-not-started" and migration_attempts.validate_no_write_evidence(repo_root, terminal[0]):
+                outcomes.append("no-write")
+            else:
+                outcomes.append("unknown")
+    except (migration_attempts.MigrationAttemptError, RolloutError, OSError, ValueError, LookupError, TypeError):
+        # Any event that cannot be read or validated leaves the write unclassified: unknown.
+        return "unknown"
+    if "unknown" in outcomes:
+        return "unknown"
+    if "verified" in outcomes:
+        return "partially-verified"
+    return "no-write-attempted"
+
+
+def _database_state_after_migration(write_state: str, before: str) -> str:
+    """The database state a failed migrate step leaves: unknown only when its write cannot be classified."""
+    if write_state == "unknown":
+        return "unknown"
+    if write_state == "partially-verified":
+        return "verified"
+    return before
+
+
+def _target_binding(step: dict, repo_root: Path, environment: str, *, capsule: bool = False) -> dict | None:
+    if capsule and step.get("type") == "migrate":
+        # Same derivation as migrate.main (see _migration_step_target), so prepare, the binding
+        # comparison at execute and the state validators cannot drift apart. Only a capsule compares
+        # this binding with a prepared one; a schema-version 1 rollout keeps its original binding
+        # shape, so its step digests and receipts stay valid across a template upgrade.
+        logical_schema, target, _migrations = _migration_step_target(repo_root, step["folders"], environment, os.environ)
+        if environment != "prod" and looks_like_production_identity(target.connection, target.schema):
+            raise RolloutError("migration target looks like production but --env is not prod")
+        return {**_binding_for_target(target), "operation": "migration", "logicalSchema": logical_schema}
     try:
         target = _target_for_step(step, repo_root, environment)
     except (TargetResolutionError, MigrationManifestError, OSError, ValueError) as error:
@@ -676,8 +764,8 @@ def _prepare_plan(manifest: RolloutManifest, environment: str) -> list[dict]:
             plan[-1]["phase"] = classification
             plan[-1]["classificationReason"] = _auxiliary_classification_reason(step["type"], classification)
         elif manifest.schema_version == 2 and step["type"] == "migrate":
-            plan[-1]["phase"] = "uncovered-object"
-            plan[-1]["classificationReason"] = _auxiliary_classification_reason("migrate", "uncovered-object")
+            plan[-1]["phase"] = "migration"
+            plan[-1]["classificationReason"] = _auxiliary_classification_reason("migrate", "migration")
     return plan
 
 
@@ -757,7 +845,7 @@ def _auxiliary_classification_reason(kind: str, classification: str) -> str:
     if classification == "ords":
         return "source passed the generated ORDS structure, OAuth exclusion, and owner checks"
     if kind == "migrate":
-        return "legacy migration folders are outside feature-checkpoint coverage"
+        return "dated migration runs as a prepared checkpoint; its time counts toward the database-object budget"
     return "source is not limited to the recognized, statically validated phase"
 
 
@@ -965,10 +1053,18 @@ def _markdown_report(report: dict) -> str:
         f"- Started: `{report['startedAt']}`",
         f"- Ended: `{report.get('endedAt') or 'not finished'}`",
         f"- Duration: `{report.get('durationSeconds')}` seconds",
+    ]
+    budget = report.get("objectBudget")
+    if isinstance(budget, Mapping):
+        lines.append(
+            f"- Object budget: coverage complete `{budget.get('coverageComplete')}`; included checkpoints "
+            f"`{budget.get('includedCheckpoints', [])}`; included migration steps `{budget.get('includedMigrationSteps', [])}`"
+        )
+    lines.extend((
         "",
         "| Step | Type | Status | SHA-256 | Start | End | Seconds | Evidence |",
         "| ---: | --- | --- | --- | --- | --- | ---: | --- |",
-    ]
+    ))
     for step in report.get("steps", []):
         evidence = ", ".join(f"`{path}`" for path in step.get("evidencePaths", [])) or "—"
         lines.append(
@@ -2046,19 +2142,23 @@ def _validate_capsule_app_targets(root: Path, target_plan, steps: Sequence[dict]
             raise RolloutError(f"application {app_id} target profile changed after preparation")
 
 
-def _validate_capsule_auxiliary_targets(target_plan, steps: Sequence[dict], environment: str) -> None:
+def _validate_capsule_auxiliary_targets(target_plan, steps: Sequence[dict], environment: str, repo_root: Path) -> None:
     for number, step in enumerate(steps, start=1):
-        if step.get("type") not in {"sql-script", "ords-import"}:
+        if step.get("type") not in {"sql-script", "ords-import", "migrate"}:
             continue
         prepared = target_plan.targets.get(f"step:{number}")
         if not isinstance(prepared, Mapping):
-            raise RolloutError(f"step {number} has no prepared SQL/ORDS target identity")
-        current = _target_binding(step, Path("."), environment)
+            raise RolloutError(f"step {number} has no prepared SQL, ORDS or migration target identity")
+        current = _target_binding(step, repo_root, environment, capsule=True)
         for field in (
             "environment", "operation", "logicalSchema", "connection", "expectedUser", "schema", "classification",
         ):
             if current.get(field) != prepared.get(field):
                 raise RolloutError(f"step {number} migration profile changed after target preparation")
+        if step["type"] == "migrate":
+            _logical, _target, migrations = _migration_step_target(repo_root, step["folders"], environment, os.environ)
+            if prepared.get("folders") != migration_folder_rows(step["folders"], migrations):
+                raise RolloutError(f"step {number} migration folders changed after target preparation")
         observed = prepared.get("observed")
         if not isinstance(observed, Mapping) or any(
             not isinstance(observed.get(field), str) or not observed[field]
@@ -2067,13 +2167,23 @@ def _validate_capsule_auxiliary_targets(target_plan, steps: Sequence[dict], envi
             raise RolloutError(f"step {number} prepared target identity is incomplete")
 
 
-def _capsule_object_budget(capsule, elapsed: float, included: Sequence[int], excluded: Sequence[str]) -> dict:
+def _capsule_object_budget(
+    capsule,
+    elapsed: float,
+    included: Sequence[int],
+    excluded: Sequence[str],
+    included_migrations: Sequence[int] = (),
+    migration_steps: int = 0,
+) -> dict:
     return {
         "seconds": capsule.database_object_budget_seconds,
         "elapsedSeconds": round(elapsed, 3),
-        "coverageComplete": len(included) == len(capsule.checkpoints) and not excluded,
+        "coverageComplete": (
+            len(included) == len(capsule.checkpoints) and not excluded and len(included_migrations) == migration_steps
+        ),
         "withinBudget": elapsed <= capsule.database_object_budget_seconds,
         "includedCheckpoints": list(included),
+        "includedMigrationSteps": list(included_migrations),
         "excludedObjectSteps": list(excluded),
     }
 
@@ -2294,6 +2404,12 @@ def _run_capsule_rollout(
             raise RolloutError("feature capsule rollout starts at step 1; use its checkpoint attempt state for recovery")
         prep_started = time.perf_counter()
         capsule = release_capsule.load_capsule(root, capsule_path)
+        if recovery_attempt is not None and not capsule.checkpoints:
+            raise RolloutError(
+                "--recover is refused: this capsule has no feature checkpoint, so it has no checkpoint attempt to recover. "
+                "Reconcile the interrupted migration as docs/migration-rules.md describes, then run a new capsule, or this "
+                "one after that reconciliation"
+            )
         selected_capsule_root = capsule.root
         selected_capsule_signature = _selected_capsule_signature(capsule)
 
@@ -2355,6 +2471,7 @@ def _run_capsule_rollout(
                     "coverageComplete": False,
                     "withinBudget": True,
                     "includedCheckpoints": [],
+                    "includedMigrationSteps": [],
                     "excludedObjectSteps": [],
                 },
                 "applicationSeconds": 0.0,
@@ -2424,6 +2541,7 @@ def _run_capsule_rollout(
                     "coverageComplete": False,
                     "withinBudget": False,
                     "includedCheckpoints": [],
+                    "includedMigrationSteps": [],
                     "excludedObjectSteps": [],
                 },
                 "objectPhaseSeconds": 0.0,
@@ -2459,7 +2577,7 @@ def _run_capsule_rollout(
 
         _capsule_live_source_check(root, capsule_document)
         _validate_capsule_app_targets(root, target_plan, [item["step"] for item in plan], environment)
-        _validate_capsule_auxiliary_targets(target_plan, [item["step"] for item in plan], environment)
+        _validate_capsule_auxiliary_targets(target_plan, [item["step"] for item in plan], environment, root)
         report = {
             "schemaVersion": 2,
             "repoRoot": str(root),
@@ -2485,6 +2603,7 @@ def _run_capsule_rollout(
                 "coverageComplete": False,
                 "withinBudget": True,
                 "includedCheckpoints": [],
+                "includedMigrationSteps": [],
                 "excludedObjectSteps": [],
             },
             "applicationSeconds": 0.0,
@@ -2520,7 +2639,7 @@ def _run_capsule_rollout(
 
         capsule = reload_selected_capsule()
         _validate_capsule_app_targets(root, target_plan, [item["step"] for item in plan], environment)
-        _validate_capsule_auxiliary_targets(target_plan, [item["step"] for item in plan], environment)
+        _validate_capsule_auxiliary_targets(target_plan, [item["step"] for item in plan], environment, root)
         scratch = _safe_scratch_root(root)
         evidence_root = scratch / "rollout-runs"
         _safe_directory(evidence_root, root)
@@ -2544,21 +2663,28 @@ def _run_capsule_rollout(
 
         run_id = release_state.start_rollout(root, capsule, target_plan)
         report["localRunId"] = run_id
+        # Rollout receipts are never replaced. Refuse before any write when a step of this manifest already has
+        # one for this environment, as a schema-version 1 rollout does. This comes after start_rollout so that
+        # an unresolved earlier run is reported first; the run then ends failed with nothing started.
+        _assert_unreceipted_execution_range(root, manifest, environment, plan, 1)
 
         included_checkpoints: list[int] = []
+        included_migration_steps: list[int] = []
         excluded_object_steps: list[str] = []
+        migration_step_count = sum(item["step"]["type"] == "migrate" for item in plan)
         object_seconds = 0.0
         checkpoint_number = 0
         for index, item in enumerate(plan):
             step = item["step"]
             step_report = report["steps"][index]
-            if step["type"] == "feature-migrate" and object_seconds >= capsule.database_object_budget_seconds:
+            if step["type"] in {"feature-migrate", "migrate"} and object_seconds >= capsule.database_object_budget_seconds:
                 report["objectPhaseSeconds"] = round(object_seconds, 3)
                 report["objectBudget"] = _capsule_object_budget(
                     capsule, object_seconds, included_checkpoints, excluded_object_steps,
+                    included_migration_steps, migration_step_count,
                 )
-                report["error"] = "database-object budget reached; stopped before the next feature checkpoint"
-                report["databaseState"] = "verified" if included_checkpoints else "not-started"
+                report["error"] = "database-object budget reached; stopped before the next feature or migration checkpoint"
+                report["databaseState"] = "verified" if (included_checkpoints or included_migration_steps) else "not-started"
                 _finish_report(report, started, "failed", 2)
                 break
 
@@ -2569,6 +2695,9 @@ def _run_capsule_rollout(
             evidence_dir = run_evidence / f"step-{item['number']:03d}"
             evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
             auxiliary_write_invoked = False
+            migration_baseline: set[str] | None = None
+            database_state_before = report["databaseState"]
+            result = None
             try:
                 if step["type"] == "feature-migrate":
                     checkpoint_number += 1
@@ -2590,8 +2719,8 @@ def _run_capsule_rollout(
                 else:
                     _snapshot(manifest, plan, f"before step {item['number']}", environment)
                     expected_identity = None
-                    if step["type"] in {"sql-script", "ords-import"}:
-                        binding = _target_binding(step, root, environment)
+                    if step["type"] in {"sql-script", "ords-import", "migrate"}:
+                        binding = _target_binding(step, root, environment, capsule=True)
                         prepared_binding = target_plan.targets.get(f"step:{item['number']}")
                         if not isinstance(prepared_binding, Mapping):
                             raise RolloutError(f"step {item['number']} has no prepared target identity")
@@ -2611,7 +2740,8 @@ def _run_capsule_rollout(
                             "step": item["number"],
                             "planDigest": target_plan.plan_digest,
                         }
-                        bound_step = dict(
+                        # migrate.main resolves its own target; the binding comparison above proves it is the prepared one.
+                        bound_step = step if step["type"] == "migrate" else dict(
                             step,
                             connection=binding["connection"],
                             expectedUser=binding["expectedUser"],
@@ -2624,6 +2754,11 @@ def _run_capsule_rollout(
                             observed = _observe_target_identity(target, evidence_dir / "target-identity")
                             if observed != expected_identity:
                                 raise RolloutError(f"step {item['number']} target identity changed after preparation")
+                            if step["type"] == "migrate":
+                                _logical, _target, migrations = _migration_step_target(root, step["folders"], environment, os.environ)
+                                if prepared_binding.get("folders") != migration_folder_rows(step["folders"], migrations):
+                                    raise RolloutError(f"step {item['number']} migration folders changed after target preparation")
+                                migration_baseline = set(_migration_attempt_events(step["folders"], root))
                             auxiliary_write_invoked = True
                             result = execute_step(
                                 bound_step,
@@ -2649,12 +2784,14 @@ def _run_capsule_rollout(
                             expected_identity=expected_identity,
                         )
                     _snapshot(manifest, plan, f"after step {item['number']}", environment)
-                    if step["type"] == "migrate" or (
-                        step["type"] in {"sql-script", "ords-import"}
-                        and step_report.get("phase") == "uncovered-object"
-                    ):
+                    if step["type"] in {"sql-script", "ords-import"} and step_report.get("phase") == "uncovered-object":
                         excluded_object_steps.append(f"step-{item['number']:03d}:{step['type']}")
                     elapsed = time.perf_counter() - step_started
+                    if step["type"] == "migrate" and result.exit_code == 0:
+                        object_seconds += elapsed
+                        included_migration_steps.append(item["number"])
+                        step_report["objectSeconds"] = round(elapsed, 3)
+                        step_report["phase"] = "migration"
                     if step["type"] == "app-deploy":
                         report["applicationSeconds"] += elapsed
                     elif step["type"] == "ords-import":
@@ -2673,12 +2810,17 @@ def _run_capsule_rollout(
                 report["objectPhaseSeconds"] = round(object_seconds, 3)
                 report["objectBudget"] = _capsule_object_budget(
                     capsule, object_seconds, included_checkpoints, excluded_object_steps,
+                    included_migration_steps, migration_step_count,
                 )
                 if result.exit_code != 0:
                     step_report["status"] = "failed"
                     step_report["error"] = result.message or f"step returned status {result.exit_code}"
                     report["error"] = step_report["error"]
-                    if step["type"] in {"migrate", "sql-script", "ords-import"}:
+                    if step["type"] == "migrate":
+                        write_state = _migration_write_state(migration_baseline, step["folders"], root)
+                        step_report["writeState"] = write_state
+                        report["databaseState"] = _database_state_after_migration(write_state, database_state_before)
+                    elif step["type"] in {"sql-script", "ords-import"}:
                         report["databaseState"] = "unknown"
                     _finish_report(report, started, "failed", 2)
                     break
@@ -2686,8 +2828,8 @@ def _run_capsule_rollout(
                 step_report["status"] = "succeeded"
                 receipt_path = _write_receipt(root, environment, manifest, item, step_report)
                 step_report["receiptPath"] = relative_to_root(receipt_path, root).as_posix()
-                if step["type"] == "feature-migrate" and object_seconds > capsule.database_object_budget_seconds:
-                    report["error"] = "database-object budget exceeded after a verified checkpoint"
+                if step["type"] in {"feature-migrate", "migrate"} and object_seconds > capsule.database_object_budget_seconds:
+                    report["error"] = "database-object budget exceeded after a verified feature or migration checkpoint"
                     report["databaseState"] = "verified"
                     _finish_report(report, started, "failed", 2)
                     break
@@ -2701,10 +2843,17 @@ def _run_capsule_rollout(
                 report["objectPhaseSeconds"] = round(object_seconds, 3)
                 report["objectBudget"] = _capsule_object_budget(
                     capsule, object_seconds, included_checkpoints, excluded_object_steps,
+                    included_migration_steps, migration_step_count,
                 )
-                if step["type"] == "migrate" or (
-                    step["type"] in {"sql-script", "ords-import"} and auxiliary_write_invoked
-                ):
+                if step["type"] == "migrate" and auxiliary_write_invoked:
+                    if result is not None:
+                        # migrate.main had already returned, so its outcome is not classified here.
+                        report["databaseState"] = "unknown"
+                    else:
+                        write_state = _migration_write_state(migration_baseline, step["folders"], root)
+                        step_report["writeState"] = write_state
+                        report["databaseState"] = _database_state_after_migration(write_state, database_state_before)
+                elif step["type"] in {"sql-script", "ords-import"} and auxiliary_write_invoked:
                     report["databaseState"] = "unknown"
                 _finish_report(report, started, "failed", 2)
                 break
@@ -2715,6 +2864,7 @@ def _run_capsule_rollout(
             report["objectPhaseSeconds"] = round(object_seconds, 3)
             report["objectBudget"] = _capsule_object_budget(
                 capsule, object_seconds, included_checkpoints, excluded_object_steps,
+                included_migration_steps, migration_step_count,
             )
             if object_seconds > capsule.database_object_budget_seconds:
                 report["error"] = "database-object budget exceeded after verified work"

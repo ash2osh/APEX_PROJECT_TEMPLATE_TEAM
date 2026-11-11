@@ -9,7 +9,9 @@ from unittest.mock import patch
 
 import _no_real_sqlcl  # noqa: F401
 from scripts import baseline, feature_claims, feature_cli, feature_compare, feature_sources
-from test_feature_sources import ENVIRON, capture_catalog
+from test_feature_sources import (
+    ENVIRON, FUNCTION_SOURCE, PROCEDURE_SOURCE, TRIGGER_SOURCE, TYPE_BODY_SOURCE, TYPE_SOURCE, capture_catalog,
+)
 
 LIVE_ENVIRON = {**ENVIRON, "DB_ENVIRONMENT": "development"}
 SPEC = ["PACKAGE PKG AS\n", "  PROCEDURE RUN;\n", "END PKG;\n"]
@@ -662,6 +664,142 @@ class FreezeGateTests(FeatureTree):
         status, output = self.freeze("--no-live", "  ")
         self.assertEqual(status, 2)
         self.assertIn("--no-live needs a reason", output)
+
+
+class StoredUnitOwnershipTests(FeatureTree):
+    """Triggers, functions, procedures and types are claimed, held, moved, compared with DEV and frozen like packages."""
+
+    def capture_unit(self, feature: str, group: str, name: str, units: dict, **options):
+        with patch.object(baseline, "_capture", return_value=capture_catalog(units)):
+            return feature_sources.capture_unit(self.root, feature, "APP_CODE", group, name, environ=LIVE_ENVIRON, **options)
+
+    def capture_all(self, feature: str = "shop") -> list[str]:
+        paths = [
+            *self.capture_unit(feature, "trigger", "ORDERS_TRG", {("TRIGGER", "ORDERS_TRG"): TRIGGER_SOURCE}),
+            *self.capture_unit(feature, "function", "GET_ONE", {("FUNCTION", "GET_ONE"): FUNCTION_SOURCE}),
+            *self.capture_unit(feature, "procedure", "RUN_IT", {("PROCEDURE", "RUN_IT"): PROCEDURE_SOURCE}),
+            *self.capture_unit(feature, "type", "ORDER_T", {("TYPE", "ORDER_T"): TYPE_SOURCE, ("TYPE BODY", "ORDER_T"): TYPE_BODY_SOURCE}),
+        ]
+        return [path.relative_to(self.root).as_posix() for path in paths]
+
+    def dev_units(self) -> dict:
+        return {
+            ("TRIGGER", "ORDERS_TRG"): TRIGGER_SOURCE,
+            ("FUNCTION", "GET_ONE"): FUNCTION_SOURCE,
+            ("PROCEDURE", "RUN_IT"): PROCEDURE_SOURCE,
+            ("TYPE", "ORDER_T"): TYPE_SOURCE,
+            ("TYPE BODY", "ORDER_T"): TYPE_BODY_SOURCE,
+        }
+
+    def doctor(self, *arguments: str, catalog_units: dict | None = None) -> tuple[int, str]:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with patch.object(baseline, "_capture", return_value=capture_catalog(catalog_units or self.dev_units())), \
+             contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            status = feature_cli.main(["doctor", *arguments], repo_root=self.root, environ=LIVE_ENVIRON)
+        return status, buffer.getvalue()
+
+    def test_every_stored_unit_type_is_claimed_as_its_own_object(self) -> None:
+        self.capture_all()
+        claims, unanalysed = feature_claims.collect_claims(self.root)
+        self.assertEqual(unanalysed, [])
+        self.assertEqual(
+            sorted((claim.kind, claim.name) for claim in claims),
+            [("FUNCTION", "GET_ONE"), ("PROCEDURE", "RUN_IT"), ("TRIGGER", "ORDERS_TRG"), ("TYPE", "ORDER_T"), ("TYPE BODY", "ORDER_T")],
+        )
+
+    def test_a_checkpoint_loads_each_captured_unit_as_its_own_stored_source_unit(self) -> None:
+        from scripts import feature_manifest
+
+        paths = self.capture_all()
+        self.write_checks("shop", {"schemaVersion": 1, "preconditions": [], "postconditions": [
+            {"id": "shop-ready", "sql": "SELECT 1 FROM dual", "expected": 1},
+        ]})
+        checkpoint = feature_manifest.load_feature_checkpoint(
+            self.root, {"type": "feature-migrate", "schema": "APP_CODE", "inputs": paths},
+        )
+        feature_manifest.validate_release_units([checkpoint])
+        self.assertEqual(
+            sorted((item.category, item.unit[1], item.unit[2]) for item in checkpoint.inputs),
+            [
+                ("stored-source", "FUNCTION", "GET_ONE"),
+                ("stored-source", "PROCEDURE", "RUN_IT"),
+                ("stored-source", "TRIGGER", "ORDERS_TRG"),
+                ("stored-source", "TYPE", "ORDER_T"),
+                ("stored-source", "TYPE BODY", "ORDER_T"),
+            ],
+        )
+
+    def test_a_trigger_another_feature_holds_needs_move_from(self) -> None:
+        self.capture_all("shop")
+        with self.assertRaisesRegex(feature_sources.FeatureSourcesError, "trigger ORDERS_TRG is held by feature shop.*--move-from shop"):
+            self.capture_unit("pickup", "trigger", "ORDERS_TRG", {("TRIGGER", "ORDERS_TRG"): TRIGGER_SOURCE})
+        self.assertFalse((self.root / "features/pickup").exists())
+
+    def test_doctor_compares_every_captured_unit_with_dev_and_reports_an_equal_one_as_clean(self) -> None:
+        self.capture_all()
+        status, output = self.doctor("--live")
+        self.assertEqual(status, 0, output)
+        self.assertIn("5 package file(s) compared with DEV", output)
+
+    def test_a_trigger_that_dev_changed_since_the_capture_is_behind_dev(self) -> None:
+        self.capture_all()
+        # Comment-only changes are ignored by the comparison, so the DEV change adds code.
+        newer = {**self.dev_units(), ("TRIGGER", "ORDERS_TRG"): [*TRIGGER_SOURCE[:-1], "  DEV_ONLY_LINE := 1;\n", TRIGGER_SOURCE[-1]]}
+        status, output = self.doctor("--live", catalog_units=newer)
+        self.assertEqual(status, 1)
+        self.assertRegex(output, r"BEHIND DEV +features/shop/APP_CODE/triggers/orders_trg\.trg\.sql")
+
+    def test_a_function_or_trigger_that_is_not_on_dev_is_an_error(self) -> None:
+        self.capture_all()
+        without = {key: value for key, value in self.dev_units().items() if key not in {("FUNCTION", "GET_ONE"), ("TRIGGER", "ORDERS_TRG")}}
+        status, output = self.doctor("--live", catalog_units=without)
+        self.assertEqual(status, 1)
+        self.assertIn("NOT ON DEV", output)
+        self.assertIn("FUNCTION GET_ONE was not found in APP_CODE on DEV", output)
+        self.assertIn("TRIGGER ORDERS_TRG was not found in APP_CODE on DEV", output)
+
+    def test_a_type_body_on_dev_without_its_specification_is_not_on_dev_for_both_files_as_packages_are(self) -> None:
+        self.capture_all()
+        units = {key: value for key, value in self.dev_units().items() if key != ("TYPE", "ORDER_T")}
+        status, output = self.doctor("--live", catalog_units=units)
+        self.assertEqual(status, 1)
+        self.assertIn("TYPE ORDER_T was not found in APP_CODE on DEV", output)
+        self.assertIn("TYPE BODY ORDER_T was not found in APP_CODE on DEV", output)
+
+    def test_freeze_gate_selects_each_stored_unit_type_and_refuses_a_file_that_dev_would_undo(self) -> None:
+        paths = self.capture_all()
+        steps = [{"type": "feature-migrate", "schema": "APP_CODE", "inputs": paths}]
+        with patch.object(baseline, "_capture", return_value=capture_catalog(self.dev_units())):
+            refused, record = feature_cli._freeze_gate(self.root, LIVE_ENVIRON, steps, None)
+        self.assertIsNone(refused)
+        self.assertEqual(record["live"], "5 package file(s) compared with DEV, 0 accepted difference(s)")
+
+        import contextlib
+        import io
+
+        newer = {**self.dev_units(), ("FUNCTION", "GET_ONE"): [*FUNCTION_SOURCE[:-1], "  DEV_ONLY_LINE := 1;\n", FUNCTION_SOURCE[-1]]}
+        printed = io.StringIO()
+        with patch.object(baseline, "_capture", return_value=capture_catalog(newer)), contextlib.redirect_stdout(printed):
+            refused, _record = feature_cli._freeze_gate(self.root, LIVE_ENVIRON, steps, None)
+        self.assertEqual(refused, 1)
+        self.assertRegex(printed.getvalue(), r"BEHIND DEV +features/shop/APP_CODE/functions/get_one\.fnc\.sql")
+
+    def test_a_moved_trigger_leaves_no_duplicate_claim_and_its_old_checks_are_removed(self) -> None:
+        self.capture_all("shop")
+        self.write_checks("shop", {"schemaVersion": 1, "preconditions": [], "postconditions": [{
+            "id": "orders-trg", "sql": "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER = :target_schema AND OBJECT_NAME = 'ORDERS_TRG' AND OBJECT_TYPE = 'TRIGGER' AND STATUS = 'VALID'",
+            "expected": 1,
+        }]})
+        self.capture_unit("pickup", "trigger", "ORDERS_TRG", {("TRIGGER", "ORDERS_TRG"): TRIGGER_SOURCE}, move_from="shop")
+
+        claims, _unanalysed = feature_claims.collect_claims(self.root)
+        self.assertEqual(feature_claims.duplicates(claims), {})
+        self.assertEqual({claim.feature for claim in claims if claim.kind == "TRIGGER"}, {"pickup"})
+        remaining = json.loads((self.root / "features/shop/APP_CODE/checks.json").read_text(encoding="utf-8"))
+        self.assertEqual(remaining["postconditions"], [])
 
 
 if __name__ == "__main__":

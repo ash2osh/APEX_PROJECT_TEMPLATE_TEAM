@@ -112,5 +112,23 @@ class FeatureDiffTests(unittest.TestCase):
         self.assertEqual(len(directories), len(set(directories)))
 
 
+    def test_type_trigger_and_function_reviews_name_their_own_object_type_and_are_namespaced_by_it(self) -> None:
+        units = (("TYPE", "ORDER_T"), ("TYPE BODY", "ORDER_T"), ("TRIGGER", "ORDERS_TRG"), ("FUNCTION", "GET_ONE"))
+        seen: set[str] = set()
+        for object_type, name in units:
+            before, after = f"{object_type} before\n", f"{object_type} after\n"
+            diff_path, review_path = self.feature_sources.write_source_review(
+                self.root, "orders", "APP_CODE", (object_type, name), before, after,
+                identity={"db_unique_name": "STAGE"}, baseline_kind="dev-capture", payload_digest="f" * 64, day="2026-11-11",
+            )
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+            self.assertEqual((review["unitType"], review["unitName"]), (object_type, name))
+            self.assertEqual(review["owner"], "APP_CODE")
+            self.assertEqual(review["beforeSha256"], hashlib.sha256(before.encode("utf-8")).hexdigest())
+            self.assertIn(f"a/{object_type} {name} (captured)", diff_path.read_text(encoding="utf-8"))
+            seen.add(diff_path.parent.name)
+        self.assertEqual(len(seen), len(units))
+
+
 if __name__ == "__main__":
     unittest.main()

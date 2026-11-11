@@ -149,7 +149,7 @@ Names are generic.
 ## Not covered
 
 - Views, DDL files and data scripts are checked for ownership but not compared with DEV.
-- The live comparison covers packages (spec and body): the stored sources `feature capture` can read.
+- The live comparison covers every stored unit `feature capture` can read: packages and types (spec and body), triggers, procedures and functions.
 - `--keep-file` does not retain a DEV baseline; run a capture with `--refresh` once the file equals DEV.
 - A unit claimed by a feature and also by an old `migrations/` folder is not detected.
 

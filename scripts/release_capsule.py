@@ -537,6 +537,12 @@ def _write_stage_file(stage: Path, relative: str, source: bytes) -> None:
         raise ReleaseCapsuleError(f"cannot write capsule file {relative}: {error}") from error
 
 
+def _require_checkpoint_or_migration(steps: Sequence[object]) -> None:
+    """A release needs feature checkpoints, migrate steps, or both; one with neither is refused."""
+    if not any(isinstance(step, Mapping) and step.get("type") in {"feature-migrate", "migrate"} for step in steps):
+        raise ReleaseCapsuleError("release must contain at least one feature checkpoint or migrate step")
+
+
 def _make_capsule(
     root: Path,
     manifest_path: Path | str,
@@ -547,6 +553,7 @@ def _make_capsule(
         manifest = rollout.load_manifest(manifest_path, root, version=2)
     except rollout.RolloutError as error:
         raise ReleaseCapsuleError(f"rollout manifest failed capsule validation: {error}") from error
+    _require_checkpoint_or_migration(manifest.steps)
     manifest_relative = relative_to_root(manifest.path, root).as_posix()
     manifest_raw = _read_input(root, manifest_relative)
     source_commit = _head_commit(root)
@@ -770,6 +777,7 @@ def _validate_capsule_directory(
         raise ReleaseCapsuleError("capsule checkpoint or source mappings differ from the digest-bound payload")
     if not isinstance(payload_definition["steps"], list) or not payload_definition["steps"]:
         raise ReleaseCapsuleError("capsule payload steps must be a nonempty ordered list")
+    _require_checkpoint_or_migration(payload_definition["steps"])
     budget = payload_definition["databaseObjectBudgetSeconds"]
     if budget is not None and (type(budget) is not int or not 1 <= budget <= 300):
         raise ReleaseCapsuleError("capsule object budget is malformed")

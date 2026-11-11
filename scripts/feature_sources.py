@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture whole stored packages and write digest-bound feature source reviews."""
+"""Capture whole stored units (packages, types, triggers, procedures, functions) and write digest-bound feature source reviews."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
@@ -30,10 +31,47 @@ IDENTITY_FIELDS = (
     "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
     "container_id", "container_name", "edition", "database_version",
 )
+# Metadata of a package capture keeps its original field set; the other groups name their group and unit.
+PACKAGE_METADATA_FIELDS = frozenset({"schemaVersion", "feature", "schema", "package", "identity", "units"})
+UNIT_METADATA_FIELDS = frozenset({"schemaVersion", "feature", "schema", "group", "unit", "identity", "units"})
 
 
 class FeatureSourcesError(ValueError):
-    """A package capture or source-review request is unsafe or incomplete."""
+    """A stored-unit capture or source-review request is unsafe or incomplete."""
+
+
+@dataclass(frozen=True)
+class UnitGroup:
+    """One capture unit: a package or type with its optional body, or a single trigger, procedure or function."""
+
+    name: str
+    directory: str
+    types: tuple[tuple[str, str], ...]  # (object type, file suffix); the first type is required
+
+    @property
+    def kinds(self) -> tuple[str, ...]:
+        return tuple(kind for kind, _suffix in self.types)
+
+    def suffix(self, kind: str) -> str:
+        return dict(self.types)[kind]
+
+
+UNIT_GROUPS: tuple[UnitGroup, ...] = (
+    UnitGroup("package", "packages", (("PACKAGE", "pks"), ("PACKAGE BODY", "pkb"))),
+    UnitGroup("type", "types", (("TYPE", "tps"), ("TYPE BODY", "tpb"))),
+    UnitGroup("trigger", "triggers", (("TRIGGER", "trg"),)),
+    UnitGroup("procedure", "procedures", (("PROCEDURE", "prc"),)),
+    UnitGroup("function", "functions", (("FUNCTION", "fnc"),)),
+)
+UNIT_GROUP_BY_NAME = {group.name: group for group in UNIT_GROUPS}
+UNIT_GROUP_BY_KIND = {kind: group for group in UNIT_GROUPS for kind in group.kinds}
+
+
+def _unit_group(name: str) -> UnitGroup:
+    group = UNIT_GROUP_BY_NAME.get(name) if isinstance(name, str) else None
+    if group is None:
+        raise FeatureSourcesError(f"unsupported unit group: {name!r}")
+    return group
 
 
 def _feature_scope(root: Path, feature: str, schema: str) -> tuple[Path, Path]:
@@ -159,20 +197,20 @@ def _atomic_group_write(root: Path, outputs: Mapping[Path, bytes], deletes: Sequ
                 pass
 
 
-def _package_name(value: str) -> str:
+def _unit_name(value: str, label: str = "package") -> str:
     if not isinstance(value, str) or not value:
-        raise FeatureSourcesError("package must be a nonempty Oracle identifier")
+        raise FeatureSourcesError(f"{label} must be a nonempty Oracle identifier")
     if QUOTED_PACKAGE_NAME_RE.fullmatch(value):
         name = value[1:-1].replace('""', '"')
         if not name or any(ord(char) < 32 for char in name):
-            raise FeatureSourcesError("quoted package name is empty or contains a control character")
+            raise FeatureSourcesError(f"quoted {label} name is empty or contains a control character")
         return name
     if PACKAGE_NAME_RE.fullmatch(value) is None:
-        raise FeatureSourcesError("package must be an Oracle identifier or a double-quoted identifier")
+        raise FeatureSourcesError(f"{label} must be an Oracle identifier or a double-quoted identifier")
     return value.upper()
 
 
-def _package_stem(name: str) -> str:
+def _unit_stem(name: str) -> str:
     if name.isascii() and name.upper() == name and PACKAGE_NAME_RE.fullmatch(name) is not None:
         return name.lower()
     try:
@@ -188,13 +226,23 @@ def _package_stem(name: str) -> str:
     return f"quoted-{hint}-{hashlib.sha256(encoded_name).hexdigest()}"
 
 
-def _package_source_path(feature_dir: Path, name: str, object_type: str) -> Path:
-    suffix = "pks" if object_type == "PACKAGE" else "pkb"
-    return feature_dir / "packages" / f"{_package_stem(name)}.{suffix}.sql"
+def _unit_source_path(feature_dir: Path, name: str, object_type: str) -> Path:
+    group = UNIT_GROUP_BY_KIND[object_type]
+    return feature_dir / group.directory / f"{_unit_stem(name)}.{group.suffix(object_type)}.sql"
 
 
-def _capture_metadata_path(scratch_dir: Path, package: str) -> Path:
-    return scratch_dir / f"capture-{_package_stem(package)}.json"
+def _capture_metadata_path(scratch_dir: Path, group: str, unit: str) -> Path:
+    stem = _unit_stem(unit)
+    if group == "package":
+        return scratch_dir / f"capture-{stem}.json"
+    return scratch_dir / f"capture-{group}-{stem}.json"
+
+
+def _metadata_scope(metadata: Mapping) -> tuple[str, str]:
+    """The (group, unit name) a validated capture metadata document covers."""
+    if "group" in metadata:
+        return metadata["group"], metadata["unit"]
+    return "package", metadata["package"]
 
 
 def _strict_capture_metadata(path: Path, root: Path) -> dict | None:
@@ -217,8 +265,12 @@ def _strict_capture_metadata(path: Path, root: Path) -> dict | None:
         value = json.loads(text, object_pairs_hook=unique_pairs)
     except (UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise FeatureSourcesError(f"feature capture metadata is invalid: {error}") from error
-    if not isinstance(value, dict) or set(value) != {"schemaVersion", "feature", "schema", "package", "identity", "units"}:
+    if not isinstance(value, dict) or set(value) not in (PACKAGE_METADATA_FIELDS, UNIT_METADATA_FIELDS):
         raise FeatureSourcesError("feature capture metadata has unsupported or missing fields")
+    if set(value) == UNIT_METADATA_FIELDS and (
+        value["group"] not in UNIT_GROUP_BY_NAME or value["group"] == "package" or not isinstance(value["unit"], str) or not value["unit"]
+    ):
+        raise FeatureSourcesError("feature capture metadata group or unit is malformed")
     if type(value["schemaVersion"]) is not int or value["schemaVersion"] != CAPTURE_SCHEMA_VERSION:
         raise FeatureSourcesError("feature capture metadata schemaVersion must be integer 1")
     if not isinstance(value["identity"], dict) or not isinstance(value["units"], list):
@@ -228,6 +280,13 @@ def _strict_capture_metadata(path: Path, root: Path) -> dict | None:
         for field in IDENTITY_FIELDS
     ):
         raise FeatureSourcesError("feature capture metadata observed identity is incomplete")
+    group, unit_name = _metadata_scope(value)
+    if not isinstance(unit_name, str) or not unit_name:
+        raise FeatureSourcesError("feature capture metadata names no unit")
+    kinds = UNIT_GROUP_BY_NAME[group].kinds
+    for unit in value["units"]:
+        if isinstance(unit, dict) and (unit.get("type") not in kinds or unit.get("name") != unit_name):
+            raise FeatureSourcesError("feature capture metadata lists a unit outside its own group")
     return value
 
 
@@ -249,9 +308,11 @@ def _metadata_path(value: object, *, prefix: tuple[str, ...], label: str) -> Pur
 def _capture_sources(
     feature: str,
     schema: str,
-    package: str,
+    unit: str,
     catalog: Mapping,
+    group: str = "package",
 ) -> tuple[dict, ...]:
+    unit_group = _unit_group(group)
     sections = catalog.get("sections") if isinstance(catalog, Mapping) else None
     if not isinstance(sections, Mapping):
         raise FeatureSourcesError("DEV source capture has no baseline sections")
@@ -262,11 +323,11 @@ def _capture_sources(
     config = {"prefixes": [], "excludedObjects": []}
     source_units = baseline._source_units(catalog, config, schema)
     settings_map = baseline._settings_map(catalog, config, schema)
-    selected = [(kind, package) for kind in ("PACKAGE", "PACKAGE BODY") if (kind, package) in source_units]
+    selected = [(kind, unit) for kind in unit_group.kinds if (kind, unit) in source_units]
     if not selected:
-        raise FeatureSourcesError(f"package {package} was not found in {schema} on DEV")
-    if selected[0] != ("PACKAGE", package):
-        raise FeatureSourcesError(f"package specification was not found in {schema} on DEV: {package}")
+        raise FeatureSourcesError(f"{unit_group.name} {unit} was not found in {schema} on DEV")
+    if selected[0] != (unit_group.kinds[0], unit):
+        raise FeatureSourcesError(f"{unit_group.kinds[0].lower()} specification was not found in {schema} on DEV: {unit}")
 
     records: list[dict] = []
     for object_type, name in selected:
@@ -279,7 +340,7 @@ def _capture_sources(
         except (baseline.BaselineError, new_migration.NewMigrationError, KeyError, TypeError, ValueError) as error:
             raise FeatureSourcesError(f"captured {object_type} {name} is incomplete: {error}") from error
         source = sql.encode("utf-8")
-        relative_path = _package_source_path(Path("features") / feature / schema, name, object_type).as_posix()
+        relative_path = _unit_source_path(Path("features") / feature / schema, name, object_type).as_posix()
         records.append({
             "type": object_type,
             "name": name,
@@ -290,8 +351,8 @@ def _capture_sources(
     return tuple(records)
 
 
-def _unit_keys(schema: str, name: str) -> tuple[tuple[str, str, str], ...]:
-    return ((schema, "PACKAGE", name), (schema, "PACKAGE BODY", name))
+def _group_keys(schema: str, group: UnitGroup, name: str) -> tuple[tuple[str, str, str], ...]:
+    return tuple((schema, kind, name) for kind in group.kinds)
 
 
 def _preview(lines: Sequence[str], limit: int = 10) -> str:
@@ -382,12 +443,36 @@ def capture_package(
     keep_file: bool = False,
     report: list[str] | None = None,
 ) -> tuple[Path, ...]:
-    """Capture the complete DEV package spec/body into stable feature source files.
+    """Capture the complete DEV package spec/body into stable feature source files (the `package` unit group)."""
+    return capture_unit(
+        repo_root, feature, schema, "package", package,
+        environ=environ, refresh=refresh, move_from=move_from, discard_unapplied=discard_unapplied,
+        keep_file=keep_file, report=report,
+    )
 
-    A package another feature holds is refused unless `move_from` names that feature. A move or a refresh first
+
+def capture_unit(
+    repo_root: Path,
+    feature: str,
+    schema: str,
+    group: str,
+    unit: str,
+    *,
+    environ: Mapping[str, str],
+    refresh: bool = False,
+    move_from: str | None = None,
+    discard_unapplied: bool = False,
+    keep_file: bool = False,
+    report: list[str] | None = None,
+) -> tuple[Path, ...]:
+    """Capture one DEV stored unit group (package, type, trigger, procedure or function) into feature source files.
+
+    A unit another feature holds is refused unless `move_from` names that feature. A move or a refresh first
     compares the file it replaces with DEV and stops when the file has lines DEV lacks, unless `discard_unapplied`.
     `keep_file` moves the old bytes unchanged instead of capturing from DEV.
     """
+    unit_group = _unit_group(group)
+    label = unit_group.name
     requested_root = Path(repo_root)
     if requested_root.is_symlink():
         raise FeatureSourcesError("repository root cannot be a symlink")
@@ -396,7 +481,7 @@ def capture_package(
     except OSError as error:
         raise FeatureSourcesError(f"repository root is unavailable: {error}") from error
     feature_dir, scratch_dir = _feature_scope(root, feature, schema)
-    name = _package_name(package)
+    name = _unit_name(unit, label)
     if type(refresh) is not bool or type(discard_unapplied) is not bool or type(keep_file) is not bool:
         raise FeatureSourcesError("refresh, discard_unapplied and keep_file must be booleans")
     if not isinstance(environ, Mapping):
@@ -405,36 +490,36 @@ def capture_package(
         if not isinstance(move_from, str) or FEATURE_RE.fullmatch(move_from) is None:
             raise FeatureSourcesError("move-from must be a lowercase hyphenated feature slug")
         if move_from == feature:
-            raise FeatureSourcesError("move-from names the feature that receives the package")
+            raise FeatureSourcesError(f"move-from names the feature that receives the {label}")
     if keep_file and move_from is None:
         raise FeatureSourcesError("keep-file only applies to a move: pass --move-from")
     messages = report if report is not None else []
 
-    # Ownership: a package another feature holds is not captured a second time.
+    # Ownership: a unit another feature holds is not captured a second time.
     claims, _unanalysed = feature_claims.collect_claims(root)
-    keys = _unit_keys(schema, name)
+    keys = _group_keys(schema, unit_group, name)
     other_claims = [claim for claim in claims if claim.key in keys and claim.feature != feature]
     other_holders = sorted({claim.feature for claim in other_claims})
     if other_holders and move_from is None:
         raise FeatureSourcesError(
-            f"package {name} is held by feature {', '.join(other_holders)}; "
+            f"{label} {name} is held by feature {', '.join(other_holders)}; "
             f"to take it over run the capture with --move-from {other_holders[0]}, or leave it there"
         )
     if move_from is not None:
         if move_from not in other_holders:
-            raise FeatureSourcesError(f"feature {move_from} does not hold package {name} in {schema}")
+            raise FeatureSourcesError(f"feature {move_from} does not hold {label} {name} in {schema}")
         if set(other_holders) - {move_from}:
             raise FeatureSourcesError(
-                f"package {name} is also held by feature {', '.join(sorted(set(other_holders) - {move_from}))}; keep one owner first"
+                f"{label} {name} is also held by feature {', '.join(sorted(set(other_holders) - {move_from}))}; keep one owner first"
             )
     old_files = {claim.kind: root / PurePosixPath(claim.path) for claim in other_claims if claim.feature == move_from}
 
     _ensure_directory(scratch_dir, root)
-    metadata_path = _capture_metadata_path(scratch_dir, name)
+    metadata_path = _capture_metadata_path(scratch_dir, label, name)
     old_metadata = _strict_capture_metadata(metadata_path, root)
     if old_metadata is not None:
-        if (old_metadata["feature"], old_metadata["schema"], old_metadata["package"]) != (feature, schema, name):
-            raise FeatureSourcesError("feature capture metadata scope does not match this package")
+        if (old_metadata["feature"], old_metadata["schema"], _metadata_scope(old_metadata)) != (feature, schema, (label, name)):
+            raise FeatureSourcesError(f"feature capture metadata scope does not match this {label}")
 
     outputs: dict[Path, bytes] = {}
     deletes: list[Path] = []
@@ -442,21 +527,21 @@ def capture_package(
     if keep_file:
         # Move the old bytes unchanged; nothing is read from DEV.
         source_paths = []
-        for object_type in ("PACKAGE", "PACKAGE BODY"):
+        for object_type in unit_group.kinds:
             old_path = old_files.get(object_type)
             if old_path is None:
                 continue
             raw = _ordinary_file(old_path, root)
             if raw is None:
                 raise FeatureSourcesError(f"feature file to move is unreadable: {relative_to_root(old_path, root).as_posix()}")
-            target = _package_source_path(feature_dir, name, object_type)
+            target = _unit_source_path(feature_dir, name, object_type)
             if _ordinary_file(target, root) is not None:
                 raise FeatureSourcesError(f"feature already has a file at {relative_to_root(target, root).as_posix()}")
             outputs[target] = raw
             deletes.append(old_path)
             source_paths.append(target)
         moved_units = {(kind, name) for kind in old_files}
-        _finish_move(root, feature, move_from, schema, name, moved_units, outputs, deletes, messages, keep_file=True)
+        _finish_move(root, feature, move_from, schema, label, name, moved_units, outputs, deletes, messages, keep_file=True)
         _atomic_group_write(root, outputs, deletes)
         messages.append(f"moved {name} from {move_from} to {feature} unchanged; DEV was not read. Run a capture with --refresh after the file equals DEV to retain a DEV baseline")
         return tuple(source_paths)
@@ -472,21 +557,21 @@ def capture_package(
                 capture_root,
                 # The existing SQL filter uppercases prefixes, so it cannot select a
                 # case-sensitive quoted name. In that case capture the source sections
-                # completely, then retain only the exact requested package in memory.
+                # completely, then retain only the exact requested unit in memory.
                 baseline_prefixes=[name] if name == name.upper() else [],
             )
             baseline._complete(catalog, ("baseline-source", "baseline-settings"))
-            identity = baseline._source_identity(catalog.get("identity"), "DEV package capture")
+            identity = baseline._source_identity(catalog.get("identity"), f"DEV {label} capture")
         except (baseline.BaselineError, OSError, ValueError) as error:
-            raise FeatureSourcesError(f"DEV package capture failed: {error}") from error
+            raise FeatureSourcesError(f"DEV {label} capture failed: {error}") from error
     finally:
         shutil.rmtree(capture_root, ignore_errors=True)
     if identity["current_schema"].upper() != schema:
         raise FeatureSourcesError(
-            f"DEV package capture current schema {identity['current_schema']!r} does not match {schema}"
+            f"DEV {label} capture current schema {identity['current_schema']!r} does not match {schema}"
         )
     try:
-        records = _capture_sources(feature, schema, name, catalog)
+        records = _capture_sources(feature, schema, name, catalog, group=label)
     except FeatureSourcesError as error:
         if move_from is not None:
             raise FeatureSourcesError(f"{error}; pass --keep-file to move the old file without DEV") from error
@@ -544,7 +629,7 @@ def capture_package(
     if move_from is not None:
         for old_path in old_files.values():
             deletes.append(old_path)
-        _finish_move(root, feature, move_from, schema, name, {(kind, name) for kind in old_files}, outputs, deletes, messages, keep_file=False)
+        _finish_move(root, feature, move_from, schema, label, name, {(kind, name) for kind in old_files}, outputs, deletes, messages, keep_file=False)
 
     if old_metadata is not None:
         current_keys = {(record["type"], record["name"]) for record in records}
@@ -568,20 +653,21 @@ def capture_package(
             if not isinstance(unit.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", unit["sha256"], re.ASCII) is None:
                 raise FeatureSourcesError("feature capture metadata unit hash is malformed")
             if current_hashes.get(key) != unit["sha256"] and not refresh:
-                raise FeatureSourcesError("live package source changed since its last capture; review it or use refresh")
+                raise FeatureSourcesError(f"live {label} source changed since its last capture; review it or use refresh")
             if key not in current_keys:
                 if not refresh:
-                    raise FeatureSourcesError("live package unit set changed; review it or use refresh")
+                    raise FeatureSourcesError(f"live {label} unit set changed; review it or use refresh")
                 deletes.append(root / source_rel)
                 deletes.append(root / captured_rel)
         if prior_keys != current_keys and not refresh:
-            raise FeatureSourcesError("live package unit set changed; review it or use refresh")
+            raise FeatureSourcesError(f"live {label} unit set changed; review it or use refresh")
 
+    scope_fields = {"package": name} if label == "package" else {"group": label, "unit": name}
     metadata = {
         "schemaVersion": CAPTURE_SCHEMA_VERSION,
         "feature": feature,
         "schema": schema,
-        "package": name,
+        **scope_fields,
         "identity": identity,
         "units": new_units,
     }
@@ -596,6 +682,7 @@ def _finish_move(
     feature: str,
     old_feature: str,
     schema: str,
+    group: str,
     name: str,
     units: set[tuple[str, str]],
     outputs: dict[Path, bytes],
@@ -613,7 +700,7 @@ def _finish_move(
     messages.append(f"add a check for {name} to features/{feature}/{schema}/checks.json if the feature has none for it")
     # Retained DEV baseline of the old owner.
     old_scratch = root / "scratch" / "feature-source" / old_feature / schema
-    old_meta = _capture_metadata_path(old_scratch, name)
+    old_meta = _capture_metadata_path(old_scratch, group, name)
     old_meta_data = _strict_capture_metadata(old_meta, root)
     if old_meta_data is not None:
         for unit in old_meta_data["units"]:

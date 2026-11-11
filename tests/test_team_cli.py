@@ -27,6 +27,15 @@ def set_environment_value(environment: dict[str, str], name: str, value: str | N
         environment[name] = value
 
 
+def feature_cli_checkout(parent: Path) -> Path:
+    """Copy the CLI into a checkout with glob characters and Unicode in its path."""
+    root = parent / "feature project [unicode] café"
+    root.mkdir()
+    shutil.copytree(ROOT / "scripts", root / "scripts")
+    return root
+
+
+
 class TeamCliTests(unittest.TestCase):
     def migration_plan_checkout(self, parent: Path, *, env_contents: str | None = None, sqlcl_version: str = "26.2.0.0"):
         """Copy only the real wrappers into a checkout path that stresses spaces and glob characters."""
@@ -959,8 +968,37 @@ exit 17
                     text=True, capture_output=True, check=False, cwd=ROOT,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                for operation in ("init", "capture", "diff", "freeze", "clean-capsule"):
+                for operation in ("init", "capture", "diff", "freeze", "clean-capsule", "reconcile-run", "convert-plan"):
                     self.assertIn(operation, result.stdout)
+
+    def test_feature_convert_plan_routes_through_both_wrappers_offline_in_a_unicode_glob_checkout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="convert wrapper ") as temporary:
+            root = feature_cli_checkout(Path(temporary))
+            folder = "migrations/APP_CODE/2026-01-05_wrapper-r001"
+            (root / folder).mkdir(parents=True)
+            (root / folder / "001-table.sql").write_text("CREATE TABLE wrapper_t (id NUMBER);\n", encoding="utf-8", newline="\n")
+            checks = {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "after", "sql": "SELECT 1 FROM dual", "expected": 1}]}
+            (root / folder / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8", newline="\n")
+            entries = [("team.sh", [BASH, str(root / "scripts" / "team.sh")])]
+            pwsh = _test_subprocess_safety.working_pwsh()
+            if pwsh:
+                entries.append(("team.ps1", [pwsh, "-NoProfile", "-File", str(root / "scripts" / "team.ps1")]))
+            for name, launcher in entries:
+                with self.subTest(wrapper=name):
+                    result = subprocess.run(
+                        [*launcher, "feature", "convert-plan", folder, "--feature", "wrapper-demo", "--format", "json"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env=dict(os.environ, PROJECT_ENV_FILE="/no/such/team-env"),
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    report = json.loads(result.stdout)
+                    self.assertEqual("convertible", report["folders"][0]["verdict"])
+                    self.assertEqual([folder], report["archive"])
+                    self.assertFalse((root / ".env").exists())
+
 
     def test_team_sh_refuses_a_bash_older_than_4_4_with_one_line_and_status_2(self) -> None:
         # No Bash 3.2 is installed here, so the guard is tested as a function fed the version parts that BASH_VERSINFO

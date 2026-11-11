@@ -543,6 +543,34 @@ class ReleaseCapsuleTests(unittest.TestCase):
         with self.assertRaisesRegex(self.release_capsule.ReleaseCapsuleError, "engine file is missing"):
             self.release_capsule.capsule_engine_digest(self.root)
 
+    def test_migration_only_release_freezes_and_loads_without_a_feature_checkpoint(self) -> None:
+        folder = "migrations/APP_CODE/2026-01-01_legacy-r001"
+        migration = self.root / folder
+        migration.mkdir(parents=True)
+        (migration / "001-create-legacy.sql").write_text("CREATE TABLE APP_CODE.LEGACY (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        (migration / "checks.json").write_text(json.dumps(CHECKS) + "\n", encoding="utf-8")
+        self.manifest_path.write_text(
+            json.dumps({"schemaVersion": 2, "steps": [{"type": "migrate", "folders": [folder]}]}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.commit("migration-only release")
+
+        capsule = self.release_capsule.build_capsule(self.root, self.manifest_path, (), {})
+
+        self.assertEqual(capsule.checkpoints, ())
+        self.assertEqual(self.release_capsule.load_capsule(self.root, capsule.root).checkpoints, ())
+        document = json.loads((capsule.root / "capsule.json").read_text(encoding="utf-8"))
+        self.assertEqual(document["checkpoints"], [])
+        self.assertEqual([step["type"] for step in document["payloadDefinition"]["steps"]], ["migrate"])
+
+    def test_release_with_neither_a_checkpoint_nor_a_migration_is_refused_at_freeze(self) -> None:
+        self.manifest_path.write_text(
+            json.dumps({"schemaVersion": 2, "steps": [{"type": "pause", "message": "review"}]}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(self.release_capsule.ReleaseCapsuleError, "feature checkpoint or migrate step"):
+            self.release_capsule.build_capsule(self.root, self.manifest_path, (), {})
+
 
 if __name__ == "__main__":
     unittest.main()

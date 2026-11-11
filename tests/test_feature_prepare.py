@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import tempfile
@@ -7,9 +8,11 @@ from dataclasses import replace
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.db_targets import Target
+from scripts.migration_checks import PreflightReport
 from scripts.feature_manifest import FeatureCheckpoint, FeatureInput
 from scripts.migration_manifest import QueryCheck
 from scripts.release_capsule import ReleaseCapsule
@@ -709,6 +712,305 @@ class FeaturePrepareTests(unittest.TestCase):
         self.assertEqual(stage_plan["payloadDigest"], prod_plan["payloadDigest"])
         self.assertNotEqual(stage_plan["planDigest"], prod_plan["planDigest"])
 
+    MIGRATION_FOLDER = "migrations/APP_CODE/2026-01-01_legacy-r001"
+    MIGRATION_PAYLOAD = "a" * 64
+    MIGRATION_CHECKS = "b" * 64
+    PROFILE = {
+        "STAGING_MIGRATION_SCHEMA": "APP_CODE",
+        "STAGING_MIGRATION_SQLCL_CONNECTION": "stage-data-alias",
+        "STAGING_MIGRATION_EXPECTED_USER": "STAGE_WRITER",
+    }
+    TWO_SCHEMAS = {
+        "STAGING_MIGRATION_SCHEMA": "APP_CODE,APP_OTHER",
+        "STAGING_MIGRATION_SQLCL_CONNECTION": "stage-data-alias,stage-other-alias",
+        "STAGING_MIGRATION_EXPECTED_USER": "STAGE_WRITER,OTHER_WRITER",
+    }
+    ONE_DEV_SCHEMA_MAPPED = {
+        "CODE_SCHEMA": "APP_CODE",
+        "CODE_SQLCL_CONNECTION": "dev-alias",
+        "CODE_EXPECTED_USER": "APP_CODE",
+        "DB_ENVIRONMENT": "development",
+        "STAGING_SCHEMA": "APP_STAGE",
+        "STAGING_SQLCL_CONNECTION": "stage-data-alias",
+        "STAGING_EXPECTED_USER": "STAGE_WRITER",
+    }
+
+    def _auxiliary_migration(
+        self, steps, report, *, environ=None, logical="APP_CODE", resolved="APP_CODE", folder=None, identity=None,
+    ):
+        """Prepare the bindings of migrate steps with the live preflight outcome supplied, reading no database."""
+        from scripts import feature_release, migration_checks, rollout
+
+        migrations = (SimpleNamespace(
+            folder=self.root / (folder or self.MIGRATION_FOLDER), schema=logical,
+            payload_digest=self.MIGRATION_PAYLOAD, checks_sha256=self.MIGRATION_CHECKS,
+        ),)
+        target = Target("staging", "stage-data-alias", "STAGE_WRITER", resolved, "staging")
+        observed = (
+            dict(IDENTITY_FIELDS, session_user="STAGE_WRITER", current_schema=resolved) if identity is None else identity
+        )
+        values = self.PROFILE if environ is None else environ
+        with patch.object(rollout, "_migration_step_target", return_value=(logical, target, migrations)), \
+                patch.object(rollout, "_observe_target_identity", return_value=observed), \
+                patch.object(migration_checks, "_live_report", return_value=report):
+            return feature_release._auxiliary_targets(self.root, steps, "staging", values)
+
+    def test_migrate_preflight_clear_is_recorded_with_its_folder_digests(self) -> None:
+        steps = [{"type": "migrate", "folders": [self.MIGRATION_FOLDER]}]
+        record = self._auxiliary_migration(steps, PreflightReport(0, (), (), {}))["step:1"]
+
+        self.assertEqual(record["preflight"]["state"], "clear")
+        self.assertEqual(record["preflight"]["exitCode"], 0)
+        self.assertEqual(record["logicalSchema"], "APP_CODE")
+        self.assertEqual(record["operation"], "migration")
+        self.assertEqual(record["folders"], [{
+            "path": self.MIGRATION_FOLDER, "payloadDigest": self.MIGRATION_PAYLOAD, "checksSha256": self.MIGRATION_CHECKS,
+        }])
+
+    def test_migrate_missing_prerequisite_created_by_an_earlier_step_is_deferred_and_recorded(self) -> None:
+        conflict = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V_ORDERS"}
+        steps = [{"type": "feature-migrate", "schema": "APP_CODE"}, {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}]
+        preflight = self._auxiliary_migration(steps, PreflightReport(1, (conflict,), (), {}))["step:2"]["preflight"]
+
+        self.assertEqual(preflight["state"], "deferred")
+        self.assertEqual(preflight["exitCode"], 1)
+        self.assertEqual(preflight["conflicts"], [conflict])
+        self.assertEqual(preflight["errors"], [])
+
+    def test_migrate_preflight_refusals_stop_the_prepare_and_name_the_conflict(self) -> None:
+        from scripts import feature_release
+
+        missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}
+        occupied = {"code": "LIVE_NAMESPACE_OCCUPIED", "name": "V", "namespace": "COMMON", "existing_types": ["TABLE"]}
+        feature = {"type": "feature-migrate", "schema": "APP_CODE"}
+        migrate = {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}
+        cases = (
+            ("occupied name", [feature, migrate], PreflightReport(1, (occupied,), (), {}), "LIVE_NAMESPACE_OCCUPIED"),
+            ("missing prerequisite with no earlier step", [migrate], PreflightReport(1, (missing,), (), {}), "MISSING_PREREQUISITE"),
+            (
+                "preflight error", [feature, migrate],
+                PreflightReport(2, (), ({"code": "LIVE_PREFLIGHT_UNAVAILABLE", "message": "unreachable"},), {}),
+                "LIVE_PREFLIGHT_UNAVAILABLE",
+            ),
+        )
+        for label, steps, report, expected in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(feature_release.FeatureReleaseError, f"migration preflight refused.*{expected}"):
+                self._auxiliary_migration(steps, report)
+
+    def test_migrate_preflight_that_observes_another_identity_refuses(self) -> None:
+        from scripts import feature_release
+
+        report = PreflightReport(0, (), (), {"observedIdentity": dict(IDENTITY_FIELDS, session_user="STAGE_WRITER", db_unique_name="OTHER_UNIQUE")})
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "different target identity"):
+            self._auxiliary_migration([{"type": "migrate", "folders": [self.MIGRATION_FOLDER]}], report)
+
+    def test_plan_digest_changes_when_the_migrate_preflight_outcome_changes(self) -> None:
+        from scripts import feature_release
+
+        steps = [{"type": "feature-migrate", "schema": "APP_CODE"}, {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}]
+        missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}
+        clear = self._auxiliary_migration(steps, PreflightReport(0, (), (), {}))
+        deferred = self._auxiliary_migration(steps, PreflightReport(1, (missing,), (), {}))
+
+        clear_digest = feature_release._plan_data("staging", self.capsule, clear, (), None, None)["planDigest"]
+        deferred_digest = feature_release._plan_data("staging", self.capsule, deferred, (), None, None)["planDigest"]
+        self.assertNotEqual(clear_digest, deferred_digest)
+
+    def test_migrate_binding_is_validated_strictly_when_the_plan_is_loaded(self) -> None:
+        from scripts import feature_release
+
+        step = {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}
+        steps = [{"type": "feature-migrate", "schema": "APP_CODE"}, step]
+        missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}
+        clear = self._auxiliary_migration([step], PreflightReport(0, (), (), {}))["step:1"]
+        deferred = self._auxiliary_migration(steps, PreflightReport(1, (missing,), (), {}))["step:2"]
+        migrations = [SimpleNamespace(payload_digest=self.MIGRATION_PAYLOAD, checks_sha256=self.MIGRATION_CHECKS)]
+
+        def validate(candidate, earlier=()):
+            with patch.object(feature_release, "load_batch", return_value=migrations):
+                feature_release._validate_migration_binding(self.root, 1, step, candidate, list(earlier))
+
+        validate(clear)
+        validate(deferred, earlier=["APP_CODE"])
+        invalid = {
+            "folder digest changed": dict(clear, folders=[dict(clear["folders"][0], payloadDigest="c" * 64)]),
+            "extra preflight field": dict(clear, preflight=dict(clear["preflight"], extra=1)),
+            "clear with a conflict": dict(clear, preflight=dict(clear["preflight"], conflicts=[missing])),
+            "malformed report digest": dict(clear, preflight=dict(clear["preflight"], reportSha256="not-a-digest")),
+            "deferred without an earlier step": deferred,
+        }
+        for label, candidate in invalid.items():
+            with self.subTest(label=label), self.assertRaises(feature_release.FeatureReleaseError):
+                validate(candidate)
+
+    def test_plan_schema_version_three_is_refused(self) -> None:
+        from scripts import feature_release
+
+        document = {
+            "schemaVersion": 3, "environment": "staging", "payloadDigest": self.payload_digest,
+            "engineDigest": self.engine_digest, "sourceCommit": self.capsule.source_commit, "recoveryAttempt": None,
+            "recoveryBinding": None, "targets": {}, "checkpointGuards": [], "reviewPaths": [], "planDigest": "0" * 64,
+        }
+        path = self.root / "scratch" / "feature-release-plans" / "staging" / f"{self.payload_digest}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "schemaVersion is unsupported"):
+            feature_release.load_target_plan(self.root, self.capsule, "staging")
+
+    def _stored_plan(self, steps, targets):
+        """Write a canonical stored plan for these steps and bindings, then load it through load_target_plan."""
+        from scripts import feature_release
+
+        guards = [{"checkpoint": 1, "schema": "APP_CODE", "targetKey": "schema:APP_CODE", "reviews": []}]
+        plan = feature_release._plan_data("staging", self.capsule, targets, guards, None, None)
+        path = self.root / "scratch" / "feature-release-plans" / "staging" / f"{self.payload_digest}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        migrations = [SimpleNamespace(payload_digest=self.MIGRATION_PAYLOAD, checks_sha256=self.MIGRATION_CHECKS)]
+        with patch.object(feature_release, "_manifest_steps", return_value=steps), \
+                patch.object(feature_release, "_checkpoint_guard", return_value={}), \
+                patch.object(feature_release, "load_batch", return_value=migrations):
+            return feature_release.load_target_plan(self.root, self.capsule, "staging")
+
+    def _stored_targets(self, *, feature_schema="APP_CODE", migrate_schema="APP_CODE", state="clear"):
+        """Bindings for one feature checkpoint and one migrate step, as prepare records them."""
+        identity = dict(IDENTITY_FIELDS, session_user="STAGE_WRITER", current_schema=migrate_schema)
+        feature_binding = {
+            "environment": "staging", "connection": "stage-data-alias", "expectedUser": "STAGE_WRITER",
+            "schema": feature_schema, "classification": "staging", "observed": dict(identity, current_schema=feature_schema),
+        }
+        preflight = {"state": state, "exitCode": 0, "conflicts": [], "errors": [], "reportSha256": "d" * 64}
+        if state == "deferred":
+            preflight.update(exitCode=1, conflicts=[{"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}])
+        migrate_binding = {
+            "environment": "staging", "operation": "migration", "logicalSchema": "APP_CODE",
+            "connection": "stage-data-alias", "expectedUser": "STAGE_WRITER", "schema": migrate_schema,
+            "classification": "staging", "observed": identity,
+            "folders": [{"path": self.MIGRATION_FOLDER, "payloadDigest": self.MIGRATION_PAYLOAD, "checksSha256": self.MIGRATION_CHECKS}],
+            "preflight": preflight,
+        }
+        return {f"schema:{feature_schema}": feature_binding, "step:2": migrate_binding}
+
+    def test_stored_plan_re_derives_a_deferred_state_from_its_own_bindings(self) -> None:
+        from scripts import feature_release
+
+        migrate = {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}
+        earlier_same = [{"type": "feature-migrate", "schema": "APP_CODE"}, migrate]
+        loaded = self._stored_plan(earlier_same, self._stored_targets(state="deferred"))
+        self.assertEqual(loaded.targets["step:2"]["preflight"]["state"], "deferred")
+
+        earlier_other = [{"type": "feature-migrate", "schema": "APP_OTHER"}, migrate]
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "inconsistent with its recorded outcome"):
+            self._stored_plan(earlier_other, self._stored_targets(feature_schema="APP_OTHER", state="deferred"))
+
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "no resolved schema binding for feature step 1"):
+            self._stored_plan(earlier_other, self._stored_targets(feature_schema="APP_CODE", state="deferred"))
+
+    def test_stored_migrate_binding_is_refused_when_incomplete_or_inexact(self) -> None:
+        from scripts import feature_release
+
+        steps = [{"type": "feature-migrate", "schema": "APP_CODE"}, {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}]
+        base = self._stored_targets()
+        self._stored_plan(steps, copy.deepcopy(base))
+
+        def mutate(change):
+            targets = copy.deepcopy(base)
+            change(targets["step:2"])
+            return targets
+
+        cases = (
+            ("missing folders", lambda r: r.pop("folders")),
+            ("missing preflight", lambda r: r.pop("preflight")),
+            ("extra key", lambda r: r.update(extra=1)),
+            ("folder row with a wrong digest", lambda r: r["folders"][0].update(payloadDigest="c" * 64)),
+            ("preflight with an extra key", lambda r: r["preflight"].update(extra=1)),
+            ("preflight missing reportSha256", lambda r: r["preflight"].pop("reportSha256")),
+            ("non-hex reportSha256", lambda r: r["preflight"].update(reportSha256="G" * 64)),
+            ("uppercase reportSha256", lambda r: r["preflight"].update(reportSha256="A" * 64)),
+            ("unknown state", lambda r: r["preflight"].update(state="bogus")),
+        )
+        for label, change in cases:
+            with self.subTest(label=label), self.assertRaises(feature_release.FeatureReleaseError):
+                self._stored_plan(steps, mutate(change))
+
+    def test_flat_migration_folder_defers_to_an_earlier_checkpoint_on_the_same_resolved_schema(self) -> None:
+        flat = "migrations/2026-01-01_x-r001"
+        steps = [{"type": "feature-migrate", "schema": "APP_CODE"}, {"type": "migrate", "folders": [flat]}]
+        missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}
+        record = self._auxiliary_migration(
+            steps, PreflightReport(1, (missing,), (), {}), logical=None, folder=flat,
+        )["step:2"]
+
+        self.assertIsNone(record["logicalSchema"])
+        self.assertEqual(record["schema"], "APP_CODE")
+        self.assertEqual(record["preflight"]["state"], "deferred")
+
+    def test_missing_prerequisite_from_an_earlier_checkpoint_on_another_resolved_schema_is_refused(self) -> None:
+        from scripts import feature_release
+
+        missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}
+        steps = [
+            {"type": "feature-migrate", "schema": "APP_OTHER"},
+            {"type": "migrate", "folders": [self.MIGRATION_FOLDER]},
+        ]
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "migration preflight refused.*MISSING_PREREQUISITE"):
+            self._auxiliary_migration(steps, PreflightReport(1, (missing,), (), {}), environ=self.TWO_SCHEMAS)
+
+    def test_one_dev_schema_mapped_to_a_differently_named_staging_schema_defers_on_the_resolved_name(self) -> None:
+        missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}
+        steps = [
+            {"type": "feature-migrate", "schema": "APP_CODE"},
+            {"type": "migrate", "folders": [self.MIGRATION_FOLDER]},
+        ]
+        targets = self._auxiliary_migration(
+            steps, PreflightReport(1, (missing,), (), {}), environ=self.ONE_DEV_SCHEMA_MAPPED,
+            logical="APP_CODE", resolved="APP_STAGE",
+        )
+
+        self.assertEqual(targets["step:2"]["logicalSchema"], "APP_CODE")
+        self.assertEqual(targets["step:2"]["schema"], "APP_STAGE")
+        self.assertEqual(targets["step:2"]["preflight"]["state"], "deferred")
+
+    def test_migration_only_capsule_without_its_step_list_is_refused_not_truncated(self) -> None:
+        from scripts import feature_release
+
+        capsule = replace(self.capsule, checkpoints=())
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "step list is unavailable"):
+            feature_release._manifest_steps(capsule)
+
+    def test_migration_only_capsule_prepares_and_loads_a_plan_with_no_checkpoint_guards(self) -> None:
+        from scripts import feature_release, migration_checks, rollout
+
+        capsule = replace(self.capsule, checkpoints=())
+        steps = [{"type": "migrate", "folders": [self.MIGRATION_FOLDER]}]
+        migrations = (SimpleNamespace(
+            folder=self.root / self.MIGRATION_FOLDER, schema="APP_CODE",
+            payload_digest=self.MIGRATION_PAYLOAD, checks_sha256=self.MIGRATION_CHECKS,
+        ),)
+        target = Target("staging", "stage-data-alias", "STAGE_WRITER", "APP_CODE", "staging")
+        observed = dict(IDENTITY_FIELDS, session_user="STAGE_WRITER")
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=capsule), \
+                patch.object(feature_release, "_manifest_steps", return_value=steps), \
+                patch.object(rollout, "_migration_step_target", return_value=("APP_CODE", target, migrations)), \
+                patch.object(rollout, "_observe_target_identity", return_value=observed), \
+                patch.object(migration_checks, "_live_report", return_value=PreflightReport(0, (), (), {})):
+            plan = feature_release.prepare_target(self.root, capsule, "staging", environ=self.PROFILE)
+
+        self.assertEqual(plan.checkpoint_guards, ())
+        self.assertEqual(set(plan.targets), {"step:1"})
+        self.assertEqual(plan.targets["step:1"]["preflight"]["state"], "clear")
+        with patch.object(feature_release, "_manifest_steps", return_value=steps), \
+                patch.object(feature_release, "load_batch", return_value=list(migrations)):
+            loaded = feature_release.load_target_plan(self.root, capsule, "staging")
+        self.assertEqual(loaded.plan_digest, plan.plan_digest)
+
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=capsule), \
+                self.assertRaisesRegex(feature_release.FeatureReleaseError, "no feature checkpoint"):
+            feature_release.prepare_target(
+                self.root, capsule, "staging", environ=self.PROFILE,
+                recovery_attempt="attempt-1", terminal_ack="RECONCILE attempt-1",
+            )
+
     def test_incomplete_or_conflicting_target_identity_refuses_preparation(self) -> None:
         from scripts import feature_release
 
@@ -848,6 +1150,257 @@ class FeaturePrepareTests(unittest.TestCase):
         self.assertFalse(plan.checkpoint_guards[0]["sourceGuards"][0]["targetExists"])
         guard = feature_release._checkpoint_guard(plan, 1, self.checkpoint)
         self.assertIsNone(guard["sourceGuards"][0]["beforeSourceSha256"])
+
+    def test_no_op_comparison_ignores_a_missing_final_newline_and_a_trigger_owner_qualifier(self) -> None:
+        from scripts import feature_release
+
+        # ALL_SOURCE may leave the last line of a type specification without its newline, and a captured
+        # file always ends its lines with one. The exact SQL check of that line already accepts both.
+        frozen = ['TYPE          "ORDER_T" as object (id number)\n', "            \n"]
+        self.assertTrue(feature_release._same_stored_source(["type ORDER_T as object (id number)\n", "            "], frozen))
+        self.assertFalse(feature_release._same_stored_source(["type ORDER_T as object (id number)\n", "            x"], frozen))
+        # ALL_SOURCE keeps the owner of a trigger header as written, but DEV's unqualified text has none.
+        qualified = ['TRIGGER "APP_CODE"."ORDERS_TRG" before insert on ORDERS for each row\n', "            begin null; end;\n"]
+        self.assertTrue(feature_release._same_stored_source(
+            ["trigger ORDERS_TRG before insert on ORDERS for each row\n", "            begin null; end;\n"], qualified,
+        ))
+        self.assertTrue(feature_release._same_stored_source(qualified, qualified))
+        self.assertFalse(feature_release._same_stored_source(
+            ["trigger OTHER_TRG before insert on ORDERS for each row\n", "            begin null; end;\n"], qualified,
+        ))
+        # Only the unit's own owner is ignored: the owner of the trigger's table still has to match.
+        self.assertFalse(feature_release._same_stored_source(
+            ['TRIGGER "ORDERS_TRG" before insert on "OTHER"."ORDERS" for each row\n', "begin null; end;\n"],
+            ['TRIGGER "ORDERS_TRG" before insert on "APP_CODE"."ORDERS" for each row\n', "begin null; end;\n"],
+        ))
+        self.assertEqual(feature_release._header_tokens('TYPE BODY "APP_CODE"."ORDER_T" as'), ["TYPE", "BODY", "ORDER_T", "AS"])
+
+    def test_stored_source_keeps_a_trigger_owner_and_blanks_a_function_owner(self) -> None:
+        import hashlib
+        from scripts import feature_release
+        from scripts.feature_manifest import FeatureInput
+
+        def unit_input(path: str, sql: str, unit: tuple[str, str, str]) -> FeatureInput:
+            source = sql.encode("ascii")
+            return FeatureInput(path, source, hashlib.sha256(source).hexdigest(), unit, "stored-source")
+
+        trigger, _ = feature_release._stored_source(unit_input(
+            "features/probe/APP_CODE/triggers/orders_trg.trg.sql",
+            'CREATE OR REPLACE TRIGGER "APP_CODE"."ORDERS_TRG"\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\nBEGIN NULL; END;\n/\n',
+            ("APP_CODE", "TRIGGER", "ORDERS_TRG"),
+        ))
+        self.assertEqual(trigger["lines"][0], 'TRIGGER "APP_CODE"."ORDERS_TRG"\n')
+        function, _ = feature_release._stored_source(unit_input(
+            "features/probe/APP_CODE/functions/get_one.fnc.sql",
+            'CREATE OR REPLACE FUNCTION "APP_CODE"."GET_ONE" return number is begin return 1; end;\n/\n',
+            ("APP_CODE", "FUNCTION", "GET_ONE"),
+        ))
+        self.assertNotIn('"APP_CODE"', function["lines"][0])
+        self.assertIn('"GET_ONE"', function["lines"][0])
+
+    def test_a_type_body_is_recreated_when_its_specification_is_recreated(self) -> None:
+        from scripts import feature_release
+
+        # Creating a specification invalidates its body even when the body text is unchanged.
+        header = "".join(f"ALTER SESSION SET {name} = {value};\n" for name, value in (
+            ("PLSQL_OPTIMIZE_LEVEL", "2"), ("PLSQL_CODE_TYPE", "INTERPRETED"), ("PLSQL_DEBUG", "FALSE"),
+            ("PLSQL_WARNINGS", "'ENABLE:ALL'"), ("PLSQL_CCFLAGS", "''"), ("NLS_LENGTH_SEMANTICS", "BYTE"),
+            ("PLSCOPE_SETTINGS", "'IDENTIFIERS:NONE'"),
+        ))
+        spec_sql = header + "CREATE OR REPLACE TYPE APP_CODE.ORDER_T AS OBJECT (id NUMBER, MEMBER FUNCTION total RETURN NUMBER)\n/\n"
+        body_sql = (header + "CREATE OR REPLACE TYPE BODY APP_CODE.ORDER_T AS\n"
+                    "  MEMBER FUNCTION total RETURN NUMBER IS BEGIN RETURN 1; END;\nEND;\n/\n")
+        spec = FeatureInput("features/orders/APP_CODE/types/order_t.tps.sql", spec_sql.encode("ascii"), "0" * 64,
+                            ("APP_CODE", "TYPE", "ORDER_T"), "stored-source")
+        body = FeatureInput("features/orders/APP_CODE/types/order_t.tpb.sql", body_sql.encode("ascii"), "0" * 64,
+                            ("APP_CODE", "TYPE BODY", "ORDER_T"), "stored-source")
+        checkpoint = FeatureCheckpoint("APP_CODE", (spec, body), (), (QueryCheck("after-type", "SELECT 1 FROM dual", 1),),
+                                       (("APP_CODE", "ORDER_T"),))
+        spec_lines, _ = feature_release._stored_source(spec)
+        body_lines, _ = feature_release._stored_source(body)
+
+        def guards(live_spec: list[str]) -> dict:
+            state = self._state(environment="staging")
+            state["sourceUnits"] = {
+                "TYPE:ORDER_T": {"lines": live_spec, "settings": dict(SETTINGS), "valid": True},
+                "TYPE BODY:ORDER_T": {"lines": list(body_lines["lines"]), "settings": dict(SETTINGS), "valid": True},
+            }
+            return {guard["unit"]["type"]: guard for guard in feature_release._source_guards(checkpoint, state, 1)}
+
+        unchanged = guards(list(spec_lines["lines"]))
+        self.assertTrue(unchanged["TYPE"]["noOp"])
+        self.assertTrue(unchanged["TYPE BODY"]["noOp"])
+        replaced = guards(["TYPE ORDER_T AS OBJECT (id NUMBER)\n"])
+        self.assertFalse(replaced["TYPE"]["noOp"])
+        self.assertFalse(replaced["TYPE BODY"]["noOp"])
+
+    def test_a_package_body_is_recreated_when_its_specification_is_recreated(self) -> None:
+        from scripts import feature_release
+
+        # Oracle invalidates a package body when its specification is replaced, as it does for a type body.
+        header = "".join(f"ALTER SESSION SET {name} = {value};\n" for name, value in (
+            ("PLSQL_OPTIMIZE_LEVEL", "2"), ("PLSQL_CODE_TYPE", "INTERPRETED"), ("PLSQL_DEBUG", "FALSE"),
+            ("PLSQL_WARNINGS", "'ENABLE:ALL'"), ("PLSQL_CCFLAGS", "''"), ("NLS_LENGTH_SEMANTICS", "BYTE"),
+            ("PLSCOPE_SETTINGS", "'IDENTIFIERS:NONE'"),
+        ))
+        spec_sql = header + "CREATE OR REPLACE PACKAGE APP_CODE.ORDER_API AS\n  FUNCTION total RETURN NUMBER;\nEND;\n/\n"
+        body_sql = (header + "CREATE OR REPLACE PACKAGE BODY APP_CODE.ORDER_API AS\n"
+                    "  FUNCTION total RETURN NUMBER IS BEGIN RETURN 1; END;\nEND;\n/\n")
+        spec = FeatureInput("features/orders/APP_CODE/packages/order_api.pks.sql", spec_sql.encode("ascii"), "0" * 64,
+                            ("APP_CODE", "PACKAGE", "ORDER_API"), "stored-source")
+        body = FeatureInput("features/orders/APP_CODE/packages/order_api.pkb.sql", body_sql.encode("ascii"), "0" * 64,
+                            ("APP_CODE", "PACKAGE BODY", "ORDER_API"), "stored-source")
+        checkpoint = FeatureCheckpoint("APP_CODE", (spec, body), (), (QueryCheck("after-package", "SELECT 1 FROM dual", 1),),
+                                       (("APP_CODE", "ORDER_API"),))
+        spec_lines, _ = feature_release._stored_source(spec)
+        body_lines, _ = feature_release._stored_source(body)
+
+        def guards(live_spec: list[str]) -> dict:
+            state = self._state(environment="staging")
+            state["sourceUnits"] = {
+                "PACKAGE:ORDER_API": {"lines": live_spec, "settings": dict(SETTINGS), "valid": True},
+                "PACKAGE BODY:ORDER_API": {"lines": list(body_lines["lines"]), "settings": dict(SETTINGS), "valid": True},
+            }
+            return {guard["unit"]["type"]: guard for guard in feature_release._source_guards(checkpoint, state, 1)}
+
+        unchanged = guards(list(spec_lines["lines"]))
+        self.assertTrue(unchanged["PACKAGE"]["noOp"])
+        self.assertTrue(unchanged["PACKAGE BODY"]["noOp"])
+        replaced = guards(["PACKAGE ORDER_API AS\n", "END;\n"])
+        self.assertFalse(replaced["PACKAGE"]["noOp"])
+        self.assertFalse(replaced["PACKAGE BODY"]["noOp"])
+
+    # A release that re-creates a trigger leaves it enabled, so prepare refuses a DISABLED one it would change.
+    TRIGGER_SQL = (
+        "ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL = 2;\n"
+        "ALTER SESSION SET PLSQL_CODE_TYPE = INTERPRETED;\n"
+        "ALTER SESSION SET PLSQL_DEBUG = FALSE;\n"
+        "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL';\n"
+        "ALTER SESSION SET PLSQL_CCFLAGS = '';\n"
+        "ALTER SESSION SET NLS_LENGTH_SEMANTICS = BYTE;\n"
+        "ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:NONE';\n"
+        "CREATE OR REPLACE TRIGGER APP_CODE.PROBE_TRIGGER\nBEFORE INSERT ON PROBE_TABLE\nFOR EACH ROW\nBEGIN NULL; END;\n/\n"
+    )
+
+    def _trigger_checkpoint(self) -> FeatureCheckpoint:
+        from scripts.migration_manifest import QueryCheck
+
+        source = self.TRIGGER_SQL.encode("ascii")
+        item = FeatureInput(
+            "features/probe/APP_CODE/triggers/probe_trigger.trg.sql", source,
+            hashlib.sha256(source).hexdigest(), ("APP_CODE", "TRIGGER", "PROBE_TRIGGER"), "stored-source",
+        )
+        return FeatureCheckpoint(
+            "APP_CODE", (item,), (), (QueryCheck("after-trigger", "SELECT 1 FROM dual", 1),), (("APP_CODE", "PROBE_TRIGGER"),),
+        )
+
+    def _trigger_release(self, checkpoint: FeatureCheckpoint):
+        return ReleaseCapsule(
+            self.capsule.root, self.capsule.manifest_sha256, self.payload_digest, self.engine_digest,
+            self.capsule.source_commit, (checkpoint,), (),
+        )
+
+    def _trigger_state(self, checkpoint: FeatureCheckpoint, *, status: str | None, same_source: bool, present: bool = True) -> dict:
+        from scripts import feature_release
+
+        state = self._state(environment="stage")
+        state["sourceUnits"] = {}
+        state["structural"]["triggers"] = []
+        if present:
+            expected, _overrides = feature_release._stored_source(checkpoint.inputs[0])
+            lines = list(expected["lines"]) if same_source else ["TRIGGER PROBE_TRIGGER\n", "BEFORE INSERT ON PROBE_TABLE\n", "FOR EACH ROW\n", "BEGIN NULL; NULL; END;\n"]
+            state["sourceUnits"]["TRIGGER:PROBE_TRIGGER"] = {"lines": lines, "settings": dict(SETTINGS), "valid": True}
+            if status is not None:
+                state["structural"]["triggers"] = [{"name": "PROBE_TRIGGER", "table_name": "PROBE_TABLE", "status": status, "object_status": "VALID"}]
+        return state
+
+    def _prepare(self, checkpoint: FeatureCheckpoint, state: dict):
+        from scripts import feature_release
+
+        capsule = self._trigger_release(checkpoint)
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=capsule), \
+             patch.object(feature_release, "capture_selected_state", return_value=state):
+            return feature_release.prepare_target(self.root, capsule, "staging", environ=self._environment("staging"))
+
+    def test_a_disabled_trigger_the_release_would_replace_refuses_prepare_and_names_it(self) -> None:
+        from scripts import feature_release
+
+        checkpoint = self._trigger_checkpoint()
+        state = self._trigger_state(checkpoint, status="DISABLED", same_source=False)
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "trigger PROBE_TRIGGER is DISABLED.*reviewed migration"):
+            self._prepare(checkpoint, state)
+        self.assertFalse((self.root / "scratch/feature-release-plans/staging" / f"{self.payload_digest}.json").exists())
+
+    def test_an_enabled_trigger_is_allowed_and_its_enablement_is_checked_again_before_the_write(self) -> None:
+        checkpoint = self._trigger_checkpoint()
+        plan = self._prepare(checkpoint, self._trigger_state(checkpoint, status="ENABLED", same_source=False))
+
+        guard = plan.checkpoint_guards[0]["sourceGuards"][0]
+        self.assertFalse(guard["noOp"])
+        enabled = [query for query in guard["preconditions"] if query["id"].startswith("enabled-")]
+        self.assertEqual(len(enabled), 1)
+        self.assertIn("ALL_TRIGGERS", enabled[0]["sql"])
+        self.assertIn("STATUS = 'ENABLED'", enabled[0]["sql"])
+        self.assertEqual(enabled[0]["expected"], 1)
+
+    def test_a_trigger_that_is_absent_on_the_target_is_allowed(self) -> None:
+        checkpoint = self._trigger_checkpoint()
+        plan = self._prepare(checkpoint, self._trigger_state(checkpoint, status=None, same_source=False, present=False))
+        self.assertFalse(plan.checkpoint_guards[0]["sourceGuards"][0]["targetExists"])
+
+    def test_a_disabled_trigger_that_is_already_current_is_allowed_because_nothing_is_replaced(self) -> None:
+        checkpoint = self._trigger_checkpoint()
+        plan = self._prepare(checkpoint, self._trigger_state(checkpoint, status="DISABLED", same_source=True))
+
+        guard = plan.checkpoint_guards[0]["sourceGuards"][0]
+        self.assertTrue(guard["noOp"])
+        self.assertFalse([query for query in guard["preconditions"] if query["id"].startswith("enabled-")])
+
+    def test_a_captured_trigger_keeps_its_dev_baseline_for_the_prepare_review(self) -> None:
+        from scripts import baseline, feature_release, feature_sources
+
+        dev_lines = ["TRIGGER PROBE_TRIGGER\n", "BEFORE INSERT ON PROBE_TABLE\n", "FOR EACH ROW\n", "BEGIN NULL; END;\n"]
+        catalog = {
+            "identity": {**IDENTITY_FIELDS, "db_name": "DEV"},
+            "coverage": {"sections": {"baseline-source": {"complete": True}, "baseline-settings": {"complete": True}}},
+            "unavailable": {},
+            "sections": {
+                "baseline-source": [
+                    {"name": "PROBE_TRIGGER", "type": "TRIGGER", "line": number, "text": line} for number, line in enumerate(dev_lines, start=1)
+                ],
+                "baseline-settings": [{"name": "PROBE_TRIGGER", "type": "TRIGGER", **SETTINGS}],
+            },
+        }
+        environ = {"CODE_SQLCL_CONNECTION": "dev_code", "CODE_EXPECTED_USER": "APP_CODE", "CODE_SCHEMA": "APP_CODE"}
+        with patch.object(baseline, "_capture", return_value=catalog):
+            (path,) = feature_sources.capture_unit(self.root, "probe", "APP_CODE", "trigger", "PROBE_TRIGGER", environ=environ)
+        source = path.read_bytes()
+        item = FeatureInput(
+            path.relative_to(self.root).as_posix(), source, hashlib.sha256(source).hexdigest(),
+            ("APP_CODE", "TRIGGER", "PROBE_TRIGGER"), "stored-source",
+        )
+        from scripts.migration_manifest import QueryCheck
+
+        checkpoint = FeatureCheckpoint(
+            "APP_CODE", (item,), (), (QueryCheck("after-trigger", "SELECT 1 FROM dual", 1),), (("APP_CODE", "PROBE_TRIGGER"),),
+        )
+        state = self._trigger_state(checkpoint, status="ENABLED", same_source=False)
+
+        plan = self._prepare(checkpoint, state)
+
+        self.assertTrue(any("/dev-capture/" in review for review in plan.review_paths), plan.review_paths)
+        self.assertTrue(any("/staging-target/" in review for review in plan.review_paths), plan.review_paths)
+        reviews = [json.loads((self.root / review).read_text(encoding="utf-8")) for review in plan.review_paths if review.endswith("review.json")]
+        self.assertEqual(sorted(row["baselineKind"] for row in reviews), ["dev-capture", "staging-target"])
+        self.assertTrue(all((row["unitType"], row["unitName"]) == ("TRIGGER", "PROBE_TRIGGER") for row in reviews))
+        self.assertIsNotNone(feature_release.load_target_plan(self.root, self._trigger_release(checkpoint), "staging"))
+
+    def test_an_existing_trigger_whose_enablement_state_is_not_observed_refuses_prepare(self) -> None:
+        from scripts import feature_release
+
+        checkpoint = self._trigger_checkpoint()
+        with self.assertRaisesRegex(feature_release.FeatureReleaseError, "enablement state is unavailable for selected TRIGGER PROBE_TRIGGER"):
+            self._prepare(checkpoint, self._trigger_state(checkpoint, status=None, same_source=False))
 
 
 if __name__ == "__main__":
