@@ -518,6 +518,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         for relative in (
             "scripts/migrate.py",
             "scripts/migration_attempts.py",
+            "scripts/rollout_capsule.py",
             "scripts/db_targets.py",
             "scripts/sqlcl_transport.py",
             "scripts/migrate.sql",
