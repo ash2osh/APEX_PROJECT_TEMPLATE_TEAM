@@ -549,8 +549,8 @@
       "status": "intended",
       "reason": "26.2 adds schema-2 feature-capsule planning and F01 writer-identity bindings/receipts; 26.1 now also classifies feature-migrate as a write so recovery refuses to replay verified feature checkpoints.",
       "blobs": [
-        "738eecaeed7b70bb62c5d40d98162391f2508c74",
-        "e439f96e725f32bf4b42c1b8a017041b723f8107"
+        "32a794c0943c3f62d5bfb1d3d8d7848cd21d51ea",
+        "04569590f2b3d99098178cbf58bc2cdf3e547f3b"
       ]
     },
     "scripts/rollout.sh": {
@@ -559,6 +559,14 @@
       "blobs": [
         "dbaec1b6ee5dc66e2b8f16eac901691c99acfcfa",
         "44514dc3aa2868f4bbf27390c2200aa5088a380c"
+      ]
+    },
+    "scripts/rollout_capsule.py": {
+      "status": "intended",
+      "reason": "Same split in both lines; 26.2 keeps its capsule=True target bindings, the never-replaced receipt check before execution, and its function order.",
+      "blobs": [
+        "be53400ec18c4b7eb9f633b999492fdda077ca18",
+        "3b2b31cec4a71952e4928755fa016d2e4ab9cc05"
       ]
     },
     "scripts/setup_graphify_apx.py": {
@@ -829,8 +837,8 @@
       "status": "feature",
       "reason": "The completed feature-migrate no-replay guard and its regression test are now aligned in 26.1; remaining 26.2 differences cover schema-2 target bindings and capsule-specific behavior.",
       "blobs": [
-        "288461d99affe7161693bdc6c76f5fda8978f1fe",
-        "e262d6ad73515dc8ea507bd00f1021b75d58a734"
+        "20d6d629e69a227a35e08c03a011d7c5949aa0f1",
+        "5d1427a6f63f6ad116e0da777278a881c2059e00"
       ]
     },
     "tests/test_graphify_corpus.py": {
@@ -1021,8 +1029,8 @@
       "status": "intended",
       "reason": "Pins each line's manifest identity.",
       "blobs": [
-        "c784026bb160d81248632dcab62087583eb9ab83",
-        "36ba9008071ddcdd8d317f11ec158e1cf5c47faa"
+        "690720ddae470388fa428c34fed38da771994f6f",
+        "0b4960e24054ee3a0dcc59deec7c6cf1ec55beac"
       ]
     },
     "tests/test_upgrade_template.py": {
