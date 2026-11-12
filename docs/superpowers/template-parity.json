@@ -133,8 +133,8 @@
       "status": "intended",
       "reason": "Describes each line's baseline contract (26.2 bound manifest, SQLcl 26.3).",
       "blobs": [
-        "665adf19db5871ece70613a83f254b047ef11051",
-        "6a63c4b6086ff97c73019d51fee965b3cc2f72f8"
+        "501871c73fb27bc1afc7d8706fb463c4f37f76f2",
+        "97678f6e59c36294747c1d6bd754dbe261702876"
       ]
     },
     "docs/ci-checks.md": {
@@ -173,8 +173,8 @@
       "status": "intended",
       "reason": "The reconcile scenario row differs: 26.2 continues with a continuation manifest because receipts are never replaced.",
       "blobs": [
-        "352c86d084b76f557c31e120d44e9aa789a93c49",
-        "29ecfa0077039d20c0b3f1c24d47d24a50aaa019"
+        "8e1899c9f3058e86cae489795b4f721be1aba8d2",
+        "774cbfe1cc01c19cf00a986030328ee0c2b6a7c9"
       ]
     },
     "docs/login-acts-as-schema.md": {

@@ -97,3 +97,7 @@ build group). `baseline_build.py` and `TODO.md` are marked `intended`; two recor
 lists a few helpers in a different order), two records were refreshed, and the `baseline_build.py` and `TODO.md` records
 were removed as stale because those files now match. 26.2 also gained a pinned-set `graphify` CI job, which 26.1 does not
 have (its Graphify tests run in the latest-Python job), so the two CI records carry that reason.
+
+2026-11-12: both lines gained `tests/test_live_baseline.py`, an opt-in live check of `baseline` (the file is identical in
+both). `docs/baseline.md` and `docs/live-feature-tests.md` carry the same added section and pointer, so their two records
+were refreshed with status and reason unchanged, and `TODO.md` stays identical.
