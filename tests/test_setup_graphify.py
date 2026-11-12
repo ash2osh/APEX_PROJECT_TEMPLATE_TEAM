@@ -92,6 +92,41 @@ class GraphifyPatchTests(unittest.TestCase):
         self.assertNotIn('".sql": extract_sql,', extract)
         self.assertIn('".sql": "sql",', extract)
 
+    def test_a_sql_import_line_that_also_imports_other_names_is_patched(self) -> None:
+        # Graphify 0.9.105 and later import a second name on the SQL extractor line.
+        self.write_package()
+        extract_path = self.root / "extract.py"
+        newer_import = "from graphify.extractors.sql import _norm_ident as _sql_norm_ident, extract_sql  # noqa: F401\n"
+        extract_path.write_text(
+            extract_path.read_text(encoding="utf-8").replace(
+                "from graphify.extractors.sql import extract_sql  # noqa: F401\n", newer_import),
+            encoding="utf-8",
+        )
+
+        self.assertTrue(MODULE.patch_graphify_dir(self.root, repo_root=self.project))
+
+        extract = extract_path.read_text(encoding="utf-8")
+        self.assertIn(newer_import + "from graphify.extractors.apexlang import extract_apexlang  # noqa: F401\n", extract)
+        self.assertIn('".apx": extract_apexlang,', extract)
+        self.assertIn('".sql": extract_sql_linked,', extract)
+        patched = extract_path.read_bytes()
+        self.assertTrue(MODULE.patch_graphify_dir(self.root, repo_root=self.project))
+        self.assertEqual(extract_path.read_bytes(), patched)
+
+    def test_a_sql_import_line_without_extract_sql_is_refused(self) -> None:
+        self.write_package()
+        extract_path = self.root / "extract.py"
+        extract_path.write_text(
+            extract_path.read_text(encoding="utf-8").replace(
+                "from graphify.extractors.sql import extract_sql  # noqa: F401\n",
+                "from graphify.extractors.sql import _norm_ident  # noqa: F401\n"),
+            encoding="utf-8",
+        )
+        before = extract_path.read_bytes()
+
+        self.assertFalse(MODULE.patch_graphify_dir(self.root, repo_root=self.project))
+        self.assertEqual(extract_path.read_bytes(), before)
+
     def test_repeated_install_is_byte_for_byte_idempotent(self) -> None:
         self.write_package()
         self.assertTrue(MODULE.patch_graphify_dir(self.root,repo_root=self.project))

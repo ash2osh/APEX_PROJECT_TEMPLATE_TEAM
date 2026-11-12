@@ -110,8 +110,8 @@ class GraphifyProjectTests(unittest.TestCase):
         self,
         env_path: Path,
         python_version: str = "3.12.3",
-        graphify_version: str = "0.9.75",
-        tree_sitter_sql_version: str = "0.3.11",
+        graphify_version: str = "0.9.106",
+        tree_sitter_sql_version: str = "0.3.13",
         include_py: bool = True,
         include_graphify_bin: bool = True,
         include_graphify_pkg: bool = True,
@@ -378,7 +378,7 @@ class GraphifyProjectTests(unittest.TestCase):
         self.write_mock_env(env_path, graphify_version="0.9.74")
         result = inspect_graphify(self.proj_a)
         self.assertEqual(result["status"], "incompatible")
-        self.assertTrue(any("version" in r.lower() or "0.9.75" in r for r in result["reasons"]))
+        self.assertTrue(any("version" in r.lower() or "0.9.106" in r for r in result["reasons"]))
 
     def test_inspect_graphify_incompatible_on_missing_sql_dependency(self) -> None:
         env_path = project_graphify_environment(self.proj_a)

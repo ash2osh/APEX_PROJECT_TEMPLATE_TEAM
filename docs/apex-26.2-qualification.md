@@ -249,9 +249,13 @@ Private evidence under ignored `scratch/agy-implementation-20261009/` includes:
 ### Isolated optional Graphify
 
 Pinned project-only Graphify setup, extraction and verification passed in a
-private fixture checkout, using Graphifyy 0.9.75 and tree-sitter-sql 0.3.11.
-A small local SQL/APEXlang corpus yielded four nodes/two edges. All 96 fingerprinted
-shared installation files remained byte-identical. This was a tooling fixture,
+private fixture checkout, using Graphifyy 0.9.106 and tree-sitter-sql 0.3.13
+(re-qualified on 2026-11-12 after the move from 0.9.75 and 0.3.11; Python 3.12).
+The installed package set equalled `tools/graphify/requirements.txt` exactly. A small
+local SQL/APEXlang corpus (two tables with a foreign key, one page) yielded seven
+nodes/six edges, including the page region's `reads_from` edge to its table and the
+foreign-key `references` edge. All 99 fingerprinted shared installation files remained
+byte-identical. This was a tooling fixture,
 not a database migration or a Natrec graph refresh. Optional Graphify needs
 Python 3.12+; the core workflow remains Python 3.10+.
 
