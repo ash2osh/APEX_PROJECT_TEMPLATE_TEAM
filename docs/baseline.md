@@ -157,6 +157,11 @@ empty line, is checked at its original line number. The predicate appends
 blank-line check into an `IS NULL` or `NVL` test. `ALL_SOURCE` is filtered by
 the configured owner so it works when the saved login differs from that owner.
 
+A new table's captured DDL is the `CREATE TABLE` statement followed by one `ALTER TABLE` statement for each key and
+check constraint. Each statement runs as its own `EXECUTE IMMEDIATE` inside the table's one existence guard, and the
+`ALTER TABLE` statements follow the target schema. New tables are created after the new tables their foreign keys
+reference; foreign keys between new tables that form a cycle stop generation and need a reviewed migration.
+
 The generator skips a same-named target object. For constraints, it replaces a
 named CHECK constraint only when its complete condition is the sole difference
 and all other captured constraint attributes match. A same-name difference in
@@ -275,6 +280,6 @@ the schema out of the exports. Use the saved connections of a disposable schema 
 | `test_bundle_build_combines_structure_grants_and_code_and_keeps_data_apart` | `--bundle` makes one bundle folder (structure, grants and code steps in order, with a provenance table) beside the data folder. |
 | `test_a_second_identical_build_leaves_every_folder_byte_identical` | Building again changes nothing and says so. |
 | `test_a_generated_folder_without_preconditions_is_refused_by_migrate` | As generated, the structure, grants and code folders have postconditions only, so `migrate` refuses the structure folder (exit 2, `UNSUPPORTED_OPERATION`) and writes nothing. A reviewer adds a precondition first. |
-| `test_a_reviewed_build_applies_to_staging_and_leaves_nothing_to_build` | **Expected failure today.** After a precondition is added to each folder, all four folders should apply to staging in order, the objects, grant and rows should read back, and a fresh build should find no structure, grant or code difference left. Applying the structure folder fails with `ORA-00922` for a new table with constraints, and `005-compile-all.sql` fails with `PLS-00103`; both are listed in `TODO.md`. Remove the `expectedFailure` decorator when they are fixed. |
+| `test_a_reviewed_build_applies_to_staging_and_leaves_nothing_to_build` | After the test adds a precondition to each folder, as a reviewer would, all four folders apply to staging in order, the objects, the grant and the rows are read back, and a fresh build finds no grant or code difference and nothing left to create (the structure folder keeps only its sequence and identity synchronization, and the data folder its guarded inserts). |
 
 `export-grants` is not covered: its system-privilege part needs a DBA login, and these checks never use one.

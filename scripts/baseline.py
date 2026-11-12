@@ -645,25 +645,30 @@ from .baseline_data import _export_data
 from .baseline_ords_filter import _filter_ords
 
 
-# Imported last: baseline_build reads baseline.<name> at call time. The names below are re-exported because main()
-# calls _build, and tests and other scripts reference them on scripts.baseline.
-from .baseline_build import (  # noqa: F401
-    DATA_STEP_STATEMENT_LIMIT,
-    DATA_STEP_BYTE_LIMIT,
+# Imported last: the build modules read baseline.<name> at call time. The names below are re-exported because main()
+# calls _build, and tests and other scripts reference them on scripts.baseline. Each name comes from the module that
+# defines it, so importing any of them first still works.
+from .baseline_sql import (  # noqa: F401
     _sql_literal,
     _q_literal,
+    _check,
+    _safe_check_slug,
+)
+from .baseline_reference_data import (  # noqa: F401
+    DATA_STEP_STATEMENT_LIMIT,
+    DATA_STEP_BYTE_LIMIT,
     _text_sql_literal,
     format_sql_value,
     _check_sql_value,
     _reference_data_tables,
     _read_exported_reference_data,
     _reference_data_bundle,
+)
+from .baseline_bundles import (  # noqa: F401
     _replace_create_header,
     _table_column_type,
     _column_sql,
-    _check,
     _column_definition_check,
-    _safe_check_slug,
     _view_validity_check,
     _source_check_queries,
     _setting_row,
@@ -681,6 +686,8 @@ from .baseline_build import (  # noqa: F401
     _grant_bundle,
     _code_bundle,
     _migration_bytes,
+)
+from .baseline_build import (  # noqa: F401
     _write_migration_stage,
     _windows_system_tool,
     _windows_current_user_sid,

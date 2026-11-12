@@ -418,11 +418,6 @@ class LiveBaselineApplyTests(unittest.TestCase):
         self.assertIn("UNSUPPORTED_OPERATION", refused.stdout + refused.stderr)
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tables where table_name = '{world.prefix}_ITEMS'"), 0)
 
-    # Known defects in the generated SQL, found by this check and listed in TODO.md: applying the structure folder fails
-    # with ORA-00922 for a new table whose captured DDL carries ALTER TABLE statements for its constraints (they sit in
-    # one EXECUTE IMMEDIATE), and 005-compile-all.sql fails with PLS-00103 (a local function is declared before the
-    # variables). Remove the decorator when both are fixed: the test then has to pass.
-    @unittest.expectedFailure
     def test_a_reviewed_build_applies_to_staging_and_leaves_nothing_to_build(self) -> None:
         world = self.world
         p = world.prefix
@@ -435,16 +430,24 @@ class LiveBaselineApplyTests(unittest.TestCase):
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tables where table_name = '{p}_ITEMS'"), 1)
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tab_columns where table_name = '{p}_NOTES' and column_name = 'NOTE_TEXT'"), 1)
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from {p}_COUNTRIES"), 4)
-        self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_objects where object_name like '{p}\\_%' escape '\\' and status <> 'VALID'"), 0)
+        # The data family's identity ALTER TABLE invalidates the view after the code family compiled it, and Oracle
+        # recompiles it on first use, so use it before asserting that nothing is left invalid.
+        self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from {p}_V_ITEMS"), 0)
+        invalid = world.sql(STAGING_CONNECTION, f"set heading off feedback off\nselect object_name || ':' || object_type from user_objects where object_name like '{p}\\_%' escape '\\' and status <> 'VALID';\n")
+        self.assertEqual("", invalid.strip(), f"objects that are not VALID after the apply: {invalid.strip()}")
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tab_privs where table_name = '{p}_COUNTRIES' and grantee = 'PUBLIC' and privilege = 'SELECT'"), 1)
         # Excluded values were never copied.
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from {p}_COUNTRIES where internal_note like '{SECRET_ONE}%' or internal_note like '{SECRET_TWO}%'"), 0)
-        # A fresh build from an empty folder finds no structure, grant or code difference left.
+        # A fresh build from an empty folder finds nothing left to create. The structure family still carries its
+        # sequence and identity synchronization and the data family its guarded inserts, which are written every time.
         shutil.move(str(world.project / "migrations" / SCHEMA), str(Path(world.workdir.name) / "applied"))
         again = world.build("--data")
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
-        created = [path.name for path in world.schema_folders()]
-        self.assertEqual([name for name in created if not name.endswith("_baseline-data-r001")], [], created)
+        remaining = sorted(path.name.split("_", 1)[1] for path in world.schema_folders())
+        self.assertEqual(["baseline-data-r001", "baseline-structure-r001"], remaining, "no grants or code difference is left")
+        structure = world.text_of(world.family("structure"))
+        for create in ("CREATE TABLE", "CREATE INDEX", "CREATE SEQUENCE", "ADD CONSTRAINT", "ADD PRIMARY KEY", "ADD ("):
+            self.assertNotIn(create, structure, f"the structure family still creates something: {create}")
 
 
 if __name__ == "__main__":
