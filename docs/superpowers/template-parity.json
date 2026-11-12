@@ -5,8 +5,8 @@
       "status": "intended",
       "reason": "26.2 adds the Oracle skills refresh and lock/partial-publish rules; the template-feedback rule exists in both.",
       "blobs": [
-        "1d65a88db7d5c013c533969ddf5b689877d19aa5",
-        "d070e04b8f5237311ddb9a9e49f3a612e07a6a77"
+        "c901474942cb0fc097eb74f43e9fd40e630980d4",
+        "7c92152683ec03b0f92fdac40f186835b4e03d2f"
       ]
     },
     ".agents/rules/graphify.md": {
@@ -70,7 +70,7 @@
       "reason": "26.1 installs a pinned Graphify in the latest-Python job and validates the graph extra; 26.2 runs Graphify through its own wrapper and has no graph extra.",
       "blobs": [
         "97fe701c578f2253fd836a7b9aac04ada2e21f94",
-        "7108002ffab3ce94bdfa9272a3cd9c6e9f83b805"
+        "a78797fb8231e63f40480373082178e423e088b1"
       ]
     },
     ".gitignore": {
@@ -85,8 +85,8 @@
       "status": "intended",
       "reason": "26.2 adds release-specific operational rules and the offline Graphify update requirement; 26.1 retains its own release commands and workflow.",
       "blobs": [
-        "728c4c2521b8cfb15acf8bdd2e42f610a30eb40f",
-        "2ec87804d029a7193fb9081fbadc2bfda5648c48"
+        "fb6d2cff435328d85cea4ee466a93f0562a9ae3c",
+        "5f6fa06bf7633b141edcd253831340cabbbeea84"
       ]
     },
     "AGENTS.project.md": {
@@ -101,16 +101,8 @@
       "status": "intended",
       "reason": "26.2 documents its release-specific commands and the offline Graphify update requirement; 26.1 retains its own release commands and workflow.",
       "blobs": [
-        "0ac20ef1871940644a3615f19ddb6721f7a3fb62",
-        "bf42f64b3419e5b6fb2589d395a85c7c665c572a"
-      ]
-    },
-    "TODO.md": {
-      "status": "intended",
-      "reason": "Project-owned file; 26.1 tracks the setup_graphify_apx.py incompatibility with Graphify 0.9.105, which does not apply to the 26.2 wrapper.",
-      "blobs": [
-        "266517edce525f8b1b28b8e91d43b01937620a41",
-        "55afd186d7a72541d1ccfed5250e10751e38cdfb"
+        "a18851ee9f291bdefef2f875e2e55f1b94c4a08f",
+        "36cdae00aa75f018f8d51c0e6d123a10f274cff2"
       ]
     },
     "docs/EXAMPLES.md": {
@@ -133,8 +125,8 @@
       "status": "intended",
       "reason": "26.2 release-specific troubleshooting includes the offline Graphify update path and optional semantic context indexing; 26.1 maintains its own guidance.",
       "blobs": [
-        "1895b437007990e011a1d2359a9df4749ae2f000",
-        "ffe09332f542f57df5b4dddd787a6475934e2a97"
+        "f12c8b7d5dcf412eca446f62e88b42d451b6445a",
+        "dc7017e85a5fb60d253d43c257116db4224d6953"
       ]
     },
     "docs/baseline.md": {
@@ -150,7 +142,7 @@
       "reason": "Test concurrency follows each line’s CI limits: 26.1 uses four workers; 26.2 limits Windows to two because its PowerShell-heavy suite exceeds the per-module timeout at higher concurrency. 26.2 also documents the parity step, which only it has.",
       "blobs": [
         "2acd78b22b64ae6412e940c53721fc71e18af4cc",
-        "f858481554dd75fb352e106b9c8a0774150c478d"
+        "57c1de6691c3ef980c65780b406475d92d46f18d"
       ]
     },
     "docs/compare-env.md": {
@@ -173,8 +165,8 @@
       "status": "intended",
       "reason": "Lists 26.2-only deliberate limits (locks, partial publish, normalization).",
       "blobs": [
-        "21b0d28226e658957bdb63e7e664f077fe839722",
-        "56938503352230a4e91a8ee67bb865b2684bde4a"
+        "167e8cda7f4f186941418044c4944ee40440c22b",
+        "ad14d0ff50c438004ab582b53730cb03397711ca"
       ]
     },
     "docs/live-feature-tests.md": {
@@ -197,8 +189,8 @@
       "status": "intended",
       "reason": "26.2 documents MIGRATION_* profiles, rehearsal metrics and schema-2 checks.",
       "blobs": [
-        "ba2084cf91f126613d0a5e837c069068abec7968",
-        "1333067c4351ff2a2a02edf1e3cfbf3137a2872d"
+        "d25bedad6bb5c96a4de713554716af7bf2472218",
+        "3d6af1ac3fe2e9cb8d5372684a875fa217e78fff"
       ]
     },
     "docs/publish-rules.md": {
@@ -245,8 +237,8 @@
       "status": "feature",
       "reason": "26.2-only MIGRATION_* owner profiles are documented there; the migration-plan wording differs.",
       "blobs": [
-        "288f3e7f9cf16514d19e0a875c9ff574e1c55495",
-        "75a02d0611cb4533bf9fd7931a7f80c87cacf7c4"
+        "3fff6134c8b6032ce8499b90e8686c8222b20c8a",
+        "cb4e4b97e4233636169961edf50f03b9a21f283c"
       ]
     },
     "pyproject.toml": {
@@ -453,16 +445,16 @@
       "status": "intended",
       "reason": "Ported both ways: 26.1 got the transport preflight (26.1 PR 24), 26.2 got relative_to_root (TEAM PR 55); only import layout differs.",
       "blobs": [
-        "0f0f4682fbf4cbf4dc0a705b126f7c87aa425dbe",
-        "9e4d4b344e3da646d0164d5f898db48bc887524b"
+        "926b6d13efa7d5bba990d9c44a112637dd4f0fa7",
+        "b37e10f321afa8baae6db28096ff4e482598851d"
       ]
     },
     "scripts/migration_attempts.py": {
       "status": "intended",
       "reason": "relative_to_root ported (TEAM PR 55); the only difference left is one blank line.",
       "blobs": [
-        "1e56be33432ff587ee4f9e89c70a36f7ded0942a",
-        "7a3554fefd9538da9f3e299f482c6e52e2e7773e"
+        "e43bec619e0de6ea4be8f8bd9c66ca40049f8e11",
+        "4bf1ba99777d1dda0f54c1e8931fbe3c159ad85a"
       ]
     },
     "scripts/migration_checks.py": {
@@ -477,8 +469,8 @@
       "status": "feature",
       "reason": "relative_to_root and declared-binding validation ported (TEAM PR 55); what remains is RehearsalMetric and schema-2 checks (26.2 only).",
       "blobs": [
-        "9d1ab86614ee158811facdec93ee43e595801689",
-        "c3bb0698bfa0e2e959a71ad548d1e2c5edcf8ae8"
+        "cb90a22a7c94cd08b6122239fee01ad9e37d0a71",
+        "f859e53c11748915b07fc4d122454bbf6261126d"
       ]
     },
     "scripts/migration_rehearsal.py": {
@@ -493,8 +485,8 @@
       "status": "intended",
       "reason": "Decided 2026-10-20 to keep both policies and document them (migration-rules.md in both): 26.1 validates every attempt-event chain first and fails closed for any target; 26.2 validates the selected target strictly, ignores damaged evidence of other targets, and stays fail-closed without a target. Both are safe for the selected target; 26.2 avoids blocking a DEV apply on a damaged production record.",
       "blobs": [
-        "139a6aede1c5d494e98320fd596a64f7d16bfc8a",
-        "58fc7cf5619f6bbe90909b00ee291e608c88ce1a"
+        "bed8ddb8fd640fc7e3a8757256f921f70f941926",
+        "bd46da6b76e8ba116130c580f62950be11bb3677"
       ]
     },
     "scripts/publish_app.ps1": {
@@ -571,10 +563,10 @@
     },
     "scripts/setup_graphify_apx.py": {
       "status": "intended",
-      "reason": "26.2 sets up the isolated .venv-graphify with atomic patching; 26.1 patches the installed Graphify.",
+      "reason": "26.2 sets up the isolated .venv-graphify with atomic patching; 26.1 patches the installed Graphify. 26.1 also accepts the SQL import line of Graphify 0.9.105 and later; 26.2 pins Graphify 0.9.75, so that change is not ported.",
       "blobs": [
         "48d7771c8a92a361abd3d59e2aab93d5f083781a",
-        "4eca5178bb1441f61ecf72ab71c9b2d991925157"
+        "dcd44b74671f240afd3568645e7b8c08630e1b99"
       ]
     },
     "scripts/sqlcl_safe.sh": {
@@ -589,16 +581,16 @@
       "status": "feature",
       "reason": "26.2 exposes release-specific feature capsules, native app locks, partial publish, migration profiles, automation controls and upgrade-apexlang; verify-local exists in both releases.",
       "blobs": [
-        "95e931a46e6ebcc8b2be7327fcd80072adc9fa22",
-        "55d938cf5a6a3df2393e226e1c307fb60542a668"
+        "9f5c564c2c039db94d729d99449ba96d5f083606",
+        "57ed960faa30612c0bcbdc87945c8663ec0a6ece"
       ]
     },
     "scripts/team.sh": {
       "status": "feature",
       "reason": "26.2 exposes release-specific feature capsules, native app locks, partial publish, migration profiles, automation controls and upgrade-apexlang; verify-local exists in both releases.",
       "blobs": [
-        "e2fc6ef4fa9dfb0726633e8a58abc5b562eb06c0",
-        "1cf83b66bba215a15003107b7f99b24e69730615"
+        "b6cd208159a906e2314c2195947acdf4fb46579c",
+        "3fd4c6abdd5fd608921b090d47b4cb0f867442ba"
       ]
     },
     "scripts/template_drift.py": {
@@ -669,8 +661,8 @@
       "status": "intended",
       "reason": "26.2 has apexRelease, minimumSqlclVersion and a template-only parity tool; 26.1 pins their absence.",
       "blobs": [
-        "840db2950c11eac5d270c0d441930ef8384facbf",
-        "1adb1d97a26269ae74f5e4035b3e148bdbfd3cae"
+        "4f42549f9f83ee49d3f2cf24c897a6138575ae0f",
+        "06b22639d371ba074f8f650cdff3342dd641e500"
       ]
     },
     "tests/fake_ords_sql.py": {
@@ -837,8 +829,8 @@
       "status": "feature",
       "reason": "The completed feature-migrate no-replay guard and its regression test are now aligned in 26.1; remaining 26.2 differences cover schema-2 target bindings and capsule-specific behavior.",
       "blobs": [
-        "20d6d629e69a227a35e08c03a011d7c5949aa0f1",
-        "5d1427a6f63f6ad116e0da777278a881c2059e00"
+        "21ce9d2d654d5e94de84a79c1308664a3a7bf7cb",
+        "b7450b39d9748c481f3cd02c62b04b7846abbefa"
       ]
     },
     "tests/test_graphify_corpus.py": {
@@ -877,16 +869,16 @@
       "status": "intended",
       "reason": "Goes with scripts/migration_revision.py: 26.1 tests its fail-closed policy, 26.2 its scoped policy.",
       "blobs": [
-        "3984b42ce10f228a424de6ec539c4267b6e2a25c",
-        "2457d509e50dee203a7a88ea7b2b681137c10e3a"
+        "9382b10c17cf5f1810e584f224cb067792413c98",
+        "26d5ab79f48ad621685aae9ef9fd40d9999c98c2"
       ]
     },
     "tests/test_migration_archive.py": {
       "status": "intended",
       "reason": "Both lines cover the same archive cases; 26.2 changes fixture schema names and test ordering only.",
       "blobs": [
-        "0cc70a2edc151bdcdd6665652baac09c7ec4e344",
-        "caab89163aba2b3b8e4c5455333c3e1e5e5080c3"
+        "25bd11ce920d5980a8729f036b29c0e5c7c82b2f",
+        "aea8e5110bd356601d1c42011dc5730079df4c9d"
       ]
     },
     "tests/test_migration_checks.py": {
@@ -925,8 +917,8 @@
       "status": "intended",
       "reason": "Goes with scripts/migration_revision.py: each line tests its own documented policy.",
       "blobs": [
-        "f990e3eb4cc1986b3ff1abe7b7c770da1cdf87f9",
-        "5f8e7d40ed0a33d6fe31026c9b9a0456e13c6d18"
+        "acf30ce3fc0beada8069fa8349b0038a842c33b0",
+        "f4a37da67eb3fa46b6395de69a6bc5f2a5e3ab03"
       ]
     },
     "tests/test_multi_schema_cli.py": {
@@ -990,7 +982,7 @@
       "reason": "Tests each line's Graphify setup.",
       "blobs": [
         "39c74a67f6cafabf47bc64e9aebbbceefa29bf34",
-        "f5ed61ec25f3d1a3d61859bc34b2a2a770f9b983"
+        "81a13f3cbab2407000e956d3c92a364a86550d23"
       ]
     },
     "tests/test_sql_driver_contracts.py": {
@@ -1013,8 +1005,8 @@
       "status": "feature",
       "reason": "Tests 26.2-only commands; the wrapper tests for shared commands exist in both.",
       "blobs": [
-        "1fbe99d43c90a72a3c28b43661159a694aaf271c",
-        "002f62ff88cb3ad6b5e85a96e80e40945e929edb"
+        "b7686740cea5116361db78b856fb9f24b3d49852",
+        "2e6d4c5676655451084ef23cbdde8f06ef1ede49"
       ]
     },
     "tests/test_template_drift.py": {
@@ -1029,8 +1021,8 @@
       "status": "intended",
       "reason": "Pins each line's manifest identity.",
       "blobs": [
-        "690720ddae470388fa428c34fed38da771994f6f",
-        "0b4960e24054ee3a0dcc59deec7c6cf1ec55beac"
+        "94b315aa472053502e1f07ea933526b6955d1741",
+        "3ee8c5556d7767e11b24b9f3f761e7f93d2bf20e"
       ]
     },
     "tests/test_upgrade_template.py": {
