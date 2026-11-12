@@ -1,0 +1,14 @@
+{
+  "archived": [
+    {
+      "archivedAt": "2026-11-12",
+      "destination": "migrations-archive/APP_ONE/2026-10-05_archive-family-r001",
+      "family": "archive-family",
+      "folder": "2026-10-05_archive-family-r001",
+      "payloadDigest": "9a33d811043df1a2395eb4ca9376d08c65b63b78036aa23b20d8e12f89b52e65",
+      "reason": "released or superseded",
+      "revision": 1
+    }
+  ],
+  "schemaVersion": 1
+}

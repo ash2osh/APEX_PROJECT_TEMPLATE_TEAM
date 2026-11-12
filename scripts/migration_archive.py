@@ -22,7 +22,8 @@ from .migration_manifest import (
     load_migration,
     validate_receipt,
 )
-from .migration_revision import inspect_migration_lock
+from .migration_attempts import RESOLUTION_STATES
+from .migration_revision import inspect_migration_lock, reconcile_hint
 from .path_utils import relative_to_root
 
 
@@ -64,6 +65,22 @@ class ArchivePlan:
     entries: tuple[ArchiveEntry, ...]
     indexes: tuple[ArchiveIndex, ...]
     family_state: tuple[tuple[str | None, str, tuple[tuple[int, str], ...]], ...]
+    preserve_unresolved: bool = False
+    # "<folder>: <reason>" for every folder --skip-refused left in place, with its reason.
+    skipped: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Evaluated:
+    """One selected folder after its evidence was read: either eligible or refused with a reason."""
+
+    item: tuple[Path, str | None, str, int, bool]
+    relative_folder: str
+    migration: object | None
+    evidence: tuple[str, ...]
+    refusal: str | None
+    destination: Path | None
+    relative_destination: str | None
 
 
 def _label(value: str) -> str:
@@ -155,8 +172,18 @@ def _validated_reason(reason: str | None) -> str:
     return selected
 
 
+def _resolution_covers(state: str) -> bool:
+    """An attempt chain closed by a committed owner resolution: it reports the outcome, not "pending"."""
+    return state.startswith("attempt-event:") and state.split(":")[1] in RESOLUTION_STATES
+
+
 def _folder_evidence(
-    root: Path, relative_folder: str, migration, *, allow_unverified_attempts: bool = False
+    root: Path,
+    relative_folder: str,
+    migration,
+    *,
+    allow_unverified_attempts: bool = False,
+    preserve_unresolved: bool = False,
 ) -> tuple[tuple[str, ...], bool, bool]:
     evidence: list[str] = []
     verified_receipt = False
@@ -176,24 +203,49 @@ def _folder_evidence(
             evidence.append(f"{path.name} (unverified)")
 
     lock = inspect_migration_lock(root, relative_folder)
+    # A resolution that is unreadable, stale or in conflict with a receipt is never archived past.
+    problems = [state for state in lock.states if state.startswith("resolution-")]
+    if problems:
+        raise MigrationArchiveError(f"resolution record for {migration.folder.name} is not usable: {'; '.join(problems)}")
+    resolution_evidence = [
+        f"resolved:{state.split(':')[1]}:{state.split(':')[2]}" for state in lock.states if state.startswith("resolution:")
+    ]
     attempt_states = tuple(
         state for state in lock.states
-        if state.startswith(("attempt:", "attempt-", "scratch-"))
+        if state.startswith(("attempt:", "attempt-", "scratch-")) and not _resolution_covers(state)
     )
-    if lock.status == "unknown" and attempt_states and not allow_unverified_attempts:
+    hint = reconcile_hint(relative_folder, attempt_states)
+    if lock.status == "unknown" and attempt_states and not (allow_unverified_attempts or preserve_unresolved):
         states = "; ".join(lock.states)
-        raise MigrationArchiveError(f"attempt or receipt evidence is unknown for {migration.folder.name}: {states}")
+        raise MigrationArchiveError(
+            f"attempt or receipt evidence is unknown for {migration.folder.name}: {states}; {hint or 'inspect the attempt evidence'}; "
+            "or archive it as unresolved with --preserve-unresolved"
+        )
+    evidence.extend(resolution_evidence)
     if attempt_states:
         evidence.extend(attempt_states)
     if not evidence:
         evidence.append("no-attempt-or-receipt")
-    if attempt_states and not verified_receipt:
-        if not allow_unverified_attempts:
+    # An attempt that provably never started its write (apply-not-started with its retained no-write
+    # evidence, so the folder is unlocked) left nothing to resolve.
+    no_write_only = (
+        bool(attempt_states)
+        and lock.status == "unlocked"
+        and all(state.startswith("attempt-event:apply-not-started:") for state in attempt_states)
+    )
+    if no_write_only and not verified_receipt:
+        evidence.append("apply-not-started (no write)")
+    elif attempt_states and not verified_receipt:
+        if allow_unverified_attempts:
+            evidence.append("attempt-without-verified-receipt (accepted)")
+        elif preserve_unresolved:
+            evidence.append("unresolved (preserved)")
+        else:
             raise MigrationArchiveError(
-                f"attempt record for {migration.folder.name} has no verified receipt for any environment; state unknown "
+                f"attempt record for {migration.folder.name} has no verified receipt for any environment; state unknown; "
+                f"{hint or 'inspect the attempt evidence'}; or archive it as unresolved with --preserve-unresolved "
                 "(--allow-unverified-attempts archives it as a failed or abandoned attempt)"
             )
-        evidence.append("attempt-without-verified-receipt (accepted)")
     return tuple(evidence), bool(attempt_states), verified_receipt
 
 
@@ -231,8 +283,16 @@ def build_archive_plan(
     destination: str = DEFAULT_DESTINATION,
     reason: str | None = None,
     allow_unverified_attempts: bool = False,
+    preserve_unresolved: bool = False,
+    skip_refused: bool = False,
 ) -> ArchivePlan:
-    """Validate selection and return a no-write move plan."""
+    """Validate selection and return a no-write move plan.
+
+    Every selected folder is evaluated before anything is decided, so each refusal is reported
+    with its own reason. Without ``skip_refused`` any refusal stops the whole plan. With it, the
+    eligible folders are kept, and within a family everything from the first refused revision
+    up is skipped, because the archived prefix must stay contiguous.
+    """
     root = Path(repo_root).resolve()
     migrations_dir = root / "migrations"
     if migrations_dir.is_symlink() or not migrations_dir.is_dir():
@@ -245,6 +305,8 @@ def build_archive_plan(
         raise MigrationArchiveError("select migration folders or use --all")
     if keep and not all_folders:
         raise MigrationArchiveError("--keep is only valid with --all")
+    if allow_unverified_attempts and preserve_unresolved:
+        raise MigrationArchiveError("choose one of --allow-unverified-attempts or --preserve-unresolved")
 
     try:
         directories = tuple(_migration_directories(root))
@@ -291,38 +353,82 @@ def build_archive_plan(
     _validate_prefix_selection(selected, directories)
     selected.sort(key=lambda item: ("" if item[1] is None else item[1], item[2], item[3]))
     reason_text = _validated_reason(reason)
-    entries: list[ArchiveEntry] = []
-    index_records: dict[tuple[str | None, Path], list[dict]] = {}
-    index_originals: dict[tuple[str | None, Path], bytes | None] = {}
-    family_state: dict[tuple[str | None, str], tuple[tuple[int, str], ...]] = {}
 
-    for path, found_schema, family, revision, _named in selected:
+    evaluated: list[_Evaluated] = []
+    for item in selected:
+        path, found_schema, family, revision, _named = item
         relative_folder = relative_to_root(path, root).as_posix()
         try:
             migration = load_migration(root, relative_folder)
         except MigrationManifestError as exc:
-            raise MigrationArchiveError(str(exc)) from exc
-        evidence, _has_attempt, _verified = _folder_evidence(
-            root, relative_folder, migration, allow_unverified_attempts=allow_unverified_attempts
-        )
-        destination = destination_root / (found_schema if found_schema is not None else "") / path.name
-        relative_destination = relative_to_root(destination, root).as_posix()
-        if os.path.lexists(destination):
-            raise MigrationArchiveError(f"archive target already exists: {relative_destination}")
+            evaluated.append(_Evaluated(item, relative_folder, None, (), str(exc), None, None))
+            continue
+        try:
+            evidence, _has_attempt, _verified = _folder_evidence(
+                root,
+                relative_folder,
+                migration,
+                allow_unverified_attempts=allow_unverified_attempts,
+                preserve_unresolved=preserve_unresolved,
+            )
+        except MigrationArchiveError as exc:
+            evaluated.append(_Evaluated(item, relative_folder, migration, (), str(exc), None, None))
+            continue
+        target = destination_root / (found_schema if found_schema is not None else "") / path.name
+        relative_destination = relative_to_root(target, root).as_posix()
+        refusal = f"archive target already exists: {relative_destination}" if os.path.lexists(target) else None
+        evaluated.append(_Evaluated(item, relative_folder, migration, evidence, refusal, target, relative_destination))
+
+    refused = [entry for entry in evaluated if entry.refusal is not None]
+    if refused and not skip_refused:
+        lines = "\n".join(f"  {entry.relative_folder}: {entry.refusal}" for entry in refused)
+        raise MigrationArchiveError(f"{len(refused)} selected folder(s) refused; nothing was archived:\n{lines}")
+
+    eligible: list[_Evaluated] = []
+    skipped: list[str] = []
+    blocked: set[tuple[str | None, str]] = set()
+    for entry in evaluated:
+        key = (entry.item[1], entry.item[2])
+        if entry.refusal is not None:
+            skipped.append(f"{entry.relative_folder}: {entry.refusal}")
+            blocked.add(key)
+        elif key in blocked:
+            skipped.append(
+                f"{entry.relative_folder}: follows a refused revision of {entry.item[2]}; "
+                "the archived prefix stops at the first refusal"
+            )
+        else:
+            eligible.append(entry)
+
+    entries: list[ArchiveEntry] = []
+    index_records: dict[tuple[str | None, Path], list[dict]] = {}
+    index_originals: dict[tuple[str | None, Path], bytes | None] = {}
+    family_state: dict[tuple[str | None, str], tuple[tuple[int, str], ...]] = {}
+    for entry in evaluated:
+        path, found_schema, family, _revision, _named = entry.item
+        family_key = (found_schema, family)
+        if family_key not in family_state:
+            family_state[family_key] = tuple(
+                (found_revision, relative_to_root(found_path, root).as_posix())
+                for found_path, found_schema2, found_family, found_revision in directories
+                if found_schema2 == found_schema and found_family == family
+            )
+    for entry in eligible:
+        path, found_schema, family, revision, _named = entry.item
+        assert entry.migration is not None and entry.destination is not None and entry.relative_destination is not None
         entries.append(
             ArchiveEntry(
                 folder=path,
-                relative_folder=relative_folder,
+                relative_folder=entry.relative_folder,
                 schema=found_schema,
                 family=family,
                 revision=revision,
-                payload_digest=migration.payload_digest,
-                evidence=evidence,
-                destination=destination,
-                relative_destination=relative_destination,
+                payload_digest=entry.migration.payload_digest,
+                evidence=entry.evidence,
+                destination=entry.destination,
+                relative_destination=entry.relative_destination,
             )
         )
-
         index_path = migrations_dir / found_schema / ".archived.json" if found_schema is not None else migrations_dir / ".archived.json"
         key = (found_schema, index_path)
         if key not in index_records:
@@ -333,13 +439,6 @@ def build_archive_plan(
                 raise MigrationArchiveError(f"archived index is invalid: {exc}") from exc
             index_records[key] = list(records)
             index_originals[key] = original
-        family_key = (found_schema, family)
-        if family_key not in family_state:
-            family_state[family_key] = tuple(
-                (found_revision, relative_to_root(found_path, root).as_posix())
-                for found_path, found_schema2, found_family, found_revision in directories
-                if found_schema2 == found_schema and found_family == family
-            )
 
     index_plans = tuple(
         ArchiveIndex(path=path, schema=index_schema, records=tuple(records), original_bytes=index_originals[(index_schema, path)])
@@ -356,6 +455,8 @@ def build_archive_plan(
             (schema_name, family, state)
             for (schema_name, family), state in sorted(family_state.items(), key=lambda item: (item[0][0] or "", item[0][1]))
         ),
+        preserve_unresolved=preserve_unresolved,
+        skipped=tuple(skipped),
     )
 
 
@@ -410,6 +511,8 @@ def execute_archive_plan(plan: ArchivePlan) -> None:
         current = index.path.read_bytes() if index.path.exists() else None
         if current != index.original_bytes:
             raise MigrationArchiveError(f"archive plan is stale; archived index changed: {index.path.name}")
+    if not plan.entries:
+        return
     for entry in plan.entries:
         if entry.folder.is_symlink() or not entry.folder.is_dir():
             raise MigrationArchiveError(f"archive plan is stale; migration folder changed: {entry.relative_folder}")
@@ -421,7 +524,13 @@ def execute_archive_plan(plan: ArchivePlan) -> None:
             raise MigrationArchiveError(f"archive plan is stale; {exc}") from exc
         if migration.payload_digest != entry.payload_digest:
             raise MigrationArchiveError(f"archive plan is stale; migration payload changed: {entry.relative_folder}")
-        _folder_evidence(root, entry.relative_folder, migration, allow_unverified_attempts=plan.allow_unverified_attempts)
+        _folder_evidence(
+            root,
+            entry.relative_folder,
+            migration,
+            allow_unverified_attempts=plan.allow_unverified_attempts,
+            preserve_unresolved=plan.preserve_unresolved,
+        )
 
     archived_at = datetime.now(timezone.utc).date().isoformat()
     records_by_path: dict[Path, list[dict]] = {index.path: list(index.records) for index in plan.indexes}
@@ -438,6 +547,7 @@ def execute_archive_plan(plan: ArchivePlan) -> None:
                 "archivedAt": archived_at,
                 "reason": plan.reason,
                 "destination": entry.relative_destination,
+                "evidence": list(entry.evidence),
             }
         )
     archive_bytes_by_path = {
@@ -591,6 +701,8 @@ def archive_migrations(
     destination: str = DEFAULT_DESTINATION,
     reason: str | None = None,
     allow_unverified_attempts: bool = False,
+    preserve_unresolved: bool = False,
+    skip_refused: bool = False,
     yes: bool = False,
 ) -> ArchivePlan:
     """Build a plan and apply it only when ``yes`` is true."""
@@ -603,6 +715,8 @@ def archive_migrations(
         destination=destination,
         reason=reason,
         allow_unverified_attempts=allow_unverified_attempts,
+        preserve_unresolved=preserve_unresolved,
+        skip_refused=skip_refused,
     )
     if yes:
         execute_archive_plan(plan)
@@ -631,6 +745,8 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
     parser.add_argument("--destination", default=DEFAULT_DESTINATION, help=f"archive directory (default: {DEFAULT_DESTINATION}/)")
     parser.add_argument("--reason", help=f"one-line archive reason (default: {DEFAULT_REASON})")
     parser.add_argument("--allow-unverified-attempts", action="store_true", help="also archive folders with an attempt record but no verified receipt (failed or abandoned attempts)")
+    parser.add_argument("--preserve-unresolved", action="store_true", help="also archive folders whose attempt has no verified receipt and no owner resolution, recorded as unresolved")
+    parser.add_argument("--skip-refused", action="store_true", help="archive the eligible folders and list the refused ones (the archived prefix still stops at the first refusal)")
     parser.add_argument("-y", "--yes", action="store_true", help="move folders and update the archived index")
     parser.add_argument("--repo-root", type=Path, default=repo_root or Path(__file__).resolve().parents[1], help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
@@ -644,12 +760,18 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
             destination=arguments.destination,
             reason=arguments.reason,
             allow_unverified_attempts=arguments.allow_unverified_attempts,
+            preserve_unresolved=arguments.preserve_unresolved,
+            skip_refused=arguments.skip_refused,
             yes=arguments.yes,
         )
     except (MigrationArchiveError, MigrationManifestError, OSError) as exc:
         print(f"migration archive error: {exc}", file=sys.stderr)
         return 2
     _print_plan(plan, dry_run=not arguments.yes)
+    if plan.skipped:
+        print("Skipped (not archived):")
+        for item in plan.skipped:
+            print(f"  {item}")
     if arguments.yes:
         for entry in plan.entries:
             print(f"Archived: {entry.relative_destination}")

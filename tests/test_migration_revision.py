@@ -1,3 +1,4 @@
+import hashlib
 import json
 import io
 import shutil
@@ -197,6 +198,7 @@ class MigrationRevisionTests(unittest.TestCase):
             "team.sh",
             "migration_revision.py",
             "migration_attempts.py",
+            "migration_resolution.py",
             "migration_manifest.py",
             "path_utils.py",
             "validate_migration.py",
@@ -446,6 +448,142 @@ class ApplyNotStartedClassificationTests(unittest.TestCase):
     def test_missing_or_ambiguous_output_stays_locked(self):
         self.assertIsNone(not_started_reason(""))
         self.assertIsNone(not_started_reason("MIGRATION_IDENTITY_VERIFIED\nMIGRATION_APPLY_COMPLETED\n"))
+
+
+RESOLUTION_CHECKS = b'{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n'
+RESOLUTION_EVIDENCE = b"Owner check: target inspected read-only.\n"
+
+
+class ResolutionLockReportTests(unittest.TestCase):
+    """Phase 2 (D3): the lock report reads the committed resolution sidecar; a folder without one is unchanged."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "migrations").mkdir()
+        (self.root / "evidence").mkdir()
+        (self.root / "evidence" / "owner-check.txt").write_bytes(RESOLUTION_EVIDENCE)
+
+    def add_folder(self, relative):
+        folder = self.root / relative
+        folder.mkdir(parents=True)
+        (folder / "001-create-table.sql").write_bytes(b"CREATE TABLE T (ID NUMBER);\n")
+        (folder / "checks.json").write_bytes(RESOLUTION_CHECKS)
+        return folder
+
+    def sidecar(self, relative, environment="dev", *, outcome="failed-no-target-effect", run_id="migration-attempt-lock-test", **overrides):
+        from scripts.migration_manifest import load_migration
+
+        folder = self.root / relative
+        migration = load_migration(self.root, relative)
+        record = {
+            "schemaVersion": 1,
+            "environment": environment,
+            "outcome": outcome,
+            "attemptId": "6f1c2a4e-9b3d-4c1e-8a7f-2d5b9e0c0d01",
+            "runId": run_id,
+            "payloadDigest": migration.payload_digest,
+            "checksSha256": migration.checks_sha256,
+            "target": {"environment": environment, "connection": "fake-dev", "expected_user": "APP_ONE", "current_schema": "APP_ONE"},
+            "evidence": {"path": "evidence/owner-check.txt", "sha256": hashlib.sha256(RESOLUTION_EVIDENCE).hexdigest()},
+            "recordedAt": "2026-11-11T10:00:00Z",
+        }
+        record.update(overrides)
+        (folder / f"resolution.{environment}.json").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        return record
+
+    def test_a_valid_resolution_is_reported_and_keeps_the_folder_locked(self):
+        relative = "migrations/2026-10-01_resolve-things-r001"
+        self.add_folder(relative)
+        self.sidecar(relative)
+
+        result = inspect_migration_lock(self.root, relative)
+
+        self.assertEqual(result.status, "locked")
+        self.assertIn("resolution:failed-no-target-effect:dev", result.states)
+
+    def test_a_resolution_for_another_environment_is_filtered_like_a_receipt(self):
+        relative = "migrations/2026-10-01_resolve-things-r001"
+        self.add_folder(relative)
+        self.sidecar(relative, "dev")
+
+        self.assertEqual(inspect_migration_lock(self.root, relative, environment="staging").status, "unlocked")
+        self.assertEqual(inspect_migration_lock(self.root, relative, environment="dev").status, "locked")
+
+    def test_an_invalid_resolution_is_reported_as_a_problem_and_the_status_is_unknown(self):
+        relative = "migrations/2026-10-01_resolve-things-r001"
+        folder = self.add_folder(relative)
+        record = self.sidecar(relative, "dev")
+        (folder / "resolution.dev.json").write_text(json.dumps(dict(record, environment="staging")) + "\n", encoding="utf-8")
+        result = inspect_migration_lock(self.root, relative)
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("resolution-invalid:dev", " ".join(result.states))
+
+        (folder / "resolution.dev.json").write_text("{\n", encoding="utf-8")
+        result = inspect_migration_lock(self.root, relative)
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("resolution-invalid:dev", " ".join(result.states))
+
+    def test_a_resolution_beside_a_verified_receipt_for_the_same_environment_is_a_conflict(self):
+        relative = "migrations/2026-10-01_resolve-things-r001"
+        folder = self.add_folder(relative)
+        (folder / "status.dev.json").write_text('{"schemaVersion":1,"state":"verified","environment":"dev"}\n', encoding="utf-8")
+        self.sidecar(relative, "dev")
+
+        result = inspect_migration_lock(self.root, relative)
+
+        self.assertNotEqual(result.status, "unlocked")
+        self.assertIn("resolution-conflict:dev", " ".join(result.states))
+
+    def test_a_resolved_scratch_attempt_is_not_reported_as_uncertain(self):
+        relative = "migrations/2026-10-01_resolve-things-r001"
+        folder = self.add_folder(relative)
+        run = self.root / "scratch" / "migration-attempt-lock-scratch"
+        run.mkdir(parents=True)
+        (run / "run-manifest.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "state": "apply-failed-or-unknown",
+            "target": {"environment": "dev", "current_schema": "APP_ONE"},
+            "migrations": [{"folder": folder.name, "writeAttempted": False, "state": "apply-failed-or-unknown"}],
+        }) + "\n", encoding="utf-8")
+
+        uncertain = inspect_migration_lock(self.root, relative)
+        self.assertEqual(uncertain.status, "unknown")
+        self.assertIn("attempt-state-uncertain", " ".join(uncertain.states))
+
+        self.sidecar(relative, "dev", run_id="migration-attempt-lock-scratch", outcome="failed-target-effect-unknown")
+        resolved = inspect_migration_lock(self.root, relative)
+
+        self.assertEqual(resolved.status, "locked")
+        self.assertIn("resolution:failed-target-effect-unknown:dev", resolved.states)
+        self.assertNotIn("attempt-state-uncertain", " ".join(resolved.states))
+
+    def test_revise_check_prints_the_resolution_state_and_returns_locked(self):
+        relative = "migrations/2026-10-01_resolve-things-r001"
+        self.add_folder(relative)
+        self.sidecar(relative)
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            status = main(["--check", relative], repo_root=self.root)
+
+        self.assertEqual(status, 1)
+        self.assertIn("LOCKED", output.getvalue())
+        self.assertIn("resolution:failed-no-target-effect:dev", output.getvalue())
+
+    def test_revise_continues_from_a_resolved_folder_without_copying_the_sidecar(self):
+        relative = "migrations/2026-10-01_resolve-things-r001"
+        folder = self.add_folder(relative)
+        self.sidecar(relative)
+        try:
+            result = revise_folder(self.root, relative, "fix the generated DDL")
+        except Exception as error:  # reported as a failed assertion, not an error
+            self.fail(f"revise refused the resolved folder: {error}")
+
+        self.assertTrue(result.folder.is_dir())
+        self.assertFalse((result.folder / "resolution.dev.json").exists())
+        self.assertTrue((folder / "resolution.dev.json").is_file())
 
 
 if __name__ == "__main__":

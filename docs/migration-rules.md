@@ -67,9 +67,9 @@ its complete folder out of the active migration tree:
 
 ```bash
 scripts/team.sh archive-migrations <folder> [<folder>...] [--schema SCHEMA] \
-  [--destination DIR] [--reason TEXT] [--yes]
+  [--destination DIR] [--reason TEXT] [--preserve-unresolved] [--skip-refused] [--yes]
 scripts/team.sh archive-migrations --all [--keep <folder>...] [--schema SCHEMA] \
-  [--destination DIR] [--reason TEXT] [--yes]
+  [--destination DIR] [--reason TEXT] [--preserve-unresolved] [--skip-refused] [--yes]
 ```
 
 The default is a dry run. It prints each folder, family, revision, local
@@ -85,16 +85,31 @@ Each archive operation adds records to
 `migrations/<SCHEMA>/.archived.json`, or `migrations/.archived.json` for the
 flat layout. The committed schema-version-1 index stores `folder`, `family`,
 `revision`, `payloadDigest`, `archivedAt` (UTC ISO date), `reason`, and the
-repository-relative `destination`. Unknown keys or malformed records make
-migration discovery refuse the index.
+repository-relative `destination`. Records written from this version also carry
+an optional `evidence` list with the plan's evidence strings; an index without
+that key loads unchanged. Unknown keys or malformed records make migration
+discovery refuse the index.
 
-A folder with an attempt record but no verified receipt is refused as unknown state;
-`--allow-unverified-attempts` archives such failed or abandoned attempts and records the
-evidence as `attempt-without-verified-receipt (accepted)` in the plan.
+A folder with an attempt record but no verified receipt is refused, and the
+refusal names the `reconcile-migration` command. Three ways through:
+
+- Record the owner's resolution first (`scripts/team.sh reconcile-migration`, see
+  [migration-attempt-resolution.md](migration-attempt-resolution.md)). A folder with a
+  resolution and no verified receipt archives without any flag, and its plan evidence reads
+  `resolved:<outcome>:<env>`.
+- `--preserve-unresolved` archives it with no resolution and records `unresolved (preserved)`.
+  It does not call the attempt failed. It also covers an attempt whose evidence can no longer be read.
+- `--allow-unverified-attempts` archives it as a failed or abandoned attempt and records
+  `attempt-without-verified-receipt (accepted)`. It is the only source of the word "accepted".
+
+`--all` evaluates every selected folder. When any is refused it prints every refusal with
+its command and archives nothing (exit 2). `--skip-refused` archives the eligible folders
+and lists the refused ones with their reasons; within a family it still stops at the first
+refused revision, so the archived prefix stays contiguous.
 
 Archiving must remove the contiguous low prefix of a family, or its whole
 visible history. A folder with an attempt record and no verified receipt for
-any environment is refused because its state is unknown. Once an archived
+any environment is refused until it is resolved or preserved as unresolved. Once an archived
 prefix exists, visible revisions must continue directly after its highest
 revision; a visible revision at or below the prefix or a later hole is still
 refused. Without an archived prefix, the existing `r001` start and consecutive
@@ -574,7 +589,9 @@ check plus inventory sessions use `MIGRATION_CHECK_TIMEOUT_SECONDS`. Both
 default to 300 seconds to preserve existing behavior. Set either to a positive
 finite number of seconds (fractional values are accepted). An apply timeout
 reports its phase and cutoff and may leave committed DDL; stop and reconcile
-the retained attempt evidence before retrying. A check or inventory timeout
+the retained attempt evidence before retrying (the owner's outcome is recorded with
+`reconcile-migration`; see [migration-attempt-resolution.md](migration-attempt-resolution.md)).
+A check or inventory timeout
 means verification did not finish, so no receipt is written. The timeout
 settings and check-driver budget are optional `.env` keys; see `.env.example`.
 The optional `MIGRATION_PREFLIGHT_INVENTORY_RETRIES` key accepts a
@@ -656,6 +673,15 @@ but its required evidence is gone, so the result is unknown and locked. A
 An attempt directory without `run-manifest.json` is incomplete evidence and
 returns 2 because its target folder cannot be established.
 
+When an apply ends with a pending or unknown attempt, the owner records what happened
+with `scripts/team.sh reconcile-migration <folder> --env <env> --outcome <outcome>
+--evidence <file>`. The outcome is `failed-no-target-effect`,
+`failed-target-effect-unknown` or `superseded`. The command writes a committed
+`resolution.<env>.json` beside the receipts and a local closing attempt event. A resolved
+folder stays locked for `migrate`: it is never applied again, and the next revision carries
+the fix. The three outcomes, their evidence and the limits are in
+[migration-attempt-resolution.md](migration-attempt-resolution.md).
+
 This rule is intentionally narrow. It recognizes the identity refusal and
 connection/start errors above only when no payload marker was printed; a
 recognized connection error after the identity marker but before the first
@@ -684,6 +710,8 @@ that target's receipt and attempt-event chain strictly and ignores damaged evide
 target, so a teammate's broken record for production does not block a DEV apply. Reports and
 `revise --check` without a target check everything and stay fail-closed. The 26.1 template is stricter
 (see its migration rules): there, damaged evidence of any target blocks every apply of the folder.
+A resolution that names one attempt closes only that attempt, in its environment; a pending attempt
+in another environment still locks the folder.
 
 ## Conflict checks and the independent-repository limit
 

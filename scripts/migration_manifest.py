@@ -16,6 +16,7 @@ from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 
 from .migration_attempts import EVENT_FILENAME_RE, MigrationAttemptError, read_attempt_events
+from .migration_resolution import MigrationResolutionError, read_resolution
 from .path_utils import relative_to_root
 from .validate_migration import validate_sql_only
 
@@ -131,6 +132,8 @@ ARCHIVED_RECORD_FIELDS = {
     "reason",
     "destination",
 }
+# Optional, written by archives from the resolution-aware plan: the plan's evidence strings.
+ARCHIVED_OPTIONAL_RECORD_FIELDS = {"evidence"}
 
 
 class MigrationManifestError(ValueError):
@@ -407,8 +410,9 @@ def load_archived_index(path: Path, schema: str | None) -> tuple[dict, ...]:
     identities: set[tuple[str, int]] = set()
     folders: set[str] = set()
     for record in raw["archived"]:
-        if not isinstance(record, dict) or set(record) != ARCHIVED_RECORD_FIELDS:
-            unknown = sorted(set(record) - ARCHIVED_RECORD_FIELDS) if isinstance(record, dict) else []
+        allowed_record_fields = ARCHIVED_RECORD_FIELDS | ARCHIVED_OPTIONAL_RECORD_FIELDS
+        if not isinstance(record, dict) or not ARCHIVED_RECORD_FIELDS <= set(record) or not set(record) <= allowed_record_fields:
+            unknown = sorted(set(record) - allowed_record_fields) if isinstance(record, dict) else []
             detail = f"; unknown key {unknown[0]!r}" if unknown else ""
             raise MigrationManifestError(f"archived index record fields do not match schemaVersion 1{detail}")
         folder = record["folder"]
@@ -437,6 +441,11 @@ def load_archived_index(path: Path, schema: str | None) -> tuple[dict, ...]:
         reason = record["reason"]
         if not isinstance(reason, str) or not reason or any(not character.isprintable() for character in reason):
             raise MigrationManifestError(f"archived index reason must be one printable line: {folder}")
+        if "evidence" in record and (
+            not isinstance(record["evidence"], list)
+            or any(not isinstance(item, str) or not item or any(not character.isprintable() for character in item) for item in record["evidence"])
+        ):
+            raise MigrationManifestError(f"archived index evidence must be a list of printable strings: {folder}")
         destination = record["destination"]
         parts = destination.split("/") if isinstance(destination, str) else []
         if (
@@ -671,6 +680,16 @@ def _validate_folder_entries(folder: Path) -> tuple[MigrationFile, ...]:
             if environment not in STATUS_ENVIRONMENTS:
                 raise MigrationManifestError(f"unsupported migration status environment: {path.name}")
             continue
+        if path.name.startswith("resolution.") and path.name.endswith(".json"):
+            environment = path.name[len("resolution.") : -len(".json")]
+            if environment not in STATUS_ENVIRONMENTS:
+                raise MigrationManifestError(f"unsupported migration resolution environment: {path.name}")
+            try:
+                # Shape only here; the binding to this folder's digests is checked where it is used.
+                read_resolution(path)
+            except MigrationResolutionError as exc:
+                raise MigrationManifestError(f"migration resolution is invalid: {_printable(str(exc))}") from exc
+            continue
         if path.name.startswith("attempt-event."):
             if EVENT_FILENAME_RE.fullmatch(path.name) is None:
                 raise MigrationManifestError(f"unsupported migration attempt event filename: {path.name}")
@@ -730,6 +749,40 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
     schemas = [schema for candidate, schema, _, _ in directories if candidate == folder]
     if not schemas:
         raise MigrationManifestError(f"migration folder is not directly under migrations/ or migrations/<SCHEMA>/: {_printable(relative_folder)}")
+    return _migration_at(folder, schemas[0])
+
+
+def load_archived_migration(repo_root: Path, destination: str, schema: str | None) -> Migration:
+    """Read one archived folder's exact payload from its recorded destination (outside migrations/).
+
+    Only the folder's own bytes are validated; the folder is never moved or repaired. The
+    caller checks that the archived index names this folder before trusting the result.
+    """
+    if not isinstance(destination, str) or "\\" in destination:
+        raise MigrationManifestError("archived destination must be a repository-relative path")
+    parts = destination.split("/")
+    if len(parts) < 2 or any(part in {"", ".", ".."} for part in parts) or parts[0] == "migrations":
+        raise MigrationManifestError(f"archived destination is not a safe archive path: {_printable(destination)}")
+    root = Path(repo_root).resolve()
+    folder = root.joinpath(*parts)
+    candidate = root
+    for part in parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise MigrationManifestError("symbolic links are not allowed in archived migration paths")
+    try:
+        relative_to_root(folder.resolve(strict=True), root)
+    except (OSError, ValueError) as exc:
+        raise MigrationManifestError(f"archived migration folder is missing or outside the repository: {_printable(destination)}") from exc
+    if not folder.is_dir():
+        raise MigrationManifestError(f"archived migration path is not a folder: {_printable(destination)}")
+    _folder_parts(folder.name)
+    return _migration_at(folder, schema)
+
+
+def _migration_at(folder: Path, schema: str | None) -> Migration:
+    """Validate the folder's entries and checks file and compute its payload digest."""
+    _, family, revision = _folder_parts(folder.name)
     files = _validate_folder_entries(folder)
     preconditions, postconditions, rehearsal_metrics, checks_source = _load_check_file(folder / "checks.json")
     checks_sha256 = hashlib.sha256(checks_source).hexdigest()
@@ -750,7 +803,7 @@ def load_migration(repo_root: Path, relative_folder: str) -> Migration:
         checks_source=checks_source,
         checks_sha256=checks_sha256,
         payload_digest=digest,
-        schema=schemas[0],
+        schema=schema,
         rehearsal_metrics=rehearsal_metrics,
     )
 

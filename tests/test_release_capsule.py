@@ -514,10 +514,17 @@ class ReleaseCapsuleTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
+    def test_migration_resolution_is_a_capsule_engine_file_listed_beside_attempts(self) -> None:
+        helpers = self.release_capsule.ENGINE_HELPER_FILES
+
+        self.assertIn("scripts/migration_resolution.py", helpers)
+        self.assertEqual(helpers.index("scripts/migration_resolution.py"), helpers.index("scripts/migration_attempts.py") + 1)
+
     def test_capsule_engine_digest_tracks_runtime_helpers_and_trusted_sql(self) -> None:
         for relative in (
             "scripts/migrate.py",
             "scripts/migration_attempts.py",
+            "scripts/migration_resolution.py",
             "scripts/rollout_capsule.py",
             "scripts/db_targets.py",
             "scripts/sqlcl_transport.py",

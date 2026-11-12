@@ -37,6 +37,11 @@ Use [`migration-plan`](../docs/migration-planning.md) to inventory local
 folders or review an explicitly ordered live preflight before choosing the
 folders for `migrate`.
 
+A pending or unknown attempt is recorded by its owner with
+`scripts/team.sh reconcile-migration`; that writes a `resolution.<env>.json` beside the
+receipts. The folder stays unchanged and is never applied again. See
+[migration attempt resolution](../docs/migration-attempt-resolution.md).
+
 Migration SQL runs with SQLcl substitution disabled. SQLcl client commands
 such as `SET`, `PROMPT`, `HOST`, `WHENEVER`, `SPOOL`, and `CONNECT` are rejected
 before SQLcl connects. A SQL statement ends at its `;`. SQLcl would also end it

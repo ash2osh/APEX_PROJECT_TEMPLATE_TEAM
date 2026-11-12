@@ -126,6 +126,8 @@ class TemplateManifestTests(unittest.TestCase):
         for path in (
             "scripts/migration_revision.py",
             "tests/test_migration_revision.py",
+            "scripts/migration_resolution.py",
+            "tests/test_migration_resolution.py",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
