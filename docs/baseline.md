@@ -240,3 +240,41 @@ reconcile arbitrary table attributes or column defaults, change existing
 column types, grant system privileges, or update/delete reference rows. Type
 changes fail with a review message. Unmodeled compare-env differences still
 need manual review.
+
+## Live check
+
+`tests/test_live_baseline.py` runs `export-source`, `export-data` and `build` (with `--data`, and with `--bundle`)
+against two disposable Oracle databases, in a copy of this repository. It is opt-in: CI never runs it, and it skips unless
+the variables of the [live feature-release checks](live-feature-tests.md) are set, with the staging variable required,
+because a build compares two environments:
+
+```bash
+TEMPLATE_LIVE_DISPOSABLE=1 \
+TEMPLATE_LIVE_CONNECTION=<dev-connection> \
+TEMPLATE_LIVE_SCHEMA=<SCHEMA> \
+TEMPLATE_LIVE_STAGING_CONNECTION=<staging-connection> \
+python3 -m unittest discover -s tests -p test_live_baseline.py -v
+```
+
+Both connections log in as the same schema name, one on each database (for example two Docker containers). Every
+object the checks create is named `BLT<token>_...` and dropped at the end; the baseline prefix filter keeps the rest of
+the schema out of the exports. Use the saved connections of a disposable schema only. A connection name that contains
+`live`, `prod` or `prd` is refused by the product's production-name guard.
+
+| Check | What it shows |
+| --- | --- |
+| `test_export_source_writes_every_unit_with_its_exact_lines` | A package, its body, a function and a view are exported with their exact `ALL_SOURCE` rows (a blank line inside a function stays its own row), and the manifest is complete. |
+| `test_export_data_keeps_excluded_columns_out_and_numbers_exact` | Reference rows for two tables are exported without the excluded column, with identity metadata, an apostrophe, an embedded newline and a date. |
+| `test_a_build_makes_the_four_families_and_names_them` | A build with `--data` creates the structure, grants, code and data folders, each with `checks.json` and `README.md`. |
+| `test_structure_family_creates_what_staging_lacks` | A missing table and sequence are created, a missing column is added, constraints are named, and a table staging already has is left alone. |
+| `test_code_family_orders_specification_before_body_and_ends_with_a_compile` | The package specification comes before its body, the view is included, and the last step compiles. |
+| `test_grants_family_grants_to_public` | An object grant to `PUBLIC` is generated. |
+| `test_data_family_resolves_parents_by_label_and_guards_every_insert` | A foreign key is resolved from the parent's label and never copied by id, quotes and newlines survive, every insert is guarded by its natural key, and the identity generator is moved past the seeded ids. |
+| `test_the_excluded_column_never_reaches_a_file` | The values of an excluded column (and the staging row's own value) appear in no exported or generated file. |
+| `test_the_target_differences_are_reported_not_hidden` | An existing staging row that differs in a captured column is reported and preserved. |
+| `test_bundle_build_combines_structure_grants_and_code_and_keeps_data_apart` | `--bundle` makes one bundle folder (structure, grants and code steps in order, with a provenance table) beside the data folder. |
+| `test_a_second_identical_build_leaves_every_folder_byte_identical` | Building again changes nothing and says so. |
+| `test_a_generated_folder_without_preconditions_is_refused_by_migrate` | As generated, the structure, grants and code folders have postconditions only, so `migrate` refuses the structure folder (exit 2, `UNSUPPORTED_OPERATION`) and writes nothing. A reviewer adds a precondition first. |
+| `test_a_reviewed_build_applies_to_staging_and_leaves_nothing_to_build` | **Expected failure today.** After a precondition is added to each folder, all four folders should apply to staging in order, the objects, grant and rows should read back, and a fresh build should find no structure, grant or code difference left. Applying the structure folder fails with `ORA-00922` for a new table with constraints, and `005-compile-all.sql` fails with `PLS-00103`; both are listed in `TODO.md`. Remove the `expectedFailure` decorator when they are fixed. |
+
+`export-grants` is not covered: its system-privilege part needs a DBA login, and these checks never use one.

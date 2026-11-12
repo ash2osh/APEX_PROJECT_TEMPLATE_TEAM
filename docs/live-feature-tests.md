@@ -33,6 +33,8 @@ On the local Oracle AI Database 26ai Free 23.26.3 containers used for the last r
 module took about 18 minutes with two databases (19 tests, one skipped) and about 13 minutes
 with one database and two schemas (19 tests, two skipped). Run one test with `-k <name>`.
 
+The `baseline` commands have their own opt-in module, `tests/test_live_baseline.py`; see [Live check](baseline.md#live-check).
+
 ## Safety
 
 - Each run copies this repository to a temporary directory and works there. It
