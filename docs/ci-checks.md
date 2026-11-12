@@ -40,6 +40,14 @@ ShellCheck runs only when `shellcheck` is on `PATH`, and the PowerShell parse on
 is missing, the check prints a one-line note and does not fail, so the local check stays usable on a machine without it;
 CI still runs both. When a step fails, the output ends with `CHECKS FAILED:` and the names of the failed steps.
 
+When a change touches a file this template shares with the 26.1 template, also run the parity report with the 26.1
+checkout beside this one, and mark what it lists before you open the pull request; CI cannot run it, because it needs
+both repositories. It must exit 0. See [template parity](superpowers/template-parity.md).
+
+```bash
+python3 tools/template_parity.py ../APEX_PROJECT_TEMPLATE_26_1
+```
+
 `python3 scripts/pre_push_check.py --install-hook` runs it on every `git push` (it never replaces an existing hook).
 Install Ruff once with `python3 -m pip install 'ruff>=0.5'`.
 

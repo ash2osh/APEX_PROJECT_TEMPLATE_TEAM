@@ -74,3 +74,8 @@ remain in the 26.2 tooling. See [the consolidated review](reviews/2026-10-20-two
 for reproductions, verification and remaining runtime limits.
 The additional pre-push hook environment isolation fix and its regression are
 identical in both lines; the number of intentional differences is unchanged.
+
+2026-11-12: after the migration capsule checkpoints and the review follow-ups were ported to both lines, the report
+listed 7 unreviewed, 52 changed and 2 stale records. The 7 were reviewed and marked `intended`, the 52 kept their status
+and reason with refreshed blob ids, and the 2 stale records were removed. The report exits 0 against 26.1 `main` at
+`de0487e`.
