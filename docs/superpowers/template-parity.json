@@ -69,7 +69,7 @@
       "status": "intended",
       "reason": "26.1 installs a pinned Graphify in the latest-Python job and validates the graph extra; 26.2 runs Graphify through its own wrapper, has no graph extra, and has its own graphify job: the exact pinned set in the project-isolated environment on Python 3.12, Graphify tests only, no skip allowed.",
       "blobs": [
-        "97fe701c578f2253fd836a7b9aac04ada2e21f94",
+        "6dc1ca90ab4d67d4902adfc4ffe52669f215c45d",
         "a78797fb8231e63f40480373082178e423e088b1"
       ]
     },
@@ -141,7 +141,7 @@
       "status": "intended",
       "reason": "Test concurrency follows each line’s CI limits: 26.1 uses four workers; 26.2 limits Windows to two because its PowerShell-heavy suite exceeds the per-module timeout at higher concurrency. 26.2 also documents the parity step and its pinned-set graphify job, which only it has.",
       "blobs": [
-        "2acd78b22b64ae6412e940c53721fc71e18af4cc",
+        "7cb16b64548cbc0d06168bf19cd4290b108efc82",
         "57c1de6691c3ef980c65780b406475d92d46f18d"
       ]
     },
