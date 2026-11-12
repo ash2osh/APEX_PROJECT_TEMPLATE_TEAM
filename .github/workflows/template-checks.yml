@@ -93,6 +93,31 @@ jobs:
           CI_FORBID_SKIP: 'PowerShell .*(not installed|required)|needs PowerShell|requires PowerShell|no PowerShell found'
         run: python3 scripts/ci_run_tests.py
 
+  graphify:
+    name: graphify (pinned set, Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Set up the project-isolated Graphify environment
+        # setup_graphify_apx.py builds .venv-graphify from tools/graphify/requirements.txt (the exact pinned set, which
+        # needs Python 3.12) and patches it with the project APEXlang extractor, so a pin move that breaks the patch
+        # fails here. Its bin directory goes on PATH because the Graphify pipeline tests look for `graphify` there.
+        run: |
+          python3 scripts/setup_graphify_apx.py
+          echo "$GITHUB_WORKSPACE/.venv-graphify/bin" >> "$GITHUB_PATH"
+      - name: Graphify tests
+        # Only the Graphify test modules run, and none of them may skip: with Graphify installed a skip means the
+        # pipeline did not run.
+        env:
+          CI_FORBID_SKIP: '.*'
+        run: python3 scripts/ci_run_tests.py -p 'test_*graphify*.py'
+
   windows-offline:
     runs-on: windows-latest
     steps:
