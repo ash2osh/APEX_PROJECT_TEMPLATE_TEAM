@@ -79,3 +79,6 @@ identical in both lines; the number of intentional differences is unchanged.
 listed 7 unreviewed, 52 changed and 2 stale records. The 7 were reviewed and marked `intended`, the 52 kept their status
 and reason with refreshed blob ids, and the 2 stale records were removed. The report exits 0 against 26.1 `main` at
 `de0487e`.
+
+2026-11-12: both lines moved the feature-capsule rollout path into `scripts/rollout_capsule.py`. The new shared file is
+marked `intended` (26.2 keeps its capsule bindings and receipt check), and three records were refreshed.

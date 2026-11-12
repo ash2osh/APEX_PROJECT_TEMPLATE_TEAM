@@ -107,6 +107,7 @@ class TemplateManifestTests(unittest.TestCase):
         for path in (
             "scripts/rollout.py",
             "scripts/rollout.sh",
+            "scripts/rollout_capsule.py",
             "tests/test_rollout.py",
             "docs/rollout-manifest.example.json",
         ):

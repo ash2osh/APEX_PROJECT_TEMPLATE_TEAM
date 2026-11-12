@@ -40,6 +40,7 @@ WORKFLOW_ENGINE_FILES = (
 )
 ENGINE_HELPER_FILES = (
     "scripts/rollout.py",
+    "scripts/rollout_capsule.py",
     "scripts/verify_checks.py",
     "scripts/migration_manifest.py",
     "scripts/migration_attempts.py",

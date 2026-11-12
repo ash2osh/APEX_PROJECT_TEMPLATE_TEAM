@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts import rollout
+from scripts import rollout, rollout_capsule
 from scripts.db_targets import Target
 from scripts.feature_manifest import FeatureCheckpoint
 from scripts.release_capsule import ReleaseCapsule
@@ -183,7 +183,7 @@ class FeatureRolloutTests(unittest.TestCase):
             patch.object(rollout, "_prepare_plan", return_value=plan),
             patch.object(feature_release, "load_target_plan", return_value=target_plan),
             patch.object(feature_release, "prepare_target", return_value=target_plan),
-            patch.object(rollout, "_capsule_live_source_check"),
+            patch.object(rollout_capsule, "_capsule_live_source_check"),
             patch.object(release_state, "_matching_capsules", return_value=[{
                 "path": self.capsule.root.relative_to(self.root).as_posix(),
                 "engineDigest": self.engine, "sourceCommit": self.source_commit,
@@ -192,7 +192,7 @@ class FeatureRolloutTests(unittest.TestCase):
                 release_state, "_validate_completion_proof",
                 side_effect=lambda _capsule, report, environment: report["completionProof"],
             ),
-            patch.object(rollout, "_validate_capsule_app_targets"),
+            patch.object(rollout_capsule, "_validate_capsule_app_targets"),
         )
 
     def _fake_checkpoint_result(
@@ -491,7 +491,7 @@ class FeatureRolloutTests(unittest.TestCase):
         confirmations = []
 
         with patch.object(release_state, "recovery_parent_rollout", return_value=parent_run) as parent, \
-             patch.object(rollout, "_validate_capsule_auxiliary_targets"):
+             patch.object(rollout_capsule, "_validate_capsule_auxiliary_targets"):
             status = rollout.run_rollout(
                 self.manifest_path, "staging", repo_root=self.root, capsule_path=self.capsule_path,
                 confirm=lambda prompt: confirmations.append(prompt) or True,
