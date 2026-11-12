@@ -86,3 +86,5 @@ marked `intended` (26.2 keeps its capsule bindings and receipt check), and three
 2026-11-12: migration attempt resolution (`reconcile-migration`) is in both lines. Twenty-four records were refreshed
 with their status and reason unchanged, and the stale `TODO.md` record was removed. 26.2 keeps its target-scoped
 attempt validation and its Graphify 0.9.75 pin.
+
+2026-11-12: 26.2 moved its Graphify pin from 0.9.75 to 0.9.106 and took the tolerant SQL-import anchor from 26.1.

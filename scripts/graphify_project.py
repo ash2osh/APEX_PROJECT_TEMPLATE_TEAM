@@ -410,12 +410,12 @@ def inspect_graphify(repo_root: Path, target_env: Path | None = None) -> dict:
             "is_package_ready": False,
             "is_graph_current": False,
         }
-    if g_ver != "0.9.75":
+    if g_ver != "0.9.106":
         return {
             "status": "incompatible",
             "environment": env_dir,
             "package_path": pkg_dir,
-            "reasons": [f"Graphify package version {g_ver} does not match required pinned version 0.9.75."],
+            "reasons": [f"Graphify package version {g_ver} does not match required pinned version 0.9.106."],
             "is_configured": True,
             "is_package_ready": False,
             "is_graph_current": False,
@@ -432,12 +432,12 @@ def inspect_graphify(repo_root: Path, target_env: Path | None = None) -> dict:
             "is_package_ready": False,
             "is_graph_current": False,
         }
-    if ts_ver != "0.3.11":
+    if ts_ver != "0.3.13":
         return {
             "status": "incompatible",
             "environment": env_dir,
             "package_path": pkg_dir,
-            "reasons": [f"tree-sitter-sql dependency version {ts_ver} does not match required pinned version 0.3.11."],
+            "reasons": [f"tree-sitter-sql dependency version {ts_ver} does not match required pinned version 0.3.13."],
             "is_configured": True,
             "is_package_ready": False,
             "is_graph_current": False,

@@ -563,9 +563,9 @@
     },
     "scripts/setup_graphify_apx.py": {
       "status": "intended",
-      "reason": "26.2 sets up the isolated .venv-graphify with atomic patching; 26.1 patches the installed Graphify. 26.1 also accepts the SQL import line of Graphify 0.9.105 and later; 26.2 pins Graphify 0.9.75, so that change is not ported.",
+      "reason": "26.2 sets up the isolated .venv-graphify with atomic patching; 26.1 patches the installed Graphify. Both accept the SQL import line of Graphify 0.9.105 and later; 26.2 pins Graphify 0.9.106.",
       "blobs": [
-        "48d7771c8a92a361abd3d59e2aab93d5f083781a",
+        "64b3fd73cd35b68c093fb1e441a86fb0b3bff70e",
         "dcd44b74671f240afd3568645e7b8c08630e1b99"
       ]
     },
@@ -981,7 +981,7 @@
       "status": "intended",
       "reason": "Tests each line's Graphify setup.",
       "blobs": [
-        "39c74a67f6cafabf47bc64e9aebbbceefa29bf34",
+        "e44d3ff00facf7773b7347f66a573e8c73faa3a3",
         "81a13f3cbab2407000e956d3c92a364a86550d23"
       ]
     },

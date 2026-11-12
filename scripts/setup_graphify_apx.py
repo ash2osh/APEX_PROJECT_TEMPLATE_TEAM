@@ -22,6 +22,9 @@ DETECT_MARKER = "'.sql', '.apx',"
 # Graphify's code-extension set, one line: CODE_EXTENSIONS = {..., '.sql', ...}
 CODE_EXTENSIONS_RE = re.compile(r"^CODE_EXTENSIONS\s*=\s*\{[^}\n]*'\.sql',[^}\n]*\}", re.MULTILINE)
 SQL_LINK_IMPORT = "from graphify.extractors.apexlang import extract_sql_linked  # noqa: F401"
+# Graphify's import of its SQL extractor. Up to 0.9.76 the line imports extract_sql alone; from 0.9.105 it
+# imports another name first. Any one-line form that brings in extract_sql is the anchor.
+SQL_IMPORT_RE = re.compile(r"^from graphify\.extractors\.sql import (?:[^\n#]*,[ \t]*)?extract_sql\b[^\n]*$", re.MULTILINE)
 
 
 def graphify_console_interpreter() -> str | None:
@@ -149,10 +152,10 @@ def _apx_registered(detect_text: str) -> bool:
 def _patched_dispatch(text: str) -> str | None:
     import_line = "from graphify.extractors.apexlang import extract_apexlang  # noqa: F401"
     if import_line not in text:
-        sql_import = "from graphify.extractors.sql import extract_sql  # noqa: F401"
-        if sql_import not in text:
+        sql_import = SQL_IMPORT_RE.search(text)
+        if sql_import is None:
             return None
-        text = text.replace(sql_import, f"{sql_import}\n{import_line}", 1)
+        text = text[: sql_import.end()] + "\n" + import_line + text[sql_import.end():]
 
     if '".apx": extract_sql,' in text:
         text = text.replace('".apx": extract_sql,', '".apx": extract_apexlang,', 1)
