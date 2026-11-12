@@ -12,8 +12,14 @@ agreed way to stop that.
 - A branch pushed without a pull request runs nothing: open the pull request to get a result.
 
 The jobs are `offline` (Linux, Python 3.10), `offline (latest Python 3.x)` (Linux, the newest Python 3.x, with the same
-compile and behavioural-test steps but not lint or the other checks), `windows-offline` and `macos-installer`. The full
-suite takes about 10 minutes on Linux and 20 to 30 on Windows.
+compile and behavioural-test steps but not lint or the other checks), `graphify (pinned set, Python 3.12)`,
+`windows-offline` and `macos-installer`. The full suite takes about 10 minutes on Linux and 20 to 30 on Windows.
+
+The `graphify` job runs `scripts/setup_graphify_apx.py`, which builds the project's `.venv-graphify` from the exact set in
+`tools/graphify/requirements.txt` (it needs Python 3.12) and patches it, puts that environment on `PATH`, and runs only
+the `test_*graphify*.py` modules with no skip allowed. The other jobs do
+not install Graphify, so their Graphify pipeline tests skip. When a pin moves, change `requirements.txt` and let this job
+show whether the setup script still patches that release.
 
 The `offline` job also runs these two checks, after the shell syntax check and before its tests:
 
@@ -64,6 +70,7 @@ not passed to the test modules that the parallel run starts.
 | `offline` | `PowerShell .*(not installed\|required)\|needs PowerShell\|requires PowerShell\|no PowerShell found` |
 | `offline (latest Python 3.x)` | the same |
 | `windows-offline` | `PowerShell .*(not installed\|required)\|needs PowerShell\|requires PowerShell\|no PowerShell found` |
+| `graphify (pinned set, Python 3.12)` | `.*`: no skip at all, in the Graphify test modules only |
 
 Limits, by design:
 
@@ -111,9 +118,9 @@ CI therefore does not cover a short temp path; code that compares paths still re
 Set these in GitHub (Settings, Branches), they are not in the repository:
 
 - Require a pull request before merging into `main`.
-- Require the status checks `offline`, `offline (latest Python 3.x)`, `windows-offline` and `macos-installer` to pass.
-  GitHub lists a check as a requirement only after it has run once, so add `offline (latest Python 3.x)` after the
-  first run of the workflow that contains it.
+- Require the status checks `offline`, `offline (latest Python 3.x)`, `graphify (pinned set, Python 3.12)`,
+  `windows-offline` and `macos-installer` to pass. GitHub lists a check as a requirement only after it has run once, so
+  add `offline (latest Python 3.x)` and the `graphify` check after the first run of the workflow that contains them.
 - Do not allow administrators to bypass these rules, so no pull request merges before its checks pass.
 - Allow auto-merge and turn it on for each pull request (`gh pr merge --auto --merge`): GitHub merges it when the
   checks pass, and nobody has to wait for the run.
