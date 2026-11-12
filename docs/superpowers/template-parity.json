@@ -147,9 +147,9 @@
     },
     "docs/ci-checks.md": {
       "status": "intended",
-      "reason": "Test concurrency follows each line’s CI limits: 26.1 uses four workers; 26.2 limits Windows to two because its PowerShell-heavy suite exceeds the per-module timeout at higher concurrency.",
+      "reason": "Test concurrency follows each line’s CI limits: 26.1 uses four workers; 26.2 limits Windows to two because its PowerShell-heavy suite exceeds the per-module timeout at higher concurrency. 26.2 also documents the parity step, which only it has.",
       "blobs": [
-        "01b9ee00d81562b20d1555fe1495d7413b13f0d5",
+        "2acd78b22b64ae6412e940c53721fc71e18af4cc",
         "f858481554dd75fb352e106b9c8a0774150c478d"
       ]
     },
