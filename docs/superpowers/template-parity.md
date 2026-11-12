@@ -82,3 +82,7 @@ and reason with refreshed blob ids, and the 2 stale records were removed. The re
 
 2026-11-12: both lines moved the feature-capsule rollout path into `scripts/rollout_capsule.py`. The new shared file is
 marked `intended` (26.2 keeps its capsule bindings and receipt check), and three records were refreshed.
+
+2026-11-12: migration attempt resolution (`reconcile-migration`) is in both lines. Twenty-four records were refreshed
+with their status and reason unchanged, and the stale `TODO.md` record was removed. 26.2 keeps its target-scoped
+attempt validation and its Graphify 0.9.75 pin.

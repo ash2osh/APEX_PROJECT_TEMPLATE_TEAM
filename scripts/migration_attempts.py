@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .path_utils import relative_to_root
 
@@ -28,7 +28,10 @@ EVENT_FIELDS = {
     "recordedAt", "migrationPath", "environment", "target", "identity",
     "files", "checksSha256", "payloadDigest", "state", "writeAttempted", "evidence",
 }
-EVENT_STATES = {"pending", "apply-not-started", "verified"}
+# Owner outcomes of a pending attempt. They close the chain like "verified" does, but
+# the attempt stays locked: the owner has stated what happened, and nothing re-applies it.
+RESOLUTION_STATES = frozenset({"failed-no-target-effect", "failed-target-effect-unknown", "superseded"})
+EVENT_STATES = {"pending", "apply-not-started", "verified"} | RESOLUTION_STATES
 IDENTITY_KEYS = {
     "session_user", "current_schema", "db_name", "db_unique_name", "service_name",
     "container_id", "container_name", "edition", "database_version",
@@ -51,6 +54,8 @@ class MigrationAttemptError(ValueError):
 class AttemptState:
     status: str
     states: tuple[str, ...]
+    # The "attempt-event:<state>:<env>" entries whose terminal state is an owner resolution.
+    resolved: tuple[str, ...] = ()
 
 
 def not_started_reason(output: str) -> str | None:
@@ -109,6 +114,18 @@ def _timestamp(value: object) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise MigrationAttemptError("event recordedAt must include the UTC timezone")
     return parsed
+
+
+def _owner_evidence_path_is_safe(path: object) -> bool:
+    """A repository-relative file that is neither under migrations/ nor under the ignored scratch/."""
+    if not isinstance(path, str) or not path or "\\" in path:
+        return False
+    # Judge the text as a POSIX path on every platform: on Windows "/etc/x" has no drive, so Path
+    # would not call it absolute. A colon is refused too (a drive letter, and invalid in Windows names).
+    parsed = PurePosixPath(path)
+    if path.startswith("/") or ":" in path or parsed.as_posix() != path or ".." in parsed.parts:
+        return False
+    return not (path.startswith(("migrations/", "scratch/")) or path in {"migrations", "scratch"})
 
 
 def validate_attempt_event(event: object, folder: Path | None = None) -> dict:
@@ -190,6 +207,8 @@ def validate_attempt_event(event: object, folder: Path | None = None) -> dict:
         raise MigrationAttemptError("attempt event state/writeAttempted values are invalid")
     if state in {"pending", "verified"} and write_attempted is not True:
         raise MigrationAttemptError("pending and verified events must retain writeAttempted=true")
+    if state in RESOLUTION_STATES and write_attempted is not True:
+        raise MigrationAttemptError("owner-resolution events must retain writeAttempted=true")
     if state == "apply-not-started" and write_attempted is not False:
         raise MigrationAttemptError("apply-not-started events must record writeAttempted=false")
     evidence = event["evidence"]
@@ -214,6 +233,19 @@ def validate_attempt_event(event: object, folder: Path | None = None) -> dict:
             or item["classification"] not in NO_WRITE_REASONS
         ):
             raise MigrationAttemptError("attempt event no-write evidence reference is invalid")
+    elif state in RESOLUTION_STATES:
+        if len(evidence) != 1:
+            raise MigrationAttemptError("owner-resolution event requires exactly one owner-resolution evidence reference")
+        item = evidence[0]
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"kind", "path", "sha256"}
+            or item.get("kind") != "owner-resolution"
+            or not _owner_evidence_path_is_safe(item.get("path"))
+            or not isinstance(item.get("sha256"), str)
+            or SHA256_RE.fullmatch(item["sha256"]) is None
+        ):
+            raise MigrationAttemptError("owner-resolution evidence reference is invalid")
     elif evidence:
         raise MigrationAttemptError("pending and verified events cannot carry no-write evidence")
     return event
@@ -321,8 +353,17 @@ def read_attempt_events(folder: Path) -> tuple[dict, ...]:
     return tuple(events)
 
 
-def reduce_attempt_events(events: Sequence[Mapping]) -> AttemptState:
-    """Reduce event chains without relying on directory order or timestamps."""
+def reduce_attempt_events(
+    events: Sequence[Mapping],
+    closed_by: Mapping[str, tuple[str, str]] | None = None,
+) -> AttemptState:
+    """Reduce event chains without relying on directory order or timestamps.
+
+    ``closed_by`` maps an attemptId to ``(environment, outcome)`` for a chain that is still
+    ``pending`` but whose committed owner resolution names it. Such a chain reports the
+    outcome, exactly as a closing event would, so a missing closing event never leaves the
+    attempt looking unresolved.
+    """
     by_id: dict[str, dict] = {}
     by_attempt: dict[str, list[dict]] = defaultdict(list)
     for raw_event in events:
@@ -333,6 +374,7 @@ def reduce_attempt_events(events: Sequence[Mapping]) -> AttemptState:
         by_attempt[event["attemptId"]].append(event)
 
     states: list[str] = []
+    resolved: list[str] = []
     locked = False
     for attempt_id, chain_events in sorted(by_attempt.items()):
         children: dict[str | None, list[dict]] = defaultdict(list)
@@ -375,10 +417,37 @@ def reduce_attempt_events(events: Sequence[Mapping]) -> AttemptState:
         if len(ordered) > 2:
             raise MigrationAttemptError(f"attempt {attempt_id} contains more than one terminal transition")
         terminal = ordered[-1]
-        states.append(f"attempt-event:{terminal['state']}:{terminal['environment']}")
-        if terminal["state"] in {"pending", "verified"}:
+        closure = (closed_by or {}).get(attempt_id)
+        if terminal["state"] == "pending" and closure is not None and closure[0] == terminal["environment"]:
+            states.append(f"attempt-event:{closure[1]}:{terminal['environment']}")
+            resolved.append(states[-1])
             locked = True
-    return AttemptState("locked" if locked else "unlocked", tuple(states))
+            continue
+        states.append(f"attempt-event:{terminal['state']}:{terminal['environment']}")
+        if terminal["state"] in RESOLUTION_STATES:
+            resolved.append(states[-1])
+        if terminal["state"] != "apply-not-started":
+            locked = True
+    return AttemptState("locked" if locked else "unlocked", tuple(states), tuple(resolved))
+
+
+def chain_terminals(events: Sequence[Mapping]) -> dict[str, tuple[str, str]]:
+    """Map each attemptId to ``(terminal state, environment)`` for chains already known to be linear.
+
+    Call it after ``reduce_attempt_events`` has validated the same events.
+    """
+    by_attempt: dict[str, list[dict]] = defaultdict(list)
+    for raw_event in events:
+        event = dict(raw_event)
+        by_attempt[event["attemptId"]].append(event)
+    result: dict[str, tuple[str, str]] = {}
+    for attempt_id, items in by_attempt.items():
+        referenced = {item["predecessorEventId"] for item in items}
+        leaves = [item for item in items if item["eventId"] not in referenced]
+        if len(leaves) != 1:
+            raise MigrationAttemptError(f"attempt {attempt_id} must end in exactly one event")
+        result[attempt_id] = (leaves[0]["state"], leaves[0]["environment"])
+    return result
 
 
 def validate_no_write_evidence(repo_root: Path, event: Mapping) -> bool:

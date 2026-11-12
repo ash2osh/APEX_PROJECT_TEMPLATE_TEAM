@@ -288,5 +288,209 @@ class MigrationAttemptEvidenceTests(unittest.TestCase):
                 self.assertEqual(invalid.status, "unknown")
 
 
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "migration_attempts_v1"
+FIXTURE_FOLDERS = {
+    "pending": "migrations/APP_ONE/2026-10-12_archive-family-r002",
+    "verified": "migrations/APP_ONE/2026-10-13_archive-family-r003",
+    "not-started": "migrations/APP_ONE/2026-10-14_archive-family-r004",
+}
+RESOLVED_STATES = ("failed-no-target-effect", "failed-target-effect-unknown", "superseded")
+OWNER_EVIDENCE_PATH = "evidence/owner-check.txt"
+PENDING_FOLDER = "migrations/APP_ONE/2026-10-12_archive-family-r002"
+CHECKS_SOURCE = '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n'
+
+
+def owner_evidence() -> dict:
+    return {"kind": "owner-resolution", "path": OWNER_EVIDENCE_PATH, "sha256": "e" * 64}
+
+
+class MigrationAttemptV1FixtureTests(unittest.TestCase):
+    """Fixtures generated from the schema-1 formats before this change; they must keep loading unchanged."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name) / "repo"
+        shutil.copytree(FIXTURE_ROOT / "repo", self.repo)
+        (self.repo / "scratch").mkdir()
+        # scratch/ is git-ignored, so the no-write SQLcl output is copied in for each test.
+        shutil.copyfile(FIXTURE_ROOT / "no-write-sqlcl-output.log", self.repo / "scratch" / "no-write-sqlcl-output.log")
+
+    def test_v1_events_receipt_index_and_no_write_evidence_load_unchanged(self):
+        from scripts import migration_attempts, migration_manifest
+
+        expected = {
+            "pending": ("locked", ("attempt-event:pending:dev",)),
+            "verified": ("locked", ("attempt-event:verified:dev",)),
+            "not-started": ("unlocked", ("attempt-event:apply-not-started:dev",)),
+        }
+        for key, (status, states) in expected.items():
+            with self.subTest(fixture=key):
+                state = migration_attempts.reduce_attempt_events(
+                    migration_attempts.read_attempt_events(self.repo / FIXTURE_FOLDERS[key])
+                )
+                self.assertEqual(state.status, status)
+                self.assertEqual(state.states, states)
+
+        folder = self.repo / FIXTURE_FOLDERS["not-started"]
+        terminal = next(event for event in migration_attempts.read_attempt_events(folder) if event["state"] == "apply-not-started")
+        self.assertTrue(migration_attempts.validate_no_write_evidence(self.repo, terminal))
+
+        verified_folder = self.repo / FIXTURE_FOLDERS["verified"]
+        migration = migration_manifest.load_migration(self.repo, FIXTURE_FOLDERS["verified"])
+        receipt = json.loads((verified_folder / "status.dev.json").read_text(encoding="utf-8"))
+        migration_manifest.validate_receipt(verified_folder / "status.dev.json", migration, receipt["target"])
+
+        index = migration_manifest.load_archived_index(self.repo / "migrations" / "APP_ONE" / ".archived.json", "APP_ONE")
+        self.assertEqual([record["folder"] for record in index], ["2026-10-05_archive-family-r001"])
+        self.assertNotIn("evidence", index[0])
+        self.assertTrue((self.repo / "migrations-archive" / "APP_ONE" / "2026-10-05_archive-family-r001" / "status.dev.json").is_file())
+
+
+class OwnerResolutionAttemptTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name) / "repo"
+        self.folder = self.repo / "migrations" / "APP_ONE" / "2026-10-12_archive-family-r002"
+        self.folder.mkdir(parents=True)
+        (self.folder / "001-create-table.sql").write_text("CREATE TABLE T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        (self.folder / "checks.json").write_text(CHECKS_SOURCE, encoding="utf-8", newline="\n")
+
+    def require_attempts(self):
+        try:
+            from scripts import migration_attempts
+        except ImportError as error:
+            self.fail(f"migration attempts module is unavailable: {error}")
+        return migration_attempts
+
+    def make_event(self, *, state="pending", attempt_id=None, predecessor=None, write_attempted=None, evidence=None):
+        if write_attempted is None:
+            write_attempted = state != "apply-not-started"
+        return {
+            "schemaVersion": 1,
+            "eventId": str(uuid.uuid4()),
+            "attemptId": str(attempt_id or uuid.uuid4()),
+            "runId": "migration-attempt-test-run",
+            "predecessorEventId": predecessor,
+            "recordedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "migrationPath": PENDING_FOLDER,
+            "environment": "dev",
+            "target": {
+                "environment": "dev",
+                "connection": "fake-dev",
+                "expected_user": "APP_ONE",
+                "current_schema": "APP_ONE",
+            },
+            "identity": None,
+            "files": [{"name": "001-create-table.sql", "sequence": 1, "sha256": "a" * 64}],
+            "checksSha256": "b" * 64,
+            "payloadDigest": "c" * 64,
+            "state": state,
+            "writeAttempted": write_attempted,
+            "evidence": evidence or [],
+        }
+
+    def accepts(self, api, event):
+        try:
+            api.validate_attempt_event(event, self.folder)
+        except api.MigrationAttemptError:
+            return False
+        return True
+
+    def test_owner_resolution_states_validate_as_terminal_events(self):
+        api = self.require_attempts()
+        for state in RESOLVED_STATES:
+            with self.subTest(state=state):
+                pending = self.make_event()
+                terminal = self.make_event(
+                    state=state, attempt_id=pending["attemptId"], predecessor=pending["eventId"], evidence=[owner_evidence()],
+                )
+                self.assertTrue(self.accepts(api, terminal), f"{state} with one owner-resolution item is refused")
+                reduced = api.reduce_attempt_events((pending, terminal))
+                self.assertEqual(reduced.status, "locked")
+                self.assertEqual(reduced.states, (f"attempt-event:{state}:dev",))
+
+    def test_owner_resolution_needs_exactly_one_safe_owner_item(self):
+        api = self.require_attempts()
+        pending = self.make_event()
+        good = owner_evidence()
+        refused = {
+            "no evidence": [],
+            "two items": [good, dict(good)],
+            "wrong kind": [dict(good, kind="no-write-sqlcl-output")],
+            "extra key": [dict(good, classification="connection-failed-before-payload")],
+            "migrations path": [dict(good, path=f"{PENDING_FOLDER}/notes.txt")],
+            "scratch path": [dict(good, path="scratch/notes.txt")],
+            "parent path": [dict(good, path="../notes.txt")],
+            "absolute path": [dict(good, path="/etc/notes.txt")],
+            "drive path": [dict(good, path="C:/notes.txt")],
+            "doubled separator": [dict(good, path="evidence//notes.txt")],
+            "backslash path": [dict(good, path="evidence\\notes.txt")],
+            "uppercase digest": [dict(good, sha256="E" * 64)],
+        }
+        for state in RESOLVED_STATES:
+            with self.subTest(state=state, case="positive"):
+                self.assertTrue(self.accepts(api, self.make_event(
+                    state=state, attempt_id=pending["attemptId"], predecessor=pending["eventId"], evidence=[good],
+                )))
+            for label, evidence in refused.items():
+                with self.subTest(state=state, case=label):
+                    event = self.make_event(
+                        state=state, attempt_id=pending["attemptId"], predecessor=pending["eventId"], evidence=evidence,
+                    )
+                    self.assertFalse(self.accepts(api, event))
+
+    def test_owner_resolution_states_keep_write_attempted_true(self):
+        api = self.require_attempts()
+        for state in RESOLVED_STATES:
+            with self.subTest(state=state):
+                pending = self.make_event()
+                self.assertTrue(self.accepts(api, self.make_event(
+                    state=state, attempt_id=pending["attemptId"], predecessor=pending["eventId"],
+                    write_attempted=True, evidence=[owner_evidence()],
+                )))
+                self.assertFalse(self.accepts(api, self.make_event(
+                    state=state, attempt_id=pending["attemptId"], predecessor=pending["eventId"],
+                    write_attempted=False, evidence=[owner_evidence()],
+                )))
+
+    def test_a_resolution_closes_the_chain_and_nothing_may_follow_it(self):
+        api = self.require_attempts()
+        pending = self.make_event()
+        resolved = self.make_event(
+            state="failed-no-target-effect", attempt_id=pending["attemptId"],
+            predecessor=pending["eventId"], evidence=[owner_evidence()],
+        )
+        self.assertTrue(self.accepts(api, resolved))
+        self.assertEqual(api.reduce_attempt_events((pending, resolved)).status, "locked")
+
+        after = self.make_event(state="verified", attempt_id=pending["attemptId"], predecessor=resolved["eventId"])
+        with self.assertRaises(api.MigrationAttemptError):
+            api.reduce_attempt_events((pending, resolved, after))
+        second = self.make_event(
+            state="failed-target-effect-unknown", attempt_id=pending["attemptId"],
+            predecessor=pending["eventId"], evidence=[owner_evidence()],
+        )
+        with self.assertRaises(api.MigrationAttemptError):
+            api.reduce_attempt_events((pending, resolved, second))
+
+    def test_reducer_reports_resolved_attempts_in_a_resolved_tuple_and_keeps_them_locked(self):
+        api = self.require_attempts()
+        pending = self.make_event()
+        resolved = self.make_event(
+            state="failed-no-target-effect", attempt_id=pending["attemptId"],
+            predecessor=pending["eventId"], evidence=[owner_evidence()],
+        )
+        self.assertTrue(self.accepts(api, resolved))
+
+        reduced = api.reduce_attempt_events((pending, resolved))
+
+        self.assertEqual(reduced.status, "locked")
+        self.assertEqual(reduced.states, ("attempt-event:failed-no-target-effect:dev",))
+        self.assertEqual(reduced.resolved, ("attempt-event:failed-no-target-effect:dev",))
+        self.assertEqual(api.reduce_attempt_events((pending,)).resolved, ())
+
+
 if __name__ == "__main__":
     unittest.main()

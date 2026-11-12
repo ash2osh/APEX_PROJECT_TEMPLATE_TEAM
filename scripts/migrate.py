@@ -57,6 +57,7 @@ from .migration_attempts import (
     not_started_reason,
     write_attempt_event,
 )
+from .migration_resolution import MigrationResolutionError, read_resolution, reconcile_command
 from .migration_revision import attempt_record_is_locked, RUN_ID_RE, RUN_MANIFEST_NAME, inspect_migration_lock
 from .schema_catalog import (
     CatalogError,
@@ -385,24 +386,48 @@ def _verification_failure_details(
     return ". ".join(parts)
 
 
+def _reconcile_command(repo_root: Path, migration: Migration | None, environment: str) -> str:
+    """D7: the command that resolves an apply left open. Outcome and evidence are the owner's to choose."""
+    relative = relative_to_root(migration.folder, repo_root).as_posix() if migration is not None else "<folder>"
+    return reconcile_command(relative, environment)
+
+
 def _verify_durable_folder_locks(
     repo_root: Path,
     migrations: Sequence[Migration],
     target_identity: Mapping[str, str],
 ) -> None:
+    environment = str(target_identity["environment"])
     for migration in migrations:
         relative = relative_to_root(migration.folder, repo_root).as_posix()
         lock = inspect_migration_lock(
             repo_root,
             relative,
-            environment=str(target_identity["environment"]),
+            environment=environment,
             schema=str(target_identity["current_schema"]),
         )
         if lock.status != "unlocked":
+            resolved = [state for state in lock.states if state.startswith("resolution:")]
+            note = (
+                f". The folder is already resolved ({resolved[0]}) and is never applied again; "
+                f"start the next revision with scripts/team.sh revise {relative}"
+                if resolved else ""
+            )
             raise MigrationApplyError(
                 f"migration folder is {lock.status} from durable receipt/attempt evidence; reconcile before applying "
-                f"{migration.folder.name}: {'; '.join(lock.states)}"
+                f"{migration.folder.name}: {'; '.join(lock.states)}; {_reconcile_command(repo_root, migration, environment)}{note}"
             )
+
+
+def _resolution_names_run(migration: Migration, environment: str, run_id: str) -> bool:
+    """True only for a readable resolution that names this run. Anything unreadable does not count."""
+    path = migration.folder / f"resolution.{environment}.json"
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        return read_resolution(path)["runId"] == run_id
+    except MigrationResolutionError:
+        return False
 
 
 def _verify_receipts_and_attempts(
@@ -414,12 +439,15 @@ def _verify_receipts_and_attempts(
     for migration in migrations:
         path = migration.folder / f"status.{environment}.json"
         if path.is_symlink():
-            raise MigrationApplyError(f"receipt path is a symbolic link and requires reconciliation: {path}")
+            raise MigrationApplyError(f"receipt path is a symbolic link and requires reconciliation: {path}; {_reconcile_command(repo_root, migration, environment)}")
         if path.exists():
             try:
                 validate_receipt(path, migration, target_identity)
             except MigrationManifestError as error:
-                raise MigrationApplyError(f"existing receipt is malformed or does not match; reconcile before applying {migration.folder.name}: {error}") from error
+                raise MigrationApplyError(
+                    f"existing receipt is malformed or does not match; reconcile before applying {migration.folder.name}: {error}; "
+                    f"{_reconcile_command(repo_root, migration, environment)}"
+                ) from error
             raise MigrationApplyError(f"{migration.folder.name} already has a verified {environment} receipt; run read-only checks instead of reapplying")
 
     scratch = repo_root / "scratch"
@@ -436,23 +464,23 @@ def _verify_receipts_and_attempts(
         if not manifest_path.exists():
             continue
         if manifest_path.is_symlink():
-            raise MigrationApplyError(f"retained migration evidence is unsafe and needs reconciliation: {manifest_path}")
+            raise MigrationApplyError(f"retained migration evidence is unsafe and needs reconciliation: {manifest_path}; {_reconcile_command(repo_root, None, environment)}")
         try:
             # Strict, like a receipt: a duplicate key would let the last one win and
             # turn "writeAttempted": true into false.
             manifest = decode_json(manifest_path.read_bytes(), str(manifest_path))
         except (OSError, MigrationManifestError) as error:
-            raise MigrationApplyError(f"retained migration evidence cannot be read; reconcile before applying: {manifest_path} ({error})") from error
+            raise MigrationApplyError(f"retained migration evidence cannot be read; reconcile before applying: {manifest_path} ({error}); {_reconcile_command(repo_root, None, environment)}") from error
         if (
             not isinstance(manifest, dict)
             or type(manifest.get("schemaVersion")) is not int
             or manifest.get("schemaVersion") not in {1, 2}
             or not isinstance(manifest.get("migrations"), list)
         ):
-            raise MigrationApplyError(f"retained migration evidence is malformed; reconcile before applying: {manifest_path}")
+            raise MigrationApplyError(f"retained migration evidence is malformed; reconcile before applying: {manifest_path}; {_reconcile_command(repo_root, None, environment)}")
         target_record = manifest.get("target")
         if not isinstance(target_record, dict):
-            raise MigrationApplyError(f"retained migration target evidence is malformed; reconcile before applying: {manifest_path}")
+            raise MigrationApplyError(f"retained migration target evidence is malformed; reconcile before applying: {manifest_path}; {_reconcile_command(repo_root, None, environment)}")
         # migrations/<SCHEMA>/ may reuse a folder name per schema. An attempt
         # against another schema is not an attempt at this folder.
         recorded_schema = target_record.get("current_schema")
@@ -463,13 +491,19 @@ def _verify_receipts_and_attempts(
                 continue
             if target_record.get("environment") != environment or not attempt_record_is_locked(record):
                 continue
+            if _resolution_names_run(selected[record["folder"]], environment, run_dir.name):
+                # The owner's committed resolution closes this run; the durable lock check below refuses with that state.
+                continue
+            command = _reconcile_command(repo_root, selected[record["folder"]], environment)
             if record.get("writeAttempted") is not True:
                 raise MigrationApplyError(
-                    f"a retained attempt for {record['folder']} has an uncertain state; inspect {run_dir} and reconcile"
+                    f"a retained attempt for {record['folder']} has an uncertain state; inspect {run_dir} and reconcile: {command}"
                 )
             if record.get("payloadDigest") != selected[record["folder"]].payload_digest:
-                raise MigrationApplyError(f"a prior write attempt has different bytes for {record['folder']}; reconcile before applying")
-            raise MigrationApplyError(f"a prior {environment} write attempt for {record['folder']} has no current verified receipt; inspect {run_dir} and reconcile")
+                raise MigrationApplyError(f"a prior write attempt has different bytes for {record['folder']}; reconcile before applying: {command}")
+            raise MigrationApplyError(
+                f"a prior {environment} write attempt for {record['folder']} has no current verified receipt; inspect {run_dir} and reconcile: {command}"
+            )
     _verify_durable_folder_locks(repo_root, migrations, target_identity)
 
 
@@ -1061,7 +1095,10 @@ def apply_batch(
                 record["error"] = "interrupted"
                 run_manifest["state"] = "apply-failed-or-unknown"
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(f"{original.folder.name} was interrupted and may be partially applied; stop and reconcile. Evidence: {run_dir}") from None
+                raise MigrationApplyError(
+                    f"{original.folder.name} was interrupted and may be partially applied; stop and reconcile: "
+                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                ) from None
             except (MigrationApplyError, OSError, RuntimeError) as error:
                 output_path = folder_run_dir / "sqlcl-output.log"
                 try:
@@ -1110,21 +1147,25 @@ def apply_batch(
                         ) from error
                     raise MigrationApplyError(
                         f"{original.folder.name} has no durable no-write proof; the pending event keeps it locked. "
-                        f"Reconcile before retrying. {error}. Evidence: {run_dir}"
+                        f"Reconcile before retrying: {_reconcile_command(repo_root, original, target.environment)}. {error}. Evidence: {run_dir}"
                     ) from error
                 record["state"] = "apply-failed-or-unknown"
                 record["error"] = str(error)
                 run_manifest["state"] = "apply-failed-or-unknown"
                 _atomic_write_json(manifest_path, run_manifest)
                 raise MigrationApplyError(
-                    f"{original.folder.name} may be partially applied; stop and reconcile. "
+                    f"{original.folder.name} may be partially applied; stop and reconcile: "
+                    f"{_reconcile_command(repo_root, original, target.environment)}. "
                     f"{error}. Evidence: {run_dir}"
                 ) from error
             if apply_evidence.get("committed") is not True:
                 record["state"] = "apply-failed-or-unknown"
                 run_manifest["state"] = record["state"]
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(f"{original.folder.name} did not provide commit evidence; stop and reconcile. Evidence: {run_dir}")
+                raise MigrationApplyError(
+                    f"{original.folder.name} did not provide commit evidence; stop and reconcile: "
+                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                )
             record["state"] = "committed-unverified"
             record["applyStartedAt"] = apply_evidence.get("applyStartedAt")
             record["applyCompletedAt"] = apply_evidence.get("applyCompletedAt")
@@ -1134,7 +1175,10 @@ def apply_batch(
 
             apply_identity = apply_evidence.get("identity")
             if not isinstance(apply_identity, Mapping):
-                raise MigrationApplyError(f"{original.folder.name} committed, but apply identity is unavailable; reconcile. Evidence: {run_dir}")
+                raise MigrationApplyError(
+                    f"{original.folder.name} committed, but apply identity is unavailable; reconcile: "
+                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                )
             _assert_same_target(initial_target_identity, apply_identity)
             operations = analyze_batch((original,), target.schema)
             selected_keys = _selected_keys(operations)
@@ -1173,7 +1217,7 @@ def apply_batch(
                 details = _verification_failure_details(post_checks, catalog_errors, verbose=verbose)
                 raise MigrationApplyError(
                     f"{original.folder.name} committed but fresh verification failed; no receipt was written. "
-                    f"{details}. Reconcile. Evidence: {run_dir}"
+                    f"{details}. Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
                 )
 
             source_relative = relative_to_root(original.folder, repo_root).as_posix()
@@ -1183,8 +1227,22 @@ def apply_batch(
                 record["state"] = "committed-source-or-payload-changed"
                 run_manifest["state"] = record["state"]
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(f"{original.folder.name} committed from frozen bytes, but local source changed during apply; no receipt was written. Reconcile. Evidence: {run_dir}")
+                raise MigrationApplyError(
+                    f"{original.folder.name} committed from frozen bytes, but local source changed during apply; no receipt was written. "
+                    f"Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                )
 
+            resolution_path = original.folder / f"resolution.{target.environment}.json"
+            if resolution_path.exists() or resolution_path.is_symlink():
+                # A resolution written during this apply closes the folder: no receipt may follow it.
+                record["state"] = "committed-receipt-failed"
+                record["receiptError"] = f"resolution.{target.environment}.json exists"
+                run_manifest["state"] = record["state"]
+                _atomic_write_json(manifest_path, run_manifest)
+                raise MigrationApplyError(
+                    f"{original.folder.name} committed, but resolution.{target.environment}.json exists; no receipt was written. "
+                    f"Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                )
             receipt = build_receipt(original, initial_target_identity, apply_evidence, fresh_snapshot, post_checks, catalog_results)
             receipt_path = original.folder / f"status.{target.environment}.json"
             try:
@@ -1194,7 +1252,10 @@ def apply_batch(
                 record["receiptError"] = str(error)
                 run_manifest["state"] = record["state"]
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(f"{original.folder.name} committed and verified, but receipt installation failed; reconcile. Evidence: {run_dir}") from error
+                raise MigrationApplyError(
+                    f"{original.folder.name} committed and verified, but receipt installation failed; reconcile: "
+                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                ) from error
             verified_event = _attempt_event(
                 repo_root,
                 original,
@@ -1218,7 +1279,8 @@ def apply_batch(
     except KeyboardInterrupt:
         if attempted and run_dir is not None:
             print(
-                "migration interrupted after a write was attempted; stop and reconcile. "
+                "migration interrupted after a write was attempted; stop and reconcile: "
+                f"{_reconcile_command(repo_root, None, target.environment)}. "
                 f"Retained attempt evidence: {run_dir}",
                 file=sys.stderr,
             )

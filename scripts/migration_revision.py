@@ -14,12 +14,15 @@ from collections.abc import Sequence
 
 from .path_utils import relative_to_root
 from .migration_attempts import (
+    RESOLUTION_STATES,
     MigrationAttemptError,
+    chain_terminals,
     not_started_reason as not_started_reason,
     read_attempt_events,
     reduce_attempt_events,
     validate_no_write_evidence,
 )
+from .migration_resolution import MigrationResolutionError, read_resolution, reconcile_command
 
 from .migration_manifest import (
     FOLDER_RE,
@@ -64,6 +67,39 @@ def attempt_record_is_locked(record: dict) -> bool:
         record.get("writeAttempted") is False
         and record.get("state") in {"frozen", "apply-not-started"}
     )
+
+
+def open_attempt_states(states: Sequence[str]) -> tuple[str, ...]:
+    """The lock states that still need an owner resolution: pending or uncertain attempts.
+
+    Closed chains (verified, apply-not-started, or an owner resolution) and runs that wrote
+    nothing are not open: the command has nothing to resolve for them.
+    """
+    result = []
+    for state in states:
+        if state.startswith("attempt-event:"):
+            if state.startswith("attempt-event:pending:"):
+                result.append(state)
+        elif state.startswith("attempt:"):
+            if not state.startswith(("attempt:apply-not-started:", "attempt:frozen:")):
+                result.append(state)
+        elif state.startswith("attempt-event-no-write-evidence-unavailable:"):
+            # The attempt is closed as apply-not-started and only its retained log is gone. The
+            # command resolves pending attempts, so it has nothing to do here.
+            continue
+        elif state.startswith(("attempt-", "scratch-")):
+            result.append(state)
+    return tuple(result)
+
+
+def reconcile_hint(folder: str, states: Sequence[str]) -> str | None:
+    """The reconcile command for a folder that an unresolved attempt holds, or None."""
+    open_states = open_attempt_states(states)
+    if not open_states:
+        return None
+    environments = [state.rsplit(":", 1)[-1] for state in open_states if state.rsplit(":", 1)[-1] in {"dev", "staging", "prod"}]
+    environment = environments[0] if environments else "<env>"
+    return f"resolve it with: {reconcile_command(folder, environment)}"
 
 
 def _safe_label(value: object) -> str:
@@ -253,13 +289,54 @@ def inspect_migration_lock(
         locked = True
         states.append(f"receipt:verified:{receipt_environment}")
 
+    # A committed owner resolution closes one attempt in one environment. Its sidecar is the
+    # durable record: a pending chain it names counts as closed even when the local closing
+    # event is missing, and a run it names is reported as resolved, not as uncertain.
+    bound: dict[str, dict] = {}
+    for resolution_environment in sorted(STATUS_ENVIRONMENTS):
+        if environment is not None and resolution_environment != environment:
+            continue
+        sidecar = folder / f"resolution.{resolution_environment}.json"
+        if not sidecar.exists() and not sidecar.is_symlink():
+            continue
+        if sidecar.is_symlink():
+            problems.append(f"resolution-symlink:{resolution_environment}")
+            continue
+        try:
+            record = read_resolution(sidecar)
+        except MigrationResolutionError as error:
+            problems.append(f"resolution-invalid:{resolution_environment}:{_safe_label(str(error))}")
+            continue
+        if schema is not None and record["target"]["current_schema"] != schema:
+            continue
+        receipt_path = folder / f"status.{resolution_environment}.json"
+        if receipt_path.exists() or receipt_path.is_symlink():
+            problems.append(f"resolution-conflict:{resolution_environment}")
+            continue
+        try:
+            migration = load_migration(root, relative_to_root(folder, root).as_posix())
+        except (MigrationManifestError, OSError, ValueError) as error:
+            problems.append(f"resolution-invalid:{resolution_environment}:{_safe_label(str(error))}")
+            continue
+        if record["payloadDigest"] != migration.payload_digest or record["checksSha256"] != migration.checks_sha256:
+            problems.append(f"resolution-stale:{resolution_environment}")
+            continue
+        bound[resolution_environment] = record
+        locked = True
+        states.append(f"resolution:{record['outcome']}:{resolution_environment}")
+    resolved_runs: set[tuple[str, str]] = {(env, record["runId"]) for env, record in bound.items()}
+    closed_by: dict[str, tuple[str, str]] = {
+        record["attemptId"]: (env, record["outcome"]) for env, record in bound.items() if record["attemptId"] is not None
+    }
+
     event_by_id: dict[str, dict] = {}
     try:
         events = read_attempt_events(folder)
         event_by_id = {event["eventId"]: event for event in events}
         events_for_no_write_validation = events
+        scoped_events = events
         if environment is None and schema is None:
-            event_state = reduce_attempt_events(events)
+            event_state = reduce_attempt_events(events, closed_by=closed_by)
         else:
             selected_events = tuple(
                 event for event in events
@@ -267,10 +344,17 @@ def inspect_migration_lock(
                 and (schema is None or event["target"]["current_schema"] == schema)
             )
             events_for_no_write_validation = selected_events
-            event_state = reduce_attempt_events(selected_events)
+            scoped_events = selected_events
+            event_state = reduce_attempt_events(selected_events, closed_by=closed_by)
         if event_state.status == "locked":
             locked = True
         states.extend(event_state.states)
+        # A closing resolution event must have its sidecar. The sidecar alone is enough to resolve.
+        for attempt_id, (terminal_state, terminal_environment) in sorted(chain_terminals(scoped_events).items()):
+            if terminal_state in RESOLUTION_STATES:
+                record = next((item for item in bound.values() if item["attemptId"] == attempt_id), None)
+                if record is None or record["outcome"] != terminal_state or record["environment"] != terminal_environment:
+                    problems.append(f"resolution-record-missing:{_safe_label(terminal_environment)}")
         for event in events_for_no_write_validation:
             if event["state"] == "apply-not-started" and not validate_no_write_evidence(root, event):
                 problems.append(f"attempt-event-no-write-evidence-unavailable:{event['eventId']}")
@@ -334,6 +418,9 @@ def inspect_migration_lock(
                     continue
                 if record.get("folder") != folder.name:
                     continue
+                if (target.get("environment"), attempt_dir.name) in resolved_runs:
+                    # Named by a committed resolution: reported by its resolution state.
+                    continue
                 state = _safe_label(record.get("state"))
                 record_environment = _safe_label(target.get("environment"))
                 if type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 2:
@@ -383,6 +470,9 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
         if arguments.check:
             report = inspect_migration_lock(arguments.repo_root, arguments.folder)
             print(f"{report.status.upper()} {arguments.folder}: {'; '.join(report.states)}")
+            hint = reconcile_hint(arguments.folder, report.states) if report.status != "unlocked" else None
+            if hint is not None:
+                print(f"  {hint}")
             return report.exit_code
         result = revise_folder(arguments.repo_root, arguments.folder, arguments.reason)
     except (MigrationRevisionError, MigrationManifestError, OSError, ValueError) as error:

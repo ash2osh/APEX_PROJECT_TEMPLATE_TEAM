@@ -467,8 +467,12 @@ receipts into the new revision.
 
 Use `revise --check` to inspect local attempt and receipt evidence without
 connecting. It exits 0 for unlocked, 1 for locked, and 2 when evidence is
-unknown or unreadable. See the [migration rules](docs/migration-rules.md) for
-the exact `apply-not-started` classification and its limits.
+unknown or unreadable. A pending or unknown attempt is closed by the owner with
+`scripts/team.sh reconcile-migration`, which records the outcome and the evidence file's
+digest and never connects to a database; see
+[migration attempt resolution](docs/migration-attempt-resolution.md). See the
+[migration rules](docs/migration-rules.md) for the exact `apply-not-started`
+classification and its limits.
 
 Use `scripts/team.sh migration-plan --format text` for a local inventory, or
 pass folders in intended order. Add `--live --env dev|staging|prod` for the
@@ -848,6 +852,7 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh revise <folder> [--reason TEXT]` | Copy a migration to its next revision; the old folder stays unchanged. |
 | `scripts/team.sh revise --check <folder>` | Report whether local receipt or attempt evidence locks a migration folder; exit 0/1/2 for unlocked/locked/unknown. |
 | `scripts/team.sh archive-migrations <folder> [...] [--schema NAME] [--destination DIR] [--reason TEXT] [--yes\|-y]` | Preview archiving released folders; `--yes` moves them and updates the archived revision index. Use `--all [--keep <folder>...]` to select by schema scope. |
+| `scripts/team.sh reconcile-migration <folder> --env <env> --outcome <outcome> --evidence <file> [--attempt ID] [--superseded-by FOLDER]` | Record the owner's outcome for a pending or unknown attempt (`failed-no-target-effect`, `failed-target-effect-unknown` or `superseded`) from local files. It never connects to a database; the typed acknowledgment is the developer's. See [migration attempt resolution](docs/migration-attempt-resolution.md). |
 | `scripts/team.sh verify <folder> [...] --env <env> [--phase pre\|post\|both] [--only-failed] [--format text\|json] [--jobs N]` | Evaluate selected migration checks read-only; exit 1 for false checks and 2 for errors. |
 | `scripts/team.sh feature <init\|capture\|diff\|doctor\|freeze\|clean-capsule\|reconcile-run\|convert-plan> ...` | Create and review mutable feature sources, check ownership (and DEV drift with `--live`), freeze committed schema-version 2 inputs, preview/apply eligible local capsule cleanup, close an unfinished run that has no checkpoint to recover (`reconcile-run`, typed acknowledgment), or plan offline and read-only how to move dated migration folders into feature files (`convert-plan`). |
 | `scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare] [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>] [--yes\|-y] [--confirm-target <db_unique_name>]` | Run a schema-version 1 ordered rollout or prepare, execute and promote a feature capsule; production capsule execution requires staging proof. `--yes` / `-y` accepts the rollout confirmation; production also needs `--confirm-target`. |

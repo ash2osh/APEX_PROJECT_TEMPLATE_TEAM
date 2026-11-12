@@ -42,7 +42,9 @@
   Treat an interrupted/unknown checkpoint as unresolved until reconciled, and
   describe only the selected feature-checkpoint and migrate-step budget, not
   whole-deployment duration. See `docs/feature-releases.md`. An agent never types
-  the `RECONCILE-RUN` acknowledgment; the developer does.
+  the `RECONCILE-RUN` acknowledgment; the developer does. The same holds for the
+  `RECONCILE-MIGRATION` acknowledgment of `scripts/team.sh reconcile-migration`, which
+  records a migration attempt's outcome: an agent never types it.
 - `-y` / `--yes` answers a staging or production `[y/N]` prompt only when the developer asked in the
   conversation for that run to be unattended. Production also needs `--confirm-target` with the name the
   developer typed for the run. An agent never sets `TEAM_ACK_FROM_STDIN`, which only the live tests use.

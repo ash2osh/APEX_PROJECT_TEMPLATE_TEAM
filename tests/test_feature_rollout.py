@@ -1097,6 +1097,30 @@ class FeatureRolloutTests(unittest.TestCase):
             self._install_attempt_event_at(repo, other)
             self.assertEqual(rollout._migration_write_state(baseline, folders, repo), "unknown")
 
+    def test_a_resolved_attempt_is_an_unknown_write_that_recovery_will_not_replay(self) -> None:
+        from scripts import migration_attempts, rollout
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            (repo / MIGRATION_FOLDER).mkdir(parents=True)
+            folders = [MIGRATION_FOLDER]
+            attempt_id = "4" * 8 + "-0000-4000-8000-" + "0" * 12
+            pending = self._attempt_event("pending", attempt_id=attempt_id)
+            self._install_attempt_event_at(repo, pending)
+            resolved = self._attempt_event(
+                "failed-no-target-effect", attempt_id=attempt_id, predecessor=pending["eventId"],
+                evidence=[{"kind": "owner-resolution", "path": "evidence/owner-check.txt", "sha256": "e" * 64}],
+            )
+            self._install_attempt_event_at(repo, resolved)
+            try:
+                read_back = migration_attempts.read_attempt_events(repo / MIGRATION_FOLDER)
+            except migration_attempts.MigrationAttemptError as error:
+                self.fail(f"resolved attempt events are not readable yet: {error}")
+            self.assertEqual({event["state"] for event in read_back}, {"pending", "failed-no-target-effect"})
+
+            self.assertEqual(rollout._migration_write_state(set(), folders, repo), "unknown")
+            self.assertEqual(rollout._migration_write_state({pending["eventId"]}, folders, repo), "unknown")
+
     def _install_attempt_event_at(self, repo: Path, event: dict) -> None:
         path = repo / MIGRATION_FOLDER / f"attempt-event.{event['eventId']}.json"
         path.write_text(json.dumps(event, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")

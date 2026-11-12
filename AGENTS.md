@@ -172,7 +172,9 @@ owner-only commands retain their owner-login checks. See
   `migrations/YYYY-MM-DD_<name>-rNNN/` with consecutive named SQL steps such as
   `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
   path. Keep source immutable after a write attempt; a follow-up uses the next
-  revision folder. Start a code change with `scripts/team.sh new-migration
+  revision folder. A pending or unknown attempt is closed by its owner with
+  `scripts/team.sh reconcile-migration` ([docs](docs/migration-attempt-resolution.md));
+  an agent never types the `RECONCILE-MIGRATION` acknowledgment; the developer does. Start a code change with `scripts/team.sh new-migration
   <name> --source "PACKAGE BODY:<NAME>" --env dev`: it copies the live DEV
   source (not the mirror) into the steps, and its preconditions refuse the
   apply if that source changes first. Run `scripts/team.sh check-conflicts <folder> --env dev`

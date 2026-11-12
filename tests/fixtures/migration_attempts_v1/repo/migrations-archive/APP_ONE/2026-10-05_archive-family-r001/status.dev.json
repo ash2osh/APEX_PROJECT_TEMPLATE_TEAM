@@ -1,0 +1,45 @@
+{
+  "applyCompletedAt": "2026-10-05T09:01:00+00:00",
+  "applyStartedAt": "2026-10-05T09:00:00+00:00",
+  "checks": [
+    {
+      "id": "ready",
+      "passed": true,
+      "rows": 1,
+      "value": 1
+    }
+  ],
+  "checksSha256": "4faa769310e38a024b86b7ee1cdb0b2ec9a1b827d692721c4f61f6f12b5c9aeb",
+  "createdDate": "2026-10-05",
+  "environment": "dev",
+  "family": "archive-family",
+  "files": [
+    {
+      "name": "001-create-table.sql",
+      "sequence": 1,
+      "sha256": "75553498518a878820841761517f987a600f73233211bf778c800c11a43cb3f1"
+    }
+  ],
+  "migration": "2026-10-05_archive-family-r001",
+  "normalization": "fixture",
+  "payloadDigest": "9a33d811043df1a2395eb4ca9376d08c65b63b78036aa23b20d8e12f89b52e65",
+  "revision": 1,
+  "schemaVersion": 1,
+  "state": "verified",
+  "target": {
+    "connection": "fake-dev",
+    "container_id": "0000000000000000",
+    "container_name": "fixture-container",
+    "current_schema": "APP_ONE",
+    "database_version": "26.1.0.0.0",
+    "db_name": "FIXDB",
+    "db_unique_name": "FIXDB_UNIQUE",
+    "edition": "ORA$BASE",
+    "environment": "dev",
+    "expected_user": "APP_ONE",
+    "service_name": "fixdb.example.test",
+    "session_user": "APP_ONE"
+  },
+  "verifiedAt": "2026-10-05T09:02:00+00:00",
+  "verifier": "template-migration-v1"
+}

@@ -44,6 +44,7 @@ ENGINE_HELPER_FILES = (
     "scripts/verify_checks.py",
     "scripts/migration_manifest.py",
     "scripts/migration_attempts.py",
+    "scripts/migration_resolution.py",
     "scripts/migration_checks.py",
     "scripts/dev_test_bindings.py",
     "scripts/validate_migration.py",

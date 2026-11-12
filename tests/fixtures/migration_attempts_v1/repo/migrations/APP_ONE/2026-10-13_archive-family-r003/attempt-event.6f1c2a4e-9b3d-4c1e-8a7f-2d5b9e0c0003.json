@@ -1,0 +1,39 @@
+{
+  "attemptId": "6f1c2a4e-9b3d-4c1e-8a7f-2d5b9e0c0a03",
+  "checksSha256": "4faa769310e38a024b86b7ee1cdb0b2ec9a1b827d692721c4f61f6f12b5c9aeb",
+  "environment": "dev",
+  "eventId": "6f1c2a4e-9b3d-4c1e-8a7f-2d5b9e0c0003",
+  "evidence": [],
+  "files": [
+    {
+      "name": "001-create-table.sql",
+      "sequence": 1,
+      "sha256": "a5c84420d516ff6f27339628cb6fe252304207edfa0f0c1990c09e4c1912f59f"
+    }
+  ],
+  "identity": {
+    "container_id": "0000000000000000",
+    "container_name": "fixture-container",
+    "current_schema": "APP_ONE",
+    "database_version": "26.1.0.0.0",
+    "db_name": "FIXDB",
+    "db_unique_name": "FIXDB_UNIQUE",
+    "edition": "ORA$BASE",
+    "service_name": "fixdb.example.test",
+    "session_user": "APP_ONE"
+  },
+  "migrationPath": "migrations/APP_ONE/2026-10-13_archive-family-r003",
+  "payloadDigest": "e3ee0593c56311c0a74cb6afe0cefa59a3620c27414b3909632fadf4f541a979",
+  "predecessorEventId": "6f1c2a4e-9b3d-4c1e-8a7f-2d5b9e0c0002",
+  "recordedAt": "2026-10-13T09:05:00Z",
+  "runId": "migration-attempt-fixture-r003",
+  "schemaVersion": 1,
+  "state": "verified",
+  "target": {
+    "connection": "fake-dev",
+    "current_schema": "APP_ONE",
+    "environment": "dev",
+    "expected_user": "APP_ONE"
+  },
+  "writeAttempted": true
+}

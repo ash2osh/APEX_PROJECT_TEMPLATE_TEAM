@@ -1,6 +1,8 @@
+import hashlib
 import json
 import contextlib
 import io
+import shutil
 import tempfile
 import unittest
 import uuid
@@ -424,5 +426,220 @@ class MigrationArchiveTests(unittest.TestCase):
         self.assertIn("rollback is incomplete", str(caught.exception))
 
 
+def write_sidecar(root: Path, folder: Path, migration, *, environment: str = "dev", outcome: str = "failed-no-target-effect",
+                  run_id: str = "migration-attempt-archive-test", superseded_by: dict | None = None) -> dict:
+    """A committed resolution sidecar with the folder's current digests and the pending attempt's identifiers."""
+    evidence = root / "evidence" / "owner-check.txt"
+    evidence.parent.mkdir(exist_ok=True)
+    evidence.write_bytes(b"Owner check: sanitized output only.\n")
+    pending = next(
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(folder.glob("attempt-event.*.json"))
+        if json.loads(path.read_text(encoding="utf-8"))["state"] == "pending"
+    )
+    record = {
+        "schemaVersion": 1,
+        "environment": environment,
+        "outcome": outcome,
+        "attemptId": pending["attemptId"],
+        "runId": run_id,
+        "payloadDigest": migration.payload_digest,
+        "checksSha256": migration.checks_sha256,
+        "target": {"environment": environment, "connection": "fake-dev", "expected_user": "APP_ONE", "current_schema": "APP_ONE"},
+        "evidence": {"path": "evidence/owner-check.txt", "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest()},
+        "recordedAt": "2026-11-11T10:00:00Z",
+    }
+    if superseded_by is not None:
+        record["supersededBy"] = superseded_by
+    (folder / f"resolution.{environment}.json").write_text(json.dumps(record) + "\n", encoding="utf-8", newline="\n")
+    return record
+
+
+class ResolvedArchiveTests(unittest.TestCase):
+    """Phase 4 (D6): resolved folders archive without a flag; unresolved ones only with --preserve-unresolved."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "migrations").mkdir()
+
+    def require_archive(self):
+        self.assertIsNotNone(archive, "migration archiving is not implemented")
+        return archive
+
+    def call(self, api, *args, **kwargs):
+        try:
+            return api.archive_migrations(self.root, *args, **kwargs)
+        except TypeError as error:
+            self.fail(f"archive option is not implemented yet: {error}")
+        except api.MigrationArchiveError as error:
+            self.fail(f"archive refused: {error}")
+
+    def pending_folder(self, name: str, api) -> Path:
+        folder = add_folder(self.root, f"migrations/APP_ONE/{name}")
+        add_attempt_event(folder, f"migrations/APP_ONE/{name}", api.load_migration(self.root, f"migrations/APP_ONE/{name}"))
+        return folder
+
+    def index_records(self) -> list[dict]:
+        return json.loads((self.root / "migrations" / "APP_ONE" / ".archived.json").read_text(encoding="utf-8"))["archived"]
+
+    def test_a_resolved_folder_archives_without_a_flag_and_its_plan_names_the_outcome(self) -> None:
+        api = self.require_archive()
+        folder = self.pending_folder("2026-10-01_archive-family-r001", api)
+        write_sidecar(self.root, folder, api.load_migration(self.root, "migrations/APP_ONE/2026-10-01_archive-family-r001"))
+
+        plan = self.call(api, ["migrations/APP_ONE/2026-10-01_archive-family-r001"], yes=True)
+
+        self.assertIn("resolved:failed-no-target-effect:dev", plan.entries[0].evidence)
+        self.assertFalse(folder.exists())
+        self.assertIn("resolved:failed-no-target-effect:dev", self.index_records()[0].get("evidence", []))
+
+    def test_preserve_unresolved_archives_an_attempt_with_no_receipt_and_records_it_as_unresolved(self) -> None:
+        api = self.require_archive()
+        folder = self.pending_folder("2026-10-01_archive-family-r001", api)
+
+        plan = self.call(api, ["migrations/APP_ONE/2026-10-01_archive-family-r001"], preserve_unresolved=True, yes=True)
+
+        self.assertIn("unresolved (preserved)", plan.entries[0].evidence)
+        self.assertNotIn("attempt-without-verified-receipt (accepted)", plan.entries[0].evidence)
+        self.assertFalse(folder.exists())
+        self.assertIn("unresolved (preserved)", self.index_records()[0].get("evidence", []))
+
+    def test_the_word_accepted_appears_only_with_allow_unverified_attempts(self) -> None:
+        api = self.require_archive()
+        self.pending_folder("2026-10-01_archive-family-r001", api)
+        selected = ["migrations/APP_ONE/2026-10-01_archive-family-r001"]
+
+        preserved = self.call(api, selected, preserve_unresolved=True)
+        allowed = api.archive_migrations(self.root, selected, allow_unverified_attempts=True)
+
+        self.assertFalse(any("accepted" in item for item in preserved.entries[0].evidence))
+        self.assertIn("attempt-without-verified-receipt (accepted)", allowed.entries[0].evidence)
+
+    def test_all_reports_every_refusal_with_its_command_and_moves_nothing(self) -> None:
+        api = self.require_archive()
+        first = self.pending_folder("2026-10-01_archive-family-r001", api)
+        second = self.pending_folder("2026-10-02_archive-family-r002", api)
+
+        with self.assertRaises(api.MigrationArchiveError) as raised:
+            api.archive_migrations(self.root, all_folders=True, yes=True)
+
+        message = str(raised.exception)
+        self.assertIn("2026-10-01_archive-family-r001", message)
+        self.assertIn("2026-10-02_archive-family-r002", message)
+        self.assertIn("scripts/team.sh reconcile-migration", message)
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+
+    def test_skip_refused_archives_the_eligible_low_prefix_and_lists_the_rest(self) -> None:
+        api = self.require_archive()
+        resolved = self.pending_folder("2026-10-01_archive-family-r001", api)
+        write_sidecar(self.root, resolved, api.load_migration(self.root, "migrations/APP_ONE/2026-10-01_archive-family-r001"))
+        verified = add_folder(self.root, "migrations/APP_ONE/2026-10-02_archive-family-r002")
+        verified_migration = api.load_migration(self.root, "migrations/APP_ONE/2026-10-02_archive-family-r002")
+        (verified / "status.dev.json").write_text(json.dumps(verified_receipt(verified, verified_migration)) + "\n", encoding="utf-8")
+        refused = self.pending_folder("2026-10-03_archive-family-r003", api)
+
+        plan = self.call(api, all_folders=True, skip_refused=True, yes=True)
+
+        self.assertFalse(resolved.exists())
+        self.assertFalse(verified.exists())
+        self.assertTrue(refused.is_dir())
+        self.assertTrue(any("2026-10-03_archive-family-r003" in item for item in getattr(plan, "skipped", ())))
+
+    def test_a_prefix_ending_in_a_superseded_revision_archives(self) -> None:
+        api = self.require_archive()
+        superseded = self.pending_folder("2026-10-01_archive-family-r001", api)
+        later = add_folder(self.root, "migrations/APP_ONE/2026-10-02_archive-family-r002")
+        later_migration = api.load_migration(self.root, "migrations/APP_ONE/2026-10-02_archive-family-r002")
+        (later / "status.dev.json").write_text(json.dumps(verified_receipt(later, later_migration)) + "\n", encoding="utf-8")
+        write_sidecar(
+            self.root, superseded, api.load_migration(self.root, "migrations/APP_ONE/2026-10-01_archive-family-r001"),
+            outcome="superseded",
+            superseded_by={
+                "folder": "2026-10-02_archive-family-r002",
+                "receiptSha256": hashlib.sha256((later / "status.dev.json").read_bytes()).hexdigest(),
+            },
+        )
+
+        self.call(api, ["migrations/APP_ONE/2026-10-01_archive-family-r001"], yes=True)
+
+        self.assertFalse(superseded.exists())
+        self.assertTrue(later.is_dir())
+
+    def test_an_index_record_without_evidence_loads_and_older_records_are_kept_byte_for_byte(self) -> None:
+        api = self.require_archive()
+        first = add_folder(self.root, "migrations/APP_ONE/2026-10-01_archive-family-r001")
+        first_migration = api.load_migration(self.root, "migrations/APP_ONE/2026-10-01_archive-family-r001")
+        (first / "status.dev.json").write_text(json.dumps(verified_receipt(first, first_migration)) + "\n", encoding="utf-8")
+        api.archive_migrations(self.root, ["migrations/APP_ONE/2026-10-01_archive-family-r001"], yes=True)
+        before = self.index_records()
+        second = add_folder(self.root, "migrations/APP_ONE/2026-10-02_archive-family-r002")
+        second_migration = api.load_migration(self.root, "migrations/APP_ONE/2026-10-02_archive-family-r002")
+        (second / "status.dev.json").write_text(json.dumps(verified_receipt(second, second_migration)) + "\n", encoding="utf-8")
+
+        api.archive_migrations(self.root, ["migrations/APP_ONE/2026-10-02_archive-family-r002"], yes=True)
+
+        after = self.index_records()
+        self.assertEqual(after[0], before[0])
+        self.assertEqual([record["folder"] for record in after], ["2026-10-01_archive-family-r001", "2026-10-02_archive-family-r002"])
+
+    def test_the_command_line_offers_preserve_unresolved_and_skip_refused(self) -> None:
+        api = self.require_archive()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            api.main(["--help"])
+        for flag in ("--preserve-unresolved", "--skip-refused"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoWriteAndUnknownArchiveTests(unittest.TestCase):
+    """A proven no-write attempt needs no resolution; --preserve-unresolved also covers an unknown lock."""
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "migration_attempts_v1"
+    NOT_STARTED = "migrations/APP_ONE/2026-10-14_archive-family-r004"
+    PENDING = "migrations/APP_ONE/2026-10-12_archive-family-r002"
+    VERIFIED = "migrations/APP_ONE/2026-10-13_archive-family-r003"
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "repo"
+        shutil.copytree(self.FIXTURE / "repo", self.root)
+
+    def keep_no_write_log(self) -> None:
+        (self.root / "scratch").mkdir()
+        shutil.copyfile(self.FIXTURE / "no-write-sqlcl-output.log", self.root / "scratch" / "no-write-sqlcl-output.log")
+
+    def test_an_attempt_that_provably_never_wrote_archives_without_a_flag(self) -> None:
+        self.keep_no_write_log()
+
+        plan = archive.archive_migrations(self.root, [self.PENDING, self.VERIFIED, self.NOT_STARTED], preserve_unresolved=True)
+
+        by_folder = {entry.folder.name: entry.evidence for entry in plan.entries}
+        not_started = by_folder["2026-10-14_archive-family-r004"]
+        self.assertIn("apply-not-started (no write)", not_started)
+        self.assertNotIn("unresolved (preserved)", not_started)
+        self.assertIn("unresolved (preserved)", by_folder["2026-10-12_archive-family-r002"])
+
+    def test_a_no_write_attempt_whose_log_is_gone_is_unknown_and_still_refused_without_a_flag(self) -> None:
+        with self.assertRaises(archive.MigrationArchiveError) as refused:
+            archive.archive_migrations(self.root, [self.PENDING, self.VERIFIED, self.NOT_STARTED], preserve_unresolved=False, skip_refused=False)
+        self.assertIn("2026-10-14_archive-family-r004", str(refused.exception))
+        # Its attempt is closed, so the refusal must not send the owner to a command that would refuse it.
+        r004 = next(line for line in str(refused.exception).splitlines() if "2026-10-14_archive-family-r004" in line)
+        self.assertNotIn("reconcile-migration", r004)
+        self.assertIn("--preserve-unresolved", r004)
+
+    def test_preserve_unresolved_archives_an_unknown_lock_without_calling_it_accepted(self) -> None:
+        plan = archive.archive_migrations(self.root, [self.PENDING, self.VERIFIED, self.NOT_STARTED], preserve_unresolved=True)
+
+        not_started = {entry.folder.name: entry.evidence for entry in plan.entries}["2026-10-14_archive-family-r004"]
+        self.assertIn("unresolved (preserved)", not_started)
+        self.assertFalse(any("accepted" in item for item in not_started))

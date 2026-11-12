@@ -44,7 +44,11 @@ Commands:
   revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
   archive-migrations <folder> [...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes|-y]
   archive-migrations --all [--keep <folder>...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes|-y]
+           [--preserve-unresolved] [--skip-refused]
                                               Move released folders outside migrations/ (dry run by default)
+  reconcile-migration <folder> --env dev|staging|prod --outcome <outcome> --evidence <file>
+           [--attempt <id>] [--superseded-by <folder>]
+                                              Record the owner's resolution of a pending attempt (local files only)
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
   query --env <env> --connection <profile> [--file <path> | SQL]
@@ -134,7 +138,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -350,6 +354,19 @@ case "$command_name" in
     esac
     cd "$REPO_ROOT"
     exec python3 -m scripts.migration_archive --repo-root "$archive_root" "$@"
+    ;;
+  reconcile-migration)
+    # Local files only: the command never starts SQLcl and never connects to a database.
+    reconcile_root="$REPO_ROOT"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          reconcile_root="$(cygpath -m -- "$REPO_ROOT")"
+        fi
+        ;;
+    esac
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.migration_resolution --repo-root "$reconcile_root" "$@"
     ;;
   dev-test)
     exec "$REPO_ROOT/scripts/dev_test.sh" "$@"
