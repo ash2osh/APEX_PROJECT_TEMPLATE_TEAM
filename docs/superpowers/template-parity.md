@@ -101,3 +101,8 @@ have (its Graphify tests run in the latest-Python job), so the two CI records ca
 2026-11-12: both lines gained `tests/test_live_baseline.py`, an opt-in live check of `baseline` (the file is identical in
 both). `docs/baseline.md` and `docs/live-feature-tests.md` carry the same added section and pointer, so their two records
 were refreshed with status and reason unchanged, and `TODO.md` stays identical.
+
+2026-11-12: both lines fixed the SQL that `baseline build` generates (a new table's statements, the compile step's
+declaration order, and the baseline module import order), found by `tests/test_live_baseline.py`. `baseline_sql.py`,
+`baseline_build.py`, the new `tests/test_baseline_generated_sql.py` and `TODO.md` are identical in both lines; the four
+changed shared records were refreshed with status and reason unchanged.
