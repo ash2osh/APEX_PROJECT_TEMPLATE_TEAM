@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -311,6 +313,27 @@ class FeatureCliTests(unittest.TestCase):
         )
         self.assertEqual(feature_cli.main(["reconcile-run", run_id, "--env", "prod"], repo_root=self.root, environ={}, read_acknowledgment=never), 2)
         self.assertNotIn("reconciliation", self._run_row(run_id))
+
+    def test_clean_capsule_accepts_the_short_yes_alias(self) -> None:
+        with patch.object(feature_cli.release_state, "cleanup_capsule", return_value={"state": "complete"}) as cleanup:
+            status = feature_cli.main(["clean-capsule", "d" * 64, "-y"], repo_root=self.root, environ={})
+        self.assertEqual(status, 0)
+        cleanup.assert_called_once_with(self.root, "d" * 64, apply=True)
+
+    def test_reconcile_acknowledgment_refuses_redirected_input_unless_the_test_switch_is_set(self) -> None:
+        from scripts import terminal_confirm
+
+        stderr = io.StringIO()
+        with patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), patch("builtins.input", side_effect=AssertionError("read")), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(feature_cli._reconcile_ack_from_terminal("RECONCILE-RUN abc"), "")
+        self.assertIn("redirected input is not accepted", stderr.getvalue())
+
+        stderr = io.StringIO()
+        with patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), patch.dict("os.environ", {"TEAM_ACK_FROM_STDIN": "1"}), \
+                patch("builtins.input", return_value="RECONCILE-RUN abc"), contextlib.redirect_stderr(stderr):
+            self.assertEqual(feature_cli._reconcile_ack_from_terminal("RECONCILE-RUN abc"), "RECONCILE-RUN abc")
+        self.assertIn("acknowledgment read from redirected input (TEAM_ACK_FROM_STDIN)", stderr.getvalue())
 
     def test_cleanup_requires_explicit_yes_to_apply_and_reports_blocked_gate(self) -> None:
         with patch.object(feature_cli.release_state, "cleanup_capsule", return_value={"state": "complete"}) as cleanup:

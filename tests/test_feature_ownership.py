@@ -263,7 +263,7 @@ class DoctorTests(FeatureTree):
 
         status, output = self._live(units())
         self.assertEqual(status, 0, output)
-        self.assertIn("2 package file(s) compared with DEV", output)
+        self.assertIn("2 stored source file(s) compared with DEV", output)
 
         newer = units(spec=SPEC[:2] + ["  PROCEDURE ADDED_ON_DEV;\n"] + SPEC[2:])
         status, output = self._live(newer)
@@ -610,8 +610,8 @@ class FreezeGateTests(FeatureTree):
         with patch.object(baseline, "_capture", return_value=capture_catalog(units())):
             status, output = self.freeze(environ=LIVE_ENVIRON)
         self.assertEqual(status, 0, output)
-        self.assertIn("note: no DEV profile for APP_DATA; their package files were not compared with DEV", output)
-        self.assertEqual(self.record()["live"], "2 package file(s) compared with DEV, 0 accepted difference(s); not compared (no DEV profile): APP_DATA")
+        self.assertIn("note: no DEV profile for APP_DATA; their stored source files were not compared with DEV", output)
+        self.assertEqual(self.record()["live"], "2 stored source file(s) compared with DEV, 0 accepted difference(s); not compared (no DEV profile): APP_DATA")
 
     def test_without_a_dev_profile_the_freeze_says_the_live_comparison_did_not_run(self) -> None:
         self.capture("pickup")
@@ -649,7 +649,7 @@ class FreezeGateTests(FeatureTree):
         with patch.object(baseline, "_capture", return_value=capture_catalog(units())):
             status, _output = self.freeze(environ=LIVE_ENVIRON)
         self.assertEqual(status, 0)
-        self.assertEqual(self.record()["live"], "2 package file(s) compared with DEV, 0 accepted difference(s)")
+        self.assertEqual(self.record()["live"], "2 stored source file(s) compared with DEV, 0 accepted difference(s)")
 
     def test_an_unreachable_dev_database_stops_the_freeze_with_the_way_out(self) -> None:
         self.capture("pickup")
@@ -742,7 +742,14 @@ class StoredUnitOwnershipTests(FeatureTree):
         self.capture_all()
         status, output = self.doctor("--live")
         self.assertEqual(status, 0, output)
-        self.assertIn("5 package file(s) compared with DEV", output)
+        self.assertIn("5 stored source file(s) compared with DEV", output)
+
+    def test_a_feature_holding_only_a_standalone_procedure_reports_stored_source_files_in_the_doctor_summary(self) -> None:
+        self.capture_unit("shop", "procedure", "RUN_IT", {("PROCEDURE", "RUN_IT"): PROCEDURE_SOURCE})
+        status, output = self.doctor("--live")
+        self.assertEqual(status, 0, output)
+        self.assertIn("live: 1 stored source file(s) compared with DEV, 0 accepted difference(s)", output)
+        self.assertNotIn("package file", output)
 
     def test_a_trigger_that_dev_changed_since_the_capture_is_behind_dev(self) -> None:
         self.capture_all()
@@ -775,7 +782,7 @@ class StoredUnitOwnershipTests(FeatureTree):
         with patch.object(baseline, "_capture", return_value=capture_catalog(self.dev_units())):
             refused, record = feature_cli._freeze_gate(self.root, LIVE_ENVIRON, steps, None)
         self.assertIsNone(refused)
-        self.assertEqual(record["live"], "5 package file(s) compared with DEV, 0 accepted difference(s)")
+        self.assertEqual(record["live"], "5 stored source file(s) compared with DEV, 0 accepted difference(s)")
 
         import contextlib
         import io

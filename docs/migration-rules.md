@@ -329,7 +329,7 @@ over false results and returns 2.
 
 Use a dated migration for seed rows, data fixes, and small one-off DDL or DML.
 Use a [feature release](feature-releases.md) for new object work that benefits
-from complete package sources and one frozen payload for staging and production.
+from complete stored-unit sources and one frozen payload for staging and production.
 
 | Change | Path |
 |---|---|
@@ -761,7 +761,7 @@ or production has the same schema name as DEV, and do not fall back to DEV when
 a target is incomplete. The SQLcl login user may differ from the schema owner.
 
 Staging and production applies show the resolved target and require an
-interactive confirmation. The runner verifies the observed database identity
+interactive confirmation, or `--confirm-target <db_unique_name>` for a run whose operator has verified the target. `--confirm-target <db_unique_name>` skips that prompt only when the value equals the observed `db_unique_name` exactly. A mismatch refuses before any write. `-y` / `--yes` accepts the prompt on DEV and staging; on production it is refused unless `--confirm-target` also matches, and `migrate --rehearse` does not accept it on production. A run confirmed by a flag prints `Confirmed by --yes; the interactive prompt was skipped.` (or the `--confirm-target` line, or both) and records `confirmedBy` in the run manifest and the rehearsal report: `--yes`, `--confirm-target`, `--yes --confirm-target`, or `terminal` for a typed answer. Piped or redirected input is refused for every `[y/N]` prompt. The flag replaces only the question: the target summary and every identity, drift, receipt and digest check still run. The run manifest records `confirmation` as `flag` or `terminal`. The runner verifies the observed database identity
 and current schema before writing and verifies the committed result afterward.
 The apply session compares its database name, unique name, service, container,
 edition and version with the preflight observation before it runs the first

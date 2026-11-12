@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from fake_sqlcl import environment as fake_environment, install
 from scripts.db_targets import Target
-from scripts.migrate import main as migrate_main, rehearse_batch
+from scripts.migrate import _confirm_from_terminal as migrate_confirm_from_terminal, main as migrate_main, rehearse_batch
 from scripts.migration_checks import CheckReport, render_in_session_check_driver
 from scripts.migration_manifest import MigrationManifestError, QueryCheck, load_batch
 from scripts.sqlcl_session import run_sqlcl
@@ -173,7 +173,7 @@ class MigrationRehearsalTests(unittest.TestCase):
     def inventory(self, target, run_dir):
         return SimpleNamespace(identity=self.identity)
 
-    def invoke_rehearsal(self, migrations, *, report_path=None, confirm=None, run_checks_fn=None):
+    def invoke_rehearsal(self, migrations, *, report_path=None, confirm=None, run_checks_fn=None, yes=False, target=None):
         captured_drivers: list[str] = []
         self.check_drivers: list[str] = []
 
@@ -193,12 +193,13 @@ class MigrationRehearsalTests(unittest.TestCase):
                 status = rehearse_batch(
                     self.root,
                     migrations,
-                    self.target,
+                    target or self.target,
                     confirm or (lambda _prompt: True),
                     capture_inventory_fn=self.inventory,
                     run_session_fn=capture_and_run,
                     run_checks_fn=run_checks_fn,
                     report_path=report_path,
+                    yes=yes,
                 )
         return status, output.getvalue(), captured_drivers
 
@@ -594,6 +595,91 @@ class MigrationRehearsalTests(unittest.TestCase):
         self.assertIn("STAGING", prompts[0])
         self.assertEqual(calls, [])
         self.assertFalse((folder / "status.staging.json").exists())
+
+    def test_yes_accepts_the_staging_rehearsal_prompt_and_records_it(self) -> None:
+        folder = self.add_folder(
+            "2026-10-15_yes-rehearse-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="before",
+            post_id="after",
+        )
+        staging = Target("staging", "fake-profile", "APP", "APP", "staging")
+        report_path = self.root / "yes-rehearsal.json"
+        sessions = []
+
+        def no_question(prompt):
+            raise AssertionError(f"-y must not ask: {prompt}")
+
+        def stop_at_the_first_session(target, driver, run_dir, **kwargs):
+            # Reaching SQLcl proves the prompt was passed; the rest needs a full fake session.
+            sessions.append(target.environment)
+            raise RuntimeError("stop after the prompt")
+
+        output = io.StringIO()
+        with patch("builtins.input", side_effect=AssertionError("-y must not read stdin")), contextlib.redirect_stdout(output):
+            status = rehearse_batch(
+                self.root, self.load(folder.name), staging, no_question,
+                capture_inventory_fn=self.inventory, run_session_fn=stop_at_the_first_session, report_path=report_path, yes=True,
+            )
+
+        self.assertEqual(sessions, ["staging"])
+        self.assertIn("Confirmed by --yes; the interactive prompt was skipped.", output.getvalue())
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["confirmedBy"], "--yes")
+        self.assertNotEqual(status, 1, "an accepted prompt must not be reported as declined")
+
+    def test_redirected_stdin_refuses_the_staging_rehearsal_prompt_without_yes(self) -> None:
+        folder = self.add_folder(
+            "2026-10-15_piped-rehearse-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="before",
+            post_id="after",
+        )
+        staging = Target("staging", "fake-profile", "APP", "APP", "staging")
+        calls = []
+        stderr = io.StringIO()
+
+        def no_session(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("refused rehearsal must not start SQLcl")
+
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch("builtins.input", side_effect=AssertionError("piped answer read")), \
+                contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            status = rehearse_batch(
+                self.root, self.load(folder.name), staging, migrate_confirm_from_terminal,
+                capture_inventory_fn=self.inventory, run_session_fn=no_session,
+            )
+
+        self.assertEqual(status, 1)
+        self.assertIn("piped or redirected answers are not accepted", stderr.getvalue())
+        self.assertIn("--yes", stderr.getvalue())
+        self.assertEqual(calls, [])
+        self.assertFalse((folder / "status.staging.json").exists())
+
+    def test_yes_is_refused_for_a_production_rehearsal_before_any_session(self) -> None:
+        folder = self.add_folder(
+            "2026-10-15_prod-rehearse-r001",
+            {"001-seed.sql": "INSERT INTO ITEMS (ID) VALUES (1);\n"},
+            pre_id="before",
+            post_id="after",
+        )
+        prod = Target("prod", "fake-profile", "APP", "APP", "production")
+        calls = []
+        stderr = io.StringIO()
+
+        def no_session(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("refused rehearsal must not start SQLcl")
+
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            status = rehearse_batch(
+                self.root, self.load(folder.name), prod, lambda _prompt: True,
+                capture_inventory_fn=self.inventory, run_session_fn=no_session, yes=True,
+            )
+
+        self.assertEqual(status, 2)
+        self.assertIn("--yes does not apply to production --rehearse", stderr.getvalue())
+        self.assertEqual(calls, [])
 
     def test_autocommit_must_be_confirmed_off_before_payload_session(self) -> None:
         folder = self.add_folder(

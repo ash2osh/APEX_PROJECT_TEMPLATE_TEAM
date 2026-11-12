@@ -175,6 +175,26 @@ What to do:
 `--force` skips only this guard. Use it only after you have reviewed the live
 app and agreed with the team that your files should replace it.
 
+## Staging and production confirmation
+
+`deploy` (and `publish` with a non-DEV target, which `deploy` calls) shows the workspace, schema
+and connection, then asks `Deploying to <TARGET>. Proceed? [y/N]`. The answer is typed at a
+terminal; piped or redirected input is refused and nothing is imported. `-y` / `--yes` accepts the
+question on staging. On production, `-y` alone is refused before any SQLcl session starts;
+`-y --confirm-target <db_unique_name>` imports only when that name equals the `db_unique_name` read
+from the database before the import. `--confirm-target` alone replaces the question the same way.
+A mismatch imports nothing. `--manual` takes neither flag, and `publish --force` is unchanged.
+`publish` keeps no run report, so the printed `Confirmed by ...` line is its only record; a
+rollout that runs an app deployment records the confirmation in its own report.
+
+| Message | Meaning |
+| --- | --- |
+| `production also needs --confirm-target <db_unique_name>` | `-y` on production without the name. Nothing ran. |
+| `--confirm-target '<name>' does not match the observed db_unique_name '<observed>'; nothing imported` | The name differs from the database. Nothing was imported. |
+| `piped or redirected answers are not accepted` | The question got its answer from a pipe or file. Run the command in a terminal, or pass `--yes`. |
+| `--confirm-target applies only to --env staging or prod` | Used on DEV. |
+| `--yes and --confirm-target do not apply to --manual` | `deploy --manual` connects to nothing and asks nothing. |
+
 ## Other refusals
 
 **Before connecting.** Nothing is changed.

@@ -2614,6 +2614,25 @@ def _verify_local_completion(root: Path, index: Mapping, capsule_row: Mapping, r
         _verify_evidence_hashes(root, verification["evidence"], "checkpoint verification")
 
 
+def _superseded_reconciliations(payload_runs: Sequence[Mapping]) -> set[str]:
+    """Run ids of reconciled runs that a later verified run of the same environment supersedes.
+
+    Runs are ordered by start time; equal timestamps keep their index order, as the production candidate choice does.
+    A verified run in another environment does not supersede a reconciled run.
+    """
+    ordered = sorted(payload_runs, key=lambda row: row["startedAt"])
+    superseded: set[str] = set()
+    for position, run in enumerate(ordered):
+        if run.get("reconciliation") is None:
+            continue
+        if any(
+            later["environment"] == run["environment"] and later["state"] == "verified"
+            for later in ordered[position + 1:]
+        ):
+            superseded.add(run["runId"])
+    return superseded
+
+
 def _cleanup_report(root: Path, index: Mapping, payload_digest: str) -> dict:
     blockers: list[str] = []
     capsule_rows = _matching_capsules(root, payload_digest)
@@ -2623,9 +2642,11 @@ def _cleanup_report(root: Path, index: Mapping, payload_digest: str) -> dict:
     if any(_is_unresolved(row, index["attempts"], index["recoveryLinks"], index["checkpointVerifications"]) for row in attempts):
         blockers.append("an unresolved attempt still references this payload")
     payload_runs = [row for row in index["rollouts"] if row["payloadDigest"] == payload_digest]
-    if any(row["state"] in {"running", "unknown", "not-started"} for row in payload_runs):
+    # A reconciled run that a later verified run of its environment supersedes no longer blocks cleanup.
+    superseded = _superseded_reconciliations(payload_runs)
+    if any(row["state"] in {"running", "unknown", "not-started"} and row["runId"] not in superseded for row in payload_runs):
         blockers.append("a rollout remains running or unresolved for this payload")
-    if any(row.get("reconciliation") is not None for row in payload_runs):
+    if any(row.get("reconciliation") is not None and row["runId"] not in superseded for row in payload_runs):
         blockers.append("a rollout for this payload was closed by reconciliation, not by verification")
     for capsule in capsule_rows:
         candidates = [row for row in payload_runs if (

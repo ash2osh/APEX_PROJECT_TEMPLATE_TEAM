@@ -387,3 +387,122 @@ class StoredUnitGroupTests(unittest.TestCase):
         self.capture("dispatch", "package", "PKG", {("PACKAGE", "PKG"): ["PACKAGE PKG AS\n", "END PKG;\n"]})
         metadata = json.loads((self.root / "scratch/feature-source/dispatch/APP_CODE/capture-pkg.json").read_text(encoding="utf-8"))
         self.assertEqual(list(metadata), ["schemaVersion", "feature", "schema", "package", "identity", "units"])
+
+
+PKG_SPEC = ["PACKAGE PKG AS\n", "  PROCEDURE RUN;\n", "END PKG;\n"]
+PKG_BODY = ["PACKAGE BODY PKG AS\n", "  PROCEDURE RUN IS BEGIN NULL; END;\n", "END PKG;\n"]
+# group, unit, DEV capture, (old, new) text that DEV changes, captured file, (old, new) text an owner edits in that file.
+UNIT_GROUP_REFRESH_CASES = (
+    ("package", "PKG", {("PACKAGE", "PKG"): PKG_SPEC, ("PACKAGE BODY", "PKG"): PKG_BODY},
+     ("BEGIN NULL; END;", "BEGIN NULL; NULL; END;"), "packages/pkg.pkb.sql", ("BEGIN NULL;", "BEGIN EDITED;")),
+    ("type", "ORDER_T", {("TYPE", "ORDER_T"): TYPE_SOURCE, ("TYPE BODY", "ORDER_T"): TYPE_BODY_SOURCE},
+     ("RETURN 1;", "RETURN 2;"), "types/order_t.tpb.sql", ("RETURN 1;", "EDITED;")),
+    ("trigger", "ORDERS_TRG", {("TRIGGER", "ORDERS_TRG"): TRIGGER_SOURCE},
+     ("BEGIN NULL; END;", "BEGIN NULL; NULL; END;"), "triggers/orders_trg.trg.sql", ("BEGIN NULL;", "BEGIN EDITED;")),
+    ("procedure", "RUN_IT", {("PROCEDURE", "RUN_IT"): PROCEDURE_SOURCE},
+     ("BEGIN NULL; END;", "BEGIN NULL; NULL; END;"), "procedures/run_it.prc.sql", ("BEGIN NULL;", "BEGIN EDITED;")),
+    ("function", "GET_ONE", {("FUNCTION", "GET_ONE"): FUNCTION_SOURCE},
+     ("RETURN 1;", "RETURN 2;"), "functions/get_one.fnc.sql", ("RETURN 1;", "EDITED;")),
+)
+
+
+def changed_units(units: dict, old: str, new: str) -> dict:
+    """The same DEV capture with one piece of text changed on every line that holds it."""
+    return {key: [line.replace(old, new) for line in lines] for key, lines in units.items()}
+
+
+class RefreshAgainstBaselineTests(unittest.TestCase):
+    """`--refresh` compares the file with its retained DEV baseline, for every stored unit group."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+        from scripts import feature_sources
+        self.feature_sources = feature_sources
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def capture(self, feature: str, group: str, name: str, units: dict, **options):
+        with patch.object(baseline, "_capture", return_value=capture_catalog(units)):
+            return self.feature_sources.capture_unit(
+                self.root, feature, "APP_CODE", group, name, environ=ENVIRON, **options,
+            )
+
+    def use_fresh_root(self) -> None:
+        # A unit name is held by one feature per repository, so each subtest captures into its own one.
+        self.temporary.cleanup()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+
+    def target(self, feature: str, relative: str) -> Path:
+        return self.root / "features" / feature / "APP_CODE" / relative
+
+    def baseline_file(self, feature: str, target: Path) -> Path:
+        return self.root / "scratch/feature-source" / feature / "APP_CODE" / "captured" / target.name
+
+    def test_an_unedited_unit_refreshes_without_the_flag_after_dev_changes_a_line(self) -> None:
+        for group, name, units, (dev_old, dev_new), relative, _edit in UNIT_GROUP_REFRESH_CASES:
+            with self.subTest(group=group):
+                feature = f"unedited-{group}"
+                self.capture(feature, group, name, units)
+                target = self.target(feature, relative)
+
+                paths = self.capture(feature, group, name, changed_units(units, dev_old, dev_new), refresh=True)
+
+                self.assertIn(target, paths)
+                self.assertIn(dev_new, target.read_text(encoding="utf-8"))
+                self.assertNotIn(dev_old, target.read_text(encoding="utf-8"))
+                # The retained baseline follows the refresh, so the next refresh compares with the new DEV source.
+                self.assertEqual(self.baseline_file(feature, target).read_bytes(), target.read_bytes())
+
+    def test_an_edited_unit_is_still_refused_without_the_flag_and_discard_still_erases_it(self) -> None:
+        for group, name, units, (dev_old, dev_new), relative, (edit_old, edit_new) in UNIT_GROUP_REFRESH_CASES:
+            with self.subTest(group=group):
+                feature = f"edited-{group}"
+                self.capture(feature, group, name, units)
+                target = self.target(feature, relative)
+                target.write_text(target.read_text(encoding="utf-8").replace(edit_old, edit_new, 1), encoding="utf-8")
+                edited = target.read_bytes()
+                changed = changed_units(units, dev_old, dev_new)
+
+                with self.assertRaisesRegex(self.feature_sources.FeatureSourcesError, "(?s)refresh refused.*EDITED"):
+                    self.capture(feature, group, name, changed, refresh=True)
+                self.assertEqual(target.read_bytes(), edited)
+
+                self.capture(feature, group, name, changed, refresh=True, discard_unapplied=True)
+                self.assertIn(dev_new, target.read_text(encoding="utf-8"))
+                self.assertNotIn("EDITED", target.read_text(encoding="utf-8"))
+
+    def test_a_missing_or_unreadable_retained_baseline_still_refuses_an_unedited_refresh(self) -> None:
+        for group, name, units, (dev_old, dev_new), relative, _edit in UNIT_GROUP_REFRESH_CASES:
+            changed = changed_units(units, dev_old, dev_new)
+            for condition in ("missing", "unreadable"):
+                with self.subTest(group=group, baseline=condition):
+                    self.use_fresh_root()
+                    feature = f"{condition}-{group}"
+                    self.capture(feature, group, name, units)
+                    target = self.target(feature, relative)
+                    retained = self.baseline_file(feature, target)
+                    if condition == "missing":
+                        retained.unlink()
+                    else:
+                        retained.unlink()
+                        retained.mkdir()
+                    before = target.read_bytes()
+
+                    with self.assertRaisesRegex(self.feature_sources.FeatureSourcesError, "refresh refused"):
+                        self.capture(feature, group, name, changed, refresh=True)
+                    self.assertEqual(target.read_bytes(), before)
+
+    def test_an_accepted_difference_still_refuses_an_unedited_refresh(self) -> None:
+        feature = "accepted-package"
+        units = {("PACKAGE", "PKG"): PKG_SPEC, ("PACKAGE BODY", "PKG"): PKG_BODY}
+        self.capture(feature, "package", "PKG", units)
+        (self.root / "features" / feature / "accepted-differences.json").write_text(json.dumps([{
+            "schema": "APP_CODE", "type": "PACKAGE BODY", "name": "PKG", "decision": "kept on purpose",
+            "featureOnly": [], "liveOnly": [],
+        }]), encoding="utf-8")
+
+        with self.assertRaisesRegex(self.feature_sources.FeatureSourcesError, "(?s)refresh refused.*an accepted difference is recorded for it: kept on purpose"):
+            self.capture(feature, "package", "PKG", changed_units(units, "BEGIN NULL; END;", "BEGIN NULL; NULL; END;"), refresh=True)

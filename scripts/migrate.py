@@ -50,6 +50,7 @@ from .migration_manifest import (
     validate_receipt,
     verify_loaded_input_hashes,
 )
+from . import terminal_confirm
 from .path_utils import relative_to_root
 from .migration_attempts import (
     MigrationAttemptError,
@@ -813,10 +814,6 @@ def build_receipt(
     }
 
 
-def _same_target_identity(expected: Mapping[str, str], observed: Mapping[str, str]) -> None:
-    _assert_same_target(expected, observed)
-
-
 def _preflight_snapshot(
     migrations: Sequence[Migration],
     target: Target,
@@ -858,25 +855,6 @@ def _print_target_summary(target: Target, identity: Mapping[str, str], frozen: S
         print(f"Migration {migration.folder.name} payload={migration.payload_digest}")
         for file in migration.files:
             print(f"  {file.sequence:03d} {file.name} sha256={file.sha256}")
-
-
-def _update_run_manifest(
-    path: Path,
-    target_identity: Mapping[str, str],
-    frozen: Sequence[_FrozenMigration],
-    records: list[dict],
-    *,
-    state: str,
-) -> dict:
-    manifest = {
-        "schemaVersion": 1,
-        "state": state,
-        "createdAt": records[0].get("createdAt") if records else _utc_now(),
-        "target": dict(target_identity),
-        "migrations": records,
-    }
-    _atomic_write_json(path, manifest)
-    return manifest
 
 
 def _receipt_record(migration: Migration, run_manifest: dict) -> dict:
@@ -935,8 +913,18 @@ def apply_batch(
     apply_folder_fn: Callable = apply_folder,
     receipt_installer: Callable = install_receipt,
     verbose: bool = False,
+    confirm_target: str | None = None,
+    yes: bool = False,
 ) -> int:
-    """Freeze, preflight, confirm when needed, apply in input order, and verify."""
+    """Freeze, preflight, confirm when needed, apply in input order, and verify.
+
+    confirm_target replaces the staging/prod prompt only when it equals the observed
+    db_unique_name exactly. A mismatch refuses before any write. yes (-y) replaces the
+    prompt on DEV and staging; on production it is refused unless confirm_target is given.
+    """
+    if yes and confirm_target is None and target.environment == "prod":
+        print("migration error: " + terminal_confirm.PRODUCTION_NAME_REQUIRED + "; --yes alone is refused and no writes were attempted.", file=sys.stderr)
+        return 2
     repo_root = Path(repo_root).resolve()
     if not migrations:
         print("migration error: select one or more folders in execution order", file=sys.stderr)
@@ -983,14 +971,32 @@ def apply_batch(
             return initial_preflight.exit_code
         if target.environment in {"staging", "prod"}:
             _print_target_summary(target, initial_target_identity, frozen)
-            prompt = f"Migrating to {target.environment.upper()}. Proceed? [y/N]"
-            try:
-                approved = bool(confirm(prompt))
-            except (EOFError, OSError):
-                approved = False
+            observed_name = initial_target_identity.get("db_unique_name")
+            if confirm_target is not None:
+                if not observed_name or confirm_target != observed_name:
+                    print(
+                        f"migration error: --confirm-target {confirm_target!r} does not match the observed "
+                        f"db_unique_name {observed_name!r}; no writes were attempted.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            if yes or confirm_target is not None:
+                approved = True
+                run_manifest["confirmation"] = "flag"
+                run_manifest["confirmedBy"] = terminal_confirm.confirmed_by(yes, confirm_target)
+                print(terminal_confirm.confirmed_line(yes, confirm_target))
+            else:
+                prompt = f"Migrating to {target.environment.upper()}. Proceed? [y/N]"
+                try:
+                    approved = bool(confirm(prompt))
+                except (EOFError, OSError):
+                    approved = False
+                run_manifest["confirmation"] = "terminal"
+                run_manifest["confirmedBy"] = "terminal"
             if not approved:
                 print(f"Migration to {target.environment.upper()} declined; no writes were attempted.")
                 return 1
+            _atomic_write_json(manifest_path, run_manifest)
 
         # Re-read original bytes after review and before any write.
         for item in frozen:
@@ -1041,6 +1047,8 @@ def apply_batch(
                 "createdAt": run_manifest["createdAt"],
                 "target": dict(initial_target_identity),
                 "migrations": records,
+                "confirmation": run_manifest.get("confirmation"),
+                "confirmedBy": run_manifest.get("confirmedBy"),
             }
             _atomic_write_json(manifest_path, run_manifest)
 
@@ -1239,6 +1247,9 @@ def apply_batch(
 
 
 def _confirm_from_terminal(prompt: str) -> bool:
+    if not terminal_confirm.may_read_yes_no():
+        print(prompt)
+        return False
     try:
         answer = input(prompt + " ").strip().casefold()
     except (EOFError, OSError):
@@ -1274,9 +1285,20 @@ def main(
     parser.add_argument("--verbose", action="store_true", help="print all failed postcondition checks")
     parser.add_argument("--rehearse", action="store_true", help="run transaction-safe data files, check them, then roll back")
     parser.add_argument("--report", type=Path, help="write rehearsal results as JSON (requires --rehearse)")
+    parser.add_argument(
+        "--confirm-target",
+        metavar="DB_UNIQUE_NAME",
+        help="staging/prod only: skip the y/N prompt when DB_UNIQUE_NAME equals the observed db_unique_name exactly",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="accept the y/N prompt (DEV and staging); production also needs --confirm-target <db_unique_name>",
+    )
     args = parser.parse_args(argv)
     if not args.folders:
-        print("usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]", file=sys.stderr)
+        print("usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>] [--confirm-target <db_unique_name>] [--yes|-y]", file=sys.stderr)
         return 2
     if args.report is not None and not args.rehearse:
         print("migration error: --report requires --rehearse", file=sys.stderr)
@@ -1284,6 +1306,23 @@ def main(
     if len(args.env or []) != 1:
         print("migration error: specify exactly one --env dev|staging|prod", file=sys.stderr)
         return 2
+    if args.confirm_target is not None:
+        if not args.confirm_target.strip():
+            print("migration error: --confirm-target needs the observed db_unique_name", file=sys.stderr)
+            return 2
+        if args.env[0] not in {"staging", "prod"}:
+            print("migration error: --confirm-target applies only to --env staging or prod", file=sys.stderr)
+            return 2
+        if args.rehearse:
+            print("migration error: --confirm-target applies to apply runs, not --rehearse", file=sys.stderr)
+            return 2
+    if args.yes and args.env[0] == "prod":
+        if args.rehearse:
+            print("migration error: --yes does not apply to production --rehearse; answer its prompt at a terminal", file=sys.stderr)
+            return 2
+        if args.confirm_target is None:
+            print("migration error: " + terminal_confirm.PRODUCTION_NAME_REQUIRED + "; --yes alone is refused and no writes were attempted.", file=sys.stderr)
+            return 2
     try:
         migrations = load_batch(Path(repo_root), args.folders)
         if expected_input_hashes is not None:
@@ -1297,8 +1336,8 @@ def main(
         print(f"migration error: {error}", file=sys.stderr)
         return 2
     if args.rehearse:
-        return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report)
-    status = apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose)
+        return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report, yes=args.yes)
+    status = apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose, confirm_target=args.confirm_target, yes=args.yes)
     if status == 0 and target.environment == "dev":
         record_daily_diffs(Path(repo_root), migrations)
     return status

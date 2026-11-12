@@ -4,10 +4,12 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/deploy.sh <app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations] [--app-source-dir <dir>]
+Usage: scripts/deploy.sh <app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations] [--app-source-dir <dir>] [--yes|-y] [--confirm-target <db_unique_name>]
 
 Direct deployment shows the selected workspace and schema, then requires
-interactive confirmation. --manual prints SQLcl instructions without connecting.
+interactive confirmation typed at a terminal. --yes accepts it; production also
+needs --confirm-target with the observed db_unique_name. --manual prints SQLcl
+instructions without connecting and takes neither flag.
 --strict-bytes disables APEXlang formatting normalization. --no-restore-automations
 skips restoring automations that were active before import.
 USAGE
@@ -28,6 +30,9 @@ manual=false
 app_source_dir=""
 strict_bytes=false
 restore_automations=true
+deploy_yes=false
+deploy_confirm_target=""
+deploy_confirm_target_given=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env)
@@ -47,6 +52,16 @@ while [ "$#" -gt 0 ]; do
       restore_automations=false
       shift
       ;;
+    --yes|-y)
+      deploy_yes=true
+      shift
+      ;;
+    --confirm-target)
+      [ "$#" -ge 2 ] && [ -n "${2//[[:space:]]/}" ] || fail "--confirm-target needs the observed db_unique_name"
+      deploy_confirm_target="$2"
+      deploy_confirm_target_given=true
+      shift 2
+      ;;
     --app-source-dir)
       [ "$#" -ge 2 ] || fail "--app-source-dir requires a directory"
       app_source_dir="$2"
@@ -63,6 +78,15 @@ case "$app_environment" in
   staging|prod) ;;
   *) fail "select --env staging or --env prod" ;;
 esac
+if [ "$manual" = true ] && { [ "$deploy_yes" = true ] || [ "$deploy_confirm_target_given" = true ]; }; then
+  fail "--yes and --confirm-target do not apply to --manual; the runbook connects to nothing and asks nothing"
+fi
+if [ "$app_environment" = prod ] && [ "$deploy_yes" = true ] && [ "$deploy_confirm_target_given" != true ]; then
+  fail "production also needs --confirm-target <db_unique_name>; --yes alone is refused and nothing was imported"
+fi
+deploy_confirm_args=()
+if [ "$deploy_yes" = true ]; then deploy_confirm_args+=(--yes); fi
+if [ "$deploy_confirm_target_given" = true ]; then deploy_confirm_args+=(--confirm-target "$deploy_confirm_target"); fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
@@ -188,4 +212,4 @@ if [ "$manual" = true ]; then
 fi
 
 PROJECT_ENV_FILE="$PROJECT_ENV_FILE" "$REPO_ROOT/scripts/publish_app.sh" \
-  "$app_id" --env "$app_environment" "${app_source_args[@]}" "${publish_option_args[@]}"
+  "$app_id" --env "$app_environment" "${app_source_args[@]}" "${publish_option_args[@]}" "${deploy_confirm_args[@]}"

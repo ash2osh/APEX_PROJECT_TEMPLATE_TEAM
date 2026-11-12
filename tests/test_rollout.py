@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -226,6 +228,186 @@ class RolloutManifestTests(unittest.TestCase):
         self.assertEqual(calls, [])
         report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
         self.assertEqual(report["status"], "declined")
+
+    def prod_sql_step(self) -> dict:
+        script = self.root / "scripts" / "prerequisite.sql"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("SELECT 1 FROM dual;\n", encoding="utf-8")
+        return {"type": "sql-script", "file": "scripts/prerequisite.sql", "connection": "PROD_APP", "expectedUser": "PROD_APP", "schema": "PROD_APP"}
+
+    def identity_for(self, name: str) -> dict:
+        return {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": name}
+
+    def observed_names(self, name: str):
+        observed: list[str] = []
+
+        def observe(target, run_dir):
+            observed.append(target.connection)
+            Path(run_dir).mkdir(parents=True, exist_ok=True)  # the receipt names this evidence directory
+            return self.identity_for(name)
+
+        return observed, observe
+
+    def fake_executor_reporting(self, calls: list[int], identity: dict):
+        """A writer that reports the identity it ran against, as the SQLcl driver does for a SQL step."""
+        base = self.fake_executor(calls)
+
+        def execute(step, **context):
+            result = base(step, **context)
+            return rollout.StepResult(result.exit_code, result.evidence_paths, result.message, identity)
+
+        return execute
+
+    def test_yes_runs_staging_without_reading_stdin_and_records_it(self) -> None:
+        calls: list[int] = []
+        manifest = self.write_manifest(self.pause_steps(2))
+        report_base = self.root / "scratch" / "report"
+        output = io.StringIO()
+        with patch("scripts.rollout.execute_step", side_effect=self.fake_executor(calls)), patch(
+            "builtins.input", side_effect=AssertionError("-y must not read stdin")
+        ), contextlib.redirect_stdout(output):
+            status = rollout.run_rollout(
+                manifest,
+                "staging",
+                repo_root=self.root,
+                report_path=report_base,
+                confirm=lambda prompt: self.fail(f"-y must not ask: {prompt}"),
+                yes=True,
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, [1, 2])
+        self.assertIn("Confirmed by --yes; the interactive prompt was skipped.", output.getvalue())
+        self.assertIn("Step 01", output.getvalue())
+        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(report["confirmedBy"], "--yes")
+        confirmation = json.loads((self.root / report["confirmationPath"]).read_text(encoding="utf-8"))
+        self.assertEqual(confirmation["confirmedBy"], "--yes")
+
+    def test_yes_alone_on_production_is_refused_before_anything_is_written(self) -> None:
+        calls: list[int] = []
+        manifest = self.write_manifest(self.pause_steps(1))
+        stderr = io.StringIO()
+        with patch("scripts.rollout.execute_step", side_effect=self.fake_executor(calls)), contextlib.redirect_stderr(stderr):
+            status = rollout.run_rollout(manifest, "prod", repo_root=self.root, yes=True, confirm=lambda _prompt: self.fail("no prompt"))
+
+        self.assertEqual(status, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("production also needs --confirm-target <db_unique_name>", stderr.getvalue())
+        self.assertFalse((self.root / "scratch").exists())
+
+    def test_yes_with_matching_confirm_target_runs_production_after_reading_its_name(self) -> None:
+        calls: list[int] = []
+        manifest = self.write_manifest([self.prod_sql_step()])
+        report_base = self.root / "scratch" / "report"
+        observed, observe = self.observed_names("PRODDB_UNIQUE")
+        output = io.StringIO()
+        with patch("scripts.rollout.execute_step", side_effect=self.fake_executor_reporting(calls, self.identity_for("PRODDB_UNIQUE"))), patch(
+            "scripts.rollout._observe_target_identity", side_effect=observe
+        ), patch("builtins.input", side_effect=AssertionError("-y must not read stdin")), contextlib.redirect_stdout(output):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, report_path=report_base, yes=True, confirm_target="PRODDB_UNIQUE",
+                confirm=lambda _prompt: self.fail("no prompt"),
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, [1])
+        # The name is read before the run; the step's own before and after identity reads hit the same connection.
+        self.assertEqual(set(observed), {"PROD_APP"})
+        self.assertIn("Confirmed by --yes and --confirm-target PRODDB_UNIQUE; the interactive prompt was skipped.", output.getvalue())
+        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(report["confirmedBy"], "--yes --confirm-target")
+
+    def test_confirm_target_mismatch_refuses_production_before_any_step(self) -> None:
+        calls: list[int] = []
+        manifest = self.write_manifest([self.prod_sql_step()])
+        _observed, observe = self.observed_names("OTHERDB_UNIQUE")
+        stderr = io.StringIO()
+        with patch("scripts.rollout.execute_step", side_effect=self.fake_executor(calls)), patch(
+            "scripts.rollout._observe_target_identity", side_effect=observe
+        ), contextlib.redirect_stderr(stderr):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, yes=True, confirm_target="PRODDB_UNIQUE", confirm=lambda _prompt: self.fail("no prompt"),
+            )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("does not match the observed db_unique_name 'OTHERDB_UNIQUE'", stderr.getvalue())
+
+    def test_confirm_target_alone_is_accepted_when_the_name_matches(self) -> None:
+        calls: list[int] = []
+        manifest = self.write_manifest([self.prod_sql_step()])
+        _observed, observe = self.observed_names("PRODDB_UNIQUE")
+        with patch("scripts.rollout.execute_step", side_effect=self.fake_executor_reporting(calls, self.identity_for("PRODDB_UNIQUE"))), patch(
+            "scripts.rollout._observe_target_identity", side_effect=observe
+        ), contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, confirm_target="PRODDB_UNIQUE", confirm=lambda _prompt: self.fail("no prompt"),
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, [1])
+
+    def test_confirmation_flags_that_fit_no_run_are_refused_without_connecting(self) -> None:
+        manifest = self.write_manifest(self.pause_steps(1))
+        cases = (
+            ({"environment": "dev", "confirm_target": "DEVDB_UNIQUE"}, "applies only to --env staging or prod"),
+            ({"environment": "staging", "yes": True, "dry_run": True}, "apply to a rollout run, not to --dry-run or --prepare"),
+            ({"environment": "prod", "confirm_target": "   "}, "needs the observed db_unique_name"),
+        )
+        for options, message in cases:
+            with self.subTest(options=options):
+                stderr = io.StringIO()
+                with patch("scripts.rollout._observe_target_identity", side_effect=AssertionError("must not connect")), contextlib.redirect_stderr(stderr):
+                    status = rollout.run_rollout(manifest, repo_root=self.root, confirm=lambda _prompt: self.fail("no prompt"), **options)
+                self.assertEqual(status, 2)
+                self.assertIn(message, stderr.getvalue())
+
+    def test_redirected_stdin_refuses_the_rollout_prompt_without_yes(self) -> None:
+        calls: list[int] = []
+        manifest = self.write_manifest(self.pause_steps(1))
+        stderr = io.StringIO()
+        with patch("scripts.rollout.execute_step", side_effect=self.fake_executor(calls)), patch(
+            "scripts.terminal_confirm.stdin_is_terminal", return_value=False
+        ), patch("builtins.input", side_effect=AssertionError("piped answer read")), contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(manifest, "staging", repo_root=self.root, report_path=self.root / "scratch" / "report")
+
+        self.assertEqual(status, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("piped or redirected answers are not accepted", stderr.getvalue())
+        self.assertIn("--yes", stderr.getvalue())
+
+    def test_production_app_deploy_child_gets_yes_and_the_observed_name_not_a_piped_answer(self) -> None:
+        app_dir = self.add_app(schema="PROD_APP")
+        (app_dir / "deployments" / "prod.json").write_text(
+            json.dumps({"workspace": {"name": "PROD_WS"}, "app": {"id": 100, "databaseSession": {"parsingSchema": "PROD_APP"}}}) + "\n",
+            encoding="utf-8",
+        )
+        self.write_project_env({
+            **self.project_env_values,
+            "PROD_SCHEMA": "PROD_APP",
+            "PROD_SQLCL_CONNECTION": "PRODDB_CONN",
+            "PROD_EXPECTED_USER": "PROD_APP",
+        })
+        manifest = self.write_manifest([{"type": "app-deploy", "appId": 100}])
+        _observed, observe = self.observed_names("PRODDB_UNIQUE")
+        completed = subprocess.CompletedProcess(["bash"], 0, "deployment complete\n")
+        with patch.dict(os.environ, {
+            "APEX_PARSING_SCHEMA": "PROD_APP", "PROD_SCHEMA": "PROD_APP",
+            "PROD_SQLCL_CONNECTION": "PRODDB_CONN", "PROD_EXPECTED_USER": "PROD_APP",
+        }, clear=False), patch(
+            "scripts.rollout._observe_target_identity", side_effect=observe
+        ), patch("scripts.rollout.subprocess.run", return_value=completed) as run, contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, report_path=self.root / "scratch" / "app-prod", stage_report_path=None,
+                confirm=lambda _prompt: True,
+            )
+
+        self.assertEqual(status, 0)
+        command = run.call_args.args[0]
+        self.assertEqual(command[-3:], ["--yes", "--confirm-target", "PRODDB_UNIQUE"])
+        self.assertIsNone(run.call_args.kwargs.get("input"))
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
     def test_resume_requires_matching_receipts_and_skips_only_prior_steps(self) -> None:
         calls: list[int] = []
@@ -969,14 +1151,18 @@ class RolloutManifestTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(len(prompts), 1)
         command = run.call_args.args[0]
-        self.assertEqual(command[-5:-2], ["100", "--env", "staging"])
+        self.assertEqual(command[2:5], ["100", "--env", "staging"])
         self.assertIn("--app-source-dir", command)
+        # The child takes --yes and reads no piped answer: the rollout's confirmation is already held.
+        self.assertIn("--yes", command)
+        self.assertNotIn("--confirm-target", command)
         staged_app = Path(command[command.index("--app-source-dir") + 1])
         self.assertEqual((staged_app / "application.apx").read_bytes(), b"app 100 {\n}\n")
         self.assertEqual((staged_app / "deployments" / "staging.json").read_bytes(), (app_dir / "deployments" / "staging.json").read_bytes())
         self.assertNotIn("--force", command)
         child_env = run.call_args.kwargs["env"]
-        self.assertEqual(run.call_args.kwargs["input"], "y\n")
+        self.assertIsNone(run.call_args.kwargs.get("input"))
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertFalse(any(key.startswith("TEAM_ROLLOUT_") for key in child_env))
         self.assertTrue((app_dir / "application.apx").is_file())
         report = json.loads((self.root / "scratch" / "app-rollout.json").read_text(encoding="utf-8"))

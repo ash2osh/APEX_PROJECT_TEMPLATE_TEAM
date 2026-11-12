@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import feature_claims, feature_convert, feature_doctor, feature_sources, release_capsule, release_state, rollout
+from scripts import feature_claims, feature_convert, feature_doctor, feature_sources, release_capsule, release_state, rollout, terminal_confirm
 from scripts.feature_manifest import FEATURE_RE, SCHEMA_RE, FeatureManifestError, load_feature_checkpoint
 from scripts.path_utils import relative_to_root
 
@@ -58,7 +58,7 @@ def _init_feature(repo_root: Path, feature: str, schema: str) -> tuple[Path, ...
     if readme_contents is None:
         outputs[readme_path] = (
             f"# {feature}\n\n"
-            f"Feature source for schema `{schema}`. Keep package files whole and edit them in place.\n"
+            f"Feature source for schema `{schema}`. Keep stored source files whole and edit them in place.\n"
             "Replace the scaffold check with a reviewed condition before preparing a release.\n"
         ).encode()
     outputs[checks_path] = (
@@ -144,7 +144,7 @@ def _freeze_gate(
     elif no_live is not None:
         record["live"] = f"skipped: {no_live.strip()}"
     elif not live_schemas:
-        record["live"] = "not run: no package files in the selected features"
+        record["live"] = "not run: no stored source files in the selected features"
     else:
         usable = [schema for schema in live_schemas if feature_doctor._dev_profile_available(environ, schema)]
         skipped = sorted(set(live_schemas) - set(usable))
@@ -156,17 +156,17 @@ def _freeze_gate(
                 live_list, compared, accepted = feature_doctor.live_findings(root, environ, claims, selected, set(usable))
             except feature_doctor.FeatureDoctorError as error:
                 print(
-                    f"feature error: {error}\nfreeze did not compare package files with DEV; fix the connection or pass "
+                    f"feature error: {error}\nfreeze did not compare stored source files with DEV; fix the connection or pass "
                     "--no-live \"<reason>\"",
                     file=sys.stderr,
                 )
                 return 2, record
             findings.extend(live_list)
-            record["live"] = f"{compared} package file(s) compared with DEV, {accepted} accepted difference(s)"
+            record["live"] = f"{compared} stored source file(s) compared with DEV, {accepted} accepted difference(s)"
             if skipped:
                 record["live"] += "; not compared (no DEV profile): " + ", ".join(skipped)
                 print(
-                    f"note: no DEV profile for {', '.join(skipped)}; their package files were not compared with DEV",
+                    f"note: no DEV profile for {', '.join(skipped)}; their stored source files were not compared with DEV",
                     file=sys.stderr,
                 )
     if any(finding.level == feature_doctor.ERROR for finding in findings):
@@ -218,7 +218,7 @@ def _parser() -> argparse.ArgumentParser:
         help="with --move-from, move the old file unchanged instead of capturing from DEV",
     )
 
-    diff_parser = subparsers.add_parser("diff", help="write package diffs against the retained DEV capture")
+    diff_parser = subparsers.add_parser("diff", help="write stored source diffs against the retained DEV capture")
     diff_parser.add_argument("feature", help="lowercase feature slug")
     diff_parser.add_argument("--schema", required=True, help="uppercase Oracle schema")
     diff_parser.add_argument("--day", default=date.today().isoformat(), help="review directory date, YYYY-MM-DD")
@@ -227,16 +227,16 @@ def _parser() -> argparse.ArgumentParser:
     freeze_parser.add_argument("manifest", type=Path, help="schema-version 2 rollout manifest")
     freeze_parser.add_argument(
         "--no-live", metavar="REASON",
-        help="skip the comparison of package files with DEV; the reason is recorded next to the capsule",
+        help="skip the comparison of stored source files with DEV; the reason is recorded next to the capsule",
     )
 
     doctor_parser = subparsers.add_parser("doctor", help="check feature ownership, orphan checks and, with --live, drift against DEV")
     doctor_parser.add_argument("--feature", help="limit the checks to one feature slug")
-    doctor_parser.add_argument("--live", action="store_true", help="compare package files with the DEV source (read-only)")
+    doctor_parser.add_argument("--live", action="store_true", help="compare stored source files with the DEV source (read-only)")
 
     clean_parser = subparsers.add_parser("clean-capsule", help="preview or remove an eligible local capsule")
     clean_parser.add_argument("payload_digest", help="64-character capsule payload digest")
-    clean_parser.add_argument("--yes", action="store_true", help="apply eligible local cleanup")
+    clean_parser.add_argument("-y", "--yes", action="store_true", help="apply eligible local cleanup")
     reconcile_parser = subparsers.add_parser(
         "reconcile-run",
         help="close an unfinished rollout run that has no checkpoint to recover, after a typed acknowledgment",
@@ -259,6 +259,8 @@ def _reconcile_ack_from_terminal(expected: str) -> str:
         "Only the developer types it; nothing else closes the run.",
         file=sys.stderr,
     )
+    if not terminal_confirm.may_read_acknowledgment():
+        return ""
     try:
         return input("Acknowledgment: ")
     except (EOFError, OSError):

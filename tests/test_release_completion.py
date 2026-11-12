@@ -308,5 +308,66 @@ class ReleaseCompletionTests(unittest.TestCase):
         self.assertFalse(report["eligible"])
         self.assertTrue(any("closed by reconciliation" in blocker for blocker in report["blockers"]), report["blockers"])
 
+    RECONCILED_BLOCKER = "a rollout for this payload was closed by reconciliation, not by verification"
+
+    def _reconciled_run(self, environment: str) -> str:
+        state = self.fixture.state_module()
+        with patch.object(state.release_capsule, "load_capsule", return_value=self.fixture.capsule):
+            run_id = state.start_rollout(self.fixture.root, self.fixture.capsule, self.fixture.make_prod_plan(environment=environment))
+        state.finish_rollout(
+            self.fixture.root, run_id,
+            outcome={
+                "state": "unknown", "databaseState": "unknown", "steps": [], "checkpointVerificationIds": [],
+                "budget": {"seconds": 120, "elapsedSeconds": None, "coverageComplete": False, "passed": False},
+                "finalReportPath": None, "finalReportSha256": None,
+            },
+        )
+        with state.run_reconciliation(self.fixture.root, run_id, environment) as session:
+            session.reconcile("RECONCILE-RUN " + run_id)
+        return run_id
+
+    def test_a_reconciled_staging_run_is_superseded_by_a_later_verified_staging_run(self) -> None:
+        state = self.fixture.state_module()
+        reconciled = self._reconciled_run("staging")
+        self.fixture.complete_rollout(environment="staging")
+        self.fixture.complete_rollout(environment="prod")
+
+        result = self._cleanup()
+
+        self.assertTrue(result["eligible"], result["blockers"])
+        self.assertEqual(result["blockers"], [])
+        self.assertTrue(self.fixture.capsule.root.exists())
+        kept = next(row for row in state._load_index(self.fixture.root)["rollouts"] if row["runId"] == reconciled)
+        self.assertIsNotNone(kept["reconciliation"])
+
+    def test_a_reconciled_staging_run_with_no_later_verified_staging_run_still_blocks_cleanup(self) -> None:
+        self._reconciled_run("staging")
+        self.fixture.complete_rollout(environment="prod")
+
+        result = self._cleanup()
+
+        self.assertFalse(result["eligible"])
+        self.assertIn(self.RECONCILED_BLOCKER, result["blockers"])
+        self.assertTrue(self.fixture.capsule.root.exists())
+
+    def test_a_verified_staging_run_that_started_before_the_reconciled_one_does_not_supersede_it(self) -> None:
+        self.fixture.complete_rollout(environment="staging")
+        self._reconciled_run("staging")
+        self.fixture.complete_rollout(environment="prod")
+
+        result = self._cleanup()
+
+        self.assertFalse(result["eligible"])
+        self.assertIn(self.RECONCILED_BLOCKER, result["blockers"])
+
+    def test_a_reconciled_production_run_that_is_the_latest_production_run_still_blocks_cleanup(self) -> None:
+        self._reconciled_run("prod")
+        self.fixture.complete_rollout(environment="staging")
+
+        result = self._cleanup()
+
+        self.assertFalse(result["eligible"])
+        self.assertIn(self.RECONCILED_BLOCKER, result["blockers"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -356,11 +357,31 @@ class FeatureRolloutTests(unittest.TestCase):
 
     def test_cli_recovery_adapter_reads_typed_acknowledgment(self) -> None:
         attempt_id = "12345678-1234-4234-8234-123456789abc"
-        with patch("builtins.input", return_value=f"RECONCILE {attempt_id}") as read:
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=True), patch(
+            "builtins.input", return_value=f"RECONCILE {attempt_id}"
+        ) as read:
             value = rollout._recovery_ack_from_terminal("show scope/evidence and terminal-state assertion")
 
         self.assertEqual(value, f"RECONCILE {attempt_id}")
         read.assert_called_once_with("Reconciliation acknowledgment: ")
+
+    def test_cli_recovery_adapter_refuses_redirected_input_unless_the_test_switch_is_set(self) -> None:
+        attempt_id = "12345678-1234-4234-8234-123456789abc"
+        stderr = io.StringIO()
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("a redirected acknowledgment must not be read")
+        ), patch.dict(os.environ, {}, clear=False), contextlib.redirect_stderr(stderr):
+            os.environ.pop("TEAM_ACK_FROM_STDIN", None)
+            value = rollout._recovery_ack_from_terminal("show scope/evidence and terminal-state assertion")
+        self.assertEqual(value, "")
+        self.assertIn("redirected input is not accepted", stderr.getvalue())
+
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch.dict(os.environ, {"TEAM_ACK_FROM_STDIN": "1"}), patch(
+            "builtins.input", return_value=f"RECONCILE {attempt_id}"
+        ), contextlib.redirect_stderr(io.StringIO()) as notice:
+            value = rollout._recovery_ack_from_terminal("show scope/evidence and terminal-state assertion")
+        self.assertEqual(value, f"RECONCILE {attempt_id}")
+        self.assertIn("acknowledgment read from redirected input (TEAM_ACK_FROM_STDIN)", notice.getvalue())
 
     def test_recovery_refuses_to_replay_verified_prior_write_steps(self) -> None:
         plan = self._plan([
@@ -493,6 +514,59 @@ class FeatureRolloutTests(unittest.TestCase):
 
         self.assertEqual(status, 2)
         execute.assert_not_called()
+
+    def test_capsule_yes_alone_is_refused_for_production_before_any_checkpoint(self) -> None:
+        from scripts import feature_release
+
+        stderr = io.StringIO()
+        with patch.object(feature_release, "execute_checkpoint") as execute, contextlib.redirect_stderr(stderr):
+            status = rollout.run_rollout(
+                self.manifest_path, "prod", repo_root=self.root, capsule_path=self.capsule_path,
+                yes=True, confirm=lambda _prompt: self.fail("no prompt"),
+            )
+
+        self.assertEqual(status, 2)
+        execute.assert_not_called()
+        self.assertIn("production also needs --confirm-target <db_unique_name>", stderr.getvalue())
+
+    def test_capsule_staging_yes_runs_without_a_prompt_and_records_it(self) -> None:
+        from scripts import feature_release
+
+        self._enter(self._patches(environment="staging"))
+        report_base = self.root / "scratch" / "staging-yes"
+        output = io.StringIO()
+        with patch.object(feature_release, "execute_checkpoint", side_effect=RuntimeError("stop before the first checkpoint")) as execute, \
+                contextlib.redirect_stdout(output), patch("builtins.input", side_effect=AssertionError("-y must not read stdin")):
+            status = rollout.run_rollout(
+                self.manifest_path, "staging", repo_root=self.root, capsule_path=self.capsule_path,
+                report_path=report_base, yes=True, confirm=lambda _prompt: self.fail("no prompt"),
+            )
+
+        self.assertEqual(status, 2)
+        self.assertTrue(execute.called, "the flag must lead to the first checkpoint")
+        self.assertIn("Confirmed by --yes; the interactive prompt was skipped.", output.getvalue())
+        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(report["confirmedBy"], "--yes")
+
+    def test_capsule_production_name_mismatch_refuses_before_any_checkpoint(self) -> None:
+        from scripts import feature_release, release_state
+
+        self._enter(self._patches(environment="prod"))
+        stage_report = self.root / "scratch" / "stage-report.json"
+        stage_report.parent.mkdir(parents=True, exist_ok=True)
+        stage_report.write_text("{}\n", encoding="utf-8")
+        observed = {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": "OTHER_UNIQUE"}
+        stderr = io.StringIO()
+        with patch.object(release_state, "validate_stage_proof"), patch.object(rollout, "_observe_target_identity", return_value=observed), \
+                patch.object(feature_release, "execute_checkpoint") as execute, contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(
+                self.manifest_path, "prod", repo_root=self.root, capsule_path=self.capsule_path, stage_report_path=stage_report,
+                yes=True, confirm_target="PRODDB_UNIQUE", confirm=lambda _prompt: self.fail("no prompt"),
+            )
+
+        self.assertEqual(status, 2)
+        execute.assert_not_called()
+        self.assertIn("does not match the observed db_unique_name 'OTHER_UNIQUE'", stderr.getvalue())
 
     def test_rollout_binds_every_checkpoint_to_the_durable_run_id(self) -> None:
         from scripts import feature_release

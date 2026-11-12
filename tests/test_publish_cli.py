@@ -1399,7 +1399,191 @@ class PublishAppCliTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertNotIn("Published APEX App 100", result.stdout + result.stderr)
 
-    def staging_promotion_confirmed_with(self, answer: bytes) -> None:
+    FAKE_LIFECYCLE = (
+        "#!/usr/bin/env python3\n"
+        "# Test stand-in for application_lifecycle.py: `capture` writes the identity the publish reads.\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "if args and args[0] == 'capture':\n"
+        "    run_dir = Path(args[args.index('--run-dir') + 1])\n"
+        "    run_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    identity = {'db_unique_name': os.environ.get('FAKE_DB_UNIQUE_NAME', 'PRODDB_UNIQUE'), 'service_name': 'prod.service',\n"
+        "                'container_id': '3', 'container_name': 'PRODPDB', 'edition': 'ORA$BASE', 'server_host': 'dbhost',\n"
+        "                'session_user': 'PROD_DEPLOYER', 'current_schema': 'STAGE_APP'}\n"
+        "    (run_dir / 'lifecycle-snapshot.json').write_text(json.dumps({'schemaVersion': 1, 'identity': identity}), encoding='utf-8')\n"
+        "raise SystemExit(0)\n"
+    )
+
+    def make_promotion_fixture(self, root: Path, environment: str, *, lifecycle: bool = True):
+        """A publish checkout with a staging or production profile, descriptor and (optionally) a fake lifecycle reader."""
+        runner, sql_log, _, env = self.make_publish_fixture(root)
+        scripts = runner.parent
+        label = environment.upper()
+        schema = "STAGE_APP" if environment == "staging" else "PROD_APP"
+        env_path = root / ".env"
+        env_path.write_text(
+            env_path.read_text(encoding="utf-8") + f"\n{label}_SQLCL_CONNECTION={environment}-db\n{label}_EXPECTED_USER={label}_DEPLOYER\n",
+            encoding="utf-8",
+        )
+        env["PROJECT_ENV_FILE"] = str(env_path)
+        (root / "apps" / "DEMO" / "100" / "deployments" / f"{environment}.json").write_text(
+            json.dumps({"workspace": {"name": "TEAM_WORKSPACE"}, "app": {"id": 100, "databaseSession": {"parsingSchema": schema}}}),
+            encoding="utf-8",
+        )
+        if lifecycle:
+            (scripts / "application_lifecycle.py").write_text(self.FAKE_LIFECYCLE, encoding="utf-8")
+            (scripts / "application_lifecycle.sql").write_text("-- test stand-in\n", encoding="utf-8")
+        env["FAKE_SQL_CALLS"] = str(root / "sql-calls.txt")
+        return runner, sql_log, env
+
+    def run_promotion(self, runner: Path, env: dict, root: Path, *args: str, stdin: bytes | None = None):
+        return subprocess.run(
+            [BASH, str(runner), "100", *args],
+            cwd=root,
+            env=env,
+            input=stdin if stdin is not None else b"",
+            capture_output=True,
+            check=False,
+        )
+
+    def test_yes_publishes_to_staging_without_reading_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "staging", lifecycle=False)
+            result = self.run_promotion(runner, env, root, "--env", "staging", "-y", stdin=b"n\n")
+            output = result.stdout.decode("utf-8", "replace")
+
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+            self.assertIn("Confirmed by --yes; the interactive prompt was skipped.", output)
+            self.assertNotIn("Proceed?", output)
+            self.assertTrue(sql_log.exists(), "the accepted import must run")
+
+    def test_piped_answer_is_refused_for_a_promotion_without_yes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "staging", lifecycle=False)
+            result = self.run_promotion(runner, env, root, "--env", "staging", stdin=b"y\n")
+            stderr = result.stderr.decode("utf-8", "replace")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("piped or redirected answers are not accepted", stderr)
+            self.assertIn("--yes", stderr)
+            self.assertFalse(sql_log.exists(), "a refused promotion must not import")
+
+    def test_yes_alone_is_refused_on_production_before_any_sqlcl_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "prod")
+            result = self.run_promotion(runner, env, root, "--env", "prod", "-y")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("production also needs --confirm-target <db_unique_name>", result.stderr.decode("utf-8", "replace"))
+            self.assertFalse((root / "sql-calls.txt").exists(), "no SQLcl session may start")
+            self.assertFalse(sql_log.exists())
+
+    def test_yes_with_matching_confirm_target_publishes_to_production(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "prod")
+            result = self.run_promotion(runner, env, root, "--env", "prod", "-y", "--confirm-target", "PRODDB_UNIQUE")
+            output = result.stdout.decode("utf-8", "replace")
+
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+            self.assertIn("Confirmed by --yes and --confirm-target PRODDB_UNIQUE; the interactive prompt was skipped.", output)
+            self.assertTrue(sql_log.exists())
+
+    def test_confirm_target_mismatch_imports_nothing_on_production(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "prod")
+            env["FAKE_DB_UNIQUE_NAME"] = "OTHERDB_UNIQUE"
+            result = self.run_promotion(runner, env, root, "--env", "prod", "-y", "--confirm-target", "PRODDB_UNIQUE")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("does not match the observed db_unique_name 'OTHERDB_UNIQUE'", result.stderr.decode("utf-8", "replace"))
+            self.assertFalse(sql_log.exists(), "a mismatched name must not import")
+
+    def test_confirm_target_alone_publishes_to_staging_without_a_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "staging")
+            env["FAKE_DB_UNIQUE_NAME"] = "STAGEDB_UNIQUE"
+            result = self.run_promotion(runner, env, root, "--env", "staging", "--confirm-target", "STAGEDB_UNIQUE")
+            output = result.stdout.decode("utf-8", "replace")
+
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+            self.assertIn("Confirmed by --confirm-target STAGEDB_UNIQUE; the interactive prompt was skipped.", output)
+            self.assertNotIn("Proceed?", output)
+            self.assertTrue(sql_log.exists())
+
+    def test_confirm_target_is_refused_on_dev_and_when_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "staging", lifecycle=False)
+            dev = self.run_promotion(runner, env, root, "--confirm-target", "DEVDB_UNIQUE")
+            blank = self.run_promotion(runner, env, root, "--env", "staging", "--confirm-target", "  ")
+
+            self.assertEqual(dev.returncode, 2)
+            self.assertIn("--confirm-target applies only to --env staging or prod", dev.stderr.decode("utf-8", "replace"))
+            self.assertEqual(blank.returncode, 2)
+            self.assertIn("--confirm-target needs the observed db_unique_name", blank.stderr.decode("utf-8", "replace"))
+            self.assertFalse(sql_log.exists())
+
+    POWERSHELL_HELPERS = (
+        "publish_app.ps1", "load_env.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "normalize_apx.ps1",
+    )
+
+    def run_promotion_powershell(self, pwsh: str, runner: Path, env: dict, root: Path, *args: str, stdin: bytes = b""):
+        scripts = runner.parent
+        for name in self.POWERSHELL_HELPERS:
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        return subprocess.run(
+            [pwsh, "-NoProfile", "-File", str(scripts / "publish_app.ps1"), "100", *args],
+            cwd=root,
+            env=env,
+            input=stdin,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_powershell_promotion_flags_match_the_bash_rules(self) -> None:
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if pwsh is None:
+            self.skipTest("PowerShell Core is not installed")
+        # PowerShell refusals are exceptions (exit 1); the wording is what must match Bash.
+        cases = (
+            ("staging", ("--env", "staging", "-y"), b"", 0, "Confirmed by --yes; the interactive prompt was skipped."),
+            ("staging", ("--env", "staging"), b"y\n", None, "piped or redirected answers are not accepted"),
+            ("prod", ("--env", "prod", "-y"), b"", None, "production also needs --confirm-target <db_unique_name>"),
+            ("prod", ("--env", "prod", "-y", "--confirm-target", "PRODDB_UNIQUE"), b"", 0,
+             "Confirmed by --yes and --confirm-target PRODDB_UNIQUE; the interactive prompt was skipped."),
+            ("prod", ("--env", "prod", "-y", "--confirm-target", "WRONGDB_UNIQUE"), b"", None, "does not match the observed db_unique_name 'PRODDB_UNIQUE'"),
+        )
+        for environment, args, stdin, expected_status, expected_text in cases:
+            with self.subTest(environment=environment, args=args), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, sql_log, env = self.make_promotion_fixture(root, environment)
+                result = self.run_promotion_powershell(pwsh, runner, env, root, *args, stdin=stdin)
+                # The PowerShell error view wraps lines and adds colour codes; compare the words only.
+                output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout.decode("utf-8", "replace") + result.stderr.decode("utf-8", "replace"))
+                output = re.sub(r"[\s|]+", " ", output)  # the error view also draws a gutter of '|'
+
+                self.assertIn(expected_text, output)
+                if expected_status is None:
+                    self.assertNotEqual(result.returncode, 0, output)
+                else:
+                    self.assertEqual(result.returncode, expected_status, output)
+                self.assertEqual(sql_log.exists(), expected_status == 0, output)
+
+    def test_refusal_text_is_the_one_the_python_helpers_print(self) -> None:
+        from scripts import terminal_confirm
+
+        for name in ("publish_app.sh", "publish_app.ps1"):
+            with self.subTest(script=name):
+                self.assertIn(terminal_confirm.YES_REFUSAL, (ROOT / "scripts" / name).read_text(encoding="utf-8"))
+
+    def staging_promotion_confirmed_with(self, answer: bytes, *args: str) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runner, sql_log, _, environment = self.make_publish_fixture(root)
@@ -1431,7 +1615,7 @@ class PublishAppCliTests(unittest.TestCase):
             original_source = (app / "application.apx").read_bytes()
 
             result = subprocess.run(
-                [BASH, str(runner), "100", "--env", "staging"],
+                [BASH, str(runner), "100", "--env", "staging", *args],
                 cwd=root,
                 env=environment,
                 # Bytes, not text: text-mode input turns "\n" into "\r\n" on Windows.
@@ -1448,12 +1632,18 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertNotIn("Stamped application version", result.stdout.decode("utf-8", "replace"))
 
     def test_staging_publish_skips_dev_builder_drift_guard(self) -> None:
-        self.staging_promotion_confirmed_with(b"y\n")
+        self.staging_promotion_confirmed_with(b"", "-y")
 
-    def test_a_crlf_yes_is_accepted_for_a_promotion(self) -> None:
-        # Windows PowerShell appends CR LF to what it pipes into a native program, so
-        # `"y" | scripts\team.ps1 deploy 100 --env staging` reaches Bash as "y\r\n".
-        self.staging_promotion_confirmed_with(b"y\r\n")
+    def test_a_crlf_yes_piped_into_a_promotion_is_refused_and_yes_is_the_way_in(self) -> None:
+        # Windows PowerShell appends CR LF to what it pipes into a native program. A piped
+        # "y" is no longer an answer: the flag is.
+        self.staging_promotion_confirmed_with(b"", "-y")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, env = self.make_promotion_fixture(root, "staging", lifecycle=False)
+            result = self.run_promotion(runner, env, root, "--env", "staging", stdin=b"y\r\n")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(sql_log.exists())
 
 
 if __name__ == "__main__":

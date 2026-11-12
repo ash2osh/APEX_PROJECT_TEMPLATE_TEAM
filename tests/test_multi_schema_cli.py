@@ -799,7 +799,11 @@ class PublishCliTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             script, environment = self.make_fixture(Path(temporary), "TWO", "TWO", extra)
-            for app_environment, expected_lookup_environment in (("staging", "staging"), ("prod", "production")):
+            # Production needs the observed name with -y; the lookup still runs first and refuses on ONE.
+            for app_environment, flags, expected_lookup_environment in (
+                ("staging", ("-y",), "staging"),
+                ("prod", ("-y", "--confirm-target", "PRODDB_UNIQUE"), "production"),
+            ):
                 with self.subTest(app_environment=app_environment):
                     lookup_path = Path(environment["FAKE_SQL_LOOKUP_ENVIRONMENTS"])
                     lookup_path.unlink(missing_ok=True)
@@ -809,7 +813,8 @@ class PublishCliTests(unittest.TestCase):
                         "--env",
                         app_environment,
                         "--force",
-                        input_text="yes\n",
+                        *flags,
+                        input_text="",
                         FAKE_LIVE_SCHEMA="ONE",
                     )
                     self.assertNotEqual(0, result.returncode, result.stdout)

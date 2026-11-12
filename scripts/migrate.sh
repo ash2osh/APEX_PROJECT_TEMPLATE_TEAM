@@ -4,11 +4,15 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/migrate.sh <migration-folder> [...] --env <dev|staging|prod> [--verbose] [--rehearse] [--report <file>]
+Usage: scripts/migrate.sh <migration-folder> [...] --env <dev|staging|prod> [--verbose] [--rehearse] [--report <file>] [--confirm-target <db_unique_name>] [--yes|-y]
 
 Select one or more migrations/<YYYY-MM-DD_name-rNNN>/ folders in execution
 order. Files inside each folder execute in ascending NNN order. Staging and
 production require a live preflight and an explicit terminal confirmation.
+--confirm-target <db_unique_name> replaces the prompt for staging or production only when the
+value equals the observed db_unique_name exactly; a mismatch refuses before any write.
+--yes (-y) accepts the prompt on DEV and staging; production also needs --confirm-target. Piped
+answers are refused: the prompt is read from a terminal only.
 Use --verbose to print every failed postcondition when fresh verification fails.
 Use --rehearse to run transaction-safe DML, check its postconditions, then roll it back.
 DDL and any file the analyzer cannot prove transaction-safe are listed as not rehearsable.

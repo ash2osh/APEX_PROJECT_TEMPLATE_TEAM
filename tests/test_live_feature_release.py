@@ -119,6 +119,15 @@ def _sqlcl(connection: str, script: str, workdir: str, env: dict, *, tolerate: b
     return result.stdout
 
 
+def _database_name(connection: str, workdir: str, env: dict) -> str:
+    """The database's db_unique_name, read through SYS_CONTEXT (USERENV needs no privilege)."""
+    output = _sqlcl(connection, "set heading off feedback off\nselect sys_context('USERENV', 'DB_UNIQUE_NAME') from dual;\n", workdir, env)
+    name = output.strip().splitlines()[-1].strip() if output.strip() else ""
+    if not name:
+        raise RuntimeError(f"connection {connection} reported no db_unique_name")
+    return name
+
+
 def _env_text() -> str:
     schemas = [SCHEMA, *([SECOND_SCHEMA] if SECOND_SCHEMA else [])]
     connections = [CONNECTION, *([SECOND_CONNECTION] if SECOND_SCHEMA else [])]
@@ -156,6 +165,8 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         cls.env = {**os.environ, "PROJECT_ENV_FILE": str(env_file)}
         cls.drops: list[tuple[str, str]] = []
         cls.sequence = 0
+        # Production runs need the observed name: the production profile is this same database.
+        cls.prod_db_name = _database_name(CONNECTION, cls.workdir.name, cls.env)
         _git(cls.project, "init", "-q")
         _commit(cls.project, "live checks: baseline")
 
@@ -205,8 +216,12 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         output = self._sql(connection, f"set heading off feedback off\n{sql};\n")
         return int(output.strip().splitlines()[-1])
 
-    def _team(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
-        return _run([str(self.project / "scripts" / "team.sh"), *args], cwd=self.project, env=self.env, stdin=stdin)
+    def _team(self, *args: str, stdin: str | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
+        return _run([str(self.project / "scripts" / "team.sh"), *args], cwd=self.project, env=env or self.env, stdin=stdin)
+
+    def _ack_env(self) -> dict:
+        """The typed acknowledgments read redirected input only under this test-only switch; the scripts never set it."""
+        return {**self.env, "TEAM_ACK_FROM_STDIN": "1"}
 
     def _feature(self, slug: str, schema: str = SCHEMA) -> None:
         result = self._team("feature", "init", slug, "--schema", schema)
@@ -254,7 +269,8 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
     def _rollout(self, environment: str, *, capsule: str | None = None, prepare: bool = False,
                  stage_report: str | None = None, recover: str | None = None,
-                 stdin: str | None = None) -> tuple[subprocess.CompletedProcess, dict]:
+                 confirm: bool = True) -> tuple[subprocess.CompletedProcess, dict]:
+        """Run a rollout. A run is confirmed by -y; production also names the observed database."""
         report = f"scratch/live-{environment}-{self._next_number()}.json"
         args = ["rollout", "releases/current.json", "--env", environment, "--report", report]
         if capsule is not None:
@@ -265,7 +281,11 @@ class LiveFeatureReleaseTests(unittest.TestCase):
             args += ["--recover", recover]
         if stage_report is not None:
             args += ["--stage-report", stage_report]
-        result = self._team(*args, stdin=stdin)
+        if confirm and not prepare:
+            args.append("-y")
+            if environment == "prod":
+                args += ["--confirm-target", type(self).prod_db_name]
+        result = self._team(*args)
         path = self.project / report
         document = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         document["reportPath"] = report
@@ -275,7 +295,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         """Prepare and run staging, assert success, and return the report document."""
         result, _ = self._rollout("staging", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, document = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, document = self._rollout("staging", capsule=capsule)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(document["status"], "success")
         return document
@@ -345,7 +365,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
         result, _ = self._rollout("prod", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(production["status"], "success")
         ran = f"select count(*) from {log} where msg = 'ran'"
@@ -418,7 +438,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
         result, _ = self._rollout("prod", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(production["status"], "success")
 
@@ -477,7 +497,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
         result, _ = self._rollout("prod", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(production["status"], "success")
         self.assertEqual(production["objectBudget"]["includedMigrationSteps"], [2])
@@ -504,7 +524,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         # The file equals DEV: the live doctor compares both files and finds nothing.
         result = self._team("feature", "doctor", "--live", "--feature", first)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("2 package file(s) compared with DEV", result.stdout)
+        self.assertIn("2 stored source file(s) compared with DEV", result.stdout)
 
         # A teammate compiles a new function on DEV: the file is now behind DEV.
         self._sql(CONNECTION, spec.format(extra="  function pong return number;\n")
@@ -578,7 +598,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         capsule = self._freeze()
         result, _ = self._rollout("prod", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, _ = self._rollout("prod", capsule=capsule, stdin="y\n")
+        result, _ = self._rollout("prod", capsule=capsule)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requires --stage-report", result.stdout + result.stderr)
         self.assertEqual(self._count(f"select count(*) from {log}"), 0)
@@ -731,7 +751,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
         result, _ = self._rollout("prod", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(production["status"], "success")
         self._expect_forms(CONNECTION, names, public)
@@ -976,12 +996,10 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         report = f"scratch/live-staging-{self._next_number()}.json"
         process = subprocess.Popen(
             [str(self.project / "scripts" / "team.sh"), "rollout", "releases/current.json", "--env", "staging",
-             "--capsule", capsule, "--report", report],
-            cwd=self.project, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+             "--capsule", capsule, "--report", report, "-y"],
+            cwd=self.project, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, start_new_session=True,
         )
-        process.stdin.write("y\n")
-        process.stdin.flush()
         attempt = self._wait_for_attempting(process)
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate(timeout=120)
@@ -990,9 +1008,9 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self._wait_until_settled(package, connection=STAGING_DB)
 
         result = self._team("rollout", "releases/current.json", "--env", "staging", "--prepare",
-                            "--capsule", capsule, "--recover", attempt, stdin=f"RECONCILE {attempt}\n")
+                            "--capsule", capsule, "--recover", attempt, env=self._ack_env(), stdin=f"RECONCILE {attempt}\n")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, recovered = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, recovered = self._rollout("staging", capsule=capsule)
         self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}\nreport: {recovered}")
         self.assertEqual(recovered["status"], "success")
 
@@ -1146,7 +1164,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
         result, _ = self._rollout("prod", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+        result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(production["status"], "success")
         self.assertEqual(production["objectBudget"]["includedCheckpoints"], [])
@@ -1176,7 +1194,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         self._sql(STAGING_DB, f"update {flag} set ok = 'N';\ncommit;\n")
-        result, failed = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, failed = self._rollout("staging", capsule=capsule)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["steps"][0]["writeState"], "no-write-attempted")
@@ -1187,7 +1205,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self._sql(STAGING_DB, f"update {flag} set ok = 'Y';\ncommit;\n")
         result, _ = self._rollout("staging", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, retried = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, retried = self._rollout("staging", capsule=capsule)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(retried["status"], "success")
         self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{table}'", STAGING_DB), 1)
@@ -1222,7 +1240,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
         result, _ = self._rollout("staging", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, failed = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, failed = self._rollout("staging", capsule=capsule)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["databaseState"], "unknown")
@@ -1231,16 +1249,16 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(self._run_row(run_id)["state"], "unknown")
 
         # The run holds its target: the next run is refused, and a closed run is still not cleanup-eligible.
-        result, _ = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, _ = self._rollout("staging", capsule=capsule)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("reconcile before reuse", result.stdout + result.stderr)
 
-        result = self._team("feature", "reconcile-run", run_id, "--env", "staging", stdin="RECONCILE-RUN not-this-run\n")
+        result = self._team("feature", "reconcile-run", run_id, "--env", "staging", env=self._ack_env(), stdin="RECONCILE-RUN not-this-run\n")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("reconciliation", self._run_row(run_id))
         self.assertEqual(self._run_row(run_id)["state"], "unknown")
 
-        result = self._team("feature", "reconcile-run", run_id, "--env", "staging", stdin=f"RECONCILE-RUN {run_id}\n")
+        result = self._team("feature", "reconcile-run", run_id, "--env", "staging", env=self._ack_env(), stdin=f"RECONCILE-RUN {run_id}\n")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         closed = self._run_row(run_id)
         self.assertEqual(closed["reconciliation"]["acknowledgment"], f"RECONCILE-RUN {run_id}")
@@ -1251,7 +1269,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         # The reconciled run is not completion or stage proof: production refuses the report it left.
         result, _ = self._rollout("prod", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, _ = self._rollout("prod", capsule=capsule, stage_report=failed["reportPath"], stdin="y\n")
+        result, _ = self._rollout("prod", capsule=capsule, stage_report=failed["reportPath"])
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self._count(f"select count(*) from {log} where msg = 'ran'", CONNECTION), 0)
 
@@ -1260,7 +1278,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self._sql(STAGING_DB, f"delete from {log} where id = 1;\ncommit;\n")
         result, _ = self._rollout("staging", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, _ = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, _ = self._rollout("staging", capsule=capsule)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("receipt path is already occupied", result.stdout + result.stderr)
         self.assertEqual(self._count(f"select count(*) from {log}", STAGING_DB), 0)
@@ -1275,14 +1293,14 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         capsule = self._freeze()
         result, _ = self._rollout("staging", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        result, staging = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, staging = self._rollout("staging", capsule=capsule)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(staging["status"], "success")
         self.assertEqual(self._count(f"select count(*) from {log} where msg = 'ran'", STAGING_DB), 1)
         if STAGING_DB != CONNECTION:
             result, _ = self._rollout("prod", capsule=capsule, prepare=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], stdin="y\n")
+            result, production = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"])
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(production["status"], "success")
             self.assertEqual(self._count(f"select count(*) from {log} where msg = 'ran'", CONNECTION), 1)
@@ -1311,18 +1329,16 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("null; null;", proc_file.read_text(encoding="utf-8"))
 
-        # DEV changes the function: the live doctor reports its file as out of step with DEV. A refresh compares the
-        # file with DEV's text only, so it stops on the line DEV no longer has, as the feature-releases guide documents.
+        # DEV changes the function: the live doctor reports its file as out of step with DEV. The function file is
+        # unedited (it equals the retained DEV baseline of its capture), so a refresh replaces it without
+        # --discard-unapplied. The edited procedure above is still refused without the flag.
         self._sql(CONNECTION, f"create or replace function {fn} return number is begin return 2; end;\n/\n")
         result = self._team("feature", "doctor", "--live", "--feature", first)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(fn_paths[0], result.stdout)
         refresh_function = ["feature", "capture", first, "--function", fn, "--schema", SCHEMA, "--env", "dev", "--refresh"]
-        result = self._team(*refresh_function)
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("DEV does not have", result.stderr)
         self.assertIn("return 1", fn_file.read_text(encoding="utf-8").lower())
-        result = self._team(*refresh_function, "--discard-unapplied")
+        result = self._team(*refresh_function)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("return 2", fn_file.read_text(encoding="utf-8").lower())
         self.assertEqual(self._team("feature", "doctor", "--live", "--feature", first).returncode, 0)
@@ -1372,7 +1388,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         result, _ = self._rollout("staging", capsule=capsule, prepare=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self._sql(STAGING_DB, f"alter trigger {trg} disable;\n")
-        result, failed = self._rollout("staging", capsule=capsule, stdin="y\n")
+        result, failed = self._rollout("staging", capsule=capsule)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(self._count(disabled, STAGING_DB), 1)

@@ -123,11 +123,6 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def generate_object_prefix() -> str:
-    """Generate a random DT_<12 uppercase hex>_ object prefix."""
-    return f"DT_{uuid.uuid4().hex[:12].upper()}_"
-
-
 def make_object_name(prefix: str, suffix: str) -> str:
     """Combine object prefix and suffix; enforce 30-byte Oracle identifier budget."""
     if not isinstance(prefix, str) or re.fullmatch(r"DT_[0-9A-F]{12}_", prefix, re.ASCII) is None:

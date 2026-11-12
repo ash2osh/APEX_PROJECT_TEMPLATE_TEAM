@@ -310,6 +310,37 @@ class AutomationOperationTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["status"], "refused")
         action.assert_not_called()
 
+    def test_piped_exact_confirmation_is_refused_and_runs_no_action(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            with (
+                patch.object(
+                    operations,
+                    "_validate_scope",
+                    return_value=(940269, self.before, run_dir, {
+                        "environment": "dev", "connection": "docker-demo2", "sessionUser": "DEMO2",
+                        "currentSchema": "DEMO2", "service": "freepdb1", "workspace": "DEMO",
+                        "appId": 940269, "release": "26.2.0",
+                    }),
+                ),
+                patch.object(operations, "read_project_env", return_value={"APEX_WORKSPACE_USERNAME": "DEMO"}),
+                patch.object(operations, "execute_automation_action") as action,
+                patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False),
+                patch("builtins.input", side_effect=AssertionError("a piped confirmation must not be read")),
+                patch("sys.stdin", io.StringIO("ENABLE 940269 TEMPLATE_AUTOMATION_SELECTED\n")),
+                patch("sys.stdout", new_callable=io.StringIO) as output,
+                patch("sys.stderr", new_callable=io.StringIO) as prompt,
+            ):
+                code = operations.main([
+                    "enable", "940269", "--env", "dev", "--schema", "DEMO2",
+                    "--automation", "TEMPLATE_AUTOMATION_SELECTED", "--repo-root", temporary,
+                    "--env-file", str(run_dir / ".env"), "--format", "json",
+                ])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(output.getvalue())["status"], "refused")
+        self.assertIn("redirected input is not accepted", prompt.getvalue())
+        action.assert_not_called()
+
     def test_cli_displays_exact_action_and_selected_state_before_confirmation(self):
         expected = {"schemaVersion": 1, "action": "enable", "status": "verified", "scope": {},
                     "before": {"staticId": "TEMPLATE_AUTOMATION_SELECTED", "status": "DISABLED"},
@@ -329,6 +360,7 @@ class AutomationOperationTests(unittest.TestCase):
                 patch.object(operations, "read_project_env", return_value={"APEX_WORKSPACE_USERNAME": "DEMO"}),
                 patch.object(operations, "_target", return_value=self.target),
                 patch.object(operations, "execute_automation_action", return_value=expected) as action,
+                patch("scripts.terminal_confirm.stdin_is_terminal", return_value=True),
                 patch("sys.stdin", io.StringIO("ENABLE 940269 TEMPLATE_AUTOMATION_SELECTED\n")),
                 patch("sys.stdout", new_callable=io.StringIO) as output,
                 patch("sys.stderr", new_callable=io.StringIO) as prompt,

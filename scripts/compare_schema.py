@@ -205,16 +205,6 @@ def _inventory_contains(inventory: SchemaInventory, name: str, object_type: str)
     return ObjectKey(owner, name, object_type) in inventory.objects
 
 
-def _ordinary_inventory_entries(inventory: SchemaInventory):
-    owner = _identity_owner(inventory)
-    for key, row in inventory.objects.items():
-        if key.owner != owner:
-            continue
-        if _row_is_identity_sequence(row):
-            continue
-        yield (key.name, key.object_type), row
-
-
 def _matched_exact(candidate: tuple[str, str], parsed: tuple[str, str | None]) -> bool:
     name, type_name = parsed
     candidate_name, candidate_type = candidate
