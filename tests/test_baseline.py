@@ -1289,7 +1289,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
             "baseline-code": {
                 "001-source-pkg-alpha-package-62c56260.sql": "54760bcde770a7c1c44bb2a01dcf08ffec70c4fc4ca53e073cdd73bbd57c08bb",
                 "002-view-v-alpha-c84bc776.sql": "8fa2d6c64ae5ae045a97e66185ac6df772b95ab9a72bd65a0fbe6fa12e05b408",
-                "003-compile-all.sql": "129069e30a63ed90794a92a868333fe69a285bb2b43085bd2fdc83665d2abc9b",
+                "003-compile-all.sql": "bb599bf90e13d3f754e3fb1d07fa444c7931f9cae4f62c4fd9049b64b229fc33",
                 "README.md": "e6be64748b36edf32d8b43f0d16421921aadfc0ac668a257783cbc75976693bf",
                 "checks.json": "269b26513eb4040d6b0599d472f2d81f1ca57426a7d2e5008ca271e9bb212e0c",
             },

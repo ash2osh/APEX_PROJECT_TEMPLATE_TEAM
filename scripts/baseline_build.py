@@ -385,11 +385,6 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
         raise
 
 
-# Imported last: this module reads baseline.<name> only when it runs, so baseline can bind the names from this module
-# at its own end without a load-time cycle.
-from . import baseline
-
-
 # The leaf helpers moved to baseline_sql. They are re-exported because baseline re-exports them and the build
 # modules and tests reference them on scripts.baseline_build.
 from .baseline_sql import (  # noqa: F401
@@ -459,3 +454,9 @@ from .baseline_bundles import (  # noqa: F401
     _wrap_guarded_ddl,
     _wrap_not_null,
 )
+
+
+# The build modules are imported above, so every name baseline re-exports is bound before baseline loads.
+# Imported last: this module reads baseline.<name> only when it runs, so baseline can bind the names from this module
+# at its own end without a load-time cycle.
+from . import baseline

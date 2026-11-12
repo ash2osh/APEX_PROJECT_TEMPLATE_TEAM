@@ -24,15 +24,61 @@ def _ddl_without_terminator(ddl: str) -> str:
     return ddl.strip().rstrip(";").rstrip()
 
 
-def _wrap_guarded_ddl(exists_query: str, ddl: str) -> str:
-    statement = _ddl_without_terminator(ddl)
+_STATEMENT_START = re.compile(r"(?:ALTER|CREATE)\s", re.IGNORECASE)
+
+
+def _split_ddl_statements(ddl: str) -> list[str]:
+    """Split DBMS_METADATA output into its statements, without terminators.
+
+    GET_DDL('TABLE') returns the CREATE TABLE statement and then one ALTER TABLE statement for each key and check
+    constraint, separated by newlines. The capture turns SQLTERMINATOR off, so nothing else marks the boundaries, and
+    EXECUTE IMMEDIATE runs one statement. A statement starts at a line that begins in column 0 with ALTER or CREATE,
+    outside a quoted literal or identifier and outside parentheses; the lines that continue a statement are indented.
+    """
+    text = ddl.strip()
+    statements: list[str] = []
+    start = depth = index = 0
+    quote = ""
+    while index < len(text):
+        character = text[index]
+        if quote:
+            if character == quote:
+                if text[index + 1:index + 2] == quote:
+                    index += 1
+                else:
+                    quote = ""
+        elif character in "'\"":
+            quote = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == "\n" and depth <= 0:
+            following = index + 1
+            while following < len(text) and text[following] in "\r\n":
+                following += 1
+            if following < len(text) and _STATEMENT_START.match(text, following):
+                statements.append(text[start:index])
+                start = index = following
+                continue
+        index += 1
+    statements.append(text[start:])
+    return [_ddl_without_terminator(statement) for statement in statements if statement.strip()]
+
+
+def _wrap_guarded_statements(exists_query: str, statements: Sequence[str]) -> str:
+    executes = "".join(f"    EXECUTE IMMEDIATE {_q_literal(statement)};\n" for statement in statements)
     return (
         "DECLARE\n  l_count NUMBER;\nBEGIN\n"
         f"  SELECT COUNT(*) INTO l_count FROM {exists_query};\n"
         "  IF l_count = 0 THEN\n"
-        f"    EXECUTE IMMEDIATE {_q_literal(statement)};\n"
+        f"{executes}"
         "  END IF;\nEND;\n/\n"
     )
+
+
+def _wrap_guarded_ddl(exists_query: str, ddl: str) -> str:
+    return _wrap_guarded_statements(exists_query, _split_ddl_statements(ddl))
 
 
 def _replace_create_header(ddl: str, object_type: str, source_schema: str, target_schema: str) -> str:
@@ -455,8 +501,8 @@ def _compile_all_step(schema: str, prefixes: Sequence[str]) -> str:
     return (
         "-- Recompile configured invalid stored units in dependency passes.\n"
         "DECLARE\n"
-        "  FUNCTION quoted(p_value VARCHAR2) RETURN VARCHAR2 IS BEGIN RETURN '''' || REPLACE(p_value, '''', '''''') || ''''; END;\n"
         "  l_previous PLS_INTEGER := -1;\n  l_current PLS_INTEGER := 0;\n  l_pass PLS_INTEGER := 0;\n  l_name VARCHAR2(261);\n"
+        "  FUNCTION quoted(p_value VARCHAR2) RETURN VARCHAR2 IS BEGIN RETURN '''' || REPLACE(p_value, '''', '''''') || ''''; END;\n"
         f"BEGIN\n  LOOP\n    SELECT COUNT(*) INTO l_current FROM ALL_OBJECTS WHERE OWNER = {_sql_literal(schema)} AND STATUS = 'INVALID' AND ("
         f"{like_patterns('OBJECT_NAME')});\n"
         "    EXIT WHEN l_current = 0 OR l_current = l_previous OR l_pass >= 10;\n"
@@ -687,6 +733,61 @@ def _sync_sequence_sql(target_schema: str, row: Mapping, mapping: Mapping) -> st
     )
 
 
+def _schema_qualifier_patterns(schema: str) -> list[re.Pattern]:
+    patterns = [re.compile(re.escape(_sql_identifier(schema)) + r"(\s*\.)")]
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]*", schema):
+        patterns.append(re.compile(r"(?<![\w$#\".])" + re.escape(schema) + r"(?![\w$#\"])(\s*\.)", re.IGNORECASE))
+    return patterns
+
+
+def _retarget_statement(statement: str, source_schema: str, target_schema: str) -> str:
+    """Point the source schema's qualified names in one statement at the target schema, outside quoted literals."""
+    if source_schema == target_schema:
+        return statement
+    target_name = _sql_identifier(target_schema)
+    patterns = _schema_qualifier_patterns(source_schema)
+    pieces = re.split(r"('(?:[^']|'')*')", statement)  # the odd entries are the string literals
+    for position in range(0, len(pieces), 2):
+        for pattern in patterns:
+            pieces[position] = pattern.sub(lambda match: target_name + match.group(1), pieces[position])
+    result = "".join(pieces)
+    if any(pattern.search(piece) for piece in re.split(r"('(?:[^']|'')*')", result)[::2] for pattern in patterns):
+        raise baseline.BaselineError("a table statement still names the source schema and needs a reviewed migration")
+    return result
+
+
+def _table_statements(raw_ddl: str, source_schema: str, target_schema: str) -> list[str]:
+    """The statements that create a table: the CREATE TABLE header and the ALTER TABLE statements that follow it."""
+    statements = _split_ddl_statements(raw_ddl)
+    if not statements:
+        return []
+    header = _replace_create_header(statements[0], "TABLE", source_schema, target_schema)
+    return [header, *(_retarget_statement(statement, source_schema, target_schema) for statement in statements[1:])]
+
+
+def _new_table_order(names: Sequence[str], constraints: Mapping) -> list[str]:
+    """Alphabetical, except that a table follows the new tables its foreign keys reference."""
+    new = set(names)
+    parents: dict[str, set[str]] = {name: set() for name in names}
+    for (table, _constraint), row in constraints.items():
+        parent = row.get("referenced_table")
+        if table in new and row.get("constraint_type") == "R" and isinstance(parent, str) and parent in new and parent != table:
+            parents[table].add(parent)
+    ordered: list[str] = []
+    placed: set[str] = set()
+    pending = list(names)
+    while pending:
+        ready = [name for name in pending if parents[name] <= placed]
+        if not ready:
+            raise baseline.BaselineError(
+                "foreign keys between new tables form a cycle and need a reviewed migration: " + ", ".join(pending)
+            )
+        ordered.append(ready[0])
+        placed.add(ready[0])
+        pending.remove(ready[0])
+    return ordered
+
+
 def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, source: Mapping, target: Mapping, snapshot: SchemaSnapshot) -> tuple[dict[str, str], dict]:
     left, right = source["sections"], target["sections"]
     source_tables = {row["name"]: row for row in left.get("tables", []) if baseline._schema_filter(config, source_schema, row.get("name", ""))}
@@ -713,14 +814,12 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
     posts: list[dict] = []
     preconditions: list[dict] = []
 
-    for name in sorted(source_tables):
-        if name in target_tables:
-            continue
+    for name in _new_table_order([name for name in sorted(source_tables) if name not in target_tables], source_constraints):
         definition = definitions.get(ObjectKey(source_schema, name, "TABLE"))
         if definition is None:
             raise baseline.BaselineError(f"source table DDL is missing for {name}")
-        ddl = _replace_create_header(definition.raw_ddl, "TABLE", source_schema, target_schema)
-        chunks.append(_wrap_guarded_ddl(f"ALL_TABLES WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(name)}", ddl))
+        statements = _table_statements(definition.raw_ddl, source_schema, target_schema)
+        chunks.append(_wrap_guarded_statements(f"ALL_TABLES WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(name)}", statements))
         posts.append(_count_check(f"table-{_safe_check_slug(name)}", f"ALL_TABLES WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(name)}", 1))
 
     to_make_not_null = set()

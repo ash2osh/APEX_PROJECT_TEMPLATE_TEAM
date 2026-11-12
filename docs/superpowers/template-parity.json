@@ -133,8 +133,8 @@
       "status": "intended",
       "reason": "Describes each line's baseline contract (26.2 bound manifest, SQLcl 26.3).",
       "blobs": [
-        "501871c73fb27bc1afc7d8706fb463c4f37f76f2",
-        "97678f6e59c36294747c1d6bd754dbe261702876"
+        "d1e76e5e372137aef0f4596e9db67b78ac2b5309",
+        "df4d1cb9c3ada9963ce4ad9ef8d81c90ae9e07f4"
       ]
     },
     "docs/ci-checks.md": {
@@ -277,8 +277,8 @@
       "status": "intended",
       "reason": "Ported on 2026-10-20 (TEAM PR 54): NOT NULL data preconditions and relative_to_root. What still differs is formatting and function order. After the build split the import layout also differs; the same names are bound.",
       "blobs": [
-        "235bc746cf352b06e0c303378d82b963f3326505",
-        "9f3e3f694e2b1beee635d465ee4ac32e915ebfb4"
+        "d1fee5bac0576f02ea04097ab74bb527db46b1ce",
+        "55c129530ea55d3594301344c3160b8e85dc32cb"
       ]
     },
     "scripts/baseline_bundle.py": {
@@ -293,8 +293,8 @@
       "status": "intended",
       "reason": "Moved out of baseline_build.py in both lines with the same definitions; 26.2 lists a few helpers (_column_sql, _count_check) in a different order, as baseline.py and baseline_build.py already do.",
       "blobs": [
-        "278057ccbd8f3cb8906b17b64566d1d85e2f36d2",
-        "a93736219b5d7b826788df690d108a532bd3ff39"
+        "39e5627821016377d22e5e44352f4579da852bb4",
+        "d22e9d5e65a58f6c2dfb4d4cc756b1a1ddd85abc"
       ]
     },
     "scripts/check_db_target.ps1": {
@@ -733,8 +733,8 @@
       "status": "intended",
       "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the rest are 26.1-specific (for example the 26.1 database tools have no 26.2 dependency).",
       "blobs": [
-        "951088ddee5a58f10f3c43dac6bbd1fa0e31bb16",
-        "30f285fa62b577957a01d8d46b6ce09c6a364628"
+        "75eed4ce4dba0fcd31437126305ebcd2c7054fd9",
+        "939f3932d290d8a8204121f94c00948a351eeabf"
       ]
     },
     "tests/test_baseline_bundle.py": {
