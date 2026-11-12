@@ -530,6 +530,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
             "scripts/release_recovery.py",
             "scripts/baseline_data.py",
             "scripts/baseline_ords_filter.py",
+            "scripts/baseline_build.py",
             "scripts/db_targets.py",
             "scripts/sqlcl_transport.py",
             "scripts/migrate.sql",

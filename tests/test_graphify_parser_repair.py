@@ -20,6 +20,27 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 
 
+_PREVIOUS_CWD: str | None = None
+_EMPTY_ROOT: tempfile.TemporaryDirectory | None = None
+
+
+def setUpModule() -> None:
+    """Run from an empty folder: the extractor resolves repository-relative paths against the
+    working directory, and a checkout with its own database/ mirror would otherwise change what
+    the fixture names (orders, users) resolve to."""
+    global _PREVIOUS_CWD, _EMPTY_ROOT
+    _PREVIOUS_CWD = os.getcwd()
+    _EMPTY_ROOT = tempfile.TemporaryDirectory(prefix="graphify-no-mirror.")
+    os.chdir(_EMPTY_ROOT.name)
+
+
+def tearDownModule() -> None:
+    if _PREVIOUS_CWD is not None:
+        os.chdir(_PREVIOUS_CWD)
+    if _EMPTY_ROOT is not None:
+        _EMPTY_ROOT.cleanup()
+
+
 def load_script(name: str):
     path = ROOT / "scripts" / f"{name}.py"
     if not path.is_file():

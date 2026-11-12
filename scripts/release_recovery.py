@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from . import release_ownership
 
 if TYPE_CHECKING:
+    from .feature_release import TargetPlan
     from .release_capsule import ReleaseCapsule
 
 
@@ -133,6 +134,21 @@ def run_reconciliation(repo_root: Path, run_id: str, environment: str) -> Iterat
                     f"run {run_id} cannot be reconciled: a target writer may still be active: {error}",
                 ) from error
         yield ReconciliationSession(root, run_id, environment, run)
+
+
+def recovery_parent_rollout(repo_root: Path, capsule: ReleaseCapsule, plan: TargetPlan) -> dict:
+    """Return the one rollout whose unresolved checkpoint is bound by this recovery plan."""
+    root = release_state._root(repo_root)
+    recovery_id = getattr(plan, "recovery_attempt", None)
+    if recovery_id is None:
+        raise release_state.ReleaseStateError("recovery parent lookup requires a recovery plan")
+    index = release_state._load_index(root)
+    release_state._validate_recovery_plan_index(index, capsule, plan)
+    attempt = next((row for row in index["attempts"] if row["attemptId"] == recovery_id), None)
+    parents = [row for row in index["rollouts"] if attempt is not None and release_state._attempt_matches_rollout(attempt, row)]
+    if len(parents) != 1 or not release_state._rollout_is_recovery_parent(index, parents[0], capsule, plan):
+        raise release_state.ReleaseStateError("recovery attempt does not identify one eligible parent rollout")
+    return dict(parents[0])
 
 
 # Imported last: this module reads release_state.<name> only when it runs, so release_state can bind the

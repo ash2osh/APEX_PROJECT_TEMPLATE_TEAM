@@ -55,6 +55,7 @@ ENGINE_HELPER_FILES = (
     "scripts/baseline_bundle.py",
     "scripts/baseline_data.py",
     "scripts/baseline_ords_filter.py",
+    "scripts/baseline_build.py",
     "scripts/new_migration.py",
     "scripts/migrate.py",
     "scripts/migration_diff.py",

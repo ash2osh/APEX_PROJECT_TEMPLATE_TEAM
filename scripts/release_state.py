@@ -1689,21 +1689,6 @@ def _rollout_is_recovery_parent(index: Mapping, run: Mapping, capsule: ReleaseCa
     )
 
 
-def recovery_parent_rollout(repo_root: Path, capsule: ReleaseCapsule, plan: TargetPlan) -> dict:
-    """Return the one rollout whose unresolved checkpoint is bound by this recovery plan."""
-    root = _root(repo_root)
-    recovery_id = getattr(plan, "recovery_attempt", None)
-    if recovery_id is None:
-        raise ReleaseStateError("recovery parent lookup requires a recovery plan")
-    index = _load_index(root)
-    _validate_recovery_plan_index(index, capsule, plan)
-    attempt = next((row for row in index["attempts"] if row["attemptId"] == recovery_id), None)
-    parents = [row for row in index["rollouts"] if attempt is not None and _attempt_matches_rollout(attempt, row)]
-    if len(parents) != 1 or not _rollout_is_recovery_parent(index, parents[0], capsule, plan):
-        raise ReleaseStateError("recovery attempt does not identify one eligible parent rollout")
-    return dict(parents[0])
-
-
 def _rollout_is_reconciled(index: Mapping, run: Mapping, capsule: ReleaseCapsule) -> bool:
     matching = [attempt for attempt in index["attempts"] if _attempt_matches_rollout(attempt, run)]
     if any(
@@ -2071,6 +2056,7 @@ from .release_cleanup import (  # noqa: F401
 # because tests, feature_cli, feature_release and rollout_capsule reference them on scripts.release_state.
 from .release_recovery import (  # noqa: F401
     recovery_attempt_details,
+    recovery_parent_rollout,
     recovery_prompt,
     run_reconciliation,
 )
