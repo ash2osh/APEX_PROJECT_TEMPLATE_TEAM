@@ -15,7 +15,6 @@ import sys
 import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -42,7 +41,6 @@ from .migration_manifest import (
 )
 from .migration_revision import inspect_migration_lock
 from .path_utils import relative_to_root
-from .rollout import RolloutError, exclude_ords_modules
 from .schema_catalog import (
     CatalogError,
     ObjectKey,
@@ -260,79 +258,6 @@ def _regular_file_info(path: Path, description: str, *, missing_ok: bool = False
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise BaselineError(f"{description} is not a regular file: {path}")
     return metadata
-
-
-@contextmanager
-def _data_export_guard(output: Path):
-    """Invalidate old data before capture and serialize writers for one schema."""
-    _reject_symlink_components(output)
-    try:
-        output.mkdir(mode=0o700, parents=True, exist_ok=True)
-    except OSError as error:
-        raise BaselineError(f"cannot create baseline data directory {output}: {error}") from error
-    _reject_symlink_components(output)
-    lock_path = output / DATA_EXPORT_LOCK_MARKER
-    incomplete_path = output / DATA_EXPORT_INCOMPLETE_MARKER
-    _regular_file_info(lock_path, "baseline data export lock marker", missing_ok=True)
-    if lock_path.exists() or lock_path.is_symlink():
-        raise BaselineError(f"baseline data export is locked by {lock_path}; verify no exporter is active before removing it")
-
-    try:
-        lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as error:
-        raise BaselineError(f"baseline data export is locked by {lock_path}; verify no exporter is active before removing it") from error
-    except OSError as error:
-        raise BaselineError(f"cannot create baseline data export lock {lock_path}: {error}") from error
-    lock_info = os.fstat(lock_fd)
-    invalidated = False
-    try:
-        os.write(lock_fd, f"pid={os.getpid()}\n".encode("ascii"))
-        os.fsync(lock_fd)
-        _reject_symlink_components(output)
-        incomplete_info = _regular_file_info(incomplete_path, "baseline data incomplete marker", missing_ok=True)
-        if incomplete_info is None:
-            try:
-                incomplete_fd = os.open(incomplete_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except OSError as error:
-                raise BaselineError(f"cannot create baseline data incomplete marker {incomplete_path}: {error}") from error
-            else:
-                try:
-                    os.write(incomplete_fd, b"export in progress\n")
-                    os.fsync(incomplete_fd)
-                finally:
-                    os.close(incomplete_fd)
-        invalidated = True
-        manifest_path = output / "manifest.json"
-        manifest_info = _regular_file_info(manifest_path, "baseline data manifest", missing_ok=True)
-        if manifest_info is not None:
-            try:
-                manifest_path.unlink()
-            except OSError as error:
-                raise BaselineError(f"cannot invalidate the previous baseline data manifest {manifest_path}: {error}") from error
-        yield
-    finally:
-        os.close(lock_fd)
-        if invalidated:
-            active_error = sys.exc_info()[0] is not None
-            try:
-                current_lock = _regular_file_info(lock_path, "baseline data export lock marker", missing_ok=True)
-                if current_lock is None or (current_lock.st_dev, current_lock.st_ino) != (lock_info.st_dev, lock_info.st_ino):
-                    raise BaselineError(f"baseline data export lock changed during capture: {lock_path}")
-                lock_path.unlink()
-            except (BaselineError, OSError) as error:
-                if not active_error:
-                    if isinstance(error, BaselineError):
-                        raise
-                    raise BaselineError(f"cannot remove baseline data export lock {lock_path}: {error}") from error
-
-
-def _clear_data_incomplete_marker(output: Path) -> None:
-    marker = output / DATA_EXPORT_INCOMPLETE_MARKER
-    _regular_file_info(marker, "baseline data incomplete marker")
-    try:
-        marker.unlink()
-    except OSError as error:
-        raise BaselineError(f"cannot clear baseline data incomplete marker {marker}: {error}") from error
 
 
 def _read_json_object(path: Path, description: str, *, parse_decimal: bool = False) -> tuple[dict, bytes]:
@@ -663,73 +588,6 @@ def _validate_reference_capture(table: Mapping, specification: Mapping, environm
         "complete": True,
         "rows": rows,
     }
-
-
-def _export_data(config: Mapping, values: Mapping[str, str], environment: str, scratch: Path, schemas: Sequence[str] | None = None) -> None:
-    tables = _reference_tables(config)
-    selected_schemas = schemas or config["schemas"]
-    if not tables:
-        print("No referenceData.tables allow-list is configured; writing identity-bound empty data manifests")
-    for schema in selected_schemas:
-        output = scratch / environment / "data" / schema
-        with _data_export_guard(output):
-            catalog = _capture(
-                values, environment, schema, ("baseline-data",), scratch / f"sqlcl-data-{environment}-{schema}",
-                baseline_data_tables=tables,
-            )
-            _complete(catalog, ("baseline-data",))
-            source_identity = _source_identity(catalog.get("identity"), f"baseline data source for {schema}")
-            captured = catalog["sections"].get("baseline-data")
-            if not isinstance(captured, list):
-                raise BaselineError("baseline-data capture did not return a table array")
-            by_name = {}
-            for row in captured:
-                name = row.get("name") if isinstance(row, Mapping) else None
-                if not isinstance(name, str) or name in by_name:
-                    raise BaselineError("baseline-data returned a malformed or duplicate table record")
-                by_name[name] = row
-            if set(by_name) != {table["name"] for table in tables}:
-                raise BaselineError("baseline-data did not return every allow-listed reference table")
-            total_rows = 0
-            validated_tables: list[tuple[str, dict]] = []
-            for specification in tables:
-                data = _validate_reference_capture(by_name[specification["name"]], specification, environment, schema)
-                encoded = _json_bytes(data)
-                if len(encoded) > 128 * 1024 * 1024:
-                    raise BaselineError(f"reference-data export for {specification['name']} exceeded the 128 MiB file cap")
-                validated_tables.append((specification["name"], data))
-                total_rows += data["rowCount"]
-
-            manifest_tables = []
-            for name, data in validated_tables:
-                path = output / f"{name}.json"
-                _write_json(path, data)
-                written, contents = _read_json_object(path, f"reference-data export for {name}", parse_decimal=True)
-                if contents != _json_bytes(data):
-                    raise BaselineError(f"reference-data export for {name} changed while being written")
-                written = _validate_reference_capture(written, next(table for table in tables if table["name"] == name), environment, schema)
-                manifest_tables.append({
-                    "name": name,
-                    "file": path.name,
-                    "sha256": hashlib.sha256(contents).hexdigest(),
-                    "rowCount": written["rowCount"],
-                })
-
-            manifest = {
-                "schemaVersion": DATA_EXPORT_MANIFEST_VERSION,
-                "environment": environment,
-                "schema": schema,
-                "sourceIdentity": source_identity,
-                "tableCount": len(manifest_tables),
-                "rowCount": total_rows,
-                "tables": manifest_tables,
-                "complete": True,
-            }
-            _write_json(output / "manifest.json", manifest)
-            observed_manifest, contents = _read_json_object(output / "manifest.json", "baseline data manifest")
-            if observed_manifest != manifest or contents != _json_bytes(manifest):
-                raise BaselineError(f"baseline data manifest changed while being written: {output / 'manifest.json'}")
-            _clear_data_incomplete_marker(output)
 
 
 def _sql_identifier(value: str) -> str:
@@ -1386,48 +1244,6 @@ def _reference_data_bundle(
         steps[f"{len(steps) + 1:03d}-identity-limit.sql"] = statement + "\n"
 
     return steps, {"preconditions": preconditions, "postconditions": postconditions}, differences
-
-
-def _filter_ords(args) -> None:
-    input_path = args.input if args.input.is_absolute() else ROOT / args.input
-    output_path = args.output if args.output.is_absolute() else ROOT / args.output
-    input_path = input_path.absolute()
-    output_path = output_path.absolute()
-    if input_path.resolve() == output_path.resolve():
-        raise BaselineError("filter-ords input and output must be different files")
-    try:
-        raw = input_path.read_bytes()
-        if raw.startswith(b"\xef\xbb\xbf"):
-            raise BaselineError("ORDS export must be UTF-8 without a byte-order mark")
-        source = raw.decode("utf-8")
-    except OSError as error:
-        raise BaselineError(f"cannot read ORDS export {input_path}: {error}") from error
-    except UnicodeError as error:
-        raise BaselineError("ORDS export must be strict UTF-8") from error
-    schemas = re.findall(r"(?im)^--[ \t]*Schema:[ \t]*([A-Z][A-Z0-9_$#]{0,127})(?:[ \t]+Date:.*)?[ \t]*$", source)
-    if len(set(schemas)) != 1:
-        raise BaselineError("ORDS export must contain one unambiguous '-- Schema: <OWNER>' header")
-    if len(set(args.exclude_module)) != len(args.exclude_module):
-        raise BaselineError("filter-ords cannot repeat an excluded module name")
-    try:
-        filtered, removed = exclude_ords_modules(source, args.exclude_module, schemas[0])
-    except RolloutError as error:
-        raise BaselineError(str(error)) from error
-    if output_path.is_symlink() or (output_path.exists() and not output_path.is_file()):
-        raise BaselineError("filter-ords output must be a regular file and cannot be a symbolic link")
-    output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = output_path.with_name(output_path.name + ".tmp")
-    if temporary.exists() or temporary.is_symlink():
-        raise BaselineError(f"filter-ords output has an unfinished temporary file: {temporary}")
-    try:
-        temporary.write_text(filtered, encoding="utf-8", newline="\n")
-        os.chmod(temporary, 0o600)
-        temporary.replace(output_path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    print(f"Removed ORDS modules: {', '.join(removed)}")
-    print(f"Filtered ORDS export: {output_path}")
 
 
 def _ddl_without_terminator(ddl: str) -> str:
@@ -2868,4 +2684,17 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Run the importable module, not this copy, so the moved subcommand code and the CLI share one set of classes.
+    from scripts import baseline as _baseline
+
+    raise SystemExit(_baseline.main())
+
+
+# Imported last: baseline_data reads baseline.<name> at call time. The export entry point is re-exported here
+# because main() calls it and the tests call it on scripts.baseline.
+from .baseline_data import _export_data
+
+
+# Imported last: baseline_ords_filter reads baseline.<name> at call time. The filter entry point is re-exported
+# here because main() calls it.
+from .baseline_ords_filter import _filter_ords

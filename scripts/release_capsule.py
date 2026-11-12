@@ -35,6 +35,8 @@ WORKFLOW_ENGINE_FILES = (
     "scripts/release_ownership.py",
     "scripts/release_capsule.py",
     "scripts/release_state.py",
+    "scripts/release_cleanup.py",
+    "scripts/release_recovery.py",
     "scripts/feature_release.py",
     "scripts/feature_cli.py",
 )
@@ -51,6 +53,8 @@ ENGINE_HELPER_FILES = (
     "scripts/db_targets.py",
     "scripts/baseline.py",
     "scripts/baseline_bundle.py",
+    "scripts/baseline_data.py",
+    "scripts/baseline_ords_filter.py",
     "scripts/new_migration.py",
     "scripts/migrate.py",
     "scripts/migration_diff.py",
