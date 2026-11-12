@@ -88,3 +88,6 @@ with their status and reason unchanged, and the stale `TODO.md` record was remov
 attempt validation and its Graphify 0.9.75 pin.
 
 2026-11-12: 26.2 moved its Graphify pin from 0.9.75 to 0.9.106 and took the tolerant SQL-import anchor from 26.1.
+
+2026-11-12: both lines split `release_state.py` and `baseline.py` (cleanup, recovery, data export, ORDS filter and the
+build group). `baseline_build.py` and `TODO.md` are marked `intended`; two records were refreshed.
