@@ -105,14 +105,6 @@
         "36cdae00aa75f018f8d51c0e6d123a10f274cff2"
       ]
     },
-    "TODO.md": {
-      "status": "intended",
-      "reason": "Project-owned file; the postponed-split notes carry each line's own line counts.",
-      "blobs": [
-        "f375c98538937e3258b2ec71a68adbd4da1af160",
-        "5cb3b77dd380dfb1aa711896dd8f3f454bac49c2"
-      ]
-    },
     "docs/EXAMPLES.md": {
       "status": "intended",
       "reason": "Release-specific examples.",
@@ -173,8 +165,8 @@
       "status": "intended",
       "reason": "Lists 26.2-only deliberate limits (locks, partial publish, normalization).",
       "blobs": [
-        "2f5d1cbe96d4d79372903e889fc082ff6494e254",
-        "a864f3662e7d107297a1ccabcaa06a50d78f13ed"
+        "0381bb920aaffa7c71d34ac50b551e80d357438e",
+        "9a3a886b7b0511bf48f339cf566ce7ccf40df72f"
       ]
     },
     "docs/live-feature-tests.md": {
@@ -289,20 +281,20 @@
         "9f3e3f694e2b1beee635d465ee4ac32e915ebfb4"
       ]
     },
-    "scripts/baseline_build.py": {
-      "status": "intended",
-      "reason": "The build group moved out of baseline.py in both lines; 26.2 keeps its own build differences (view validity check, baseline_names/scope_names).",
-      "blobs": [
-        "973aac2677dbe71b487ce2a229ed84226dbbac9f",
-        "fa1c35cf62d7919c641cb9c6c64fc1b56e6249d3"
-      ]
-    },
     "scripts/baseline_bundle.py": {
       "status": "intended",
       "reason": "Both validate bundle components with 23 refusals each; the helpers are structured differently (26.1 _validate_check_list/_validate_component_steps, 26.2 _append_checks/_ordered_steps).",
       "blobs": [
         "d9c904ef75eddf47043274de5ea7d7c6a6d61e4d",
         "b315388db2876a3da0c5481b17554db9685720cd"
+      ]
+    },
+    "scripts/baseline_bundles.py": {
+      "status": "intended",
+      "reason": "Moved out of baseline_build.py in both lines with the same definitions; 26.2 lists a few helpers (_column_sql, _count_check) in a different order, as baseline.py and baseline_build.py already do.",
+      "blobs": [
+        "278057ccbd8f3cb8906b17b64566d1d85e2f36d2",
+        "a93736219b5d7b826788df690d108a532bd3ff39"
       ]
     },
     "scripts/check_db_target.ps1": {

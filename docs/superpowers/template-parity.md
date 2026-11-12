@@ -91,3 +91,9 @@ attempt validation and its Graphify 0.9.75 pin.
 
 2026-11-12: both lines split `release_state.py` and `baseline.py` (cleanup, recovery, data export, ORDS filter and the
 build group). `baseline_build.py` and `TODO.md` are marked `intended`; two records were refreshed.
+
+2026-11-12: both lines cut `baseline_build.py` into `baseline_sql.py`, `baseline_reference_data.py` and
+`baseline_bundles.py`. The first two are byte-identical in both lines. `baseline_bundles.py` is marked `intended` (26.2
+lists a few helpers in a different order), two records were refreshed, and the `baseline_build.py` and `TODO.md` records
+were removed as stale because those files now match. 26.2 also gained a pinned-set `graphify` CI job, which 26.1 does not
+have (its Graphify tests run in the latest-Python job), so the two CI records carry that reason.
