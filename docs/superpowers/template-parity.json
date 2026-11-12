@@ -105,6 +105,14 @@
         "36cdae00aa75f018f8d51c0e6d123a10f274cff2"
       ]
     },
+    "TODO.md": {
+      "status": "intended",
+      "reason": "Project-owned file; the postponed-split notes carry each line's own line counts.",
+      "blobs": [
+        "f375c98538937e3258b2ec71a68adbd4da1af160",
+        "5cb3b77dd380dfb1aa711896dd8f3f454bac49c2"
+      ]
+    },
     "docs/EXAMPLES.md": {
       "status": "intended",
       "reason": "Release-specific examples.",
@@ -165,8 +173,8 @@
       "status": "intended",
       "reason": "Lists 26.2-only deliberate limits (locks, partial publish, normalization).",
       "blobs": [
-        "167e8cda7f4f186941418044c4944ee40440c22b",
-        "ad14d0ff50c438004ab582b53730cb03397711ca"
+        "2f5d1cbe96d4d79372903e889fc082ff6494e254",
+        "a864f3662e7d107297a1ccabcaa06a50d78f13ed"
       ]
     },
     "docs/live-feature-tests.md": {
@@ -275,10 +283,18 @@
     },
     "scripts/baseline.py": {
       "status": "intended",
-      "reason": "Ported on 2026-10-20 (TEAM PR 54): NOT NULL data preconditions and relative_to_root. What still differs is formatting and function order.",
+      "reason": "Ported on 2026-10-20 (TEAM PR 54): NOT NULL data preconditions and relative_to_root. What still differs is formatting and function order. After the build split the import layout also differs; the same names are bound.",
       "blobs": [
-        "3d4169332cd5608f5a176cd63b56d0c07934abeb",
-        "0939a3798823a1ff54690df1b3d03fe1f29ab8d9"
+        "235bc746cf352b06e0c303378d82b963f3326505",
+        "9f3e3f694e2b1beee635d465ee4ac32e915ebfb4"
+      ]
+    },
+    "scripts/baseline_build.py": {
+      "status": "intended",
+      "reason": "The build group moved out of baseline.py in both lines; 26.2 keeps its own build differences (view validity check, baseline_names/scope_names).",
+      "blobs": [
+        "973aac2677dbe71b487ce2a229ed84226dbbac9f",
+        "fa1c35cf62d7919c641cb9c6c64fc1b56e6249d3"
       ]
     },
     "scripts/baseline_bundle.py": {
