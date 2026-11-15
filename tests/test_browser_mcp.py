@@ -233,6 +233,109 @@ class BrowserMcpTests(unittest.TestCase):
                 ["chrome", "firefox", "both", "none"],
             )
 
+    def test_setup_yes_without_terminal_selects_none_and_calls_no_input(self) -> None:
+        repo = self.make_repo("yes-none")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo-root", str(repo), "setup", "--yes"],
+            cwd=repo,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads((repo / ".browser-mcp-selection.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["selection"], "none")
+        self.assertIn("Browser MCP selection saved: none", result.stdout)
+
+        spec = importlib.util.spec_from_file_location("browser_mcp_inproc_test", SCRIPT)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        repo2 = self.make_repo("yes-none-inproc")
+        with patch.object(module.sys, "stdin", io.StringIO("")), patch(
+            "builtins.input", side_effect=AssertionError("input must not be called")
+        ) as mock_input:
+            with patch("sys.argv", [str(SCRIPT), "--repo-root", str(repo2), "setup", "-y"]):
+                code = module.main()
+        self.assertEqual(code, 0)
+        mock_input.assert_not_called()
+
+    def test_setup_yes_with_choice_favors_choice(self) -> None:
+        repo = self.make_repo("yes-choice")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo-root", str(repo), "setup", "--yes", "--choice", "firefox"],
+            cwd=repo,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads((repo / ".browser-mcp-selection.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["selection"], "firefox")
+        self.assertIn("Browser MCP selection saved: firefox", result.stdout)
+
+    def test_setup_without_terminal_and_no_flag_fails(self) -> None:
+        repo = self.make_repo("no-term")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo-root", str(repo), "setup"],
+            cwd=repo,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("choose --choice chrome|firefox|both|none when stdin is not interactive", result.stderr)
+
+    def test_setup_eof_when_isatty_true_fails_cleanly_without_writes(self) -> None:
+        spec = importlib.util.spec_from_file_location("browser_mcp_eof_test", SCRIPT)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        repo = self.make_repo("eof-isatty-true")
+
+        with patch("sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", side_effect=EOFError("EOF when reading a line")
+        ):
+            with self.assertRaises(module.SetupError) as context:
+                module.setup(repo, None)
+        self.assertIn(
+            "choose --choice chrome|firefox|both|none when stdin is not interactive",
+            str(context.exception),
+        )
+        self.assertFalse((repo / ".mcp.json").exists())
+        self.assertFalse((repo / ".codex/config.toml").exists())
+        self.assertFalse((repo / ".browser-mcp-selection.json").exists())
+
+        stderr = io.StringIO()
+        with patch("sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", side_effect=EOFError("EOF when reading a line")
+        ), patch("sys.stderr", stderr):
+            code = module.main(["--repo-root", str(repo), "setup"])
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "choose --choice chrome|firefox|both|none when stdin is not interactive",
+            stderr.getvalue(),
+        )
+        self.assertFalse((repo / ".mcp.json").exists())
+        self.assertFalse((repo / ".codex/config.toml").exists())
+        self.assertFalse((repo / ".browser-mcp-selection.json").exists())
+
+    def test_validate_target_path_refuses_a_path_that_escapes_the_checkout(self) -> None:
+        spec = importlib.util.spec_from_file_location("browser_mcp_escape_test", SCRIPT)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        repo = self.make_repo("escape")
+
+        with self.assertRaises(module.SetupError) as context:
+            module.validate_target_path(repo, "../outside.json")
+        self.assertIn("escapes the checkout", str(context.exception))
+        self.assertFalse((repo.parent / "outside.json").exists())
+        self.assertEqual(module.validate_target_path(repo, ".mcp.json"), repo / ".mcp.json")
+
     def test_team_shell_mcp_setup_and_status_dispatch(self) -> None:
         repo = self.make_repo()
         scripts = repo / "scripts"

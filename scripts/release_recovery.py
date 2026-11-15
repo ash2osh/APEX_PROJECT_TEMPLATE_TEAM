@@ -83,7 +83,7 @@ class ReconciliationSession:
         self.environment = environment
         self.run = dict(run)
 
-    def reconcile(self, acknowledgment: str) -> dict:
+    def reconcile(self, acknowledgment: str, acknowledged_by: str | None = None) -> dict:
         """Close the run if the acknowledgment is exactly RECONCILE-RUN <run id>; otherwise change nothing."""
         if acknowledgment != release_state.RUN_RECONCILE_PREFIX + self.run_id:
             raise release_state.AcknowledgmentError("the acknowledgment does not match RECONCILE-RUN for this run; nothing was changed")
@@ -100,6 +100,7 @@ class ReconciliationSession:
                 row["finishedAt"] = release_state._utc_now()
             row["reconciliation"] = release_state._validate_reconciliation({
                 "acknowledgedAt": release_state._utc_now(), "acknowledgment": acknowledgment,
+                "acknowledgedBy": acknowledged_by or "terminal",
                 "priorState": prior_state, "priorDatabaseState": prior_database,
             }, row)
             closed.update(runId=row["runId"], state=row["state"], databaseState=row["databaseState"],

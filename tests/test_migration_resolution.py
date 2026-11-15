@@ -88,6 +88,7 @@ class ResolutionTestCase(unittest.TestCase):
             },
             "evidence": {"path": EVIDENCE, "sha256": sha256(EVIDENCE_BYTES)},
             "recordedAt": "2026-11-11T10:00:00Z",
+            "acknowledgedBy": "terminal",
         }
         record.update(overrides)
         return record
@@ -225,6 +226,41 @@ class ResolutionRecordTests(ResolutionTestCase):
         with self.assertRaises(resolution.MigrationResolutionError):
             resolution.validate_resolution(staged_name, migration)
 
+    def test_record_without_acknowledged_by_is_accepted_and_read_as_terminal(self):
+        resolution = self.require()
+        folder = self.root / PENDING_FOLDER
+        record_without_key = self.record(PENDING_FOLDER)
+        record_without_key.pop("acknowledgedBy", None)
+        path = folder / "resolution.dev.json"
+        self.write_raw(path, record_without_key)
+
+        read = resolution.read_resolution(path)
+        self.assertEqual(read["acknowledgedBy"], "terminal")
+        validated = resolution.validate_resolution(path, self.load(PENDING_FOLDER))
+        self.assertEqual(validated["acknowledgedBy"], "terminal")
+        path.unlink()
+
+    def test_record_with_acknowledged_by_round_trips(self):
+        resolution = self.require()
+        folder = self.root / PENDING_FOLDER
+        for value in ("--yes", "terminal"):
+            with self.subTest(acknowledgedBy=value):
+                path = folder / "resolution.dev.json"
+                record = self.record(PENDING_FOLDER, acknowledgedBy=value)
+                resolution.write_resolution(path, record)
+                self.assertEqual(resolution.read_resolution(path)["acknowledgedBy"], value)
+                path.unlink()
+
+    def test_record_with_invalid_acknowledged_by_is_refused(self):
+        resolution = self.require()
+        folder = self.root / PENDING_FOLDER
+        path = folder / "resolution.dev.json"
+        bad = self.record(PENDING_FOLDER, acknowledgedBy="invalid")
+        self.write_raw(path, bad)
+        with self.assertRaises(resolution.MigrationResolutionError):
+            resolution.read_resolution(path)
+        path.unlink()
+
     def test_a_folder_never_holds_a_receipt_and_a_resolution_for_one_environment(self):
         resolution = self.require()
         folder = self.root / PENDING_FOLDER
@@ -316,6 +352,7 @@ class ReconcileCommandTests(ResolutionTestCase):
         record = json.loads((folder / "resolution.dev.json").read_text(encoding="utf-8"))
         self.assertEqual(record["outcome"], "failed-no-target-effect")
         self.assertEqual(record["attemptId"], self.event(PENDING_FOLDER, "pending")["attemptId"])
+        self.assertEqual(record["acknowledgedBy"], "terminal")
         closing = self.event(PENDING_FOLDER, "failed-no-target-effect")
         self.assertEqual(closing["predecessorEventId"], self.event(PENDING_FOLDER, "pending")["eventId"])
         after = self.snapshot()
@@ -325,6 +362,39 @@ class ReconcileCommandTests(ResolutionTestCase):
             f"{PENDING_FOLDER}/attempt-event.{closing['eventId']}.json",
         })
         self.assertFalse((folder / "status.dev.json").exists())
+
+    def test_reconcile_with_yes_succeeds_without_terminal_and_records_acknowledged_by(self):
+        def input_must_not_be_called(prompt=""):
+            raise AssertionError("input must not be called when --yes is passed")
+
+        status, out, errors = self.reconcile(
+            self.reconcile_args() + ["--yes"],
+            terminal=False,
+            input_effect=input_must_not_be_called,
+        )
+        self.assertEqual(status, 0, errors)
+        self.assertIn("Acknowledged by --yes; the acknowledgment was not typed.", out)
+        folder = self.root / PENDING_FOLDER
+        record = json.loads((folder / "resolution.dev.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["acknowledgedBy"], "--yes")
+        self.assertEqual(record["outcome"], "failed-no-target-effect")
+
+    def test_reconcile_with_yes_and_missing_evidence_or_invalid_outcome_refuses_and_writes_nothing(self):
+        before = self.snapshot()
+        missing = self.reconcile_args(extra=()) + ["--yes"]
+        missing[missing.index("--evidence") + 1] = str(self.root / "evidence" / "missing.txt")
+        status, _out, _errors = self.reconcile(
+            missing, terminal=False, input_effect=AssertionError("must not call input"),
+        )
+        self.assertEqual(status, 2)
+        self.assertEqual(self.snapshot(), before)
+
+        bad_outcome = self.reconcile_args(outcome="invalid-outcome") + ["--yes"]
+        status, _out, _errors = self.reconcile(
+            bad_outcome, terminal=False, input_effect=AssertionError("must not call input"),
+        )
+        self.assertEqual(status, 2)
+        self.assertEqual(self.snapshot(), before)
 
     def test_a_wrong_acknowledgment_refuses_and_writes_nothing(self):
         before = self.snapshot()

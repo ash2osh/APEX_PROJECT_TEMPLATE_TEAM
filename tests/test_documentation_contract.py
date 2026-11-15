@@ -253,6 +253,19 @@ class DocumentationContractTests(unittest.TestCase):
         guide = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
         self.assertIn("py -3 --version", guide)
 
+    def test_reconcile_rule_lets_an_agent_pass_yes_and_no_file_says_it_never_types_the_acknowledgment(self) -> None:
+        # Owner decision 2026-11-15: no typed answer may stop an agent; --yes is the recorded route.
+        agents = " ".join((ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
+        self.assertIn("An agent may pass `--yes` to `reconcile-migration`, `feature reconcile-run` and the rollout recovery", agents)
+        self.assertIn("`acknowledgedBy: --yes`", agents)
+        for relative in ("AGENTS.md", ".agents/rules/agent-safety.md", "README.md", "docs/feature-releases.md",
+                         "docs/migration-attempt-resolution.md", "docs/migration-rules.md",
+                         "docs/live-feature-tests.md"):
+            text = " ".join((ROOT / relative).read_text(encoding="utf-8").split()).lower()
+            for withdrawn in ("an agent never types", "no flag supplies it", "are terminal-only and cannot be bypassed",
+                              "-y never replaces the typed", "does not cover the typed `reconcile`"):
+                self.assertNotIn(withdrawn, text, f"{relative} still states the withdrawn rule: {withdrawn}")
+
     def test_troubleshooting_explains_the_team_ps1_refusals_about_bash(self) -> None:
         # The table quotes these messages verbatim, so rewording one must update it.
         troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")

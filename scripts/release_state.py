@@ -71,6 +71,7 @@ ROLLOUT_FIELDS = {
 ROLLOUT_STATES = {"running", "verified", "failed", "unknown", "not-started"}
 ROLLOUT_OPTIONAL_FIELDS = {"reconciliation"}
 RECONCILIATION_FIELDS = {"acknowledgedAt", "acknowledgment", "priorState", "priorDatabaseState"}
+RECONCILIATION_OPTIONAL_FIELDS = {"acknowledgedBy"}
 RECONCILIATION_PRIOR_STATES = {"running", "unknown", "failed"}
 RUN_RECONCILE_PREFIX = "RECONCILE-RUN "
 STEP_OUTCOME_FIELDS = {"step", "status", "receiptPath", "receiptSha256"}
@@ -532,7 +533,7 @@ def _validate_step_outcome(row: object) -> dict:
 
 def _validate_reconciliation(value: object, row: Mapping) -> dict:
     """An operator's closure of a run that had no checkpoint to recover; it is never proof of completion."""
-    if not isinstance(value, Mapping) or set(value) != RECONCILIATION_FIELDS:
+    if not isinstance(value, Mapping) or not RECONCILIATION_FIELDS <= set(value) or set(value) - RECONCILIATION_FIELDS - RECONCILIATION_OPTIONAL_FIELDS:
         raise ReleaseStateError("rollout reconciliation has unsupported or missing fields")
     _timestamp(value["acknowledgedAt"], "rollout reconciliation acknowledgedAt")
     if value["acknowledgment"] != RUN_RECONCILE_PREFIX + row["runId"]:
@@ -543,7 +544,12 @@ def _validate_reconciliation(value: object, row: Mapping) -> dict:
         raise ReleaseStateError("rollout reconciliation priorDatabaseState is invalid")
     if row["state"] in {"running", "verified"}:
         raise ReleaseStateError("a reconciled rollout must be closed, not running or verified")
-    return {field: value[field] for field in RECONCILIATION_FIELDS}
+    acknowledged_by = value.get("acknowledgedBy", "terminal")
+    if acknowledged_by not in {"--yes", "terminal"}:
+        raise ReleaseStateError("rollout reconciliation acknowledgedBy must be '--yes' or 'terminal'")
+    result = {field: value[field] for field in RECONCILIATION_FIELDS}
+    result["acknowledgedBy"] = acknowledged_by
+    return result
 
 
 def _validate_rollout(row: object) -> dict:
@@ -1419,8 +1425,10 @@ def _validate_recovery_plan_index(
         "attemptId", "attemptState", "checkpoint", "targetScope", "terminalAcknowledgment",
         "acknowledgedAt", "oldEvidence", "observedStateSha256",
     }
-    if not isinstance(binding, Mapping) or set(binding) != binding_fields:
+    if not isinstance(binding, Mapping) or set(binding) - {"acknowledgedBy"} != binding_fields:
         raise ReleaseStateError("recovery plan is missing its terminal reconciliation binding")
+    if binding.get("acknowledgedBy", "terminal") not in {"--yes", "terminal"}:
+        raise ReleaseStateError("recovery acknowledgedBy must be '--yes' or 'terminal'")
     if (
         binding.get("attemptId") != recovery_id or binding.get("attemptState") != old["state"]
         or binding.get("checkpoint") != old["checkpoint"]
@@ -1716,7 +1724,7 @@ def _run_blocks_target(row: Mapping) -> bool:
 
 
 def _rollout_is_operator_reconciled(run: Mapping) -> bool:
-    """An operator closed this run with the typed RECONCILE-RUN acknowledgment; it no longer occupies its target."""
+    """An operator closed this run with the RECONCILE-RUN acknowledgment; it no longer occupies its target."""
     return run.get("reconciliation") is not None
 
 
@@ -1984,7 +1992,7 @@ def finish_rollout(repo_root: Path, run_id: str, *, outcome: Mapping) -> None:
 
 
 class AcknowledgmentError(ReleaseStateError):
-    """The typed RECONCILE-RUN acknowledgment is missing or wrong; nothing was changed."""
+    """The RECONCILE-RUN acknowledgment is missing or wrong; nothing was changed."""
 
 
 def validate_stage_proof(capsule: ReleaseCapsule, report: Mapping) -> None:

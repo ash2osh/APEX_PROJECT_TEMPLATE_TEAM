@@ -302,7 +302,62 @@ class FeatureCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         row = self._run_row(run_id)
         self.assertEqual(row["reconciliation"]["acknowledgment"], f"RECONCILE-RUN {run_id}")
+        self.assertEqual(row["reconciliation"]["acknowledgedBy"], "terminal")
         self.assertEqual((row["state"], row["databaseState"]), ("unknown", "unknown"))
+
+    def test_reconcile_run_with_yes_flag_succeeds_without_terminal_and_records_acknowledged_by(self) -> None:
+        run_id = self._unknown_run()
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("input must not be called")
+        ) as mock_input:
+            status = feature_cli.main(["reconcile-run", run_id, "--env", "staging", "--yes"], repo_root=self.root, environ={})
+        self.assertEqual(status, 0)
+        mock_input.assert_not_called()
+        row = self._run_row(run_id)
+        self.assertEqual(row["reconciliation"]["acknowledgedBy"], "--yes")
+        self.assertEqual(row["reconciliation"]["acknowledgment"], f"RECONCILE-RUN {run_id}")
+        self.assertEqual((row["state"], row["databaseState"]), ("unknown", "unknown"))
+
+    def test_reconcile_run_without_yes_and_no_terminal_refuses(self) -> None:
+        run_id = self._unknown_run()
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("input must not be called")
+        ):
+            status = feature_cli.main(["reconcile-run", run_id, "--env", "staging"], repo_root=self.root, environ={})
+        self.assertEqual(status, 1)
+        self.assertNotIn("reconciliation", self._run_row(run_id))
+
+    def test_reconcile_run_with_yes_refuses_invalid_run_and_writes_nothing(self) -> None:
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False):
+            status = feature_cli.main(
+                ["reconcile-run", "0" * 8 + "-0000-4000-8000-" + "0" * 12, "--env", "staging", "--yes"],
+                repo_root=self.root, environ={},
+            )
+        self.assertEqual(status, 2)
+
+    def test_reconciliation_validator_accepts_records_with_and_without_acknowledged_by(self) -> None:
+        row = {"runId": "00000000-0000-4000-8000-000000000001", "state": "unknown"}
+        base = {
+            "acknowledgedAt": "2026-11-15T10:00:00Z",
+            "acknowledgment": "RECONCILE-RUN 00000000-0000-4000-8000-000000000001",
+            "priorState": "unknown",
+            "priorDatabaseState": "unknown",
+        }
+        # Old record without acknowledgedBy is read as terminal
+        old_val = feature_cli.release_state._validate_reconciliation(base, row)
+        self.assertEqual(old_val["acknowledgedBy"], "terminal")
+
+        # Record with --yes
+        yes_val = feature_cli.release_state._validate_reconciliation(dict(base, acknowledgedBy="--yes"), row)
+        self.assertEqual(yes_val["acknowledgedBy"], "--yes")
+
+        # Record with terminal
+        term_val = feature_cli.release_state._validate_reconciliation(dict(base, acknowledgedBy="terminal"), row)
+        self.assertEqual(term_val["acknowledgedBy"], "terminal")
+
+        # Invalid acknowledgedBy
+        with self.assertRaises(feature_cli.release_state.ReleaseStateError):
+            feature_cli.release_state._validate_reconciliation(dict(base, acknowledgedBy="other"), row)
 
     def test_reconcile_run_refuses_an_unknown_run_or_the_wrong_environment_with_exit_two(self) -> None:
         run_id = self._unknown_run()

@@ -47,7 +47,7 @@ Commands:
            [--preserve-unresolved] [--skip-refused]
                                               Move released folders outside migrations/ (dry run by default)
   reconcile-migration <folder> --env dev|staging|prod --outcome <outcome> --evidence <file>
-           [--attempt <id>] [--superseded-by <folder>]
+           [--attempt <id>] [--superseded-by <folder>] [--yes|-y]
                                               Record the owner's resolution of a pending attempt (local files only)
   verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
          [--format text|json] [--jobs N]     Evaluate migration checks read-only
@@ -85,7 +85,8 @@ Commands:
                                               Update template-owned files from the template
   verify-local [--format text|json] [--skills-root <path>] [...] [--live]
                                               Validate local environment, lock, apps and skills read-only
-  mcp setup [--choice chrome|firefox|both|none] Choose browser MCPs for this checkout
+  mcp setup [--choice chrome|firefox|both|none] [--yes|-y]
+                                              Choose browser MCP servers for this checkout
   mcp status                                  Show the saved browser MCP choice
   skills setup none|superpowers|mattpocock|both [--primary superpowers|mattpocock]
                                               Set up optional repository workflow packs

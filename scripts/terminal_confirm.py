@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Terminal-only answers for release prompts, and the explicit flag that replaces them.
 
-A `[y/N]` prompt reads its answer only from a terminal: redirected or piped input is
-refused, so a piped answer cannot confirm a deployment. The recorded way to skip a
-prompt is `-y` / `--yes`; on production it also needs `--confirm-target <db_unique_name>`.
+A `[y/N]` prompt or a typed acknowledgment reads its answer only from a terminal: redirected
+or piped input is refused, so a piped answer cannot confirm a deployment or close an attempt.
+The recorded way to skip a prompt is `-y` / `--yes`; on production a run also needs
+`--confirm-target <db_unique_name>`. For the acknowledgments `--yes` is recorded as
+`acknowledgedBy: --yes`.
 """
 
 from __future__ import annotations

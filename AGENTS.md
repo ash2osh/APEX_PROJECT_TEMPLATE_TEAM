@@ -173,8 +173,13 @@ owner-only commands retain their owner-login checks. See
   `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
   path. Keep source immutable after a write attempt; a follow-up uses the next
   revision folder. A pending or unknown attempt is closed by its owner with
-  `scripts/team.sh reconcile-migration` ([docs](docs/migration-attempt-resolution.md));
-  an agent never types the `RECONCILE-MIGRATION` acknowledgment; the developer does. Start a code change with `scripts/team.sh new-migration
+  `scripts/team.sh reconcile-migration` ([docs](docs/migration-attempt-resolution.md)).
+  An agent may pass `--yes` to `reconcile-migration`, `feature reconcile-run` and the rollout
+  recovery so the command finishes without a person. `--yes` replaces the typed acknowledgment
+  only: the outcome and the evidence file must come from checks the agent actually ran (read-only),
+  the evidence file says who established the outcome, and the record shows `acknowledgedBy: --yes`
+  so a reviewer can tell it was not typed. Without `--yes` the acknowledgment is still typed at a
+  terminal. Start a code change with `scripts/team.sh new-migration
   <name> --source "PACKAGE BODY:<NAME>" --env dev`: it copies the live DEV
   source (not the mirror) into the steps, and its preconditions refuse the
   apply if that source changes first. Run `scripts/team.sh check-conflicts <folder> --env dev`
@@ -189,7 +194,7 @@ owner-only commands retain their owner-login checks. See
   to the existing connection and expected-user settings. Staging and production applies ask `[y/N]` at
   the terminal. `--confirm-target <db_unique_name>` skips that prompt only when the value equals the observed
   `db_unique_name`; an agent must never supply it unless the developer typed that exact name for the run.
-  `-y` / `--yes` (migrate, rollout, publish, deploy, archive-migrations, feature clean-capsule) replaces a
+  `-y` / `--yes` (migrate, rollout, publish, deploy, archive-migrations, feature clean-capsule, the rollout `pause` step, `mcp setup`) replaces a
   `[y/N]` prompt; an agent passes it for staging or production only when the developer asked in this
   conversation for that run to be unattended, and production also needs the typed name. An agent never sets
   `TEAM_ACK_FROM_STDIN`. Receipts are written only after a verified apply. Multi-schema projects use
@@ -206,8 +211,7 @@ owner-only commands retain their owner-login checks. See
   interrupted or unknown attempt needs reconciliation before recovery. Capsule
   timing covers selected feature checkpoints and migrate steps, not app imports or
   excluded unclassified object steps. Existing migrations and version-1 rollouts keep their
-  current behavior. `feature convert-plan` plans offline how to move old folders into features. Follow [docs/feature-releases.md](docs/feature-releases.md). An
-  agent never types the `RECONCILE-RUN` acknowledgment; the developer does.
+  current behavior. `feature convert-plan` plans offline how to move old folders into features. Follow [docs/feature-releases.md](docs/feature-releases.md).
 - **Schema comparison:** Use `scripts/team.sh compare-schema --env staging
   --object CUSTOMERS` or `--from dev --to prod --pattern 'HR_*'` to compare
   selected live objects. This reports schema drift; local receipts cannot

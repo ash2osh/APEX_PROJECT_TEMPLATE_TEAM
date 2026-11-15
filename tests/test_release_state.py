@@ -531,6 +531,39 @@ class ReleaseStateTests(unittest.TestCase):
         self.assertEqual(rows[old_id]["recoveredBy"], recovery_id)
         self.assertEqual(rows[recovery_id]["recoveryOf"], old_id)
 
+    def test_recovery_binding_accepts_acknowledged_by_yes_or_terminal_and_refuses_other_values(self) -> None:
+        state = self.state_module()
+        old_id = self.record()
+        log = self.root / "scratch" / "sqlcl.log"
+        log.write_text("ORA-03113: end-of-file on communication channel\n", encoding="utf-8")
+        state.finish_attempt(self.root, old_id, state="unknown", evidence=["scratch/sqlcl.log"], metrics={})
+        old_before = dict(self.index()["attempts"][0])
+        scope = state.recovery_attempt_details(self.root, self.capsule, "staging", old_id)["targetScope"]
+
+        def binding(**extra):
+            return {
+                "attemptId": old_id, "attemptState": "unknown", "checkpoint": 1,
+                "targetScope": scope, "terminalAcknowledgment": f"RECONCILE {old_id}",
+                "acknowledgedAt": state._utc_now(), "oldEvidence": old_before["evidence"],
+                "observedStateSha256": hashlib.sha256(b"partial state").hexdigest(), **extra,
+            }
+
+        bad_plan = self.make_plan(
+            recovery_attempt=old_id, recovery_binding=binding(acknowledgedBy="other"),
+            plan_digest=hashlib.sha256(b"bad recovery").hexdigest(),
+        )
+        with self.assertRaisesRegex(state.ReleaseStateError, "acknowledgedBy"):
+            self.record(plan=bad_plan, checkpoint=1)
+        self.assertEqual(len(self.index()["attempts"]), 1)
+
+        good_plan = self.make_plan(
+            recovery_attempt=old_id, recovery_binding=binding(acknowledgedBy="--yes"),
+            plan_digest=hashlib.sha256(b"yes recovery").hexdigest(),
+        )
+        recovery_id = self.record(plan=good_plan, checkpoint=1)
+        rows = {row["attemptId"]: row for row in self.index()["attempts"]}
+        self.assertEqual(rows[recovery_id]["recoveryOf"], old_id)
+
     def test_recovery_reconciles_only_the_bound_unknown_rollout(self) -> None:
         from scripts import release_ownership
 

@@ -239,10 +239,11 @@ def _parser() -> argparse.ArgumentParser:
     clean_parser.add_argument("-y", "--yes", action="store_true", help="apply eligible local cleanup")
     reconcile_parser = subparsers.add_parser(
         "reconcile-run",
-        help="close an unfinished rollout run that has no checkpoint to recover, after a typed acknowledgment",
+        help="close an unfinished rollout run that has no checkpoint to recover, after an acknowledgment",
     )
     reconcile_parser.add_argument("run_id", help="rollout run id from the local release state")
     reconcile_parser.add_argument("--env", required=True, choices=("staging", "prod"), help="the run's environment")
+    reconcile_parser.add_argument("-y", "--yes", action="store_true", help="accept the acknowledgment without typing at a terminal")
     convert_parser = subparsers.add_parser(
         "convert-plan",
         help="offline, read-only plan for moving dated migration folders into feature files",
@@ -256,7 +257,7 @@ def _parser() -> argparse.ArgumentParser:
 def _reconcile_ack_from_terminal(expected: str) -> str:
     print(
         f"Type {expected} to acknowledge that the original process and database operation have ended. "
-        "Only the developer types it; nothing else closes the run.",
+        "Without --yes, only the developer types it at a terminal; nothing else closes the run.",
         file=sys.stderr,
     )
     if not terminal_confirm.may_read_acknowledgment():
@@ -284,13 +285,25 @@ def _render_run(run: Mapping) -> str:
 
 
 def _reconcile_run(
-    root: Path, run_id: str, environment: str, read_acknowledgment: Callable[[str], str],
+    root: Path,
+    run_id: str,
+    environment: str,
+    read_acknowledgment: Callable[[str], str],
+    *,
+    yes: bool = False,
 ) -> int:
-    """Close an unfinished run after the typed acknowledgment: 0 closed, 1 declined or wrong, 2 refused or error."""
+    """Close an unfinished run after the acknowledgment: 0 closed, 1 declined or wrong, 2 refused or error."""
     try:
         with release_state.run_reconciliation(root, run_id, environment) as session:
             print(_render_run(session.run))
-            closed = session.reconcile(read_acknowledgment(release_state.RUN_RECONCILE_PREFIX + run_id) or "")
+            expected = release_state.RUN_RECONCILE_PREFIX + run_id
+            if yes:
+                ack = expected
+                acknowledged_by = "--yes"
+            else:
+                ack = read_acknowledgment(expected) or ""
+                acknowledged_by = "terminal"
+            closed = session.reconcile(ack, acknowledged_by=acknowledged_by)
     except release_state.AcknowledgmentError as error:
         print(f"feature error: {error}", file=sys.stderr)
         return 1
@@ -384,7 +397,10 @@ def main(
             print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
             return 0
         if args.command == "reconcile-run":
-            return _reconcile_run(root, args.run_id, args.env, read_acknowledgment or _reconcile_ack_from_terminal)
+            return _reconcile_run(
+                root, args.run_id, args.env, read_acknowledgment or _reconcile_ack_from_terminal,
+                yes=args.yes,
+            )
         if args.command == "convert-plan":
             if args.feature is not None and FEATURE_RE.fullmatch(args.feature) is None:
                 raise FeatureCliError("feature must be a lowercase hyphenated slug")
