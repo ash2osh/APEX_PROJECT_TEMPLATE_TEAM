@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +79,10 @@ def prompt_choice() -> str:
     for number, label in enumerate(labels, start=1):
         print(f"  {number}. {label}")
     while True:
-        answer = input("Choice [1-4, default 4]: ").strip().lower()
+        try:
+            answer = input("Choice [1-4, default 4]: ").strip().lower()
+        except EOFError as exc:
+            raise SetupError("choose --choice chrome|firefox|both|none when stdin is not interactive") from exc
         if not answer:
             return "none"
         mapping = {"1": "chrome", "2": "firefox", "3": "both", "4": "none"}
@@ -270,7 +274,9 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
-def setup(repo_root: Path, choice: str | None) -> int:
+def setup(repo_root: Path, choice: str | None, *, yes: bool = False) -> int:
+    if choice is None and yes:
+        choice = "none"
     choice = choice or prompt_choice()
     if choice not in CHOICES:
         raise SetupError(f"invalid choice {choice!r}; use chrome, firefox, both, or none")
@@ -350,19 +356,20 @@ def status(repo_root: Path) -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parent.parent)
     commands = parser.add_subparsers(dest="command", required=True)
     setup_parser = commands.add_parser("setup", help="choose browser MCP servers for this checkout")
+    setup_parser.add_argument("-y", "--yes", action="store_true", help="accept the default choice, none, without the menu")
     setup_parser.add_argument("--choice", choices=CHOICES, help="skip the interactive prompt")
     commands.add_parser("status", help="show the saved browser MCP selection")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
 
     try:
         if args.command == "setup":
-            return setup(repo_root, args.choice)
+            return setup(repo_root, args.choice, yes=args.yes)
         return status(repo_root)
     except SetupError as exc:
         print(f"mcp error: {exc}", file=sys.stderr)

@@ -1331,16 +1331,27 @@ def _confirmation_text(manifest: RolloutManifest, plan: Sequence[dict], environm
 
 
 def _confirmation_flag_problem(
-    environment: str, *, yes: bool, confirm_target: str | None, dry_run: bool, prepare_only: bool,
+    environment: str,
+    *,
+    yes: bool,
+    confirm_target: str | None,
+    dry_run: bool,
+    prepare_only: bool,
+    recovery_attempt: str | None = None,
 ) -> str | None:
     """Refusals that need no connection and write nothing: the flags must fit the run they accompany."""
     if confirm_target is not None and not confirm_target.strip():
         return "--confirm-target needs the observed db_unique_name"
-    if (yes or confirm_target is not None) and (dry_run or prepare_only):
+    # --prepare --recover is the one preparation that may take --yes: it replaces the typed RECONCILE
+    # acknowledgment and writes nothing to the target, so it needs no database name.
+    recovery_prepare = prepare_only and recovery_attempt is not None
+    if (yes or confirm_target is not None) and (
+        dry_run or (prepare_only and (confirm_target is not None or not recovery_prepare))
+    ):
         return "--yes and --confirm-target apply to a rollout run, not to --dry-run or --prepare"
     if confirm_target is not None and environment == "dev":
         return "--confirm-target applies only to --env staging or prod"
-    if environment == "prod" and yes and confirm_target is None:
+    if environment == "prod" and yes and confirm_target is None and not recovery_prepare:
         return terminal_confirm.PRODUCTION_NAME_REQUIRED + "; --yes alone is refused and no steps were run"
     return None
 
@@ -1903,6 +1914,7 @@ def execute_step(
     expected_identity: Mapping[str, str] | None = None,
     confirm_target: str | None = None,
     rollout_confirmed_by: str | None = None,
+    accept_pauses: bool = False,
 ) -> StepResult:
     """Execute one step using existing command or SQLcl paths."""
     kind = step["type"]
@@ -2020,6 +2032,12 @@ def execute_step(
         )
     if kind == "pause":
         print(step["message"])
+        if accept_pauses:
+            return StepResult(
+                0,
+                (),
+                "pause accepted by --yes without waiting; the manual step it describes was not confirmed by a person",
+            )
         try:
             input("Press Enter to continue the rollout...")
         except (EOFError, OSError):
@@ -2315,6 +2333,7 @@ def _run_legacy_rollout(
                     expected_identity=before_identity,
                     confirm_target=step_target_name,
                     rollout_confirmed_by=report["confirmedBy"],
+                    accept_pauses=yes,
                 )
                 if not isinstance(result, StepResult):
                     raise RolloutError("rollout step executor returned an invalid result")
@@ -2430,6 +2449,7 @@ def run_rollout(
     """Keep schema-1 rollout behavior intact and route capsule runs through v2."""
     problem = _confirmation_flag_problem(
         environment, yes=yes, confirm_target=confirm_target, dry_run=dry_run, prepare_only=prepare_only,
+        recovery_attempt=recovery_attempt,
     )
     if problem is not None:
         print(f"rollout error: {problem}", file=sys.stderr)
@@ -2473,7 +2493,7 @@ def run_rollout(
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path, help="ordered rollout manifest JSON, relative to the repository root")
     parser.add_argument("--env", required=True, choices=("dev", "staging", "prod"))
@@ -2509,6 +2529,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from_step=args.from_step,
         dry_run=args.dry_run,
         report_path=args.report,
+        repo_root=repo_root or ROOT,
         prepare_only=args.prepare,
         capsule_path=args.capsule,
         stage_report_path=args.stage_report,

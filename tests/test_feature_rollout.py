@@ -354,6 +354,7 @@ class FeatureRolloutTests(unittest.TestCase):
         self.assertEqual(acknowledgments, [prompt_text])
         prepare = self._patch_mocks[5]
         self.assertEqual(prepare.call_args.kwargs["terminal_ack"], f"RECONCILE {attempt_id}")
+        self.assertEqual(prepare.call_args.kwargs["acknowledged_by"], "terminal")
 
     def test_cli_recovery_adapter_reads_typed_acknowledgment(self) -> None:
         attempt_id = "12345678-1234-4234-8234-123456789abc"
@@ -381,6 +382,94 @@ class FeatureRolloutTests(unittest.TestCase):
         ), contextlib.redirect_stderr(io.StringIO()):
             value = rollout._recovery_ack_from_terminal("show scope/evidence and terminal-state assertion")
         self.assertEqual(value, f"RECONCILE {attempt_id}")
+
+    def test_recovery_prepare_with_yes_shows_the_prompt_and_binds_exact_ack_without_a_terminal(self) -> None:
+        from scripts import release_state
+
+        self._enter(self._patches())
+        attempt_id = "12345678-1234-4234-8234-123456789abc"
+        prompt_text = "scope and saved evidence; confirm the original SQLcl/database operation has ended"
+        stderr = io.StringIO()
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("input must not be called")
+        ) as mock_input, patch.object(release_state, "recovery_prompt", return_value=prompt_text) as show, \
+                contextlib.redirect_stderr(stderr):
+            status = rollout.run_rollout(
+                self.manifest_path,
+                "staging",
+                repo_root=self.root,
+                capsule_path=self.capsule_path,
+                prepare_only=True,
+                recovery_attempt=attempt_id,
+                yes=True,
+            )
+        self.assertEqual(status, 0)
+        mock_input.assert_not_called()
+        show.assert_called_once_with(self.root, self.capsule, "staging", attempt_id)
+        self.assertIn(prompt_text, stderr.getvalue())
+        self.assertIn("Acknowledged by --yes; the acknowledgment was not typed.", stderr.getvalue())
+        prepare = self._patch_mocks[5]
+        self.assertEqual(prepare.call_args.kwargs["terminal_ack"], f"RECONCILE {attempt_id}")
+        self.assertEqual(prepare.call_args.kwargs["acknowledged_by"], "--yes")
+
+    def test_recovery_prepare_cli_with_yes_flag(self) -> None:
+        from scripts import release_state
+
+        self._enter(self._patches())
+        attempt_id = "12345678-1234-4234-8234-123456789abc"
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("input must not be called")
+        ), patch.object(release_state, "recovery_prompt", return_value="evidence"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.main([
+                str(self.manifest_path),
+                "--env", "staging",
+                "--capsule", str(self.capsule_path),
+                "--prepare",
+                "--recover", attempt_id,
+                "--yes",
+            ], repo_root=self.root)
+        self.assertEqual(status, 0)
+        prepare = self._patch_mocks[5]
+        self.assertEqual(prepare.call_args.kwargs["terminal_ack"], f"RECONCILE {attempt_id}")
+        self.assertEqual(prepare.call_args.kwargs["acknowledged_by"], "--yes")
+
+    def test_recovery_prepare_without_yes_and_no_terminal_refuses(self) -> None:
+        self._enter(self._patches())
+        attempt_id = "12345678-1234-4234-8234-123456789abc"
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("input must not be called")
+        ):
+            status = rollout.run_rollout(
+                self.manifest_path,
+                "staging",
+                repo_root=self.root,
+                capsule_path=self.capsule_path,
+                prepare_only=True,
+                recovery_attempt=attempt_id,
+                recovery_confirm=rollout._recovery_ack_from_terminal,
+                yes=False,
+            )
+        self.assertEqual(status, 2)
+
+    def test_yes_flag_rules_for_recovery_preparation_and_for_runs(self) -> None:
+        problem = rollout._confirmation_flag_problem
+        recover = "12345678-1234-4234-8234-123456789abc"
+        # --prepare --recover takes --yes in every environment, with no database name: it writes nothing to the target.
+        for environment in ("staging", "prod"):
+            with self.subTest(environment=environment):
+                self.assertIsNone(problem(environment, yes=True, confirm_target=None, dry_run=False,
+                                          prepare_only=True, recovery_attempt=recover))
+        # --confirm-target still does not belong to a preparation, and --yes needs --recover to be accepted there.
+        self.assertIn("apply to a rollout run", problem("staging", yes=False, confirm_target="DB", dry_run=False,
+                                                         prepare_only=True, recovery_attempt=recover))
+        self.assertIn("apply to a rollout run", problem("staging", yes=True, confirm_target=None, dry_run=False,
+                                                         prepare_only=True, recovery_attempt=None))
+        self.assertIn("apply to a rollout run", problem("staging", yes=True, confirm_target=None, dry_run=True,
+                                                         prepare_only=False, recovery_attempt=recover))
+        # A production run still needs the name.
+        self.assertIn("--confirm-target", problem("prod", yes=True, confirm_target=None, dry_run=False,
+                                                  prepare_only=False, recovery_attempt=None))
 
     def test_recovery_refuses_to_replay_verified_prior_write_steps(self) -> None:
         plan = self._plan([

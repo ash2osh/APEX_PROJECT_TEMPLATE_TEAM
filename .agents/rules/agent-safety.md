@@ -41,13 +41,14 @@
   for staging and production; production requires a verified staging report.
   Treat an interrupted/unknown checkpoint as unresolved until reconciled, and
   describe only the selected feature-checkpoint and migrate-step budget, not
-  whole-deployment duration. See `docs/feature-releases.md`. An agent never types
-  the `RECONCILE-RUN` acknowledgment; the developer does. The same holds for the
-  `RECONCILE-MIGRATION` acknowledgment of `scripts/team.sh reconcile-migration`, which
-  records a migration attempt's outcome: an agent never types it.
+  whole-deployment duration. See `docs/feature-releases.md`. An agent may pass `--yes` to `reconcile-migration`,
+  `feature reconcile-run` and the rollout recovery so the command finishes without a person. `--yes` replaces the
+  typed acknowledgment only: the outcome and the evidence file must come from checks the agent actually ran (read-only),
+  the evidence file says who established the outcome, and the record shows `acknowledgedBy: --yes` so a reviewer can
+  tell it was not typed. Without `--yes` the acknowledgment is still typed at a terminal.
 - `-y` / `--yes` answers a staging or production `[y/N]` prompt only when the developer asked in the
   conversation for that run to be unattended. Production also needs `--confirm-target` with the name the
-  developer typed for the run. An agent never sets `TEAM_ACK_FROM_STDIN`; it does not bypass terminal-only acknowledgments.
+  developer typed for the run. An agent never sets `TEAM_ACK_FROM_STDIN`; piped or redirected acknowledgments stay refused, and `--yes` is the recorded route.
 - Use `scripts/team.sh compare-schema` with exact names or object prefixes for
   read-only live drift reports. Receipts and resulting DDL cannot reliably
   identify one unique migration file.

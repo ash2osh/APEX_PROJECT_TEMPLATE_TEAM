@@ -590,9 +590,28 @@ class FeaturePrepareTests(unittest.TestCase):
         self.assertEqual(recovery.recovery_attempt, attempt_id)
         self.assertEqual(recovery.recovery_binding["attemptState"], "attempting")
         self.assertEqual(recovery.recovery_binding["terminalAcknowledgment"], f"RECONCILE {attempt_id}")
+        self.assertEqual(recovery.recovery_binding["acknowledgedBy"], "terminal")
         index = release_state._load_index(self.root)
         self.assertEqual(index["attempts"][0]["state"], "attempting")
         self.assertFalse(index["attempts"][0]["evidence"])
+
+    def test_recovery_preparation_records_that_yes_supplied_the_acknowledgment(self) -> None:
+        from scripts import feature_release
+
+        initial = self._state(environment="staging")
+        partial = self._state(environment="staging", lines=["PACKAGE PARTIAL AS\n", "END DISPATCH;\n"])
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release, "capture_selected_state", side_effect=(initial, partial)):
+            original = feature_release.prepare_target(
+                self.root, self.capsule, "staging", environ=self._environment("staging"),
+            )
+            attempt_id = self._record_attempt(original, 1)
+            recovery = feature_release.prepare_target(
+                self.root, self.capsule, "staging", environ=self._environment("staging"),
+                recovery_attempt=attempt_id, terminal_ack=f"RECONCILE {attempt_id}", acknowledged_by="--yes",
+            )
+        self.assertEqual(recovery.recovery_binding["acknowledgedBy"], "--yes")
+        self.assertEqual(recovery.recovery_binding["terminalAcknowledgment"], f"RECONCILE {attempt_id}")
 
     def test_recovery_requires_ack_and_refuses_an_active_target_lease_before_capture(self) -> None:
         from scripts import feature_release, release_ownership, release_state

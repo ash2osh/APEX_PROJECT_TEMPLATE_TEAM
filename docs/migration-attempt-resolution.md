@@ -31,7 +31,7 @@ is the honest choice when a check was not possible.
 ```bash
 scripts/team.sh reconcile-migration <folder> --env dev|staging|prod \
   --outcome failed-no-target-effect|failed-target-effect-unknown|superseded \
-  --evidence <file> [--attempt <attempt-id>] [--superseded-by <folder>]
+  --evidence <file> [--attempt <attempt-id>] [--superseded-by <folder>] [--yes|-y]
 ```
 
 - `<folder>` is `migrations/<SCHEMA>/<dated-folder>` (or `migrations/<dated-folder>` in a flat layout).
@@ -41,10 +41,10 @@ scripts/team.sh reconcile-migration <folder> --env dev|staging|prod \
 - `--attempt` names the attempt (or the scratch run id) when more than one is pending.
 - The command prints the folder, environment, attempt id, run id, the failure state from the
   retained run manifest when there is one, the outcome and the evidence digest. Then it asks
-  for the typed acknowledgment `RECONCILE-MIGRATION <attempt-id>`. For a scratch-only attempt
-  the acknowledgment names the run id. The developer types it at a terminal. Redirected input
-  is refused.
-- An agent never types the acknowledgment.
+  for the acknowledgment `RECONCILE-MIGRATION <attempt-id>`. For a scratch-only attempt
+  the acknowledgment names the run id. An agent may pass `--yes` to record the acknowledgment
+  without typing, recording `acknowledgedBy: --yes`. Without `--yes`, the developer types it at
+  a terminal. Redirected input is refused.
 
 It reads local files only. It starts no process, runs no SQLcl and connects to no database.
 
@@ -69,7 +69,7 @@ Run: migration-attempt-<run-id>
 Recorded failure state: apply-failed-or-unknown
 Outcome: failed-no-target-effect
 Evidence: evidence/APP_ONE-r002-owner-check.txt sha256=<digest>
-Type RECONCILE-MIGRATION <attempt-id> to record this owner resolution. Only the owner types it.
+Type RECONCILE-MIGRATION <attempt-id> to record this owner resolution. Without --yes, only the owner types it at a terminal.
 Acknowledgment: <typed by the developer>
 Recorded owner resolution: migrations/APP_ONE/2026-10-12_archive-family-r002 dev failed-no-target-effect
   resolution record: migrations/APP_ONE/2026-10-12_archive-family-r002/resolution.dev.json
@@ -129,8 +129,8 @@ the run as resolved.
 - It does not edit or delete the folder's SQL, `checks.json`, receipts or earlier attempt events.
 - It does not verify a folder. A folder with a verified receipt is refused.
 - It does not replace an existing resolution for the same environment.
-- It does not accept an acknowledgment from a pipe, a file, an environment variable or an agent:
-  acknowledgments are terminal-only.
+- It does not accept an acknowledgment from a pipe, a file, or an environment variable. Without
+  `--yes`, an acknowledgment is read only from a terminal.
 
 ## Refusals
 

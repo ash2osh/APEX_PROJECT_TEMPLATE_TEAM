@@ -510,7 +510,7 @@ and may not contain `.`/`..`, symbolic links, or generated `scratch/` state.
 | `sql-script` | `file`, `connection`, `expectedUser`, `schema` | — | Runs a reviewed DBA SQL file after checking `SESSION_USER`, `CURRENT_SCHEMA`, and the live database/service identity. The saved-connection alias must exactly equal `expectedUser`. |
 | `ords-import` | `file`, `connection`, `expectedUser`, `schema` | `excludeModules`: array of module names | Validates a generated ORDS export, rejects OAuth material, optionally removes complete calls for the named modules, then uses the guarded SQL script path. `expectedUser` and `schema` must match. |
 | `app-deploy` | `appId`: positive numeric application ID | — | Runs the existing deployment command and the environment's descriptor; staging and production only. |
-| `pause` | `message`: nonempty text | — | Prints the message and waits for Enter before continuing. |
+| `pause` | `message`: nonempty text | — | Prints the message and waits for Enter before continuing; `--yes` accepts it without waiting and the report records that no person confirmed the manual step. |
 
 Every source file used by a step is hashed before execution. The runner shows
 the manifest digest, each step digest and every referenced file digest in the
@@ -675,8 +675,9 @@ returns 2 because its target folder cannot be established.
 
 When an apply ends with a pending or unknown attempt, the owner records what happened
 with `scripts/team.sh reconcile-migration <folder> --env <env> --outcome <outcome>
---evidence <file>`. The outcome is `failed-no-target-effect`,
-`failed-target-effect-unknown` or `superseded`. The command writes a committed
+--evidence <file> [--yes|-y]`. The outcome is `failed-no-target-effect`,
+`failed-target-effect-unknown` or `superseded`. An agent may pass `--yes` to record the
+acknowledgment without typing, recording `acknowledgedBy: --yes`. The command writes a committed
 `resolution.<env>.json` beside the receipts and a local closing attempt event. A resolved
 folder stays locked for `migrate`: it is never applied again, and the next revision carries
 the fix. The three outcomes, their evidence and the limits are in

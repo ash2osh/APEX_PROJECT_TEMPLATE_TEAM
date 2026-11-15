@@ -1033,6 +1033,7 @@ def prepare_target(
     environ: Mapping[str, str],
     recovery_attempt: str | None = None,
     terminal_ack: str | None = None,
+    acknowledged_by: str | None = None,
 ) -> TargetPlan:
     """Capture selected target state, create diffs and persist a target-specific plan."""
     root = _root(repo_root)
@@ -1159,6 +1160,7 @@ def prepare_target(
             "checkpoint": old_checkpoint,
             "targetScope": recovery_record["targetScope"],
             "terminalAcknowledgment": terminal_ack,
+            "acknowledgedBy": acknowledged_by or "terminal",
             "acknowledgedAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "oldEvidence": recovery_record["evidence"],
             "observedStateSha256": observed_state_sha256,

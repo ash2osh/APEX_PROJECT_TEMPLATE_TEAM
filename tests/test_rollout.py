@@ -284,6 +284,75 @@ class RolloutManifestTests(unittest.TestCase):
         confirmation = json.loads((self.root / report["confirmationPath"]).read_text(encoding="utf-8"))
         self.assertEqual(confirmation["confirmedBy"], "--yes")
 
+    def test_pause_step_with_yes_passes_without_reading_stdin_and_records_it(self) -> None:
+        manifest = self.write_manifest(self.pause_steps(1))
+        report_base = self.root / "scratch" / "report"
+        with patch("sys.stdin.isatty", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("input must not be called")
+        ) as mock_input, contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest,
+                "staging",
+                repo_root=self.root,
+                report_path=report_base,
+                yes=True,
+            )
+
+        self.assertEqual(status, 0)
+        mock_input.assert_not_called()
+        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(report["steps"][0]["status"], "succeeded")
+        self.assertIn("accepted by --yes", report["steps"][0]["message"])
+        self.assertEqual(
+            report["steps"][0]["message"],
+            "pause accepted by --yes without waiting; the manual step it describes was not confirmed by a person",
+        )
+
+    def test_pause_step_without_yes_and_no_terminal_fails_with_unacknowledged_message(self) -> None:
+        manifest = self.write_manifest(self.pause_steps(1))
+        report_base = self.root / "scratch" / "report"
+        with patch("sys.stdin.isatty", return_value=False), patch(
+            "builtins.input", side_effect=EOFError("no terminal")
+        ), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest,
+                "staging",
+                repo_root=self.root,
+                report_path=report_base,
+                confirm=lambda _prompt: True,
+                yes=False,
+            )
+
+        self.assertEqual(status, 1)
+        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(report["steps"][0]["status"], "failed")
+        self.assertEqual(report["steps"][0]["message"], "pause was not acknowledged")
+
+    def test_pause_step_with_confirm_target_only_does_not_accept_pause(self) -> None:
+        sql_step = self.prod_sql_step()
+        sql_step.update(connection="STAGE_APP", expectedUser="STAGE_APP", schema="STAGE_APP")
+        manifest = self.write_manifest([self.pause_steps(1)[0], sql_step])
+        report_base = self.root / "scratch" / "report"
+        _observed, observe = self.observed_names("STAGING_DB")
+        with patch("scripts.rollout._observe_target_identity", side_effect=observe), patch(
+            "sys.stdin.isatty", return_value=False
+        ), patch(
+            "builtins.input", side_effect=EOFError("no terminal")
+        ), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest,
+                "staging",
+                repo_root=self.root,
+                report_path=report_base,
+                confirm_target="STAGING_DB",
+                yes=False,
+            )
+
+        self.assertEqual(status, 1)
+        report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(report["steps"][0]["status"], "failed")
+        self.assertEqual(report["steps"][0]["message"], "pause was not acknowledged")
+
     def test_yes_alone_on_production_is_refused_before_anything_is_written(self) -> None:
         calls: list[int] = []
         manifest = self.write_manifest(self.pause_steps(1))

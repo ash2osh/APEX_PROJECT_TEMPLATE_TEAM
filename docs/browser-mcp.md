@@ -9,6 +9,8 @@ The command prompts for Chrome, Firefox, both, or none. For scripts and project 
     scripts/team.sh mcp setup --choice firefox
     scripts/team.sh mcp status
 
+Pass `-y` / `--yes` to accept the default choice (`none`) without the interactive menu.
+
 The selection belongs to the local checkout. Setup writes ignored configuration files: .mcp.json for clients using the MCP JSON format, .codex/config.toml for Codex, and .browser-mcp-selection.json for status. It preserves unrelated MCP entries and refuses to overwrite a conflicting browser entry or tracked client config. All three generated files must be ignored by Git; setup checks this before writing. Move tracked config out of Git first. Setup itself does not start a browser or an MCP process. Re-run setup to change the choice.
 
 Codex reads project settings only after the checkout is trusted. Reload the coding client after changing the selection. The selected MCP package is launched by the client; Node.js and npm/npx must be available then. Setup itself needs Python 3.10 or newer.

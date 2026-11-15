@@ -6,9 +6,10 @@ concluded about a pending attempt that did not verify. It never makes a folder v
 and it never changes the payload digest.
 
 The command (``reconcile-migration``) reads local files only. It never starts a process
-and never connects to a database. Its acknowledgment is typed by the owner; an agent never
-types it. Imports of the manifest and revision modules happen inside functions, because
-those modules import this one.
+and never connects to a database. An agent may pass ``--yes`` to supply the acknowledgment
+and record ``acknowledgedBy: --yes``; without ``--yes`` the acknowledgment is typed by the
+owner at a terminal. Imports of the manifest and revision modules happen inside functions,
+because those modules import this one.
 """
 
 from __future__ import annotations
@@ -148,6 +149,8 @@ def _check_shape(record: object, environment: str) -> dict:
     fields = set(RESOLUTION_FIELDS)
     if record.get("outcome") == "superseded":
         fields.add("supersededBy")
+    if "acknowledgedBy" in record:
+        fields.add("acknowledgedBy")
     if set(record) != fields:
         unknown = sorted(set(record) - fields)
         detail = f"; unexpected key {unknown[0]!r}" if unknown else ""
@@ -158,6 +161,9 @@ def _check_shape(record: object, environment: str) -> dict:
         raise MigrationResolutionError("resolution environment does not match its file name")
     if record["outcome"] not in RESOLUTION_STATES:
         raise MigrationResolutionError("resolution outcome is not one of the three owner outcomes")
+    if "acknowledgedBy" in record:
+        if record["acknowledgedBy"] not in {"--yes", "terminal"}:
+            raise MigrationResolutionError("resolution acknowledgedBy must be '--yes' or 'terminal'")
     # Null only for the scratch-only case: the attempt's pending event is not in this checkout.
     if record["attemptId"] is not None:
         _canonical_uuid(record["attemptId"], "attemptId")
@@ -208,7 +214,9 @@ def read_resolution(path: Path) -> dict:
         raw = path.read_bytes()
     except OSError as error:
         raise MigrationResolutionError(f"resolution sidecar could not be read: {error}") from error
-    return _check_shape(_decode(raw, path.name), environment)
+    record = _check_shape(_decode(raw, path.name), environment)
+    record.setdefault("acknowledgedBy", "terminal")
+    return record
 
 
 def validate_resolution(path: Path, migration) -> dict:
@@ -611,6 +619,7 @@ def _prepare(repo_root: Path, arguments: argparse.Namespace) -> _Plan:
         "target": target,
         "evidence": evidence,
         "recordedAt": _now(),
+        "acknowledgedBy": "--yes" if getattr(arguments, "yes", False) else "terminal",
     }
     if superseded is not None:
         record["supersededBy"] = superseded
@@ -642,7 +651,7 @@ def _print_plan(plan: _Plan) -> None:
     print(f"Evidence: {record['evidence']['path']} sha256={record['evidence']['sha256']}")
     if plan.superseded_by is not None:
         print(f"Superseded by: {plan.superseded_by} (receipt sha256={record['supersededBy']['receiptSha256']})")
-    print(f"Type {plan.acknowledgment} to record this owner resolution. Only the owner types it.")
+    print(f"Type {plan.acknowledgment} to record this owner resolution. Without --yes, only the owner types it at a terminal.")
 
 
 def _closing_event(pending: Mapping, outcome: str, evidence: Mapping) -> dict:
@@ -678,6 +687,7 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
     parser.add_argument("--evidence", required=True, metavar="FILE", help="repository file recording the owner's check; read, never copied; no secrets or personal data")
     parser.add_argument("--attempt", metavar="ID", help="attempt id (or scratch run id) to resolve when more than one is pending")
     parser.add_argument("--superseded-by", metavar="FOLDER", help="for --outcome superseded: the later revision of the same family that carries the fix")
+    parser.add_argument("-y", "--yes", action="store_true", help="accept the acknowledgment without typing at a terminal")
     parser.add_argument("--repo-root", type=Path, default=repo_root or Path(__file__).resolve().parents[1], help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     try:
@@ -687,20 +697,23 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
         return 2
     _print_plan(plan)
 
-    # Imported here so that this module stays importable in checkouts without the terminal helper.
-    from . import terminal_confirm
+    if arguments.yes:
+        print("Acknowledged by --yes; the acknowledgment was not typed.")
+    else:
+        # Imported here so that this module stays importable in checkouts without the terminal helper.
+        from . import terminal_confirm
 
-    if not terminal_confirm.may_read_acknowledgment():
-        print("reconcile-migration refused: nothing was written", file=sys.stderr)
-        return 2
-    print("Acknowledgment (type it, then Enter):", file=sys.stderr)
-    try:
-        answer = input()
-    except (EOFError, OSError):
-        answer = ""
-    if answer.strip() != plan.acknowledgment:
-        print(f"reconcile-migration refused: the acknowledgment must be exactly {plan.acknowledgment}; nothing was written", file=sys.stderr)
-        return 2
+        if not terminal_confirm.may_read_acknowledgment():
+            print("reconcile-migration refused: nothing was written", file=sys.stderr)
+            return 2
+        print("Acknowledgment (type it, then Enter):", file=sys.stderr)
+        try:
+            answer = input()
+        except (EOFError, OSError):
+            answer = ""
+        if answer.strip() != plan.acknowledgment:
+            print(f"reconcile-migration refused: the acknowledgment must be exactly {plan.acknowledgment}; nothing was written", file=sys.stderr)
+            return 2
 
     sidecar = plan.folder / f"resolution.{plan.environment}.json"
     try:

@@ -217,10 +217,12 @@ revalidates target identity, selected source and metadata before writing, then
 applies each feature checkpoint in one SQLcl session and proves source,
 settings, validity, and checks afterward. A lost or ambiguous write remains
 unresolved. Recovery preparation displays the attempt's target scope and saved
-evidence, refuses while a local writer lease is active, and requires the exact
-typed acknowledgment `RECONCILE <attempt-uuid>`. That acknowledgment asserts
-the original SQLcl process and database operation have ended; a free local lock
-or stale PID file does not establish this.
+evidence, refuses while a local writer lease is active, and requires the
+acknowledgment `RECONCILE <attempt-uuid>`. `-y/--yes` supplies it directly,
+recording `acknowledgedBy: --yes`. Without `--yes`, the acknowledgment is typed
+at a terminal. That acknowledgment asserts the original SQLcl process and
+database operation have ended; a free local lock or stale PID file does not
+establish this.
 
 ```bash
 scripts/team.sh rollout releases/current.json --env staging --prepare --capsule <capsule-dir> --recover <attempt-uuid>
@@ -320,8 +322,15 @@ differs from the observed `db_unique_name` of any database the rollout writes to
 first write (the check only reads). `--confirm-target` alone is accepted too, as it is for `migrate`.
 `--yes` and `--confirm-target` do not apply to `--dry-run` or `--prepare`, and piped input is refused.
 The rollout report and `rollout-confirmation.json` record `confirmedBy`. An app-deploy step runs
-`deploy.sh` with `--yes` and, on production, the name; it never receives a piped answer. `-y` does
-not cover the typed `RECONCILE` acknowledgments, the `Press Enter` pause, or `--recover`.
+`deploy.sh` with `--yes` and, on production, the name; it never receives a piped answer. `-y` accepts
+rollout `pause` steps without waiting, recording in the report that no person confirmed the manual step.
+An agent may pass `--yes` to `reconcile-migration`, `feature reconcile-run` and the rollout recovery so the command
+finishes without a person. `--yes` replaces the typed acknowledgment only: the outcome and the evidence file must come from
+checks the agent actually ran (read-only), the evidence file says who established the outcome, and the record shows
+`acknowledgedBy: --yes` so a reviewer can tell it was not typed. Without `--yes` the acknowledgment is still typed at
+a terminal. A rollout run keeps its production rule (`--yes` alone is refused on production; it also needs
+`--confirm-target`). `--prepare --recover <attempt> --yes` needs no database name in any environment: it writes
+nothing to the target, and the run that follows asks for its own confirmation.
 
 ## Closing a run that has no checkpoint to recover
 
@@ -336,8 +345,9 @@ scripts/team.sh feature reconcile-run <run-id> --env staging
 The command reads only `releases/.local-state.json`. It needs no capsule, manifest,
 `.env` or database. It shows the run id, environment, payload and plan digests, state,
 database state, start and finish times, each target scope, each recorded step outcome,
-and the evidence location (`scratch/rollout-runs/`). It then asks for the typed
-acknowledgment `RECONCILE-RUN <run-id>`. No flag supplies it, and an empty answer or a
+and the evidence location (`scratch/rollout-runs/`). It then asks for the
+acknowledgment `RECONCILE-RUN <run-id>`. An agent may pass `-y/--yes` so the command finishes without
+a person, recording `acknowledgedBy: --yes`. Without `--yes`, it is typed at a terminal, and an empty answer or a
 closed input is a refusal.
 
 It refuses, and changes nothing, when the run id is unknown, when `--env` differs from
