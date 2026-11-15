@@ -165,6 +165,29 @@ class AutomationOperationTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 1)
         self.assertEqual(capture.call_count, 2)
 
+    def test_persisted_action_evidence_records_how_it_was_acknowledged(self):
+        for acknowledged_by, expected in (({"acknowledged_by": "--yes"}, "--yes"), ({}, "terminal")):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temporary:
+                run_dir = Path(temporary)
+                with (
+                    patch.object(operations, "capture_lifecycle", side_effect=[self.before, snapshot(selected_status="ACTIVE")]),
+                    patch.object(
+                        operations,
+                        "run_sqlcl",
+                        side_effect=lambda target, driver, directory: SqlclResult(
+                            0, self.action_output("enable"), directory
+                        ),
+                    ),
+                ):
+                    result = operations.execute_automation_action(
+                        self.target, "DEMO", 940269, "TEMPLATE_AUTOMATION_SELECTED", "enable",
+                        self.before, run_dir, workspace_user="DEMO", **acknowledged_by,
+                    )
+                persisted = json.loads((run_dir / "automation-action.json").read_text(encoding="utf-8"))
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(result["acknowledgedBy"], expected)
+                self.assertEqual(persisted["acknowledgedBy"], expected)
+
     def test_status_drift_after_confirmation_refuses_before_sqlcl(self):
         with tempfile.TemporaryDirectory() as temporary:
             with (
@@ -377,6 +400,7 @@ class AutomationOperationTests(unittest.TestCase):
         self.assertIn("current status=DISABLED", prompt.getvalue())
         self.assertIn("ENABLE 940269 TEMPLATE_AUTOMATION_SELECTED", prompt.getvalue())
         action.assert_called_once()
+        self.assertEqual(action.call_args.kwargs.get("acknowledged_by"), "terminal")
 
     def test_action_driver_uses_current_session_public_apis_and_no_schedule_restore(self):
         renderer = operations.render_action_driver
@@ -405,6 +429,128 @@ class AutomationOperationTests(unittest.TestCase):
         self.assertNotIn("PUBLISH_APP", source)
         self.assertNotIn("APEX_WORKFLOW", source)
         self.assertNotIn("APEX_HUMAN_TASK", source)
+
+    def test_cli_yes_accepts_confirmation_without_terminal_for_write_actions(self):
+        for action_name in ("enable", "disable", "run-once"):
+            with self.subTest(action=action_name), tempfile.TemporaryDirectory() as temporary:
+                run_dir = Path(temporary)
+                expected_report = {
+                    "schemaVersion": 1,
+                    "action": action_name,
+                    "status": "verified",
+                    "scope": {},
+                    "staticId": "TEMPLATE_AUTOMATION_SELECTED",
+                    "acknowledgedBy": "--yes",
+                }
+                with (
+                    patch.object(
+                        operations,
+                        "_validate_scope",
+                        return_value=(940269, self.before, run_dir, {
+                            "environment": "dev", "connection": "docker-demo2", "sessionUser": "DEMO2",
+                            "currentSchema": "DEMO2", "service": "freepdb1", "workspace": "DEMO",
+                            "appId": 940269, "release": "26.2.0",
+                        }),
+                    ),
+                    patch.object(operations, "read_project_env", return_value={"APEX_WORKSPACE_USERNAME": "DEMO"}),
+                    patch.object(operations, "_target", return_value=self.target),
+                    patch.object(operations, "execute_automation_action", return_value=expected_report) as action_mock,
+                    patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False),
+                    patch("builtins.input", side_effect=AssertionError("input() must not be called when --yes is supplied")),
+                    patch("sys.stdout", new_callable=io.StringIO) as output,
+                    patch("sys.stderr", new_callable=io.StringIO) as prompt,
+                ):
+                    code = operations.main([
+                        action_name, "940269", "--env", "dev", "--schema", "DEMO2",
+                        "--automation", "TEMPLATE_AUTOMATION_SELECTED", "--repo-root", temporary,
+                        "--env-file", str(run_dir / ".env"), "--format", "json", "--yes",
+                    ])
+                self.assertEqual(code, 0)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["status"], "verified")
+                self.assertIn("Acknowledged by --yes; the confirmation was not typed.", prompt.getvalue())
+                self.assertIn("environment=dev", prompt.getvalue())
+                self.assertIn(f"Action {action_name}: automation TEMPLATE_AUTOMATION_SELECTED", prompt.getvalue())
+                action_mock.assert_called_once_with(
+                    self.target,
+                    "DEMO",
+                    940269,
+                    "TEMPLATE_AUTOMATION_SELECTED",
+                    action_name,
+                    self.before,
+                    run_dir,
+                    workspace_user="DEMO",
+                    acknowledged_by="--yes",
+                )
+
+    def test_cli_production_yes_requires_matching_confirm_target(self):
+        prod_target = Target("prod", "docker-prod", "DEMO2", "DEMO2", "production")
+        cases = [
+            ("missing", None, 2, "refused", False),
+            ("mismatch", "WRONG_DB", 2, "refused", False),
+            ("match", "FREE", 0, "verified", True),
+        ]
+        for label, target_name, expected_code, expected_status, should_call in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                run_dir = Path(temporary)
+                expected_report = {
+                    "schemaVersion": 1,
+                    "action": "enable",
+                    "status": "verified",
+                    "scope": {},
+                    "staticId": "TEMPLATE_AUTOMATION_SELECTED",
+                    "acknowledgedBy": "--yes",
+                }
+                cmd = [
+                    "enable", "940269", "--env", "prod", "--schema", "DEMO2",
+                    "--automation", "TEMPLATE_AUTOMATION_SELECTED", "--repo-root", temporary,
+                    "--env-file", str(run_dir / ".env"), "--format", "json", "--yes",
+                ]
+                if target_name is not None:
+                    cmd.extend(["--confirm-target", target_name])
+                with (
+                    patch.object(
+                        operations,
+                        "_validate_scope",
+                        return_value=(940269, self.before, run_dir, {
+                            "environment": "prod", "connection": "docker-prod", "sessionUser": "DEMO2",
+                            "currentSchema": "DEMO2", "service": "freepdb1", "workspace": "DEMO",
+                            "appId": 940269, "release": "26.2.0",
+                        }),
+                    ),
+                    patch.object(operations, "read_project_env", return_value={"APEX_WORKSPACE_USERNAME": "DEMO"}),
+                    patch.object(operations, "_target", return_value=prod_target),
+                    patch.object(operations, "execute_automation_action", return_value=expected_report) as action_mock,
+                    patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False),
+                    patch("builtins.input", side_effect=AssertionError("input() must not be called")),
+                    patch("sys.stdout", new_callable=io.StringIO) as output,
+                    patch("sys.stderr", new_callable=io.StringIO),
+                ):
+                    code = operations.main(cmd)
+                self.assertEqual(code, expected_code)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["status"], expected_status)
+                if should_call:
+                    action_mock.assert_called_once()
+                    self.assertEqual(action_mock.call_args.kwargs["acknowledged_by"], "--yes")
+                else:
+                    action_mock.assert_not_called()
+                    self.assertEqual(report["acknowledgedBy"], "--yes")
+                    # A refusal before any action writes no evidence file, as the typed refusal never did.
+                    self.assertFalse((run_dir / "automation-action.json").exists())
+
+    def test_cli_argument_parser_refuses_invalid_flag_combinations(self):
+        invalid_invocations = [
+            ["enable", "940269", "--env", "prod", "--schema", "DEMO2", "--automation", "TEMPLATE_AUTOMATION_SELECTED", "--confirm-target", "FREE"],
+            ["enable", "940269", "--env", "dev", "--schema", "DEMO2", "--automation", "TEMPLATE_AUTOMATION_SELECTED", "--yes", "--confirm-target", "FREE"],
+            ["list", "940269", "--env", "dev", "--schema", "DEMO2", "--yes"],
+            ["check", "940269", "--env", "dev", "--schema", "DEMO2", "--automation", "TEMPLATE_AUTOMATION_SELECTED", "--expected-status", "ACTIVE", "--yes"],
+        ]
+        for argv in invalid_invocations:
+            with self.subTest(argv=argv), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as cm:
+                    operations.main(argv)
+                self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == "__main__":

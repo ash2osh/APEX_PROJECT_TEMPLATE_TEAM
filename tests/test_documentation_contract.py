@@ -266,6 +266,19 @@ class DocumentationContractTests(unittest.TestCase):
                               "-y never replaces the typed", "does not cover the typed `reconcile`"):
                 self.assertNotIn(withdrawn, text, f"{relative} still states the withdrawn rule: {withdrawn}")
 
+    def test_automations_rule_lets_an_agent_pass_yes_and_no_file_says_exact_typed_confirmation(self) -> None:
+        # Owner decision 2026-11-15: --yes replaces the typed confirmation for automations enable|disable|run-once.
+        agents = " ".join((ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
+        self.assertIn("automations enable|disable|run-once", agents)
+        self.assertIn("`acknowledgedBy: --yes`", agents)
+        safety = " ".join((ROOT / ".agents" / "rules" / "agent-safety.md").read_text(encoding="utf-8").split())
+        self.assertIn("automations enable|disable|run-once", safety)
+        self.assertIn("`acknowledgedBy: --yes`", safety)
+        for relative in ("AGENTS.md", ".agents/rules/agent-safety.md", "README.md", "docs/known-limitations.md", "scripts/automation_operations.py"):
+            text = " ".join((ROOT / relative).read_text(encoding="utf-8").split()).lower()
+            for withdrawn in ("no flag replaces it", "exact typed confirmation", "after typed target/action confirmation"):
+                self.assertNotIn(withdrawn, text, f"{relative} still states the withdrawn rule: {withdrawn}")
+
     def test_troubleshooting_explains_the_team_ps1_refusals_about_bash(self) -> None:
         # The table quotes these messages verbatim, so rewording one must update it.
         troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")

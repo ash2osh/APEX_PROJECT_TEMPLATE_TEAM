@@ -384,7 +384,17 @@ def _store_action_evidence(run_dir: Path, report: Mapping) -> None:
     os.replace(temporary, path)
 
 
-def _action_result(action: str, status: str, scope: Mapping, static_id: str, before=None, after=None, **extra) -> dict:
+def _action_result(
+    action: str,
+    status: str,
+    scope: Mapping,
+    static_id: str,
+    before=None,
+    after=None,
+    *,
+    acknowledgedBy: str = "terminal",
+    **extra,
+) -> dict:
     return {
         "schemaVersion": 1,
         "action": action,
@@ -393,6 +403,7 @@ def _action_result(action: str, status: str, scope: Mapping, static_id: str, bef
         "staticId": static_id,
         "before": before,
         "after": after,
+        "acknowledgedBy": acknowledgedBy,
         **extra,
     }
 
@@ -429,6 +440,7 @@ def execute_automation_action(
     run_dir: Path,
     *,
     workspace_user: str | None = None,
+    acknowledged_by: str = "terminal",
 ) -> dict:
     """Apply one confirmed, app-scoped APEX action and independently read it back."""
     scope = {
@@ -440,9 +452,9 @@ def execute_automation_action(
         "appId": app_id,
     }
     if action not in WRITE_ACTIONS:
-        return _action_result(action, "refused", scope, static_id, reason="unknown automation action")
+        return _action_result(action, "refused", scope, static_id, acknowledgedBy=acknowledged_by, reason="unknown automation action")
     if not _valid_static_id(static_id):
-        return _action_result(action, "refused", scope, static_id, reason="invalid automation static ID")
+        return _action_result(action, "refused", scope, static_id, acknowledgedBy=acknowledged_by, reason="invalid automation static ID")
     try:
         validate_snapshot(expected_snapshot)
         expected_rows = _automation_index(expected_snapshot)
@@ -459,19 +471,22 @@ def execute_automation_action(
         if not _valid_workspace_user(user):
             raise AutomationOperationError("set APEX_WORKSPACE_USERNAME to an existing workspace developer")
     except (AutomationOperationError, TypeError, ValueError) as error:
-        return _action_result(action, "refused", scope, static_id, reason=str(error))
+        return _action_result(action, "refused", scope, static_id, acknowledgedBy=acknowledged_by, reason=str(error))
 
     run_dir = Path(run_dir)
     if run_dir.is_symlink():
-        return _action_result(action, "refused", scope, static_id, reason="automation action evidence directory is a symbolic link")
+        return _action_result(action, "refused", scope, static_id, acknowledgedBy=acknowledged_by, reason="automation action evidence directory is a symbolic link")
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     run_dir.chmod(0o700)
     try:
         live_before = capture_lifecycle(target, workspace, app_id, run_dir / "live-before")
     except (OSError, SqlclError, ValueError) as error:
-        report = _action_result(action, "refused", scope, static_id, before=expected_selected,
-                                apiOutcome="not-started",
-                                reason=f"live scope recheck is unavailable ({type(error).__name__})")
+        report = _action_result(
+            action, "refused", scope, static_id, before=expected_selected,
+            acknowledgedBy=acknowledged_by,
+            apiOutcome="not-started",
+            reason=f"live scope recheck is unavailable ({type(error).__name__})",
+        )
         _store_action_evidence(run_dir, report)
         return report
     try:
@@ -488,6 +503,7 @@ def execute_automation_action(
             action, "refused", scope, static_id,
             before=expected_selected,
             liveBefore=live_selected,
+            acknowledgedBy=acknowledged_by,
             reason="target, application, or selected automation changed after confirmation",
         )
         _store_action_evidence(run_dir, report)
@@ -502,6 +518,7 @@ def execute_automation_action(
     except (AutomationOperationError, OSError, ValueError) as error:
         report = _action_result(
             action, "refused", scope, static_id, before=live_selected,
+            acknowledgedBy=acknowledged_by,
             apiOutcome="not-started", reason=f"action preflight failed ({type(error).__name__})",
             evidence=str(driver_dir),
         )
@@ -519,6 +536,7 @@ def execute_automation_action(
             scope,
             static_id,
             before=live_selected,
+            acknowledgedBy=acknowledged_by,
             apiOutcome="not-started" if refusal else "unknown",
             reason=REFUSAL_REASONS[refusal] if refusal else "SQLcl did not confirm the automation action; do not replay until reconciled",
             evidence=str(error.run_dir),
@@ -528,6 +546,7 @@ def execute_automation_action(
     except (AutomationOperationError, OSError, ValueError) as error:
         report = _action_result(
             action, "unknown", scope, static_id, before=live_selected, apiOutcome="unknown",
+            acknowledgedBy=acknowledged_by,
             reason=f"automation action evidence is incomplete ({type(error).__name__})",
             evidence=str(run_dir),
         )
@@ -586,6 +605,7 @@ def execute_automation_action(
         after=after_record,
         apiOutcome="returned",
         runLog=run_log,
+        acknowledgedBy=acknowledged_by,
         reason=reason,
     )
     _store_action_evidence(run_dir, report)
@@ -601,6 +621,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--automation", action="append", default=[], help="exact static ID; repeat to select several")
     parser.add_argument("--expected-status", help="required by check; APEX 26.2: ACTIVE, DISABLED, or ERROR")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("-y", "--yes", action="store_true", help="accept the action confirmation without typing at a terminal")
+    parser.add_argument("--confirm-target", metavar="DB_UNIQUE_NAME", help="for --yes with --env prod: the observed db_unique_name")
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--env-file", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -608,6 +630,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     schema = args.schema or os.environ.get("PROJECT_SCHEMA", "")
     if args.action != "check" and args.expected_status is not None:
         parser.error("--expected-status is valid only with check")
+    if args.action not in WRITE_ACTIONS and args.yes:
+        parser.error("-y/--yes is valid only with enable, disable, or run-once")
+    if args.confirm_target is not None:
+        if not args.yes:
+            parser.error("--confirm-target is valid only with --yes")
+        if args.action not in WRITE_ACTIONS:
+            parser.error("--confirm-target is valid only with enable, disable, or run-once")
+        if args.env == "dev":
+            parser.error("--confirm-target is not valid with --env dev")
+        if not args.confirm_target.strip():
+            parser.error("--confirm-target needs the observed db_unique_name")
     if args.action == "check":
         if not args.automation:
             parser.error("check requires one or more --automation static IDs")
@@ -654,32 +687,74 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "This creates and deletes an APEX session; the application's configured session initialization and cleanup code may run.",
                 file=sys.stderr,
             )
-            print(f"Type exactly {confirmation!r} to continue: ", end="", file=sys.stderr, flush=True)
-            # A typed acknowledgment: redirected input is refused (no flag replaces it), so a piped line cannot run an action.
-            entered = ""
-            if terminal_confirm.may_read_acknowledgment():
-                try:
-                    entered = input().strip()
-                except EOFError:
-                    entered = ""
-            if entered != confirmation:
-                report = _action_result(
-                    args.action, "refused", scope, selected_row["staticId"],
-                    before=selected_row,
-                    reason="exact action confirmation was not supplied",
-                )
+            if args.yes:
+                observed_db = identity.get("db_unique_name")
+                if args.env == "prod" and args.confirm_target is None:
+                    report = _action_result(
+                        args.action,
+                        "refused",
+                        scope,
+                        selected_row["staticId"],
+                        before=selected_row,
+                        acknowledgedBy="--yes",
+                        reason=terminal_confirm.PRODUCTION_NAME_REQUIRED + "; --yes alone is refused and no action was run",
+                    )
+                elif args.confirm_target is not None and args.confirm_target != observed_db:
+                    report = _action_result(
+                        args.action,
+                        "refused",
+                        scope,
+                        selected_row["staticId"],
+                        before=selected_row,
+                        acknowledgedBy="--yes",
+                        reason=f"--confirm-target {args.confirm_target!r} does not match observed db_unique_name {observed_db!r}; no action was run",
+                    )
+                else:
+                    print("Acknowledged by --yes; the confirmation was not typed.", file=sys.stderr)
+                    target = _target(values, args.env, schema)
+                    report = execute_automation_action(
+                        target,
+                        scope["workspace"],
+                        app_id,
+                        selected_row["staticId"],
+                        args.action,
+                        snapshot,
+                        run_dir,
+                        workspace_user=values["APEX_WORKSPACE_USERNAME"],
+                        acknowledged_by="--yes",
+                    )
             else:
-                target = _target(values, args.env, schema)
-                report = execute_automation_action(
-                    target,
-                    scope["workspace"],
-                    app_id,
-                    selected_row["staticId"],
-                    args.action,
-                    snapshot,
-                    run_dir,
-                    workspace_user=values["APEX_WORKSPACE_USERNAME"],
-                )
+                print(f"Type exactly {confirmation!r} to continue: ", end="", file=sys.stderr, flush=True)
+                # A typed acknowledgment: redirected input is refused (pass --yes to skip), so a piped line cannot run an action.
+                entered = ""
+                if terminal_confirm.may_read_acknowledgment():
+                    try:
+                        entered = input().strip()
+                    except EOFError:
+                        entered = ""
+                if entered != confirmation:
+                    report = _action_result(
+                        args.action,
+                        "refused",
+                        scope,
+                        selected_row["staticId"],
+                        before=selected_row,
+                        acknowledgedBy="terminal",
+                        reason="exact action confirmation was not supplied",
+                    )
+                else:
+                    target = _target(values, args.env, schema)
+                    report = execute_automation_action(
+                        target,
+                        scope["workspace"],
+                        app_id,
+                        selected_row["staticId"],
+                        args.action,
+                        snapshot,
+                        run_dir,
+                        workspace_user=values["APEX_WORKSPACE_USERNAME"],
+                        acknowledged_by="terminal",
+                    )
         else:
             report = _result(args.action, "observed", scope, selected)
     except (ConfigError, QueryError, TargetResolutionError, DescriptorError, AutomationOperationError, OSError, ValueError) as error:
@@ -710,6 +785,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Before: {json.dumps(report['before'], ensure_ascii=True, sort_keys=True)}")
         if report.get("after") is not None:
             print(f"After: {json.dumps(report['after'], ensure_ascii=True, sort_keys=True)}")
+        if report.get("acknowledgedBy"):
+            print(f"Acknowledged by: {report['acknowledgedBy']}")
         if report.get("runLog"):
             print(f"Execution log: {json.dumps(report['runLog'], ensure_ascii=True, sort_keys=True)}")
         if report.get("reason"):
