@@ -330,10 +330,9 @@ class FeatureCliTests(unittest.TestCase):
         self.assertIn("redirected input is not accepted", stderr.getvalue())
 
         stderr = io.StringIO()
-        with patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), patch.dict("os.environ", {"TEAM_ACK_FROM_STDIN": "1"}), \
+        with patch.object(terminal_confirm, "stdin_is_terminal", return_value=True), \
                 patch("builtins.input", return_value="RECONCILE-RUN abc"), contextlib.redirect_stderr(stderr):
             self.assertEqual(feature_cli._reconcile_ack_from_terminal("RECONCILE-RUN abc"), "RECONCILE-RUN abc")
-        self.assertIn("acknowledgment read from redirected input (TEAM_ACK_FROM_STDIN)", stderr.getvalue())
 
     def test_cleanup_requires_explicit_yes_to_apply_and_reports_blocked_gate(self) -> None:
         with patch.object(feature_cli.release_state, "cleanup_capsule", return_value={"state": "complete"}) as cleanup:

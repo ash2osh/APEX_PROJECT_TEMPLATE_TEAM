@@ -6,7 +6,6 @@ import shutil
 import tempfile
 import unittest
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +16,9 @@ except ImportError:
 
 
 CHECKS = b'{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n'
+IDENTITY = {"session_user": "APP_DEV", "current_schema": "APP_DEV", "db_name": "DB",
+            "db_unique_name": "DB_A", "service_name": "SERVICE", "container_id": "3",
+            "container_name": "PDB_A", "edition": "ORA$BASE", "database_version": "19.0"}
 
 
 def add_folder(root: Path, relative: str) -> Path:
@@ -27,24 +29,31 @@ def add_folder(root: Path, relative: str) -> Path:
     return folder
 
 
-def add_attempt(root: Path, folder: Path, *, schema: str = "APP_DEV") -> Path:
-    attempt = root / "scratch" / "migration-attempt-archive-test"
-    attempt.mkdir(parents=True)
+def add_attempt(
+    root: Path, folder: Path, *, schema: str = "APP_DEV", environment: str = "dev",
+    run_suffix: str = "archive-test", target: dict | None = None,
+) -> Path:
+    attempt = root / "scratch" / f"migration-attempt-{run_suffix}"
+    attempt.mkdir(parents=True, exist_ok=True)
+    manifest_target = target or {"environment": environment, **IDENTITY, "current_schema": schema}
     manifest = {
         "schemaVersion": 1,
         "state": "write-attempted",
-        "target": {"environment": "dev", "current_schema": schema},
+        "target": manifest_target,
         "migrations": [{"folder": folder.name, "writeAttempted": True, "state": "write-attempted"}],
     }
-    (attempt / "run-manifest.json").write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    (attempt / "run-manifest.json").write_text(json.dumps(manifest) + "\n", encoding="utf-8", newline="\n")
     return attempt
 
 
-def verified_receipt(folder: Path, migration, *, schema: str = "APP_DEV") -> dict:
+def verified_receipt(
+    folder: Path, migration, *, schema: str = "APP_DEV", environment: str = "dev", target_identity: dict | None = None,
+) -> dict:
+    target = target_identity or {"environment": environment, **IDENTITY, "current_schema": schema}
     return {
         "schemaVersion": 1,
         "state": "verified",
-        "environment": "dev",
+        "environment": environment,
         "migration": folder.name,
         "createdDate": migration.date,
         "family": migration.family,
@@ -52,7 +61,7 @@ def verified_receipt(folder: Path, migration, *, schema: str = "APP_DEV") -> dic
         "files": [{"name": item.name, "sequence": item.sequence, "sha256": item.sha256} for item in migration.files],
         "checksSha256": migration.checks_sha256,
         "payloadDigest": migration.payload_digest,
-        "target": {"environment": "dev", "current_schema": schema},
+        "target": target,
         "applyStartedAt": "2026-10-01T10:00:00+00:00",
         "applyCompletedAt": "2026-10-01T10:01:00+00:00",
         "verifiedAt": "2026-10-01T10:02:00+00:00",
@@ -70,11 +79,11 @@ def add_attempt_event(folder: Path, relative: str, migration) -> Path:
         "attemptId": str(uuid.uuid4()),
         "runId": "migration-attempt-archive-test",
         "predecessorEventId": None,
-        "recordedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "recordedAt": "2026-10-01T09:59:00Z",
         "migrationPath": relative,
         "environment": "dev",
         "target": {"environment": "dev", "connection": "fake-dev", "expected_user": "APP_DEV", "current_schema": "APP_DEV"},
-        "identity": None,
+        "identity": dict(IDENTITY),
         "files": [{"name": item.name, "sequence": item.sequence, "sha256": item.sha256} for item in migration.files],
         "checksSha256": migration.checks_sha256,
         "payloadDigest": migration.payload_digest,
@@ -97,6 +106,92 @@ class MigrationArchiveTests(unittest.TestCase):
     def require_archive(self):
         self.assertIsNotNone(archive, "migration archiving is not implemented")
         return archive
+
+    def test_receipt_with_unknown_database_does_not_resolve_pending_attempt(self) -> None:
+        api = self.require_archive()
+        relative = "migrations/APP_DEV/2026-10-01_archive-family-r001"
+        folder = add_folder(self.root, relative)
+        migration = api.load_migration(self.root, relative)
+        receipt = verified_receipt(folder, migration, target_identity={"environment": "dev", "current_schema": "APP_DEV"})
+        (folder / "status.dev.json").write_text(json.dumps(receipt) + "\n", encoding="utf-8", newline="\n")
+        add_attempt_event(folder, relative, migration)
+        with self.assertRaises(api.MigrationArchiveError):
+            api.archive_migrations(self.root, [relative])
+        self.assertTrue(folder.is_dir())
+
+    def test_one_receipt_cannot_resolve_two_pending_attempts_on_same_target(self) -> None:
+        api = self.require_archive()
+        relative = "migrations/APP_DEV/2026-10-01_archive-family-r001"
+        folder = add_folder(self.root, relative)
+        migration = api.load_migration(self.root, relative)
+        (folder / "status.dev.json").write_text(
+            json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8", newline="\n"
+        )
+        add_attempt_event(folder, relative, migration)
+        add_attempt_event(folder, relative, migration)
+        with self.assertRaises(api.MigrationArchiveError):
+            api.archive_migrations(self.root, [relative])
+        self.assertTrue(folder.is_dir())
+
+    def test_one_receipt_cannot_resolve_two_scratch_only_attempts(self) -> None:
+        api = self.require_archive()
+        relative = "migrations/APP_DEV/2026-10-01_archive-family-r001"
+        folder = add_folder(self.root, relative)
+        migration = api.load_migration(self.root, relative)
+        (folder / "status.dev.json").write_text(
+            json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8", newline="\n"
+        )
+        add_attempt(self.root, folder, run_suffix="first")
+        add_attempt(self.root, folder, run_suffix="second")
+        with self.assertRaises(api.MigrationArchiveError):
+            api.archive_migrations(self.root, [relative])
+
+    def test_receipt_does_not_cover_a_later_pending_attempt(self) -> None:
+        api = self.require_archive()
+        relative = "migrations/APP_DEV/2026-10-01_archive-family-r001"
+        folder = add_folder(self.root, relative)
+        migration = api.load_migration(self.root, relative)
+        (folder / "status.dev.json").write_text(
+            json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8", newline="\n"
+        )
+        event = add_attempt_event(folder, relative, migration)
+        payload = json.loads(event.read_text(encoding="utf-8"))
+        payload["recordedAt"] = "2026-10-02T10:02:00Z"
+        event.write_text(json.dumps(payload) + "\n", encoding="utf-8", newline="\n")
+        with self.assertRaises(api.MigrationArchiveError):
+            api.archive_migrations(self.root, [relative])
+
+    def test_receipt_with_database_identity_does_not_cover_an_unidentified_attempt(self) -> None:
+        api = self.require_archive()
+        relative = "migrations/APP_DEV/2026-10-01_archive-family-r001"
+        folder = add_folder(self.root, relative)
+        migration = api.load_migration(self.root, relative)
+        target = {"environment": "dev", "current_schema": "APP_DEV", "db_unique_name": "DB_A"}
+        (folder / "status.dev.json").write_text(
+            json.dumps(verified_receipt(folder, migration, target_identity=target)) + "\n", encoding="utf-8", newline="\n"
+        )
+        add_attempt_event(folder, relative, migration)
+        with self.assertRaises(api.MigrationArchiveError):
+            api.archive_migrations(self.root, [relative])
+
+    def test_receipt_does_not_cover_an_attempt_in_another_container(self) -> None:
+        api = self.require_archive()
+        relative = "migrations/APP_DEV/2026-10-01_archive-family-r001"
+        folder = add_folder(self.root, relative)
+        migration = api.load_migration(self.root, relative)
+        identity = {"session_user": "APP_DEV", "current_schema": "APP_DEV", "db_name": "DB",
+                    "db_unique_name": "DB_A", "service_name": "svc", "container_id": "3",
+                    "container_name": "PDB_A", "edition": "ORA$BASE", "database_version": "19.0"}
+        target = {"environment": "dev", **identity}
+        (folder / "status.dev.json").write_text(
+            json.dumps(verified_receipt(folder, migration, target_identity=target)) + "\n", encoding="utf-8", newline="\n"
+        )
+        event = add_attempt_event(folder, relative, migration)
+        payload = json.loads(event.read_text(encoding="utf-8"))
+        payload["identity"] = {**identity, "container_id": "4", "container_name": "PDB_B"}
+        event.write_text(json.dumps(payload) + "\n", encoding="utf-8", newline="\n")
+        with self.assertRaises(api.MigrationArchiveError):
+            api.archive_migrations(self.root, [relative])
 
     def test_default_run_prints_a_dry_run_plan_without_moving_files(self) -> None:
         api = self.require_archive()
@@ -245,11 +340,97 @@ class MigrationArchiveTests(unittest.TestCase):
         add_attempt(self.root, folder)
         migration = api.load_migration(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
         receipt = verified_receipt(folder, migration)
-        (folder / "status.dev.json").write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+        (folder / "status.dev.json").write_text(json.dumps(receipt) + "\n", encoding="utf-8", newline="\n")
 
         result = api.archive_migrations(self.root, ["migrations/APP_DEV/2026-10-01_archive-family-r001"])
 
         self.assertTrue(any(item.startswith("status.dev.json") for item in result.entries[0].evidence))
+        self.assertTrue(folder.is_dir())
+
+    def test_dev_receipt_with_pending_staging_attempt_refuses_default_archive(self) -> None:
+        api = self.require_archive()
+        folder = add_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        migration = api.load_migration(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        (folder / "status.dev.json").write_text(json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8", newline="\n")
+        add_attempt(self.root, folder, environment="staging", run_suffix="staging-run")
+
+        with self.assertRaisesRegex(api.MigrationArchiveError, "attempt record.*no verified receipt for staging"):
+            api.archive_migrations(self.root, ["migrations/APP_DEV/2026-10-01_archive-family-r001"])
+
+        self.assertTrue(folder.is_dir())
+
+    def test_dev_receipt_with_pending_prod_attempt_refuses_default_archive(self) -> None:
+        api = self.require_archive()
+        folder = add_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        migration = api.load_migration(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        (folder / "status.dev.json").write_text(json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8", newline="\n")
+        add_attempt(self.root, folder, environment="prod", run_suffix="prod-run")
+
+        with self.assertRaisesRegex(api.MigrationArchiveError, "attempt record.*no verified receipt for prod"):
+            api.archive_migrations(self.root, ["migrations/APP_DEV/2026-10-01_archive-family-r001"])
+
+        self.assertTrue(folder.is_dir())
+
+    def test_staging_attempt_with_staging_verified_receipt_can_be_archived(self) -> None:
+        api = self.require_archive()
+        folder = add_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        migration = api.load_migration(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        (folder / "status.staging.json").write_text(
+            json.dumps(verified_receipt(folder, migration, environment="staging")) + "\n", encoding="utf-8", newline="\n"
+        )
+        add_attempt(self.root, folder, environment="staging", run_suffix="staging-run")
+
+        result = api.archive_migrations(self.root, ["migrations/APP_DEV/2026-10-01_archive-family-r001"])
+
+        self.assertTrue(any(item.startswith("status.staging.json") for item in result.entries[0].evidence))
+        self.assertTrue(folder.is_dir())
+
+    def test_preserve_unresolved_archives_staging_attempt_with_dev_receipt(self) -> None:
+        api = self.require_archive()
+        folder = add_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        migration = api.load_migration(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        (folder / "status.dev.json").write_text(json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8", newline="\n")
+        add_attempt(self.root, folder, environment="staging", run_suffix="staging-run")
+
+        plan = api.archive_migrations(
+            self.root,
+            ["migrations/APP_DEV/2026-10-01_archive-family-r001"],
+            preserve_unresolved=True,
+            yes=True,
+        )
+
+        self.assertIn("unresolved (preserved)", plan.entries[0].evidence)
+        self.assertFalse(folder.exists())
+        self.assertTrue((self.root / "migrations-archive/APP_DEV/2026-10-01_archive-family-r001").is_dir())
+
+    def test_dev_receipt_with_attempt_on_different_target_identity_refuses(self) -> None:
+        api = self.require_archive()
+        folder = add_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        migration = api.load_migration(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        receipt_target = {"environment": "dev", "current_schema": "APP_DEV", "db_unique_name": "DB_A"}
+        (folder / "status.dev.json").write_text(
+            json.dumps(verified_receipt(folder, migration, target_identity=receipt_target)) + "\n", encoding="utf-8", newline="\n"
+        )
+        attempt_target = {"environment": "dev", "current_schema": "APP_DEV", "db_unique_name": "DB_B"}
+        add_attempt(self.root, folder, environment="dev", run_suffix="mismatched-target", target=attempt_target)
+
+        with self.assertRaisesRegex(api.MigrationArchiveError, "attempt record.*no verified receipt.*unknown"):
+            api.archive_migrations(self.root, ["migrations/APP_DEV/2026-10-01_archive-family-r001"])
+
+        self.assertTrue(folder.is_dir())
+
+    def test_malformed_unknown_scratch_evidence_refuses_default_archive(self) -> None:
+        api = self.require_archive()
+        folder = add_folder(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        migration = api.load_migration(self.root, "migrations/APP_DEV/2026-10-01_archive-family-r001")
+        (folder / "status.dev.json").write_text(json.dumps(verified_receipt(folder, migration)) + "\n", encoding="utf-8", newline="\n")
+        bad_dir = self.root / "scratch" / "migration-attempt-bad"
+        bad_dir.mkdir(parents=True, exist_ok=True)
+        (bad_dir / "run-manifest.json").write_text("not json!\n", encoding="utf-8", newline="\n")
+
+        with self.assertRaisesRegex(api.MigrationArchiveError, "state unknown"):
+            api.archive_migrations(self.root, ["migrations/APP_DEV/2026-10-01_archive-family-r001"])
+
         self.assertTrue(folder.is_dir())
 
     def test_only_the_contiguous_low_prefix_or_the_whole_family_can_be_archived(self) -> None:

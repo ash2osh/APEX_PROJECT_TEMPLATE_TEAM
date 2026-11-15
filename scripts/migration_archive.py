@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from .migration_manifest import (
     SCHEMA_DIRECTORY_RE,
@@ -22,13 +22,90 @@ from .migration_manifest import (
     load_migration,
     validate_receipt,
 )
-from .migration_attempts import RESOLUTION_STATES
+from .migration_attempts import RESOLUTION_STATES, chain_terminals, read_attempt_events
 from .migration_revision import inspect_migration_lock, reconcile_hint
 from .path_utils import relative_to_root
 
 
 DEFAULT_DESTINATION = "migrations-archive"
 DEFAULT_REASON = "released or superseded"
+
+
+def _attempt_matches_receipt_target(root: Path, folder: Path, env: str, receipt_target: Mapping, verified_at: str) -> bool:
+    identity_fields = ("session_user", "current_schema", "db_name", "db_unique_name", "service_name",
+                       "container_id", "container_name", "edition", "database_version")
+    # A receipt that lacks the observed identity cannot establish where a
+    # pending write occurred, even when its environment and schema match.
+    if any(not receipt_target.get(field) for field in identity_fields):
+        return False
+    run_ids: set[str] = set()
+    unresolved_runs: set[str] = set()
+    scratch = root / "scratch"
+    if scratch.is_dir():
+        for attempt_dir in scratch.iterdir():
+            if not attempt_dir.is_dir() or not attempt_dir.name.startswith("migration-attempt-"):
+                continue
+            manifest_path = attempt_dir / "run-manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                manifest = decode_json(manifest_path.read_bytes(), str(manifest_path))
+            except Exception:
+                continue
+            if not isinstance(manifest, dict):
+                continue
+            target = manifest.get("target")
+            if not isinstance(target, dict) or target.get("environment") != env:
+                continue
+            for rec in manifest.get("migrations", []):
+                if isinstance(rec, dict) and rec.get("folder") == folder.name:
+                    state = rec.get("state")
+                    if state not in {"frozen", "apply-not-started"}:
+                        run_ids.add(attempt_dir.name)
+                        if state != "verified":
+                            unresolved_runs.add(attempt_dir.name)
+                    if any(receipt_target.get(field) and target.get(field) != receipt_target[field] for field in identity_fields):
+                        return False
+    try:
+        events = read_attempt_events(folder)
+    except Exception:
+        return False
+    terminals = chain_terminals(events)
+    relevant = [state for state, environment in terminals.values() if environment == env and state in {"pending", "verified"}]
+    for event in events:
+        terminal = terminals.get(event.get("attemptId"))
+        if terminal and terminal[1] == env and terminal[0] in {"pending", "verified"}:
+            run_ids.add(event["runId"])
+            if terminal[0] == "pending":
+                unresolved_runs.add(event["runId"])
+    # A receipt carries no attempt id, so it cannot establish which of several
+    # attempts it verifies, even when they used the same database and schema.
+    if ("pending" in relevant and len(relevant) > 1) or (unresolved_runs and len(run_ids) > 1):
+        return False
+    for event in events:
+        if not isinstance(event, dict) or event.get("environment") != env:
+            continue
+        if event.get("state") == "pending" and terminals.get(event.get("attemptId")) == ("pending", env):
+            try:
+                started = datetime.fromisoformat(event["recordedAt"].replace("Z", "+00:00"))
+                verified = datetime.fromisoformat(verified_at.replace("Z", "+00:00"))
+                if started >= verified:
+                    return False
+            except (KeyError, TypeError, ValueError):
+                return False
+        ev_target = event.get("target")
+        if isinstance(ev_target, dict):
+            if ev_target.get("current_schema") and receipt_target.get("current_schema"):
+                if ev_target["current_schema"] != receipt_target["current_schema"]:
+                    return False
+            if ev_target.get("db_unique_name") and receipt_target.get("db_unique_name"):
+                if ev_target["db_unique_name"] != receipt_target["db_unique_name"]:
+                    return False
+        ev_identity = event.get("identity")
+        if any(receipt_target.get(field) and (not isinstance(ev_identity, dict) or ev_identity.get(field) != receipt_target[field])
+               for field in identity_fields if field != "current_schema"):
+            return False
+    return True
 
 
 class MigrationArchiveError(ValueError):
@@ -187,6 +264,9 @@ def _folder_evidence(
 ) -> tuple[tuple[str, ...], bool, bool]:
     evidence: list[str] = []
     verified_receipt = False
+    verified_by_env: dict[str, bool] = {}
+    receipt_targets: dict[str, dict] = {}
+    receipt_times: dict[str, str] = {}
     for environment in ("dev", "staging", "prod"):
         path = migration.folder / f"status.{environment}.json"
         if not path.exists() and not path.is_symlink():
@@ -197,10 +277,15 @@ def _folder_evidence(
                 validate_receipt(path, migration, raw["target"])
                 evidence.append(f"{path.name} (verified)")
                 verified_receipt = True
+                verified_by_env[environment] = True
+                receipt_targets[environment] = raw["target"]
+                receipt_times[environment] = raw["verifiedAt"]
             else:
                 evidence.append(f"{path.name} (unverified)")
+                verified_by_env[environment] = False
         except (OSError, MigrationManifestError, TypeError, ValueError):
             evidence.append(f"{path.name} (unverified)")
+            verified_by_env[environment] = False
 
     lock = inspect_migration_lock(root, relative_folder)
     # A resolution that is unreadable, stale or in conflict with a receipt is never archived past.
@@ -226,26 +311,50 @@ def _folder_evidence(
         evidence.extend(attempt_states)
     if not evidence:
         evidence.append("no-attempt-or-receipt")
-    # An attempt that provably never started its write (apply-not-started with its retained no-write
-    # evidence, so the folder is unlocked) left nothing to resolve.
-    no_write_only = (
-        bool(attempt_states)
-        and lock.status == "unlocked"
-        and all(state.startswith("attempt-event:apply-not-started:") for state in attempt_states)
-    )
-    if no_write_only and not verified_receipt:
-        evidence.append("apply-not-started (no write)")
-    elif attempt_states and not verified_receipt:
+
+    unresolved_attempts = []
+    no_write_states = []
+    for state in attempt_states:
+        if state.startswith("attempt-event:apply-not-started:") and lock.status == "unlocked":
+            no_write_states.append(state)
+            continue
+        if state.startswith(("attempt:", "attempt-event:")):
+            parts = state.split(":")
+            attempt_env = parts[2] if len(parts) >= 3 else None
+        else:
+            attempt_env = None
+
+        if attempt_env not in {"dev", "staging", "prod"}:
+            unresolved_attempts.append(state)
+            continue
+
+        if not verified_by_env.get(attempt_env):
+            unresolved_attempts.append(state)
+            continue
+
+        receipt_target = receipt_targets.get(attempt_env, {})
+        if not _attempt_matches_receipt_target(root, migration.folder, attempt_env, receipt_target, receipt_times[attempt_env]):
+            unresolved_attempts.append(state)
+            continue
+
+    if unresolved_attempts:
         if allow_unverified_attempts:
             evidence.append("attempt-without-verified-receipt (accepted)")
         elif preserve_unresolved:
             evidence.append("unresolved (preserved)")
         else:
+            unresolved_envs = sorted({
+                state.split(":")[2] for state in unresolved_attempts
+                if state.startswith(("attempt:", "attempt-event:")) and len(state.split(":")) >= 3 and state.split(":")[2] in {"dev", "staging", "prod"}
+            })
+            env_desc = f"for {', '.join(unresolved_envs)}" if unresolved_envs else "for any environment"
             raise MigrationArchiveError(
-                f"attempt record for {migration.folder.name} has no verified receipt for any environment; state unknown; "
+                f"attempt record for {migration.folder.name} has no verified receipt {env_desc}; state unknown; "
                 f"{hint or 'inspect the attempt evidence'}; or archive it as unresolved with --preserve-unresolved "
                 "(--allow-unverified-attempts archives it as a failed or abandoned attempt)"
             )
+    elif no_write_states and not verified_receipt:
+        evidence.append("apply-not-started (no write)")
     return tuple(evidence), bool(attempt_states), verified_receipt
 
 

@@ -1392,6 +1392,22 @@ def _assert_confirm_target(root: Path, targets: Sequence[Target], confirm_target
         safe_rmtree(run_dir)
 
 
+def _observe_production_target_names(root: Path, targets: Sequence[Target]) -> dict[Target, str]:
+    """Capture each production target's database name before terminal confirmation."""
+    unique_targets = list(dict.fromkeys(targets))
+    if not unique_targets:
+        raise RolloutError("production rollout has no database target to check; no steps were run")
+    scratch = _safe_scratch_root(root)
+    run_dir = Path(tempfile.mkdtemp(prefix="confirm-target-", dir=scratch))
+    try:
+        return {
+            target: _observed_db_unique_name(target, run_dir / f"target-{index:02d}")
+            for index, target in enumerate(unique_targets, start=1)
+        }
+    finally:
+        safe_rmtree(run_dir)
+
+
 def _confirm_from_terminal(prompt: str) -> bool:
     print(prompt)
     if not terminal_confirm.may_read_yes_no():
@@ -1830,10 +1846,16 @@ def _execute_app_deploy(
     # --confirm-target, or else the name read from the target just before this child starts.
     child_flags = ["--yes"]
     if environment == "prod":
-        child_name = confirm_target
-        if child_name is None:
-            child_name = _observed_db_unique_name(_target_from_binding(frozen_child_binding), evidence_dir / "target-identity")
-        child_flags += ["--confirm-target", child_name]
+        if confirm_target is None:
+            raise RolloutError("production app-deploy requires confirmed target name")
+        observed_name = _observed_db_unique_name(_target_from_binding(frozen_child_binding), evidence_dir / "target-identity")
+        if observed_name != confirm_target:
+            raise RolloutError(
+                f"step application target db_unique_name {observed_name!r} does not match confirmed target {confirm_target!r}"
+            )
+        child_flags += ["--confirm-target", confirm_target]
+    elif confirm_target is not None:
+        child_flags += ["--confirm-target", confirm_target]
     # deploy.sh is a Bash entry point. On Windows, `sys.executable` is Python, so
     # launch Git Bash by its resolved path through the project's shared helper.
     from scripts.sqlcl_session import bash_command
@@ -1880,6 +1902,7 @@ def execute_step(
     manifest_confirmed: bool,
     expected_identity: Mapping[str, str] | None = None,
     confirm_target: str | None = None,
+    rollout_confirmed_by: str | None = None,
 ) -> StepResult:
     """Execute one step using existing command or SQLcl paths."""
     kind = step["type"]
@@ -1903,6 +1926,8 @@ def execute_step(
                     repo_root=repo_root,
                     confirm=require_rollout_confirmation,
                     expected_input_hashes=expected_input_hashes,
+                    expected_db_unique_name=confirm_target,
+                    rollout_confirmed_by=rollout_confirmed_by,
                 )
         else:
             arguments.extend(("--phase", step["phase"], "--format", "json"))
@@ -1945,6 +1970,24 @@ def execute_step(
         if kind == "ords-import":
             validate_ords_script(source, step["schema"], step_number)
             source, removed = exclude_ords_modules(source, step.get("excludeModules", []), step["schema"])
+        target_expected_identity = expected_identity
+        if environment in {"staging", "prod"} or expected_identity is not None:
+            binding = _target_binding(step, repo_root, environment)
+            target = Target(environment, binding["connection"], binding["expectedUser"], binding["schema"], binding["classification"])
+            step_observed = _observe_target_identity(target, evidence_dir / "target-identity")
+            if environment == "prod" or confirm_target is not None:
+                observed_db = step_observed.get("db_unique_name")
+                if not observed_db:
+                    raise RolloutError(f"step {step_number} target database identity has no db_unique_name")
+                if confirm_target is not None and observed_db != confirm_target:
+                    raise RolloutError(
+                        f"step {step_number} target db_unique_name {observed_db!r} does not match confirmed target {confirm_target!r}"
+                    )
+            if expected_identity is not None and step_observed != expected_identity:
+                raise RolloutError(f"step {step_number} target identity changed after preparation")
+            if target_expected_identity is None:
+                target_expected_identity = step_observed
+
         result = _execute_sql_payload(
             step,
             environment=environment,
@@ -1953,7 +1996,7 @@ def execute_step(
             step_number=step_number,
             source=source,
             ords=kind == "ords-import",
-            expected_identity=expected_identity,
+            expected_identity=target_expected_identity,
         )
         if removed:
             return StepResult(result.exit_code, result.evidence_paths, f"excluded ORDS modules {', '.join(removed)}; {result.message}", result.observed_identity)
@@ -2161,16 +2204,34 @@ def _run_legacy_rollout(
             return 0
 
         manifest_confirmed = False
+        approved_target_name: str | None = confirm_target
+        approved_target_names: dict[Target, str] = {}
         if environment in {"staging", "prod"}:
-            if confirm_target is not None:
-                _assert_confirm_target(root, _plan_targets(plan, root, environment), confirm_target, environment)
+            if environment == "prod":
+                targets = _plan_targets(plan, root, environment)
+                if confirm_target is not None:
+                    _assert_confirm_target(root, targets, confirm_target, environment)
+                    approved_target_name = confirm_target
+                elif targets:
+                    approved_target_names = _observe_production_target_names(root, targets)
+                else:
+                    approved_target_name = None
+            elif confirm_target is not None:
+                targets = _plan_targets(plan, root, environment)
+                _assert_confirm_target(root, targets, confirm_target, environment)
+                approved_target_name = confirm_target
             if yes or confirm_target is not None:
                 print(_confirmation_text(manifest, plan, environment, from_step, question=False))
                 print(terminal_confirm.confirmed_line(yes, confirm_target))
                 approved = True
             else:
                 try:
-                    approved = bool(confirm(_confirmation_text(manifest, plan, environment, from_step)))
+                    prompt = _confirmation_text(manifest, plan, environment, from_step, question=False)
+                    if approved_target_names:
+                        prompt += "\nObserved production targets: " + ", ".join(
+                            f"{target.connection}={name}" for target, name in approved_target_names.items()
+                        )
+                    approved = bool(confirm(prompt + "\nContinue with this rollout? [y/N]"))
                 except (EOFError, OSError):
                     approved = False
             if not approved:
@@ -2235,6 +2296,13 @@ def _run_legacy_rollout(
                     before_dir = evidence_dir / "target-before"
                     before_identity = _observe_target_identity(_target_from_binding(binding), before_dir)
                     identity_evidence.append(relative_to_root(before_dir, root).as_posix())
+                step_target_name = approved_target_name
+                if approved_target_names:
+                    step_targets = _plan_targets([item], root, environment)
+                    if step_targets:
+                        step_target_name = approved_target_names.get(step_targets[0])
+                        if step_target_name is None:
+                            raise RolloutError(f"step {item['number']} target was not confirmed")
                 result = execute_step(
                     item["step"],
                     environment=environment,
@@ -2245,7 +2313,8 @@ def _run_legacy_rollout(
                     plan=plan,
                     manifest_confirmed=manifest_confirmed,
                     expected_identity=before_identity,
-                    confirm_target=confirm_target,
+                    confirm_target=step_target_name,
+                    rollout_confirmed_by=report["confirmedBy"],
                 )
                 if not isinstance(result, StepResult):
                     raise RolloutError("rollout step executor returned an invalid result")

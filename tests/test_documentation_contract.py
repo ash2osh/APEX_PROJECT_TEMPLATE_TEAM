@@ -532,6 +532,24 @@ class GuideContractTests(unittest.TestCase):
         self.assertIn("fingerprint", rules)
         self.assertIn("one direct", limitations)
 
+    def test_publish_targets_dev_and_deploy_targets_staging_and_prod(self) -> None:
+        team_sh = (ROOT / "scripts" / "team.sh").read_text(encoding="utf-8")
+        team_ps1 = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        publish_rules = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
+        getting_started = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+
+        for script_text in (team_sh, team_ps1):
+            self.assertIn("publish <app_id> [--env dev] [--force]", script_text)
+            self.assertIn("import to DEV", script_text)
+            self.assertIn("deploy <app_id> --env <staging|prod>", script_text)
+
+        self.assertIn("publish targets DEV only", publish_rules)
+        self.assertIn("scripts/team.sh deploy <id> --env <staging|prod>", publish_rules)
+        self.assertIn("publish_app.sh`/`publish_app.ps1` script is an internal implementation helper", publish_rules)
+        self.assertIn("Imports to shared DEV only", readme)
+        self.assertIn("`scripts/team.sh publish` targets DEV only", getting_started)
+
 
 if __name__ == "__main__":
     unittest.main()

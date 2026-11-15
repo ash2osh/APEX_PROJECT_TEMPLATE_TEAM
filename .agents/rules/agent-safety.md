@@ -47,7 +47,7 @@
   records a migration attempt's outcome: an agent never types it.
 - `-y` / `--yes` answers a staging or production `[y/N]` prompt only when the developer asked in the
   conversation for that run to be unattended. Production also needs `--confirm-target` with the name the
-  developer typed for the run. An agent never sets `TEAM_ACK_FROM_STDIN`, which only the live tests use.
+  developer typed for the run. An agent never sets `TEAM_ACK_FROM_STDIN`; it does not bypass terminal-only acknowledgments.
 - Use `scripts/team.sh compare-schema` with exact names or object prefixes for
   read-only live drift reports. Receipts and resulting DDL cannot reliably
   identify one unique migration file.

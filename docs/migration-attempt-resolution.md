@@ -129,8 +129,8 @@ the run as resolved.
 - It does not edit or delete the folder's SQL, `checks.json`, receipts or earlier attempt events.
 - It does not verify a folder. A folder with a verified receipt is refused.
 - It does not replace an existing resolution for the same environment.
-- It does not accept an acknowledgment from a pipe, a file or an agent, except the test-only
-  `TEAM_ACK_FROM_STDIN=1` path used by the opt-in live tests.
+- It does not accept an acknowledgment from a pipe, a file, an environment variable or an agent:
+  acknowledgments are terminal-only.
 
 ## Refusals
 
@@ -153,7 +153,7 @@ Nothing is written on any refusal. Each refusal exits 2 and says why:
 | --- | --- | --- |
 | Verified receipt, no attempt | Yes | `status.<env>.json (verified)` |
 | Resolution recorded, no verified receipt | Yes | `resolved:<outcome>:<env>` |
-| Pending attempt, no resolution | No: refused, the refusal names the command | With `--preserve-unresolved`: `unresolved (preserved)`. With `--allow-unverified-attempts`: `attempt-without-verified-receipt (accepted)` |
+| Pending attempt, no resolution | Refused unless a verified receipt for the same environment and complete target identity can be matched unambiguously to the attempt | With `--preserve-unresolved`: `unresolved (preserved)`. With `--allow-unverified-attempts`: `attempt-without-verified-receipt (accepted)` |
 | `apply-not-started` attempt with its retained no-write log | Yes | `apply-not-started (no write)` |
 | Attempt whose evidence cannot be read (unknown) | No | With `--preserve-unresolved`: `unresolved (preserved)`. With `--allow-unverified-attempts`: `attempt-without-verified-receipt (accepted)` |
 | Resolution that is unreadable, stale, or in conflict with a receipt | No. No flag accepts it | Refused with the states listed |

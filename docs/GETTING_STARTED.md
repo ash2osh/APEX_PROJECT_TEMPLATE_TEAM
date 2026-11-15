@@ -388,7 +388,7 @@ git add apps/ && git commit -m "Change the dashboard title"
    change `title: Employee Self Service` to `title: Employee Self Service Portal`.
 2. **Tell your team which app you are publishing**, and check that nobody has
    unsaved work in Builder on it. Git cannot see Builder.
-3. Publish. You do not need to commit first: publish imports the files as
+3. Publish to DEV. `scripts/team.sh publish` targets DEV only (promotions to staging or production use `deploy`). You do not need to commit first: publish imports the files as
    they are on disk, and the shared DEV database is the source of truth.
 
 ```bash

@@ -376,12 +376,11 @@ class FeatureRolloutTests(unittest.TestCase):
         self.assertEqual(value, "")
         self.assertIn("redirected input is not accepted", stderr.getvalue())
 
-        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch.dict(os.environ, {"TEAM_ACK_FROM_STDIN": "1"}), patch(
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=True), patch(
             "builtins.input", return_value=f"RECONCILE {attempt_id}"
-        ), contextlib.redirect_stderr(io.StringIO()) as notice:
+        ), contextlib.redirect_stderr(io.StringIO()):
             value = rollout._recovery_ack_from_terminal("show scope/evidence and terminal-state assertion")
         self.assertEqual(value, f"RECONCILE {attempt_id}")
-        self.assertIn("acknowledgment read from redirected input (TEAM_ACK_FROM_STDIN)", notice.getvalue())
 
     def test_recovery_refuses_to_replay_verified_prior_write_steps(self) -> None:
         plan = self._plan([
@@ -568,6 +567,42 @@ class FeatureRolloutTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertIn("does not match the observed db_unique_name 'OTHER_UNIQUE'", stderr.getvalue())
 
+    def test_confirmed_database_must_match_prepared_feature_checkpoint(self) -> None:
+        from scripts import feature_release, release_state
+
+        self._enter(self._patches(environment="prod"))
+        stage_report = self.root / "scratch" / "stage-report.json"
+        stage_report.parent.mkdir(parents=True, exist_ok=True)
+        stage_report.write_text("{}\n", encoding="utf-8")
+        observed = {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": "DB_A"}
+        result = SimpleNamespace(exit_code=2, database_state="not-started", object_seconds=0.0,
+                                 session_count=0, evidence_paths=(), message="unexpected checkpoint")
+        with patch.object(release_state, "validate_stage_proof"), \
+                patch.object(rollout, "_observe_target_identity", return_value=observed), \
+                patch.object(feature_release, "execute_checkpoint", return_value=result) as execute, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(
+                self.manifest_path, "prod", repo_root=self.root, capsule_path=self.capsule_path,
+                stage_report_path=stage_report, yes=True, confirm_target="DB_A",
+            )
+        self.assertEqual(status, 2)
+        self.assertEqual(0, execute.call_count, "mismatched prepared target must not run a checkpoint")
+
+    def test_staging_confirmed_database_must_match_prepared_checkpoint(self) -> None:
+        from scripts import feature_release
+
+        self._enter(self._patches(environment="staging"))
+        observed = {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": "STAGE_A"}
+        result = SimpleNamespace(exit_code=2, database_state="not-started", object_seconds=0.0,
+                                 session_count=0, evidence_paths=(), message="unexpected checkpoint")
+        with patch.object(rollout, "_observe_target_identity", return_value=observed), \
+                patch.object(feature_release, "execute_checkpoint", return_value=result) as execute, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(self.manifest_path, "staging", repo_root=self.root,
+                                         capsule_path=self.capsule_path, confirm_target="STAGE_A")
+        self.assertEqual(2, status)
+        self.assertEqual(0, execute.call_count)
+
     def test_rollout_binds_every_checkpoint_to_the_durable_run_id(self) -> None:
         from scripts import feature_release
 
@@ -620,7 +655,7 @@ class FeatureRolloutTests(unittest.TestCase):
         identity_by_connection = {}
 
         def target_record(environment, number, schema, connection, expected_user):
-            db_name = "STAGE" if environment == "staging" else "LIVE"
+            db_name = "STAGE" if environment == "staging" else f"PROD{number}"
             identity = {
                 "session_user": expected_user, "current_schema": schema,
                 "db_name": db_name, "db_unique_name": f"{db_name}_UNIQUE",
@@ -712,7 +747,115 @@ class FeatureRolloutTests(unittest.TestCase):
                 [call.args[0]["connection"] for call in execute_mock.call_args_list],
                 [data_alias, ords_alias],
             )
+            if environment == "prod":
+                self.assertEqual(["PROD2_UNIQUE", "PROD3_UNIQUE"],
+                                 [call.kwargs["confirm_target"] for call in execute_mock.call_args_list])
             self.assertEqual(checkpoint.call_count, 2)
+
+    def test_interactive_capsule_lists_each_distinct_database_at_confirmation(self) -> None:
+        from scripts import release_state
+        stage_report = self.root / "scratch" / "stage.json"
+        stage_report.parent.mkdir(parents=True, exist_ok=True)
+        stage_report.write_text("{}\n", encoding="utf-8")
+        patches = list(self._patches(environment="prod"))
+        patches.append(patch.object(release_state, "validate_stage_proof"))
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(patcher) for patcher in patches]
+            target_plan = mocks[4].return_value
+            target_plan.targets["step:2"] = {
+                "environment": "prod", "operation": "migration", "logicalSchema": "APP_CODE",
+                "connection": "other-conn", "expectedUser": "APP_CODE", "schema": "APP_CODE",
+                "classification": "production",
+                "observed": {
+                    "session_user": "APP_CODE", "current_schema": "APP_CODE",
+                    "db_name": "OTHER", "db_unique_name": "OTHER_UNIQUE",
+                    "service_name": "other.example.invalid", "container_id": "7",
+                    "container_name": "OTHERPDB", "edition": "ORA$BASE",
+                    "database_version": "19.0.0.0",
+                },
+            }
+            prompts = []
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                status = rollout.run_rollout(
+                    self.manifest_path, "prod", repo_root=self.root,
+                    capsule_path=self.capsule_path,
+                    stage_report_path=stage_report,
+                    confirm=lambda prompt: prompts.append(prompt) or False,
+                )
+            self.assertEqual(status, 1)
+            self.assertIn("PROD_UNIQUE", prompts[0])
+            self.assertIn("OTHER_UNIQUE", prompts[0])
+
+    def test_capsule_target_switch_between_preparation_and_writer_refuses(self) -> None:
+        from scripts import feature_release, release_state
+        stage_report = self.root / "scratch" / "stage.json"
+        stage_report.parent.mkdir(parents=True, exist_ok=True)
+        stage_report.write_text("{}\n", encoding="utf-8")
+        sql_path = self.root / "scripts" / "aux.sql"
+        sql_path.parent.mkdir(parents=True, exist_ok=True)
+        sql_path.write_text("SELECT 1 FROM dual;\n", encoding="utf-8")
+        steps = [
+            dict(self.steps[0]),
+            {"type": "sql-script", "file": "scripts/aux.sql", "schema": "APP_CODE"},
+            dict(self.steps[1]),
+        ]
+        environ = {
+            "PROD_SCHEMA": "APP_CODE",
+            "PROD_SQLCL_CONNECTION": "prod-aux-conn",
+            "PROD_EXPECTED_USER": "APP_CODE",
+        }
+        patches = list(self._patches(environment="prod", steps=steps))
+        patches.extend([
+            patch.dict("os.environ", environ),
+            patch.object(release_state, "validate_stage_proof"),
+        ])
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(patcher) for patcher in patches]
+            plan = mocks[3].return_value
+            aux_hash = hashlib.sha256(sql_path.read_bytes()).hexdigest()
+            plan[1]["phase"] = "data"
+            plan[1]["classificationReason"] = "data"
+            plan[1]["inputHashes"] = [{"path": "scripts/aux.sql", "sha256": aux_hash}]
+            plan[1]["sha256"] = rollout._canonical_hash({"step": plan[1]["step"], "inputHashes": plan[1]["inputHashes"]})
+            plan[1]["targetBinding"] = rollout._target_binding(plan[1]["step"], self.root, "prod")
+            target_plan = mocks[4].return_value
+            target_plan.targets["step:2"] = {
+                "environment": "prod", "operation": "migration", "logicalSchema": "APP_CODE",
+                "connection": "prod-aux-conn", "expectedUser": "APP_CODE", "schema": "APP_CODE",
+                "classification": "production",
+                "observed": {
+                    "session_user": "APP_CODE", "current_schema": "APP_CODE",
+                    "db_name": "PROD", "db_unique_name": "PROD_UNIQUE",
+                    "service_name": "prod.example.invalid", "container_id": "7",
+                    "container_name": "PRODPDB", "edition": "ORA$BASE",
+                    "database_version": "19.0.0.0",
+                },
+            }
+            def observe(target, _run_dir):
+                return {
+                    "session_user": "APP_CODE", "current_schema": "APP_CODE",
+                    "db_name": "OTHER", "db_unique_name": "OTHER_UNIQUE",
+                    "service_name": "other.example.invalid", "container_id": "7",
+                    "container_name": "OTHERPDB", "edition": "ORA$BASE",
+                    "database_version": "19.0.0.0",
+                }
+            stack.enter_context(patch.object(rollout, "_observe_target_identity", side_effect=observe))
+            stack.enter_context(patch.object(feature_release, "execute_checkpoint", side_effect=lambda *args, **kwargs: self._fake_checkpoint_result(args, kwargs, object_seconds=1.0, session_count=1)))
+            exec_mock = stack.enter_context(patch.object(rollout, "execute_step"))
+            report_base = self.root / "scratch" / "test-switch"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                status = rollout.run_rollout(
+                    self.manifest_path, "prod", repo_root=self.root,
+                    capsule_path=self.capsule_path,
+                    report_path=report_base,
+                    stage_report_path=stage_report,
+                    confirm=lambda _prompt: True,
+                )
+            rep = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual(status, 2)
+            self.assertIn("target identity changed after preparation", rep["error"])
+            exec_mock.assert_not_called()
 
     def test_budget_boundary_stops_before_second_feature_checkpoint(self) -> None:
         from scripts import feature_release
