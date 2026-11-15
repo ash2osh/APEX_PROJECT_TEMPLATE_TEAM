@@ -1,7 +1,10 @@
 # Publish rules: why publish refuses and what to do
 
 `scripts/team.sh publish <id> --env dev` imports the APEXlang files in your
-app folder, committed or not, into the shared DEV app. The shared database is
+app folder, committed or not, into the shared DEV app. The public wrapper command
+`publish` targets DEV only; promotions to staging or production use `scripts/team.sh deploy <id> --env <staging|prod>`.
+The underlying `publish_app.sh`/`publish_app.ps1` script is an internal implementation helper
+used by `publish` for DEV and `deploy` for promotions. The shared database is
 the source of truth, so you may commit before or after publishing. Because the whole team edits that one app,
 publish first proves that nobody changed the app since you last took a copy
 of it. If it cannot prove that, it refuses rather than silently overwriting a
