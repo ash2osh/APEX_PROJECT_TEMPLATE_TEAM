@@ -194,7 +194,7 @@ owner-only commands retain their owner-login checks. See
   to the existing connection and expected-user settings. Staging and production applies ask `[y/N]` at
   the terminal. `--confirm-target <db_unique_name>` skips that prompt only when the value equals the observed
   `db_unique_name`; an agent must never supply it unless the developer typed that exact name for the run.
-  `-y` / `--yes` (migrate, rollout, publish, deploy, archive-migrations, feature clean-capsule, the rollout `pause` step, `mcp setup`) replaces a
+  `-y` / `--yes` (migrate, rollout, publish, deploy, archive-migrations, feature clean-capsule, the rollout `pause` step, `mcp setup`, automations enable|disable|run-once) replaces a
   `[y/N]` prompt; an agent passes it for staging or production only when the developer asked in this
   conversation for that run to be unattended, and production also needs the typed name. An agent never sets
   `TEAM_ACK_FROM_STDIN`. Receipts are written only after a verified apply. Multi-schema projects use
@@ -254,8 +254,9 @@ owner-only commands retain their owner-login checks. See
   `scripts/team.sh automations list|check <app-id> --env <env> --schema <schema>`
   reads app-scoped automation states through the lifecycle adapter; `check`
   requires an explicit status and exact static-ID selection. Explicit
-  `enable|disable|run-once` actions require one static ID and exact typed
-  confirmation, recheck native application locks and target/status, and read
+  `enable|disable|run-once` actions require one static ID and target/action
+  confirmation (`--yes` supplies the confirmation, records `acknowledgedBy: --yes`,
+  and on production also needs `--confirm-target`), recheck native application locks and target/status, and read
   the result back. `run-once` is synchronous and requires a completed success
   log; an ambiguous action is `unknown` and must not be replayed automatically.
   These commands never repair workflow/task state or advance a failed publish

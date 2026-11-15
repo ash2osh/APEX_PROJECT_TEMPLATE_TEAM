@@ -94,6 +94,7 @@ Commands:
   template-status [--format text|json] [--upstream --ref <ref>]
                                               Inspect local template drift; fetch upstream only when requested
   automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
+         [--yes|-y] [--confirm-target <db_unique_name>]
                                               Observe, check or explicitly operate on one scoped automation
 Options:
   --schema <NAME>                             Run one configured schema (except offline/tooling commands)

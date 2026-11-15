@@ -876,7 +876,7 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh template-status --upstream --ref <ref>` | Explicitly compare local files with a branch, tag or commit from the manifest's upstream repository. |
 | `scripts/team.sh automations list <id> --env <env> --schema <schema>` | Read one application's automation status in its descriptor workspace. |
 | `scripts/team.sh automations check <id> --env <env> --schema <schema> --automation <static-id> --expected-status ACTIVE` | Check an exact selected automation against APEX 26.2's `ACTIVE`, `DISABLED`, or `ERROR` schedule states. |
-| `scripts/team.sh automations enable|disable|run-once <id> --env <env> --schema <schema> --automation <static-id>` | Explicitly change one automation's schedule or run it once after typed target/action confirmation; no publish path invokes these operations. |
+| `scripts/team.sh automations enable|disable|run-once <id> --env <env> --schema <schema> --automation <static-id> [--yes|-y] [--confirm-target <db_unique_name>]` | Explicitly change one automation's schedule or run it once after target/action confirmation; no publish path invokes these operations. `--yes` / `-y` supplies the confirmation; production also needs `--confirm-target`. |
 
 Each write accepts one exact static ID, rechecks target/app/status and native
 application lock before calling the public APEX API, then reads the same app

@@ -45,7 +45,11 @@
   `feature reconcile-run` and the rollout recovery so the command finishes without a person. `--yes` replaces the
   typed acknowledgment only: the outcome and the evidence file must come from checks the agent actually ran (read-only),
   the evidence file says who established the outcome, and the record shows `acknowledgedBy: --yes` so a reviewer can
-  tell it was not typed. Without `--yes` the acknowledgment is still typed at a terminal.
+  tell it was not typed. Without `--yes` the acknowledgment is still typed at a terminal. An agent may pass `--yes` to
+  `automations enable|disable|run-once` so the command finishes without a person; `--yes` replaces the typed confirmation only;
+  the target and action lines are still printed, the native-lock, status and identity rechecks still run, the report shows
+  `acknowledgedBy: --yes`; on production it also needs `--confirm-target <db_unique_name>` and the agent never supplies that
+  name unless the developer typed it for the run.
 - `-y` / `--yes` answers a staging or production `[y/N]` prompt only when the developer asked in the
   conversation for that run to be unattended. Production also needs `--confirm-target` with the name the
   developer typed for the run. An agent never sets `TEAM_ACK_FROM_STDIN`; piped or redirected acknowledgments stay refused, and `--yes` is the recorded route.
