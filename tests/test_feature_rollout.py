@@ -376,12 +376,11 @@ class FeatureRolloutTests(unittest.TestCase):
         self.assertEqual(value, "")
         self.assertIn("redirected input is not accepted", stderr.getvalue())
 
-        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=False), patch.dict(os.environ, {"TEAM_ACK_FROM_STDIN": "1"}), patch(
+        with patch("scripts.terminal_confirm.stdin_is_terminal", return_value=True), patch(
             "builtins.input", return_value=f"RECONCILE {attempt_id}"
-        ), contextlib.redirect_stderr(io.StringIO()) as notice:
+        ), contextlib.redirect_stderr(io.StringIO()):
             value = rollout._recovery_ack_from_terminal("show scope/evidence and terminal-state assertion")
         self.assertEqual(value, f"RECONCILE {attempt_id}")
-        self.assertIn("acknowledgment read from redirected input (TEAM_ACK_FROM_STDIN)", notice.getvalue())
 
     def test_recovery_refuses_to_replay_verified_prior_write_steps(self) -> None:
         plan = self._plan([

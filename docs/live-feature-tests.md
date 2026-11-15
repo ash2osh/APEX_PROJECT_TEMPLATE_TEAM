@@ -77,9 +77,10 @@ The module confirms its rollouts with `-y`, and a production rollout also passes
 with the name the module reads once at class setup through `SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME')`.
 The production profile is the same database as DEV, so one name serves both. If
 `TEMPLATE_LIVE_SECOND_CONNECTION` is a different database, a production rollout that writes to both is
-refused by the name rule. The two typed acknowledgments (`RECONCILE` and `RECONCILE-RUN`) read their
-answers from redirected input only when the child environment sets `TEAM_ACK_FROM_STDIN=1`; only this
-module sets it. Piped `y` answers are no longer accepted by any prompt.
+refused by the name rule. The two typed acknowledgments (`RECONCILE` and `RECONCILE-RUN`) are terminal-only
+and cannot be bypassed via environment variables or redirected input.
+The two live reconciliation scenarios are skipped by the automated suite; a developer must perform
+those checks manually and type the acknowledgment. Piped `y` answers are no longer accepted by any prompt.
 
 ## Not covered
 

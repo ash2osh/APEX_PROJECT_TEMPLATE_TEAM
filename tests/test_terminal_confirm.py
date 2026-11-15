@@ -42,20 +42,24 @@ class TerminalConfirmTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue().strip(), terminal_confirm.YES_REFUSAL)
         self.assertIn("--yes", terminal_confirm.YES_REFUSAL)
 
-    def test_the_acknowledgment_switch_never_opens_a_yes_no_prompt(self):
+    def test_redirected_input_refused_for_yes_no_prompt(self):
         stderr = io.StringIO()
-        with patch.dict(os.environ, {terminal_confirm.ACK_FROM_STDIN_ENV: "1"}), patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), \
+        with patch.dict(os.environ, {"TEAM_ACK_FROM_STDIN": "1"}), patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), \
                 patch("builtins.input", side_effect=AssertionError("a piped answer must not be read")), contextlib.redirect_stderr(stderr):
             self.assertFalse(migrate._confirm_from_terminal("Migrating to PROD. Proceed? [y/N]"))
         self.assertIn("refused", stderr.getvalue())
 
-    def test_the_acknowledgment_switch_allows_only_a_redirected_acknowledgment_and_says_so(self):
+    def test_redirected_input_refused_for_acknowledgment_even_with_environment_variable(self):
         stderr = io.StringIO()
-        with patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), contextlib.redirect_stderr(stderr):
+        with patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), \
+                patch.dict(os.environ, {"TEAM_ACK_FROM_STDIN": "1"}), contextlib.redirect_stderr(stderr):
             self.assertFalse(terminal_confirm.may_read_acknowledgment({}))
-            self.assertTrue(terminal_confirm.may_read_acknowledgment({terminal_confirm.ACK_FROM_STDIN_ENV: "1"}))
-            self.assertFalse(terminal_confirm.may_read_acknowledgment({terminal_confirm.ACK_FROM_STDIN_ENV: "yes"}))
-        self.assertEqual(stderr.getvalue().count(terminal_confirm.ACK_FROM_STDIN_NOTICE), 1)
+            self.assertFalse(terminal_confirm.may_read_acknowledgment({"TEAM_ACK_FROM_STDIN": "1"}))
+            self.assertFalse(terminal_confirm.may_read_acknowledgment({"TEAM_ACK_FROM_STDIN": "yes"}))
+        self.assertIn(terminal_confirm.ACKNOWLEDGMENT_REFUSAL, stderr.getvalue())
+
+        with patch.object(terminal_confirm, "stdin_is_terminal", return_value=True):
+            self.assertTrue(terminal_confirm.may_read_acknowledgment())
 
     def test_recorded_and_printed_confirmation_forms(self):
         self.assertEqual(terminal_confirm.confirmed_by(False, None), "terminal")
