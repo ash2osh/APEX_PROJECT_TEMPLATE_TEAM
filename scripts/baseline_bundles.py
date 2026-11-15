@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
 
-from .baseline_sql import _check, _q_literal, _safe_check_slug, _sql_identifier, _sql_literal
+from .baseline_sql import _check, _q_literal, _safe_check_slug, _sql_identifier, _sql_literal, retarget_sql_identifiers, sql_tokens
 from .migration_manifest import validate_sql_only
 from .schema_catalog import ObjectKey, SchemaSnapshot
 
@@ -37,31 +37,24 @@ def _split_ddl_statements(ddl: str) -> list[str]:
     """
     text = ddl.strip()
     statements: list[str] = []
-    start = depth = index = 0
-    quote = ""
-    while index < len(text):
-        character = text[index]
-        if quote:
-            if character == quote:
-                if text[index + 1:index + 2] == quote:
-                    index += 1
-                else:
-                    quote = ""
-        elif character in "'\"":
-            quote = character
-        elif character == "(":
+    start = depth = offset = 0
+    for kind, token in sql_tokens(text):
+        if kind == "symbol" and token == "(":
             depth += 1
-        elif character == ")":
+        elif kind == "symbol" and token == ")":
             depth -= 1
-        elif character == "\n" and depth <= 0:
-            following = index + 1
-            while following < len(text) and text[following] in "\r\n":
-                following += 1
-            if following < len(text) and _STATEMENT_START.match(text, following):
-                statements.append(text[start:index])
-                start = index = following
-                continue
-        index += 1
+        elif (kind == "space" or (kind == "comment" and token.startswith("--"))) and depth <= 0:
+            for position, character in enumerate(token):
+                index = offset + position
+                if character != "\n" or index < start:
+                    continue
+                following = index + 1
+                while following < len(text) and text[following] in "\r\n":
+                    following += 1
+                if following < len(text) and _STATEMENT_START.match(text, following):
+                    statements.append(text[start:index])
+                    start = following
+        offset += len(token)
     statements.append(text[start:])
     return [_ddl_without_terminator(statement) for statement in statements if statement.strip()]
 
@@ -81,6 +74,14 @@ def _wrap_guarded_ddl(exists_query: str, ddl: str) -> str:
     return _wrap_guarded_statements(exists_query, _split_ddl_statements(ddl))
 
 
+def _matches_schema(ident: str, schema: str) -> bool:
+    if ident == _sql_identifier(schema):
+        return True
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]*", schema) and ident.upper() == schema.upper():
+        return True
+    return False
+
+
 def _replace_create_header(ddl: str, object_type: str, source_schema: str, target_schema: str) -> str:
     """Rewrite only schema-qualified names in a DBMS_METADATA CREATE header."""
     if source_schema == target_schema:
@@ -93,11 +94,12 @@ def _replace_create_header(ddl: str, object_type: str, source_schema: str, targe
         pattern = re.compile(rf"(?is)(\bCREATE\s+SEQUENCE\s+){identifier}\s*\.\s*{identifier}")
         return pattern.sub(lambda match: f'{match.group(1)}{_sql_identifier(target_schema)}.{match.group(3)}', ddl, count=1)
     if object_type == "INDEX":
-        pattern = re.compile(rf"(?is)(\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+){identifier}\s*\.\s*{identifier}(\s+ON\s+){identifier}\s*\.\s*{identifier}")
-        return pattern.sub(
-            lambda match: f'{match.group(1)}{_sql_identifier(target_schema)}.{match.group(3)}{match.group(4)}{_sql_identifier(target_schema)}.{match.group(6)}',
-            ddl, count=1,
-        )
+        pattern = re.compile(rf"(?is)(\bCREATE\s+(?:(?:UNIQUE|BITMAP)\s+)?INDEX\s+){identifier}\s*\.\s*{identifier}(\s+ON\s+){identifier}\s*\.\s*{identifier}")
+        def _replace_index(match):
+            idx_owner = _sql_identifier(target_schema) if _matches_schema(match.group(2), source_schema) else match.group(2)
+            tbl_owner = _sql_identifier(target_schema) if _matches_schema(match.group(5), source_schema) else match.group(5)
+            return f'{match.group(1)}{idx_owner}.{match.group(3)}{match.group(4)}{tbl_owner}.{match.group(6)}'
+        return pattern.sub(_replace_index, ddl, count=1)
     if object_type == "VIEW":
         pattern = re.compile(
             rf"(?is)(\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?VIEW\s+)"
@@ -742,18 +744,7 @@ def _schema_qualifier_patterns(schema: str) -> list[re.Pattern]:
 
 def _retarget_statement(statement: str, source_schema: str, target_schema: str) -> str:
     """Point the source schema's qualified names in one statement at the target schema, outside quoted literals."""
-    if source_schema == target_schema:
-        return statement
-    target_name = _sql_identifier(target_schema)
-    patterns = _schema_qualifier_patterns(source_schema)
-    pieces = re.split(r"('(?:[^']|'')*')", statement)  # the odd entries are the string literals
-    for position in range(0, len(pieces), 2):
-        for pattern in patterns:
-            pieces[position] = pattern.sub(lambda match: target_name + match.group(1), pieces[position])
-    result = "".join(pieces)
-    if any(pattern.search(piece) for piece in re.split(r"('(?:[^']|'')*')", result)[::2] for pattern in patterns):
-        raise baseline.BaselineError("a table statement still names the source schema and needs a reviewed migration")
-    return result
+    return retarget_sql_identifiers(statement, source_schema, target_schema)
 
 
 def _table_statements(raw_ddl: str, source_schema: str, target_schema: str) -> list[str]:
@@ -762,7 +753,8 @@ def _table_statements(raw_ddl: str, source_schema: str, target_schema: str) -> l
     if not statements:
         return []
     header = _replace_create_header(statements[0], "TABLE", source_schema, target_schema)
-    return [header, *(_retarget_statement(statement, source_schema, target_schema) for statement in statements[1:])]
+    header = retarget_sql_identifiers(header, source_schema, target_schema)
+    return [header, *(retarget_sql_identifiers(statement, source_schema, target_schema) for statement in statements[1:])]
 
 
 def _new_table_order(names: Sequence[str], constraints: Mapping) -> list[str]:
@@ -920,6 +912,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         if definition is None:
             raise baseline.BaselineError(f"source index definition is missing for {name}")
         ddl = _replace_create_header(definition.raw_ddl, "INDEX", source_schema, target_schema)
+        ddl = retarget_sql_identifiers(ddl, source_schema, target_schema)
         chunks.append(_wrap_guarded_ddl(f"ALL_INDEXES WHERE OWNER = {_sql_literal(target_schema)} AND INDEX_NAME = {_sql_literal(name)}", ddl))
         posts.append(_count_check(f"index-{_safe_check_slug(name)}", f"ALL_INDEXES WHERE OWNER = {_sql_literal(target_schema)} AND INDEX_NAME = {_sql_literal(name)}", 1))
 
@@ -932,6 +925,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             if definition is None:
                 raise baseline.BaselineError(f"source sequence definition is missing for {name}")
             ddl = _replace_create_header(definition.raw_ddl, "SEQUENCE", source_schema, target_schema)
+            ddl = retarget_sql_identifiers(ddl, source_schema, target_schema)
             chunks.append(_wrap_guarded_ddl(f"ALL_SEQUENCES WHERE SEQUENCE_OWNER = {_sql_literal(target_schema)} AND SEQUENCE_NAME = {_sql_literal(name)}", ddl))
             posts.append(_count_check(f"sequence-{_safe_check_slug(name)}", f"ALL_SEQUENCES WHERE SEQUENCE_OWNER = {_sql_literal(target_schema)} AND SEQUENCE_NAME = {_sql_literal(name)}", 1))
         chunks.append(_sync_sequence_sql(target_schema, row, mappings[name]))
@@ -1053,6 +1047,7 @@ def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source
             raise baseline.BaselineError(f"stored view metadata DDL for {name} is missing")
         target_row = target_views.get(name, {})
         mapped_ddl = _replace_create_header(source_ddl, "VIEW", source_schema, target_schema)
+        mapped_ddl = retarget_sql_identifiers(mapped_ddl, source_schema, target_schema)
         if target_row.get("text") == row.get("text") and target_row.get("ddl") == mapped_ddl:
             continue
         ddl = source_ddl

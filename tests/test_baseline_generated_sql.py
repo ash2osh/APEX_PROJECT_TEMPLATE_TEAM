@@ -37,6 +37,19 @@ def _fk(table: str, parent: str) -> dict:
 
 
 class DdlStatementSplitTests(unittest.TestCase):
+    def test_alternative_quoted_apostrophe_and_newline_do_not_hide_next_statement(self) -> None:
+        ddl = "CREATE TABLE DEV.T (C VARCHAR2(80) DEFAULT q'[it's\nALTER TABLE XX]')\nALTER TABLE DEV.T ADD PRIMARY KEY (C)"
+        statements = baseline_bundles._split_ddl_statements(ddl)
+        self.assertEqual(2, len(statements))
+        self.assertIn("q'[it's\nALTER TABLE XX]'", statements[0])
+        self.assertTrue(statements[1].startswith("ALTER TABLE DEV.T"))
+
+    def test_a_line_comment_at_the_end_of_a_statement_does_not_hide_the_next(self) -> None:
+        ddl = "CREATE TABLE DEV.T (C NUMBER) -- captured comment\nALTER TABLE DEV.T ADD PRIMARY KEY (C)"
+        statements = baseline_bundles._split_ddl_statements(ddl)
+        self.assertEqual(2, len(statements))
+        self.assertTrue(statements[1].startswith("ALTER TABLE DEV.T"))
+
     def test_a_table_ddl_splits_at_each_column_zero_alter(self) -> None:
         statements = baseline_bundles._split_ddl_statements(TABLE_DDL)
 
@@ -130,6 +143,84 @@ class TableStatementTests(unittest.TestCase):
         self.assertEqual('ALTER TABLE "APP_STAGE"."T" ADD CONSTRAINT "CK" CHECK ("C" <> \'"APP_DEV".x\')', result)
         self.assertEqual(statement, baseline_bundles._retarget_statement(statement, "APP_DEV", "APP_DEV"))
 
+    def test_retarget_preserves_quoted_identifiers_and_maps_across_comments(self) -> None:
+        sql = 'CREATE VIEW "APP_STAGE"."V" AS SELECT "PRICE APP_DEV.X" FROM APP_DEV /*keep*/ .T'
+        result = baseline_bundles.retarget_sql_identifiers(sql, "APP_DEV", "APP_STAGE")
+        self.assertIn('"PRICE APP_DEV.X"', result)
+        self.assertIn('FROM "APP_STAGE" /*keep*/ .T', result)
+
+    def test_view_alias_named_as_source_is_not_silently_rewritten(self) -> None:
+        sql = 'CREATE VIEW "APP_STAGE"."V" AS SELECT APP_DEV.ID FROM "APP_DEV"."T" APP_DEV'
+        with self.assertRaisesRegex(baseline.BaselineError, "ambiguous|review"):
+            baseline_bundles.retarget_sql_identifiers(sql, "APP_DEV", "APP_STAGE")
+
+    def test_view_comma_join_retargets_all_tables(self) -> None:
+        sql = 'CREATE OR REPLACE VIEW "DEV"."V" AS SELECT a.x FROM "DEV"."A" a, "DEV"."B" b WHERE a.id = b.id'
+        expected = (
+            'CREATE OR REPLACE VIEW "STAGE"."V" AS SELECT a.x FROM "STAGE"."A" a, "STAGE"."B" b WHERE a.id = b.id'
+        )
+        self.assertEqual(expected, baseline_bundles.retarget_sql_identifiers(sql, "DEV", "STAGE"))
+
+        sql_unquoted = "CREATE OR REPLACE VIEW DEV.V AS SELECT a.x FROM DEV.A a, DEV.B b WHERE a.id = b.id"
+        expected_unquoted = (
+            'CREATE OR REPLACE VIEW "STAGE".V AS SELECT a.x FROM "STAGE".A a, "STAGE".B b WHERE a.id = b.id'
+        )
+        self.assertEqual(expected_unquoted, baseline_bundles.retarget_sql_identifiers(sql_unquoted, "DEV", "STAGE"))
+
+    def test_view_three_part_column_retargets_body(self) -> None:
+        sql = 'CREATE OR REPLACE VIEW "DEV"."V" AS SELECT "DEV"."T"."C" AS c FROM "DEV"."T"'
+        expected = 'CREATE OR REPLACE VIEW "STAGE"."V" AS SELECT "STAGE"."T"."C" AS c FROM "STAGE"."T"'
+        self.assertEqual(expected, baseline_bundles.retarget_sql_identifiers(sql, "DEV", "STAGE"))
+
+        sql_unquoted = "CREATE OR REPLACE VIEW DEV.V AS SELECT DEV.T.C AS c FROM DEV.T"
+        expected_unquoted = 'CREATE OR REPLACE VIEW "STAGE".V AS SELECT "STAGE".T.C AS c FROM "STAGE".T'
+        self.assertEqual(expected_unquoted, baseline_bundles.retarget_sql_identifiers(sql_unquoted, "DEV", "STAGE"))
+
+    def test_view_sequence_expression_retargets_body(self) -> None:
+        sql = 'CREATE OR REPLACE VIEW "DEV"."V" AS SELECT "DEV"."SEQ".NEXTVAL AS n FROM dual'
+        expected = 'CREATE OR REPLACE VIEW "STAGE"."V" AS SELECT "STAGE"."SEQ".NEXTVAL AS n FROM dual'
+        self.assertEqual(expected, baseline_bundles.retarget_sql_identifiers(sql, "DEV", "STAGE"))
+
+        sql_unquoted = "CREATE OR REPLACE VIEW DEV.V AS SELECT DEV.SEQ.NEXTVAL AS n FROM dual"
+        expected_unquoted = 'CREATE OR REPLACE VIEW "STAGE".V AS SELECT "STAGE".SEQ.NEXTVAL AS n FROM dual'
+        self.assertEqual(expected_unquoted, baseline_bundles.retarget_sql_identifiers(sql_unquoted, "DEV", "STAGE"))
+
+    def test_view_alias_style_reference_in_expression_is_refused(self) -> None:
+        bad_views = [
+            'CREATE OR REPLACE VIEW "DEV"."V" AS SELECT "DEV".ID FROM "DEV"."T"',
+            'CREATE OR REPLACE VIEW "DEV"."V" AS SELECT a.x, "DEV".ID FROM "DEV"."T" a',
+            'CREATE OR REPLACE VIEW "DEV"."V" AS SELECT a.x FROM "DEV"."T" a WHERE "DEV".ID = 1',
+        ]
+        for view_sql in bad_views:
+            with self.subTest(sql=view_sql):
+                with self.assertRaisesRegex(baseline.BaselineError, "ambiguous.*qualifier"):
+                    baseline_bundles.retarget_sql_identifiers(view_sql, "DEV", "STAGE")
+
+    def test_view_retargeting_preserves_literals_and_comments(self) -> None:
+        sql = (
+            'CREATE OR REPLACE VIEW "DEV"."V" AS SELECT a.x, \'DEV.X\' AS c1, q\'[it\'s DEV.X]\' AS c2 '
+            'FROM "DEV"."A" a, "DEV"."B" b -- DEV.Y\n'
+            'WHERE a.id = b.id /* "DEV".Z */'
+        )
+        expected = (
+            'CREATE OR REPLACE VIEW "STAGE"."V" AS SELECT a.x, \'DEV.X\' AS c1, q\'[it\'s DEV.X]\' AS c2 '
+            'FROM "STAGE"."A" a, "STAGE"."B" b -- DEV.Y\n'
+            'WHERE a.id = b.id /* "DEV".Z */'
+        )
+        result = baseline_bundles.retarget_sql_identifiers(sql, "DEV", "STAGE")
+        self.assertEqual(expected, result)
+        self.assertIn("'DEV.X'", result)
+        self.assertIn("q'[it's DEV.X]'", result)
+        self.assertIn("-- DEV.Y", result)
+        self.assertIn('/* "DEV".Z */', result)
+
+    def test_unbalanced_opening_bracket_inside_q_quote_is_literal(self) -> None:
+        sql = 'ALTER TABLE APP_DEV.T ADD CHECK (C <> q\'[unbalanced [ APP_DEV.X]\')'
+        self.assertEqual(
+            'ALTER TABLE "APP_STAGE".T ADD CHECK (C <> q\'[unbalanced [ APP_DEV.X]\')',
+            baseline_bundles.retarget_sql_identifiers(sql, "APP_DEV", "APP_STAGE"),
+        )
+
     def test_parents_are_created_before_the_tables_that_reference_them(self) -> None:
         constraints = {("A_CHILD", "A_CHILD_FK"): _fk("A_CHILD", "B_PARENT"), ("C_SELF", "C_SELF_FK"): _fk("C_SELF", "C_SELF")}
 
@@ -150,6 +241,67 @@ class TableStatementTests(unittest.TestCase):
             baseline_bundles._new_table_order(["A", "B"], constraints)
 
         self.assertIn("cycle", str(raised.exception))
+
+    def test_table_with_default_sequence_retargets_to_target_schema(self) -> None:
+        raw_ddl = 'CREATE TABLE "APP_DEV"."T" ("ID" NUMBER DEFAULT "APP_DEV"."SEQ".NEXTVAL, "NAME" VARCHAR2(100));'
+        statements = baseline_bundles._table_statements(raw_ddl, "APP_DEV", "APP_STAGE")
+        self.assertEqual(len(statements), 1)
+        self.assertIn('CREATE TABLE "APP_STAGE"."T"', statements[0])
+        self.assertIn('DEFAULT "APP_STAGE"."SEQ".NEXTVAL', statements[0])
+        self.assertNotIn('"APP_DEV"', statements[0])
+
+    def test_view_referencing_source_schema_retargets_body(self) -> None:
+        source_ddl = 'CREATE OR REPLACE FORCE EDITIONABLE VIEW "APP_DEV"."CUSTOMERS_V" AS SELECT ID, NAME FROM "APP_DEV"."CUSTOMERS"'
+        mapped_ddl = baseline_bundles._replace_create_header(source_ddl, "VIEW", "APP_DEV", "APP_STAGE")
+        mapped_ddl = baseline_bundles.retarget_sql_identifiers(mapped_ddl, "APP_DEV", "APP_STAGE")
+        self.assertIn('VIEW "APP_STAGE"."CUSTOMERS_V"', mapped_ddl)
+        self.assertIn('FROM "APP_STAGE"."CUSTOMERS"', mapped_ddl)
+        self.assertNotIn('"APP_DEV"', mapped_ddl)
+
+    def test_create_bitmap_index_retargets_to_target_schema(self) -> None:
+        ddl = 'CREATE BITMAP INDEX "APP_DEV"."IX_STATUS" ON "APP_DEV"."T" ("STATUS");'
+        mapped = baseline_bundles._replace_create_header(ddl, "INDEX", "APP_DEV", "APP_STAGE")
+        mapped = baseline_bundles.retarget_sql_identifiers(mapped, "APP_DEV", "APP_STAGE")
+        self.assertIn('CREATE BITMAP INDEX "APP_STAGE"."IX_STATUS" ON "APP_STAGE"."T"', mapped)
+        self.assertNotIn('"APP_DEV"', mapped)
+
+    def test_q_quoted_literals_preserve_bytes_and_delimiters(self) -> None:
+        cases = [
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'[it\'s APP_DEV.X]\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'{it\'s APP_DEV.X}\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'<it\'s APP_DEV.X>\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'(it\'s APP_DEV.X)\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'[nested [brackets] APP_DEV.X]\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'~it\'s APP_DEV.X~\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'!it\'s APP_DEV.X!\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'#it\'s APP_DEV.X#\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> \'it\'\'s APP_DEV.X\')',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" > 0) -- APP_DEV.X note\n',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" > 0) /* APP_DEV.X block */',
+        ]
+        for statement in cases:
+            with self.subTest(statement=statement):
+                result = baseline_bundles._retarget_statement(statement, "APP_DEV", "APP_STAGE")
+                self.assertIn('"APP_STAGE"."T"', result)
+                # The literal / comment itself must retain the original APP_DEV text verbatim
+                self.assertIn("APP_DEV.X", result)
+
+    def test_external_schema_references_preserved(self) -> None:
+        statement = 'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "FK" FOREIGN KEY ("C") REFERENCES "OTHER"."T" ("C")'
+        result = baseline_bundles._retarget_statement(statement, "APP_DEV", "APP_STAGE")
+        self.assertEqual('ALTER TABLE "APP_STAGE"."T" ADD CONSTRAINT "FK" FOREIGN KEY ("C") REFERENCES "OTHER"."T" ("C")', result)
+
+    def test_unclosed_syntax_fails_closed(self) -> None:
+        bad_statements = [
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> q\'[unclosed)',
+            'ALTER TABLE "APP_DEV"."T" ADD CONSTRAINT "CK" CHECK ("C" <> \'unclosed)',
+            'ALTER TABLE "APP_DEV"."T" /* unclosed comment',
+            'ALTER TABLE "APP_DEV"."T" ADD ("C',
+        ]
+        for statement in bad_statements:
+            with self.subTest(statement=statement):
+                with self.assertRaises(baseline.BaselineError):
+                    baseline_bundles._retarget_statement(statement, "APP_DEV", "APP_STAGE")
 
 
 class CompileStepTests(unittest.TestCase):
