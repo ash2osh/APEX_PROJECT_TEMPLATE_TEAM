@@ -949,6 +949,8 @@ def apply_batch(
     verbose: bool = False,
     confirm_target: str | None = None,
     yes: bool = False,
+    expected_db_unique_name: str | None = None,
+    rollout_confirmed_by: str | None = None,
 ) -> int:
     """Freeze, preflight, confirm when needed, apply in input order, and verify.
 
@@ -1006,6 +1008,9 @@ def apply_batch(
         if target.environment in {"staging", "prod"}:
             _print_target_summary(target, initial_target_identity, frozen)
             observed_name = initial_target_identity.get("db_unique_name")
+            if expected_db_unique_name is not None and observed_name != expected_db_unique_name:
+                print("migration error: rollout target changed after confirmation; no writes were attempted.", file=sys.stderr)
+                return 2
             if confirm_target is not None:
                 if not observed_name or confirm_target != observed_name:
                     print(
@@ -1025,8 +1030,8 @@ def apply_batch(
                     approved = bool(confirm(prompt))
                 except (EOFError, OSError):
                     approved = False
-                run_manifest["confirmation"] = "terminal"
-                run_manifest["confirmedBy"] = "terminal"
+                run_manifest["confirmation"] = "flag" if rollout_confirmed_by and rollout_confirmed_by != "terminal" else "terminal"
+                run_manifest["confirmedBy"] = rollout_confirmed_by or "terminal"
             if not approved:
                 print(f"Migration to {target.environment.upper()} declined; no writes were attempted.")
                 return 1
@@ -1339,6 +1344,8 @@ def main(
     repo_root: Path = ROOT,
     confirm: Callable[[str], bool] = _confirm_from_terminal,
     expected_input_hashes: Mapping[str, str] | None = None,
+    expected_db_unique_name: str | None = None,
+    rollout_confirmed_by: str | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folders", nargs="*")
@@ -1399,7 +1406,17 @@ def main(
         return 2
     if args.rehearse:
         return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report, yes=args.yes)
-    status = apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose, confirm_target=args.confirm_target, yes=args.yes)
+    status = apply_batch(
+        Path(repo_root),
+        migrations,
+        target,
+        confirm,
+        verbose=args.verbose,
+        confirm_target=args.confirm_target,
+        yes=args.yes,
+        expected_db_unique_name=expected_db_unique_name,
+        rollout_confirmed_by=rollout_confirmed_by,
+    )
     if status == 0 and target.environment == "dev":
         record_daily_diffs(Path(repo_root), migrations)
     return status

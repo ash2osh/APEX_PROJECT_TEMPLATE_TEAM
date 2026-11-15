@@ -409,6 +409,140 @@ class RolloutManifestTests(unittest.TestCase):
         self.assertIsNone(run.call_args.kwargs.get("input"))
         self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
+    def test_production_app_deploy_target_switch_refuses_before_deploy(self) -> None:
+        self.add_app()
+        (self.root / "apps" / "DEMO" / "100" / "deployments" / "prod.json").write_text(
+            json.dumps({"workspace": {"name": "PROD_WS"}, "app": {"id": 100, "databaseSession": {"parsingSchema": "PROD_APP"}}}) + "\n",
+            encoding="utf-8",
+        )
+        manifest = self.write_manifest([{"type": "app-deploy", "appId": 100}])
+        observations = ["PRODDB_UNIQUE", "OTHERDB_UNIQUE"]
+        def observe(target, run_dir):
+            db = observations.pop(0) if observations else "OTHERDB_UNIQUE"
+            return {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": db}
+        with patch.dict(os.environ, {"APEX_PARSING_SCHEMA": "PROD_APP", "PROD_SQLCL_CONNECTION": "PRODDB_CONN", "PROD_EXPECTED_USER": "PROD_APP"}, clear=True), patch(
+            "scripts.rollout._observe_target_identity", side_effect=observe
+        ), patch("scripts.rollout.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, report_path=self.root / "scratch" / "app-prod-switch",
+                confirm=lambda _prompt: True,
+            )
+        self.assertEqual(status, 2)
+        run.assert_not_called()
+
+    def test_production_sql_script_target_switch_refuses_before_payload(self) -> None:
+        manifest = self.write_manifest([self.prod_sql_step()])
+        observations = ["PRODDB_UNIQUE", "OTHERDB_UNIQUE"]
+        def observe(target, run_dir):
+            db = observations.pop(0) if observations else "OTHERDB_UNIQUE"
+            return {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": db}
+        with patch("scripts.rollout._observe_target_identity", side_effect=observe), patch(
+            "scripts.rollout._execute_sql_payload"
+        ) as payload_mock, contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, report_path=self.root / "scratch" / "sql-switch",
+                confirm=lambda _prompt: True,
+            )
+        self.assertEqual(status, 2)
+        payload_mock.assert_not_called()
+
+    def test_staging_confirmed_name_is_rechecked_before_sql_payload(self) -> None:
+        step = self.prod_sql_step()
+        step.update(connection="STAGE_APP", expectedUser="STAGE_APP", schema="STAGE_APP")
+        manifest = self.write_manifest([step])
+        observations = ["STAGE_A", "STAGE_B"]
+        def observe(target, run_dir):
+            name = observations.pop(0) if observations else "STAGE_B"
+            return {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": name}
+        with patch("scripts.rollout._observe_target_identity", side_effect=observe), \
+                patch("scripts.rollout._execute_sql_payload", return_value=rollout.StepResult(0)) as payload, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(manifest, "staging", repo_root=self.root, confirm_target="STAGE_A")
+        self.assertEqual(status, 2)
+        self.assertEqual(0, payload.call_count)
+
+    def test_migration_keeps_manifest_recheck_and_internal_target_binding(self) -> None:
+        step = {"type": "migrate", "folders": ["migrations/2026-10-10_release-r001"]}
+        plan = [{"number": 1, "inputHashes": []}]
+        evidence = self.root / "scratch" / "migration-recheck"
+        evidence.mkdir(parents=True)
+        captured = {}
+        def fake_migrate(arguments, **kwargs):
+            captured["arguments"] = arguments
+            captured["expected"] = kwargs.get("expected_db_unique_name")
+            captured["confirmed"] = kwargs["confirm"]("synthetic prompt")
+            return 0
+        with patch("scripts.rollout.migrate.main", side_effect=fake_migrate), \
+                patch("scripts.rollout._snapshot") as snapshot:
+            result = rollout.execute_step(step, environment="prod", repo_root=self.root, evidence_dir=evidence,
+                                          step_number=1, manifest=self.write_manifest([]), plan=plan,
+                                          manifest_confirmed=True, confirm_target="DB_A")
+        self.assertEqual(0, result.exit_code)
+        self.assertNotIn("--confirm-target", captured["arguments"])
+        self.assertEqual("DB_A", captured["expected"])
+        self.assertTrue(captured["confirmed"])
+        self.assertEqual(1, snapshot.call_count)
+
+    def test_production_ords_import_target_switch_refuses_before_payload(self) -> None:
+        ords_file = self.root / "scripts" / "ords.sql"
+        ords_file.parent.mkdir(parents=True, exist_ok=True)
+        ords_file.write_text(
+            "-- Generated by test\n-- Schema: PROD_APP\nBEGIN\n  ORDS.ENABLE_SCHEMA(p_schema => 'PROD_APP');\n  COMMIT;\nEND;\n/\n",
+            encoding="utf-8",
+        )
+        step = {"type": "ords-import", "file": "scripts/ords.sql", "connection": "PROD_APP", "expectedUser": "PROD_APP", "schema": "PROD_APP", "excludeModules": []}
+        manifest = self.write_manifest([step])
+        observations = ["PRODDB_UNIQUE", "OTHERDB_UNIQUE"]
+        def observe(target, run_dir):
+            db = observations.pop(0) if observations else "OTHERDB_UNIQUE"
+            return {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": db}
+        with patch("scripts.rollout._observe_target_identity", side_effect=observe), patch(
+            "scripts.rollout._execute_sql_payload"
+        ) as payload_mock, contextlib.redirect_stdout(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, report_path=self.root / "scratch" / "ords-switch",
+                confirm=lambda _prompt: True,
+            )
+        self.assertEqual(status, 2)
+        payload_mock.assert_not_called()
+
+    def test_interactive_production_rollout_binds_each_database_separately(self) -> None:
+        step1 = self.prod_sql_step()
+        script2 = self.root / "scripts" / "step2.sql"
+        script2.write_text("SELECT 2 FROM dual;\n", encoding="utf-8")
+        step2 = {"type": "sql-script", "file": "scripts/step2.sql", "connection": "PROD_OTHER", "expectedUser": "PROD_OTHER", "schema": "PROD_OTHER"}
+        manifest = self.write_manifest([step1, step2])
+        def observe(target, run_dir):
+            run_dir.mkdir(parents=True, exist_ok=True)
+            db = "PRODDB_A" if target.connection == "PROD_APP" else "PRODDB_B"
+            return {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": db}
+        prompts = []
+        def fake_execute(step, **kwargs):
+            return rollout.StepResult(0, evidence_paths=(), observed_identity=kwargs.get("expected_identity"))
+        with patch("scripts.rollout._observe_target_identity", side_effect=observe), patch(
+            "scripts.rollout.execute_step", side_effect=fake_execute
+        ) as exec_mock, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, confirm=lambda prompt: prompts.append(prompt) or True,
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(["PRODDB_A", "PRODDB_B"], [call.kwargs["confirm_target"] for call in exec_mock.call_args_list])
+        self.assertIn("PRODDB_A", prompts[0])
+        self.assertIn("PRODDB_B", prompts[0])
+
+    def test_production_target_missing_db_unique_name_refuses_before_payload(self) -> None:
+        manifest = self.write_manifest([self.prod_sql_step()])
+        def observe(target, run_dir):
+            return {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": ""}
+        with patch("scripts.rollout._observe_target_identity", side_effect=observe), patch(
+            "scripts.rollout._execute_sql_payload"
+        ) as payload_mock, contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(
+                manifest, "prod", repo_root=self.root, confirm=lambda _prompt: True,
+            )
+        self.assertEqual(status, 2)
+        payload_mock.assert_not_called()
+
     def test_resume_requires_matching_receipts_and_skips_only_prior_steps(self) -> None:
         calls: list[int] = []
         manifest = self.write_manifest(self.pause_steps(3))
@@ -1009,10 +1143,13 @@ class RolloutManifestTests(unittest.TestCase):
         prompts: list[str] = []
         callback_approvals: list[bool] = []
 
-        def fake_migrate_main(arguments, *, environ, repo_root, confirm, expected_input_hashes):
+        def fake_migrate_main(arguments, *, environ, repo_root, confirm, expected_input_hashes,
+                              expected_db_unique_name, rollout_confirmed_by):
             self.assertEqual(arguments, [folder, "--env", "staging"])
             self.assertIs(environ, os.environ)
             self.assertEqual(relative_to_root(repo_root, self.root), Path("."))
+            self.assertIsNone(expected_db_unique_name)
+            self.assertEqual("terminal", rollout_confirmed_by)
             self.assertEqual(
                 expected_input_hashes[f"{folder}/001-create-table.sql"],
                 hashlib.sha256((self.root / folder / "001-create-table.sql").read_bytes()).hexdigest(),

@@ -328,6 +328,25 @@ class MigrateCliTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "apply" for call in fake.calls))
         self.assertFalse((folder / "status.staging.json").exists())
 
+    def test_rollout_binding_refuses_a_changed_target_and_preserves_confirmation_source(self):
+        folder = self.add_folder("2026-09-28_rollout-binding-r001", {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"})
+        migration = self.load(folder.name)
+        prompts = []
+        result, fake = self.apply(migration, self.target("staging"),
+                                  confirm=lambda prompt: prompts.append(prompt) or True,
+                                  expected_db_unique_name="WRONG", rollout_confirmed_by="--confirm-target")
+        self.assertEqual(2, result)
+        self.assertEqual([], prompts)
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+
+        result, fake = self.apply(migration, self.target("staging"),
+                                  confirm=lambda prompt: prompts.append(prompt) or True,
+                                  expected_db_unique_name="STAGINGDB_UNIQUE", rollout_confirmed_by="--confirm-target")
+        self.assertEqual(0, result)
+        self.assertTrue(prompts)
+        records = [json.loads(path.read_text(encoding="utf-8")) for path in self.root.rglob("run-manifest.json")]
+        self.assertIn(("flag", "--confirm-target"), {(row.get("confirmation"), row.get("confirmedBy")) for row in records})
+
     def test_yes_skips_the_staging_prompt_reads_no_stdin_and_records_the_flag(self):
         folder = self.add_folder("2026-09-28_yes-staging-r001", {"001-create-table.sql": "CREATE TABLE T (ID NUMBER);\n"})
         migration = self.load(folder.name)

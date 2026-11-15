@@ -662,15 +662,41 @@ def _run_capsule_rollout(
             + f"\nWorkflow engine SHA-256: {capsule.engine_digest}"
             + f"\nTarget plan SHA-256: {target_plan.plan_digest}"
         )
-        if confirm_target is not None:
+        approved_target_name: str | None = confirm_target
+        approved_target_names: dict[str, str] = {}
+        if environment == "prod":
+            targets = _capsule_plan_targets(target_plan, environment)
+            if confirm_target is not None:
+                rollout._assert_confirm_target(root, targets, confirm_target, environment)
+            for key, record in target_plan.targets.items():
+                observed = record.get("observed") if isinstance(record, Mapping) else None
+                prepared_name = observed.get("db_unique_name") if isinstance(observed, Mapping) else None
+                if not isinstance(prepared_name, str) or not prepared_name:
+                    raise rollout.RolloutError(f"prepared target {key} has no production db_unique_name; no steps were run")
+                if confirm_target is not None and prepared_name != confirm_target:
+                    raise rollout.RolloutError(
+                        f"prepared target {key} does not match the confirmed production db_unique_name; no steps were run"
+                    )
+                approved_target_names[key] = prepared_name
+        elif confirm_target is not None:
             rollout._assert_confirm_target(root, _capsule_plan_targets(target_plan, environment), confirm_target, environment)
+            approved_target_name = confirm_target
+            for key, record in target_plan.targets.items():
+                observed = record.get("observed") if isinstance(record, Mapping) else None
+                if not isinstance(observed, Mapping) or observed.get("db_unique_name") != confirm_target:
+                    raise rollout.RolloutError(f"prepared target {key} does not match the confirmed db_unique_name; no steps were run")
         if yes or confirm_target is not None:
             print(rollout._confirmation_text(manifest, plan, environment, 1, question=False) + capsule_digests)
             print(terminal_confirm.confirmed_line(yes, confirm_target))
             approved = True
         else:
             try:
-                approved = bool(confirm(rollout._confirmation_text(manifest, plan, environment, 1) + capsule_digests))
+                prompt = rollout._confirmation_text(manifest, plan, environment, 1, question=False) + capsule_digests
+                if approved_target_names:
+                    prompt += "\nObserved production targets: " + ", ".join(
+                        f"{key}={name}" for key, name in approved_target_names.items()
+                    )
+                approved = bool(confirm(prompt + "\nContinue with this rollout? [y/N]"))
             except (EOFError, OSError):
                 approved = False
         if not approved:
@@ -763,6 +789,12 @@ def _run_capsule_rollout(
                 else:
                     rollout._snapshot(manifest, plan, f"before step {item['number']}", environment)
                     expected_identity = None
+                    step_target_name = approved_target_name
+                    if environment == "prod" and step["type"] in {"sql-script", "ords-import", "migrate", "app-deploy"}:
+                        target_key = f"app:{step['appId']}" if step["type"] == "app-deploy" else f"step:{item['number']}"
+                        step_target_name = approved_target_names.get(target_key)
+                        if step_target_name is None:
+                            raise rollout.RolloutError(f"step {item['number']} target was not confirmed")
                     if step["type"] in {"sql-script", "ords-import", "migrate"}:
                         binding = rollout._target_binding(step, root, environment, capsule=True)
                         prepared_binding = target_plan.targets.get(f"step:{item['number']}")
@@ -777,6 +809,10 @@ def _run_capsule_rollout(
                             binding["schema"], binding["classification"],
                         )
                         expected_identity = dict(prepared_binding["observed"])
+                        if environment == "prod" and expected_identity.get("db_unique_name") != step_target_name:
+                            raise rollout.RolloutError(
+                                f"step {item['number']} prepared target {expected_identity.get('db_unique_name')!r} does not match approved production target {step_target_name!r}"
+                            )
                         scope = release_state.target_scope_from_identity(expected_identity)
                         lease_identity = {
                             "purpose": "rollout-auxiliary-step",
@@ -798,6 +834,10 @@ def _run_capsule_rollout(
                             observed = rollout._observe_target_identity(target, evidence_dir / "target-identity")
                             if observed != expected_identity:
                                 raise rollout.RolloutError(f"step {item['number']} target identity changed after preparation")
+                            if environment == "prod" and observed.get("db_unique_name") != step_target_name:
+                                raise rollout.RolloutError(
+                                    f"step {item['number']} target db_unique_name {observed.get('db_unique_name')!r} does not match approved production target {step_target_name!r}"
+                                )
                             if step["type"] == "migrate":
                                 _logical, _target, migrations = rollout._migration_step_target(root, step["folders"], environment, os.environ)
                                 if prepared_binding.get("folders") != migration_folder_rows(step["folders"], migrations):
@@ -814,7 +854,8 @@ def _run_capsule_rollout(
                                 plan=plan,
                                 manifest_confirmed=True,
                                 expected_identity=expected_identity,
-                                confirm_target=confirm_target,
+                                confirm_target=step_target_name if environment == "prod" else confirm_target,
+                                rollout_confirmed_by=report["confirmedBy"],
                             )
                     else:
                         result = rollout.execute_step(
@@ -827,7 +868,8 @@ def _run_capsule_rollout(
                             plan=plan,
                             manifest_confirmed=True,
                             expected_identity=expected_identity,
-                            confirm_target=confirm_target,
+                            confirm_target=step_target_name if environment == "prod" else confirm_target,
+                            rollout_confirmed_by=report["confirmedBy"],
                         )
                     rollout._snapshot(manifest, plan, f"after step {item['number']}", environment)
                     if step["type"] in {"sql-script", "ords-import"} and step_report.get("phase") == "uncovered-object":
