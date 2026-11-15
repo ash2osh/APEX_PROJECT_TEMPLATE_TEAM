@@ -433,9 +433,12 @@ if [ "$app_environment" = dev ]; then
   lock_held=true
   lock_assert_script="$lock_recovery/assert-lock.sql"
 fi
+if [ ! -f "$REPO_ROOT/scripts/application_lifecycle.py" ] || [ ! -f "$REPO_ROOT/scripts/application_lifecycle.sql" ]; then
+  fail 'application lifecycle helpers are unavailable; nothing imported'
+fi
 lifecycle_args=(--connection "$sqlcl_connection" --expected-user "$expected_user" --schema "$parsing_schema"
   --workspace "$workspace_name" --app-id "$app_id" --environment "$app_environment")
-python3 "$REPO_ROOT/scripts/application_lifecycle.py" capture "${lifecycle_args[@]}" --run-dir "$staging_dir/lifecycle-before"
+python3 "$REPO_ROOT/scripts/application_lifecycle.py" capture "${lifecycle_args[@]}" --run-dir "$staging_dir/lifecycle-before" || fail 'pre-publication lifecycle observation is unavailable; nothing imported'
 identity_values="$(python3 - "$staging_dir/lifecycle-before/lifecycle-snapshot.json" <<'PY'
 import json, sys
 from pathlib import Path
@@ -555,7 +558,8 @@ import_unverified=true
 
 if [ "$restore_automations" = true ]; then
   python3 "$REPO_ROOT/scripts/application_lifecycle.py" restore-automations "${lifecycle_args[@]}" \
-    --before "$staging_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$staging_dir/automation-restore"
+    --before "$staging_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$staging_dir/automation-restore" || \
+    fail 'automation restoration did not verify; baseline and recovery evidence retained'
 fi
 
 # Re-export from the selected target and compare normalized APEXlang source
@@ -655,7 +659,8 @@ fi
 python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}" "${stability_args[@]}"
 python3 "$REPO_ROOT/scripts/application_lifecycle.py" verify "${lifecycle_args[@]}" \
   --before "$staging_dir/lifecycle-before/lifecycle-snapshot.json" --run-dir "$staging_dir/lifecycle-after" \
-  --summary-path "$staging_dir/publish-verification.json"
+  --summary-path "$staging_dir/publish-verification.json" || \
+  fail 'application lifecycle verification failed; baseline and recovery evidence retained'
 if [ "$app_environment" = dev ]; then
   python3 "$REPO_ROOT/scripts/application_lock.py" check "${lock_args[@]}"
   python3 "$REPO_ROOT/scripts/application_lock.py" release "${lock_args[@]}"

@@ -402,12 +402,16 @@ try {
     $lockHeld = $true
     $lockAssertScript = Join-Path $lockRecovery 'assert-lock.sql'
   }
+  if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'application_lifecycle.py') -PathType Leaf) -or
+      -not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'application_lifecycle.sql') -PathType Leaf)) {
+    throw 'publish error: application lifecycle helpers are unavailable; nothing imported'
+  }
   $lifecyclePython = Resolve-TeamPython
   if ($null -eq $lifecyclePython) { throw 'Python 3.10 or newer is required for lifecycle verification' }
   $lifecycleArguments = @('--connection', $sqlclConnection, '--expected-user', $expectedUser, '--schema', $parsingSchema,
     '--workspace', [string]$deployment.workspace.name, '--app-id', $AppId, '--environment', $appEnvironment)
   & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') capture @lifecycleArguments --run-dir (Join-Path $publishWorkDir 'lifecycle-before')
-  if ($LASTEXITCODE -ne 0) { throw 'publish error: lifecycle pre-read unavailable; nothing imported' }
+  if ($LASTEXITCODE -ne 0) { throw 'publish error: pre-publication lifecycle observation is unavailable; nothing imported' }
   $identitySnapshot = Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json'
   $identityJson = Get-Content -LiteralPath $identitySnapshot -Raw | ConvertFrom-Json
   $identityFields = @('db_unique_name','service_name','container_id','container_name','edition','server_host','session_user','current_schema')
@@ -522,7 +526,7 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   if (-not $noRestoreAutomations) {
     & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') restore-automations @lifecycleArguments `
       --before (Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json') --run-dir (Join-Path $publishWorkDir 'automation-restore')
-    if ($LASTEXITCODE -ne 0) { throw 'publish error: automation restore did not verify; baseline and recovery evidence retained' }
+    if ($LASTEXITCODE -ne 0) { throw 'publish error: automation restoration did not verify; baseline and recovery evidence retained' }
   }
 
   # Re-export the selected target and compare normalized APEXlang source before
