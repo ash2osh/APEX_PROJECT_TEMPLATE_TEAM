@@ -115,3 +115,26 @@ Refreshed `docs/superpowers/template-parity.json` against `APEX_PROJECT_TEMPLATE
   - `tests/test_rollout.py`: five PR 74 tests (transport preflight, evidence paths, missing-evidence receipt) exist in 26.1 only, although 26.2 `rollout.py` has the same checks.
   - `tests/test_backup_ords_cli.py`: 26.2 has an unguarded-ORDS-failure regression test that 26.1 lacks, although `scripts/backup_db.sh` is identical in both.
 - Checked offline only: no database, SQLcl, network or publish command.
+
+## Decisions 1 and 3: symlink test guard and dry-run wording
+
+- Branch `chore/decisions-262` from `origin/main` (`c22604e`). Commits: `db20969` (symlink guard), `112d22a` (dry-run wording), `8ec7117` (parity re-marks), then this section and the parked item in `TODO.md`.
+- `tests/test_path_utils.py`: the parent-alias test now calls `skipTest` when `symlink_to` raises `OSError`, the guard `test_validate_app_source.py` uses. The assertion is unchanged and no test was added. With `Path.symlink_to` patched to raise `OSError`, the test reports skipped, not errored.
+- Dry-run wording, checked in the code first:
+  - `scripts/rollout.py` `_prepare_plan` and `_target_binding` resolve each step's target from `PROD_*` or `STAGING_*` (`resolve_target(os.environ, ...)`). That happens before the dry-run return in `_run_legacy_rollout`. `_observe_target_identity` and `_plan_targets` run only after that return.
+  - `scripts/rollout_capsule.py` reaches the same resolution through `rollout._prepare_plan`. Its dry-run return comes before `feature_release.prepare_target`. The request named a `_prepare_plan` in that file; the function is not defined there.
+  - Reworded: `docs/migration-rules.md` (dry-run paragraph), `README.md` (the production example paragraph and the rollout rules paragraph) and `docs/feature-releases.md` (dry-run paragraph).
+  - Wording differs from the request: the docs say "process environment", not "environment or .env". `scripts/rollout.sh` execs `rollout.py` on `--dry-run` before it sources `.env`, and `rollout.py` reads `.env` only for an `app-deploy` step's child configuration.
+  - Offline probe in a scratch copy: with `PROD_*` only in `.env`, a schema-version 2 dry run failed with `schema APP is not listed in PROD_SCHEMA for prod` (exit 2). With the same values exported, it printed the plan (exit 0).
+  - "No database session" rests on the code reading and on `test_v2_dry_run_without_capsule_stays_offline_and_schema1_execution_is_unchanged`, which asserts that `run_sqlcl` and `_observe_target_identity` are not called. A stub named `sql` on the PATH recorded no calls, but the bridge's binary name was not confirmed, so that stub proves little.
+- Parity (`8ec7117`): `tests/test_path_utils.py`, `docs/migration-rules.md` and `README.md` were re-marked `intended` with their reasons kept (blob ids changed). `docs/feature-releases.md` was added as `intended`: 26.1's dry run plans from local source only (its `_prepare_plan` resolves no target), so its local-only wording stays correct there.
+- Parity left alone: `scripts/rollout.py`, `tests/test_rollout.py`, `tests/test_backup_ords_cli.py` and `scripts/dev_test_core_migrations.py` were already `changed` before this work; `scripts/team.sh` stays `missed`.
+- Open: the dry-run `.env` wording waits for the core `rollout.sh` change. Parked in `TODO.md` under "Parked 2026-11-16".
+- Verification, offline, on `chore/decisions-262`:
+  - `python3 scripts/pre_push_check.py --all`: exit 0, all checks passed.
+  - `python3 -m unittest discover -s tests -p test_path_utils.py -v`: 3 tests, OK.
+  - `python3 -m unittest discover -s tests -p test_documentation_contract.py`: 26 tests, OK.
+  - `python3 -m unittest discover -s tests -p test_validate_app_source.py`: 7 tests, OK.
+  - `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py`: exit 0; 3106 tests, skipped=60, failures=0, errors=0, incomplete_modules=0.
+  - `python3 tools/template_parity.py ../APEX_PROJECT_TEMPLATE_26_1`: 0 unreviewed, 1 missed (`scripts/team.sh`), 4 changed (the four pre-existing records above), exit 1.
+- Not verified: Windows symlink privilege (simulated only). The core `rollout.sh` change. No database, SQLcl, publish or export command ran. The 26.1 checkout was read only through its committed HEAD (the parity tool and `git show`).

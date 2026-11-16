@@ -171,7 +171,9 @@ stops it, with exit 1. The [feature ownership and DEV drift](feature-ownership.m
 guide lists each check. Save the capsule path it prints and pass that same path
 to every later command.
 
-`--dry-run` checks only local source, manifest, capsule, and hashes. `--prepare`
+`--dry-run` checks local source, manifest, capsule, and hashes, and resolves each
+step's target from the `STAGING_*` or `PROD_*` settings in the process
+environment. It opens no database session. `--prepare`
 uses the selected environment's guarded read-only capture to make exact
 before-state, compiler-setting, structural, and descriptor checks. Review the
 target plan and generated diffs before execution.

@@ -30,7 +30,10 @@ class RelativeToRootTests(unittest.TestCase):
             root = parent / "repo"
             root.mkdir(parents=True)
             alias_parent = Path(temporary) / "parent-alias"
-            alias_parent.symlink_to(parent, target_is_directory=True)
+            try:
+                alias_parent.symlink_to(parent, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
             candidate = alias_parent / "repo" / "scratch" / "report.json"
 
             self.assertEqual(Path("scratch/report.json"), relative_to_root(candidate, root))
