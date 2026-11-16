@@ -21,10 +21,10 @@ Fixed five review findings on the 26.2 template, branched from `origin/main` at 
    - `may_read_acknowledgment` lost its unused `environ` parameter and the `Mapping` import. All callers already passed no argument.
 
 4. **Privacy scrub, text only** (commits `bf6528e`, `178850a`, `35d956a`): `docs/apex-26.2-qualification.md`, `docs/superpowers/**` (except `template-parity.json`, which is not edited), `tests/test_feature_ddl_adversarial.py`, `tests/test_feature_ddl_forms.py`
-   - Downstream project names replaced with neutral wording. `/home/ash/...` paths replaced with `<26.1 checkout>`, `<26.2 checkout>`, or `<downstream checkout>`.
+   - Downstream project names replaced with neutral wording. Personal home-directory paths replaced with `<26.1 checkout>`, `<26.2 checkout>`, or `<downstream checkout>`.
    - Relative links into a downstream checkout became plain text, because those files are not in this repository.
-   - The grantee name `RUNERP_USER` in two DDL fixture modules became `SERVICE_USER`; expected classifications are unchanged.
-   - After the scrub, `git grep -n -i -E 'abshry|absh\b|natrec|runerp|/home/ash'` hits only `tests/test_agent_styles.py:34`, whose deny-list is kept on purpose.
+   - A grantee name derived from a downstream project in two DDL fixture modules became `SERVICE_USER`; expected classifications are unchanged.
+   - After the scrub, a search for those names and paths hits only the deny-list in `tests/test_agent_styles.py`, which is kept on purpose.
 
 5. **Daily change record**: `ai_generate/2026-11-15/WALKTHROUGH.md` (PRs #101 and #102) and this file.
 
