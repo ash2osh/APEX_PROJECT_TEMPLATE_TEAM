@@ -63,3 +63,8 @@ Commands and results, all run on this branch after the five commits above:
 ## Follow-up on this branch
 
 - `scripts/workflow_skills.py`: `CORE_SKILLS` now lists `firefox-devtools-mcp`, so a workflow pack cannot install a skill with that name over the template skill. `tests/test_workflow_skills.py` `CoreSkillListTests` pins the list to the template skill folders, ignoring skills an installed pack recorded in `.agent-skills.lock.json`. The same change is on the 26.1 branch.
+
+## Live reconciliation scenarios run again
+
+- `tests/test_live_feature_release.py`: `test_abrupt_termination_mid_apply_is_recovered_after_reconciliation` and `test_unknown_run_without_a_checkpoint_is_reconciled_then_frees_the_target` were permanently skipped because they typed an acknowledgment. They now supply it with `--yes` (`rollout --prepare --recover --yes`, `feature reconcile-run --yes`), assert `acknowledgedBy: --yes`, and first assert that a piped acknowledgment, even the exact text, is refused. `docs/live-feature-tests.md` describes this.
+- Live results are in the pull request description.
