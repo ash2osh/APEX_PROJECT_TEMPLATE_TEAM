@@ -485,6 +485,13 @@ case "$command_name" in
     ;;
   compare-env)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown] [--emit-dba-script <file>]"
+    # Command help is argparse-only and must work without a configured .env.
+    for compare_argument in "$@"; do
+      if [ "$compare_argument" = "--help" ] || [ "$compare_argument" = "-h" ]; then
+        cd "$REPO_ROOT"
+        exec python3 -m scripts.compare_schema compare-env "$@"
+      fi
+    done
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/compare_schema.sh" compare-env "$@"
     ;;
