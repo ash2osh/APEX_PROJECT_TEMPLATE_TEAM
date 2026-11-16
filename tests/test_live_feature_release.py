@@ -219,9 +219,9 @@ class LiveFeatureReleaseTests(unittest.TestCase):
     def _team(self, *args: str, stdin: str | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
         return _run([str(self.project / "scripts" / "team.sh"), *args], cwd=self.project, env=env or self.env, stdin=stdin)
 
-    def _team_ack(self, *args: str, ack: str) -> subprocess.CompletedProcess:
-        """Acknowledgments require a developer at a terminal, not automated input."""
-        raise unittest.SkipTest("live reconciliation requires a developer's terminal acknowledgment")
+    def _team_yes(self, *args: str) -> subprocess.CompletedProcess:
+        """Supply an acknowledgment with --yes, the recorded unattended route (recorded as acknowledgedBy: --yes)."""
+        return self._team(*args, "--yes")
 
     def _feature(self, slug: str, schema: str = SCHEMA) -> None:
         result = self._team("feature", "init", slug, "--schema", schema)
@@ -968,7 +968,6 @@ class LiveFeatureReleaseTests(unittest.TestCase):
                 self.assertIsNotNone(modelled, f"a shape Oracle accepts was refused: {label}")
                 self.assertEqual(truth.get(view, set()), {name.upper() for _, name in modelled["dependencies"]}, label)
 
-    @unittest.skip("live reconciliation requires a developer's terminal acknowledgment")
     def test_abrupt_termination_mid_apply_is_recovered_after_reconciliation(self) -> None:
         slug = self._name("kill")
         package = f"LIVE_{self.token}_KILL"
@@ -1008,8 +1007,12 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         # package to stop changing before reconciling, or recovery captures a moving target.
         self._wait_until_settled(package, connection=STAGING_DB)
 
-        result = self._team_ack("rollout", "releases/current.json", "--env", "staging", "--prepare",
-                                "--capsule", capsule, "--recover", attempt, ack=f"RECONCILE {attempt}\n")
+        # A piped acknowledgment, even the exact text, is refused: only a terminal or --yes supplies it.
+        result = self._team("rollout", "releases/current.json", "--env", "staging", "--prepare",
+                            "--capsule", capsule, "--recover", attempt, stdin=f"RECONCILE {attempt}\n")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self._team_yes("rollout", "releases/current.json", "--env", "staging", "--prepare",
+                                "--capsule", capsule, "--recover", attempt)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         result, recovered = self._rollout("staging", capsule=capsule)
         self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}\nreport: {recovered}")
@@ -1211,7 +1214,6 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(retried["status"], "success")
         self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{table}'", STAGING_DB), 1)
 
-    @unittest.skip("live reconciliation requires a developer's terminal acknowledgment")
     def test_unknown_run_without_a_checkpoint_is_reconciled_then_frees_the_target(self) -> None:
         slug = self._name("recon")
         package, log = f"LIVE_{self.token}_RCP", f"LIVE_{self.token}_RCLOG"
@@ -1255,15 +1257,17 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("reconcile before reuse", result.stdout + result.stderr)
 
-        result = self._team_ack("feature", "reconcile-run", run_id, "--env", "staging", ack="RECONCILE-RUN not-this-run\n")
+        # A piped acknowledgment, even the exact text, is refused: only a terminal or --yes supplies it.
+        result = self._team("feature", "reconcile-run", run_id, "--env", "staging", stdin=f"RECONCILE-RUN {run_id}\n")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("reconciliation", self._run_row(run_id))
         self.assertEqual(self._run_row(run_id)["state"], "unknown")
 
-        result = self._team_ack("feature", "reconcile-run", run_id, "--env", "staging", ack=f"RECONCILE-RUN {run_id}\n")
+        result = self._team_yes("feature", "reconcile-run", run_id, "--env", "staging")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         closed = self._run_row(run_id)
         self.assertEqual(closed["reconciliation"]["acknowledgment"], f"RECONCILE-RUN {run_id}")
+        self.assertEqual(closed["reconciliation"]["acknowledgedBy"], "--yes")
         self.assertEqual(closed["reconciliation"]["priorState"], "unknown")
         self.assertEqual(closed["reconciliation"]["priorDatabaseState"], "unknown")
         self.assertFalse(json.loads(self._team("feature", "clean-capsule", payload).stdout)["eligible"])
