@@ -7,7 +7,7 @@ description: Use when creating, changing, translating or debugging an Oracle APE
 
 A **template component** (APEX 23.1+) is a plug-in that renders each row of a query through an HTML partial with placeholders. The query returns plain data; the component owns the markup, CSS and JavaScript; pages reuse it. This skill covers the **report** type at application level (region type `appTemplateComponent/<name>`), written as APEXlang source, tested in a browser, and imported.
 
-Verified on APEX 26.1 (compatibility mode 24.2), `uc-apx` and SQLcl `apex validate`, with real imports and browser runs. The templates in `templates/` validate as they are.
+Verified on APEX 26.1 (compatibility mode 24.2) with SQLcl `apex validate`, real imports and browser runs. The templates in `templates/` validate as they are. An earlier verification also ran `uc-apx`; that tool is retired and is not part of this template, so nothing here requires it.
 
 ## Choose the right tool
 
@@ -29,7 +29,7 @@ Alpine.js is **optional**. A template component with plain HTML/CSS, or with one
 5. **Translate** (next section).
 6. **Make it mobile first and right-to-left safe** (`reference/mobile-and-rtl.md`): one column, 44px touch targets, collapse secondary facts on phones, logical CSS properties.
 7. **Server code**: any action goes through one AJAX callback that checks ownership and relations on the server, calls the package routines the app already has, rolls back on failure and answers with a message **key** (`reference/pitfalls.md`, security rows).
-8. **Validate offline**: SQLcl `apex validate` (always available) and `uc-apx validate` (optional tool, when installed), parse-compile every query and PL/SQL block against the parsing schema, run the logic with empty, wrong and odd inputs, run the project tests, add a source-rule test for each rule you rely on.
+8. **Validate offline**: SQLcl `apex validate` is the validation command for this template (`uc-apx` is retired and not part of it), parse-compile every query and PL/SQL block against the parsing schema, run the logic with empty, wrong and odd inputs, run the project tests, add a source-rule test for each rule you rely on.
 9. **Test in Chrome before asking for approval** (`reference/testing-and-import.md` section 4, and the `chrome-devtools-mcp` skill): look at the console and a screenshot, prototype fixes by injecting CSS/JS in the live page, let the owner verify, then put exactly that into source.
 10. **Import** through the project's workflow; expect sessions to end; test again with no injected fixes, on a phone viewport, in both languages, with a long list and with a user who must not see someone else's rows.
 

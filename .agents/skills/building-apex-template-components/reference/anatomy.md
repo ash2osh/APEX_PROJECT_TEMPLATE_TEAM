@@ -1,6 +1,6 @@
 # Anatomy of a report template component in APEXlang
 
-Everything below was verified on APEX 26.1 (compatibility mode 24.2) with `uc-apx validate`, SQLcl `apex validate`, an import, and a browser run.
+Everything below was verified on APEX 26.1 (compatibility mode 24.2) with SQLcl `apex validate`, an import, and a browser run. An earlier verification also ran `uc-apx validate`; uc-apx is retired and is not part of this template.
 The files in `../templates/` are a complete, validated example (a "ticket card").
 
 ## 1. Where the files live
@@ -108,4 +108,4 @@ region ticket-cards (
 
 ## 7. Syntax you cannot guess
 
-If no example of the construct exists in the repo, do not invent it. Ask the owner to create a minimal skeleton in App Builder (see `testing-and-import.md`), export it in a throwaway worktree and copy the new files. `uc-apx shape region --list-types` and `uc-apx shape region --type <type> --json-pretty` print real examples of the built-in kinds; `sql -nolog` + `apex validate -input <dir>` names the invalid property and the allowed values (for example a button's `behavior { action: }` must be `submitPage`, not `submit`).
+If no example of the construct exists in the repo, do not invent it. Ask the owner to create a minimal skeleton in App Builder (see `testing-and-import.md`), export it in a throwaway worktree and copy the new files. `sql -nolog` + `apex validate -input <dir>` names the invalid property and the allowed values. If you have the retired uc-apx tool installed outside this template, its `uc-apx shape region --list-types` prints examples of the built-in kinds; this template does not ship or need it (for example a button's `behavior { action: }` must be `submitPage`, not `submit`).
