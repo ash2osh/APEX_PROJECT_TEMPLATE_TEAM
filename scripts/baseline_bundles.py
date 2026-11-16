@@ -191,6 +191,10 @@ def _table_column_type(row: Mapping) -> str:
     return value
 
 
+def _column_sql(row: Mapping) -> str:
+    return f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
+
+
 def _column_definition_check(schema: str, row: Mapping) -> dict:
     table_name = str(row["table_name"])
     column_name = str(row["name"])
@@ -299,6 +303,13 @@ def _column_definition_check(schema: str, row: Mapping) -> dict:
     return _check(check_id, sql)
 
 
+def _count_check(check_id: str, table_and_where: str, expected: int) -> dict:
+    return _check(
+        check_id,
+        f"SELECT CASE WHEN (SELECT COUNT(*) FROM {table_and_where}) = {expected} THEN 1 ELSE 0 END FROM DUAL",
+    )
+
+
 def _view_validity_check(schema: str, name: str) -> dict:
     sql = (
         "SELECT CASE WHEN EXISTS ("
@@ -311,17 +322,6 @@ def _view_validity_check(schema: str, name: str) -> dict:
     )
     check_id = f"valid-view-{_safe_check_slug(name)}"
     return _check(check_id, sql)
-
-
-def _column_sql(row: Mapping) -> str:
-    return f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
-
-
-def _count_check(check_id: str, table_and_where: str, expected: int) -> dict:
-    return _check(
-        check_id,
-        f"SELECT CASE WHEN (SELECT COUNT(*) FROM {table_and_where}) = {expected} THEN 1 ELSE 0 END FROM DUAL",
-    )
 
 
 def _source_line_predicate(line_number: int, line: str, *, final: bool) -> str:
@@ -349,8 +349,8 @@ def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000)
         ]
         text_match = " OR ".join(predicates) if predicates else "1 = 0"
         return (
-            "SELECT CASE WHEN "
-            f"COUNT(*) = {len(lines)} AND COUNT(DISTINCT CASE WHEN {text_match} THEN S.LINE END) = {len(rows)} "
+            "SELECT CASE WHEN COUNT(*) = "
+            f"{len(lines)} AND COUNT(DISTINCT CASE WHEN {text_match} THEN S.LINE END) = {len(rows)} "
             "THEN 1 ELSE 0 END FROM ALL_SOURCE S "
             f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} "
             f"AND S.TYPE = {_sql_literal(object_type)}"
@@ -416,15 +416,15 @@ def _needs_clob_assembly(lines: Sequence[str]) -> bool:
 
 
 def _clob_source_step(unit: Mapping, settings: Mapping | None) -> str:
-    lines = [f"-- Exact stored source for {unit['type']} {unit['name']} assembled as a CLOB."]
-    if settings is not None:
-        lines.append(_session_settings_sql(settings))
-    lines.extend([
+    lines = [
+        f"-- Exact stored source for {unit['type']} {unit['name']} assembled as a CLOB.",
         "DECLARE",
         "  l_source CLOB;",
         "BEGIN",
         "  l_source := TO_CLOB('CREATE OR REPLACE ');",
-    ])
+    ]
+    if settings is not None:
+        lines.insert(1, _session_settings_sql(settings))
     for exported in unit["lines"]:
         has_newline = exported.endswith("\n")
         content = exported[:-1] if has_newline else exported
@@ -470,7 +470,7 @@ def _clob_ddl_step(label: str, ddl: str) -> str:
     return "\n".join(lines)
 
 
-def _exact_source_step(unit: Mapping, settings: Mapping) -> str:
+def _exact_source_step(unit: Mapping, settings: Mapping | None) -> str:
     return _clob_source_step(unit, settings) if _needs_clob_assembly(unit["lines"]) else _direct_source_step(unit, settings)
 
 

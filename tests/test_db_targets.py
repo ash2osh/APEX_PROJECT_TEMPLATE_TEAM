@@ -220,6 +220,31 @@ class MultiSchemaTargetTests(unittest.TestCase):
             self.api().batch_schema([None], "AAA", narrowed)
         self.assertIn("migrations/<SCHEMA>/", str(raised.exception))
 
+    def test_environment_migration_profile_overrides_the_normal_connection_and_login(self) -> None:
+        values = {
+            **BASE_ENV,
+            "STAGING_MIGRATION_SCHEMA": "APP_STAGE",
+            "STAGING_MIGRATION_SQLCL_CONNECTION": "stage-migration",
+            "STAGING_MIGRATION_EXPECTED_USER": "APP_STAGE",
+            "PROD_MIGRATION_SCHEMA": "APP_PROD",
+            "PROD_MIGRATION_SQLCL_CONNECTION": "prod-migration",
+            "PROD_MIGRATION_EXPECTED_USER": "PROD_MIGRATOR",
+        }
+
+        staging = self.api().resolve_target(values, "staging", "migration", schema="APP_STAGE")
+        prod = self.api().resolve_target(values, "prod", "migration", schema="APP_PROD")
+
+        self.assertEqual(staging, self.api().Target("staging", "stage-migration", "APP_STAGE", "APP_STAGE", "staging"))
+        self.assertEqual(prod, self.api().Target("prod", "prod-migration", "PROD_MIGRATOR", "APP_PROD", "production"))
+        self.assertNotEqual(staging.connection, values["STAGING_SQLCL_CONNECTION"])
+        self.assertNotEqual(prod.connection, values["PROD_SQLCL_CONNECTION"])
+
+    def test_partial_migration_profile_refuses_instead_of_falling_back_to_normal_profile(self) -> None:
+        values = {**BASE_ENV, "STAGING_MIGRATION_SQLCL_CONNECTION": "stage-migration"}
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().resolve_target(values, "staging", "migration", schema="APP_STAGE")
+        self.assertIn("STAGING_MIGRATION_SCHEMA", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
