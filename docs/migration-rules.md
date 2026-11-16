@@ -574,10 +574,9 @@ cross-process runs or database writes; two processes can both pass preflight
 before either installs its receipt.
 
 `--dry-run` validates the manifest and local step inputs, resolves each step's
-target from the `PROD_*` or `STAGING_*` settings in the process environment
+target from the `PROD_*` or `STAGING_*` settings in the environment or `.env`
 (except a step that names its own connection), prints all hashes, and writes the report pair without running the steps. It
-opens no database session. A dry run reads `.env` only for an `app-deploy`
-step's child configuration. `--report <file>` writes
+opens no database session. A dry run loads `.env` the way the real run does, so the same settings resolve in both. `--report <file>` writes
 JSON and Markdown siblings; a `.json` or `.md` suffix is replaced to select the
 pair's common base name. By default, both reports go under `scratch/`. Reports
 include the overall and per-step start/end times, durations, status, hashes,

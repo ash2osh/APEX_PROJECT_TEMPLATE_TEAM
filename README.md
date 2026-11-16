@@ -697,7 +697,7 @@ scripts/team.sh rollout release/rollout.json --env prod
 ```
 
 The dry run prints the local manifest and input hashes. It resolves each step's
-target from the `PROD_*` or `STAGING_*` settings in the process environment
+target from the `PROD_*` or `STAGING_*` settings in the environment or `.env`
 (except a step that names its own connection) and opens no database session. The production run shows its target and requires the
 manifest confirmation.
 
@@ -954,8 +954,7 @@ reports. A production or staging run has one explicit confirmation listing the
 manifest and every step/input SHA-256. Resume with `--from-step N` only after
 the earlier successful step receipts under `scratch/` match this exact
 manifest, environment and input set. `--dry-run` validates local inputs,
-resolves each step's target from the `PROD_*` or `STAGING_*` settings in the
-process environment (except a step that names its own connection), and prints
+resolves each step's target from the `PROD_*` or `STAGING_*` settings in the environment or `.env` (except a step that names its own connection), and prints
 the hashes before execution. It opens no database session. The confirmation includes app workspace
 and schema or standalone SQL connection/user/schema details. The command
 prints JSON/Markdown report paths, including on step failure; report outputs
