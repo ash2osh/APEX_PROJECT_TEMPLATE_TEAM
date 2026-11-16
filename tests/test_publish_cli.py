@@ -1530,6 +1530,54 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("--confirm-target needs the observed db_unique_name", blank.stderr.decode("utf-8", "replace"))
             self.assertFalse(sql_log.exists())
 
+    def test_app_source_dir_is_refused_for_dev_before_any_sqlcl_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, _, environment = self.make_publish_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            for args in ([], ["--env", "dev"]):
+                with self.subTest(args=args):
+                    result = subprocess.run(
+                        [BASH, str(runner), "100", *args, "--app-source-dir", "apps/DEMO/100"],
+                        cwd=root, env=environment, capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn(
+                        "--app-source-dir is supported only for staging or production deployment", result.stderr,
+                    )
+                    self.assertFalse(sql_log.exists(), "a refused DEV publish must not reach SQLcl")
+
+    def test_app_source_dir_passes_the_dev_refusal_for_staging(self) -> None:
+        # Positive control: the refusal is DEV-only, so a staging run gets past it and stops at the missing descriptor.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner, sql_log, _, environment = self.make_publish_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            result = subprocess.run(
+                [BASH, str(runner), "100", "--env", "staging", "--app-source-dir", "apps/DEMO/100"],
+                cwd=root, env=environment, capture_output=True, text=True,
+            )
+            self.assertNotIn("supported only for staging or production", result.stdout + result.stderr)
+            self.assertIn("deployment descriptor not found", result.stdout + result.stderr)
+            self.assertFalse(sql_log.exists())
+
+    def test_powershell_publish_has_no_app_source_dir_option_so_it_cannot_import_from_a_directory(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell is not available")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, sql_log, _, environment = self.make_publish_fixture(root)
+            environment["PROJECT_ENV_FILE"] = str(root / ".env")
+            result = subprocess.run(
+                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "publish_app.ps1"), "100",
+                 "--env", "dev", "--app-source-dir", "apps/DEMO/100"],
+                cwd=root, env=environment, capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("unknown option: --app-source-dir", result.stdout + result.stderr)
+            self.assertFalse(sql_log.exists(), "the PowerShell wrapper must not reach SQLcl")
+
     POWERSHELL_HELPERS = (
         "publish_app.ps1", "load_env.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "normalize_apx.ps1",
     )

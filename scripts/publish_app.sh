@@ -97,6 +97,7 @@ case "$app_environment" in
   dev|staging|prod) ;;
   *) fail "unsupported environment '$app_environment'; use dev, staging, or prod" ;;
 esac
+[ -z "$app_source_override" ] || [ "$app_environment" != dev ] || fail '--app-source-dir is supported only for staging or production deployment'
 if [ "$confirm_target_given" = true ] && [ "$app_environment" = dev ]; then
   fail "--confirm-target applies only to --env staging or prod"
 fi

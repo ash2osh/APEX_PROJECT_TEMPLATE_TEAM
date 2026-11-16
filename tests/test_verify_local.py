@@ -192,6 +192,19 @@ APEX_EXPECTED_USER=DEMO
         self.assertEqual(checks_by_name["template_lock"]["status"], "fail")
         self.assertIn("apexRelease mismatch", checks_by_name["template_lock"]["message"])
 
+    def test_lock_without_template_ref_fails(self) -> None:
+        self.write_valid_env()
+        self.create_valid_app()
+        lock_path = self.write_valid_lock()
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        del lock["templateRef"]
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        from scripts.local_config import read_project_env
+        report = build_report(self.repo, read_project_env(self.repo / ".env"), self.current_skills)
+        lock_check = next(c for c in report["checks"] if c["check"] == "template_lock")
+        self.assertEqual(lock_check["status"], "fail")
+        self.assertIn("templateRef", lock_check["message"])
+
     def test_missing_dev_descriptor_fails(self) -> None:
         self.write_valid_env()
         self.write_valid_lock()

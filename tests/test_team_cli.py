@@ -1060,6 +1060,35 @@ exit 17
                 self.assertIn("compare-env", full.stdout)
                 self.assertNotIn("Everyday commands:", full.stdout)
 
+    def test_team_wrappers_expose_baseline_and_compare_env_with_offline_help(self) -> None:
+        environment = dict(os.environ, PROJECT_ENV_FILE="/no/such/team-env")
+        entries = [("team.sh", [BASH])]
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if pwsh:
+            entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
+
+        for name, launcher in entries:
+            script = ROOT / "scripts" / name
+            with self.subTest(entry=name, command="help"):
+                help_result = subprocess.run(
+                    [*launcher, str(script), "--help"], cwd=ROOT, env=environment,
+                    capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=30,
+                )
+                self.assertEqual(0, help_result.returncode, help_result.stderr)
+                self.assertIn("compare-env", help_result.stdout)
+                self.assertIn("baseline export-source", help_result.stdout)
+
+            for command in ("baseline", "compare-env"):
+                with self.subTest(entry=name, command=command):
+                    result = subprocess.run(
+                        [*launcher, str(script), command, "--help"], cwd=ROOT, env=environment,
+                        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=30,
+                    )
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    expected = "export-source" if command == "baseline" else "Compare environment catalog"
+                    self.assertIn(expected, result.stdout)
+                    self.assertNotIn("configuration file", result.stderr)
+
     def test_argument_errors_read_and_exit_the_same_in_both_wrappers(self) -> None:
         # An uncaught throw makes PowerShell print an exception block with the
         # script path and line and exit 1; Bash prints one `team error:` line and

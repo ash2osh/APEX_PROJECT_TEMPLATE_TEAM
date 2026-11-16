@@ -95,3 +95,9 @@ Refreshed `docs/superpowers/template-parity.json` against `APEX_PROJECT_TEMPLATE
 
 - `scripts/backup_db.sh`: the EXIT trap now keeps the run's status; under errexit a failed scratch cleanup used to turn a refusal (2) or a finished backup (0) into 1. A cleanup failure is reported as a warning. `run_ords_scope` exits 2 directly on each refusal and is called without `||`, so errexit stays on inside it (26.2 had it off). The file is now identical in both templates.
 - The Windows known-flaky entry (refusal printed, exit 0) is not explained by this; the leading candidate is `exec` in `scripts/team.sh` under Git Bash, which needs a Windows probe. The entry stays until then.
+
+## Parity ports into 26.2
+
+- `scripts/publish_app.sh`: `--app-source-dir` with `--env dev` is refused before any SQLcl call, as in 26.1 (the option was added for staging and production only).
+- `scripts/team.sh`, `scripts/team.ps1`: `compare-env --help` answers before `.env` is loaded, as in 26.1.
+- Tests ported from 26.1: the capsule rerun refusal on an occupied receipt (`test_feature_rollout`), a template lock without `templateRef` (`test_verify_local`), and ten `test_rollout` cases (pause-step rerun, multiline `UPDATE ... SET`, auxiliary DML classifier, shared-catalog identity, schema-2 budget).

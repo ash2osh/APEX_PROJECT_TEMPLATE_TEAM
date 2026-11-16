@@ -588,6 +588,11 @@ try {
           $compareArguments[$compareIndex] = "--emit-dba-script=" + (ConvertTo-MigrationFolderArgument $scriptValue)
         }
       }
+      # Command help is argparse-only and must work without a configured .env, as in team.sh.
+      if ($compareArguments -ccontains "--help" -or $compareArguments -ccontains "-h") {
+        Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("compare-env") + $compareArguments)
+        Exit-Team 0
+      }
       Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments (@("compare-env") + $compareArguments)
     }
     "baseline" {
