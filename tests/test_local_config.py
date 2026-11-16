@@ -11,6 +11,11 @@ import unittest
 from pathlib import Path
 
 from scripts.local_config import ConfigError, read_project_env
+from scripts.template_release import is_apex_26_2
+
+# Phase 2 release switch: the uc-apx settings are retired on 26.2 only (apexRelease in template-manifest.json).
+ROOT = Path(__file__).resolve().parents[1]
+APEX_26_2 = is_apex_26_2(ROOT)
 
 
 VALID_BASE_CONFIG = """# Valid baseline test config
@@ -63,23 +68,16 @@ class LocalConfigTests(unittest.TestCase):
         self.assertEqual(values["MIGRATION_CHECK_BATCH_BYTES"], "2097152")
         self.assertEqual(values["MIGRATION_PREFLIGHT_INVENTORY_RETRIES"], "3")
 
-    def test_compare_env_dba_connection_aliases_are_optional_single_aliases(self) -> None:
-        content = VALID_BASE_CONFIG + (
-            "DEV_DBA_SQLCL_CONNECTION=dev-readonly\n"
-            "STAGING_DBA_SQLCL_CONNECTION=stage-readonly\n"
-        )
-        values = read_project_env(self.write_env(content))
-        self.assertEqual(values["DEV_DBA_SQLCL_CONNECTION"], "dev-readonly")
-        self.assertEqual(values["STAGING_DBA_SQLCL_CONNECTION"], "stage-readonly")
-        for value in ("", "bad alias", "dev-one,dev-two"):
-            with self.subTest(value=value), self.assertRaises(ConfigError):
-                read_project_env(self.write_env(VALID_BASE_CONFIG + f"DEV_DBA_SQLCL_CONNECTION={value}\n"))
-
     def test_preflight_inventory_retries_accepts_zero_and_rejects_invalid_counts(self) -> None:
         values = read_project_env(self.write_env(VALID_BASE_CONFIG + "MIGRATION_PREFLIGHT_INVENTORY_RETRIES=0\n"))
         self.assertEqual(values["MIGRATION_PREFLIGHT_INVENTORY_RETRIES"], "0")
         for value in ("-1", "1.5", "many"):
             with self.subTest(value=value), self.assertRaises(ConfigError):
+                read_project_env(self.write_env(VALID_BASE_CONFIG + f"MIGRATION_PREFLIGHT_INVENTORY_RETRIES={value}\n"))
+
+    def test_preflight_inventory_retry_count_must_be_nonnegative_integer(self) -> None:
+        for value in ("-1", "1.5", "01", "three"):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "non-negative integer"):
                 read_project_env(self.write_env(VALID_BASE_CONFIG + f"MIGRATION_PREFLIGHT_INVENTORY_RETRIES={value}\n"))
 
     def test_utf8_bom_stripped_cleanly(self) -> None:
@@ -179,6 +177,24 @@ class LocalConfigTests(unittest.TestCase):
         self.assertIn("DEVELOPER_NAME", error_msg)
         self.assertNotIn(secret, error_msg)
 
+    @unittest.skipIf(APEX_26_2, "26.2 retired the uc-apx settings")
+    def test_legacy_uc_apx_settings_remain_supported_for_this_release_line(self) -> None:
+        content = VALID_BASE_CONFIG + "INSTALL_UC_APX=false\nUC_APX_SKILLS_AGENT=universal\n"
+        values = read_project_env(self.write_env(content))
+        self.assertEqual(values["INSTALL_UC_APX"], "false")
+        self.assertEqual(values["UC_APX_SKILLS_AGENT"], "universal")
+
+        for key, value, message in (
+            ("INSTALL_UC_APX", "invalid", "INSTALL_UC_APX must be true or false"),
+            ("UC_APX_SKILLS_AGENT", "invalid", "UC_APX_SKILLS_AGENT must be universal or claude-code"),
+        ):
+            with self.subTest(key=key):
+                bad = VALID_BASE_CONFIG + f"{key}={value}\n"
+                with self.assertRaises(ConfigError) as ctx:
+                    read_project_env(self.write_env(bad))
+                self.assertEqual(str(ctx.exception), message)
+
+    @unittest.skipUnless(APEX_26_2, "26.1 keeps the uc-apx settings")
     def test_retired_uc_apx_settings_rejected(self) -> None:
         for key in ("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT"):
             for val in ("false", "true", "invalid"):
@@ -328,6 +344,50 @@ class LocalConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             read_project_env(Path("/nonexistent/path/to/.env"))
         self.assertIn("configuration file not found", str(ctx.exception))
+
+    def test_compare_env_dba_connection_aliases_are_optional_single_aliases(self) -> None:
+        content = VALID_BASE_CONFIG + (
+            "DEV_DBA_SQLCL_CONNECTION=dev-readonly\n"
+            "STAGING_DBA_SQLCL_CONNECTION=stage-readonly\n"
+        )
+        values = read_project_env(self.write_env(content))
+        self.assertEqual(values["DEV_DBA_SQLCL_CONNECTION"], "dev-readonly")
+        self.assertEqual(values["STAGING_DBA_SQLCL_CONNECTION"], "stage-readonly")
+        for value in ("", "bad alias", "dev-one,dev-two"):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                read_project_env(self.write_env(VALID_BASE_CONFIG + f"DEV_DBA_SQLCL_CONNECTION={value}\n"))
+
+    def test_dba_sqlcl_connection_settings(self) -> None:
+        content = VALID_BASE_CONFIG + (
+            "DEV_DBA_SQLCL_CONNECTION=dev-dba\n"
+            "STAGING_DBA_SQLCL_CONNECTION=stage_dba.1\n"
+            "PROD_DBA_SQLCL_CONNECTION=prod-dba-01\n"
+        )
+        values = read_project_env(self.write_env(content))
+        self.assertEqual(values["DEV_DBA_SQLCL_CONNECTION"], "dev-dba")
+        self.assertEqual(values["STAGING_DBA_SQLCL_CONNECTION"], "stage_dba.1")
+        self.assertEqual(values["PROD_DBA_SQLCL_CONNECTION"], "prod-dba-01")
+
+    def test_dba_sqlcl_connection_empty_rejected(self) -> None:
+        for key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
+            for bad_val in ("", "   "):
+                with self.subTest(key=key, bad_val=bad_val):
+                    with self.assertRaises(ConfigError) as ctx:
+                        read_project_env(self.write_env(VALID_BASE_CONFIG + f"{key}={bad_val}\n"))
+                    self.assertIn(f"{key} must not be empty", str(ctx.exception))
+
+    def test_dba_sqlcl_connection_invalid_values_refused(self) -> None:
+        for value in ("", "bad alias", "dev,dba", "-leading", ".leading", "has/slash"):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                read_project_env(self.write_env(VALID_BASE_CONFIG + f"DEV_DBA_SQLCL_CONNECTION={value}\n"))
+
+    @unittest.skipIf(APEX_26_2, "26.2 wording: a comma list is 'accepts one saved SQLcl connection alias'")
+    def test_dba_sqlcl_connection_invalid_characters_rejected(self) -> None:
+        for invalid in ("dev,dba", "dev dba", "-leading", ".leading", "has/slash"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ConfigError) as ctx:
+                    read_project_env(self.write_env(VALID_BASE_CONFIG + f"DEV_DBA_SQLCL_CONNECTION={invalid}\n"))
+                self.assertIn("DEV_DBA_SQLCL_CONNECTION contains unsupported characters", str(ctx.exception))
 
 
 if __name__ == "__main__":

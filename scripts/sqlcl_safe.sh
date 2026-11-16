@@ -144,7 +144,8 @@ sqlcl_require_ords_version() {
   python3 "$REPO_ROOT/scripts/ords_export.py" sqlcl-version "$output_file" > /dev/null || return 2
 }
 
-# APEX 26.2 source/import support was qualified with SQLcl 26.3. Runs offline.
+# 26.2 only: APEX 26.2 source/import support was qualified with SQLcl 26.3. Defined on both templates;
+# only the 26.2 callers use it (26.1 has no apex_compatibility.py). Runs offline.
 sqlcl_require_apex_version() {
   [ "$#" -eq 1 ] || { printf 'usage: sqlcl_require_apex_version <work-dir>\n' >&2; return 2; }
   local work_dir="$1" stdin_file="$1/.sqlcl-stdin" output_file="$1/sqlcl-version.txt"

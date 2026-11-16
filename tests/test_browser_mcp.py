@@ -343,6 +343,7 @@ class BrowserMcpTests(unittest.TestCase):
         shutil.copy2(ROOT / "scripts/team.sh", scripts / "team.sh")
         if SCRIPT.is_file():
             shutil.copy2(SCRIPT, scripts / "browser_mcp.py")
+        shutil.copy2(ROOT / "template-manifest.json", repo / "template-manifest.json")
         bash = bash_command()
 
         setup = subprocess.run(
@@ -376,6 +377,7 @@ class BrowserMcpTests(unittest.TestCase):
             if name == "browser_mcp.py":
                 source = SCRIPT
             shutil.copy2(source, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", repo / "template-manifest.json")
 
         result = subprocess.run(
             [powershell, "-NoProfile", "-File", str(scripts / "team.ps1"), "mcp", "setup", "--choice", "firefox"],

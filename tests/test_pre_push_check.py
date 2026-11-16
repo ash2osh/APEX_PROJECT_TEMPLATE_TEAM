@@ -55,6 +55,8 @@ class PrePushCheckTests(unittest.TestCase):
         (repo / "scripts").mkdir(parents=True)
         (repo / "tests").mkdir()
         shutil.copy2(Path(__file__).resolve().parents[1] / "scripts/pre_push_check.py", repo / "scripts")
+        # The copied loaders read the release from the template manifest (Phase 2 release switch).
+        shutil.copy2(Path(__file__).resolve().parents[1] / "template-manifest.json", repo / "template-manifest.json")
 
         def git(*args):
             return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)

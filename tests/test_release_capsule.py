@@ -23,6 +23,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         actual_root = Path(__file__).resolve().parents[1]
         shutil.copytree(actual_root / "scripts", self.root / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(actual_root / "template-manifest.json", self.root / "template-manifest.json")
         try:
             from scripts import feature_manifest, release_capsule, rollout
         except ImportError as error:
@@ -368,6 +369,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         fresh_root = Path(self.temporary.name).resolve() / "second-root"
         fresh_root.mkdir()
         shutil.copytree(Path(__file__).resolve().parents[1] / "scripts", fresh_root / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(Path(__file__).resolve().parents[1] / "template-manifest.json", fresh_root / "template-manifest.json")
         other = ReleaseCapsuleTests()
         other.root = fresh_root
         other.release_capsule = self.release_capsule
@@ -440,6 +442,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         fresh_root = Path(self.temporary.name).resolve() / "file-set-root"
         fresh_root.mkdir()
         shutil.copytree(Path(__file__).resolve().parents[1] / "scripts", fresh_root / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(Path(__file__).resolve().parents[1] / "template-manifest.json", fresh_root / "template-manifest.json")
         (fresh_root / "features").mkdir()
         other = ReleaseCapsuleTests()
         other.root = fresh_root
@@ -459,6 +462,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         extra_root = Path(self.temporary.name).resolve() / "extra-root"
         extra_root.mkdir()
         shutil.copytree(Path(__file__).resolve().parents[1] / "scripts", extra_root / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(Path(__file__).resolve().parents[1] / "template-manifest.json", extra_root / "template-manifest.json")
         other.root = extra_root
         other.manifest_path = extra_root / "releases" / "current.json"
         other.create_feature()
@@ -482,6 +486,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         partial_root = Path(self.temporary.name).resolve() / "partial-root"
         partial_root.mkdir()
         shutil.copytree(Path(__file__).resolve().parents[1] / "scripts", partial_root / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(Path(__file__).resolve().parents[1] / "template-manifest.json", partial_root / "template-manifest.json")
         other = ReleaseCapsuleTests()
         other.root = partial_root
         other.release_capsule = self.release_capsule

@@ -6,8 +6,10 @@ Matches the validation and semantics of scripts/load_env.sh and scripts/load_env
 - Rejects UTF-16 files.
 - Strips outer matching quotes without shell evaluation or command substitution.
 - Never discloses secret values or invalid raw lines in error messages.
-- Rejects retired uc-apx settings, unknown keys, and duplicate keys.
-- Validates identifier, alias, prefix, and aligned profile lists.
+- Release switch (Phase 2): the 26.1 template keeps its uc-apx settings; the 26.2 template
+  retired them and rejects them. Read from template-manifest.json (apexRelease, absent = 26.1).
+  DBA alias validation follows the 26.2 wording on 26.2 and the 26.1 wording on 26.1.
+- Rejects unknown or duplicate keys, and validates identifier, alias, prefix, and aligned profile lists.
 """
 
 from __future__ import annotations
@@ -15,13 +17,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .template_release import is_apex_26_2
+
+TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
+# Decided per template by apexRelease: True on the 26.2 template, False on 26.1. An unreadable manifest raises here.
+APEX_26_2 = is_apex_26_2(TEMPLATE_ROOT)
+
 
 class ConfigError(ValueError):
     """Configuration error without value disclosure."""
 
 
 AGENT_STYLES = ("standard", "concise", "teaching", "asharif-style")
-ALLOWED_KEYS = frozenset({
+UC_APX_KEYS = frozenset({"INSTALL_UC_APX", "UC_APX_SKILLS_AGENT"})
+UC_APX_RETIRED_MESSAGE = "uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env"
+# The base set is the same on both releases; 26.1 adds the uc-apx keys (see UC_APX_KEYS).
+_BASE_ALLOWED_KEYS = frozenset({
     "PROJECT_NAME",
     "DEVELOPER_NAME",
     "DB_ENVIRONMENT",
@@ -46,9 +57,6 @@ ALLOWED_KEYS = frozenset({
     "STAGING_SQLCL_CONNECTION",
     "STAGING_EXPECTED_USER",
     "STAGING_SCHEMA",
-    "DEV_DBA_SQLCL_CONNECTION",
-    "STAGING_DBA_SQLCL_CONNECTION",
-    "PROD_DBA_SQLCL_CONNECTION",
     "ORDS_SCHEMA",
     "ORDS_SQLCL_CONNECTION",
     "ORDS_EXPECTED_USER",
@@ -56,9 +64,14 @@ ALLOWED_KEYS = frozenset({
     "MIGRATION_CHECK_TIMEOUT_SECONDS",
     "MIGRATION_CHECK_BATCH_BYTES",
     "MIGRATION_PREFLIGHT_INVENTORY_RETRIES",
+    "DEV_DBA_SQLCL_CONNECTION",
+    "STAGING_DBA_SQLCL_CONNECTION",
+    "PROD_DBA_SQLCL_CONNECTION",
 }) | frozenset(prefix + "MIGRATION_" + suffix
                for prefix in ("", "STAGING_", "PROD_")
                for suffix in ("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER"))
+# 26.1 accepts the uc-apx keys; 26.2 retired them, so they are not allowed there (see read_project_env).
+ALLOWED_KEYS = _BASE_ALLOWED_KEYS if APEX_26_2 else _BASE_ALLOWED_KEYS | UC_APX_KEYS
 
 REQUIRED_KEYS = (
     "PROJECT_NAME",
@@ -161,8 +174,8 @@ def read_project_env(path: Path) -> dict[str, str]:
         key = match.group(1)
         raw_val = match.group(2)
 
-        if key in ("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT"):
-            raise ConfigError("uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env")
+        if APEX_26_2 and key in UC_APX_KEYS:
+            raise ConfigError(UC_APX_RETIRED_MESSAGE)
 
         if key not in ALLOWED_KEYS:
             raise ConfigError(f"unsupported setting in {path}: {key}")
@@ -207,6 +220,11 @@ def read_project_env(path: Path) -> dict[str, str]:
     if values["DB_ENVIRONMENT"] not in ("development", "test", "staging", "production"):
         raise ConfigError("DB_ENVIRONMENT must be development, test, staging, or production")
 
+    if not APEX_26_2:  # 26.1 keeps and validates its uc-apx settings
+        if values.get("INSTALL_UC_APX", "false") not in ("true", "false"):
+            raise ConfigError("INSTALL_UC_APX must be true or false")
+        if values.get("UC_APX_SKILLS_AGENT", "universal") not in ("universal", "claude-code"):
+            raise ConfigError("UC_APX_SKILLS_AGENT must be universal or claude-code")
     if values.get("AGENT_STYLE", "standard") not in AGENT_STYLES:
         raise ConfigError("AGENT_STYLE must be one of: " + ", ".join(AGENT_STYLES))
     if values.get("AGENT_STYLE_LEARNING", "on") not in ("on", "off"):
@@ -309,12 +327,20 @@ def read_project_env(path: Path) -> dict[str, str]:
             if s_item != u_item:
                 raise ConfigError("ORDS_EXPECTED_USER must equal ORDS_SCHEMA entry for entry: the ORDS export needs the schema owner; use a connection that logs in as that schema")
 
-    for key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
-        if key in seen_keys:
-            if not values[key].strip():
-                raise ConfigError(f"{key} must not be empty when configured")
-            _check_alias_list(key, values[key])
-            if "," in values[key]:
-                raise ConfigError(f"{key} accepts one saved SQLcl connection alias")
+    for dba_key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
+        if dba_key in seen_keys:
+            if APEX_26_2:
+                # 26.2 wording: one saved SQLcl alias, checked as an alias list.
+                if not values[dba_key].strip():
+                    raise ConfigError(f"{dba_key} must not be empty when configured")
+                _check_alias_list(dba_key, values[dba_key])
+                if "," in values[dba_key]:
+                    raise ConfigError(f"{dba_key} accepts one saved SQLcl connection alias")
+                continue
+            # 26.1 wording, unchanged.
+            if not values[dba_key].strip():
+                raise ConfigError(f"{dba_key} must not be empty")
+            if not RE_ALIAS.fullmatch(values[dba_key]):
+                raise ConfigError(f"{dba_key} contains unsupported characters")
 
     return values

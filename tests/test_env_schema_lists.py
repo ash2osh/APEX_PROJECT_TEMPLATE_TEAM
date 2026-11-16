@@ -4,13 +4,17 @@ import subprocess
 import _test_subprocess_safety  # noqa: F401
 import tempfile
 import unittest
-from unittest.mock import patch
 from fake_sqlcl import BASH
 from pathlib import Path
+from unittest.mock import patch
+
+from scripts.template_release import is_apex_26_2
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PWSH = _test_subprocess_safety.working_pwsh()
+# Phase 2 release switch: the uc-apx settings are retired on 26.2 only (apexRelease in template-manifest.json).
+APEX_26_2 = is_apex_26_2(ROOT)
 
 
 def plain(text: str) -> str:
@@ -81,14 +85,6 @@ def write_without_workspace_username(directory: Path, extra: str = "") -> Path:
     return path
 
 
-def replace_environment_value(environment: dict[str, str], name: str, value: str | None) -> None:
-    for existing_name in list(environment):
-        if existing_name.casefold() == name.casefold():
-            del environment[existing_name]
-    if value is not None:
-        environment[name] = value
-
-
 class BashEnvironmentListTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -115,12 +111,20 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
 
+    @unittest.skipIf(APEX_26_2, "26.2 retired the uc-apx settings")
+    def test_fresh_config_exports_the_26_1_uc_defaults(self) -> None:
+        result = load(write_without_uc(self.directory), 'printf "%s|%s" "$INSTALL_UC_APX" "$UC_APX_SKILLS_AGENT"')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("false|universal", result.stdout)
+
+    @unittest.skipUnless(APEX_26_2, "26.1 keeps the uc-apx settings")
     def test_fresh_config_does_not_export_retired_uc_settings(self) -> None:
         result = load(write_without_uc(self.directory),
                       'printf "%s|%s" "${INSTALL_UC_APX+set}" "${UC_APX_SKILLS_AGENT+set}"')
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("|", result.stdout)
 
+    @unittest.skipUnless(APEX_26_2, "26.1 keeps the uc-apx settings")
     def test_retired_uc_keys_require_explicit_config_cleanup(self) -> None:
         for setting in ("INSTALL_UC_APX=false", "INSTALL_UC_APX=true", "UC_APX_SKILLS_AGENT=universal"):
             with self.subTest(setting=setting):
@@ -273,6 +277,86 @@ class BashEnvironmentListTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("STAGING_SCHEMA is required", result.stderr)
 
+    def test_dba_sqlcl_connections_load_from_file_and_override_ambient(self) -> None:
+        extra = "\nDEV_DBA_SQLCL_CONNECTION=file-dev-dba\nSTAGING_DBA_SQLCL_CONNECTION=file-stage-dba\nPROD_DBA_SQLCL_CONNECTION=file-prod-dba\n"
+        env_path = write_env(self.directory, {}, extra)
+        env = os.environ.copy()
+        env["DEV_DBA_SQLCL_CONNECTION"] = "ambient-dev-dba"
+        result = subprocess.run(
+            [BASH, "-c", 'set -e; source "$1" "$2"; printf "%s|%s|%s\\n" "$DEV_DBA_SQLCL_CONNECTION" "$STAGING_DBA_SQLCL_CONNECTION" "$PROD_DBA_SQLCL_CONNECTION"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
+            env=env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("file-dev-dba|file-stage-dba|file-prod-dba\n", result.stdout)
+
+    def test_dba_sqlcl_connections_ambient_ignored_when_absent_from_file(self) -> None:
+        # Only the file may set these keys: an inherited value must neither be visible nor exported to children.
+        env_path = write_env(self.directory, {})
+        env = os.environ.copy()
+        for key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
+            env[key] = f"ambient-{key.lower()}"
+        result = subprocess.run(
+            [BASH, "-c", 'set -e; source "$1" "$2"; printf "%s|%s|%s\\n" "${DEV_DBA_SQLCL_CONNECTION-unset}" "${STAGING_DBA_SQLCL_CONNECTION-unset}" "${PROD_DBA_SQLCL_CONNECTION-unset}"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
+            env=env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("unset|unset|unset\n", result.stdout)
+        exported = subprocess.run(
+            [BASH, "-c", 'set -e; source "$1" "$2"; for key in DEV_DBA_SQLCL_CONNECTION STAGING_DBA_SQLCL_CONNECTION PROD_DBA_SQLCL_CONNECTION; do if printenv "$key" >/dev/null; then echo "exported $key"; fi; done', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
+            env=env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, exported.returncode, exported.stderr)
+        self.assertEqual("", exported.stdout)
+
+    def test_dba_sqlcl_connection_from_the_file_is_the_only_value_a_child_process_sees(self) -> None:
+        env_path = write_env(self.directory, {}, "\nSTAGING_DBA_SQLCL_CONNECTION=file-stage-dba\n")
+        env = os.environ.copy()
+        env["STAGING_DBA_SQLCL_CONNECTION"] = "ambient-stage-dba"
+        result = subprocess.run(
+            [BASH, "-c", 'source "$1" "$2" && printenv STAGING_DBA_SQLCL_CONNECTION', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
+            env=env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("file-stage-dba\n", result.stdout)
+
+    @unittest.skipIf(APEX_26_2, "26.2 wording is covered by test_dba_sqlcl_connection_refusals_26_2")
+    def test_dba_sqlcl_connection_refusals(self) -> None:
+        # File blank
+        env_path = write_env(self.directory, {}, "\nDEV_DBA_SQLCL_CONNECTION=\n")
+        result = load(env_path)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("DEV_DBA_SQLCL_CONNECTION must not be empty", result.stderr)
+
+        # File comma list
+        env_path = write_env(self.directory, {}, "\nDEV_DBA_SQLCL_CONNECTION=dba1,dba2\n")
+        result = load(env_path)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("DEV_DBA_SQLCL_CONNECTION contains unsupported characters", result.stderr)
+
+        # Ambient blank: an inherited value is not configuration, so it is neither refused nor exported.
+        env_path = write_env(self.directory, {})
+        env = os.environ.copy()
+        env["DEV_DBA_SQLCL_CONNECTION"] = "   "
+        result = subprocess.run(
+            [BASH, "-c", 'set -e; source "$1" "$2"; printf "%s\\n" "${DEV_DBA_SQLCL_CONNECTION-unset}"', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
+            env=env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("unset\n", result.stdout)
+
+    @unittest.skipUnless(APEX_26_2, "26.1 wording is covered by test_dba_sqlcl_connection_refusals")
+    def test_dba_sqlcl_connection_refusals_26_2(self) -> None:
+        # 26.2 wording: one saved SQLcl alias, checked as an alias list.
+        env_path = write_env(self.directory, {}, "\nDEV_DBA_SQLCL_CONNECTION=\n")
+        result = load(env_path)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("DEV_DBA_SQLCL_CONNECTION must not be empty when configured", result.stderr)
+
+        env_path = write_env(self.directory, {}, "\nDEV_DBA_SQLCL_CONNECTION=dba1,dba2\n")
+        result = load(env_path)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("DEV_DBA_SQLCL_CONNECTION accepts one saved SQLcl connection alias", result.stderr)
+
     def test_require_single_refuses_a_multi_project_without_a_selection(self) -> None:
         env_path = write_env(self.directory, MULTI)
         refused = load(env_path, probe='project_env_require_single "unit test"')
@@ -302,10 +386,7 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
         if project_schema is not None:
             environment["PROJECT_SCHEMA"] = project_schema
         script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; {probe}'
-        return subprocess.run(
-            [PWSH, "-NoProfile", "-Command", script], env=environment,
-            text=True, encoding="utf-8", errors="replace", capture_output=True, check=False,
-        )
+        return subprocess.run([PWSH, "-NoProfile", "-Command", script], env=environment, text=True, capture_output=True, check=False)
 
     def test_workspace_developer_matches_bash_literal_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -322,6 +403,15 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
                     expected = (username + "|ALICE|DEMO").encode("utf-8").hex()
                     self.assertEqual(result.stdout.strip().lower(), expected)
 
+    @unittest.skipIf(APEX_26_2, "26.2 retired the uc-apx settings")
+    def test_fresh_config_exports_the_26_1_uc_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_without_uc(Path(temporary))
+            result = self.run_probe(path, '"$($env:INSTALL_UC_APX)|$($env:UC_APX_SKILLS_AGENT)"')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("false|universal", result.stdout.strip())
+
+    @unittest.skipUnless(APEX_26_2, "26.1 keeps the uc-apx settings")
     def test_retired_uc_keys_match_bash_refusal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             for setting in ("INSTALL_UC_APX=false", "INSTALL_UC_APX=true", "UC_APX_SKILLS_AGENT=universal"):
@@ -332,6 +422,7 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
                     self.assertIn(RETIRED_UC_ERROR, plain(result.stderr))
                     self.assertNotIn("LOADED", result.stdout)
 
+    @unittest.skipUnless(APEX_26_2, "26.1 keeps the uc-apx settings")
     def test_fresh_config_does_not_export_retired_uc_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = write_without_uc(Path(temporary))
@@ -373,17 +464,43 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("must not contain empty entries", plain(result.stderr))
 
+    def test_dba_sqlcl_connections_load_from_file_and_override_ambient(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env_path = write_env(Path(temporary), {}, "\nDEV_DBA_SQLCL_CONNECTION=file-dev-dba\nSTAGING_DBA_SQLCL_CONNECTION=file-stage-dba\nPROD_DBA_SQLCL_CONNECTION=file-prod-dba\n")
+            env = os.environ.copy()
+            env["DEV_DBA_SQLCL_CONNECTION"] = "ambient-dev-dba"
+            script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; "$($env:DEV_DBA_SQLCL_CONNECTION)|$($env:STAGING_DBA_SQLCL_CONNECTION)|$($env:PROD_DBA_SQLCL_CONNECTION)"'
+            result = subprocess.run([PWSH, "-NoProfile", "-Command", script], env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("file-dev-dba|file-stage-dba|file-prod-dba", result.stdout.strip())
+
+    def test_dba_sqlcl_connections_ambient_ignored_when_absent_from_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env_path = write_env(Path(temporary), {})
+            env = os.environ.copy()
+            for key in ("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"):
+                env[key] = f"ambient-{key.lower()}"
+            script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; "[$($env:DEV_DBA_SQLCL_CONNECTION)|$($env:STAGING_DBA_SQLCL_CONNECTION)|$($env:PROD_DBA_SQLCL_CONNECTION)]"'
+            result = subprocess.run([PWSH, "-NoProfile", "-Command", script], env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("[||]", result.stdout.strip())
+
     def test_refusals_match_the_bash_loader_word_for_word(self) -> None:
         # Both loaders are also run directly (and by the helper scripts); the PowerShell one
         # used to drop the "project environment error:" prefix on most of its refusals.
         cases = {
+            "boolean": {"INSTALL_UC_APX=false": "INSTALL_UC_APX="},
             "developer": {"DEVELOPER_NAME=ALICE": "DEVELOPER_NAME=lower"},
             "environment": {"DB_ENVIRONMENT=development": "DB_ENVIRONMENT=dev"},
             "duplicate": {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,ONE"},
             "lengths": {**MULTI, "CODE_EXPECTED_USER=ONE,TWO": "CODE_EXPECTED_USER=ONE"},
             "empty entry": {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,,TWO"},
             "lowercase": {**MULTI, "CODE_SCHEMA=ONE,TWO": "CODE_SCHEMA=ONE,two"},
+            "dba blank": {"PROJECT_NAME=apex-team-template": "PROJECT_NAME=apex-team-template\nDEV_DBA_SQLCL_CONNECTION="},
+            "dba comma": {"PROJECT_NAME=apex-team-template": "PROJECT_NAME=apex-team-template\nDEV_DBA_SQLCL_CONNECTION=dba1,dba2"},
         }
+        if APEX_26_2:
+            del cases["boolean"]  # 26.1 wording for a uc-apx value; 26.2 refuses the key as retired
         for label, replacements in cases.items():
             with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
                 env_path = write_env(Path(temporary), replacements)

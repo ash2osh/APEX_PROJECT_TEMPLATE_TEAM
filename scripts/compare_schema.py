@@ -12,13 +12,15 @@ import re
 import shutil
 import sys
 import tempfile
-from datetime import datetime
-from decimal import Decimal
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
+from . import migration_runtime
 from .db_targets import Target, TargetResolutionError, resolve_target
+from .template_release import is_apex_26_2
 from .schema_catalog import (
     CatalogError,
     ObjectDefinition,
@@ -45,6 +47,11 @@ EXACT_IDENTIFIER_RE = re.compile(r"[A-Za-z][A-Za-z0-9_$#]*\Z", re.ASCII)
 TYPE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_$#]*(?:\s+[A-Za-z0-9_$#]+)*\Z", re.ASCII)
 PATTERN_CHARS_RE = re.compile(r"[A-Za-z0-9_$#*]+\Z", re.ASCII)
 SCOPE_IDENTITY_FIELDS = ("db_unique_name", "container_id", "container_name", "current_schema", "edition")
+# Phase 2 release switch (apexRelease in template-manifest.json, absent is 26.1). The two releases list the
+# same column fields in different orders, and the field order shows in the report, so each keeps its own.
+APEX_26_2 = is_apex_26_2(Path(__file__).resolve().parents[1])
+
+
 COMPARE_ENV_SECTIONS = (
     "tables", "columns", "constraints", "indexes", "triggers", "sequences", "synonyms", "views",
     "stored-code", "invalid-objects", "identity-columns", "object-grants",
@@ -73,11 +80,20 @@ COMPARE_ENV_NOT_COMPARED = (
     "ORDS metadata beyond schema mapping/status/auth, module status/prefix/page size, template URI/priority, and handler method/source/MIME/page size is not compared.",
     "In the inspected ORDS 26.3 dictionaries, module type and handler format columns are absent; other ORDS releases with different metadata require separate qualification.",
 )
+_COLUMN_FIELDS_26_1 = (
+    "data_type", "data_type_mod", "data_type_owner", "data_length", "data_precision", "data_scale",
+    "char_used", "char_length", "nullable", "hidden", "virtual", "column_position", "user_generated",
+)
+_COLUMN_FIELDS_26_2 = (
+    "column_position", "data_type", "data_type_mod", "data_type_owner", "data_length", "data_precision", "data_scale",
+    "char_used", "char_length", "nullable", "hidden", "user_generated", "virtual",
+)
 COMPARE_ENV_FIELDS = {
     "tables": ("temporary", "partitioned", "iot_type", "nested", "secondary", "compression", "logging"),
-    "columns": ("column_position", "data_type", "data_type_mod", "data_type_owner", "data_length", "data_precision", "data_scale", "char_used", "char_length", "nullable", "hidden", "user_generated", "virtual"),
+    "columns": _COLUMN_FIELDS_26_2 if APEX_26_2 else _COLUMN_FIELDS_26_1,
     "constraints": ("constraint_type", "columns", "referenced_table", "referenced_columns", "condition", "condition_truncated", "status", "validated", "delete_rule", "deferrable", "deferred", "rely"),
     "indexes": ("table_name", "uniqueness", "columns", "index_type", "visibility", "status"),
+    # ASHARIF 2026-10-28: compare ALL_OBJECTS validity separately from the trigger enablement flag.
     "triggers": ("table_name", "trigger_type", "triggering_event", "base_object_type", "status", "object_status", "line_count", "source_hash"),
     "sequences": ("increment_by", "min_value", "max_value", "cycle_flag", "order_flag", "cache_size"),
     "synonyms": ("table_owner", "table_name", "db_link"),
@@ -237,8 +253,7 @@ def select_objects(
         for key, row in inventory.objects.items():
             if key.owner != _identity_owner(inventory):
                 continue
-            # Storage/subobject rows belong to the parent table or index DDL.
-            # Keep them in the inventory for drift checks, not comparison roots.
+            # Storage/subobject rows belong to their parent object's DDL.
             if key.object_type == "LOB" or key.subobject_name:
                 continue
             candidate = (key.name, key.object_type)
@@ -542,11 +557,12 @@ def _column_order_is_provable(row: Mapping) -> bool:
     position = row.get("column_position")
     if type(position) is int and position > 0:
         return True
-    return (
+    is_system_hidden = (
         position is None
         and str(row.get("hidden", "")).upper() in {"Y", "YES", "TRUE"}
         and str(row.get("user_generated", "")).upper() in {"N", "NO", "FALSE"}
     )
+    return is_system_hidden
 
 
 def _mle_language_is_provable(row: Mapping) -> bool:
@@ -557,14 +573,17 @@ def _mle_language_is_provable(row: Mapping) -> bool:
 
 
 def _ace_bounds_timezone_are_provable(row: Mapping) -> bool:
-    bounds = [value for value in (row.get("start_date"), row.get("end_date")) if value not in (None, "")]
+    bounds = [row.get(field) for field in ("start_date", "end_date")]
+    bounds = [value for value in bounds if value not in (None, "")]
     if not bounds:
         return True
+
     explicit_qualification = row.get("bounds_timezone_qualified")
     if explicit_qualification is True:
         return True
     if explicit_qualification is not None:
         return False
+
     for value in bounds:
         if not isinstance(value, str):
             return False
@@ -934,29 +953,33 @@ def compare_environment_catalogs(
         left = list(source_sections.get(section, []))
         right = list(target_sections.get(section, []))
         if section == "columns":
-            missing_positions = [
-                {"section": section, "side": side,
-                 "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
-                 "message": "column position evidence is missing or invalid"}
-                for side, rows in (("source", left), ("target", right))
-                for row in rows if not _column_order_is_provable(row)
-            ]
+            missing_positions = []
+            for side, rows in (("source", left), ("target", right)):
+                missing_positions.extend(
+                    {"section": section, "side": side, "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
+                     "message": "column position evidence is missing or invalid"}
+                    for row in rows if not _column_order_is_provable(row)
+                )
             if missing_positions:
                 blockers.extend(missing_positions)
-                section_status[section] = {"status": "incomplete", "sourceRows": len(left), "targetRows": len(right)}
+                section_status[section] = {
+                    "status": "incomplete", "sourceRows": len(left), "targetRows": len(right),
+                }
                 not_compared.append("Column rows without order evidence were not compared.")
                 continue
         if section == "java-mle":
-            missing_languages = [
-                {"section": section, "side": side,
-                 "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
-                 "message": "MLE module language metadata is missing"}
-                for side, rows in (("source", left), ("target", right))
-                for row in rows if not _mle_language_is_provable(row)
-            ]
+            missing_languages = []
+            for side, rows in (("source", left), ("target", right)):
+                missing_languages.extend(
+                    {"section": section, "side": side, "name": _compare_env_name(section, row, _compare_env_key(section, row, "")),
+                     "message": "MLE module language metadata is missing"}
+                    for row in rows if not _mle_language_is_provable(row)
+                )
             if missing_languages:
                 blockers.extend(missing_languages)
-                section_status[section] = {"status": "incomplete", "sourceRows": len(left), "targetRows": len(right)}
+                section_status[section] = {
+                    "status": "incomplete", "sourceRows": len(left), "targetRows": len(right),
+                }
                 not_compared.append("MLE modules without language metadata were not compared.")
                 continue
         if section == "ords":
@@ -1254,8 +1277,11 @@ def _environment_driver(
     scope_names: Sequence[str] = (),
 ) -> Path:
     selected = _validate_compare_env_sections(sections, allow_baseline_internal=baseline_capture)
-    if not baseline_capture and (baseline_prefixes or baseline_excluded or baseline_data_tables or baseline_names or scope_names):
-        raise CatalogError("baseline filters and exact-name scope require the private baseline capture mode")
+    if APEX_26_2:
+        if not baseline_capture and (baseline_prefixes or baseline_excluded or baseline_data_tables or baseline_names or scope_names):
+            raise CatalogError("baseline filters and exact-name scope require the private baseline capture mode")
+    elif not baseline_capture and (baseline_prefixes or baseline_excluded or baseline_data_tables or baseline_names):
+        raise CatalogError("baseline filters and data tables require the private baseline capture mode")
     sql_source = Path(__file__).with_name("compare_env_catalog.sql")
     if not sql_source.is_file():
         raise CatalogError("compare-env SQL catalog driver is missing")
@@ -1456,6 +1482,14 @@ def main_compare_env(
         print(f"compare-env error: {error}", file=sys.stderr)
         return 2
 
+    # 26.1 refuses compare-env below the SQLcl 26.3 migration floor. The 26.2 template has no call here and keeps none.
+    if not APEX_26_2:
+        try:
+            migration_runtime.require_migration_sqlcl_version()
+        except RuntimeError as error:
+            print(f"compare-env error: {error}", file=sys.stderr)
+            return 2
+
     own_run_dir = run_dir is None
     if own_run_dir:
         scratch = ROOT / "scratch"
@@ -1552,6 +1586,7 @@ def main_compare_env(
     finally:
         if own_run_dir and not keep_logs:
             safe_rmtree(run_dir)
+
 
 
 def _empty_snapshot(inventory: SchemaInventory) -> SchemaSnapshot:

@@ -33,6 +33,7 @@ class PublicationIdentityTests(unittest.TestCase):
             script, log = case.make_deploy_checkout(root)
             for name in ('application_lifecycle.py', 'application_lifecycle.sql', 'db_targets.py', 'sqlcl_session.py', 'windows_job.py'):
                 shutil.copy2(ROOT / 'scripts' / name, root / 'scripts' / name)
+            shutil.copy2(ROOT / 'template-manifest.json', root / 'template-manifest.json')
             result = case.run_deploy(script, log, '--manual')
             self.assertEqual(result.returncode, 0, result.stderr)
             commands = [line.strip() for line in result.stdout.splitlines() if 'publication_identity' in line]

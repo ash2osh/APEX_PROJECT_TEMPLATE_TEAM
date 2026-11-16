@@ -21,8 +21,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Release switch (Phase 2): the 26.2 template answers with SQLcl 26.3 and reports the APEX release.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ords_fixtures import COUNTS, export_text, inventory  # noqa: E402
+from scripts.template_release import is_apex_26_2  # noqa: E402
+
+APEX_26_2 = is_apex_26_2(Path(__file__).resolve().parents[1])
 
 LONG_ADVISORY = (
     "Warning: This LONG setting may cause Java memory problems.",
@@ -133,7 +138,7 @@ def database_session(config: dict, arguments: list[str]) -> int:
     name = {"tables": "FAKE_TABLE", "code": "FAKE_VIEW"}[scope]
     target = Path.cwd() / "database" / spool_schema / directory
     target.mkdir(parents=True, exist_ok=True)
-    (target / f"{name}.sql").write_text(f"CREATE FAKE {name} FOR {schema};\n", encoding="utf-8", newline="\n")
+    (target / f"{name}.sql").write_text(f"CREATE FAKE {name} FOR {schema};\n", encoding="utf-8", newline="")
     manifest = Path.cwd() / "database" / spool_schema / f"manifest-{scope}.txt"
     manifest.write_text(
         "TABLE=1\n" if scope == "tables" else "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n",
@@ -148,7 +153,8 @@ def main(arguments: list[str]) -> int:
     config = json.loads(Path(os.environ["FAKE_ORDS_CONFIG"]).read_text(encoding="utf-8"))
     if arguments == ["-V"]:
         log(config, "version")
-        print(config.get("version", "SQLcl: Release 26.3.0.0 Production Build: 26.3.0.260.1620"))
+        default = "SQLcl: Release 26.3.0.0 Production Build: 26.3.0.260.1620" if APEX_26_2 else "SQLcl: Release 26.2.2.0 Production Build: 26.2.2.233.1901"
+        print(config.get("version", default))
         return 0
     connection = arguments[arguments.index("-name") + 1]
     os.environ["FAKE_CONNECTION"] = connection
@@ -168,7 +174,7 @@ def main(arguments: list[str]) -> int:
             return 1
         print("DATABASE_VERSION_VERIFIED:23.26.0.0.0:23.0.0")
         print(f"APEX_DOCTOR_VERIFIED:{user}")
-        if script == "doctor.sql" and len(rest) >= 4 and rest[3] == "apex":
+        if APEX_26_2 and script == "doctor.sql" and len(rest) >= 4 and rest[3] == "apex":
             print("APEX_RELEASE_VERIFIED:26.2")
             print("APEX_WORKSPACE_USERS_VERIFIED")
         return 0

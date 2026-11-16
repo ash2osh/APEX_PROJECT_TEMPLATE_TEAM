@@ -104,6 +104,19 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(selection.keys, (("HR_USERS", "TABLE"),))
         self.assertEqual(selection.errors, ())
 
+    def test_wildcard_omits_subobject_rows_as_comparison_roots(self) -> None:
+        source = inventory("APP_DEV", "DEVDB", [("HR_USERS", "TABLE", {})])
+        target = inventory("APP_STAGE", "STAGEDB", [("HR_USERS", "TABLE", {})])
+        for observed in (source, target):
+            owner = observed.identity["current_schema"]
+            observed.objects[ObjectKey(owner, "HR_USERS_PART1", "TABLE", "HR_USERS_PART1")] = {
+                "owner": owner, "name": "HR_USERS_PART1", "type": "TABLE", "status": "VALID",
+            }
+
+        selection = select_objects(source, target, (), ("*",))
+
+        self.assertEqual(selection.keys, (("HR_USERS", "TABLE"),))
+
     def test_exact_selectors_fold_unquoted_preserve_quoted_and_qualify_type(self) -> None:
         self.assertEqual(parse_exact_selector("customers"), ("CUSTOMERS", None))
         self.assertEqual(parse_exact_selector('"Customer Details"'), ("Customer Details", None))
