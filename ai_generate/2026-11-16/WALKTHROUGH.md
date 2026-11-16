@@ -90,3 +90,9 @@ Refreshed `docs/superpowers/template-parity.json` against `APEX_PROJECT_TEMPLATE
   - `tests/test_baseline_generated_sql.py`: 26.2 needs `PYTHONPATH` to import its guard module.
   - `tests/test_feature_rollout.py`, `tests/test_rollout.py`, `tests/test_verify_local.py`: regression tests present on one side only.
 - Offline only. Commands run: `template_parity.py` (read and `--mark`), `python3 -B -m unittest tests.test_baseline_generated_sql` with and without `PYTHONPATH`, and `scripts/team.sh compare-env --help` with no `.env` (exit 1). No database, SQLcl or network command ran.
+
+## Parity ports into 26.2
+
+- `scripts/publish_app.sh`: `--app-source-dir` with `--env dev` is refused before any SQLcl call, as in 26.1 (the option was added for staging and production only).
+- `scripts/team.sh`, `scripts/team.ps1`: `compare-env --help` answers before `.env` is loaded, as in 26.1.
+- Tests ported from 26.1: the capsule rerun refusal on an occupied receipt (`test_feature_rollout`), a template lock without `templateRef` (`test_verify_local`), and ten `test_rollout` cases (pause-step rerun, multiline `UPDATE ... SET`, auxiliary DML classifier, shared-catalog identity, schema-2 budget).
