@@ -91,6 +91,10 @@ Refreshed `docs/superpowers/template-parity.json` against `APEX_PROJECT_TEMPLATE
   - `tests/test_feature_rollout.py`, `tests/test_rollout.py`, `tests/test_verify_local.py`: regression tests present on one side only.
 - Offline only. Commands run: `template_parity.py` (read and `--mark`), `python3 -B -m unittest tests.test_baseline_generated_sql` with and without `PYTHONPATH`, and `scripts/team.sh compare-env --help` with no `.env` (exit 1). No database, SQLcl or network command ran.
 
+## backup-db keeps its exit status
+
+- `scripts/backup_db.sh`: the EXIT trap now keeps the run's status; under errexit a failed scratch cleanup used to turn a refusal (2) or a finished backup (0) into 1. A cleanup failure is reported as a warning. `run_ords_scope` exits 2 directly on each refusal and is called without `||`, so errexit stays on inside it (26.2 had it off). The file is now identical in both templates.
+- The Windows known-flaky entry (refusal printed, exit 0) is not explained by this; the leading candidate is `exec` in `scripts/team.sh` under Git Bash, which needs a Windows probe. The entry stays until then.
 ## Parity ports into 26.2
 
 - `scripts/publish_app.sh`: `--app-source-dir` with `--env dev` is refused before any SQLcl call, as in 26.1 (the option was added for staging and production only).
