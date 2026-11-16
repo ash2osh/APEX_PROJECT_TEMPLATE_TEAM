@@ -557,8 +557,24 @@ APEX_EXPECTED_USER=DEMO
         check = next((row for row in report["checks"] if row["check"] == "graphify_setup"), None)
         self.assertIsNotNone(check)
         self.assertEqual(check["status"], "attention")
-        self.assertIn("run python3 scripts/setup_graphify_apx.py", check["message"])
+        self.assertIn("run python3 scripts/graphify_project.py setup", check["message"])
+        self.assertNotIn("run python3 scripts/setup_graphify_apx.py", check["message"])
         self.assertEqual(report["exitCode"], 1)
+
+    def test_graphify_setup_missing_script_points_to_documented_setup(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        self.create_valid_app()
+        graphify_dir = self.repo / "graphify-out"
+        graphify_dir.mkdir(parents=True)
+        (graphify_dir / "graph.json").write_text("{}", encoding="utf-8")
+        from scripts.local_config import read_project_env
+        values = read_project_env(self.repo / ".env")
+        report = build_report(self.repo, values, self.current_skills)
+        check = next((row for row in report["checks"] if row["check"] == "graphify_setup"), None)
+        self.assertIsNotNone(check)
+        self.assertEqual(check["status"], "attention")
+        self.assertIn("python3 scripts/graphify_project.py setup", check["message"])
 
     def test_graphify_setup_omitted_when_no_graph_json(self) -> None:
         self.write_valid_env()
