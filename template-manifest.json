@@ -90,6 +90,7 @@
     ".agent-skills.json"
   ],
   "templateOnly": [
+    ".core-stamp.json",
     "docs/superpowers/**",
     "tools/template_parity.py"
   ]

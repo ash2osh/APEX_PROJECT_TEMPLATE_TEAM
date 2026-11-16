@@ -57,6 +57,21 @@ python3 tools/template_parity.py ../APEX_PROJECT_TEMPLATE_26_1
 `python3 scripts/pre_push_check.py --install-hook` runs it on every `git push` (it never replaces an existing hook).
 Install Ruff once with `python3 -m pip install 'ruff>=0.5'`.
 
+## Shared core files
+
+About 200 files under `scripts/`, `tools/` and `tests/` are identical in the 26.1 and 26.2 templates. Their single
+source is the [APEX_TEMPLATE_CORE](https://github.com/ash2osh/APEX_TEMPLATE_CORE) repository; `.core-stamp.json`
+lists each one with its SHA-256 and the core commit it came from. Do not edit them here:
+
+1. Fix the file in the core repository, run `python3 sync_core.py refresh` there, test and commit.
+2. In each template, on a branch: `python3 <core>/sync_core.py sync . --core <core>`, review the diff, commit the
+   changed files with `.core-stamp.json`, and open one pull request per template.
+
+`python3 scripts/pre_push_check.py` runs `scripts/sync_core.py check .` and fails when a shared file differs from its
+stamp. The `offline` job runs the same check against a clone of the core repository (`check --core`), which also
+proves that the stamp matches the core at its commit. `.core-stamp.json` is template-only: downstream projects do not
+receive it, and their `pre_push_check` skips the check.
+
 ## Skips that fail the run
 
 Some tests skip when a tool is missing. On a CI runner that tool is always present, so a skip there means the check did

@@ -169,6 +169,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     for test in changed_test_files(paths):
         label = f"Changed test {test}"
         results.append((label, step(label, [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", Path(test).name, "-v"])))
+    # A template carries the shared core files with a stamp. Editing one of them in the template fails here:
+    # fix it in the core repository and sync it. A downstream project has no stamp, so nothing runs.
+    stamp, checker = ROOT / ".core-stamp.json", ROOT / "scripts" / "sync_core.py"
+    if stamp.is_file() and checker.is_file():
+        label = "Shared core files (edit them in APEX_TEMPLATE_CORE, then sync)"
+        results.append((label, step(label, [sys.executable, str(checker), "check", str(ROOT)])))
     if not results:
         print("nothing to check: no changed Python, shell, PowerShell or test files")
     failed = [label for label, ok in results if not ok]

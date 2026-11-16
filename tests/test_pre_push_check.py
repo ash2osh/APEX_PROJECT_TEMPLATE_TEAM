@@ -179,6 +179,21 @@ class ToolStepTests(unittest.TestCase):
         self.assertEqual(lines[-1], "CHECKS FAILED: Python syntax; Ruff; Shell syntax scripts/run.sh; ShellCheck (error severity)")
         self.assertIn("fix them before pushing", lines[-2])
 
+    def test_a_core_stamp_runs_the_shared_file_check(self):
+        (self.root / ".core-stamp.json").write_text("{}", encoding="utf-8")
+        (self.root / "scripts" / "sync_core.py").write_text("", encoding="utf-8")
+        code, _ = self.run_check([], [], {})
+        self.assertEqual(code, 0)
+        checks = [command for label, command in self.calls if label.startswith("Shared core files")]
+        self.assertEqual(checks, [[pre_push_check.sys.executable, str(self.root / "scripts" / "sync_core.py"), "check", str(self.root)]])
+
+    def test_without_a_core_stamp_the_shared_file_check_does_not_run(self):
+        (self.root / "scripts" / "sync_core.py").write_text("", encoding="utf-8")
+        code, output = self.run_check([], [], {})
+        self.assertEqual(code, 0)
+        self.assertFalse(any(label.startswith("Shared core files") for label, _ in self.calls))
+        self.assertIn("nothing to check", output)
+
     def test_a_real_syntax_error_names_its_step_on_the_last_line(self):
         (self.root / "scripts/bad.py").write_text("def broken(:\n", encoding="utf-8")
         output = io.StringIO()
