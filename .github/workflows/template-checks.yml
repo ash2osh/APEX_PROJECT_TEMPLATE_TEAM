@@ -53,6 +53,10 @@ jobs:
             }
           }
           if ($bad -gt 0) { exit 1 }
+      - name: Shared core files match APEX_TEMPLATE_CORE
+        run: |
+          git clone --quiet --filter=blob:none https://github.com/ash2osh/APEX_TEMPLATE_CORE.git "$RUNNER_TEMP/core"
+          python3 scripts/sync_core.py check . --core "$RUNNER_TEMP/core"
       - name: Behavioral tests
         env:
           CI_TEST_JOBS: '4'
