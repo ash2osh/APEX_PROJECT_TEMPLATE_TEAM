@@ -12,7 +12,7 @@ The user accepted qualification against DEV's installed versions because DEV is 
 
 The user explicitly chose optional cleanup. Fixture objects and data are retained by default for inspection. Retention is a normal result, not a failure. Expected rollbacks inside a particular transaction test can still undo that test's transient rows; retention does not mean every intermediate row must survive.
 
-The first release combines six built-in template scenarios with a small, declarative interface for project SQL scenarios. NATREC business names, IDs and repair procedures do not belong in the generic runner.
+The first release combines six built-in template scenarios with a small, declarative interface for project SQL scenarios. A downstream project's business names, IDs and repair procedures do not belong in the generic runner.
 
 Success means a developer can preview the target and effects, execute selected scenarios, inspect evidence and retained fixtures, and optionally clean up supported fixtures later. Reports must distinguish successful assertions, failed assertions, missing prerequisites, incomplete execution and retained data.
 
@@ -376,11 +376,11 @@ Console/Markdown reports contain sanitized diagnostics, identifiers, counts and 
 These are historical repository/chat observations inspected on 2026-10-16, not new live verification. Sources with later corrections take precedence over earlier diagnoses.
 
 - The 26.1 [live fixture summary](../../../../APEX_PROJECT_TEMPLATE_26_1/scratch/live-qualification-2026-10-15/SUMMARY.md) recorded datatype roundtrip, blank-line UPDATE, migration refusal, invalid-view and verified cleanup behavior at `9c233a4`, using administrative sessions. It did not qualify the later compiler-settings correction or normal owner login behavior.
-- NATREC [retained fixture impact, I-50](../../../../natrec_team/docs/project/abshry/dev26-issues.md) records demo service areas/automation affecting existing customer addresses; [lessons](../../../../natrec_team/docs/project/abshry/lessons.md) document environment-specific IDs and transaction assumptions.
-- The current [worker-dispatch test](../../../../natrec_team/scripts/abshry/dev26/test_deployed_worker_dispatch.sql) rolls back before closing its APEX session; the [deployment log](../../../../natrec_team/docs/project/abshry/dev26-deployment-log.md) records the prior accidental persistence and retained sample orders.
-- The final [dependency repair record](../../../../natrec_team/scratch/app115-dev26-sysdata-recompile-2026-10-13/RESULT.md) states the suspected missing grant already existed and no grant was issued. Earlier chat diagnosis is not current grant proof.
-- The [receipt review](../../../../natrec_team/docs/project/abshry/agent-records/RESULT_codex_db_review.md) classified 75 historical failed checks as 64 superseded, seven test-data drift, three transfer regressions and one unknown, rather than treating every old mismatch as a current defect.
-- NATREC's [API contract](../../../../natrec_team/docs/project/abshry/api-contract.md) distinguishes business reads, persistent logging, mutations, external effects and unresolved routes; its [workflow recovery notes](../../../../natrec_team/app_context/115/recovery.md) identify APEX context/transaction limits.
+- The downstream project's retained fixture impact, I-50, records demo service areas/automation affecting existing customer addresses; its lessons document environment-specific IDs and transaction assumptions.
+- The current downstream worker-dispatch test rolls back before closing its APEX session; the downstream deployment log records the prior accidental persistence and retained sample orders.
+- The final downstream dependency repair record states the suspected missing grant already existed and no grant was issued. Earlier chat diagnosis is not current grant proof.
+- The downstream receipt review classified 75 historical failed checks as 64 superseded, seven test-data drift, three transfer regressions and one unknown, rather than treating every old mismatch as a current defect.
+- The downstream API contract distinguishes business reads, persistent logging, mutations, external effects and unresolved routes; its workflow recovery notes identify APEX context/transaction limits.
 - Existing template integration points: `scripts/team.sh`, `scripts/team.ps1`, `scripts/db_targets.py`, `scripts/sqlcl_session.py`, `scripts/migration_checks.py`, `scripts/verify_checks.py`, `scripts/rollout.py`, `scripts/baseline.py`, `template-manifest.json`, and `docs/known-limitations.md`.
 
 Cross-repository scratch links are local evidence pointers and may be unavailable on another clone. The normative requirements above are self-contained and do not require those historical artifacts at runtime.

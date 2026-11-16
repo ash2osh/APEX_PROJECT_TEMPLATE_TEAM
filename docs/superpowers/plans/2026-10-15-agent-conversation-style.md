@@ -18,7 +18,7 @@
 - Style files: at most 70 lines each, the same eight sections, the exact "never overrides" sentence, no URLs, hosts, e-mail addresses, schema or project names. `personal.md`: at most 40 lines.
 - A path has one owner: the five style files are `templateOwned` by exact path; `.agents/styles/personal.md` is `projectOwned`.
 - Files use LF line endings. No credentials anywhere.
-- Commits, pushes and PRs happen only in the two template clones, on branch `feat/agent-conversation-style`, under this plan's approval. Merge with merge commits (no squash, no branch deletion). Nothing is committed in `natrec_team`.
+- Commits, pushes and PRs happen only in the two template clones, on branch `feat/agent-conversation-style`, under this plan's approval. Merge with merge commits (no squash, no branch deletion). Nothing is committed in the downstream project.
 
 ## Review Focus
 
@@ -267,7 +267,7 @@ PRIVATE = (
     re.compile(r"https?://"),
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),
     re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
-    re.compile(r"RUNERP|ABSH|NATREC|DEV26|DEV2\b", re.IGNORECASE),
+    re.compile(r"<downstream names>|DEV26|DEV2\b", re.IGNORECASE),
 )
 STYLE_LINE_BUDGET = 70
 PERSONAL_LINE_BUDGET = 40
@@ -722,15 +722,15 @@ If `git am` stops on a conflict, resolve it by keeping both sides' surrounding l
 
 ---
 
-### Task 6: Pull into natrec_team and activate
+### Task 6: Pull into the downstream project and activate
 
-**Files:** `natrec_team` working tree (no commit unless the owner asks).
+**Files:** the downstream project's working tree (no commit unless the owner asks).
 
 - [ ] **Step 1: Dry run.** `scripts/team.sh upgrade-template --dry-run`. Expected: lists `.agents/styles/*.md` (five template-owned), `AGENTS.md`, `README.md`, `.env.example`, the three loaders and the manifest; does not list `.agents/styles/personal.md` as overwritten. Check the working tree first: the 59 uncommitted App 100/115/120 export files are unrelated, leave them.
 - [ ] **Step 2: Apply.** `scripts/team.sh upgrade-template`. Review `git status --short` and the `AGENTS.md` diff. Resolve the ownership surprise if `AGENTS.project.md` text conflicts with the new section (ask the owner which applies).
 - [ ] **Step 3: Activate.** Add `AGENT_STYLE=asharif-style` and `AGENT_STYLE_LEARNING=on` to the root `.env` (comment-free lines, no credentials).
-- [ ] **Step 4: Verify.** `source scripts/load_env.sh .env && echo "$AGENT_STYLE $AGENT_STYLE_LEARNING"` prints `asharif-style on`; `python3 -m unittest tests.test_natrec_api_cli -q` still passes; the next conversation's first reply starts with `Style: asharif-style`.
-- [ ] **Step 5: Report** with the commands run and their timings. Commit and push in `natrec_team` only if the owner asks.
+- [ ] **Step 4: Verify.** `source scripts/load_env.sh .env && echo "$AGENT_STYLE $AGENT_STYLE_LEARNING"` prints `asharif-style on`; `python3 -m unittest tests.test_<downstream>_api_cli -q` still passes; the next conversation's first reply starts with `Style: asharif-style`.
+- [ ] **Step 5: Report** with the commands run and their timings. Commit and push in the downstream project only if the owner asks.
 
 ---
 
@@ -743,7 +743,7 @@ If `git am` stops on a conflict, resolve it by keeping both sides' surrounding l
 | 3 AGENTS.md, README, tests | 0.5 |
 | 4 Verify, 26.1 PR, CI wait | 0.75 |
 | 5 Port to 26.2, PR, CI wait | 0.75 |
-| 6 Natrec upgrade and activation | 0.5 |
+| 6 Downstream upgrade and activation | 0.5 |
 | Final whole-branch review | 0.25 |
 
 What shortened it: the `style` command and `doctor` line were dropped; one new test file; 26.2 is a patch, not a rewrite; the full suite runs once per repo while CI runs in parallel; one review of the whole branch instead of one per task.

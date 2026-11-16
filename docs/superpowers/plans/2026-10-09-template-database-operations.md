@@ -56,7 +56,7 @@ must use that same resolution. Backup/read target resolution stays unchanged.
 - [x] Implement the nine exact keys from the design in both loaders and the local parser; preserve unfiltered migration schema lists for folder-layout validation. Extend target and preflight selection without relaxing identity/production guards.
 - [x] Add optional DEV migration identities to `doctor` and offline validation, deduplicating identical connection/user/schema probes. Keep explicit staging/production identity selection.
 - [x] Run the target, loader, migration/conflict, multi-schema and readiness regressions; expect profile parity, pre-write refusals and legacy compatibility.
-- [x] Update examples using generic saved aliases, not Natrec credentials; document optional all-or-none profiles and fallback behavior.
+- [x] Update examples using generic saved aliases, not a downstream project's credentials; document optional all-or-none profiles and fallback behavior.
 - [x] Run the full offline suite and prepare the independently reviewable profile change when authorized.
 
 ### Task 2: Capture and compare release-qualified lifecycle snapshots
@@ -100,5 +100,5 @@ independent; every recovery summary includes `sourceVerified` and
 - [x] Capture pre-import lifecycle under the current DEV native-lock workflow before the final drift check/import. Capture post-import lifecycle after exact source verification and before lock release/baseline advancement; connect partial mode to the same gate. Stage/prod imports use their exact descriptor target and existing confirmation without claiming DEV locks.
 - [x] Preserve actionable recovery evidence after ambiguous writes and distinguish source equality from runtime readiness in messages. Never automatically restore automation states or resume workflows.
 - [x] Run wrapper tests, source-verification tests and the full offline suite; expect existing drift/lock/partial guarantees plus lifecycle refusals.
-- [x] With explicit live-write authorization, qualify full and selected-page import on a disposable Docker app with an automation and workflow/task fixture. Record before/after states and cleanup only run-created fixtures. Test unavailable post-read through controlled failure injection; never target Natrec.
+- [x] With explicit live-write authorization, qualify full and selected-page import on a disposable Docker app with an automation and workflow/task fixture. Record before/after states and cleanup only run-created fixtures. Test unavailable post-read through controlled failure injection; never target the downstream project.
 - [ ] Document actual release behavior, visibility limits, recovery actions and independent-source verification; prepare Release B integration when authorized.

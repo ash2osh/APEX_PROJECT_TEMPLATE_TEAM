@@ -5,7 +5,7 @@
 ## Purpose and evidence
 
 Improve the reusable template using the completed inline review, the independent
-AGY review and the read-only investigation of `natrec_team`. Deliver three
+AGY review and the read-only investigation of the downstream project repository. Deliver three
 independently releasable changesets instead of one broad refactor.
 
 The existing twelve-path correction set is uncommitted on
@@ -14,9 +14,9 @@ The existing twelve-path correction set is uncommitted on
 or the 26.1 branch has passed. Review evidence remains in ignored scratch:
 
 - `scratch/agy-review-20261009/adjudication.md`
-- `scratch/natrec-template-review-20261009/report.md`
+- `scratch/<downstream>-template-review-20261009/report.md`
 
-Natrec supplies examples and historical performance evidence. Do not alter its
+The downstream project supplies examples and historical performance evidence. Do not alter its
 repository, connect to its shared database or import its downstream commits.
 
 ## Release A: maintenance and local readiness

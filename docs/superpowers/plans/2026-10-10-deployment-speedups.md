@@ -3,9 +3,9 @@
 Branch: `feature/deployment-speedups`, created from `origin/main` (`e211f4f`, APEX 26.2 template). Target: a production deployment window that is short because
 everything that can be done earlier is done earlier, the window itself is one scripted command, and a failure tells you exactly what failed.
 
-Origin: the DEV2 -> DEV26 rollout of the ABSHRY project (project repository `natrec_team`, worktree `/home/ash/projects/natrec_wt/D26`, log
-`docs/project/abshry/dev26-deployment-log.md`, steps 1-25). Every item below fixes something that cost real hours there. The project's own tooling in
-`/home/ash/projects/natrec_wt/D26/scripts/abshry/` is the reference implementation for the generic features (it works, it is not generic): read it, do not copy it blindly.
+Origin: the DEV2 -> DEV26 rollout of a downstream project (its own repository, worktree `<downstream checkout>/D26`, log
+`docs/project/<project>/dev26-deployment-log.md`, steps 1-25). Every item below fixes something that cost real hours there. The project's own tooling in
+`<downstream checkout>/D26/scripts/<project>/` is the reference implementation for the generic features (it works, it is not generic): read it, do not copy it blindly.
 
 ## Rules for every phase (apply to the implementer)
 
@@ -25,7 +25,7 @@ Origin: the DEV2 -> DEV26 rollout of the ABSHRY project (project repository `nat
 | E2 | A 1,856-statement file was cut off after 5 minutes with no ORA error; an oversized verification session ended with no output at all | `scripts/sqlcl_session.py` `timeout_seconds=300`; `scripts/migration_checks.py` `_driver_for_checks` (one driver, hex chunks, 9.8 MB for 193 checks) |
 | E3 | Exact-text verification needed 2.3 MB of check SQL; no hash function is allowed | `scripts/migration_manifest.py` `SAFE_FUNCTIONS` |
 | E4 | Two generator bugs (a name turned into a date; `OVERRIDING SYSTEM VALUE`) were caught only by a hand-made rolled-back dry run | no rehearsal mode |
-| E5 | Five structure revisions and three code revisions were needed; every failed attempt locks its folder, also one that failed before any statement ran | `scripts/migrate.py` run manifest `writeAttempted`; `scripts/abshry`-style revision helpers |
+| E5 | Five structure revisions and three code revisions were needed; every failed attempt locks its folder, also one that failed before any statement ran | `scripts/migrate.py` run manifest `writeAttempted`; `scripts/<project>`-style revision helpers |
 | E6 | `check-conflicts` reports `MISSING_PREREQUISITE` for a CREATE VIEW over tables reached through a public synonym, and flaky `LIVE_PREFLIGHT_UNAVAILABLE: owner inventory changed since selector discovery` | `scripts/migration_checks.py` `preflight`, `scripts/schema_catalog*.py` |
 | E7 | The gap between two databases was found by hand: constraints/indexes/grants/ACEs/privileges differed in ways the first report (truncated lists, whole-line comparison) got wrong | `scripts/compare_schema.py` (objects only, selected by name) |
 | E8 | No way to run a frozen, ordered rollout unattended; every step needed a person and ~15 s per connection | none |
@@ -47,14 +47,14 @@ Origin: the DEV2 -> DEV26 rollout of the ABSHRY project (project repository `nat
 
 - New `team.sh verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]`: loads migrations, runs their preconditions and/or postconditions read-only (same driver as the runner, batched per Phase 1.3), prints a table (phase, id, expected, observed, status) and a summary, exit 0 only if everything requested is true, 1 if any false, 2 on error. `--jobs N` runs sessions in parallel (default 1).
 - Reuse `run_checks`; do not duplicate guards. Honour `--schema`, multi-schema folders, staging/prod resolution through `db_targets.py`.
-- Reference: `D26/scripts/abshry/evaluate_checks_readonly.py` (batches 25 statements per connection, marker rows).
+- Reference: `D26/scripts/<project>/evaluate_checks_readonly.py` (batches 25 statements per connection, marker rows).
 - Windows wrapper, docs, tests (fake SQLcl): all true, some false, error in one check, JSON output schema.
 
 ## Phase 3 - Rollout command for the window  (E8)
 
 - New `team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--report <file>] [--yes-for-all]`. The manifest (JSON, schema documented and validated) lists ordered steps of types `migrate` (folders), `verify` (folders, phase), `sql-script` (a reviewed script run with the same identity guard as the DBA scripts, for DBA prerequisites), `ords-import` (a file, optional module exclusions), `app-deploy` (numeric app id), `pause` (message). Execution per step: preflight, confirmation once at the start (staging/prod) listing every step with its SHA-256, apply, verify, timing; stop at the first failure; write a report (JSON and Markdown) with start/end times, durations and evidence paths; `--from-step` resumes only after verifying that the previous steps' receipts exist and match.
 - Safety: the manifest and every referenced file are hashed at start; any change during the run aborts. No new bypass of the per-folder confirmation: one explicit confirmation for the whole manifest is acceptable only if the manifest and its hashes were shown.
-- Reference: `D26/docs/project/abshry/dev26-deployment-log.md` "Order of execution".
+- Reference: `D26/docs/project/<project>/dev26-deployment-log.md` "Order of execution".
 - Tests: step ordering, stop-on-failure, resume, hash change aborts, dry-run prints plan, report content, Windows wrapper.
 
 ## Phase 4 - Rehearsal mode  (E4)
@@ -97,7 +97,7 @@ Origin: the DEV2 -> DEV26 rollout of the ABSHRY project (project repository `nat
 
 ## Phase 9 - Read-only ad-hoc queries  (E7, tooling)
 
-- `team.sh query --env <env> --connection <profile> "<select>"` or `--file`: the literal-aware read-only gate from `D26/scripts/abshry/ro_sql.py` (SELECT/WITH only; comments and `;` handled outside string literals; DML/DDL/PL-SQL/packages/db links blocked; read-only transaction; `set define off`; output cap; embedded newlines in literals kept as explicit `CHR(10)` because of the SQLcl hyphen continuation). It is the single place where ad-hoc read-only access to a shared database is allowed for agents; document it in `AGENTS.md` rules for coding agents as the required way, with the SQLcl MCP/CLI direct use discouraged for shared targets.
+- `team.sh query --env <env> --connection <profile> "<select>"` or `--file`: the literal-aware read-only gate from `D26/scripts/<project>/ro_sql.py` (SELECT/WITH only; comments and `;` handled outside string literals; DML/DDL/PL-SQL/packages/db links blocked; read-only transaction; `set define off`; output cap; embedded newlines in literals kept as explicit `CHR(10)` because of the SQLcl hyphen continuation). It is the single place where ad-hoc read-only access to a shared database is allowed for agents; document it in `AGENTS.md` rules for coding agents as the required way, with the SQLcl MCP/CLI direct use discouraged for shared targets.
 - Tests: every blocked form, literal edge cases (`--`, `;`, quotes, newlines, `&`).
 
 ## Phase 10 - Documentation, runbook, qualification

@@ -41,8 +41,8 @@ Planning observed the following local checkouts; these are not a future branch-t
 
 | Track | Checkout | Observed HEAD |
 | --- | --- | --- |
-| 26.2 | `/home/ash/projects/APEX_PROJECT_TEMPLATE_TEAM` | `8c0c3c4e1474f77d6a4a301491ec88bcad2b18e5` |
-| 26.1 | `/home/ash/projects/APEX_PROJECT_TEMPLATE_26_1` | `e08b2bcd7d0f4e8795066603ec0371759ff8441a` |
+| 26.2 | `<26.2 checkout>` | `8c0c3c4e1474f77d6a4a301491ec88bcad2b18e5` |
+| 26.1 | `<26.1 checkout>` | `e08b2bcd7d0f4e8795066603ec0371759ff8441a` |
 
 The shared spec is in the 26.2 checkout and covers both releases. Both this plan and its spec are newly written documents, not implementation commits. At approved implementation start, inspect current repository instructions, known limitations, branch/upstream and dirty state again. Use a named feature branch in the existing checkout as required by the local executing/writing-plan workflow; do not create a worktree for this plan. Preserve existing app exports, `.env`, mirrors, scratch evidence and planning documents. Use the same feature branch name in each independent repository if convenient, without assuming shared history.
 
@@ -196,7 +196,7 @@ Controller review note: standalone rollout SQL scripts require the saved alias t
 
 ## Task 11: Port the feature contract to 26.1 and complete offline qualification
 
-**Files:** Port the explicit new/modified implementation files from Tasks 1–10 to `/home/ash/projects/APEX_PROJECT_TEMPLATE_26_1`; include the shared spec and plan if committing that repository's feature branch. Preserve all release-specific files/sections not required by this feature.
+**Files:** Port the explicit new/modified implementation files from Tasks 1–10 to `<26.1 checkout>`; include the shared spec and plan if committing that repository's feature branch. Preserve all release-specific files/sections not required by this feature.
 
 **Interfaces:** Both repositories expose the same command, suite/report schema, scenario IDs, retention behavior and exit contract. Report the actual release/commit/dirty state. Do not change 26.1 upstream/schemaVersion or adopt 26.2 APEX command behavior while porting common database testing code.
 
@@ -208,7 +208,7 @@ Controller review note: standalone rollout SQL scripts require the saved alias t
 
 ## Task 12: Real DEV acceptance, final review and delivery evidence
 
-**Files:** Create ignored `scratch/dev-test-implementation-2026-10-16/RESULT.md` and `result.json` plus supporting logs; update only the feature guide/known limitations if newly verified behavior requires a correction. Keep scenario run evidence under the normal `scratch/dev-test/<run-id>/` layout. Do not write NATREC migrations, application changes or production runbooks for this feature qualification.
+**Files:** Create ignored `scratch/dev-test-implementation-2026-10-16/RESULT.md` and `result.json` plus supporting logs; update only the feature guide/known limitations if newly verified behavior requires a correction. Keep scenario run evidence under the normal `scratch/dev-test/<run-id>/` layout. Do not write downstream-project migrations, application changes or production runbooks for this feature qualification.
 
 **Interfaces:** Execute only the public CLI from Task 9 using a named saved owner connection resolved by existing project configuration. Target/schema names in the examples below are placeholders; replace them only after observing the authorized actual DEV identity. Plan approval is not blanket authorization to execute SQL against an unspecified database.
 

@@ -5,7 +5,7 @@ developer stopped AGY and requested the remaining work inline. No subagents or
 AGY sessions were used after that switch. The changes were committed as
 `6b057a6`, fast-forwarded to local `main`, and pushed to `origin/main` on
 2026-10-09; the feature branch was deleted. The original template checkout and
-prior maintenance fixes were preserved. No Natrec writes were performed.
+prior maintenance fixes were preserved. No downstream project writes were performed.
 
 ## Delivered behavior
 
