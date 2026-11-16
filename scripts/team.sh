@@ -339,7 +339,9 @@ case "$command_name" in
     case "$(uname -s 2>/dev/null)" in
       MINGW*|MSYS*|CYGWIN*)
         if command -v cygpath >/dev/null 2>&1; then
-          migration_plan_root="$(cygpath -m "$REPO_ROOT")"
+          # Native Windows Python cannot resolve Git Bash's /c/... spelling;
+          # mixed paths also survive brackets and spaces in the checkout root.
+          migration_plan_root="$(cygpath -m -- "$REPO_ROOT")"
         fi
         ;;
     esac

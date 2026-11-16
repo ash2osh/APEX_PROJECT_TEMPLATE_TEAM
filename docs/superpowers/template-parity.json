@@ -586,10 +586,10 @@
       ]
     },
     "scripts/team.sh": {
-      "status": "missed",
-      "reason": "Missed: 26.1 passes the migration-plan repo root through cygpath -m -- and tests it (test_bash_forwards_converted_repo_root_to_native_python), while 26.2 omits the --. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile.",
+      "status": "feature",
+      "reason": "Ported to 26.2 (fix/parity-ports-2-262): migration-plan passes the repo root through cygpath -m -- with its comment. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile.",
       "blobs": [
-        "d423f2c321249d21a7b2d00c946e6bdbf36d4ea2",
+        "db0c71443ed1d6b00e1902dfe971815947c8bc20",
         "ae6a67ac554eefa7b8fb5c4186f98eb69e189ff6"
       ]
     },
@@ -914,10 +914,10 @@
       ]
     },
     "tests/test_rollout.py": {
-      "status": "missed",
-      "reason": "Missed: five PR 74 tests exist in 26.1 only (test_sql_script_transport_preflight_refuses_direct_quoted_hyphen_before_sqlcl, test_sql_script_transport_review_warns_on_assembled_clob_and_still_runs, test_validate_evidence_paths_refuses_unsafe_syntax_missing_and_linked_paths, test_receipt_is_not_installed_when_a_step_reports_missing_evidence, test_resume_refuses_a_receipt_whose_evidence_was_removed_or_replaced_by_a_link), although 26.2 rollout.py has the same checks; 26.2 own identity and app-deploy tests are feature or intended.",
+      "status": "feature",
+      "reason": "Ported to 26.2 (fix/parity-ports-2-262): the five PR 74 tests (SQL transport preflight and review, evidence paths, missing evidence, removed or linked evidence on resume). No 26.1-only test names remain. The nine 26.2-only tests cover target identity binding, app-deploy child configuration, SQL-script writer identity and hazards, and dry-run without an env file: feature or intended.",
       "blobs": [
-        "3aaa79b00c28885e0d52e3f22f8aeac80157c83b",
+        "fe17f7872cf7d6c1a54107721aadebd693b300aa",
         "c85bc837ec166d2dc731b6b4720d1f3d7c8af9a9"
       ]
     },
@@ -931,9 +931,9 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2 adds tests for its automations, app-lock, upgrade-apexlang and doctor-profile commands; the 26.1-only wrapper tests cover shared commands that 26.2 also tests under other names (not every name matched one by one), except the cygpath -m -- pin counted under scripts/team.sh.",
+      "reason": "26.2 adds tests for its automations, app-lock, upgrade-apexlang and doctor-profile commands. The cygpath -m -- pin is ported (test_bash_forwards_converted_repo_root_to_native_python). The 26.1-only wrapper tests cover shared commands that 26.2 also tests under other names (not every name matched one by one).",
       "blobs": [
-        "0a4fb5d2d0fb857dab81b1db3129a96b72339be2",
+        "4287afc56c06a4e6f1ca87215516aa7442cc8d89",
         "2e6d4c5676655451084ef23cbdde8f06ef1ede49"
       ]
     },

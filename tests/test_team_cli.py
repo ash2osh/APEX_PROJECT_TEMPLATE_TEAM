@@ -338,6 +338,46 @@ exit 17
             self.assertEqual(expected_root, arguments[repo_index + 1])
             self.assertEqual(["--schema", "APP", "--format", "json"], arguments[repo_index + 2:])
 
+    def test_bash_forwards_converted_repo_root_to_native_python(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, environment, calls = self.migration_plan_checkout(Path(temporary))
+            bash_env = Path(temporary) / "path bridge [fake].bash"
+            bash_env.write_text(
+                "uname() { printf 'MINGW64_NT-10.0\\n'; }\n"
+                "cygpath() {\n"
+                "  printf '%s\\n' \"$*\" >> \"$CYGPATH_CAPTURE\"\n"
+                "  [ \"$1\" = '-m' ] && [ \"$2\" = '--' ] || return 2\n"
+                "  printf '%s\\n' \"$MIGRATION_PLAN_NATIVE_ROOT\"\n"
+                "}\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            capture = Path(temporary) / "cygpath args.log"
+            environment["BASH_ENV"] = str(bash_env)
+            environment["CYGPATH_CAPTURE"] = str(capture)
+            environment["MIGRATION_PLAN_NATIVE_ROOT"] = root.resolve().as_posix()
+
+            result = subprocess.run(
+                [BASH, str(root / "scripts" / "team.sh"), "migration-plan", "--format", "json"],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(0, json.loads(result.stdout)["summary"]["folderCount"])
+            self.assertTrue(
+                capture.exists(),
+                f"MSYS roots must pass through cygpath before native Python starts: {result.stdout}{result.stderr}",
+            )
+            self.assertEqual("-m --", " ".join(capture.read_text(encoding="utf-8").strip().split(" ")[:2]))
+            self.assertTrue(
+                capture.read_text(encoding="utf-8").strip().endswith("/" + root.name),
+                capture.read_text(encoding="utf-8"),
+            )
+            self.assertFalse(calls.exists(), "offline reporting must not start fake SQLcl")
+
     def test_both_wrappers_forward_schema_and_folder_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root, environment, calls = self.migration_plan_checkout(Path(temporary))
