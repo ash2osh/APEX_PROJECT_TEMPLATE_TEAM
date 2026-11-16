@@ -994,6 +994,7 @@ class RolloutManifestTests(unittest.TestCase):
 
     def test_team_rollout_dry_run_does_not_require_a_project_env_file(self) -> None:
         shutil.copytree(ROOT / "scripts", self.root / "scripts", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy2(ROOT / "template-manifest.json", self.root / "template-manifest.json")
         self.write_manifest([{"type": "pause", "message": "review before applying"}])
         environment = os.environ.copy()
         environment.pop("PROJECT_ENV_FILE", None)

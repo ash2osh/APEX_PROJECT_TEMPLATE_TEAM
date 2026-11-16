@@ -70,6 +70,7 @@ class UpgradeApexlangTests(unittest.TestCase):
             scripts = Path(temporary) / 'scripts'
             scripts.mkdir()
             shutil.copyfile(ROOT / 'scripts/team.ps1', scripts / 'team.ps1')
+            shutil.copy2(ROOT / 'template-manifest.json', Path(temporary) / 'template-manifest.json')
             (scripts / 'upgrade_apexlang.ps1').write_text("Write-Output 'fixture conversion completed'\nexit 0\n")
             result = subprocess.run(['pwsh', '-NoProfile', '-File', str(scripts / 'team.ps1'), 'upgrade-apexlang', '100', '--mode', 'builder'], capture_output=True, text=True)
             self.assertIn('fixture conversion completed', result.stdout)

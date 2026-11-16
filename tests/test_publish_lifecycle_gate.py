@@ -114,6 +114,9 @@ class PublishLifecycleGateTests(unittest.TestCase):
                     import shutil
                     for name in ('publish_app.ps1', 'load_env.ps1', 'invoke_sqlcl.ps1', 'resolve_python.ps1', 'check_db_target.ps1', 'normalize_apx.ps1'):
                         shutil.copy2(ROOT / 'scripts' / name, root / 'scripts' / name)
+                    shutil.copy2(ROOT / 'template-manifest.json', root / 'template-manifest.json')
+                    if (ROOT / 'scripts' / 'template_release.ps1').exists():
+                        shutil.copy2(ROOT / 'scripts' / 'template_release.ps1', root / 'scripts' / 'template_release.ps1')
                 script = runner if engine == 'bash' else runner.with_suffix('.ps1')
                 result = subprocess.run([*launcher, str(script), '100', '--env', 'staging', '-y'], cwd=root, env=environment,
                                         text=True, capture_output=True)
