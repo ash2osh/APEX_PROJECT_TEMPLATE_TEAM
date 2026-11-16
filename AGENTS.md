@@ -196,7 +196,7 @@ owner-only commands retain their owner-login checks. See
   `db_unique_name`; an agent must never supply it unless the developer typed that exact name for the run.
   `-y` / `--yes` (migrate, rollout, publish, deploy, archive-migrations, feature clean-capsule, the rollout `pause` step, `mcp setup`, automations enable|disable|run-once) replaces a
   `[y/N]` prompt; an agent passes it for staging or production only when the developer asked in this
-  conversation for that run to be unattended, and production also needs the typed name. An agent never sets
+  conversation for that run to be unattended, and production also needs the typed name.
   The `TEAM_ACK_FROM_STDIN` variable is retired and ignored: piped or redirected acknowledgments stay refused, and `--yes` is the recorded route. Receipts are written only after a verified apply. Multi-schema projects use
   `migrations/<SCHEMA>/…`; one migration changes one schema. See
   [docs/migration-rules.md](docs/migration-rules.md) for naming, ordering,
