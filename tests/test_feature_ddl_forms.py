@@ -147,11 +147,11 @@ class GrantAndGateTests(unittest.TestCase):
         self.assertEqual(SCHEMA, grant["owner"])
 
     def test_execute_grant_and_sequence_grant(self) -> None:
-        exec_grant = model("GRANT EXECUTE ON APP_DATA.MY_PROC TO RUNERP_USER", "REVIEWED_OPERATION")
-        self.assertEqual(("GRANT_OBJECT", "MY_PROC", "EXECUTE", ("RUNERP_USER",)),
+        exec_grant = model("GRANT EXECUTE ON APP_DATA.MY_PROC TO SERVICE_USER", "REVIEWED_OPERATION")
+        self.assertEqual(("GRANT_OBJECT", "MY_PROC", "EXECUTE", ("SERVICE_USER",)),
                          (exec_grant["kind"], exec_grant["name"], exec_grant["privileges"], exec_grant["grantees"]))
-        seq_grant = model("GRANT SELECT ON APP_DATA.MY_SEQ TO RUNERP_USER", "REVIEWED_OPERATION")
-        self.assertEqual(("GRANT_OBJECT", "MY_SEQ", "SELECT", ("RUNERP_USER",)),
+        seq_grant = model("GRANT SELECT ON APP_DATA.MY_SEQ TO SERVICE_USER", "REVIEWED_OPERATION")
+        self.assertEqual(("GRANT_OBJECT", "MY_SEQ", "SELECT", ("SERVICE_USER",)),
                          (seq_grant["kind"], seq_grant["name"], seq_grant["privileges"], seq_grant["grantees"]))
         multi = model("GRANT EXECUTE ON PKG TO U1, U2 WITH GRANT OPTION", "REVIEWED_OPERATION")
         self.assertEqual(("U1", "U2"), multi["grantees"])
