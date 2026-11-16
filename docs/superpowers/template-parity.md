@@ -106,3 +106,9 @@ were refreshed with status and reason unchanged, and `TODO.md` stays identical.
 declaration order, and the baseline module import order), found by `tests/test_live_baseline.py`. `baseline_sql.py`,
 `baseline_build.py`, the new `tests/test_baseline_generated_sql.py` and `TODO.md` are identical in both lines; the four
 changed shared records were refreshed with status and reason unchanged.
+
+2026-11-16: TEAM ported the migration-plan `cygpath -m --` guard (`scripts/team.sh`) and the five PR 74 rollout tests
+(`tests/test_rollout.py`) from 26.1 on `fix/parity-ports-2-262`. The `scripts/team.sh`, `tests/test_rollout.py` and
+`tests/test_team_cli.py` records were re-marked `feature` with refreshed blob ids, and the report has no unreviewed or
+changed records. The two `missed` records (`scripts/rollout.py`, `tests/test_backup_ords_cli.py`) predate this port and
+were not changed.
