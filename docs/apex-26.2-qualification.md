@@ -190,7 +190,7 @@ were preserved; no custom team database objects or implicit migrations were adde
 These checks used fresh SQLcl 26.3.0.0 CLI processes against the explicitly
 identified Docker DEMO / FREEPDB1 target, APEX 26.2.0 and Oracle 23.26.3.0.0.
 All remaining implementation and final review were performed inline after the
-developer stopped AGY. Existing applications and Natrec were not imported.
+developer stopped AGY. Existing applications and the downstream project were not imported.
 
 ### Catalog transport
 
@@ -256,7 +256,7 @@ local SQL/APEXlang corpus (two tables with a foreign key, one page) yielded seve
 nodes/six edges, including the page region's `reads_from` edge to its table and the
 foreign-key `references` edge. All 99 fingerprinted shared installation files remained
 byte-identical. This was a tooling fixture,
-not a database migration or a Natrec graph refresh. Optional Graphify needs
+not a database migration or a downstream project graph refresh. Optional Graphify needs
 Python 3.12+; the core workflow remains Python 3.10+.
 
 See [local qualification](local-qualification.md) for reproducible modes and
