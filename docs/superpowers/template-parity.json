@@ -125,8 +125,8 @@
       "status": "intended",
       "reason": "Release-specific command table and publish wording: 26.2 documents normalized verification, native locks, partial publish, automations and the offline Graphify path, while 26.1 documents byte-exact verification and its own release commands.",
       "blobs": [
-        "5b34048e107da7578afccff108323dbbbe7ac74e",
-        "fa8fe15d5e41d733fa2d275b2dec52d33c4ab1d1"
+        "e21505c0f6827d525ad544396deff7076523277b",
+        "8b46f40372455410accac1d75ca4925261320004"
       ]
     },
     "ai_generate/2026-11-14/WALKTHROUGH.md": {
@@ -201,6 +201,14 @@
         "84fb1931204a67b732e902add23612b6ca0e8556"
       ]
     },
+    "docs/feature-releases.md": {
+      "status": "intended",
+      "reason": "Release-specific dry run: 26.2 resolves each step's target from the PROD_* or STAGING_* settings at planning and opens no database session (commit df22dbb, deliberate). 26.1's dry run plans from local source and hashes only (its _prepare_plan resolves no target), so its docs keep the local-only wording.",
+      "blobs": [
+        "4b4395892225ab6e0599e03b3aaa92a4071228a5",
+        "69ba702f161283730d93d0b5c307ffeb259bebd2"
+      ]
+    },
     "docs/known-limitations.md": {
       "status": "intended",
       "reason": "Release-specific limits: 26.2 lists native-lock, partial-publish, normalization, rehearsal and capsule-budget limits; 26.1 lists its no-lock publish race and the -y flags for reconcile and rollout recovery.",
@@ -221,8 +229,8 @@
       "status": "intended",
       "reason": "Release-specific rules: 26.2 documents the MIGRATION_* owner profiles, schema-2 rehearsal metrics and the selected-target attempt policy; 26.1 documents its fail-closed every-chain attempt policy (decided 2026-10-20).",
       "blobs": [
-        "8f17bf2e518d8fbbd175da7642d063da4eb3cf07",
-        "70821db53101a3a561dd74011f4f6302a5ddd198"
+        "c327d84acfcb786ecbdcfe391f8f8f7b15981fc4",
+        "34d3e61de73f81946fb1efbb3bef8099ef30d5f2"
       ]
     },
     "docs/publish-rules.md": {
@@ -885,7 +893,7 @@
       "status": "intended",
       "reason": "Same helper (scripts/path_utils.py is identical); the two tests exercise it differently.",
       "blobs": [
-        "9bf6f46a774bd75d52c7f91958008dd2ed9bdab7",
+        "d9c2c28a9a9638b29191a63306dfe5707b66f047",
         "445b14d626dc58ec8f4cd658de5955888346898c"
       ]
     },
