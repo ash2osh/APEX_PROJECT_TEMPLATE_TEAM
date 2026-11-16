@@ -147,10 +147,10 @@
     },
     "ai_generate/2026-11-16/WALKTHROUGH.md": {
       "status": "intended",
-      "reason": "Each line's own daily change record for 2026-11-16: 26.1 lists its branch fix/review-2026-11-16 fixes, 26.2 lists its five fixes on fix/review-2026-11-16-262 and now this parity section.",
+      "reason": "Each line's own daily change record for 2026-11-16: 26.1 lists its fix/review-2026-11-16 fixes, 26.2 lists its own fixes and the parity sections.",
       "blobs": [
-        "7234a1deb1b359cca608ad655a73b4a8fc13615d",
-        "015d454cd0ca3dcefe23a9d424d4c7ee3cd29f14"
+        "f3a57945077e32414e4f08a71f1c8667dcfc4e1f",
+        "dfc765706f06f37ed9d48a708f53fa198b94f7b9"
       ]
     },
     "docs/EXAMPLES.md": {
@@ -219,10 +219,10 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "Release-specific rules: 26.2 documents the MIGRATION_* owner profiles, schema-2 rehearsal metrics and the selected-target attempt policy; 26.1 documents its fail-closed every-chain attempt policy (decided 2026-10-20) and its own migration-plan and verify text.",
+      "reason": "Release-specific rules: 26.2 documents the MIGRATION_* owner profiles, schema-2 rehearsal metrics and the selected-target attempt policy; 26.1 documents its fail-closed every-chain attempt policy (decided 2026-10-20).",
       "blobs": [
         "8f17bf2e518d8fbbd175da7642d063da4eb3cf07",
-        "b9fd3540c16cd134c25db6788d733176a4998407"
+        "70821db53101a3a561dd74011f4f6302a5ddd198"
       ]
     },
     "docs/publish-rules.md": {
@@ -305,14 +305,6 @@
         "e8e915091deda37ca91618a2e54bc44cd8d28edb"
       ]
     },
-    "scripts/backup_db.sh": {
-      "status": "intended",
-      "reason": "Not the cause of the Windows ORDS flake (TEAM issue 49): the same failure occurred on 2026-10-13 at commit 9adb983, before the return form (6770f55) existed, and 96 Windows runs of both forms reproduced nothing. The return/exit forms behave the same.",
-      "blobs": [
-        "ec5b999b1888e131c2c750ab7aaeadaf3a8d00e0",
-        "a4d847829121a6290ebd13134ee11fac3ff9cb1a"
-      ]
-    },
     "scripts/baseline.py": {
       "status": "intended",
       "reason": "Ported on 2026-10-20 (TEAM PR 54): NOT NULL data preconditions and relative_to_root. What still differs is formatting and function order. After the build split the import layout also differs; the same names are bound.",
@@ -327,14 +319,6 @@
       "blobs": [
         "d9c904ef75eddf47043274de5ea7d7c6a6d61e4d",
         "b315388db2876a3da0c5481b17554db9685720cd"
-      ]
-    },
-    "scripts/baseline_bundles.py": {
-      "status": "intended",
-      "reason": "Same output with a different layout: 26.2 orders the _column_sql and _count_check helpers differently, builds the CLOB source header in another order, and annotates _exact_source_step as Mapping instead of Mapping | None.",
-      "blobs": [
-        "bf1e05c04ca61ace0ef8d5fd1efabaabfe783eeb",
-        "954fe392443601a7d53fe9012b5d192dc55732c2"
       ]
     },
     "scripts/check_db_target.ps1": {
@@ -399,14 +383,6 @@
       "blobs": [
         "46440eb126572cb4141050a387731bd17a9030bb",
         "a0aa3798eca3b4d3c7a785e066c840fad98b29dd"
-      ]
-    },
-    "scripts/directory_install.py": {
-      "status": "intended",
-      "reason": "The pinned-handle installer was ported (TEAM PR 53); the only difference left is the compat helper _is_symlink_or_reparse.",
-      "blobs": [
-        "82cf05418531cfd0813fdcc93ede3097e2ac8ec8",
-        "7ce3efe07d4d0e54e6a0d9f639c3a4858dd18317"
       ]
     },
     "scripts/doctor.sql": {
@@ -489,30 +465,6 @@
         "588850ddddcdd22f4da7faf410b2096e7e4a2f9e"
       ]
     },
-    "scripts/migrate.py": {
-      "status": "intended",
-      "reason": "Import layout and one reformatted apply_batch call only; both lines pass yes, confirm_target and rollout_confirmed_by the same way.",
-      "blobs": [
-        "a576f33d94b012ab93463d3bb68a253236a9935e",
-        "e74a9a538864992e0fc86763ed4476ab62862d9f"
-      ]
-    },
-    "scripts/migration_archive.py": {
-      "status": "intended",
-      "reason": "Layout only: 26.2 defines MigrationArchiveError after its helper functions instead of before them, with identical logic.",
-      "blobs": [
-        "72b379f7bbb81bad475f52c06f3a8b9582b58664",
-        "e2a88b8a3231132bbfe6224bf288db2c7a1f3617"
-      ]
-    },
-    "scripts/migration_attempts.py": {
-      "status": "intended",
-      "reason": "relative_to_root ported (TEAM PR 55); the only difference left is one blank line.",
-      "blobs": [
-        "e43bec619e0de6ea4be8f8bd9c66ca40049f8e11",
-        "4bf1ba99777d1dda0f54c1e8931fbe3c159ad85a"
-      ]
-    },
     "scripts/migration_checks.py": {
       "status": "feature",
       "reason": "relative_to_root ported (TEAM PR 55); what remains is the 26.2-only rehearsal metric phases.",
@@ -554,10 +506,10 @@
       ]
     },
     "scripts/publish_app.sh": {
-      "status": "missed",
-      "reason": "Port to 26.2: 26.1 refuses --app-source-dir with --env dev ('--app-source-dir is supported only for staging or production deployment'), but 26.2 has no such refusal, so a DEV publish would import and drift-check from the directory given (checked in the 26.2 script).",
+      "status": "intended",
+      "reason": "Release-specific publish flow: 26.2 adds native DEV application locks, --file partial publish, normalized verification and the APEX_WORKSPACE_USERNAME check, while 26.1 keeps the byte-exact drift guard; the --app-source-dir refusal with --env dev is on both lines now.",
       "blobs": [
-        "606c8130a37dd1147f1c80443b5174934f88b6ed",
+        "c98ad8c162bb478159da0e5ea51f284c429663d7",
         "96585ccbcde484005595c053c281a3c035dd94e7"
       ]
     },
@@ -595,18 +547,10 @@
     },
     "scripts/rollout.py": {
       "status": "missed",
-      "reason": "Port to 26.1: 26.2 runs the SQLcl transport preflight on rollout SQL payloads (26.1 runs it only in migrate.py), validates receipt evidence paths on write and checks symlinks and existence on read, observes the target identity before and after each step and verifies migration receipts on resume for schema-1 manifests too, and freezes app-deploy child configuration with a target-binding check; 26.1 lacks each of these (its evidence-path check covers path syntax only).",
+      "reason": "Missed: 26.2 observes the target identity after each migrate or SQL step, checks each migration receipt against it on execute and resume, and refuses legacy schema-1 receipts without observed identity, which 26.1 does not do. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA.",
       "blobs": [
         "292b5ef494d41ab8ffcbd394d96dfe512df01049",
-        "bb04a9f02c3f0677cb07ffb779e170c1e8b04a48"
-      ]
-    },
-    "scripts/rollout.sh": {
-      "status": "intended",
-      "reason": "Both lines now bypass environment loading for offline --dry-run; only the explanatory comment wording differs.",
-      "blobs": [
-        "dbaec1b6ee5dc66e2b8f16eac901691c99acfcfa",
-        "44514dc3aa2868f4bbf27390c2200aa5088a380c"
+        "5ca3e91902199cf472c9fd82ea46bbdc2714fe47"
       ]
     },
     "scripts/rollout_capsule.py": {
@@ -634,18 +578,18 @@
       ]
     },
     "scripts/team.ps1": {
-      "status": "missed",
-      "reason": "Port to 26.2: 26.1 answers compare-env --help from argparse before .env is loaded, but 26.2 removed that short-circuit, so compare-env --help exits with 'configuration file not found' when .env is absent (checked on 26.2).",
+      "status": "feature",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile (APEX_WORKSPACE_USERNAME, release and workspace-user verification); 26.1 has none of them. The compare-env --help path is on both lines now.",
       "blobs": [
-        "2d4fab75a6f7630cf0014b5da9dbaed76e85f980",
+        "d0a6571c5d1bee211b7cfd4a5faa12d4cba5741f",
         "8bc8af687d54d51548eae7795bb39e5f920173a6"
       ]
     },
     "scripts/team.sh": {
       "status": "missed",
-      "reason": "Port to 26.2: 26.1 answers compare-env --help from argparse before .env is loaded, but 26.2 removed that short-circuit, so compare-env --help exits 1 with 'configuration file not found' when .env is absent (checked on 26.2).",
+      "reason": "Missed: 26.1 passes the migration-plan repo root through cygpath -m -- and tests it (test_bash_forwards_converted_repo_root_to_native_python), while 26.2 omits the --. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile.",
       "blobs": [
-        "8e6d9dd2e32494607629bb20a7dc91b2c6926ca7",
+        "d423f2c321249d21a7b2d00c946e6bdbf36d4ea2",
         "ae6a67ac554eefa7b8fb5c4186f98eb69e189ff6"
       ]
     },
@@ -673,20 +617,12 @@
         "2bd03da4c02f2c770b7ab2e8fe1cd72106635982"
       ]
     },
-    "scripts/validate_migration.py": {
-      "status": "intended",
-      "reason": "Decided 2026-10-20: both accept only COMMIT and ROLLBACK [WORK] in rollout scripts (TEAM PR 59 aligned 26.2 with 26.1; ROLLBACK TO SAVEPOINT could never be used and COMMIT/ROLLBACK FORCE was accepted). What differs is docstring and code layout.",
-      "blobs": [
-        "93b9781fc005549d42fd196ee05bb5e5612cde62",
-        "fb134cfcf451452b178d4c9e2249147b36bbea4e"
-      ]
-    },
     "scripts/verify_local.py": {
-      "status": "missed",
-      "reason": "Port to 26.1: 26.2 forces a template-locked file that is missing to attention (counts['missing']), while 26.1 reports the same template_drift result as pass; the Oracle skills, Graphify, lock-recovery and apexRelease checks are 26.2-only and intended.",
+      "status": "feature",
+      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now.",
       "blobs": [
         "91370e6827fa491e95197ef04734ad98d4d499c3",
-        "f38b8d79f6628fbe6abd08c37eaa405f57129588"
+        "2b77daf5b597db01f50ba82bfaff9b1a702e281c"
       ]
     },
     "scripts/verify_publish_state.py": {
@@ -729,22 +665,6 @@
         "a6a304aa23fd4de1107d1801d3fe7424eced4627"
       ]
     },
-    "tests/fixtures/baseline/ords_modules.sql": {
-      "status": "intended",
-      "reason": "One trailing space on the Date line in 26.1's fixture; no behaviour.",
-      "blobs": [
-        "90a8e10fda78922950f6ccb1691dae17d6697f12",
-        "8d42a053314fb6709b7b0ad00296bdf539898a44"
-      ]
-    },
-    "tests/fixtures/baseline/system_dev.json": {
-      "status": "intended",
-      "reason": "Trailing blank line only (26.2 has it); no behaviour.",
-      "blobs": [
-        "c56d665d457341db5cbfd486bf686adb7fd9e4d1",
-        "2e6235945ef9a7f81ca3119e0d9d5fe1d199c40c"
-      ]
-    },
     "tests/fixtures/schema_catalog/view-synonyms.json": {
       "status": "feature",
       "reason": "26.2 synonym target_exists/target_type fields (TF-001), used by 26.2-only tests.",
@@ -770,11 +690,11 @@
       ]
     },
     "tests/test_backup_ords_cli.py": {
-      "status": "intended",
-      "reason": "26.2 fixtures include the SQLcl 26.3 version helper.",
+      "status": "missed",
+      "reason": "Missed: 26.2 has test_an_unguarded_failure_inside_the_ords_scope_stops_the_run_before_sqlcl, which 26.1 lacks although scripts/backup_db.sh is identical in both; the SQLcl 26.3 floor test wording is release-specific.",
       "blobs": [
-        "54457807f98a2d138e1ff66d752a92cbec7167b8",
-        "11ed04102b89d7fd7e2617819940bcc8348d0fe6"
+        "86e92e138c447eea44f391dcf11c21f4e44c8bfa",
+        "9e1fd907cb20d42c037f96ecd464c2caf344b539"
       ]
     },
     "tests/test_baseline.py": {
@@ -801,14 +721,6 @@
         "64746c1eee9d94c16e86128d3874092cbba6aaa2"
       ]
     },
-    "tests/test_baseline_generated_sql.py": {
-      "status": "missed",
-      "reason": "Port to 26.2: 26.1 adds a sys.path bootstrap so the _no_real_sqlcl guard imports under python3 -m unittest tests.test_baseline_generated_sql (its review fix), while 26.2 imports it bare and that command fails with ImportError unless PYTHONPATH includes tests (checked on 26.2).",
-      "blobs": [
-        "ff604dc5795814a3bb9873b8d1fb216f90eaec5a",
-        "ebae1aa44bee5755fc4e7e1190528fefca96887f"
-      ]
-    },
     "tests/test_chrome_devtools_docs.py": {
       "status": "intended",
       "reason": "Pins each line's project rule wording for the Chrome daemon fallback.",
@@ -833,14 +745,6 @@
         "b5bad67c58799bb66c034aec83f684c304c97baa"
       ]
     },
-    "tests/test_db_targets.py": {
-      "status": "intended",
-      "reason": "26.2 moved the two migration-profile tests into tests/test_migration_profiles.py; 26.1 keeps them in this module, so the test coverage exists on both lines.",
-      "blobs": [
-        "894303bbc6d338b42130e07201493316484fc35a",
-        "4e7dbb17399540b3c442c46ae61b99590a9de550"
-      ]
-    },
     "tests/test_deployment_descriptor.py": {
       "status": "feature",
       "reason": "Tests the 26.2-only deployment verification.",
@@ -855,14 +759,6 @@
       "blobs": [
         "5b92c0ca65533312cdf35ef44d1c776da17fb612",
         "6c544794c28b97631112694b1ede2340ec1676cc"
-      ]
-    },
-    "tests/test_directory_install.py": {
-      "status": "intended",
-      "reason": "26.1 parent-swap tests ported (TEAM PR 53); TEAM keeps its Darwin refusal test.",
-      "blobs": [
-        "c0b79f940aa2f0687f012a54ad9f653e8ea8df64",
-        "7065ab72f2810a56d9753b3b485c27670766d559"
       ]
     },
     "tests/test_documentation_contract.py": {
@@ -890,10 +786,10 @@
       ]
     },
     "tests/test_feature_rollout.py": {
-      "status": "missed",
-      "reason": "Port to 26.2: 26.1 has test_capsule_rerun_refuses_an_occupied_receipt_before_any_checkpoint for the capsule receipt guard, which 26.2 has in rollout_capsule.py (line 749) and the message but no test covers.",
+      "status": "feature",
+      "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now.",
       "blobs": [
-        "726d57eb2e8e98ef33186173a8ce6aab8a77d0a1",
+        "311025f89a944d9e8228329683ad017194accc2c",
         "866d141435823d9918611b1025bd50aafcb5ce9a"
       ]
     },
@@ -919,14 +815,6 @@
       "blobs": [
         "f0a544020cc418f4ff433d7a60153d40cd87acde",
         "cf10f1e411ba1dc00925ceda326d1836435ba708"
-      ]
-    },
-    "tests/test_login_differs_from_schema.py": {
-      "status": "intended",
-      "reason": "26.2 imports the subprocess-safety guard and renames a test-local variable; behavioral assertions are equivalent.",
-      "blobs": [
-        "58d6e87508f2e770c00bdd2d43c7580fa4a75fad",
-        "6e1dc8dbd1389a1fb81b9eb796e12aaea6643774"
       ]
     },
     "tests/test_migrate_cli.py": {
@@ -959,14 +847,6 @@
       "blobs": [
         "b7b9287f5639c48ce259155184c18ea66cdf7fe2",
         "9abefdae45261dbcbc7c093cf1721fe42352a5a2"
-      ]
-    },
-    "tests/test_migration_plan.py": {
-      "status": "intended",
-      "reason": "Identity refinement test ported to 26.1 (26.1 PR 24); the files are close to identical.",
-      "blobs": [
-        "50847992d71bb9ab5422f77b0d73c5e663cc95d0",
-        "e471d7fe383a39d900348e436f7ee4e729330702"
       ]
     },
     "tests/test_migration_rehearsal.py": {
@@ -1009,19 +889,11 @@
         "445b14d626dc58ec8f4cd658de5955888346898c"
       ]
     },
-    "tests/test_publication_identity.py": {
-      "status": "intended",
-      "reason": "26.2 closes subprocess stdin in test helpers; the assertions and publication identity behavior are unchanged.",
-      "blobs": [
-        "c6508ffffb55a2708118784b53696df05af7b995",
-        "4af458e135869eba0a7bfc159886ba445fc37adc"
-      ]
-    },
     "tests/test_publish_cli.py": {
       "status": "intended",
-      "reason": "Release-specific publish tests: 26.2 expects native-lock refusals, lifecycle preservation and partial publish, and refuses a first publish of an absent app before import (locks need an existing app), where 26.1 expects the drift guard and an absent-app first publish.",
+      "reason": "Release-specific publish tests: 26.2 expects native-lock refusals, partial publish and a refusal of a first publish of an absent app before import (locks need an existing app), where 26.1 expects the drift guard and an absent-app first import.",
       "blobs": [
-        "dcd57ae9ba2fd7f8755bdebaeea44b4c84b5b641",
+        "133e9dfaeed63ff0745f1cfdf2976fad11b1a789",
         "57e7401c522af60b8da63a5607eef3bf411c1121"
       ]
     },
@@ -1043,10 +915,10 @@
     },
     "tests/test_rollout.py": {
       "status": "missed",
-      "reason": "Port to 26.2: 26.1's test_rollout has tests 26.2 lacks (rerun from step 1 with pause steps keeps receipts, multiline UPDATE SET in sql-script, the auxiliary DML classifier, the shared-catalog identity path, schema-2 budget cases); port to 26.1: 26.2 tests the identity-revalidated resume and child-configuration cases that 26.1 lacks.",
+      "reason": "Missed: five PR 74 tests exist in 26.1 only (test_sql_script_transport_preflight_refuses_direct_quoted_hyphen_before_sqlcl, test_sql_script_transport_review_warns_on_assembled_clob_and_still_runs, test_validate_evidence_paths_refuses_unsafe_syntax_missing_and_linked_paths, test_receipt_is_not_installed_when_a_step_reports_missing_evidence, test_resume_refuses_a_receipt_whose_evidence_was_removed_or_replaced_by_a_link), although 26.2 rollout.py has the same checks; 26.2 own identity and app-deploy tests are feature or intended.",
       "blobs": [
-        "e02883bb407b35c96b4b9d68700b596c0fd741dd",
-        "fffb9c9f62b3a0836b5aa57725253689e7b4fac6"
+        "3aaa79b00c28885e0d52e3f22f8aeac80157c83b",
+        "c85bc837ec166d2dc731b6b4720d1f3d7c8af9a9"
       ]
     },
     "tests/test_setup_graphify.py": {
@@ -1057,27 +929,11 @@
         "81a13f3cbab2407000e956d3c92a364a86550d23"
       ]
     },
-    "tests/test_sql_driver_contracts.py": {
-      "status": "intended",
-      "reason": "26.1 BLOB/UTL_COMPRESS chunking assertions ported (TEAM PR 54).",
-      "blobs": [
-        "2c8305e209442ee5638bb4f68eb39cece1351022",
-        "fcf87fcf805184ff5ee86083361f52d404a8839f"
-      ]
-    },
-    "tests/test_sqlcl_transport.py": {
-      "status": "intended",
-      "reason": "Transport preflight tests ported to 26.1 (26.1 PR 24).",
-      "blobs": [
-        "80beaed34fa42fd0d8eb3fa64c1ce87aca7ba79d",
-        "3a284495d0ccfd91758b52fb0fa57ab569dd3ceb"
-      ]
-    },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "Tests 26.2-only commands; the wrapper tests for shared commands exist in both.",
+      "reason": "26.2 adds tests for its automations, app-lock, upgrade-apexlang and doctor-profile commands; the 26.1-only wrapper tests cover shared commands that 26.2 also tests under other names (not every name matched one by one), except the cygpath -m -- pin counted under scripts/team.sh.",
       "blobs": [
-        "b7686740cea5116361db78b856fb9f24b3d49852",
+        "0a4fb5d2d0fb857dab81b1db3129a96b72339be2",
         "2e6d4c5676655451084ef23cbdde8f06ef1ede49"
       ]
     },
@@ -1105,20 +961,12 @@
         "dc61b8acd7e06faec71fec6da393c7fccb6bf906"
       ]
     },
-    "tests/test_validate_migration.py": {
-      "status": "intended",
-      "reason": "Both pin the strict rule (TEAM PR 59, 26.1 PR 25); the test layouts differ.",
-      "blobs": [
-        "cf19aaf5911d79fb216efd6e4033fe1840e02e2a",
-        "efabddcdb9a9f48f0e7e65f3ca4c1a5fef2c2b0f"
-      ]
-    },
     "tests/test_verify_local.py": {
-      "status": "missed",
-      "reason": "Port to 26.2: 26.1 has test_lock_without_template_ref_fails, and 26.2 code still refuses a lock without templateRef but has no test for it; port to 26.1: 26.2 has the missing-locked-command and Graphify tests that 26.1 lacks.",
+      "status": "feature",
+      "reason": "26.2 adds tests for the Oracle skills, unresolved lock-recovery and wrong-release or ref lock checks and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1. The templateRef and missing-locked-file tests are on both lines now.",
       "blobs": [
-        "64eff9df22b744188da8fcb01bcd0004b0d2e91e",
-        "3ab8762cba01d60ac2fb0a9d972c6c742741eb9c"
+        "1598b4125e0b295fd5e71a6cf4fa36607174081c",
+        "6510c621c00ec4243bb48a918a98e4346541c1ab"
       ]
     },
     "tests/test_verify_publish_state.py": {
