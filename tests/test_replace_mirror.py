@@ -26,6 +26,7 @@ class ReplaceMirrorTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         replace_script = scripts / "replace_mirror.ps1"
         shutil.copy2(ROOT / "scripts" / "replace_mirror.ps1", replace_script)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         scratch = root / "scratch"
         scratch.mkdir()
         staged = scratch / "stage"
@@ -77,6 +78,7 @@ class ReplaceMirrorTests(unittest.TestCase):
             scripts.mkdir()
             replace_script = scripts / "replace_mirror.ps1"
             shutil.copy2(ROOT / "scripts" / "replace_mirror.ps1", replace_script)
+            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
             scratch = root / "scratch"
             scratch.mkdir()
             outside = Path(temporary) / "outside-stage"
@@ -118,6 +120,7 @@ class MirrorSafetyTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         for name in ("replace_mirror.sh", "replace_mirror.ps1"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         (root / ".gitignore").write_text("scratch/\n*.local\napps/**/apex-team-export.json\n", encoding="utf-8")
         mirror = root / "database" / "DEMO"
         (mirror / "tables").mkdir(parents=True)

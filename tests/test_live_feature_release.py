@@ -34,7 +34,11 @@ import unittest
 import uuid
 from pathlib import Path
 
+from scripts.template_release import is_apex_26_2
+
 ROOT = Path(__file__).resolve().parents[1]
+# Phase 2 release switch: 26.2 retired the uc-apx settings, so the generated .env omits them there.
+APEX_26_2 = is_apex_26_2(ROOT)
 CONNECTION = os.environ.get("TEMPLATE_LIVE_CONNECTION", "")
 SCHEMA = os.environ.get("TEMPLATE_LIVE_SCHEMA", "").upper()
 SECOND_CONNECTION = os.environ.get("TEMPLATE_LIVE_SECOND_CONNECTION", "")
@@ -147,6 +151,7 @@ def _env_text() -> str:
         f"STAGING_EXPECTED_USER={','.join(schemas)}",
         f"PROD_SCHEMA={','.join(schemas)}", f"PROD_SQLCL_CONNECTION={','.join(connections)}",
         f"PROD_EXPECTED_USER={','.join(schemas)}",
+        *(() if APEX_26_2 else ("INSTALL_UC_APX=false", "UC_APX_SKILLS_AGENT=universal")),
         "AGENT_STYLE=standard", "AGENT_STYLE_LEARNING=on",
     ]) + "\n"
 

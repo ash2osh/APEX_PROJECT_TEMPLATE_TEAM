@@ -15,7 +15,6 @@ try {
 Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:PROD_SCHEMA, Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
   Env:STAGING_SCHEMA,
-  Env:DEV_DBA_SQLCL_CONNECTION, Env:STAGING_DBA_SQLCL_CONNECTION, Env:PROD_DBA_SQLCL_CONNECTION,
   Env:ORDS_SCHEMA, Env:ORDS_SQLCL_CONNECTION, Env:ORDS_EXPECTED_USER,
   Env:INSTALL_UC_APX, Env:UC_APX_SKILLS_AGENT, Env:AGENT_STYLE, Env:AGENT_STYLE_LEARNING, Env:APEX_WORKSPACE_USERNAME -ErrorAction SilentlyContinue
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
@@ -25,7 +24,17 @@ foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
 }
 Remove-Item -Path Env:MIGRATION_APPLY_TIMEOUT_SECONDS, Env:MIGRATION_CHECK_TIMEOUT_SECONDS,
   Env:MIGRATION_CHECK_BATCH_BYTES, Env:MIGRATION_PREFLIGHT_INVENTORY_RETRIES -ErrorAction SilentlyContinue
+# A DBA connection comes only from the file: an inherited value must not reach the caller.
+Remove-Item -Path Env:DEV_DBA_SQLCL_CONNECTION, Env:STAGING_DBA_SQLCL_CONNECTION,
+  Env:PROD_DBA_SQLCL_CONNECTION -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+# Phase 2 release switch: the rule lives in scripts/template_release.ps1 (apexRelease; absent is 26.1).
+. (Join-Path $PSScriptRoot "template_release.ps1")
+try {
+  $projectEnvApexRelease = Get-TemplateApexRelease -RepoRoot $projectEnvRepoRoot
+} catch {
+  throw "project environment error: $($_.Exception.Message)"
+}
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $projectEnvRepoRoot ".env" }
 # Mirror load_env.sh: a relative PROJECT_ENV_FILE resolves against the
 # repository root when it is not found relative to the caller's location.
@@ -59,11 +68,12 @@ $projectEnvAllowed = @(
   "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
   "PROD_SQLCL_CONNECTION", "PROD_EXPECTED_USER", "PROD_SCHEMA",
   "STAGING_SQLCL_CONNECTION", "STAGING_EXPECTED_USER", "STAGING_SCHEMA",
-  "DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION",
   "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER",
   "MIGRATION_APPLY_TIMEOUT_SECONDS", "MIGRATION_CHECK_TIMEOUT_SECONDS", "MIGRATION_CHECK_BATCH_BYTES",
-  "MIGRATION_PREFLIGHT_INVENTORY_RETRIES"
+  "MIGRATION_PREFLIGHT_INVENTORY_RETRIES",
+  "DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"
 )
+if ($projectEnvApexRelease -eq "26.1") { $projectEnvAllowed += @("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT") }
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
   foreach ($projectEnvSuffix in @("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER")) {
     $projectEnvAllowed += "${projectEnvMigrationPrefix}MIGRATION_${projectEnvSuffix}"
@@ -77,7 +87,7 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   }
   $projectEnvKey = $Matches[1]
   $projectEnvValue = $Matches[2]
-  if ($projectEnvKey -in @("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT")) {
+  if (($projectEnvApexRelease -eq "26.2") -and ($projectEnvKey -in @("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT"))) {
     throw "project environment error: uc-apx settings are retired; remove INSTALL_UC_APX and UC_APX_SKILLS_AGENT from .env"
   }
   if ($projectEnvKey -notin $projectEnvAllowed) { throw "project environment error: unsupported setting in ${EnvFile}: $projectEnvKey" }
@@ -100,6 +110,10 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   $projectEnvSeen[$projectEnvKey] = $true
 }
 
+if ($projectEnvApexRelease -eq "26.1") {
+  if (-not $projectEnvSeen.ContainsKey("INSTALL_UC_APX")) { $env:INSTALL_UC_APX = "false" }
+  if (-not $projectEnvSeen.ContainsKey("UC_APX_SKILLS_AGENT")) { $env:UC_APX_SKILLS_AGENT = "universal" }
+}
 if (-not $projectEnvSeen.ContainsKey("AGENT_STYLE")) { $env:AGENT_STYLE = "standard" }
 if (-not $projectEnvSeen.ContainsKey("AGENT_STYLE_LEARNING")) { $env:AGENT_STYLE_LEARNING = "on" }
 
@@ -265,6 +279,12 @@ if ($env:DEVELOPER_NAME -cnotmatch '^[A-Z][A-Z0-9_]{0,29}$') {
 if ($env:DB_ENVIRONMENT -cnotin @("development", "test", "staging", "production")) {
   throw "project environment error: DB_ENVIRONMENT must be development, test, staging, or production"
 }
+if ($projectEnvApexRelease -eq "26.1") {
+  if ($env:INSTALL_UC_APX -cnotin @("true", "false")) { throw "project environment error: INSTALL_UC_APX must be true or false" }
+  if ($env:UC_APX_SKILLS_AGENT -cnotin @("universal", "claude-code")) {
+    throw "project environment error: UC_APX_SKILLS_AGENT must be universal or claude-code"
+  }
+}
 if ($env:AGENT_STYLE -cnotin @("standard", "concise", "teaching", "asharif-style")) {
   throw "project environment error: AGENT_STYLE must be one of: standard, concise, teaching, asharif-style"
 }
@@ -278,17 +298,34 @@ foreach ($projectEnvKey in @("TABLES_SCHEMA", "TABLES_EXPECTED_USER", "CODE_SCHE
 foreach ($projectEnvKey in @("TABLES_SQLCL_CONNECTION", "CODE_SQLCL_CONNECTION", "APEX_SQLCL_CONNECTION")) {
   Assert-ProjectEnvList -Name $projectEnvKey -Kind alias
 }
-foreach ($projectEnvKey in @("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION")) {
-  if ($projectEnvSeen.ContainsKey($projectEnvKey)) {
-    $projectEnvValue = [Environment]::GetEnvironmentVariable($projectEnvKey, "Process")
-    if ([string]::IsNullOrWhiteSpace($projectEnvValue)) { throw "project environment error: $projectEnvKey must not be empty when configured" }
-    if ($projectEnvValue.Contains(",")) { throw "project environment error: $projectEnvKey accepts one saved SQLcl connection alias" }
-    Assert-ProjectEnvList -Name $projectEnvKey -Kind alias
+# 26.2 DBA connection check (its position in 26.2 is kept; the 26.1 check follows the APEX checks).
+if ($projectEnvApexRelease -eq "26.2") {
+  foreach ($projectEnvKey in @("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION")) {
+    if ($projectEnvSeen.ContainsKey($projectEnvKey)) {
+      $projectEnvValue = [Environment]::GetEnvironmentVariable($projectEnvKey, "Process")
+      if ([string]::IsNullOrWhiteSpace($projectEnvValue)) { throw "project environment error: $projectEnvKey must not be empty when configured" }
+      if ($projectEnvValue.Contains(",")) { throw "project environment error: $projectEnvKey accepts one saved SQLcl connection alias" }
+      Assert-ProjectEnvList -Name $projectEnvKey -Kind alias
+    }
   }
 }
 Assert-ProjectEnvTriple -SchemaKey TABLES_SCHEMA -ConnectionKey TABLES_SQLCL_CONNECTION -UserKey TABLES_EXPECTED_USER
 Assert-ProjectEnvTriple -SchemaKey CODE_SCHEMA -ConnectionKey CODE_SQLCL_CONNECTION -UserKey CODE_EXPECTED_USER
 Assert-ProjectEnvTriple -SchemaKey APEX_PARSING_SCHEMA -ConnectionKey APEX_SQLCL_CONNECTION -UserKey APEX_EXPECTED_USER
+
+if ($projectEnvApexRelease -eq "26.1") {
+  foreach ($projectEnvDbaKey in @("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION")) {
+    if (Test-Path -LiteralPath "Env:$projectEnvDbaKey") {
+      $projectEnvDbaVal = (Get-Item -LiteralPath "Env:$projectEnvDbaKey").Value
+      if ([string]::IsNullOrWhiteSpace($projectEnvDbaVal)) {
+        throw "project environment error: $projectEnvDbaKey must not be empty"
+      }
+      if ($projectEnvDbaVal -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw "project environment error: $projectEnvDbaKey contains unsupported characters"
+      }
+    }
+  }
+}
 
 # The configured schemas, and whether any list names more than one.
 $projectEnvUnion = @()

@@ -25,19 +25,23 @@ from fake_sqlcl import BASH
 from ords_fixtures import SCHEMA, export_text
 
 from scripts import ords_export
+from scripts.template_release import is_apex_26_2
 
 ROOT = Path(__file__).resolve().parents[1]
+# Phase 2 release switch: 26.2 requires SQLcl 26.3 for APEX work and ships apex_compatibility.py.
+APEX_26_2 = is_apex_26_2(ROOT)
 PWSH = _test_subprocess_safety.working_pwsh()
 FAKE = Path(__file__).resolve().parent / "fake_ords_sql.py"
 
 SQL_FILES = (
-    "backup_manifest.py",
     "backup_db.sql", "doctor.sql", "doctor_ords.sql", "verify_db_access.sql", "verify_ords_access.sql",
-    "ords_export.sql", "ords_export_run.sql", "ords_export_skip.sql", "ords_inventory.sql", "ords_export.py", "apex_compatibility.py", "sqlcl_version.py",
-)
+    "ords_export.sql", "ords_export_run.sql", "ords_export_skip.sql", "ords_inventory.sql", "ords_export.py",
+    "backup_manifest.py",
+) + (("apex_compatibility.py", "sqlcl_version.py") if APEX_26_2 else ())
 BASH_FILES = ("team.sh", "backup_db.sh", "load_env.sh", "check_db_target.sh", "sqlcl_safe.sh", "replace_mirror.sh")
 POWERSHELL_FILES = (
     "team.ps1", "backup_db.ps1", "load_env.ps1", "check_db_target.ps1", "invoke_sqlcl.ps1", "resolve_python.ps1", "replace_mirror.ps1",
+    "template_release.ps1",
 )
 
 ORDS_REST = "\nORDS_SCHEMA=REST_API\nORDS_SQLCL_CONNECTION=dev-rest\nORDS_EXPECTED_USER=REST_API\n"
@@ -80,6 +84,8 @@ class Project:
         scripts.mkdir(parents=True)
         for name in (BASH_FILES if shell == "bash" else POWERSHELL_FILES) + SQL_FILES:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        # The copied loaders read the release from the template manifest (Phase 2 release switch).
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8") + ords + env_extra, encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "config", "user.name", "Ords Test"], check=True)
@@ -541,6 +547,18 @@ class DoctorOrdsTests(OrdsCliTestCase):
             self.assertIn("1 of 2 doctor check(s) failed", plain(result.stderr))
         self.each_shell(body, config={"ords": {"REST_API": {"scenario": "wrong-owner-exit1"}}})
 
+    @unittest.skipIf(APEX_26_2, "26.2 reports the APEX and ORDS SQLcl refusals separately")
+    def test_an_unsupported_sqlcl_release_fails_the_ords_doctor_checks_only(self) -> None:
+        def body(project: Project) -> None:
+            result = project.run("doctor")
+            output = plain(result.stdout + result.stderr)
+            self.assertEqual(2, result.returncode, output)
+            self.assertIn("SQLcl 26.1 or newer is required", output)
+            self.assertIn("1 of 2 doctor check(s) failed", output)
+            self.assertFalse([line for line in project.logged() if line.startswith("doctor|doctor_ords.sql")])
+        self.each_shell(body, config={"version": "SQLcl: Release 25.1.0.0 Production"})
+
+    @unittest.skipUnless(APEX_26_2, "26.1 keeps its own SQLcl refusal wording")
     def test_old_sqlcl_reports_independent_apex_and_ords_refusals(self) -> None:
         def body(project: Project) -> None:
             result = project.run("doctor")
@@ -552,6 +570,7 @@ class DoctorOrdsTests(OrdsCliTestCase):
             self.assertFalse([line for line in project.logged() if line.startswith("doctor|doctor_ords.sql")])
         self.each_shell(body, config={"version": "SQLcl: Release 25.1.0.0 Production"})
 
+    @unittest.skipUnless(APEX_26_2, "26.1 does not probe the SQLcl release without an ORDS profile")
     def test_without_ords_profile_doctor_still_checks_apex_release(self) -> None:
         def body(project: Project) -> None:
             result = project.run("doctor")
@@ -559,19 +578,29 @@ class DoctorOrdsTests(OrdsCliTestCase):
             self.assertEqual(["version", "doctor|doctor.sql|DEMO|DEMO|docker-demo"], project.logged())
         self.each_shell(body, ords="")
 
-    def test_schema_narrows_doctor_to_the_ords_only_schema(self) -> None:
+    @unittest.skipIf(APEX_26_2, "26.2 checks the APEX release even without an ORDS profile")
+    def test_without_an_ords_profile_doctor_does_not_probe_the_sqlcl_release(self) -> None:
         def body(project: Project) -> None:
-            result = project.run("doctor", "--schema", "REST_TWO")
+            result = project.run("doctor")
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertEqual(["version", "doctor|doctor_ords.sql|REST_TWO|REST_TWO|dev-two"], project.logged())
-        self.each_shell(body, ords=ORDS_TWO)
+            self.assertNotIn("version", project.logged())
+            self.assertEqual(["doctor|doctor.sql|DEMO|DEMO|docker-demo"], project.logged())
+        self.each_shell(body, ords="")
 
+    @unittest.skipUnless(APEX_26_2, "26.1 has no SQLcl 26.3 APEX gate")
     def test_ords_only_selection_accepts_sqlcl_below_the_apex_floor(self) -> None:
         def body(project: Project) -> None:
             result = project.run("doctor", "--schema", "REST_TWO")
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertEqual(["version", "doctor|doctor_ords.sql|REST_TWO|REST_TWO|dev-two"], project.logged())
         self.each_shell(body, ords=ORDS_TWO, config={"version": "SQLcl: Release 26.2.2.0 Production"})
+
+    def test_schema_narrows_doctor_to_the_ords_only_schema(self) -> None:
+        def body(project: Project) -> None:
+            result = project.run("doctor", "--schema", "REST_TWO")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(["version", "doctor|doctor_ords.sql|REST_TWO|REST_TWO|dev-two"], project.logged())
+        self.each_shell(body, ords=ORDS_TWO)
 
 
 class SchemaConstantTests(unittest.TestCase):

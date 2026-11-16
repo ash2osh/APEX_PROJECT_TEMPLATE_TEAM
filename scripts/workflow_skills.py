@@ -17,18 +17,22 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 try:
+    from .template_release import is_apex_26_2
     from .upgrade_template import UpgradeError, safe_project_path
 except ImportError:
+    from template_release import is_apex_26_2
     from upgrade_template import UpgradeError, safe_project_path
 
 CONFIG = ".agent-skills.json"
 LOCK = ".agent-skills.lock.json"
 SELECTIONS = {"none": (), "superpowers": ("superpowers",), "mattpocock": ("mattpocock",),
               "both": ("superpowers", "mattpocock")}
+# Release switch (Phase 2): the 26.1 template ships install-uc-apx as a core skill; the 26.2 template retired it.
+APEX_26_2 = is_apex_26_2(Path(__file__).resolve().parents[1])
 CORE_SKILLS = {"apex-background", "apex-session-context", "apex-workflow-lifecycle", "apexlang-export-debugging",
                "building-apex-template-components", "chrome-devtools-mcp", "firefox-devtools-mcp", "initialize-project",
                "optimizing-apex-task-inboxes", "safeguarding-apexlang-text-messages", "sqlcl-mcp-r0",
-               "sqlcl-script-path-debugging"}
+               "sqlcl-script-path-debugging"} | (frozenset() if APEX_26_2 else {"install-uc-apx"})
 NAME = re.compile(r"[a-z][a-z0-9-]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")

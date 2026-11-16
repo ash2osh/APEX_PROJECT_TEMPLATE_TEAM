@@ -17,6 +17,8 @@ class DoctorDatabaseInfoTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "doctor project [space]"
         shutil.copytree(ROOT / "scripts", self.root / "scripts")
+        # The copied loaders read the release from the template manifest (Phase 2 release switch).
+        shutil.copy2(ROOT / "template-manifest.json", self.root / "template-manifest.json")
         self.config = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.env_file = self.root / ".env"
         self.env_file.write_text(self.config, encoding="utf-8")

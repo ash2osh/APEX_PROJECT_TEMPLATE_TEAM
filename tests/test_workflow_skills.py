@@ -275,8 +275,11 @@ class WorkflowSkillsTests(unittest.TestCase):
     def test_both_wrappers_status_work_without_env_or_sqlcl(self):
         scripts = self.root / "scripts"
         scripts.mkdir()
-        for name in ("team.sh", "team.ps1", "workflow_skills.py", "upgrade_template.py", "resolve_python.ps1"):
+        for name in ("team.sh", "team.ps1", "workflow_skills.py", "upgrade_template.py", "resolve_python.ps1",
+                     "template_release.py", "template_release.ps1"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        # The copied loaders read the release from the template manifest (Phase 2 release switch).
+        shutil.copy2(ROOT / "template-manifest.json", self.root / "template-manifest.json")
         for entry in ("team.sh", "team.ps1"):
             if entry.endswith("ps1"):
                 if not _test_subprocess_safety.working_pwsh():
