@@ -18,12 +18,11 @@ git -C /tmp/export-wt status --short | grep -v '^ M'      # the new plug-in fold
 ## 2. Validate offline before any import
 
 ```bash
-uc-apx validate --app-dir apps/<SCHEMA>/<app id>                      # optional tool; errors must be 0
 printf 'apex validate -input apps/<SCHEMA>/<app id>\nexit\n' | sql -nolog   # "Validation successful."
 python3 -m unittest discover -s tests                                  # the project's source rules
 ```
 
-SQLcl names the invalid property and lists the allowed values. Run both validators when `uc-apx` is installed: each catches things the other does not.
+SQLcl names the invalid property and lists the allowed values. SQLcl `apex validate` is the only validator this template uses; uc-apx is retired and is not part of it.
 
 Compile-check the SQL and PL/SQL of the page without running it:
 

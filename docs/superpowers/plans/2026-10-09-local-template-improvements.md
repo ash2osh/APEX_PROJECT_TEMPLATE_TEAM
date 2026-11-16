@@ -50,6 +50,6 @@
 Implementation and qualification results are recorded in
 [the inline review](../reviews/2026-10-09-local-template-improvements.md).
 The 26.1 maintenance patch is prepared and tested; branch integration, commits,
-pushes and PR merging remain pending explicit authorization. Natrec is reference evidence only and is not an implementation target
+pushes and PR merging remain pending explicit authorization. The downstream project is reference evidence only and is not an implementation target
 for these plans. No commit, push, PR merge or live operation is part of writing
 this plan.

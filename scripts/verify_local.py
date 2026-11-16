@@ -500,7 +500,10 @@ def build_report(
                 "check": "graphify_setup",
                 "status": "attention",
                 "path": str(graphify_out),
-                "message": "graphify-out exists but scripts/setup_graphify_apx.py is missing",
+                "message": (
+                    "graphify-out exists but scripts/setup_graphify_apx.py is missing; "
+                    "restore that file, then run python3 scripts/graphify_project.py setup"
+                ),
             })
         else:
             try:
@@ -526,7 +529,7 @@ def build_report(
                         "path": str(setup_script),
                         "message": (
                             f"Graphify APEXlang extractor unverified: {detail}; "
-                            "run python3 scripts/setup_graphify_apx.py"
+                            "run python3 scripts/graphify_project.py setup"
                         ),
                     })
             except Exception as exc:  # noqa: BLE001 - readiness should report tool availability

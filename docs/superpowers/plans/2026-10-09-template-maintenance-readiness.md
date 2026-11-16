@@ -65,7 +65,7 @@ the 26.1 manifest remains compatible with 26.1 and must not advertise 26.2 APIs.
 - [x] Implement explicit release/ref resolution and retained lock metadata using existing upgrader safety helpers. Do not infer a live database version or convert app source.
 - [x] Carry over the native-registry weekly refresh instructions and qualifying maintenance fixes; exclude 26.2 application/page APIs. Ensure retired UC-APX settings cannot be newly reintroduced by the upgrader.
 - [x] Run upgrade, manifest and documentation tests, then the full offline suite separately on each release branch; expect each branch's own release contract to pass.
-- [x] Dry-run the resulting 26.1 engine against a disposable copied legacy project fixture with project tests/custom rules; expect a pinned preview and preserved project files, with no tracked writes. Do not apply to Natrec.
+- [x] Dry-run the resulting 26.1 engine against a disposable copied legacy project fixture with project tests/custom rules; expect a pinned preview and preserved project files, with no tracked writes. Do not apply to the downstream project.
 - [ ] Review and prepare the independent 26.1 maintenance integration when authorized; do not assume all 26.2 fixes cherry-pick unchanged.
 
 ### Task 3: Add shared native skills inspection and offline readiness

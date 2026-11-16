@@ -1,6 +1,6 @@
 # Phase 9: restore active automations after import; normalized post-import verification
 
-Date: 2026-10-11. Branch `feature/post-import-automations-verify` (from `main` at `9aed8a2`). Requested by the ABSHRY downstream project; implemented with Codex (gpt-6-luna) and finished and reviewed by the coordinating agent.
+Date: 2026-10-11. Branch `feature/post-import-automations-verify` (from `main` at `9aed8a2`). Requested by a downstream project; implemented with Codex (gpt-6-luna) and finished and reviewed by the coordinating agent.
 
 ## Problems
 
@@ -23,4 +23,4 @@ Date: 2026-10-11. Branch `feature/post-import-automations-verify` (from `main` a
 
 - The restore uses the static ids captured before the import; an automation created by the import itself is not enabled (by design).
 - Selected-page publish keeps its whole-app exact-source rule after synchronization.
-- The ABSHRY project does not run these template scripts yet (its upgrade script predates manifest schema 2); until it upgrades, it uses its own wrapper `scripts/abshry/dev26/redeploy.sh`.
+- The downstream project does not run these template scripts yet (its upgrade script predates manifest schema 2); until it upgrades, it uses its own wrapper `scripts/<project>/dev26/redeploy.sh`.

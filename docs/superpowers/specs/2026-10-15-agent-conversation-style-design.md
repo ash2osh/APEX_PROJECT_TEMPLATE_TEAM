@@ -223,7 +223,7 @@ change small; add them later if the first-reply line proves insufficient.
 2. Implementation plan (writing-plans skill).
 3. 26.1 branch and PR, CI green (offline, windows-offline, macos-installer), merged.
 4. Same change ported to 26.2, same checks.
-5. Downstream natrec_team: `upgrade-template`, set `AGENT_STYLE=asharif-style` in `.env`,
+5. Downstream project: `upgrade-template`, set `AGENT_STYLE=asharif-style` in `.env`,
    commit only on request.
 
 Estimate: about 5 hours (see the implementation plan for the breakdown).
