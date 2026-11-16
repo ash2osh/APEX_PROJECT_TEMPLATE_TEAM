@@ -124,7 +124,14 @@ done
 
 mkdir -p "$REPO_ROOT/scratch"
 STAGING_DIR="$(mktemp -d "$REPO_ROOT/scratch/db-backup.XXXXXX")"
-cleanup() { rm -rf -- "$STAGING_DIR"; }
+# The EXIT trap keeps the run's own status. Under errexit a failed rm here used to
+# replace a refusal's 2 with 1; a scratch directory that cannot be removed is
+# reported, and it never changes the verdict.
+cleanup() {
+  local status=$?
+  rm -rf -- "$STAGING_DIR" || echo "backup warning: could not remove scratch directory $STAGING_DIR" >&2
+  exit "$status"
+}
 trap cleanup EXIT
 # Ctrl-C or SIGTERM ends the run with the conventional status after the EXIT
 # trap above has removed the staging directory, instead of dying by signal.
@@ -225,6 +232,8 @@ run_backup_scope() {
 # One schema's ORDS export, judged by scripts/ords_export.py: SQLcl's exit
 # status and a non-empty spool file prove nothing, so identity, completion, the
 # dictionary inventory and consistency between two exports are all checked.
+# Call it without `||`: a `||` caller turns errexit off for the whole body, so an
+# unguarded failure in here would be ignored. Every refusal exits 2 directly.
 run_ords_scope() {
   local schema="$1"
   local connection="$2"
@@ -245,16 +254,16 @@ run_ords_scope() {
       ' | tee "$transcript"
   ) || {
     local ords_status=$?
-    [ "$ords_status" -gt 128 ] && return "$ords_status"
+    [ "$ords_status" -gt 128 ] && exit "$ords_status"
     echo "ORDS export for $schema failed in SQLcl; the mirror was not replaced" >&2
-    return 2
+    exit 2
   }
   python3 "$REPO_ROOT/scripts/ords_export.py" verify \
     --stage "$STAGING_DIR" --spool-schema "$spool_schema" \
     --schema "$schema" --expected-user "$expected_user" \
     --transcript "$transcript" || {
     echo "the mirror was not replaced" >&2
-    return 2
+    exit 2
   }
 }
 
@@ -268,7 +277,7 @@ for ((index = 0; index < ${#CODE_SCHEMAS[@]}; index++)); do
     "${CODE_USERS[$index]}" "$CODE_PREFIXES"
 done
 for ((index = 0; index < ${#ORDS_SCHEMAS[@]}; index++)); do
-  run_ords_scope "${ORDS_SCHEMAS[$index]}" "${ORDS_CONNECTIONS[$index]}" "${ORDS_USERS[$index]}" || exit $?
+  run_ords_scope "${ORDS_SCHEMAS[$index]}" "${ORDS_CONNECTIONS[$index]}" "${ORDS_USERS[$index]}"
 done
 
 REPLACE_ARGS=()
