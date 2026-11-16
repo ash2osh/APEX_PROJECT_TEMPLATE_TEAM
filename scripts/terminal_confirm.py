@@ -11,7 +11,6 @@ The recorded way to skip a prompt is `-y` / `--yes`; on production a run also ne
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping
 from typing import TextIO
 
 YES_REFUSAL = (
@@ -41,7 +40,7 @@ def may_read_yes_no() -> bool:
     return False
 
 
-def may_read_acknowledgment(environ: Mapping[str, str] | None = None) -> bool:
+def may_read_acknowledgment() -> bool:
     """Gate a typed acknowledgment. Refuses, printing ACKNOWLEDGMENT_REFUSAL, unless standard input is a terminal."""
     if stdin_is_terminal():
         return True

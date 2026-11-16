@@ -417,7 +417,7 @@ class ReconcileCommandTests(ResolutionTestCase):
         self.assertEqual(status, 2)
         self.assertEqual(self.snapshot(), before)
 
-        # TEAM_ACK_FROM_STDIN does not bypass the terminal requirement
+        # The retired TEAM_ACK_FROM_STDIN variable does not bypass the terminal requirement
         status, _out, _errors = self.reconcile(
             self.reconcile_args(), ack_variable=True, terminal=False, input_effect=must_not_read,
         )
