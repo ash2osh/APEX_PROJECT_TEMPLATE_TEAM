@@ -59,3 +59,7 @@ Commands and results, all run on this branch after the five commits above:
 2. The uc-apx history sentence stays ("an earlier verification also ran uc-apx") so the historical record is not rewritten.
 3. Kept the `DEV2`/`DEV26` labels and the `D26` worktree folder name in docs/superpowers. They are environment labels, not downstream names, and the scrub pattern does not include them.
 4. Commit trailers use the Opus 5.5 line from the task. The environment attribution names a different model. Choose one for future commits.
+
+## Follow-up on this branch
+
+- `scripts/workflow_skills.py`: `CORE_SKILLS` now lists `firefox-devtools-mcp`, so a workflow pack cannot install a skill with that name over the template skill. `tests/test_workflow_skills.py` `CoreSkillListTests` pins the list to the template skill folders, ignoring skills an installed pack recorded in `.agent-skills.lock.json`. The same change is on the 26.1 branch.

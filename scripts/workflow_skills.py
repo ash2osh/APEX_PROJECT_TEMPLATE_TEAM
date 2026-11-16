@@ -26,8 +26,9 @@ LOCK = ".agent-skills.lock.json"
 SELECTIONS = {"none": (), "superpowers": ("superpowers",), "mattpocock": ("mattpocock",),
               "both": ("superpowers", "mattpocock")}
 CORE_SKILLS = {"apex-background", "apex-session-context", "apex-workflow-lifecycle", "apexlang-export-debugging",
-               "building-apex-template-components", "chrome-devtools-mcp", "initialize-project", "optimizing-apex-task-inboxes",
-               "safeguarding-apexlang-text-messages", "sqlcl-mcp-r0", "sqlcl-script-path-debugging"}
+               "building-apex-template-components", "chrome-devtools-mcp", "firefox-devtools-mcp", "initialize-project",
+               "optimizing-apex-task-inboxes", "safeguarding-apexlang-text-messages", "sqlcl-mcp-r0",
+               "sqlcl-script-path-debugging"}
 NAME = re.compile(r"[a-z][a-z0-9-]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
