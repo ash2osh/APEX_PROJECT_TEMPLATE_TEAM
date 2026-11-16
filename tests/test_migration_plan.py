@@ -32,6 +32,9 @@ except ImportError:
 class MigrationPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        # Production resolves the report root before checking every component;
+        # keep the fixture on the same canonical path on Windows, where the
+        # temporary-directory environment may use an 8.3 alias.
         self.root = Path(self.temporary.name).resolve()
         (self.root / "migrations").mkdir()
 

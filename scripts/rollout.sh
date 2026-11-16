@@ -6,7 +6,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exec python3 "$(dirname "${BASH_SOURCE[0]}")/rollout.py" --help
 fi
 
-# Dry-run validates local source and hashes; it needs no configured DB profile.
+# Dry-run validates only local source and hashes; it needs no configured DB profile.
 for rollout_argument in "$@"; do
   if [ "$rollout_argument" = "--dry-run" ]; then
     REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"

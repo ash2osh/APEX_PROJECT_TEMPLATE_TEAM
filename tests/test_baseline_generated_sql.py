@@ -12,7 +12,11 @@ import sys
 import unittest
 from pathlib import Path
 
-import _no_real_sqlcl  # noqa: F401 (tests must never fall through to installed SQLcl)
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
+import _no_real_sqlcl  # noqa: F401, E402 (tests must never fall through to installed SQLcl)
 from scripts import baseline, baseline_bundles
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
 

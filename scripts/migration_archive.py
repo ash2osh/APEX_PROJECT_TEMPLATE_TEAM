@@ -31,6 +31,10 @@ DEFAULT_DESTINATION = "migrations-archive"
 DEFAULT_REASON = "released or superseded"
 
 
+class MigrationArchiveError(ValueError):
+    """A local migration archive operation could not be completed safely."""
+
+
 def _attempt_matches_receipt_target(root: Path, folder: Path, env: str, receipt_target: Mapping, verified_at: str) -> bool:
     identity_fields = ("session_user", "current_schema", "db_name", "db_unique_name", "service_name",
                        "container_id", "container_name", "edition", "database_version")
@@ -106,10 +110,6 @@ def _attempt_matches_receipt_target(root: Path, folder: Path, env: str, receipt_
                for field in identity_fields if field != "current_schema"):
             return False
     return True
-
-
-class MigrationArchiveError(ValueError):
-    """A local migration archive operation could not be completed safely."""
 
 
 @dataclass(frozen=True)

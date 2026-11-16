@@ -4,12 +4,14 @@
 The core repository keeps one copy of each shared file under files/, listed with
 its sha256 in core-manifest.json. Commands:
 
-  seed   rebuild files/ and core-manifest.json from committed template refs
-  sync   copy the manifest files into a template at the same paths and write
-         .core-stamp.json (core commit id and per-file sha256)
-  check  verify a template against its stamp, offline; --core also compares the
-         stamp with core-manifest.json at the stamped commit
-  diff   show what the next sync would change (writes no template files)
+  seed     rebuild files/ and core-manifest.json from committed template refs
+  refresh  re-hash files/ into core-manifest.json after a hand fix (adds no paths)
+  add      list files already placed under files/ in core-manifest.json
+  sync     copy the manifest files into a template at the same paths and write
+           .core-stamp.json (core commit id and per-file sha256)
+  check    verify a template against its stamp, offline; --core also compares the
+           stamp with core-manifest.json at the stamped commit
+  diff     show what the next sync would change (writes no template files)
 
 Exit codes: 0 ok; 1 drift found, or refused before any write; 2 usage or
 internal error. Python 3.10+, standard library only.
@@ -707,6 +709,74 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_add(args: argparse.Namespace) -> int:
+    """List files already placed under files/ in the manifest. Refusals write nothing."""
+    core = core_root(args.core, need_files=True)
+    manifest_path = core / MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise UsageError(f"{manifest_path} not found; run seed first")
+    payload, entries = parse_manifest(manifest_path.read_bytes(), str(manifest_path))
+    prefixes = tuple(payload.get("prefixes") or DEFAULT_PREFIXES)
+    listed = {e.path for e in entries}
+    folded = {e.path.casefold(): e.path for e in entries}
+    files_root = core / FILES_DIR
+
+    rels: list[str] = []
+    for text in args.paths:
+        rel = text.replace("\\", "/")
+        try:
+            check_relpath(rel)
+        except UnsafePath as exc:
+            raise Refused(f"path is not allowed: {text!r}") from exc
+        if not rel.startswith(prefixes):
+            raise Refused(f"{rel} is outside the managed directories ({', '.join(prefixes)})")
+        if rel in listed:
+            raise Refused(f"{rel} is already listed in {MANIFEST_NAME}")
+        if rel in rels:
+            raise Refused(f"{rel} is given more than once")
+        if rel.casefold() in folded:
+            raise Refused(f"{rel} differs only by case from {folded[rel.casefold()]}")
+        folded[rel.casefold()] = rel
+        rels.append(rel)
+
+    new_entries: list[Entry] = []
+    for rel in rels:
+        problem = _walk_problem(files_root, rel)
+        if problem:
+            raise Refused(problem)
+        source = files_root.joinpath(*rel.split("/"))
+        try:
+            st = os.lstat(source)
+        except FileNotFoundError as exc:
+            raise UsageError(f"missing {FILES_DIR}/{rel}; place the file there before adding it") from exc
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused(f"{FILES_DIR}/{rel} is not a regular file")
+        if os.name == "nt":  # Windows has no executable bit; the flag is the only source
+            executable = args.executable
+        else:
+            executable = bool(st.st_mode & 0o111)
+            if args.executable and not executable:
+                raise Refused(f"{FILES_DIR}/{rel} is not executable; chmod +x it or drop --executable")
+        new_entries.append(Entry(rel, sha256_hex(source.read_bytes()), executable))
+
+    on_disk: set[str] = set()
+    for path in files_root.rglob("*"):
+        if path.is_symlink():
+            raise UsageError(f"{path} is a symbolic link; files/ must hold regular files only")
+        if path.is_file():
+            on_disk.add(path.relative_to(files_root).as_posix())
+    extra = sorted(on_disk - listed - set(rels))
+    if extra:
+        raise UsageError("files/ has paths the manifest does not list; add or delete them first: " + ", ".join(extra))
+
+    merged = sorted([*entries, *new_entries], key=lambda e: e.path.encode("utf-8"))
+    payload["entries"] = [{"path": e.path, "sha256": e.sha256, "executable": e.executable} for e in merged]
+    write_atomic(manifest_path, (json.dumps(payload, indent=2) + "\n").encode("utf-8"), False)
+    print(f"Added {len(new_entries)} path(s) to {MANIFEST_NAME}: {', '.join(rels)}.")
+    print("Commit files/ and the manifest together. seed rebuilds only paths identical in both templates, so it drops these until they are.")
+    return EXIT_OK
+
+
 def file_problem(root: Path, entry: Entry) -> str | None:
     try:
         check_relpath(entry.path)
@@ -782,6 +852,12 @@ def build_parser() -> argparse.ArgumentParser:
     refresh = sub.add_parser("refresh", help="re-hash files/ into core-manifest.json after a hand fix (adds and removes no paths)")
     refresh.add_argument("--core", type=Path, metavar="DIR", help="core repository (default: the directory of this script)")
     refresh.set_defaults(handler=cmd_refresh)
+
+    add = sub.add_parser("add", help="list files already placed under files/ in core-manifest.json")
+    add.add_argument("paths", nargs="+", metavar="PATH", help="paths under files/, relative to it, e.g. scripts/new_tool.py")
+    add.add_argument("--executable", action="store_true", help="record the path as executable; on Windows this is the only source, on POSIX it must match the file mode")
+    add.add_argument("--core", type=Path, metavar="DIR", help="core repository (default: the directory of this script)")
+    add.set_defaults(handler=cmd_add)
 
     commands = (
         ("sync", cmd_sync, "copy the shared files into a template and write its stamp"),

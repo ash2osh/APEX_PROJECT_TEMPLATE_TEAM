@@ -16,7 +16,6 @@ from pathlib import Path, PurePosixPath
 
 from .path_utils import relative_to_root
 
-
 EVENT_FILENAME_RE = re.compile(
     r"attempt-event\.(?P<event_id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json\Z",
     re.ASCII,

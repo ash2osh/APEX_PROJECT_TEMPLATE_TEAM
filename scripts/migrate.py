@@ -52,13 +52,14 @@ from .migration_manifest import (
 )
 from . import terminal_confirm
 from .path_utils import relative_to_root
-from .migration_attempts import (
-    MigrationAttemptError,
-    not_started_reason,
-    write_attempt_event,
-)
+from .migration_attempts import MigrationAttemptError, not_started_reason, write_attempt_event
 from .migration_resolution import MigrationResolutionError, read_resolution, reconcile_command
-from .migration_revision import attempt_record_is_locked, RUN_ID_RE, RUN_MANIFEST_NAME, inspect_migration_lock
+from .migration_revision import (
+    attempt_record_is_locked,
+    RUN_ID_RE,
+    RUN_MANIFEST_NAME,
+    inspect_migration_lock,
+)
 from .schema_catalog import (
     CatalogError,
     InventoryRetriesExhaustedError,
@@ -1406,17 +1407,8 @@ def main(
         return 2
     if args.rehearse:
         return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report, yes=args.yes)
-    status = apply_batch(
-        Path(repo_root),
-        migrations,
-        target,
-        confirm,
-        verbose=args.verbose,
-        confirm_target=args.confirm_target,
-        yes=args.yes,
-        expected_db_unique_name=expected_db_unique_name,
-        rollout_confirmed_by=rollout_confirmed_by,
-    )
+    status = apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose, confirm_target=args.confirm_target,
+                         yes=args.yes, expected_db_unique_name=expected_db_unique_name, rollout_confirmed_by=rollout_confirmed_by)
     if status == 0 and target.environment == "dev":
         record_daily_diffs(Path(repo_root), migrations)
     return status
