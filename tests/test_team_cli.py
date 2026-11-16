@@ -32,6 +32,7 @@ def feature_cli_checkout(parent: Path) -> Path:
     root = parent / "feature project [unicode] café"
     root.mkdir()
     shutil.copytree(ROOT / "scripts", root / "scripts")
+    shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
     return root
 
 
@@ -44,6 +45,7 @@ class TeamCliTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         for name in ("team.sh", "team.ps1", "resolve_python.ps1", "migration_plan_args.ps1"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         (root / "migrations").mkdir()
         if env_contents is not None:
             (root / ".env").write_text(env_contents, encoding="utf-8", newline="\n")
@@ -81,6 +83,7 @@ exit 17
             source = ROOT / "scripts" / name
             if source.is_file():
                 shutil.copy2(source, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         (root / "migrations" / "APP_DEV").mkdir(parents=True)
         (root / "migrations" / "APP_STAGE").mkdir(parents=True)
         for schema, family in (("APP_DEV", "first-family"), ("APP_STAGE", "second-family")):
@@ -138,6 +141,7 @@ exit 17
             scripts.mkdir()
             loader = scripts / "load_env.sh"
             shutil.copy2(ROOT / "scripts" / "load_env.sh", loader)
+            shutil.copy2(ROOT / "template-manifest.json", Path(temporary) / "template-manifest.json")
             return subprocess.run(
                 [
                     BASH,
@@ -229,6 +233,7 @@ exit 17
             scripts.mkdir(parents=True)
             for name in ("team.sh", "team.ps1", "dev_test.sh", "resolve_python.ps1"):
                 shutil.copy2(ROOT / "scripts" / name, scripts / name)
+            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
             fake_bin = parent / "fake python [dev-test]"
             fake_bin.mkdir()
             captured = parent / "python arguments.txt"
@@ -301,6 +306,7 @@ exit 17
             scripts = root / "scripts"
             scripts.mkdir(parents=True)
             shutil.copy2(ROOT / "scripts" / "team.sh", scripts / "team.sh")
+            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
             fake_bin = parent / "fake-bin"
             fake_bin.mkdir()
             if os.name != "nt":
@@ -926,6 +932,7 @@ exit 17
                 scripts = Path(temporary) / "scripts"
                 scripts.mkdir()
                 shutil.copy2(ROOT / "scripts" / "load_env.sh", scripts / "load_env.sh")
+                shutil.copy2(ROOT / "template-manifest.json", Path(temporary) / "template-manifest.json")
                 bash_result = subprocess.run(
                     [BASH, "-c", 'set -e; source "$1" "$2"; echo accepted', "bash", str(scripts / "load_env.sh"), str(environment)],
                     text=True, capture_output=True, check=False,
@@ -1458,6 +1465,7 @@ exit 17
             scripts.mkdir()
             for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh", "apex_compatibility.py", "sqlcl_version.py"):
                 shutil.copy2(ROOT / "scripts" / name, scripts / name)
+            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
             (root / "scripts" / "verify_db_access.sql").write_text(
                 "PROMPT identity checked\n", encoding="utf-8"
             )
@@ -1518,6 +1526,7 @@ exit 17
             scripts.mkdir()
             for name in ("team.sh", "load_env.sh", "check_db_target.sh", "doctor.sql", "sqlcl_safe.sh", "apex_compatibility.py", "sqlcl_version.py"):
                 shutil.copy2(ROOT / "scripts" / name, scripts / name)
+            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
             (scripts / "verify_db_access.sql").write_text("PROMPT identity checked\n", encoding="utf-8")
             (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"))
             fake_bin = root / "bin"
@@ -1558,6 +1567,7 @@ exit 17
             with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+                shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
                 (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
                 folder = root / "migrations" / "2026-10-02_interrupt-r001"
                 folder.mkdir(parents=True)
@@ -1604,6 +1614,7 @@ exit 17
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
             (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
             record = root / "python-pid"
             fake_bin = root / "bin"
@@ -1653,6 +1664,7 @@ exit 17
 
     def make_windows_interrupt_checkout(self, root: Path) -> None:
         shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
 
     @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is above")
@@ -1788,6 +1800,7 @@ exit 17
             source = ROOT / "scripts" / name
             if source.exists():
                 shutil.copy2(source, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         if with_lifecycle:
             # The identity reader --confirm-target compares against; a stand-in that reports PRODDB_UNIQUE.
             from test_publish_cli import PublishAppCliTests
@@ -2051,6 +2064,9 @@ exit 17
         (project / "scripts").mkdir()
         for name in ("team.sh", "team.ps1", "upgrade_template.py", "load_env.sh", "load_env.ps1", "resolve_python.ps1"):
             shutil.copy2(ROOT / "scripts" / name, project / "scripts" / name)
+        shutil.copy2(template / "template-manifest.json", project / "template-manifest.json")
+        if (ROOT / "scripts" / "template_release.ps1").exists():
+            shutil.copy2(ROOT / "scripts" / "template_release.ps1", project / "scripts" / "template_release.ps1")
         # .env is local configuration; ignoring it keeps the tree clean for the engine.
         (project / ".gitignore").write_text(".env\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(project), "add", "-A"], check=True)

@@ -58,6 +58,9 @@ class ExportCliTests(unittest.TestCase):
             source = ROOT / "scripts" / name
             if source.exists():
                 shutil.copy2(source, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
+        if (ROOT / "scripts" / "template_release.ps1").exists():
+            shutil.copy2(ROOT / "scripts" / "template_release.ps1", scripts / "template_release.ps1")
 
         env_text = (ROOT / ".env.example").read_text(encoding="utf-8")
         env_text = env_text.replace("APEX_APP_ID=100,200", "APEX_APP_ID=100")
@@ -270,6 +273,7 @@ class ExportCliTests(unittest.TestCase):
             with self.subTest(shell=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
                 script, _ = self.make_checkout(Path(temporary), powershell="pwsh" in Path(wrapper[0]).name)
                 shutil.copytree(ROOT / "scripts", script.parent, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+                shutil.copy2(ROOT / "template-manifest.json", script.parents[1] / "template-manifest.json")
                 fake_sql = script.parents[1] / "bin" / "sql"
                 fake_sql.write_text(
                     "#!/usr/bin/env bash\ncat > /dev/null\n"

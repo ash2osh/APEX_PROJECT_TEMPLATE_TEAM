@@ -107,6 +107,9 @@ class DoctorCliTests(unittest.TestCase):
         scripts.mkdir()
         for name in self.NAMES:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
+        if (ROOT / "scripts" / "template_release.ps1").exists():
+            shutil.copy2(ROOT / "scripts" / "template_release.ps1", scripts / "template_release.ps1")
         (root / ".env").write_text(env_text(replacements), encoding="utf-8")
         fake_bin = root / "bin"
         fake_bin.mkdir()
@@ -249,6 +252,7 @@ class CheckDbTargetTests(unittest.TestCase):
             scripts.mkdir()
             for name in ("check_db_target.sh", "load_env.sh"):
                 shutil.copy2(ROOT / "scripts" / name, scripts / name)
+            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
             (root / ".env").write_text(env_text(replacements), encoding="utf-8")
             environment = os.environ.copy()
             environment["PROJECT_ENV_FILE"] = str(root / ".env")
@@ -299,6 +303,9 @@ class BackupCliTests(unittest.TestCase):
         scripts.mkdir()
         for name in self.NAMES:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
+        if (ROOT / "scripts" / "template_release.ps1").exists():
+            shutil.copy2(ROOT / "scripts" / "template_release.ps1", scripts / "template_release.ps1")
         (root / ".env").write_text(env_text(replacements), encoding="utf-8")
         git_init(root)
         fake_bin = root / "bin"
@@ -482,6 +489,9 @@ class ExportCliTests(unittest.TestCase):
         scripts.mkdir()
         for name in self.NAMES:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
+        if (ROOT / "scripts" / "template_release.ps1").exists():
+            shutil.copy2(ROOT / "scripts" / "template_release.ps1", scripts / "template_release.ps1")
         (root / ".env").write_text(env_text({**replacements, "APEX_APP_ID=100,200": f"APEX_APP_ID={app_ids}"}), encoding="utf-8")
         git_init(root)
         fake_bin = root / "bin"
@@ -656,6 +666,9 @@ class PublishCliTests(unittest.TestCase):
         scripts.mkdir()
         for name in self.NAMES:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
+        if (ROOT / "scripts" / "template_release.ps1").exists():
+            shutil.copy2(ROOT / "scripts" / "template_release.ps1", scripts / "template_release.ps1")
         (root / ".env").write_text(env_text({**schemas, "APEX_APP_ID=100,200": "APEX_APP_ID=117"}) + extra_env, encoding="utf-8")
         app = root / "apps" / folder_schema / "117"
         (app / "deployments").mkdir(parents=True)

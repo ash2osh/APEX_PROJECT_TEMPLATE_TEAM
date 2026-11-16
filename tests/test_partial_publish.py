@@ -173,6 +173,7 @@ class VerifiedSourceReplacementTests(unittest.TestCase):
                     scripts = root / 'scripts'; scripts.mkdir()
                     for name in ('replace_mirror.sh', 'replace_mirror.ps1', 'resolve_python.ps1', 'check_mirror_source.py', 'source_evidence.py', 'validate_app_source.py', 'path_utils.py'):
                         if (ROOT / 'scripts' / name).exists(): shutil.copyfile(ROOT / 'scripts' / name, scripts / name)
+                    shutil.copy2(ROOT / 'template-manifest.json', root / 'template-manifest.json')
                     source = root / 'apps/DEMO/100'; source.mkdir(parents=True)
                     (source / 'application.apx').write_text('original\n')
                     subprocess.run(['git', 'init', '-q', str(root)], check=True)

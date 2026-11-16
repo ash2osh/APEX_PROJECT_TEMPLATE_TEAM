@@ -658,6 +658,7 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
     def make_checkout(self, temporary: str) -> Path:
         checkout = Path(temporary) / "checkout"
         shutil.copytree(ROOT / "scripts", checkout / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy2(ROOT / "template-manifest.json", checkout / "template-manifest.json")
         folder = checkout / "migrations" / "2026-10-02_win-r001"
         folder.mkdir(parents=True)
         (folder / "001-create.sql").write_bytes(b"CREATE TABLE T (ID NUMBER);\n")

@@ -512,6 +512,7 @@ APEX_EXPECTED_USER=DEMO
         source_root = Path(__file__).resolve().parents[1]
         shutil.copytree(source_root / "scripts", self.repo / "scripts",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(source_root / "template-manifest.json", self.repo / "template-manifest.json")
         env = os.environ.copy()
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONDONTWRITEBYTECODE", None)

@@ -204,6 +204,7 @@ class MigrationRevisionTests(unittest.TestCase):
             "validate_migration.py",
         ):
             shutil.copy2(Path(__file__).resolve().parents[1] / "scripts" / name, scripts / name)
+        shutil.copy2(Path(__file__).resolve().parents[1] / "template-manifest.json", self.root / "template-manifest.json")
         folder = self.add_folder("migrations/2026-10-01_create-things-r001")
 
         created = subprocess.run(

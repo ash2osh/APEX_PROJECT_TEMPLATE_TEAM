@@ -34,6 +34,7 @@ class BaselineBundleCliTests(unittest.TestCase):
         root = (Path(temporary) / "baseline project [bundle]").resolve()
         root.mkdir()
         shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
+        shutil.copy2(REPO_ROOT / "template-manifest.json", root / "template-manifest.json")
         (root / "migrations").mkdir()
         (root / "baseline.json").write_text(json.dumps({
             "schemaVersion": 1,

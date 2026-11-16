@@ -40,6 +40,9 @@ class BackupDbCliTests(unittest.TestCase):
             )
         for name in names:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
+        if (ROOT / "scripts" / "template_release.ps1").exists():
+            shutil.copy2(ROOT / "scripts" / "template_release.ps1", scripts / "template_release.ps1")
 
         env_text = (ROOT / ".env.example").read_text(encoding="utf-8")
         env_text = env_text.replace("TABLES_SCHEMA=DEMO", "TABLES_SCHEMA=DEMO$")
