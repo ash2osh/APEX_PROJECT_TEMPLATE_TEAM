@@ -101,3 +101,17 @@ Refreshed `docs/superpowers/template-parity.json` against `APEX_PROJECT_TEMPLATE
 - `scripts/publish_app.sh`: `--app-source-dir` with `--env dev` is refused before any SQLcl call, as in 26.1 (the option was added for staging and production only).
 - `scripts/team.sh`, `scripts/team.ps1`: `compare-env --help` answers before `.env` is loaded, as in 26.1.
 - Tests ported from 26.1: the capsule rerun refusal on an occupied receipt (`test_feature_rollout`), a template lock without `templateRef` (`test_verify_local`), and ten `test_rollout` cases (pause-step rerun, multiline `UPDATE ... SET`, auxiliary DML classifier, shared-catalog identity, schema-2 budget).
+
+## Parity refresh 2 against the 26.1 main
+
+- Compared against 26.1 `origin/main` at `babee3f`. The 26.1 checkout's HEAD is `1663bd8`, three commits behind it, so the tool ran against a read-only clone pinned to `babee3f`.
+- Before: 142 entries (103 intended, 30 feature, 9 missed as stored), 13 changed, 19 stale, 0 unreviewed.
+- Removed the 19 stale entries. Their files are byte-identical in both lines now (core sync batch 1: 26.1 PR 75 and 26.2 PR 109), including the earlier `test_baseline_generated_sql.py` missed item.
+- Reclassified the 13 changed files from their committed diffs. After: 123 entries (85 intended, 34 feature, 4 missed), 0 unreviewed, 0 changed, 0 stale; `template_parity.py` exit 0.
+- Decision recorded: 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings. That is intended in the `scripts/rollout.py` entry, which stays `missed` for a separate check (below).
+- Missed, not fixed here:
+  - `scripts/rollout.py`: 26.2 observes the target identity after each migrate or SQL step, checks each migration receipt against it on execute and resume, and refuses legacy schema-1 receipts without observed identity. 26.1 does not.
+  - `scripts/team.sh`: 26.1 passes the migration-plan root through `cygpath -m --` under a test. 26.2 omits the `--`.
+  - `tests/test_rollout.py`: five PR 74 tests (transport preflight, evidence paths, missing-evidence receipt) exist in 26.1 only, although 26.2 `rollout.py` has the same checks.
+  - `tests/test_backup_ords_cli.py`: 26.2 has an unguarded-ORDS-failure regression test that 26.1 lacks, although `scripts/backup_db.sh` is identical in both.
+- Checked offline only: no database, SQLcl, network or publish command.
