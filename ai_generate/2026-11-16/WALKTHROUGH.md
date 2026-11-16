@@ -74,3 +74,19 @@ Commands and results, all run on this branch after the five commits above:
 - The 202 files under `scripts/`, `tools/` and `tests/` that are identical in both templates now come from the new public repository `ash2osh/APEX_TEMPLATE_CORE` through `scripts/sync_core.py`. `.core-stamp.json` (template-only, not shipped downstream) lists each file with its SHA-256 and the core commit.
 - `scripts/pre_push_check.py` runs `scripts/sync_core.py check .` when the stamp exists; the `offline` CI job runs `check --core` against a clone of the core. `docs/ci-checks.md` describes the fix-in-core workflow.
 - Phase 2 (merging the 104 differing files behind an `apexRelease` switch) is next; see the core README.
+
+## Template parity refresh against the 26.1 template
+
+Refreshed `docs/superpowers/template-parity.json` against `APEX_PROJECT_TEMPLATE_26_1` at `fce9a7b`, the 26.1 `main` HEAD.
+
+- Before: `template_parity.py` exit 1 with 142 differing shared files: 10 unreviewed, 28 changed, 2 stale, 30 feature and 74 intended.
+- Removed the two stale entries. `docs/feature-releases.md` and `docs/live-feature-tests.md` are byte-identical in both lines now, so the shared core tracks them.
+- Reclassified all 38 unreviewed or changed files from the actual diff, with one reason each that names the difference. Result: 103 intended, 30 feature, 9 missed, 0 unreviewed, 0 changed, 0 stale. Exit 0.
+- The nine `missed` files are work items. Each reason in the JSON gives the port direction. Nothing was fixed in this change:
+  - `scripts/publish_app.sh`: 26.1 refuses `--app-source-dir` with `--env dev`; 26.2 does not.
+  - `scripts/rollout.py`: 26.2 has four safety checks 26.1 lacks (SQLcl transport preflight for rollout payloads, receipt evidence path checks, target identity checks for schema-1 manifests, frozen app-deploy child configuration).
+  - `scripts/team.sh` and `scripts/team.ps1`: 26.2 lost the `compare-env --help` path that works without `.env`.
+  - `scripts/verify_local.py`: 26.2 reports missing template-locked files as attention; 26.1 reports them as pass.
+  - `tests/test_baseline_generated_sql.py`: 26.2 needs `PYTHONPATH` to import its guard module.
+  - `tests/test_feature_rollout.py`, `tests/test_rollout.py`, `tests/test_verify_local.py`: regression tests present on one side only.
+- Offline only. Commands run: `template_parity.py` (read and `--mark`), `python3 -B -m unittest tests.test_baseline_generated_sql` with and without `PYTHONPATH`, and `scripts/team.sh compare-env --help` with no `.env` (exit 1). No database, SQLcl or network command ran.
