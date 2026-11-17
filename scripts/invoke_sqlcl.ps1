@@ -74,13 +74,12 @@ function Stop-SqlclChildren([System.Diagnostics.Process[]] $Children, [datetime]
 # it). Wait in short steps instead; Stop-SqlclProcess handles an interrupt.
 function Wait-SqlclProcess {
   param([Parameter(Mandatory = $true)] $Process)
-  # Phase 2 release switch (scripts/template_release.ps1). 26.1 keeps its order: wait for exit and the
-  # redirected output first, then stop the children. 26.2 polls for exit, stops the children, then
-  # finishes the redirected output.
+  # Phase 2 release switch (scripts/template_release.ps1). Both releases poll for exit in short steps,
+  # so Stop-SqlclProcess can handle an interrupt. 26.1 then completes the redirected output before it
+  # stops the children; 26.2 stops the children first and then completes the output.
   $apex262 = (Get-TemplateApexRelease -RepoRoot (Split-Path -Parent $PSScriptRoot)) -eq "26.2"
-  if ($apex262) {
-    while (-not $Process.WaitForExit(200)) { }
-  } else {
+  while (-not $Process.WaitForExit(200)) { }
+  if (-not $apex262) {
     # Complete asynchronous redirected-output events before a caller reads the transcript.
     $Process.WaitForExit()
   }
