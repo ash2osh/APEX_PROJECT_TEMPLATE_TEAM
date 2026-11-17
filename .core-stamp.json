@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "f78e75648ba618dc601f0aece37a16ac92bc9c56",
+  "coreCommit": "c16258a5b7f36be518545728d3d006d515803919",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -224,7 +224,7 @@
     },
     {
       "path": "scripts/invoke_sqlcl.ps1",
-      "sha256": "5034bc6a67a7ee920f5ef2fb595ae178e9765668dc20e7932c2034adc6e66dfc",
+      "sha256": "93d326ded00db14e95bcc697cf066638ecbe6871b1da72c8b4c2a8fff36c8dbb",
       "executable": false
     },
     {
