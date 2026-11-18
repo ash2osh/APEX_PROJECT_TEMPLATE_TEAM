@@ -3,9 +3,9 @@
   "files": {
     ".agents/rules/agent-safety.md": {
       "status": "intended",
-      "reason": "26.2 adds the mandatory Oracle skills refresh, the --no-team-notice partial-publish rule, automations --yes and the verify/query rules; the TEAM_ACK_FROM_STDIN retirement is worded differently but behaves the same in both.",
+      "reason": "26.2 includes mandatory Oracle skills refresh, guarded partial publish and automation recovery, and sets feature files as the default for stored-code changes.",
       "blobs": [
-        "64d9a488bc8d5849a36f48edb31fd041dbdd5f15",
+        "41753fbd8f9ddf571464a70b9b45f97e0bfb46f0",
         "14434ab47397d25c11a24ae20f9885968859c1c9"
       ]
     },
@@ -107,9 +107,9 @@
     },
     "AGENTS.md": {
       "status": "intended",
-      "reason": "26.2 documents its own release rules (SQLcl 26.3 floor, normalized publish verification, native DEV locks, partial publish, automation restore, Oracle skills refresh, pinned Graphify); it also documents a rollout transport preflight that the 26.1 rollout code lacks (see scripts/rollout.py).",
+      "reason": "26.2 documents its SQLcl floor, native locks, partial publish, runtime verification, Oracle skills refresh, pinned Graphify and feature-first database workflow.",
       "blobs": [
-        "d92fc204d76cd04b5982490cfaa60cbd6f7c3734",
+        "5f6e02ee854e38a193324b8045e91b81471cce4a",
         "a9bb654839a7d1a627f47fc5c19af8972b4646f6"
       ]
     },
@@ -123,17 +123,17 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Release-specific README: 26.2 documents normalized verification, native DEV locks, partial publish, automations and the offline Graphify path; 26.1 documents byte-exact verification, its own release commands and a Recover an older template lock section that 26.2 lacks",
+      "reason": "Each template documents its own APEX release commands and publication checks. The 26.2 guide also describes the feature-first workflow.",
       "blobs": [
-        "a03d63c2359db6153fec710db0b273da55f0510e",
+        "467849ba51205a8f7af692a6568ea35c4c04f53f",
         "8b46f40372455410accac1d75ca4925261320004"
       ]
     },
     "TODO.md": {
       "status": "intended",
-      "reason": "Project-owned parked list: 26.2 parks a dry-run .env wording item tied to its target-resolving dry run (docs/feature-releases.md, README, docs/migration-rules.md); 26.1 has no such item because its dry run resolves no target",
+      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence.",
       "blobs": [
-        "ccb48afde46783705254c57422f01917c62c2c69",
+        "a9a03eed1dd40125d683a4719456c6e82055636e",
         "b570ce17cbd085d251fa566e8a7c5a22f01df05b"
       ]
     },
@@ -171,9 +171,9 @@
     },
     "docs/GETTING_STARTED.md": {
       "status": "intended",
-      "reason": "Release-specific setup: 26.1 requires APEX and SQLcl 26.1, has its own clone URL, 26.1 upgrade-lock recovery and 26.1 cleanup steps; 26.2 requires SQLcl 26.3.0.0.",
+      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow.",
       "blobs": [
-        "6a98ded806df77b87af30433917649ea54e10005",
+        "4c335f3f5f4607d805f3103f64a837c4b3cf7c3e",
         "8d1819f7b19f7d50d90a15afc203d79c9b634efd"
       ]
     },
@@ -209,11 +209,19 @@
         "84fb1931204a67b732e902add23612b6ca0e8556"
       ]
     },
+    "docs/feature-ownership.md": {
+      "status": "intended",
+      "reason": "The 26.2 ownership guide treats feature files as the default for new stored-code work and documents how dated migrations fit that workflow.",
+      "blobs": [
+        "93f8c2ae0977a617653c6ae916bc4b8767bbae4f",
+        "ed33e9305fc8c1a2da41515754552c9c4c9ccb6f"
+      ]
+    },
     "docs/feature-releases.md": {
       "status": "intended",
-      "reason": "Release-specific dry run: 26.2 resolves each step target from the STAGING_* or PROD_* settings in the environment or .env at planning and opens no session (commit df22dbb); 26.1 dry run checks local source, manifest, capsule and hashes only, because its plan resolves no target",
+      "reason": "The 26.2 guide describes feature-first selection and how to order dependent migrations. Its dry run resolves target profiles before opening any session, while the 26.1 dry run stays local to capsule and manifest validation.",
       "blobs": [
-        "bbae68a89641caa2c79efe38d076f6224105f49b",
+        "b072098a51f42ab4d56028c6b1b85a52412e741d",
         "69ba702f161283730d93d0b5c307ffeb259bebd2"
       ]
     },
@@ -235,9 +243,9 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "Release-specific rules: 26.2 documents MIGRATION_* owner profiles, schema-2 rehearsal metrics, the selected-target attempt policy, full-environment comparison and baseline generation; 26.1 documents its fail-closed every-chain attempt policy (decided 2026-10-20), planning reports, read-only verification and generated baseline migrations",
+      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow.",
       "blobs": [
-        "6dadf76dbd5fffe028b5236d664a6a5cfdf4ed37",
+        "c09a13df0d44fb5740fab574ebdd614747abb106",
         "34d3e61de73f81946fb1efbb3bef8099ef30d5f2"
       ]
     },
@@ -291,9 +299,9 @@
     },
     "migrations/README.md": {
       "status": "feature",
-      "reason": "26.2-only MIGRATION_* owner profiles are documented there; the migration-plan wording differs.",
+      "reason": "The 26.2 guide documents dedicated migration-owner profiles and reserves dated migrations for one-time effects and required transitions.",
       "blobs": [
-        "3fff6134c8b6032ce8499b90e8686c8222b20c8a",
+        "d35cd776bf4eb713b1c0ff8fc7f906db3d53d894",
         "cb4e4b97e4233636169961edf50f03b9a21f283c"
       ]
     },
