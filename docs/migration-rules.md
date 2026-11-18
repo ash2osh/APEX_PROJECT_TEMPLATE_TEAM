@@ -342,32 +342,32 @@ over false results and returns 2.
 
 ## Choosing a path
 
-Use a dated migration for seed rows, data fixes, and small one-off DDL or DML.
-Use a [feature release](feature-releases.md) for new object work that benefits
-from complete stored-unit sources and one frozen payload for staging and production.
+Use a [feature](feature-releases.md) for the final definition of stored code.
+Keep edits in Git and select one final definition per object for staging and
+production. Use a dated migration when the database must go through a specific
+change or intermediate state.
 
 | Change | Path |
 |---|---|
 | Package specification or body | Feature, one mutable file per unit |
-| View | Feature, `CREATE OR REPLACE VIEW` in the feature's `ddl.sql` |
+| View | Feature, one supported `CREATE OR REPLACE VIEW` per `views/<name>.sql` |
 | Trigger, procedure, function or type | Feature, one mutable file per unit |
-| DDL that belongs to a feature release | The feature's `ddl.sql` |
-| Seed rows, data fixes, small one-off DDL or DML | Dated migration |
-| Anything that must reach staging and production as one payload | Feature release |
+| One-time schema changes, seed rows, backfills, data fixes, and required intermediate definitions | Dated migration |
+| Existing modeled one-time DDL already in a feature checkpoint | Keep its reviewed delivery route and order |
+| Feature definitions and dated migrations that ship together | One version-2 release capsule in dependency order |
 
 Feature capture reads one stored unit per capture: a package or type (specification
-and body), or one trigger, procedure or function. Destructive DDL (`DROP`, `RENAME`,
-`TRUNCATE`) and anything the feature DDL forms refuse stay in dated migrations.
-Feature files have no supported DEV apply path: `feature capture` only reads DEV,
-and `rollout` accepts only staging or production for a feature capsule. Check the
-current state of both in [feature releases](feature-releases.md) before choosing
-a path for a change that must be tested on DEV first.
+and body), or one trigger, procedure or function. Add supported views to
+their own feature files. Destructive DDL (`DROP`, `RENAME`, `TRUNCATE`) and
+anything the feature DDL forms refuse stay in dated migrations.
+Guarded DEV apply from feature files is planned. Until then, qualify selected
+source through the [current DEV workflow](feature-releases.md#scope-and-current-dev-workflow).
 
 ## Starting a code migration from DEV
 
-A package, procedure, function, trigger or type change starts from the source that is
-live on DEV, not from the mirror under `database/`: the mirror is refreshed irregularly
-and teammates change live code.
+Use this route for existing dated code migrations, required intermediate
+definitions, or an approved DEV compatibility migration. The starting point
+is live DEV source. The mirror under `database/` may lag behind it.
 
 ```bash
 scripts/team.sh new-migration add-customer-flag --source "PACKAGE:CUSTOMER_PKG" --source "PACKAGE BODY:CUSTOMER_PKG" --env dev
@@ -782,8 +782,13 @@ scripts/team.sh migrate \
   migrations/2026-09-27_create-customers-r001 --env prod
 ```
 
-DEV uses `CODE_SQLCL_CONNECTION`, `CODE_EXPECTED_USER`, and `CODE_SCHEMA`.
-Staging and production reuse `STAGING_SQLCL_CONNECTION` /
+Each environment uses its configured migration profile when present.
+Configure the `MIGRATION_SCHEMA`, `MIGRATION_SQLCL_CONNECTION`, and
+`MIGRATION_EXPECTED_USER` triple for DEV, or the same keys prefixed by
+`STAGING_` or `PROD_`. All three keys are required for an override.
+Without an override, DEV uses `CODE_SQLCL_CONNECTION`,
+`CODE_EXPECTED_USER`, and `CODE_SCHEMA`. Staging and production use
+`STAGING_SQLCL_CONNECTION` /
 `STAGING_EXPECTED_USER` and `PROD_SQLCL_CONNECTION` / `PROD_EXPECTED_USER`,
 with explicit `STAGING_SCHEMA` and `PROD_SCHEMA`. Set the schema separately
 because the owner can differ between environments even when the saved

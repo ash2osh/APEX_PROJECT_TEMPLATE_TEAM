@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "c16258a5b7f36be518545728d3d006d515803919",
+  "coreCommit": "60c5e85a7241a4d7f456da6c1a81f66fa71911df",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -214,7 +214,7 @@
     },
     {
       "path": "scripts/feature_release.py",
-      "sha256": "e50fef879b3a4d9d9e48f4cc692324db5a22e315f92ae4def56ce4276fc4fbe2",
+      "sha256": "5bd86445c729956a0a5e2fa5236b73cf55229e72e91e3ecd6aad6cf43905c8bc",
       "executable": false
     },
     {
@@ -929,7 +929,7 @@
     },
     {
       "path": "tests/test_feature_prepare.py",
-      "sha256": "03d7c960f3d974f6333ec3f635dd81a27a8fa41ba47d503b4dbfadbb443e33fb",
+      "sha256": "1078dca2c814b8ba4aebf630fe628fc4bf47acc150d5fd7072ed42a5d259a6d8",
       "executable": false
     },
     {
@@ -1069,7 +1069,7 @@
     },
     {
       "path": "tests/test_release_capsule.py",
-      "sha256": "9ad5fe70757f30ba99de3561bcb80f79b5593fdada058e4076c5961f2aae288f",
+      "sha256": "4fb4dca7f02ed0a0b09509d8ba17f91289e20a82e1c4d56b40f354b53352a5a7",
       "executable": false
     },
     {

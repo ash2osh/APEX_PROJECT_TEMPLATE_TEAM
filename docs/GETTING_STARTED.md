@@ -416,8 +416,11 @@ git commit -m "Change the dashboard title (published r001)"
 
 ## 10. Make your first database change
 
-Database changes are dated folders of numbered SQL files, plus a `checks.json`
-that proves the change is safe and that it worked.
+Use [feature files](feature-releases.md) to edit stored code and views. Git
+keeps the edit history, and the release selects the final definition. The
+example below uses a dated migration because adding a column is a one-time
+change. Each migration has numbered SQL files and a `checks.json` with
+assertions about the target before and after the change.
 
 ```text
 migrations/2026-09-30_add-notes-to-hr-users-r001/
@@ -487,8 +490,8 @@ revision folder instead (`...-r002`). Commit the folder.
 | test a SQL change without a database | `scripts/team.sh check-conflicts <folder> --local` |
 | test a SQL change against the database | `scripts/team.sh check-conflicts <folder> --env dev` |
 | plan or run the DEV fixture suite | `scripts/team.sh dev-test --env dev --schema <OWNER> --plan` or `--run`; see [dev-test.md](dev-test.md) for retained-fixture and project-suite rules |
-| start a package or procedure change from the live DEV source | `scripts/team.sh new-migration <name> --source "PACKAGE BODY:<NAME>" --env dev` |
-| apply a SQL change | `scripts/team.sh migrate <folder> --env dev` |
+| start editing a package from live DEV source | `scripts/team.sh feature capture <slug> --package <NAME> --schema <OWNER> --env dev` after [feature setup](feature-releases.md#create-and-review-feature-source) |
+| apply a dated migration | `scripts/team.sh migrate <folder> --env dev` |
 | change a migration that was already attempted | `scripts/team.sh revise <folder>` |
 | list the everyday commands | `scripts/team.sh` (no command); `--help` lists every command |
 | see how two environments differ | `scripts/team.sh compare-schema --from dev --to staging --object <NAME>` |

@@ -1,27 +1,58 @@
 # Feature-oriented releases
 
-Use mutable feature files for new object work that benefits from complete
-stored-unit sources, compact Git diffs, and one frozen payload for staging and
-production. Existing dated migrations and schema-version 1 rollout manifests
-keep their current behavior.
+Use mutable feature files as the default for packages, types, procedures,
+functions, triggers, and views. Keep successive edits in Git and select each
+final definition once for promotion. Use dated migrations for one-time changes
+and ordered transitions. One version-2 capsule can carry both.
 
-## Scope and revisit criteria
+## Scope and current DEV workflow
 
-Feature releases do not replace dated migrations yet. Today:
+1. Capture existing stored source from DEV or author the complete new source
+   under its owning feature. Put each new supported view in a separate
+   `views/<name>.sql` file so a later release can select it independently.
+   Use `feature doctor --live` to check DEV stored-source drift and
+   review the changes with `feature diff` or Git.
+2. Coordinate with the team and use the project's approved DEV delivery route
+   for the selected source. After applying, verify the installed source,
+   settings and validity, and run relevant behavior checks. The template
+   currently provides read-only capture and comparison for DEV. Its guarded
+   feature DEV apply command is planned, and `rollout` accepts feature capsules
+   for staging and production.
+3. Commit the final definitions and any required dated migrations, then
+   freeze one release capsule. Apply and verify it on staging before promoting
+   that capsule to production.
 
-- `feature capture` reads one stored unit: a package or type (specification and
-  body), or a single trigger, procedure or function. Views go in the feature's
-  `ddl.sql`. Destructive DDL (`DROP`, `RENAME`, `TRUNCATE`) and anything the DDL
-  forms refuse stay in dated migrations started with
-  `scripts/team.sh new-migration --source`.
-- Feature files have no DEV apply path. `feature capture --env dev` reads DEV into
-  the repository and writes nothing to DEV. `rollout` refuses `--env dev` for a
-  feature capsule and runs only `--env staging` or `--env prod`.
+Use dated migrations for backfills, seeds, data fixes, destructive DDL, and
+changes requiring an intermediate definition. Existing modeled one-time DDL
+in feature checkpoints keeps its current release semantics. If a DEV write
+needs a dated compatibility migration, review its source against the feature
+files and decide which effects each delivery step owns. Keep required one-time
+effects in the promotion manifest. Omit a source-only revision from a release
+only after reviewing its replacement and original target evidence.
 
-Revisit whether dated migrations can be retired for object work only when all of
-these hold: one feature release has moved through DEV, then staging, then
-production under a frozen capsule; a DEV apply path for feature files is
-documented; and the data-step rule for features is settled.
+Prepare checks the target before any release step writes. The capsule order
+depends on which definition the backfill needs.
+
+- **Backfill uses the final definition.** Select the feature once, then
+  select the dated backfill. A declared migration precondition that fails
+  during preparation will refuse the release. In the migration SQL, check
+  the installed source, compiler settings, and validity before changing data
+  when those checks depend on the preceding feature step.
+- **Backfill needs an intermediate definition.** Select one reviewed dated
+  migration. Install the intermediate definition, assert its source, settings,
+  and validity, perform the backfill, then install the final definition.
+  Make the assertion raise on a mismatch. Verify the
+  last step against the canonical feature file at the release commit, then
+  check the installed final source, settings, validity, and resulting data.
+  Make the migration the sole writer of the unit in this capsule. Qualify
+  from the expected starting state, using a disposable copy if DEV already
+  has the final definition.
+
+Prepare refuses a directly identifiable earlier migration replacement that
+would change a later feature checkpoint's before-source on the same resolved
+target. Indirect effects, such as dynamic SQL, require operator review and
+can still trip the runtime guard. Ship a prerequisite in its own verified
+release if a dependent checkpoint needs it during preparation.
 
 ## Create and review feature source
 
@@ -59,7 +90,12 @@ Capture preserves existing short source paths and uses a bounded hashed stem
 for longer quoted identifiers; metadata and review files retain the full
 case-sensitive identifier and source hashes.
 
-One-time DDL may live in `features/<slug>/<SCHEMA>/ddl.sql`. Complete stored
+Existing modeled one-time DDL may live in `features/<slug>/<SCHEMA>/ddl.sql`.
+Put each new supported `CREATE OR REPLACE VIEW` in
+`features/<slug>/<SCHEMA>/views/<name>.sql`. Existing mixed `ddl.sql` files
+are still valid release inputs. If a view in one of those files needs a
+separate release, move its definition after reviewing its dependencies and
+ownership. Complete stored
 units live under `features/<slug>/<SCHEMA>/`, one directory per unit group:
 `packages/` (`.pks.sql`, `.pkb.sql`), `types/` (`.tps.sql`, `.tpb.sql`),
 `triggers/` (`.trg.sql`), `procedures/` (`.prc.sql`) and `functions/`
@@ -73,7 +109,7 @@ export. Schema-version 1 keeps its explicit connection and expected-user fields.
 
 ### DDL a feature checkpoint accepts
 
-`feature freeze` and `rollout --prepare` read a `ddl.sql` with the same rules
+`feature freeze` and `rollout --prepare` read feature DDL files with the same rules
 (`scripts/feature_ddl_forms.py`), so a statement that freezes is also one that
 prepare can prove. Each form below names only objects of the checkpoint's own
 schema, and prepare generates a catalog check for it: a before-state check that
@@ -409,15 +445,15 @@ plan artifacts, keeps compact receipts and review diffs, and records which paths
 
 ## Converting an existing project later
 
-Template upgrade does not convert or archive downstream migrations. In a later
-project task, inventory and reconcile every old attempt first. Derive each
-final package spec/body once, keep DML separate, then checksum-archive the exact
-legacy SQL, checks, receipts, and attempt evidence. Verify the archive checksum
-and contents before removing converted active folders. Retire an old archive
-index only together with its entire converted legacy tree. Never leave active
-revision families pointing into a removed archive. Keep the archive and
-conversion review in project-owned paths; do not put customer source in this
-template guide or example.
+Inventory the legacy folders with `feature convert-plan`. Review each
+stored-code family's final definition against DEV and the release target.
+Retain any required one-time effects and state-dependent intermediate definitions
+in the ordered manifest. Check original-target attempts and reconcile ambiguous
+writes from their own evidence. Apply normal archive eligibility rules to the
+reviewed folders and keep the exact SQL, checks, receipts, and attempt evidence.
+Verify checksums and update consumers of old paths. Archived bytes record history.
+Successful delivery requires its own target verification. Template upgrades leave
+conversion and archival to the project's explicit workflow.
 
 ### Plan the conversion offline
 

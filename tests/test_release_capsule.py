@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -583,6 +586,151 @@ class ReleaseCapsuleTests(unittest.TestCase):
         document = json.loads((capsule.root / "capsule.json").read_text(encoding="utf-8"))
         self.assertEqual(document["checkpoints"], [])
         self.assertEqual([step["type"] for step in document["payloadDefinition"]["steps"]], ["migrate"])
+
+    def test_final_source_and_ordered_backfills_freeze_without_replaying_the_archive(self) -> None:
+        def source(version: int) -> str:
+            return (
+                "CREATE OR REPLACE PACKAGE BODY APP_CODE.DISPATCH AS\n"
+                f"  FUNCTION VERSION_NUMBER RETURN NUMBER IS BEGIN RETURN {version}; END;\n"
+                "END DISPATCH;\n/\n"
+            )
+
+        backfill = "UPDATE APP_CODE.JOBS SET VERSION_USED = APP_CODE.DISPATCH.VERSION_NUMBER();\n"
+        assert_version = (
+            "BEGIN\n"
+            "  IF APP_CODE.DISPATCH.VERSION_NUMBER() <> 2 THEN\n"
+            "    RAISE_APPLICATION_ERROR(-20001, 'Expected version 2');\n"
+            "  END IF;\n"
+            "END;\n/\n"
+        )
+        body_path = "features/dispatch/APP_CODE/packages/dispatch.pkb.sql"
+        body = self.root / body_path
+        body.parent.mkdir()
+        body.write_text(source(3), encoding="utf-8")
+        archive = self.root / "migrations-archive/APP_CODE/2026-01-01_dispatch-r001"
+        archive.mkdir(parents=True)
+        historical = {
+            archive / "001-package-body.sql": source(1),
+            archive / "status.dev.json": '{"status":"applied"}\n',
+        }
+        for path, content in historical.items():
+            path.write_text(content, encoding="utf-8")
+        archive_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in historical}
+
+        feature = {
+            "type": "feature-migrate", "schema": "APP_CODE", "inputs": [body_path],
+            "checks": ["features/dispatch/APP_CODE/checks.json"],
+        }
+        ordinary = "migrations/APP_CODE/2026-01-02_backfill-r001"
+        transition = "migrations/APP_CODE/2026-01-02_transition-r001"
+        for folder, sources, steps, checkpoint_count in (
+            (ordinary, {"001-backfill.sql": backfill}, [feature, {"type": "migrate", "folders": [ordinary]}], 1),
+            (transition, {
+                "001-intermediate.sql": source(2), "002-assert-version.sql": assert_version,
+                "003-backfill.sql": backfill, "004-final.sql": source(3),
+            }, [{"type": "migrate", "folders": [transition]}], 0),
+        ):
+            with self.subTest(folder=folder):
+                migration = self.root / folder
+                migration.mkdir(parents=True)
+                for filename, sql in sources.items():
+                    (migration / filename).write_text(sql, encoding="utf-8")
+                (migration / "checks.json").write_text(json.dumps(CHECKS) + "\n", encoding="utf-8")
+                self.manifest_path.write_text(json.dumps({"schemaVersion": 2, "steps": steps}) + "\n", encoding="utf-8")
+                self.commit(folder)
+
+                capsule = self.build()
+                loaded = self.release_capsule.load_capsule(self.root, capsule.root)
+                document = json.loads((loaded.root / "capsule.json").read_bytes())
+
+                self.assertEqual(document["payloadDefinition"]["steps"], steps)
+                self.assertEqual(len(loaded.checkpoints), checkpoint_count)
+                frozen_sql = {
+                    row["sourcePath"]: (loaded.root / row["sourcePath"]).read_text(encoding="utf-8")
+                    for row in document["sourceInputs"] if row["sourcePath"].endswith(".sql")
+                }
+                expected = {f"payload/{folder}/{filename}": sql for filename, sql in sources.items()}
+                if checkpoint_count:
+                    expected[f"payload/{body_path}"] = source(3)
+                self.assertEqual(frozen_sql, expected)
+                self.assertEqual(
+                    {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in historical},
+                    archive_hashes,
+                )
+
+    def test_final_body_guard_refuses_after_unmodeled_migration_replacement(self) -> None:
+        from scripts import feature_release, migration_checks
+        from test_feature_runtime import IDENTITY, SETTINGS
+
+        def body(version: int) -> str:
+            return (
+                "PACKAGE BODY DISPATCH AS\n"
+                f"  FUNCTION VERSION_NUMBER RETURN NUMBER IS BEGIN RETURN {version}; END;\n"
+                "END DISPATCH;\n"
+            )
+
+        feature = self.root / "features/dispatch/APP_CODE/packages/dispatch.pkb.sql"
+        feature.parent.mkdir()
+        feature.write_text(f"CREATE OR REPLACE {body(3)}/\n", encoding="utf-8")
+        folder = "migrations/APP_CODE/2026-01-02_intermediate-r001"
+        migration = self.root / folder
+        migration.mkdir(parents=True)
+        (migration / "001-package-body.sql").write_text(
+            f"BEGIN EXECUTE IMMEDIATE q'[CREATE OR REPLACE {body(2)}]'; END;\n/\n",
+            encoding="utf-8",
+        )
+        (migration / "checks.json").write_text(json.dumps(CHECKS) + "\n", encoding="utf-8")
+        steps = [
+            {"type": "migrate", "folders": [folder]},
+            {"type": "feature-migrate", "schema": "APP_CODE", "inputs": [feature.relative_to(self.root).as_posix()]},
+        ]
+        self.manifest_path.write_text(json.dumps({"schemaVersion": 2, "steps": steps}) + "\n", encoding="utf-8")
+        self.commit("rollout with unmodeled preceding source replacement")
+        capsule = self.build()
+        catalog = {
+            "schema": "APP_CODE",
+            "identity": dict(IDENTITY),
+            "sourceUnits": {
+                "PACKAGE BODY:DISPATCH": {"lines": body(1).splitlines(keepends=True), "settings": SETTINGS, "valid": True},
+            },
+            "structural": {section: [] for section in feature_release.STRUCTURAL_SECTIONS},
+            "coverage": {"ownerComplete": False, "selectedScopeComplete": True},
+        }
+        env = {
+            "STAGING_MIGRATION_SCHEMA": "APP_CODE", "STAGING_MIGRATION_EXPECTED_USER": "APP_CODE",
+            "STAGING_MIGRATION_SQLCL_CONNECTION": "staging-conn",
+        }
+
+        def simulate_verified_migration(step, **_kwargs):
+            self.assertEqual(step["type"], "migrate")
+            catalog["sourceUnits"]["PACKAGE BODY:DISPATCH"]["lines"] = body(2).splitlines(keepends=True)
+            return self.rollout.StepResult(0)
+
+        output = StringIO()
+        report_path = self.root / "scratch/test-rollout.json"
+        with patch.dict(os.environ, env), \
+             patch.object(feature_release, "capture_selected_state", return_value=catalog), \
+             patch.object(self.rollout, "_observe_target_identity", return_value=IDENTITY), \
+             patch.object(migration_checks, "_live_report", return_value=migration_checks.PreflightReport(0, (), (), {})), \
+             patch.object(self.rollout, "execute_step", side_effect=simulate_verified_migration) as migrate, \
+             patch.object(feature_release.sqlcl_session, "run_sqlcl") as apply, \
+             redirect_stdout(output), redirect_stderr(output):
+            run = {
+                "repo_root": self.root, "capsule_path": capsule.root,
+                "report_path": report_path, "confirm": lambda _prompt: True,
+            }
+            prepared = self.rollout.run_rollout(self.manifest_path, "staging", prepare_only=True, **run)
+            self.assertEqual(prepared, 0, output.getvalue())
+            result = self.rollout.run_rollout(self.manifest_path, "staging", **run)
+
+        self.assertEqual(result, 2, output.getvalue())
+        report = json.loads(report_path.read_bytes())
+        self.assertRegex(report["error"], r"(?i)(source|before-state).*(changed|drift)|changed.*source")
+        self.assertEqual([step["status"] for step in report["steps"]], ["succeeded", "failed"])
+        receipt = json.loads((self.root / report["steps"][0]["receiptPath"]).read_bytes())
+        self.assertEqual((receipt["status"], receipt["stepType"]), ("succeeded", "migrate"))
+        migrate.assert_called_once()
+        apply.assert_not_called()
 
     def test_release_with_neither_a_checkpoint_nor_a_migration_is_refused_at_freeze(self) -> None:
         self.manifest_path.write_text(

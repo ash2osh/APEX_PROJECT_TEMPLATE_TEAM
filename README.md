@@ -437,6 +437,11 @@ every rule, what each message means, and what to do.
 
 ## Schema migrations
 
+Keep the final definition of a package, type, procedure, function, trigger,
+or view in [a feature](#feature-oriented-releases). Use dated migrations for
+one-time schema changes, seed data, backfills, data fixes, and transitions
+that require an intermediate definition.
+
 Create one dated folder per migration. Put each SQL step in its own numbered
 file and list the folder when checking or applying it:
 
@@ -623,12 +628,14 @@ reviewed recovery. Existing attempted or applied folders remain immutable.
 
 ## Feature-oriented releases
 
-Use mutable feature directories for new database-object work that benefits
-from complete stored-unit sources (packages, types, triggers, procedures and
-functions) and compact review diffs. `feature capture` reads only DEV;
-`feature diff` stays offline. Freeze committed inputs into one
-environment-neutral capsule, prepare each target separately, and promote the
-same payload from staging to production:
+Use mutable feature directories as the default for packages, types, triggers,
+procedures, functions, and views. Review successive edits in Git, then select
+each final definition once. Keep required one-time migrations in the release's
+explicit dependency order. `feature capture` reads DEV and `feature diff` is
+offline. Guarded DEV apply from feature files is planned. The
+[feature guide](docs/feature-releases.md#scope-and-current-dev-workflow)
+describes the current route. Freeze committed inputs once, prepare each target
+separately, and promote the same capsule from staging to production.
 
 ```bash
 scripts/team.sh feature init inventory --schema APP_CODE

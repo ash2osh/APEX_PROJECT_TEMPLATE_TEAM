@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import time
 import uuid
@@ -814,6 +815,100 @@ def _auxiliary_targets(root: Path, steps: Sequence[Mapping], environment: str, e
     return targets
 
 
+def _check_preceding_migration_sources(
+    capsule: release_capsule.ReleaseCapsule,
+    preceding_steps: Sequence[Mapping],
+    bindings: Mapping[str, Mapping],
+    checkpoint: FeatureCheckpoint,
+    state: Mapping,
+) -> None:
+    """Refuse a known source change before a checkpoint prepared against the live definition."""
+    scope = release_state.target_scope_from_identity(state["identity"])
+    selected = {
+        (scope["schema"], item.unit[1], item.unit[2])
+        for item in checkpoint.inputs
+        if item.category == "stored-source" and item.unit is not None
+    }
+    if not selected:
+        return
+    replacements: dict[tuple[str, str, str], tuple[int, list[str]]] = {}
+    uncertain_steps: set[int] = set()
+    for number, step in enumerate(preceding_steps, start=1):
+        kind = step["type"]
+        if kind == "app-deploy" and replacements:
+            uncertain_steps.add(number)
+            replacements.clear()
+            continue
+        if kind not in {"migrate", "sql-script", "ords-import"}:
+            continue
+        binding = bindings[f"step:{number}"]
+        if release_state.target_scope_from_identity(binding["observed"]) != scope:
+            continue
+        if kind != "migrate":
+            uncertain_steps.add(number)
+            replacements.clear()
+            continue
+        try:
+            migrations = load_batch(capsule.root / "payload", step["folders"])
+        except (MigrationManifestError, OSError) as error:
+            raise FeatureReleaseError(f"cannot inspect frozen migration step {number}: {error}") from error
+        for migration in migrations:
+            schema = binding["schema"]
+            for file in migration.files:
+                source = file.source.decode("utf-8")
+                for start, end in statement_spans(source):
+                    sql = source[start:end]
+                    tokens = migration_checks._leading_tokens(sql)
+                    schema_change = migration_checks._current_schema_change(tokens)
+                    if schema_change is not None:
+                        schema = schema_change
+                        continue
+                    if all(migration_checks._word(tokens, index, word) for index, word in enumerate(("CREATE", "OR", "REPLACE"))):
+                        units = migration_checks._compiled_unit(tokens, schema)
+                        if len(units) == 1 and units[0][1] in feature_manifest.STORED_SOURCE_TYPES:
+                            owner, object_type, name, _required = units[0]
+                            key = (owner, object_type, name)
+                            if key in selected:
+                                # statement_spans omits the SQLcl slash line.
+                                body = (sql + "/\n").encode("utf-8")
+                                item = FeatureInput(file.name, body, _sha256(body), key, "stored-source")
+                                try:
+                                    definition, _settings = _stored_source(item)
+                                except FeatureReleaseError:
+                                    replacements.pop(key, None)
+                                    uncertain_steps.add(number)
+                                else:
+                                    replacements[key] = (number, definition["lines"])
+                            continue
+                    if (
+                        not tokens or tokens[0].value in {"INSERT", "UPDATE", "DELETE", "MERGE"}
+                        or feature_manifest._setting_name(sql) is not None
+                        or migration_checks._parse_operation(tokens, schema)["supported"]
+                    ):
+                        continue
+                    # Opaque SQL may supersede a direct replacement. Only a later known
+                    # replacement can restore certainty about that unit's final source.
+                    replacements.clear()
+                    uncertain_steps.add(number)
+
+    checkpoint_step = len(preceding_steps) + 1
+    for (_owner, kind, name), (number, lines) in sorted(replacements.items()):
+        before = state["sourceUnits"].get(f"{kind}:{name}")
+        if before is None or not _same_stored_source(before["lines"], lines):
+            raise FeatureReleaseError(
+                f"migration step {number} replaces {kind} {name} in {scope['schema']} before feature step {checkpoint_step}; "
+                "its source differs from the feature step's prepared before-state. "
+                "Deliver the intermediate change, backfill and final source as one reviewed migration."
+            )
+    if uncertain_steps:
+        numbers = ", ".join(str(number) for number in sorted(uncertain_steps))
+        print(
+            f"Feature step {checkpoint_step}: review unmodeled source effects in preceding step(s) {numbers} "
+            f"before executing; the feature before-state is based on live {scope['schema']}.",
+            file=sys.stderr,
+        )
+
+
 def _manifest_steps(capsule: release_capsule.ReleaseCapsule) -> list[dict]:
     path = capsule.root / "capsule.json"
     try:
@@ -1076,7 +1171,8 @@ def prepare_target(
     earlier_effects_by_schema: dict[str, list[dict]] = {}
     day = datetime.now(timezone.utc).date().isoformat()
 
-    for checkpoint_number, checkpoint in enumerate(capsule.checkpoints, start=1):
+    checkpoint_steps = (number for number, step in enumerate(steps, start=1) if step["type"] == "feature-migrate")
+    for checkpoint_number, (step_number, checkpoint) in enumerate(zip(checkpoint_steps, capsule.checkpoints, strict=True), start=1):
         try:
             target = resolve_target(environ, environment, "migration", schema=checkpoint.schema)
         except TargetResolutionError as error:
@@ -1101,6 +1197,7 @@ def prepare_target(
             raise FeatureReleaseError("selected feature checkpoints have conflicting edition identities on one physical target")
         shared_identity[scope_key] = identity
         state = dict(state, identity=identity, environment=environment)
+        _check_preceding_migration_sources(capsule, steps[:step_number - 1], targets, checkpoint, state)
         source_guards = _source_guards(checkpoint, state, checkpoint_number)
         _refuse_disabled_triggers(checkpoint, state, source_guards, environment)
         _refuse_body_outside_release(checkpoint, state, source_guards, environment)

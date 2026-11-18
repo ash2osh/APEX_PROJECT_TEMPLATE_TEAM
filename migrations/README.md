@@ -1,5 +1,9 @@
 # Migrations
 
+Use dated migrations for one-time schema or data changes and required
+intermediate definitions. Keep final stored-code and view definitions in
+[feature files](../docs/feature-releases.md), with edit history in Git.
+
 Use one dated folder per migration, with one numbered SQL file per step. For a
 multi-schema code profile, place it under `migrations/<SCHEMA>/`:
 

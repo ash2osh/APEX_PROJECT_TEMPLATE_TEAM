@@ -6,6 +6,13 @@ steps; each command still uses its existing connection, checks, and target
 guards. A green source/readiness report does not prove that an APEX application
 works at runtime.
 
+For stored-code releases, select one final definition per object and the
+required ordered migrations in a version-2 manifest. Follow the
+[feature release workflow](feature-releases.md#execute-staging-and-promote)
+to freeze once, verify staging, and promote the same capsule. Use baseline
+generation when provisioning or reconciling drift calls for a separately
+reviewed set of changes.
+
 ## Before the window
 
 1. **Freeze and identify the release.** Name the release commit, migration
@@ -23,7 +30,7 @@ works at runtime.
    Use `--emit-dba-script <path>` only when DBA-level differences are in scope.
    The output is an additive review artifact. Inspect every statement and hash
    it before adding it as a `sql-script` step; the comparison never applies it.
-3. **Build and review migration candidates.** With a reviewed
+3. **Build and review migration candidates when needed.** With a reviewed
    `baseline.json`, export the source-side catalog and build against the named
    target. Reference-data generation is optional; choose one build command.
    For a structure, grants, and source build:

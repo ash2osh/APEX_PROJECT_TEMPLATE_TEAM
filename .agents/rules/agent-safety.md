@@ -34,10 +34,16 @@
   the conflict checker. Treat a write attempt without a verified receipt as
   requiring live reconciliation before retry. See
   `docs/migration-rules.md`.
-- For feature capsules, keep complete mutable package sources under
-  `features/<slug>/<SCHEMA>/`, capture only from DEV, and review the generated
-  source diff. Replace the scaffold check and commit every selected input and
-  the schema-version 2 manifest before freezing. Use the same frozen capsule
+- Use `features/<slug>/<SCHEMA>/` as the default source for stored code.
+  Capture from DEV, check ownership and drift, and review the source diff.
+  Coordinate shared DEV writes and require explicit authorization for the
+  selected target and units. Guarded feature DEV apply is planned. Use an
+  approved DEV route in the meantime. Use dated migrations for one-time
+  changes and required intermediate definitions.
+- For feature capsules, select each final definition once, together with the
+  required migrations in dependency order. Replace the scaffold check and
+  commit every selected input and the schema-version 2 manifest before
+  freezing. Use the same frozen capsule
   for staging and production; production requires a verified staging report.
   Treat an interrupted/unknown checkpoint as unresolved until reconciled, and
   describe only the selected feature-checkpoint and migrate-step budget, not
