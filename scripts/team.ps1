@@ -668,6 +668,13 @@ try {
     }
     "targets" {
       # Offline and read-only: the report reads the loaded .env names and never connects or starts SQLcl.
+      # It lists every configured schema, so --schema is refused and an inherited PROJECT_SCHEMA is cleared.
+      foreach ($targetsArgument in $Arguments) {
+        if ($targetsArgument -eq "--schema" -or $targetsArgument -like "--schema=*") {
+          Fail "targets does not accept --schema: it reports every configured schema"
+        }
+      }
+      Remove-Item -LiteralPath Env:PROJECT_SCHEMA -ErrorAction SilentlyContinue
       # Help is argparse-only and must work without a configured .env, as in compare-env.
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
       # Resolve a relative PROJECT_ENV_FILE as load_env.ps1 does: the caller's directory first, then the repository root.

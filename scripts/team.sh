@@ -301,6 +301,13 @@ case "$command_name" in
     ;;
   targets)
     # Offline and read-only: the report reads the loaded .env names and never connects or starts SQLcl.
+    # It lists every configured schema, so --schema is refused and an inherited PROJECT_SCHEMA is cleared.
+    for targets_argument in "$@"; do
+      case "$targets_argument" in
+        --schema|--schema=*) fail "targets does not accept --schema: it reports every configured schema" ;;
+      esac
+    done
+    unset PROJECT_SCHEMA
     # Help is argparse-only and must work without a configured .env, as in compare-env.
     for targets_argument in "$@"; do
       if [ "$targets_argument" = "--help" ] || [ "$targets_argument" = "-h" ]; then

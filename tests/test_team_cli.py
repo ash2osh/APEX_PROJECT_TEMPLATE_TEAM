@@ -1261,6 +1261,23 @@ exit 17
                         self.assertEqual(2, refused.returncode, refused.stdout + refused.stderr)
                 self.assertFalse(started.exists(), "a refused argument still started SQLcl")
 
+    def test_targets_ignores_an_inherited_project_schema_in_both_wrappers(self) -> None:
+        # targets reports every configured schema, so a PROJECT_SCHEMA left in the shell must not narrow it or refuse it.
+        for name, launcher in self.targets_wrappers():
+            with self.subTest(entry=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env_file = root / ".env"
+                env_file.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+                fake_bin = root / "bin"
+                started = root / "sqlcl-started"
+                fake_sqlcl.install(fake_bin, f": > '{started}'\nexit 97\n")
+                environment = fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(env_file), PROJECT_SCHEMA="NOT_CONFIGURED")
+                result = self._run_wrapper(launcher, name, environment, "targets")
+                output = result.stdout + result.stderr
+                self.assertEqual(0, result.returncode, output)
+                self.assertRegex(result.stdout, r"(?m)^dev\s+read\s+DEMO\s+docker-demo\s+DEMO\s+no\s+development\s+resolved")
+                self.assertFalse(started.exists(), f"targets started SQLcl: {output}")
+
     def test_argument_errors_read_and_exit_the_same_in_both_wrappers(self) -> None:
         # An uncaught throw makes PowerShell print an exception block with the
         # script path and line and exit 1; Bash prints one `team error:` line and
