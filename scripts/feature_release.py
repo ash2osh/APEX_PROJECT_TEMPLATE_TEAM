@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from . import baseline, compare_schema, deployment_descriptor, feature_manifest, feature_preflight, feature_sources, migration_attempts, migration_checks, migrate, new_migration, release_capsule, release_ownership, release_state, rollout, sqlcl_session
+from . import baseline, compare_schema, database_support, deployment_descriptor, feature_manifest, feature_preflight, feature_sources, migration_attempts, migration_checks, migrate, new_migration, release_capsule, release_ownership, release_state, rollout, sqlcl_session
 from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target
 from .feature_manifest import FeatureCheckpoint, FeatureInput
 from .migration_checks import complete_observed_identity
@@ -160,6 +160,7 @@ def _identity(target: Target, value: object) -> dict[str, str]:
         observed["db_name"], observed["db_unique_name"], observed["service_name"],
     ):
         raise FeatureReleaseError("selected target identity resembles production")
+    database_support.warn_once(observed["database_version"])  # 23ai is the supported floor; older versions warn and continue.
     return observed
 
 

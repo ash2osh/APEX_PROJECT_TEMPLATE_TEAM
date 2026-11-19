@@ -88,7 +88,7 @@ begin
   return upper(p_name);
 end BLT_FN;
 /
-create table BLT_NOTES (note_id number primary key, note_title varchar2(50) not null, note_text varchar2(400));
+create table BLT_NOTES (note_id number primary key, note_title varchar2(50) not null, note_text varchar2(400), note_total number as (note_id * 2) virtual, note_flag number invisible);
 grant select on BLT_COUNTRIES to public;
 commit;
 """
@@ -310,6 +310,12 @@ class LiveBaselineTests(unittest.TestCase):
         p = self.world.prefix
         self.assertIn(f'CREATE TABLE "{SCHEMA}"."{p}_ITEMS"', text)
         self.assertIn(f'"{SCHEMA}"."{p}_NOTES" ADD ("NOTE_TEXT" VARCHAR2(400', text)
+        # Staging's older BLT_NOTES lacks the virtual and the INVISIBLE column that DEV has: both are added. The
+        # expression text is the catalog's DATA_DEFAULT_VC form (Oracle 23ai quotes the column name).
+        self.assertIn(f'"{SCHEMA}"."{p}_NOTES" ADD ("NOTE_TOTAL" NUMBER GENERATED ALWAYS AS ("NOTE_ID"*2) VIRTUAL)', text)
+        self.assertIn(f'"{SCHEMA}"."{p}_NOTES" ADD ("NOTE_FLAG" NUMBER INVISIBLE)', text)
+        self.assertIn("VIRTUAL_COLUMN = 'YES'", text)
+        self.assertIn("HIDDEN_COLUMN = 'YES'", text)
         self.assertIn(f'CREATE SEQUENCE  "{SCHEMA}"."{p}_ITEMS_SEQ"', text)
         for constraint in (f"{p}_ITEMS_FK", f"{p}_ITEMS_PRICE_CK"):
             self.assertIn(constraint, text)
@@ -467,6 +473,9 @@ class LiveBaselineApplyTests(unittest.TestCase):
         # The staging database now has what DEV has.
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tables where table_name = '{p}_ITEMS'"), 1)
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tab_columns where table_name = '{p}_NOTES' and column_name = 'NOTE_TEXT'"), 1)
+        # USER_TAB_COLS (not USER_TAB_COLUMNS) lists the INVISIBLE column, which USER_TAB_COLUMNS hides.
+        self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tab_cols where table_name = '{p}_NOTES' and column_name = 'NOTE_TOTAL' and virtual_column = 'YES' and user_generated = 'YES'"), 1)
+        self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from user_tab_cols where table_name = '{p}_NOTES' and column_name = 'NOTE_FLAG' and hidden_column = 'YES' and user_generated = 'YES'"), 1)
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from {p}_COUNTRIES"), 4)
         self.assertEqual(world.count(STAGING_CONNECTION, f"select count(*) from dual where {p}_FN('Mixed') = 'MIXED'"), 1)
         # The data family's identity ALTER TABLE invalidates the view after the code family compiled it, and Oracle

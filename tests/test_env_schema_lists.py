@@ -1,3 +1,4 @@
+import itertools
 import os
 import re
 import subprocess
@@ -8,6 +9,7 @@ from fake_sqlcl import BASH
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts.local_config import read_project_env
 from scripts.template_release import is_apex_26_2
 
 
@@ -511,6 +513,157 @@ class PowerShellEnvironmentListTests(unittest.TestCase):
                 message = bash.stderr.strip()
                 self.assertTrue(message.startswith("project environment error: "), message)
                 self.assertIn(message, plain(powershell.stderr))
+
+
+# DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER fill the TABLES, CODE and APEX profiles
+# when a profile has none of its own three keys. The probes print the same eleven values in the
+# same order for every loader, so the outputs can be compared field by field.
+DEV_FILLED_KEYS = (
+    "TABLES_SCHEMA", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER", "TABLES_PREFIXES",
+    "CODE_SCHEMA", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER", "CODE_PREFIXES",
+    "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER",
+)
+DEV_BASH_PROBE = 'printf "' + "|".join(["%s"] * len(DEV_FILLED_KEYS)) + '\\n" ' + " ".join(f'"${key}"' for key in DEV_FILLED_KEYS)
+DEV_PS_PROBE = '"' + "|".join(f"$($env:{key})" for key in DEV_FILLED_KEYS) + '"'
+DEV_HEADER = "PROJECT_NAME=DEMO\nDEVELOPER_NAME=ALICE\nDB_ENVIRONMENT=development\nAPEX_APP_ID=100\n"
+DEV_TRIO = "DEV_SCHEMA=DEMO\nDEV_SQLCL_CONNECTION=dev-conn\nDEV_EXPECTED_USER=DEMO\n"
+DEV_TRIO_MESSAGE = "configure DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER together"
+DEV_PARITY_BODY = (
+    "CODE_PREFIXES=ZZ_\nCODE_SCHEMA=OWN\nCODE_SQLCL_CONNECTION=own-conn\nCODE_EXPECTED_USER=OWN\n"
+    "DEV_SCHEMA=ONE,TWO\nDEV_SQLCL_CONNECTION=conn-one,conn-two\nDEV_EXPECTED_USER=ONE,TWO\n"
+)
+DEV_PARITY_EXPECTED = [
+    "ONE,TWO", "conn-one,conn-two", "ONE,TWO", "*",
+    "OWN", "own-conn", "OWN", "ZZ_",
+    "ONE,TWO", "conn-one,conn-two", "ONE,TWO",
+]
+
+
+def write_dev_env(directory: Path, body: str) -> Path:
+    path = directory / ".env"
+    path.write_text(DEV_HEADER + body, encoding="utf-8")
+    return path
+
+
+def ps_probe(env_path: Path, probe: str) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.pop("PROJECT_SCHEMA", None)
+    script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; {probe}'
+    return subprocess.run([PWSH, "-NoProfile", "-Command", script], env=environment, text=True, capture_output=True, check=False)
+
+
+class DevTrioLoaderCases:
+    """Shared cases for one loader; a subclass supplies run_loader and its probe."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+
+    def run_loader(self, env_path: Path) -> subprocess.CompletedProcess[str]:
+        raise NotImplementedError
+
+    def loaded_fields(self, body: str) -> list[str]:
+        result = self.run_loader(write_dev_env(self.directory, body))
+        self.assertEqual(0, result.returncode, plain(result.stderr))
+        return result.stdout.strip().split("|")
+
+    def refusal(self, body: str) -> str:
+        result = self.run_loader(write_dev_env(self.directory, body))
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        return plain(result.stderr).strip()
+
+    def test_dev_trio_alone_fills_tables_code_and_apex(self) -> None:
+        self.assertEqual(
+            ["DEMO", "dev-conn", "DEMO", "*", "DEMO", "dev-conn", "DEMO", "*", "DEMO", "dev-conn", "DEMO"],
+            self.loaded_fields(DEV_TRIO),
+        )
+
+    def test_dev_trio_lists_fill_all_three_profiles_aligned(self) -> None:
+        body = "DEV_SCHEMA=ONE,TWO\nDEV_SQLCL_CONNECTION=conn-one,conn-two\nDEV_EXPECTED_USER=ONE,TWO\n"
+        fields = self.loaded_fields(body)
+        self.assertEqual(["ONE,TWO", "conn-one,conn-two", "ONE,TWO", "*"], fields[0:4])
+        self.assertEqual(["ONE,TWO", "conn-one,conn-two", "ONE,TWO", "*"], fields[4:8])
+        self.assertEqual(["ONE,TWO", "conn-one,conn-two", "ONE,TWO"], fields[8:11])
+
+    def test_profile_with_its_own_values_wins_over_the_dev_trio(self) -> None:
+        body = DEV_TRIO + "TABLES_SCHEMA=OWN\nTABLES_PREFIXES=OWN_\nTABLES_SQLCL_CONNECTION=own-conn\nTABLES_EXPECTED_USER=OWN\n"
+        fields = self.loaded_fields(body)
+        self.assertEqual(["OWN", "own-conn", "OWN", "OWN_"], fields[0:4])
+        self.assertEqual(["DEMO", "dev-conn", "DEMO", "*"], fields[4:8])
+        self.assertEqual(["DEMO", "dev-conn", "DEMO"], fields[8:11])
+
+    def test_partially_configured_profile_keeps_the_existing_required_error(self) -> None:
+        message = self.refusal(DEV_TRIO + "TABLES_SCHEMA=OWN\nTABLES_PREFIXES=*\n")
+        self.assertIn("TABLES_SQLCL_CONNECTION is required in", message)
+        self.assertNotIn(DEV_TRIO_MESSAGE, message)
+
+    def test_partial_dev_trio_is_refused_with_the_new_message(self) -> None:
+        pairs = {
+            "DEV_SCHEMA": "SECRET_DEV_SCHEMA_VALUE",
+            "DEV_SQLCL_CONNECTION": "SECRET-DEV-CONN",
+            "DEV_EXPECTED_USER": "SECRET_DEV_USER_VALUE",
+        }
+        for size in (1, 2):
+            for subset in itertools.combinations(pairs, size):
+                with self.subTest(keys=subset):
+                    body = "".join(f"{key}={pairs[key]}\n" for key in subset)
+                    message = self.refusal(body)
+                    self.assertIn(DEV_TRIO_MESSAGE, message)
+                    for value in pairs.values():
+                        self.assertNotIn(value, message)
+
+    def test_dev_trio_without_expected_user_is_refused(self) -> None:
+        message = self.refusal("DEV_SCHEMA=DEMO\nDEV_SQLCL_CONNECTION=dev-conn\n")
+        self.assertIn(DEV_TRIO_MESSAGE, message)
+
+    def test_dev_lists_must_align(self) -> None:
+        message = self.refusal("DEV_SCHEMA=ONE,TWO\nDEV_SQLCL_CONNECTION=conn-one\nDEV_EXPECTED_USER=ONE,TWO\n")
+        self.assertIn("must list the same number of entries", message)
+
+    def test_dev_values_are_validated_and_never_echoed(self) -> None:
+        secret = "lower_secret_dev_value"
+        message = self.refusal(f"DEV_SCHEMA={secret}\nDEV_SQLCL_CONNECTION=dev-conn\nDEV_EXPECTED_USER=DEMO\n")
+        self.assertIn("must be an uppercase Oracle identifier", message)
+        self.assertNotIn(secret, message)
+
+    def test_unknown_key_is_still_rejected_next_to_the_dev_trio(self) -> None:
+        message = self.refusal(DEV_TRIO + "DEV_OTHER_SETTING=1\n")
+        self.assertIn("unsupported setting in", message)
+        self.assertIn("DEV_OTHER_SETTING", message)
+
+
+class BashDevTrioTests(DevTrioLoaderCases, unittest.TestCase):
+    def run_loader(self, env_path: Path) -> subprocess.CompletedProcess[str]:
+        return load(env_path, DEV_BASH_PROBE)
+
+
+@unittest.skipUnless(PWSH, "PowerShell Core is not installed")
+class PowerShellDevTrioTests(DevTrioLoaderCases, unittest.TestCase):
+    def run_loader(self, env_path: Path) -> subprocess.CompletedProcess[str]:
+        return ps_probe(env_path, DEV_PS_PROBE)
+
+
+class DevTrioParityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+
+    def test_python_bash_and_powershell_resolve_the_dev_trio_identically(self) -> None:
+        env_path = write_dev_env(Path(self.temporary.name), DEV_PARITY_BODY)
+        python_values = read_project_env(env_path)
+        python_fields = [python_values[key] for key in DEV_FILLED_KEYS]
+        bash = load(env_path, DEV_BASH_PROBE)
+        self.assertEqual(0, bash.returncode, bash.stderr)
+        bash_fields = bash.stdout.strip().split("|")
+        self.assertEqual(DEV_PARITY_EXPECTED, python_fields)
+        self.assertEqual(python_fields, bash_fields)
+        if PWSH:
+            powershell = ps_probe(env_path, DEV_PS_PROBE)
+            self.assertEqual(0, powershell.returncode, powershell.stderr)
+            self.assertEqual(python_fields, powershell.stdout.strip().split("|"))
+        else:
+            self.skipTest("PowerShell Core is not installed")
 
 
 if __name__ == "__main__":

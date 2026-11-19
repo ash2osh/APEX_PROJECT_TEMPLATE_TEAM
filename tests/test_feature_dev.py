@@ -1077,6 +1077,36 @@ class PendingMigrationGuardTests(unittest.TestCase):
         self.assert_refused("cannot verify retained migration attempts without their migrations directory")
 
 
+class ObservedDatabaseVersionWarningTests(unittest.TestCase):
+    """The feature path's observed identity warns on stderr for older releases and never changes its result."""
+
+    def setUp(self):
+        from scripts import database_support
+        from scripts.db_targets import Target
+
+        database_support._warned_versions.clear()
+        self.addCleanup(database_support._warned_versions.clear)
+        self.target = Target("dev", "dev-owner", "APP_CODE", "APP_CODE", "development")
+
+    def _observe(self, version):
+        identity = dict(IDENTITY, database_version=version)
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            result = feature_release._identity(self.target, identity)
+        return result, out.getvalue(), err.getvalue()
+
+    def test_older_database_warns_on_stderr_and_result_is_unchanged(self):
+        result, out, err = self._observe("19.0.0.0")
+        self.assertIn("19.0.0.0", err)
+        self.assertIn("23ai", err)
+        self.assertEqual(out, "")
+        self.assertEqual(result, dict(IDENTITY, database_version="19.0.0.0"))
+
+    def test_supported_database_prints_nothing(self):
+        result, out, err = self._observe("23.26.3.0.0")
+        self.assertEqual(err, "")
+        self.assertEqual(out, "")
+        self.assertEqual(result, dict(IDENTITY, database_version="23.26.3.0.0"))
 
 
 if __name__ == "__main__":

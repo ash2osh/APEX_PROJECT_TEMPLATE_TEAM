@@ -209,7 +209,7 @@ def _type_owner(row: Mapping, source_schema: str | None, target_schema: str | No
     return owner
 
 
-def _column_sql(row: Mapping, source_schema: str | None = None, target_schema: str | None = None) -> str:
+def _column_sql(row: Mapping, source_schema: str | None = None, target_schema: str | None = None, *, invisible: bool | None = None) -> str:
     owner = _type_owner(row, source_schema, target_schema)
     if owner is None:
         definition = f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
@@ -218,9 +218,27 @@ def _column_sql(row: Mapping, source_schema: str | None = None, target_schema: s
         if not isinstance(type_name, str) or not type_name:
             raise baseline.BaselineError(f"column {row.get('table_name')}.{row.get('name')} has invalid data_type: {type_name!r}")
         definition = f"{_sql_identifier(str(row['name']))} {_sql_identifier(owner)}.{_sql_identifier(type_name)}"
-    if _is_invisible(row):
+    if (_is_invisible(row) if invisible is None else invisible):
         definition += " INVISIBLE"
     return definition
+
+
+def _virtual_expression(row: Mapping) -> str | None:
+    """The captured expression of a virtual column, or None when it was not captured (an older database or catalog).
+
+    The catalog writes it only for virtual rows, on Oracle 23ai or newer. An empty, blank or non-string value counts as
+    not captured.
+    """
+    value = row.get("virtual_expression")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _is_hidden_user_column(row: Mapping) -> bool:
+    """True for a hidden column the user generated, virtual or not; a virtual column's INVISIBLE clause uses it."""
+    where = f"column {row.get('table_name')}.{row.get('name')}"
+    return _column_flag(row, "hidden", where) is True and _column_flag(row, "user_generated", where) is True
 
 
 def _column_definition_check(schema: str, row: Mapping, source_schema: str | None = None) -> dict:
@@ -330,7 +348,11 @@ def _column_definition_check(schema: str, row: Mapping, source_schema: str | Non
     else:
         predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
 
-    if _is_invisible(row):
+    if _column_flag(row, "virtual", f"column {table_name}.{column_name}") is True:
+        predicates.append("VIRTUAL_COLUMN = 'YES'")
+        if _is_hidden_user_column(row):
+            predicates.append("HIDDEN_COLUMN = 'YES'")
+    elif _is_invisible(row):
         predicates.append("HIDDEN_COLUMN = 'YES'")
 
     where_clause = " AND ".join(predicates)
@@ -1020,16 +1042,23 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         existing = target_columns.get(key)
         if existing is None:
             if kind == "virtual":
-                raise baseline.BaselineError(
-                    f"virtual column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture its expression)"
-                )
-            if kind == "hidden" and not _is_invisible(row):
-                raise baseline.BaselineError(
-                    f"hidden column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture how Oracle represents it)"
-                )
-            column_ddl = _column_sql(row, source_schema, target_schema)
+                expression = _virtual_expression(row)
+                if expression is None:
+                    raise baseline.BaselineError(
+                        f"virtual column {table_name}.{column_name} needs a reviewed migration "
+                        "(its expression was not captured; capture needs Oracle 23ai or newer)"
+                    )
+                target_expression = retarget_sql_identifiers(expression, source_schema, target_schema)
+                column_ddl = _column_sql(row, source_schema, target_schema, invisible=_is_hidden_user_column(row))
+                column_ddl += f" GENERATED ALWAYS AS ({target_expression}) VIRTUAL"
+            else:
+                if kind == "hidden" and not _is_invisible(row):
+                    raise baseline.BaselineError(
+                        f"hidden column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture how Oracle represents it)"
+                    )
+                column_ddl = _column_sql(row, source_schema, target_schema)
             identity = source_identity.get(key)
-            if identity is not None:
+            if identity is not None and kind != "virtual":
                 generation = str(identity.get("generation_type", "BY DEFAULT")).upper()
                 if generation not in {"ALWAYS", "BY DEFAULT", "BY DEFAULT ON NULL"}:
                     raise baseline.BaselineError(f"unsupported identity generation type {generation!r} for {table_name}.{column_name}")
@@ -1056,6 +1085,14 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             where = f"column {table_name}.{column_name}"
             if (_column_flag(row, "virtual", where) is True) != (_column_flag(existing, "virtual", where) is True):
                 raise baseline.BaselineError(f"column virtual/stored change needs a reviewed data migration: {table_name}.{column_name}")
+            if _column_flag(row, "virtual", where) is True:
+                source_expression = _virtual_expression(row)
+                target_expression = _virtual_expression(existing)
+                if source_expression is not None and target_expression is not None and (
+                    _condition_key(retarget_sql_identifiers(source_expression, source_schema, target_schema))
+                    != _condition_key(target_expression)
+                ):
+                    raise baseline.BaselineError(f"virtual column expression change needs a reviewed migration: {table_name}.{column_name}")
             if _is_invisible(row) != _is_invisible(existing):
                 raise baseline.BaselineError(f"column visibility change needs a reviewed migration: {table_name}.{column_name}")
             if row.get("nullable") == "N" and existing.get("nullable") == "Y":

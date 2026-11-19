@@ -27,6 +27,8 @@ Remove-Item -Path Env:MIGRATION_APPLY_TIMEOUT_SECONDS, Env:MIGRATION_CHECK_TIMEO
 # A DBA connection comes only from the file: an inherited value must not reach the caller.
 Remove-Item -Path Env:DEV_DBA_SQLCL_CONNECTION, Env:STAGING_DBA_SQLCL_CONNECTION,
   Env:PROD_DBA_SQLCL_CONNECTION -ErrorAction SilentlyContinue
+# The DEV shorthand comes only from the file too; an inherited value must not reach the caller.
+Remove-Item -Path Env:DEV_SCHEMA, Env:DEV_SQLCL_CONNECTION, Env:DEV_EXPECTED_USER -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 # Phase 2 release switch: the rule lives in scripts/template_release.ps1 (apexRelease; absent is 26.1).
 . (Join-Path $PSScriptRoot "template_release.ps1")
@@ -71,7 +73,8 @@ $projectEnvAllowed = @(
   "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER",
   "MIGRATION_APPLY_TIMEOUT_SECONDS", "MIGRATION_CHECK_TIMEOUT_SECONDS", "MIGRATION_CHECK_BATCH_BYTES",
   "MIGRATION_PREFLIGHT_INVENTORY_RETRIES",
-  "DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION"
+  "DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION",
+  "DEV_SCHEMA", "DEV_SQLCL_CONNECTION", "DEV_EXPECTED_USER"
 )
 if ($projectEnvApexRelease -eq "26.1") { $projectEnvAllowed += @("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT") }
 foreach ($projectEnvMigrationPrefix in @("", "STAGING_", "PROD_")) {
@@ -108,6 +111,36 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   }
   Set-Item -LiteralPath "Env:$projectEnvKey" -Value $projectEnvValue
   $projectEnvSeen[$projectEnvKey] = $true
+}
+
+# DEV shorthand: DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER are all or none. A profile
+# with none of its own three keys takes the DEV values, and its prefixes default to '*' when absent.
+# A profile with some of its keys keeps today's validation and errors. Runs before the required check.
+$projectEnvDevKeys = @("DEV_SCHEMA", "DEV_SQLCL_CONNECTION", "DEV_EXPECTED_USER")
+$projectEnvDevPresent = @($projectEnvDevKeys | Where-Object { $projectEnvSeen.ContainsKey($_) }).Count
+if ($projectEnvDevPresent -ne 0 -and $projectEnvDevPresent -ne 3) {
+  throw "project environment error: configure DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER together"
+}
+function Set-ProjectEnvFromDev([string]$SchemaKey, [string]$ConnectionKey, [string]$UserKey, [string]$PrefixesKey) {
+  # Fill a profile only when it has none of its own three keys.
+  $projectEnvOwnKeys = @($SchemaKey, $ConnectionKey, $UserKey | Where-Object { $projectEnvSeen.ContainsKey($_) })
+  if ($projectEnvOwnKeys.Count -ne 0) { return }
+  $projectEnvPairs = @(@($SchemaKey, "DEV_SCHEMA"), @($ConnectionKey, "DEV_SQLCL_CONNECTION"), @($UserKey, "DEV_EXPECTED_USER"))
+  foreach ($projectEnvPair in $projectEnvPairs) {
+    # [string] turns a missing (empty) DEV value into "", which keeps the key defined but empty.
+    $projectEnvDevValue = [string][Environment]::GetEnvironmentVariable($projectEnvPair[1], "Process")
+    [Environment]::SetEnvironmentVariable($projectEnvPair[0], $projectEnvDevValue, "Process")
+    $projectEnvSeen[$projectEnvPair[0]] = $true
+  }
+  if ($PrefixesKey -and -not $projectEnvSeen.ContainsKey($PrefixesKey)) {
+    [Environment]::SetEnvironmentVariable($PrefixesKey, "*", "Process")
+    $projectEnvSeen[$PrefixesKey] = $true
+  }
+}
+if ($projectEnvDevPresent -eq 3) {
+  Set-ProjectEnvFromDev "TABLES_SCHEMA" "TABLES_SQLCL_CONNECTION" "TABLES_EXPECTED_USER" "TABLES_PREFIXES"
+  Set-ProjectEnvFromDev "CODE_SCHEMA" "CODE_SQLCL_CONNECTION" "CODE_EXPECTED_USER" "CODE_PREFIXES"
+  Set-ProjectEnvFromDev "APEX_PARSING_SCHEMA" "APEX_SQLCL_CONNECTION" "APEX_EXPECTED_USER" $null
 }
 
 if ($projectEnvApexRelease -eq "26.1") {
@@ -436,9 +469,10 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   projectEnvMultiMapping, projectEnvOrdsKeys, projectEnvOrdsPresent, projectEnvOrdsSchemas, projectEnvOrdsUsers, projectEnvOrdsIndex `
   -ErrorAction SilentlyContinue
 Remove-Variable -Name projectEnvMigrationPrefix, projectEnvMigrationKeys, projectEnvMigrationPresent, projectEnvSuffix, projectEnvDevMigrationSchema -ErrorAction SilentlyContinue
+Remove-Variable -Name projectEnvDevKeys, projectEnvDevPresent, projectEnvDevValue, projectEnvOwnKeys -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,
   Function:Assert-ProjectEnvList, Function:Assert-ProjectEnvTriple,
-  Function:Set-ProjectEnvNarrow -ErrorAction SilentlyContinue
+  Function:Set-ProjectEnvNarrow, Function:Set-ProjectEnvFromDev -ErrorAction SilentlyContinue
 }
 finally {
   Remove-Variable -Name projectEnvRepoRoot, projectEnvRootRelative -ErrorAction SilentlyContinue

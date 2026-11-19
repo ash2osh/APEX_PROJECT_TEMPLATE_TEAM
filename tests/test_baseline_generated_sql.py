@@ -366,9 +366,98 @@ class ColumnFlagTests(unittest.TestCase):
         for flag in ("Y", "YES"):
             with self.subTest(flag=flag):
                 with self.assertRaisesRegex(
-                    baseline.BaselineError, r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration",
+                    baseline.BaselineError,
+                    r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration \(its expression was not captured; capture needs Oracle 23ai or newer\)",
                 ):
                     self._structure([self._column("ITEM_ID"), self._column("TOTAL", virtual=flag)], [self._column("ITEM_ID")])
+
+    def test_a_missing_virtual_column_without_a_usable_expression_keeps_the_refusal(self) -> None:
+        for expression in (None, "", "   ", 5, ["x"]):
+            with self.subTest(expression=expression):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError,
+                    r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration \(its expression was not captured",
+                ):
+                    self._structure(
+                        [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression=expression)],
+                        [self._column("ITEM_ID")],
+                    )
+
+    def test_a_missing_virtual_column_with_an_expression_is_added_as_a_generated_column(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="YES", virtual_expression='"ITEM_ID"*2')],
+            [self._column("ITEM_ID")],
+        )
+
+        sql = steps["001-structure-delta.sql"]
+        self.assertIn('ADD ("TOTAL" NUMBER GENERATED ALWAYS AS ("ITEM_ID"*2) VIRTUAL)', sql)
+        self.assertNotIn("INVISIBLE", sql)
+        post = self._definition_check(checks, "TOTAL")
+        self.assertIn("VIRTUAL_COLUMN = 'YES'", post["sql"])
+        self.assertNotIn("HIDDEN_COLUMN", post["sql"])
+
+    def test_an_invisible_virtual_column_puts_invisible_before_generated(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", hidden="Y", virtual="Y", virtual_expression='"ITEM_ID"*2')],
+            [self._column("ITEM_ID")],
+        )
+
+        sql = steps["001-structure-delta.sql"]
+        self.assertIn('ADD ("TOTAL" NUMBER INVISIBLE GENERATED ALWAYS AS ("ITEM_ID"*2) VIRTUAL)', sql)
+        post = self._definition_check(checks, "TOTAL")
+        self.assertIn("VIRTUAL_COLUMN = 'YES'", post["sql"])
+        self.assertIn("HIDDEN_COLUMN = 'YES'", post["sql"])
+
+    def test_a_virtual_expression_naming_the_source_schema_is_retargeted(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='APP_DEV.FN_TAX("ITEM_ID")')],
+            [self._column("ITEM_ID")],
+        )
+
+        sql = steps["001-structure-delta.sql"]
+        self.assertIn('GENERATED ALWAYS AS ("APP_TEST".FN_TAX("ITEM_ID")) VIRTUAL', sql)
+        self.assertNotIn("APP_DEV", sql)
+
+    def test_equal_virtual_expressions_on_both_sides_generate_nothing(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID"*2')],
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID" * 2')],
+        )
+
+        self.assertEqual({}, steps)
+        self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_differing_virtual_expressions_on_both_sides_are_refused(self) -> None:
+        with self.assertRaisesRegex(
+            baseline.BaselineError, r"virtual column expression change needs a reviewed migration: APP_ITEMS\.TOTAL",
+        ):
+            self._structure(
+                [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID"*2')],
+                [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID"*3')],
+            )
+
+    def test_a_virtual_expression_missing_on_either_side_generates_nothing_more(self) -> None:
+        for source_expr, target_expr in ((None, '"ITEM_ID"*2'), ('"ITEM_ID"*2', None), (None, None)):
+            with self.subTest(source=source_expr, target=target_expr):
+                steps, checks = self._structure(
+                    [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression=source_expr)],
+                    [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression=target_expr)],
+                )
+
+                self.assertEqual({}, steps)
+                self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_a_system_column_with_an_expression_is_still_skipped(self) -> None:
+        steps, checks = self._structure(
+            [
+                self._column("ITEM_ID"),
+                self._column("SYS_NC00005$", hidden="Y", virtual="Y", user_generated="NO", virtual_expression='"ITEM_ID"*2'),
+            ],
+            [self._column("ITEM_ID")],
+        )
+
+        self.assertEqual({}, steps)
+        self.assertEqual({"preconditions": [], "postconditions": []}, checks)
 
     def test_a_hidden_column_with_no_user_generated_flag_is_still_refused_and_not_guessed(self) -> None:
         for hidden in ("Y", "YES"):
@@ -402,6 +491,7 @@ class ColumnFlagTests(unittest.TestCase):
         self.assertNotIn("INVISIBLE", steps["001-structure-delta.sql"])
         post = self._definition_check(checks, "ITEM_NAME")
         self.assertNotIn("HIDDEN_COLUMN", post["sql"])
+        self.assertNotIn("VIRTUAL_COLUMN", post["sql"])
 
     def test_an_invisible_column_present_on_both_sides_with_equal_visibility_generates_nothing(self) -> None:
         steps, checks = self._structure(

@@ -15,6 +15,8 @@ unset MIGRATION_APPLY_TIMEOUT_SECONDS MIGRATION_CHECK_TIMEOUT_SECONDS MIGRATION_
 unset MIGRATION_PREFLIGHT_INVENTORY_RETRIES
 # A DBA connection comes only from the file: an inherited value must not reach the caller.
 unset DEV_DBA_SQLCL_CONNECTION STAGING_DBA_SQLCL_CONNECTION PROD_DBA_SQLCL_CONNECTION
+# The DEV shorthand comes only from the file too; an inherited value must not reach the caller.
+unset DEV_SCHEMA DEV_SQLCL_CONNECTION DEV_EXPECTED_USER
 
 # README.md documents a relative PROJECT_ENV_FILE. Resolve it against the
 # repository root when it is not found relative to the caller's directory, so a
@@ -156,7 +158,8 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
     PROD_MIGRATION_SCHEMA|PROD_MIGRATION_SQLCL_CONNECTION|PROD_MIGRATION_EXPECTED_USER|\
     MIGRATION_APPLY_TIMEOUT_SECONDS|MIGRATION_CHECK_TIMEOUT_SECONDS|MIGRATION_CHECK_BATCH_BYTES|\
     MIGRATION_PREFLIGHT_INVENTORY_RETRIES|\
-    DEV_DBA_SQLCL_CONNECTION|STAGING_DBA_SQLCL_CONNECTION|PROD_DBA_SQLCL_CONNECTION) ;;
+    DEV_DBA_SQLCL_CONNECTION|STAGING_DBA_SQLCL_CONNECTION|PROD_DBA_SQLCL_CONNECTION|\
+    DEV_SCHEMA|DEV_SQLCL_CONNECTION|DEV_EXPECTED_USER) ;;
     *)
       project_env_fail "unsupported setting in $PROJECT_ENV_FILE: $project_env_key"
       return 1 2>/dev/null || exit 1
@@ -188,6 +191,48 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   export "$project_env_key=$project_env_value"
   project_env_seen_keys+=("$project_env_key")
 done < "$PROJECT_ENV_FILE"
+
+# DEV shorthand: DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER are all or none. A profile
+# with none of its own three keys takes the DEV values, and its prefixes default to '*' when absent.
+# A profile with some of its keys keeps today's validation and errors. Runs before the required check.
+project_env_dev_present=0
+for project_env_key in DEV_SCHEMA DEV_SQLCL_CONNECTION DEV_EXPECTED_USER; do
+  for project_env_seen_key in "${project_env_seen_keys[@]}"; do
+    [ "$project_env_seen_key" = "$project_env_key" ] && project_env_dev_present=$((project_env_dev_present + 1))
+  done
+done
+if [ "$project_env_dev_present" -ne 0 ] && [ "$project_env_dev_present" -ne 3 ]; then
+  project_env_fail "configure DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER together"
+  return 1 2>/dev/null || exit 1
+fi
+project_env_fill_from_dev() {
+  # <schema-key> <connection-key> <user-key> [prefixes-key]: copy the DEV values into a profile
+  # that has none of its own three keys. A missing prefixes key defaults to '*'.
+  local schema_key="$1" connection_key="$2" user_key="$3" prefixes_key="${4:-}"
+  local key seen_key own_count=0 prefixes_seen=false
+  for key in "$schema_key" "$connection_key" "$user_key"; do
+    for seen_key in "${project_env_seen_keys[@]}"; do
+      [ "$seen_key" = "$key" ] && own_count=$((own_count + 1))
+    done
+  done
+  [ "$own_count" -eq 0 ] || return 0
+  export "$schema_key=$DEV_SCHEMA" "$connection_key=$DEV_SQLCL_CONNECTION" "$user_key=$DEV_EXPECTED_USER"
+  project_env_seen_keys+=("$schema_key" "$connection_key" "$user_key")
+  if [ -n "$prefixes_key" ]; then
+    for seen_key in "${project_env_seen_keys[@]}"; do
+      [ "$seen_key" = "$prefixes_key" ] && prefixes_seen=true
+    done
+    if [ "$prefixes_seen" != true ]; then
+      export "$prefixes_key=*"
+      project_env_seen_keys+=("$prefixes_key")
+    fi
+  fi
+}
+if [ "$project_env_dev_present" -eq 3 ]; then
+  project_env_fill_from_dev TABLES_SCHEMA TABLES_SQLCL_CONNECTION TABLES_EXPECTED_USER TABLES_PREFIXES
+  project_env_fill_from_dev CODE_SCHEMA CODE_SQLCL_CONNECTION CODE_EXPECTED_USER CODE_PREFIXES
+  project_env_fill_from_dev APEX_PARSING_SCHEMA APEX_SQLCL_CONNECTION APEX_EXPECTED_USER
+fi
 
 if [ "$project_env_apex_release" != 26.2 ]; then
   if [ "${INSTALL_UC_APX+x}" != x ]; then INSTALL_UC_APX=false; fi
@@ -636,9 +681,9 @@ unset project_env_migration_prefix project_env_migration_present project_env_dev
 unset project_env_union project_env_multi project_env_items project_env_item
 unset project_env_known project_env_union_item project_env_selected_known project_env_count_items
 unset project_env_dev_schema project_env_multi_mapping project_env_ords_present project_env_ords_schemas project_env_ords_users project_env_ords_index
-unset project_env_repo_root project_env_apex_release
+unset project_env_repo_root project_env_apex_release project_env_dev_present
 # project_env_fail and project_env_require_single stay defined for callers that
 # refuse an ambiguous schema; the parsing helpers do not.
 unset -f project_env_validate_unique_csv project_env_csv_shape_ok project_env_split_csv \
   project_env_count project_env_check_list project_env_check_aligned project_env_narrow \
-  project_env_match project_env_read_apex_release
+  project_env_match project_env_read_apex_release project_env_fill_from_dev

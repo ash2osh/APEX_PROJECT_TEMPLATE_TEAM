@@ -67,6 +67,9 @@ _BASE_ALLOWED_KEYS = frozenset({
     "DEV_DBA_SQLCL_CONNECTION",
     "STAGING_DBA_SQLCL_CONNECTION",
     "PROD_DBA_SQLCL_CONNECTION",
+    "DEV_SCHEMA",
+    "DEV_SQLCL_CONNECTION",
+    "DEV_EXPECTED_USER",
 }) | frozenset(prefix + "MIGRATION_" + suffix
                for prefix in ("", "STAGING_", "PROD_")
                for suffix in ("SCHEMA", "SQLCL_CONNECTION", "EXPECTED_USER"))
@@ -89,6 +92,16 @@ REQUIRED_KEYS = (
     "APEX_PARSING_SCHEMA",
     "APEX_SQLCL_CONNECTION",
     "APEX_EXPECTED_USER",
+)
+
+# DEV shorthand: all three keys fill the TABLES, CODE and APEX profiles that have none of their own keys.
+DEV_TRIO_KEYS = ("DEV_SCHEMA", "DEV_SQLCL_CONNECTION", "DEV_EXPECTED_USER")
+DEV_TRIO_MESSAGE = "configure DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER together"
+# (profile, schema key, connection key, user key, prefixes key); APEX has no prefixes key.
+DEV_FILLED_PROFILES = (
+    ("TABLES", "TABLES_SCHEMA", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER", "TABLES_PREFIXES"),
+    ("CODE", "CODE_SCHEMA", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER", "CODE_PREFIXES"),
+    ("APEX", "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER", None),
 )
 
 RE_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
@@ -202,6 +215,23 @@ def read_project_env(path: Path) -> dict[str, str]:
 
         values[key] = val
         seen_keys.add(key)
+
+    # DEV shorthand: all three or none. A profile with none of its own keys takes the DEV values, and
+    # its prefixes default to '*' when absent. A profile with some of its keys keeps today's errors.
+    dev_present = [key for key in DEV_TRIO_KEYS if key in seen_keys]
+    if dev_present and len(dev_present) != len(DEV_TRIO_KEYS):
+        raise ConfigError(DEV_TRIO_MESSAGE)
+    if len(dev_present) == len(DEV_TRIO_KEYS):
+        for _profile, schema_key, connection_key, user_key, prefixes_key in DEV_FILLED_PROFILES:
+            if any(key in seen_keys for key in (schema_key, connection_key, user_key)):
+                continue
+            values[schema_key] = values["DEV_SCHEMA"]
+            values[connection_key] = values["DEV_SQLCL_CONNECTION"]
+            values[user_key] = values["DEV_EXPECTED_USER"]
+            seen_keys.update((schema_key, connection_key, user_key))
+            if prefixes_key is not None and prefixes_key not in seen_keys:
+                values[prefixes_key] = "*"
+                seen_keys.add(prefixes_key)
 
     # Required keys verification
     for key in REQUIRED_KEYS:

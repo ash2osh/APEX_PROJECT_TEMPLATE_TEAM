@@ -1,9 +1,14 @@
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
-from scripts.migrate import MigrationApplyError, build_receipt
+from scripts import database_support
+from scripts.db_targets import Target
+from scripts.migrate import MigrationApplyError, _identity_for_receipt, build_receipt
 from scripts.migration_checks import CheckReport
 from scripts.migration_manifest import MigrationManifestError, install_receipt, load_migration, validate_receipt
 from scripts.schema_catalog import SchemaSnapshot
@@ -93,6 +98,40 @@ class MigrationReceiptTests(unittest.TestCase):
             install_receipt(path, {**receipt, "payloadDigest": "changed"})
 
         self.assertEqual(path.read_bytes(), original)
+
+
+class ObservedDatabaseVersionWarningTests(unittest.TestCase):
+    def setUp(self):
+        database_support._warned_versions.clear()
+        self.addCleanup(database_support._warned_versions.clear)
+        self.target = Target("dev", "dev-owner", "APP_DEV", "APP_DEV", "development")
+        self.identity = {
+            "session_user": "APP_DEV", "current_schema": "APP_DEV", "db_name": "DEVDB",
+            "db_unique_name": "DEVDB_UNIQUE", "service_name": "devdb.example.invalid",
+            "container_id": "3", "container_name": "DEVPDB", "edition": "ORA$BASE",
+        }
+
+    def _observe(self, version):
+        identity = dict(self.identity, database_version=version)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            result = _identity_for_receipt(SimpleNamespace(identity=identity), self.target)
+        return result, out.getvalue(), err.getvalue()
+
+    def test_older_database_warns_on_stderr_and_result_is_unchanged(self):
+        result, out, err = self._observe("19.0.0.0")
+        self.assertIn("19.0.0.0", err)
+        self.assertIn("23ai", err)
+        self.assertEqual(out, "")
+        self.assertEqual(result["database_version"], "19.0.0.0")
+        self.assertEqual(result["expected_user"], "APP_DEV")
+        self.assertEqual(result["current_schema"], "APP_DEV")
+
+    def test_supported_database_prints_nothing(self):
+        result, out, err = self._observe("23.26.3.0.0")
+        self.assertEqual(err, "")
+        self.assertEqual(out, "")
+        self.assertEqual(result["database_version"], "23.26.3.0.0")
 
 
 if __name__ == "__main__":
