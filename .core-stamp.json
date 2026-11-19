@@ -1,11 +1,16 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "3d96643634d66848531eeeef1fe8b6ecc38183ba",
+  "coreCommit": "4cbdb77430541d0245ce1b434040ace0227870dc",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
       "sha256": "a94fb8fb00d0dc3cae533f3a2532176a21af4c7f5ce0086bc43d5a9e50bc5dff",
       "executable": false
+    },
+    {
+      "path": "scripts/backup_db.sh",
+      "sha256": "c542809364b244f409abcbb7a6660113dc96f25a1cfd9361455312ffc7c51da5",
+      "executable": true
     },
     {
       "path": "scripts/backup_db.sql",
@@ -24,7 +29,7 @@
     },
     {
       "path": "scripts/baseline_bundles.py",
-      "sha256": "d34700137a748e8f1c663c4f0df912bee4ecc43eeac49bf134d0ef1324c81b74",
+      "sha256": "904d4e69751d42e004615c41ff2307ae09ea128b8a4755ca8dc0b2ca47c963cd",
       "executable": false
     },
     {
@@ -274,7 +279,7 @@
     },
     {
       "path": "scripts/migration_archive.py",
-      "sha256": "23838c2a6dd7d31a2d98170913fa99aebb88c0fb0f16dea84fc7aa8e1bb92a03",
+      "sha256": "0158e03908b20f62dcae8716c847f4f19a9911538e265535812345f6cd3b8381",
       "executable": false
     },
     {
@@ -754,7 +759,7 @@
     },
     {
       "path": "tests/test_baseline_generated_sql.py",
-      "sha256": "19db7fd4c218aabc1a2cac7e7ec431d86158dc8694e13ce2051ef5e3127db9cd",
+      "sha256": "aa89eb374f206e08c78dfaed2365fb7f213931c0275ce4a8a963a84e44f234a6",
       "executable": false
     },
     {
@@ -1008,8 +1013,13 @@
       "executable": false
     },
     {
+      "path": "tests/test_migration_archive.py",
+      "sha256": "2ce2b7bc42217fcad27f81dff09ba8096bf04ce1f5859f3fd3e45f899c1bff12",
+      "executable": false
+    },
+    {
       "path": "tests/test_migration_archive_followups.py",
-      "sha256": "bbec636849f09681981d23a9ed28eaea7a8673be3c6336430e9d2d549a0e37a4",
+      "sha256": "afa8638c3433e7da8e27f00f53f0d4b9c0adb97a55f93648e2a62bd85d320634",
       "executable": false
     },
     {
@@ -1070,6 +1080,11 @@
     {
       "path": "tests/test_ords_profile.py",
       "sha256": "b341507da6d2ba28bfc4d49946a3601487624729e8f17b970866796977a93fbd",
+      "executable": false
+    },
+    {
+      "path": "tests/test_path_utils.py",
+      "sha256": "9287fa559d49e9befc6f8b295354048865811885bf932d12d312f9636af8ca03",
       "executable": false
     },
     {
@@ -1195,6 +1210,11 @@
     {
       "path": "tests/test_verify_checks.py",
       "sha256": "bdccd81f28924b4cff5393a28f7220b91f22c3efe6a85b58b3affe759128a5fb",
+      "executable": false
+    },
+    {
+      "path": "tests/test_windows_support_shared.py",
+      "sha256": "4588284ff44441262aabbdd6dec4439fa23b5cca7680f53833d957cbcdf5653e",
       "executable": false
     },
     {

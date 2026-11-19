@@ -316,8 +316,9 @@ class ColumnFlagTests(unittest.TestCase):
 
     scripts/compare_env_catalog.sql writes hidden and virtual as Y/N and user_generated as YES/NO, and other producers
     use YES/NO, so both encodings are tested. A system-generated hidden column (SYS_NC...$) is skipped. A virtual column,
-    or a hidden column the user created, is refused rather than added as an ordinary column. A virtual flag that
-    differs between the two schemas is refused for a column that exists in both.
+    or a hidden column whose user_generated flag is missing, is refused. A user-generated INVISIBLE column is added with
+    INVISIBLE and checked with HIDDEN_COLUMN = 'YES'. A virtual flag or an invisible state that differs between the two
+    schemas is refused for a column that exists in both.
     """
 
     config = {"schemas": ["APP_DEV"], "prefixes": ["APP_"], "excludedObjects": [], "sequenceMappings": []}
@@ -343,6 +344,13 @@ class ColumnFlagTests(unittest.TestCase):
         snapshot = SchemaSnapshot({}, {}, {}, {}, "", "")
         return baseline._structure_bundle(self.config, "APP_DEV", "APP_TEST", source, target, snapshot)
 
+    def _definition_check(self, checks: dict, column: str) -> dict:
+        """Return the one column-definition postcondition for APP_ITEMS.<column>; its id carries a hash suffix."""
+        prefix = "column-def-" + baseline_bundles._safe_check_slug("APP_ITEMS-" + column)
+        matches = [check for check in checks["postconditions"] if check["id"].startswith(prefix)]
+        self.assertEqual(1, len(matches), f"no single column-definition check for {column}")
+        return matches[0]
+
     def test_a_system_hidden_column_is_skipped_for_both_flag_encodings(self) -> None:
         for hidden, user_generated in (("Y", "N"), ("YES", "NO")):
             with self.subTest(hidden=hidden, user_generated=user_generated):
@@ -362,16 +370,65 @@ class ColumnFlagTests(unittest.TestCase):
                 ):
                     self._structure([self._column("ITEM_ID"), self._column("TOTAL", virtual=flag)], [self._column("ITEM_ID")])
 
-    def test_a_missing_hidden_user_column_is_refused_and_not_guessed(self) -> None:
-        for hidden, user_generated in (("Y", "YES"), ("YES", "YES"), ("Y", None)):
-            with self.subTest(hidden=hidden, user_generated=user_generated):
+    def test_a_hidden_column_with_no_user_generated_flag_is_still_refused_and_not_guessed(self) -> None:
+        for hidden in ("Y", "YES"):
+            with self.subTest(hidden=hidden):
                 with self.assertRaisesRegex(
                     baseline.BaselineError, r"hidden column APP_ITEMS\.NOTE_X needs a reviewed migration",
                 ):
                     self._structure(
-                        [self._column("ITEM_ID"), self._column("NOTE_X", hidden=hidden, user_generated=user_generated)],
+                        [self._column("ITEM_ID"), self._column("NOTE_X", hidden=hidden, user_generated=None)],
                         [self._column("ITEM_ID")],
                     )
+
+    def test_a_missing_invisible_user_column_is_added_invisible_and_checked(self) -> None:
+        for hidden, user_generated in (("Y", "YES"), ("YES", "TRUE")):
+            with self.subTest(hidden=hidden, user_generated=user_generated):
+                steps, checks = self._structure(
+                    [self._column("ITEM_ID"), self._column("NOTE_X", hidden=hidden, user_generated=user_generated)],
+                    [self._column("ITEM_ID")],
+                )
+
+                sql = steps["001-structure-delta.sql"]
+                self.assertIn('ADD ("NOTE_X" NUMBER INVISIBLE)', sql)
+                post = self._definition_check(checks, "NOTE_X")
+                self.assertIn("HIDDEN_COLUMN = 'YES'", post["sql"])
+
+    def test_a_visible_column_has_no_invisible_clause_or_hidden_predicate(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("ITEM_NAME")], [self._column("ITEM_ID")],
+        )
+
+        self.assertNotIn("INVISIBLE", steps["001-structure-delta.sql"])
+        post = self._definition_check(checks, "ITEM_NAME")
+        self.assertNotIn("HIDDEN_COLUMN", post["sql"])
+
+    def test_an_invisible_column_present_on_both_sides_with_equal_visibility_generates_nothing(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("NOTE_X", hidden="Y")],
+            [self._column("ITEM_ID"), self._column("NOTE_X", hidden="YES")],
+        )
+
+        self.assertEqual({}, steps)
+        self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_an_existing_column_whose_visibility_differs_is_refused(self) -> None:
+        for source_hidden, target_hidden in (("Y", "N"), ("N", "YES")):
+            with self.subTest(source_hidden=source_hidden, target_hidden=target_hidden):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError, r"column visibility change needs a reviewed migration: APP_ITEMS\.NOTE_X",
+                ):
+                    self._structure(
+                        [self._column("NOTE_X", hidden=source_hidden)],
+                        [self._column("NOTE_X", hidden=target_hidden)],
+                    )
+
+    def test_a_virtual_column_is_still_refused_even_when_hidden(self) -> None:
+        with self.assertRaisesRegex(baseline.BaselineError, r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration"):
+            self._structure(
+                [self._column("ITEM_ID"), self._column("TOTAL", hidden="Y", virtual="Y")],
+                [self._column("ITEM_ID")],
+            )
 
     def test_an_existing_column_whose_virtual_flag_differs_is_refused(self) -> None:
         for source_flag, target_flag in (("Y", "N"), ("NO", "YES")):

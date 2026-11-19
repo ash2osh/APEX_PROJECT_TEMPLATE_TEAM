@@ -1,4 +1,4 @@
-"""Filesystem path helpers keep Windows short-name aliases inside their root."""
+"""Path containment handles equivalent Windows short-name aliases."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ class RelativeToRootTests(unittest.TestCase):
             def samefile(left: str | Path, right: str | Path) -> bool:
                 return Path(left) == alias and Path(right) == root
 
+            self.assertIsNotNone(relative_to_root, "the short-path-aware containment helper is missing")
+            assert relative_to_root is not None
             with patch("scripts.path_utils.os.path.samefile", side_effect=samefile):
                 self.assertEqual(Path("scratch/report.json"), relative_to_root(candidate, root))
 
@@ -38,7 +40,7 @@ class RelativeToRootTests(unittest.TestCase):
 
             self.assertEqual(Path("scratch/report.json"), relative_to_root(candidate, root))
 
-    def test_rejects_an_unrelated_path(self) -> None:
+    def test_rejects_a_path_outside_the_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "root"
             outside = Path(temporary) / "outside" / "file.json"

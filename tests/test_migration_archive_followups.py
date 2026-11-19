@@ -162,5 +162,75 @@ class ReceiptScheduleMatchTests(unittest.TestCase):
         ))
 
 
+class ConcurrentIndexChangeTests(unittest.TestCase):
+    """An index changed by another archive run after validation must not be overwritten."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "migrations").mkdir()
+        self.relative = "migrations/APP_DEV/2026-10-01_concurrent-family-r001"
+        self.folder = add_folder(self.root, self.relative)
+        self.destination = self.root / "migrations-archive/APP_DEV" / self.folder.name
+        self.index = self.root / "migrations/APP_DEV/.archived.json"
+        self.other_run_index = (
+            b'{"archived": [{"folder": "2026-09-01_other-r001", "family": "other", "revision": 1}], "schemaVersion": 1}\n'
+        )
+
+    def require_archive(self):
+        self.assertIsNotNone(archive, "migration archiving is not implemented")
+        return archive
+
+    def assert_other_run_index_kept_and_folder_retained(self, error: str) -> None:
+        # The existing rollback keeps a moved folder in the archive when the index is not in its planned state
+        # (it is listed for recovery) rather than moving it back; the other run's index bytes stay untouched.
+        self.assertIn("archived folders retained for recovery", error)
+        self.assertFalse(self.folder.exists(), "the folder is retained in the archive, not moved back")
+        self.assertTrue(self.destination.is_dir(), "the archived folder must still be at its destination")
+        self.assertEqual(self.index.read_bytes(), self.other_run_index, "the other run's index bytes must be untouched")
+
+    def test_index_changed_after_validation_aborts_before_the_write(self) -> None:
+        api = self.require_archive()
+        self.index.parent.mkdir(parents=True, exist_ok=True)
+        self.index.write_bytes(b'{"archived": [], "schemaVersion": 1}\n')
+        real_replace = os.replace
+        changed = []
+
+        def move_then_let_another_run_finish(source, destination):
+            real_replace(source, destination)
+            if not changed and Path(destination) == self.destination:
+                changed.append(True)
+                self.index.write_bytes(self.other_run_index)
+
+        with patch.object(api.os, "replace", new=move_then_let_another_run_finish):
+            with self.assertRaises(api.MigrationArchiveError) as caught:
+                api.archive_migrations(self.root, [self.relative], yes=True)
+
+        self.assertTrue(changed, "the other run's index change was not reached")
+        self.assertIn("archived index changed while archiving; rerun the archive", str(caught.exception))
+        self.assert_other_run_index_kept_and_folder_retained(str(caught.exception))
+
+    def test_index_created_after_validation_is_not_overwritten(self) -> None:
+        api = self.require_archive()
+        self.index.parent.mkdir(parents=True, exist_ok=True)
+        real_replace = os.replace
+        changed = []
+
+        def move_then_create_index(source, destination):
+            real_replace(source, destination)
+            if not changed and Path(destination) == self.destination:
+                changed.append(True)
+                self.index.write_bytes(self.other_run_index)
+
+        with patch.object(api.os, "replace", new=move_then_create_index):
+            with self.assertRaises(api.MigrationArchiveError) as caught:
+                api.archive_migrations(self.root, [self.relative], yes=True)
+
+        self.assertTrue(changed, "the other run's index creation was not reached")
+        self.assertIn("archived index changed while archiving; rerun the archive", str(caught.exception))
+        self.assert_other_run_index_kept_and_folder_retained(str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -827,6 +827,10 @@ def execute_archive_plan(plan: ArchivePlan) -> None:
             moved.append((entry.folder, entry.destination))
 
         for index in plan.indexes:
+            # Another archive run may have finished since validation; writing now would drop its records.
+            current_index = index.path.read_bytes() if index.path.exists() else None
+            if current_index != index.original_bytes:
+                raise MigrationArchiveError("archived index changed while archiving; rerun the archive")
             _atomic_write(index.path, archive_bytes_by_path[index.path])
     except KeyboardInterrupt:
         rollback_errors, retained = _roll_back_archive(plan, moved, created_directories, archive_bytes_by_path)

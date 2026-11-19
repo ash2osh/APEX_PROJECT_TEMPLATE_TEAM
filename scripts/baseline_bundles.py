@@ -212,11 +212,15 @@ def _type_owner(row: Mapping, source_schema: str | None, target_schema: str | No
 def _column_sql(row: Mapping, source_schema: str | None = None, target_schema: str | None = None) -> str:
     owner = _type_owner(row, source_schema, target_schema)
     if owner is None:
-        return f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
-    type_name = row.get("data_type")
-    if not isinstance(type_name, str) or not type_name:
-        raise baseline.BaselineError(f"column {row.get('table_name')}.{row.get('name')} has invalid data_type: {type_name!r}")
-    return f"{_sql_identifier(str(row['name']))} {_sql_identifier(owner)}.{_sql_identifier(type_name)}"
+        definition = f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
+    else:
+        type_name = row.get("data_type")
+        if not isinstance(type_name, str) or not type_name:
+            raise baseline.BaselineError(f"column {row.get('table_name')}.{row.get('name')} has invalid data_type: {type_name!r}")
+        definition = f"{_sql_identifier(str(row['name']))} {_sql_identifier(owner)}.{_sql_identifier(type_name)}"
+    if _is_invisible(row):
+        definition += " INVISIBLE"
+    return definition
 
 
 def _column_definition_check(schema: str, row: Mapping, source_schema: str | None = None) -> dict:
@@ -325,6 +329,9 @@ def _column_definition_check(schema: str, row: Mapping, source_schema: str | Non
 
     else:
         predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+
+    if _is_invisible(row):
+        predicates.append("HIDDEN_COLUMN = 'YES'")
 
     where_clause = " AND ".join(predicates)
     sql = f"SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_COLS WHERE {where_clause}) THEN 1 ELSE 0 END FROM DUAL"
@@ -953,6 +960,20 @@ def _column_kind(row: Mapping) -> str:
     return "ordinary"
 
 
+def _is_invisible(row: Mapping) -> bool:
+    """True for a user-created INVISIBLE column: hidden, user generated and not virtual.
+
+    A system-generated hidden column (user_generated false) and a hidden column whose user_generated flag is missing are
+    not invisible user columns, so they never match here.
+    """
+    where = f"column {row.get('table_name')}.{row.get('name')}"
+    return (
+        _column_flag(row, "hidden", where) is True
+        and _column_flag(row, "user_generated", where) is True
+        and _column_flag(row, "virtual", where) is not True
+    )
+
+
 def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, source: Mapping, target: Mapping, snapshot: SchemaSnapshot) -> tuple[dict[str, str], dict]:
     left, right = source["sections"], target["sections"]
     source_tables = {row["name"]: row for row in left.get("tables", []) if baseline._schema_filter(config, source_schema, row.get("name", ""))}
@@ -1002,7 +1023,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
                 raise baseline.BaselineError(
                     f"virtual column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture its expression)"
                 )
-            if kind == "hidden":
+            if kind == "hidden" and not _is_invisible(row):
                 raise baseline.BaselineError(
                     f"hidden column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture how Oracle represents it)"
                 )
@@ -1035,6 +1056,8 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             where = f"column {table_name}.{column_name}"
             if (_column_flag(row, "virtual", where) is True) != (_column_flag(existing, "virtual", where) is True):
                 raise baseline.BaselineError(f"column virtual/stored change needs a reviewed data migration: {table_name}.{column_name}")
+            if _is_invisible(row) != _is_invisible(existing):
+                raise baseline.BaselineError(f"column visibility change needs a reviewed migration: {table_name}.{column_name}")
             if row.get("nullable") == "N" and existing.get("nullable") == "Y":
                 to_make_not_null.add(key)
                 preconditions.append(_count_check(
