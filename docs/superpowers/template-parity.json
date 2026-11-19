@@ -379,10 +379,10 @@
     },
     "scripts/compare_env_catalog.sql": {
       "status": "feature",
-      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply. Follow-up 2026-11-20: both lines now capture `virtual_expression` (DATA_DEFAULT_VC when the database has it, NULL otherwise) in the columns section; the same change, so the remaining difference is unchanged.",
+      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply. Follow-up 2026-11-20: both lines now capture `virtual_expression` (DATA_DEFAULT_VC when the database has it, NULL otherwise) in the columns section; the same change, so the remaining difference is unchanged. The columns section also carries internal_column_id (the position evidence of an invisible column) on both lines.",
       "blobs": [
-        "5fb1d7ba419f80a696addf4aad526ae416e81d67",
-        "13152d39a829b4881f721af55ab3432381ce35c0"
+        "f18f3ac8511b3ff7b2a0aa33fb74fde9608b4b8e",
+        "b4ac0629f77cfae9c2437057b8c4214938bbba5b"
       ]
     },
     "scripts/deploy.sh": {
@@ -691,10 +691,10 @@
     },
     "tests/test_compare_env.py": {
       "status": "intended",
-      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines. Follow-up 2026-11-20: both lines pin the virtual_expression probe, token and key in the catalog SQL.",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines. Follow-up 2026-11-20: both lines pin the virtual_expression probe, token and key in the catalog SQL. Both lines test that an invisible user column is accepted with a positive internal_column_id and refused without one.",
       "blobs": [
-        "2d993f776d43c4312f0928f753417f0de343bef4",
-        "a57730bed4e47767cab62fc18767d691e11211be"
+        "e5be1fd1ef7d9b523ce4415b419cdb8d803f715f",
+        "15a7b38b69b4ca0d16f9bd04e99eb735092ff24f"
       ]
     },
     "tests/test_deployment_descriptor.py": {
