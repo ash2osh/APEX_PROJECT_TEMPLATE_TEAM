@@ -20,8 +20,9 @@ from scripts.db_targets import Target
 from scripts.migrate import MigrationApplyError, _assert_check_identity, _attempt_event, _confirm_from_terminal, _verify_receipts_and_attempts, apply_batch, apply_folder, main
 from scripts.migration_attempts import write_attempt_event
 from scripts.migration_checks import CheckReport, analyze_batch, run_checks
-from scripts.migration_manifest import load_batch, validate_receipt
+from scripts.migration_manifest import install_receipt, load_batch, validate_receipt
 from scripts.migration_revision import inspect_migration_lock
+from scripts.release_ownership import TargetWriterBusy, target_writer_lease
 from scripts.schema_catalog import InventoryChangedError, ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
@@ -839,6 +840,82 @@ class MigrateCliTests(unittest.TestCase):
 
         self.assertEqual(second, 2)
         self.assertEqual(len([call for call in fake.calls if call[0] == "apply"]), apply_count)
+
+    def test_migration_completed_while_confirmation_waits_blocks_the_confirmed_replay(self):
+        folder = self.add_folder(
+            "2026-09-28_insert-once-r001",
+            {"001-insert.sql": "INSERT INTO ORDERS (ID) VALUES (1);\n"},
+            preconditions=[{"id": "orders-empty", "sql": "SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM ORDERS", "expected": 1}],
+            postconditions=[{"id": "one-order", "sql": "SELECT COUNT(*) FROM ORDERS", "expected": 1}],
+        )
+        migrations = self.load(folder.name)
+        target = self.target("staging")
+        fake = FakeDatabase(target)
+
+        def finish_other_run(_prompt):
+            first, _ = self.apply(migrations, target, fake=fake, confirm_target="STAGINGDB_UNIQUE")
+            self.assertEqual(first, 0)
+            return True
+
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            status, _ = self.apply(migrations, target, fake=fake, confirm=finish_other_run)
+
+        self.assertEqual(status, 2)
+        self.assertIn("already has a verified staging receipt", output.getvalue())
+        self.assertEqual(sum(call[0] == "apply" for call in fake.calls), 1)
+        self.assertTrue((folder / "status.staging.json").is_file())
+
+    def test_target_writer_lease_refuses_before_sql_and_releases_after_receipt(self):
+        folder = self.add_folder("2026-09-28_create-once-r001", {"001-create.sql": "CREATE TABLE ONCE_T (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        target = self.target()
+        fake = FakeDatabase(target)
+        scope = {"dbUniqueName": "DEVDB_UNIQUE", "containerId": "3", "schema": target.schema, "edition": "ORA$BASE"}
+
+        output = io.StringIO()
+        with target_writer_lease(self.root, scope, {"purpose": "other writer"}), contextlib.redirect_stderr(output):
+            status, _ = self.apply(migrations, target, fake=fake)
+
+        self.assertEqual(status, 2)
+        self.assertIn("another local run owns this target scope", output.getvalue())
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+        self.assertFalse((folder / "status.dev.json").exists())
+
+        def install_under_lease(path, receipt):
+            with self.assertRaises(TargetWriterBusy):
+                with target_writer_lease(self.root, scope, {"purpose": "other writer"}):
+                    self.fail("migration released the lease before installing its receipt")
+            install_receipt(path, receipt)
+
+        status, _ = self.apply(migrations, target, fake=fake, receipt_installer=install_under_lease)
+
+        self.assertEqual(status, 0)
+        self.assertTrue((folder / "status.dev.json").is_file())
+        with target_writer_lease(self.root, scope, {"purpose": "next writer"}):
+            pass
+
+    def test_migration_reuses_only_an_active_rollout_lease_for_its_observed_target(self):
+        folder = self.add_folder("2026-09-28_create-once-r001", {"001-create.sql": "CREATE TABLE ONCE_T (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        target = self.target()
+        fake = FakeDatabase(target)
+        scope = {"dbUniqueName": "DEVDB_UNIQUE", "containerId": "3", "schema": target.schema, "edition": "ORA$BASE"}
+
+        with target_writer_lease(self.root, {**scope, "containerId": "4"}, {"purpose": "rollout"}) as wrong:
+            with contextlib.redirect_stderr(io.StringIO()) as output:
+                status, _ = self.apply(migrations, target, fake=fake, writer_lease=wrong)
+        self.assertEqual(status, 2)
+        self.assertIn("does not cover the observed migration target", output.getvalue())
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+
+        with target_writer_lease(self.root, scope, {"purpose": "rollout"}) as lease:
+            status, _ = self.apply(migrations, target, fake=fake, writer_lease=lease)
+            self.assertEqual(status, 0)
+            self.assertTrue((folder / "status.dev.json").is_file())
+            with self.assertRaises(TargetWriterBusy):
+                with target_writer_lease(self.root, scope, {"purpose": "unrelated writer"}):
+                    self.fail("migration released the owning rollout lease")
 
     def test_source_mutation_after_review_blocks_first_write(self):
         folder = self.add_folder("2026-09-28_create-frozen-r001", {"001-create-t.sql": "CREATE TABLE T (ID NUMBER);\n"})

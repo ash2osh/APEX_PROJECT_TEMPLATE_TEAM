@@ -296,7 +296,12 @@ def _build(args, config: Mapping, values: Mapping[str, str], scratch: Path) -> N
             granular_bundles = (
                 ("baseline-structure", "Structure delta generated from complete source and target catalog observations.", structure_steps, structure_checks),
                 ("baseline-grants", "Grouped additive object grants generated from complete source and target grant observations.", grants_steps, grants_checks),
-                ("baseline-code", "Exact stored source, per-unit compiler settings, and name-based source checks.", code_steps, code_checks),
+                (
+                    "baseline-code",
+                    "Exact stored source, per-unit compiler settings, and name-based source checks. "
+                    "The first SQL step checks the captured target and its code before the generated DDL.",
+                    code_steps, code_checks,
+                ),
             )
             data_bundle = None
             data_differences: Sequence[str] = ()

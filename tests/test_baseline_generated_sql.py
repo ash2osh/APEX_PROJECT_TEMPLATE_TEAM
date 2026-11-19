@@ -7,6 +7,8 @@ before its variables (PLS-00103). The build modules must also import in any orde
 
 from __future__ import annotations
 
+import re
+import sqlite3
 import subprocess
 import sys
 import unittest
@@ -19,6 +21,7 @@ if _TESTS_DIR not in sys.path:
 import _no_real_sqlcl  # noqa: F401, E402 (tests must never fall through to installed SQLcl)
 from scripts import baseline, baseline_bundles
 from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot
+from scripts.sqlcl_transport import lint_sqlcl_transport
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -310,11 +313,116 @@ class TableStatementTests(unittest.TestCase):
 
 class CompileStepTests(unittest.TestCase):
     def test_the_compile_block_declares_its_variables_before_the_local_function(self) -> None:
-        sql = baseline._compile_all_step("APP_STAGE", ["APP_"])
+        sql = baseline._compile_all_step("APP_STAGE", [("PACKAGE", "APP_PKG")])
 
         declarations = sql.split("DECLARE\n", 1)[1].split("BEGIN\n", 1)[0]
-        self.assertLess(declarations.index("l_name VARCHAR2"), declarations.index("FUNCTION quoted"))
+        self.assertLess(declarations.index("l_name VARCHAR2"), declarations.index("FUNCTION invalid_count"))
         self.assertEqual(1, declarations.count("FUNCTION"))
+
+
+class CodeBeforeStateTests(unittest.TestCase):
+    def test_generated_code_checks_the_reviewed_scope_and_before_state_first(self) -> None:
+        settings = {
+            "plsql_optimize_level": "2", "plsql_code_type": "INTERPRETED", "plsql_debug": "FALSE",
+            "plsql_warnings": "DISABLE:ALL", "plsql_ccflags": None, "nls_length_semantics": "BYTE",
+            "plscope_settings": "IDENTIFIERS:NONE",
+        }
+        spec = {"name": "Pkg'Mixed", "type": "PACKAGE"}
+        body = {"name": "Pkg'Mixed", "type": "PACKAGE BODY"}
+        procedure = {"name": "Added", "type": "PROCEDURE"}
+        before_view = ' \nCREATE OR REPLACE VIEW "APP_STAGE"."View Mixed" AS SELECT \'x-\n'
+        before_view += '  \n' + 'ħ🌺' * 10000 + "' X FROM DUAL\n "
+        source = {"sections": {
+            "baseline-source": [
+                {**spec, "line": 1, "text": 'PACKAGE "Pkg\'Mixed" AS PROCEDURE p; END;\n'},
+                {**body, "line": 1, "text": 'PACKAGE BODY "Pkg\'Mixed" AS PROCEDURE p IS BEGIN NULL; END; END;\n'},
+                {**procedure, "line": 1, "text": 'PROCEDURE "Added" AS BEGIN NULL; END;\n'},
+            ],
+            "baseline-settings": [{**unit, **settings} for unit in (spec, body, procedure)],
+            "baseline-views": [
+                {"name": "View Mixed", "ddl": 'CREATE OR REPLACE VIEW "APP_DEV"."View Mixed" AS SELECT 2 X FROM DUAL'},
+                {"name": "Added View", "ddl": 'CREATE VIEW "APP_DEV"."Added View" AS SELECT 1 X FROM DUAL'},
+            ],
+        }}
+        target = {
+            "identity": {
+                "session_user": "CAPTURE_LOGIN", "current_schema": "APP_STAGE", "db_name": "CDB",
+                "db_unique_name": "STAGE_DB", "service_name": "STAGE_SERVICE", "container_id": "5",
+                "container_name": "STAGE_PDB", "edition": "RELEASE_2", "database_version": "23.0",
+            },
+            "sections": {
+                "baseline-source": [
+                    {**spec, "line": 1, "text": 'PACKAGE "Pkg\'Mixed" AS PROCEDURE old; END;\n'},
+                    source["sections"]["baseline-source"][1],
+                ],
+                "baseline-settings": [{**spec, **settings, "plsql_optimize_level": "1"}, {**body, **settings}],
+                "baseline-views": [{"name": "View Mixed", "ddl": before_view}],
+            },
+        }
+
+        steps, checks = baseline_bundles._code_bundle({}, "APP_DEV", "APP_STAGE", source, target)
+
+        self.assertEqual(next(iter(steps)), "001-verify-code-before.sql")
+        guard = steps["001-verify-code-before.sql"]
+        for attribute, value in (
+            ("DB_UNIQUE_NAME", "STAGE_DB"), ("CON_ID", "5"), ("CON_NAME", "STAGE_PDB"),
+            ("CURRENT_SCHEMA", "APP_STAGE"), ("CURRENT_EDITION_NAME", "RELEASE_2"),
+        ):
+            self.assertRegex(guard, rf"(?m)^.*SYS_CONTEXT\('USERENV', '{attribute}'\).*'{value}'")
+        self.assertNotIn("CAPTURE_LOGIN", guard)
+        self.assertNotIn("STAGE_SERVICE", guard)
+        checks_sql = "\n".join(check["sql"] for check in checks["preconditions"])
+        self.assertIn("PROCEDURE old", checks_sql)
+        self.assertIn("PLSQL_OPTIMIZE_LEVEL = '1'", checks_sql)
+        self.assertIn("PROCEDURE p IS BEGIN", checks_sql)
+        self.assertRegex(checks_sql, r"(?m)COUNT\(\*\).*'Added'.* = 0 THEN 1")
+        self.assertRegex(checks_sql, r"(?m)COUNT\(\*\).*'Added View'.* = 0 THEN 1")
+        self.assertIn("DBMS_METADATA.GET_DDL('VIEW', 'View Mixed', 'APP_STAGE')", guard)
+        self.assertIn("DBMS_LOB.COMPARE", guard)
+        guard_values = re.findall(r"append_hex\('([0-9A-F]+)'\)", guard)
+        self.assertIn(before_view, b"".join(bytes.fromhex(value) for value in guard_values).decode("utf-8"))
+        self.assertEqual((), lint_sqlcl_transport(guard, "direct"))
+        compile_step = next(sql for name, sql in steps.items() if name.endswith("compile-all.sql"))
+        self.assertIn("'Pkg''Mixed', 'PACKAGE BODY'", compile_step)
+        self.assertIn("REUSE SETTINGS", compile_step)
+        self.assertNotIn("ALTER SESSION SET PLSQL_", compile_step)
+
+        # Exercise the scalar before-checks against dictionary-shaped rows.
+        # Oracle-specific identity and CLOB steps are inspected separately above.
+        with sqlite3.connect(":memory:") as catalog:
+            catalog.executescript("""
+                ATTACH DATABASE ':memory:' AS SYS;
+                CREATE TABLE SYS.DUAL (dummy TEXT);
+                INSERT INTO SYS.DUAL VALUES ('X');
+                CREATE TABLE SYS.ALL_OBJECTS (owner TEXT, object_name TEXT, object_type TEXT, subobject_name TEXT);
+                INSERT INTO SYS.ALL_OBJECTS VALUES ('APP_STAGE', 'View Mixed', 'VIEW', NULL);
+                CREATE TABLE SYS.ALL_SOURCE (owner TEXT, name TEXT, type TEXT, line INTEGER, text TEXT);
+                CREATE TABLE SYS.ALL_PLSQL_OBJECT_SETTINGS (
+                    owner TEXT, name TEXT, type TEXT, plsql_optimize_level INTEGER, plsql_code_type TEXT,
+                    plsql_debug TEXT, plsql_warnings TEXT, plsql_ccflags TEXT, nls_length_semantics TEXT, plscope_settings TEXT
+                );
+            """)
+            for row in target["sections"]["baseline-source"]:
+                catalog.execute(
+                    "INSERT INTO SYS.ALL_SOURCE VALUES ('APP_STAGE', ?, ?, ?, ?)",
+                    (row["name"], row["type"], row["line"], row["text"]),
+                )
+            for row in target["sections"]["baseline-settings"]:
+                catalog.execute(
+                    "INSERT INTO SYS.ALL_PLSQL_OBJECT_SETTINGS VALUES ('APP_STAGE', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (row["name"], row["type"], *(row[field] for field in settings)),
+                )
+
+            def failed_checks() -> set[str]:
+                return {check["id"].split("-", 2)[1] for check in checks["preconditions"] if catalog.execute(check["sql"]).fetchone() != (1,)}
+
+            self.assertEqual(set(), failed_checks())
+            catalog.execute("UPDATE SYS.ALL_SOURCE SET text = REPLACE(text, 'old', 'OLD') WHERE type = 'PACKAGE'")
+            self.assertEqual({"source"}, failed_checks())
+            catalog.execute("UPDATE SYS.ALL_PLSQL_OBJECT_SETTINGS SET plsql_optimize_level = 3 WHERE type = 'PACKAGE BODY'")
+            self.assertEqual({"source", "settings"}, failed_checks())
+            catalog.execute("INSERT INTO SYS.ALL_OBJECTS VALUES ('APP_STAGE', 'Added', 'PROCEDURE', NULL)")
+            self.assertEqual({"source", "settings", "absent"}, failed_checks())
 
 
 class ImportOrderTests(unittest.TestCase):

@@ -511,11 +511,14 @@ class BaselineBuilderUnitTests(unittest.TestCase):
         self.assertIn("SEARCH_CONDITION_VC", sql)
         self.assertIn('"ITEM_ID" IS NOT NULL', sql)
 
-    def test_compile_all_without_prefixes_covers_every_invalid_configured_unit(self) -> None:
-        sql = baseline._compile_all_step("APP_STAGE", [])
+    def test_compile_step_preserves_settings_and_limits_retries_to_reviewed_units(self) -> None:
+        sql = baseline._compile_all_step("APP_STAGE", [("PACKAGE BODY", "APP_ITEMS_PKG"), ("VIEW", "APP_ITEMS_V")])
 
-        self.assertIn("OWNER = 'APP_STAGE' AND STATUS = 'INVALID' AND (1 = 1)", sql)
-        self.assertIn("configured stored units remain invalid after compile passes", sql)
+        self.assertIn("owner = 'APP_STAGE' AND status = 'INVALID'", sql)
+        self.assertIn("('APP_ITEMS_PKG', 'PACKAGE BODY')", sql)
+        self.assertIn("('APP_ITEMS_V', 'VIEW')", sql)
+        self.assertIn("COMPILE BODY REUSE SETTINGS", sql)
+        self.assertIn("reviewed stored units remain invalid after compile passes", sql)
 
     def test_identity_and_sequence_steps_move_generators_without_system_value_override(self) -> None:
         identity = baseline._sync_identity_sql("APP_STAGE", {
@@ -871,6 +874,11 @@ class BaselineBuilderUnitTests(unittest.TestCase):
             },
         }
         target = {
+            "identity": {
+                "session_user": "APP_STAGE", "current_schema": "APP_STAGE",
+                "db_name": "STAGE", "db_unique_name": "STAGE_UNIQUE", "service_name": "STAGE_SERVICE",
+                "container_id": "3", "container_name": "STAGE_PDB", "edition": "ORA$BASE", "database_version": "19.0",
+            },
             "source-units": {},
             "settings": {},
             "sections": {"baseline-views": []},
@@ -878,8 +886,11 @@ class BaselineBuilderUnitTests(unittest.TestCase):
 
         steps, checks = baseline._code_bundle(config, "APP_DEV", "APP_STAGE", source, target)
 
-        self.assertEqual(len(steps), 1)
-        self.assertIn("001-view-v-items-", list(steps.keys())[0])
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(next(iter(steps)), "001-verify-code-before.sql")
+        self.assertIn("002-view-v-items-", list(steps)[1])
+        self.assertEqual(len(checks["preconditions"]), 1)
+        self.assertTrue(checks["preconditions"][0]["id"].startswith("before-absent-v-items-"))
         # compile-all is NOT emitted when only views change (no stored units)
         self.assertFalse(any("compile-all" in s for s in steps))
 
@@ -1284,15 +1295,8 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
         self.assertEqual(code, 0, output + error)
         self.assertEqual(3, len(list((self.root / "migrations" / "APP_STAGE").iterdir())))
 
-    def test_no_bundle_preserves_existing_generated_bytes(self) -> None:
+    def test_generated_code_guards_preserve_existing_ddl_and_other_bundle_bytes(self) -> None:
         expected = {
-            "baseline-code": {
-                "001-source-pkg-alpha-package-62c56260.sql": "54760bcde770a7c1c44bb2a01dcf08ffec70c4fc4ca53e073cdd73bbd57c08bb",
-                "002-view-v-alpha-c84bc776.sql": "8fa2d6c64ae5ae045a97e66185ac6df772b95ab9a72bd65a0fbe6fa12e05b408",
-                "003-compile-all.sql": "bb599bf90e13d3f754e3fb1d07fa444c7931f9cae4f62c4fd9049b64b229fc33",
-                "README.md": "e6be64748b36edf32d8b43f0d16421921aadfc0ac668a257783cbc75976693bf",
-                "checks.json": "269b26513eb4040d6b0599d472f2d81f1ca57426a7d2e5008ca271e9bb212e0c",
-            },
             "baseline-grants": {
                 "001-object-grants.sql": "b33b8ba6a46f8214f2348ced90a82d4800bb11964fe891ff23db593ac5b90de4",
                 "README.md": "a9d0fae6e5298896a9833725b9e633181ab3d27e4df5d12d950222d835ba18de",
@@ -1317,6 +1321,11 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
                 for path in folder.iterdir()
             }
         self.assertEqual(len(folders), 3, output)
+        code_payload = observed.pop("baseline-code")
+        self.assertIn("001-verify-code-before.sql", code_payload)
+        self.assertEqual(code_payload["002-source-pkg-alpha-package-62c56260.sql"], "54760bcde770a7c1c44bb2a01dcf08ffec70c4fc4ca53e073cdd73bbd57c08bb")
+        self.assertEqual(code_payload["003-view-v-alpha-c84bc776.sql"], "8fa2d6c64ae5ae045a97e66185ac6df772b95ab9a72bd65a0fbe6fa12e05b408")
+        self.assertIn("004-compile-all.sql", code_payload)
         self.assertEqual(observed, expected)
 
     def test_build_refuses_same_observed_scope_even_with_service_aliases(self) -> None:

@@ -1124,7 +1124,16 @@ class FeatureRolloutTests(unittest.TestCase):
         return status, report, migrate
 
     def test_prepared_migration_step_is_a_covered_checkpoint_in_a_verified_release(self) -> None:
-        status, report, migrate = self._run_migration_release(self._migration_release_patches(), label="covered-migration")
+        from scripts import release_ownership
+
+        def migrate_under_the_existing_lease(_step, *, writer_lease, **_kwargs):
+            scope = release_ownership.scope_from_observed_identity(self._observed_identity())
+            self.assertTrue(writer_lease.holds(self.root, scope))
+            return rollout.StepResult(0, (), "migration applied")
+
+        status, report, migrate = self._run_migration_release(
+            self._migration_release_patches(), label="covered-migration", migrate_effect=migrate_under_the_existing_lease,
+        )
 
         self.assertEqual(status, 0, report.get("error"))
         migrate.assert_called_once()

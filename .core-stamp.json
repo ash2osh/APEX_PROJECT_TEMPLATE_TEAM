@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "47c9f6989085401c85f4b7d3eff9275d72030e5a",
+  "coreCommit": "95c15fb64dfc63854465e6a7c66c9f63dc4d83a0",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -19,12 +19,12 @@
     },
     {
       "path": "scripts/baseline_build.py",
-      "sha256": "2b54ad2286a3a91db7c104bb67dcc5d2840991d8b7dcd3764dc58446c50bfb26",
+      "sha256": "a006926ce333b5e520f2afc63badf21316ed159b0502c7ab324ac9f89b67e704",
       "executable": false
     },
     {
       "path": "scripts/baseline_bundles.py",
-      "sha256": "6ed58949954b1e2b3f9b52023cfafddf7a8753c0b69174ee1445b697047f4fe9",
+      "sha256": "91e77ee235b3685bd51c5ddf9b1120fc629e85e52dc3e4b3f4bccf9d1a346c77",
       "executable": false
     },
     {
@@ -259,7 +259,7 @@
     },
     {
       "path": "scripts/migrate.py",
-      "sha256": "f2cf3e8a505aecb304521018ca0b51a4bcf9d212f662dfcdfd1285c7406dc1f9",
+      "sha256": "95173edfbbe47e3015ed7a3ccc2bc3e93ab1c0429efa582a8e78203330c65376",
       "executable": false
     },
     {
@@ -384,7 +384,7 @@
     },
     {
       "path": "scripts/release_ownership.py",
-      "sha256": "33a9ada62a774e9dfed15d9feaff98aad9cf0be37490da59043a273b9b998505",
+      "sha256": "1473040fecb0d46bcd55036db7d7a970346fff8c67d570f5cd803cd8f7a2465b",
       "executable": false
     },
     {
@@ -394,7 +394,7 @@
     },
     {
       "path": "scripts/release_state.py",
-      "sha256": "dddb814391dc26167ede3b06f030f7606dbf865876083ef4428f9b7fc7f5d2e0",
+      "sha256": "e511f50f956e28e1b7670f37ca807894ddae606d298349fe897c20f12c69ad75",
       "executable": false
     },
     {
@@ -749,7 +749,7 @@
     },
     {
       "path": "tests/test_baseline_generated_sql.py",
-      "sha256": "21dc139e03dfb886e8562cea3b42765b80006eff316d048d506fbe6b7ff2e62f",
+      "sha256": "ccc35415f2824ac824e82f2182dd6592dcdcddd058e80b6425e2be87b1061c03",
       "executable": false
     },
     {
@@ -984,7 +984,7 @@
     },
     {
       "path": "tests/test_live_baseline.py",
-      "sha256": "75cc640aed4cb7933e44a06319de6d1e3655f98631acdba7ac77c9485baa4696",
+      "sha256": "b575a90327e5c40809c50aeb54f184452b0e05a853da9d6e870dd8cda8985d94",
       "executable": false
     },
     {
@@ -1094,7 +1094,7 @@
     },
     {
       "path": "tests/test_release_ownership.py",
-      "sha256": "934bf8483290b059c58cd5ef98a3ea415f8d65af5de61d66b102735b217f5ad8",
+      "sha256": "666c38c8810de02c1a6b891a1e680c0d916cc2dad01bfd81fbe919e759ed6f6b",
       "executable": false
     },
     {

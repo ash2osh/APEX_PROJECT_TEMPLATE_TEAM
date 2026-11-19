@@ -12,6 +12,7 @@ from .migration_manifest import validate_sql_only
 
 
 CATEGORY_ORDER = ("structure", "grants", "code")
+CODE_BEFORE_STEP = "001-verify-code-before.sql"
 BUNDLE_NAME_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z", re.ASCII)
 
 
@@ -126,16 +127,23 @@ def combine_baseline_components(components: Sequence[BaselineComponent]) -> Bund
         by_kind[component.kind] = component
 
     ordered: dict[str, tuple[tuple[str, str, str], ...]] = {}
+    ordered_payload: list[tuple[str, str, str, str]] = []
     for kind in CATEGORY_ORDER:
         component = by_kind.get(kind)
         if component is None:
             continue
-        ordered[kind] = _ordered_steps(component)
-        if kind in {"grants", "code"} and component.preconditions:
+        component_steps = _ordered_steps(component)
+        has_code_guard = kind == "code" and bool(component_steps) and component_steps[0][0] == CODE_BEFORE_STEP
+        if kind != "structure" and component.preconditions and not has_code_guard:
             raise BaselineBundleError(f"{kind} component preconditions cannot move across the combined initial boundary")
+        if has_code_guard:
+            # Observe the captured state before any structure or grant step can change it.
+            ordered_payload.append((kind, *component_steps[0]))
+            component_steps = component_steps[1:]
+        ordered[kind] = component_steps
 
-    step_count = sum(len(ordered.get(kind, ())) for kind in CATEGORY_ORDER)
-    if step_count > 999:
+    ordered_payload.extend((kind, *step) for kind in CATEGORY_ORDER for step in ordered.get(kind, ()))
+    if len(ordered_payload) > 999:
         raise BaselineBundleError("combined baseline bundle cannot contain more than 999 SQL steps")
 
     steps: dict[str, str] = {}
@@ -149,17 +157,17 @@ def combine_baseline_components(components: Sequence[BaselineComponent]) -> Bund
         seen_ids: set[str] = set()
         _append_checks(component.preconditions, kind, "preconditions", seen_ids, preconditions)
         _append_checks(component.postconditions, kind, "postconditions", seen_ids, postconditions)
-        for original_name, slug, sql in ordered[kind]:
-            generated_name = f"{len(steps) + 1:03d}-{kind}-{slug}.sql"
-            steps[generated_name] = sql
-            provenance.append(
-                {
-                    "kind": kind,
-                    "originalName": original_name,
-                    "generatedName": generated_name,
-                    "sqlSha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
-                }
-            )
+    for number, (kind, original_name, slug, sql) in enumerate(ordered_payload, start=1):
+        generated_name = f"{number:03d}-{kind}-{slug}.sql"
+        steps[generated_name] = sql
+        provenance.append(
+            {
+                "kind": kind,
+                "originalName": original_name,
+                "generatedName": generated_name,
+                "sqlSha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+            }
+        )
 
     return BundledBaseline(
         steps=steps,

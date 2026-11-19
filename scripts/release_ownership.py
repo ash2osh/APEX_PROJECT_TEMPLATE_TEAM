@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kernel-backed local writer leases for feature release targets."""
+"""Kernel-backed local writer leases for database release targets."""
 
 from __future__ import annotations
 
@@ -43,6 +43,16 @@ def _scope_record(scope: Mapping) -> dict[str, str]:
             raise ReleaseOwnershipError(f"target writer scope {field} must be a nonempty string")
         result[field] = value
     return result
+
+
+def scope_from_observed_identity(identity: Mapping[str, str]) -> dict[str, str]:
+    """Project a validated database observation onto its physical writer scope."""
+    return {
+        "dbUniqueName": identity["db_unique_name"].upper(),
+        "containerId": identity["container_id"],
+        "schema": identity["current_schema"].upper(),
+        "edition": identity["edition"].upper(),
+    }
 
 
 def _root(repo_root: Path) -> Path:
@@ -109,6 +119,10 @@ class TargetWriterLease:
         self.path = target_writer_lock_path(self.root, self.target_scope)
         self._fd: int | None = None
 
+    def holds(self, repo_root: Path, target_scope: Mapping) -> bool:
+        """Check that a caller-provided lease is active for this checkout and target."""
+        return self._fd is not None and self.root == _root(repo_root) and self.target_scope == _scope_record(target_scope)
+
     def acquire(self) -> TargetWriterLease:
         if self._fd is not None:
             raise ReleaseOwnershipError("target writer lease is already acquired")
@@ -154,7 +168,7 @@ class TargetWriterLease:
             self._close(fd, unlock=self._fd is not None)
             self._fd = None
             raise ReleaseOwnershipError(f"cannot record target writer lease: {error}") from error
-        except Exception:
+        except BaseException:
             self._close(fd, unlock=self._fd is not None)
             self._fd = None
             raise

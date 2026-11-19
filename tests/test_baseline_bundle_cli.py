@@ -246,7 +246,12 @@ exit 17
         expected_checks = {"preconditions": [], "postconditions": []}
         for kind in ("structure", "grants", "code"):
             folder = next(path for path in granular_folders if f"_baseline-{kind}-r" in path.name)
-            expected_sql.extend(path.read_bytes() for path in sorted(folder.glob("*.sql")))
+            steps = sorted(folder.glob("*.sql"))
+            if kind == "code":
+                guard = steps.pop(0)
+                self.assertEqual(guard.name, "001-verify-code-before.sql")
+                expected_sql.insert(0, guard.read_bytes())
+            expected_sql.extend(path.read_bytes() for path in steps)
             checks = json.loads((folder / "checks.json").read_text(encoding="utf-8"))
             for phase in expected_checks:
                 expected_checks[phase].extend(
@@ -272,9 +277,11 @@ exit 17
         filenames = [path.name for path in sorted(folder.glob("*.sql"))]
         self.assertTrue(all(name.startswith(f"{index:03d}-") for index, name in enumerate(filenames, 1)))
         readme = (folder / "README.md").read_text(encoding="utf-8")
-        self.assertIn("001-structure-", readme)
-        self.assertIn("002-grants-", readme)
-        self.assertIn("003-code-", readme)
+        self.assertEqual(filenames[0], "001-code-verify-code-before.sql")
+        self.assertIn("001-code-verify-code-before.sql", readme)
+        self.assertIn("002-structure-", readme)
+        self.assertIn("003-grants-", readme)
+        self.assertIn("004-code-", readme)
 
     def test_bundle_with_data_keeps_two_folders_and_data_only_skips_empty_bundle(self) -> None:
         with_core_changes = self.new_fixture()

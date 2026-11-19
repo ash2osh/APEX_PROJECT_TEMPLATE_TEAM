@@ -619,6 +619,13 @@ a count of `INVALID` objects in `ALL_OBJECTS`.
 
 ## Immutability and status receipts
 
+After confirmation, `migrate` acquires a checkout-local writer lock for the
+observed database, container, schema, and edition. It checks the selected
+folders' receipts and attempts again under the lock, then holds the lock
+through payload execution, verification, and receipt installation. A competing
+run from the same checkout refuses before SQL is applied. Other checkouts and
+direct database sessions still require coordination.
+
 Once a migration has been applied or a write attempt may have begun, keep its
 SQL bytes, names, order, and `checks.json` unchanged. A correction or recovery
 belongs in the next revision folder. A failed or ambiguous attempt may have
@@ -922,7 +929,9 @@ other independent repositories.
 
 By default, structure, grants and code remain separate families. `--bundle
 <name>` combines the generated structure, grants, and code in that order into
-`baseline-bundle-<name>`. The name must be an ASCII lowercase slug matching
+`baseline-bundle-<name>`. If the bundle contains code changes, the generated
+target and code guard runs before these changes and before structure or grants.
+The name must be an ASCII lowercase slug matching
 `[a-z][a-z0-9]*(?:-[a-z0-9]+)*`, no longer than 64 characters, and is checked
 before SQLcl starts. Composition uses the same complete source and target
 captures, preserves every eligible SQL step and check, and writes a bundle
