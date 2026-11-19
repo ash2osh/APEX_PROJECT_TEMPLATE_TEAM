@@ -353,6 +353,14 @@ class PartialWorkflowTests(unittest.TestCase):
         # cost one full scan per file. Unrelated live-only files make the list grow without changing the publish.
         from scripts.partial_publish import publish_partial
         import scripts.partial_publish as partial_module
+
+        def counting_hashes(counted, real):
+            # A factory rather than a closure over the loop variables: each call keeps its own list and hash function.
+            def counting(path):
+                counted.append(path)
+                return real(path)
+            return counting
+
         counts = {}
         for label, extra_count in (('few', 3), ('many', 120)):
             with self.subTest(files=label), tempfile.TemporaryDirectory() as temporary:
@@ -365,13 +373,7 @@ class PartialWorkflowTests(unittest.TestCase):
                     target.write_text(f'teammate live work {index}\n', encoding='utf-8')
                     extra_names.append(name)
                 counted = []
-                real_tree_hashes = tree_hashes
-
-                def counting_tree_hashes(path):
-                    counted.append(path)
-                    return real_tree_hashes(path)
-
-                with mock.patch.object(partial_module, 'tree_hashes', counting_tree_hashes):
+                with mock.patch.object(partial_module, 'tree_hashes', counting_hashes(counted, tree_hashes)):
                     publish_partial(source, 100, ['pages/p00001-home.apx'], 'DEMO', root / 'run', backend, 'ALICE')
                 counts[label] = len(counted)
                 report = json.loads((root / 'run/partial.json').read_text())
