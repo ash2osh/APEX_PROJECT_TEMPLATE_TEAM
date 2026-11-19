@@ -467,6 +467,27 @@ def check_project(project_root: Path) -> None:
         raise UpgradeError(f"resolve and delete {CONFLICT_SUFFIX} files first: {', '.join(pending)}")
 
 
+def _exec_bit_differs(target: Path, source: Path) -> bool:
+    """True when the template file is executable and the project's copy is not.
+
+    An upstream commit can change only the Git executable bit (same blob). The
+    content digests then match, and without this check a copy installed as 0644
+    would stay non-executable. Only this direction is acted on: a file system that
+    cannot record the bit (for example a Windows drive mounted on Linux) reports
+    every file as executable, and that must not make every file look changed.
+    Always False on Windows and when either file is missing or not a regular file.
+    """
+    if os.name == "nt":
+        return False
+    target_info = _lstat(target)
+    source_info = _lstat(source)
+    if target_info is None or source_info is None:
+        return False
+    if not stat.S_ISREG(target_info.st_mode) or not stat.S_ISREG(source_info.st_mode):
+        return False
+    return bool(stat.S_IMODE(source_info.st_mode) & 0o111) and not bool(stat.S_IMODE(target_info.st_mode) & 0o111)
+
+
 def _new_file_hash(template_root: Path, relative: str) -> tuple[str, str]:
     digests = sha256_pair(template_root / relative)
     if digests is None:
@@ -499,7 +520,9 @@ def plan_upgrade(
         if local_pair is None:
             kind = "CREATE" if last is None else "KEEP-DELETED"
         elif local_pair[1] == new_normalized:
-            kind = "UNCHANGED"
+            # Same bytes, but an upstream commit may have changed only the Git
+            # executable bit. UPDATE rewrites the file with the template's mode.
+            kind = "UPDATE" if _exec_bit_differs(target, template_root / path) else "UNCHANGED"
         elif last in local_pair:
             kind = "UPDATE"
         elif last in (new_raw, new_normalized):

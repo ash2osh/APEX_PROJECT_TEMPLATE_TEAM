@@ -1606,6 +1606,82 @@ class LineEndingPlanTests(unittest.TestCase):
             self.assertFalse((project / upgrade_engine.LOCK_NAME).exists())
 
 
+class ModeOnlyPlanTests(unittest.TestCase):
+    """A Git executable-bit change with identical bytes must reach the project.
+
+    scripts/build_release.sh changed 100644 -> 100755 upstream with no content
+    change. The digest matched, so the file was UNCHANGED and stayed
+    non-executable in downstream copies.
+    """
+
+    CONTENT = b"echo v1\n"
+    LOCK_HASH = hashlib.sha256(b"echo v1\n").hexdigest()
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        base = Path(self.temporary.name)
+        self.template = base / "template"
+        self.project = base / "project"
+        (self.template / "scripts").mkdir(parents=True)
+        (self.project / "scripts").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def install(self, template_bytes: bytes, template_mode: int, project_bytes: bytes, project_mode: int) -> None:
+        template_file = self.template / "scripts" / "tool.sh"
+        project_file = self.project / "scripts" / "tool.sh"
+        template_file.write_bytes(template_bytes)
+        template_file.chmod(template_mode)
+        project_file.write_bytes(project_bytes)
+        project_file.chmod(project_mode)
+
+    def plan(self, lock_hash: str):
+        actions, new_lock = upgrade_engine.plan_upgrade(
+            self.project, self.template, ["scripts/tool.sh"], [], {"files": {"scripts/tool.sh": lock_hash}}
+        )
+        return {action.path: action for action in actions}, new_lock
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable bits")
+    def test_mode_only_upstream_change_is_an_update_that_sets_the_bit(self) -> None:
+        self.install(self.CONTENT, 0o755, self.CONTENT, 0o644)
+
+        actions, new_lock = self.plan(self.LOCK_HASH)
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UPDATE")
+
+        upgrade_engine.apply_actions(
+            self.project, self.template, list(actions.values()), "unused", "0" * 40, new_lock
+        )
+        target = self.project / "scripts" / "tool.sh"
+        self.assertEqual(target.read_bytes(), self.CONTENT)
+        self.assertTrue(target.stat().st_mode & 0o111, "executable bit was not applied")
+
+    def test_identical_content_and_mode_stays_unchanged(self) -> None:
+        self.install(self.CONTENT, 0o644, self.CONTENT, 0o644)
+
+        actions, _ = self.plan(self.LOCK_HASH)
+
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UNCHANGED")
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable bits")
+    def test_identical_content_with_an_extra_local_executable_bit_is_left_alone(self) -> None:
+        # Only a template-executable, project-non-executable file is acted on: a file system that cannot record the
+        # bit reports every file as executable, which must not make every file look changed.
+        self.install(self.CONTENT, 0o644, self.CONTENT, 0o755)
+
+        actions, _ = self.plan(self.LOCK_HASH)
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UNCHANGED")
+
+    def test_content_and_mode_both_differing_keeps_the_content_decision(self) -> None:
+        # The template changed and the project was edited: a conflict, as before.
+        self.install(b"echo v2\n", 0o755, b"our edit\n", 0o644)
+        actions, _ = self.plan(hashlib.sha256(b"echo v1\n").hexdigest())
+        self.assertEqual(actions["scripts/tool.sh"].kind, "CONFLICT")
+
+        # The lock records the project's own bytes: an update, as before.
+        actions, _ = self.plan(hashlib.sha256(b"our edit\n").hexdigest())
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UPDATE")
+
 
 class ConservativeOwnershipUpgradeTests(unittest.TestCase):
     """Verify conservative file-level ownership, ensuring custom tests, project plans,
