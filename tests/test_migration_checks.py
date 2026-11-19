@@ -19,6 +19,17 @@ from scripts.schema_catalog import ObjectDefinition, ObjectKey, SchemaSnapshot, 
 from scripts.migration_checks import CheckReport, analyze_batch, compiled_units, preflight, preflight_inventory_retries, render_in_session_check_driver, run_checks
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
+# The interrupt test relies on these three numbers together:
+# - LATE_WRITER_SECONDS is how long each fake SQLcl child sleeps before it writes its marker.
+# - PROMPT_CANCEL_SECONDS bounds how long run_checks may take to exit after SIGINT. It stays at
+#   least 1.0 s below LATE_WRITER_SECONDS: a run that waited for its workers instead of cancelling
+#   them would finish about LATE_WRITER_SECONDS after the interrupt and fail that bound.
+# - After the interrupt the test waits until LATE_WRITER_SECONDS + 0.3 s have passed, so every late
+#   writer has finished its sleep before the test looks for a marker. A marker found then means the
+#   writer survived the cancellation.
+LATE_WRITER_SECONDS = 4.0
+PROMPT_CANCEL_SECONDS = 2.5
+
 
 class MigrationChecksTests(unittest.TestCase):
     def setUp(self):
@@ -1143,7 +1154,7 @@ class MigrationChecksTests(unittest.TestCase):
         pid_dir.mkdir()
         late_writer = self.root / "late_writer.py"
         late_writer.write_text(
-            "import sys, time\nfrom pathlib import Path\ntime.sleep(1.2)\nPath(sys.argv[1]).write_text('survived')\n",
+            f"import sys, time\nfrom pathlib import Path\ntime.sleep({LATE_WRITER_SECONDS})\nPath(sys.argv[1]).write_text('survived')\n",
             encoding="utf-8",
         )
         binary = install(
@@ -1189,13 +1200,14 @@ class MigrationChecksTests(unittest.TestCase):
             interrupted_at = time.monotonic()
             os.kill(process.pid, signal.SIGINT)
             try:
-                returncode = process.wait(timeout=1.5)
+                returncode = process.wait(timeout=PROMPT_CANCEL_SECONDS)
             except subprocess.TimeoutExpired:
                 self.fail("run_checks waited for SQLcl workers instead of cancelling their process groups")
             process.communicate()
-            self.assertLess(time.monotonic() - interrupted_at, 1.5)
+            self.assertLess(time.monotonic() - interrupted_at, PROMPT_CANCEL_SECONDS)
             self.assertNotEqual(returncode, 0)
-            time.sleep(1.3)
+            # Each late writer started before the interrupt, so this ends after its sleep has finished.
+            time.sleep(max(0.0, interrupted_at + LATE_WRITER_SECONDS + 0.3 - time.monotonic()))
             self.assertFalse(list(pid_dir.glob("late-*")), "an SQLcl descendant survived interruption")
             for child_file in pid_dir.glob("child-*"):
                 child_pid = int(child_file.read_text(encoding="utf-8"))

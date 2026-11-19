@@ -1222,13 +1222,13 @@ exit 17
                 while not started.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(started.exists(), "the helper never started")
-                os.killpg(process.pid, signal.SIGINT)
-                process.communicate(timeout=60)
+                _test_subprocess_safety.interrupt_process_group(process)
+                stdout, stderr = process.communicate(timeout=60)
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate()
-            self.assertEqual(process.returncode, 130)
+            self.assertEqual(process.returncode, 130, f"stdout: {stdout}\nstderr: {stderr}")
 
     @unittest.skipIf(os.name == "nt", "pwsh on Linux and macOS ends the tree with Kill(true); Windows twin: SqlclProcessTreeTests in test_windows_support.py")
     def test_powershell_ends_the_whole_sqlcl_tree_when_sqlcl_ignores_ctrl_c(self) -> None:
@@ -1265,9 +1265,8 @@ exit 17
                 child = int(child_pid.read_text())
                 # SQLcl can start before Start-Process has handed it to PowerShell; a Ctrl-C
                 # inside Start-Process cannot be handled, so let it return first.
-                time.sleep(1)
+                _test_subprocess_safety.interrupt_process_group(process, settle=1.0)
                 interrupted_at = time.monotonic()
-                os.killpg(process.pid, signal.SIGINT)
                 output, errors = process.communicate(timeout=60)
                 elapsed = time.monotonic() - interrupted_at
                 time.sleep(0.5)
@@ -1313,13 +1312,13 @@ exit 17
                 while not started.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(started.exists(), "the helper never started")
-                os.killpg(process.pid, signal.SIGINT)
-                process.communicate(timeout=60)
+                _test_subprocess_safety.interrupt_process_group(process)
+                stdout, stderr = process.communicate(timeout=60)
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate()
-            self.assertEqual(process.returncode, 2)
+            self.assertEqual(process.returncode, 2, f"stdout: {stdout}\nstderr: {stderr}")
 
     def test_yes_and_confirm_target_reach_their_helpers_and_both_usage_screens_list_them(self) -> None:
         # Production refusals come from the helpers before any connection; the wrappers must pass the flags through.
@@ -1613,13 +1612,13 @@ exit 17
                     while not started.exists() and time.monotonic() < deadline:
                         time.sleep(0.05)
                     self.assertTrue(started.exists(), "SQLcl never started")
-                    os.killpg(process.pid, signal.SIGINT)
-                    _, stderr = process.communicate(timeout=60)
+                    _test_subprocess_safety.interrupt_process_group(process)
+                    stdout, stderr = process.communicate(timeout=60)
                 finally:
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate()
-                self.assertEqual(process.returncode, 130, stderr)
+                self.assertEqual(process.returncode, 130, f"stdout: {stdout}\nstderr: {stderr}")
                 self.assertEqual(stderr.strip(), "preflight interrupted; it only reads, so nothing was changed")
                 self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
 
