@@ -5,7 +5,7 @@
       "status": "intended",
       "reason": "26.2 includes mandatory Oracle skills refresh, guarded partial publish and automation recovery, and sets feature files as the default for stored-code changes.",
       "blobs": [
-        "41753fbd8f9ddf571464a70b9b45f97e0bfb46f0",
+        "3530b1e9e76e27a289b1cb4fda9915b81689153a",
         "14434ab47397d25c11a24ae20f9885968859c1c9"
       ]
     },
@@ -101,16 +101,16 @@
       "status": "intended",
       "reason": "attempt-event is now ignored in both (26.1 PR 24); only the uc-apx and .venv-graphify lines differ, as intended.",
       "blobs": [
-        "9974ddd4a98e28e4a99fce85519f7c7a7ca2c0fd",
-        "255792bc184094009a3cc2c3632ffd2b312476b7"
+        "e7b6a1130dca7af0f3b4c7d61c33710563db49aa",
+        "e3c7796b68e73d45e753fe5d7ee542dd4d462f72"
       ]
     },
     "AGENTS.md": {
       "status": "intended",
       "reason": "26.2 documents its SQLcl floor, native locks, partial publish, runtime verification, Oracle skills refresh, pinned Graphify and feature-first database workflow.",
       "blobs": [
-        "5f6e02ee854e38a193324b8045e91b81471cce4a",
-        "a9bb654839a7d1a627f47fc5c19af8972b4646f6"
+        "9084926b55771d9023b1197e276d53a51991e840",
+        "70c9b36dd678d95b8696b4f4fabb6d0f861619df"
       ]
     },
     "AGENTS.project.md": {
@@ -125,7 +125,7 @@
       "status": "intended",
       "reason": "Each template documents its own APEX release commands and publication checks. The 26.2 guide also describes the feature-first workflow.",
       "blobs": [
-        "467849ba51205a8f7af692a6568ea35c4c04f53f",
+        "33767fcd336698abea2ec80d179529bca126104c",
         "8b46f40372455410accac1d75ca4925261320004"
       ]
     },
@@ -213,7 +213,7 @@
       "status": "intended",
       "reason": "The 26.2 ownership guide treats feature files as the default for new stored-code work and documents how dated migrations fit that workflow.",
       "blobs": [
-        "93f8c2ae0977a617653c6ae916bc4b8767bbae4f",
+        "5dd9382c89b6602e30f46342b97704eae2cdd3b8",
         "ed33e9305fc8c1a2da41515754552c9c4c9ccb6f"
       ]
     },
@@ -221,8 +221,8 @@
       "status": "intended",
       "reason": "The 26.2 guide describes feature-first selection and how to order dependent migrations. Its dry run resolves target profiles before opening any session, while the 26.1 dry run stays local to capsule and manifest validation.",
       "blobs": [
-        "b072098a51f42ab4d56028c6b1b85a52412e741d",
-        "69ba702f161283730d93d0b5c307ffeb259bebd2"
+        "12f04eff9567bb52d1c41f253887f67024dc4f7b",
+        "cdb2324f075a43887b634abfbacd03352ee1e8ff"
       ]
     },
     "docs/known-limitations.md": {
@@ -371,10 +371,10 @@
     },
     "scripts/compare_env_catalog.sql": {
       "status": "feature",
-      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency/synonym relationships; 26.1 does not include these catalog fields.",
+      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency/synonym relationships; 26.1 does not include these catalog fields. The guarded DEV feature workflow and long-view transport changes are on both lines.",
       "blobs": [
-        "db3ade8e14a027fe3621eabda248a40bf64c14e4",
-        "362ae9e684ad3f9e4ff6b7c8eab9992baff81079"
+        "01d8e78a97e18b3f1bc38a39af66924147828e49",
+        "d83e25e3e09f3466814361ea27b9570f4b385780"
       ]
     },
     "scripts/deploy.sh": {
@@ -555,18 +555,18 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile (APEX_WORKSPACE_USERNAME, release and workspace-user verification); 26.1 has none of them. The compare-env --help path is on both lines now.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile (APEX_WORKSPACE_USERNAME, release and workspace-user verification); 26.1 has none of them. The compare-env --help path is on both lines now. The guarded DEV feature workflow and long-view transport changes are on both lines.",
       "blobs": [
-        "d0a6571c5d1bee211b7cfd4a5faa12d4cba5741f",
-        "8bc8af687d54d51548eae7795bb39e5f920173a6"
+        "0dfa244b65319385defdf542d4a1f4f5d94e6997",
+        "3000270d1db77460c97d8f0180c45f1470b42a53"
       ]
     },
     "scripts/team.sh": {
       "status": "feature",
-      "reason": "Ported to 26.2 (fix/parity-ports-2-262): migration-plan passes the repo root through cygpath -m -- with its comment. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile.",
+      "reason": "Ported to 26.2 (fix/parity-ports-2-262): migration-plan passes the repo root through cygpath -m -- with its comment. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile. The guarded DEV feature workflow and long-view transport changes are on both lines.",
       "blobs": [
-        "db0c71443ed1d6b00e1902dfe971815947c8bc20",
-        "ae6a67ac554eefa7b8fb5c4186f98eb69e189ff6"
+        "452e79e3f66d1199d447b69ccdf54e700ade344f",
+        "ffc537bf9e420fcba72efbe1c55daedcdbca4d0b"
       ]
     },
     "scripts/template_drift.py": {
@@ -683,10 +683,10 @@
     },
     "tests/test_compare_env.py": {
       "status": "intended",
-      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring.",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines.",
       "blobs": [
-        "f1e137bcf1344d0b727c7cd8f52c179fb97a76a4",
-        "557575bf1b860f40ba85c4147e1415eb2069dc38"
+        "2414e8b74b116fe0aa6192e175e06c4cfd08efa8",
+        "68d57f7dfc7c70c015520d97a1fc3b08fc7b5b90"
       ]
     },
     "tests/test_deployment_descriptor.py": {
