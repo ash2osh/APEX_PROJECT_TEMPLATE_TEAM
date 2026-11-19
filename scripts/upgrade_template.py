@@ -865,20 +865,20 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _post_upgrade_sync(project_root: Path, actions: list[Action]) -> None:
-    """Refresh optional Graphify integration after an upgrade changes its code."""
+    """Refresh the Graphify integration, but only in a project that already uses it.
+
+    Runs setup_graphify_apx.py when the project has a graphify-out directory or
+    the project-local .venv-graphify environment. Updating the extractor alone
+    does not trigger it.
+    """
     setup_script = project_root / "scripts" / "setup_graphify_apx.py"
     if not setup_script.is_file():
         return
+    # Optional tooling is never installed by an upgrade: a project that has never
+    # used Graphify gets the new extractor file but no environment or packages.
     graphify_out = project_root / "graphify-out"
-    touched_extractor = any(
-        action.path in (
-            "scripts/graphify_apexlang_extractor.py",
-            "scripts/setup_graphify_apx.py",
-        )
-        and action.kind in ("CREATE", "UPDATE")
-        for action in actions
-    )
-    if not (graphify_out.is_dir() or touched_extractor):
+    project_venv = project_root / ".venv-graphify"
+    if not (graphify_out.is_dir() or project_venv.is_dir()):
         return
 
     try:
