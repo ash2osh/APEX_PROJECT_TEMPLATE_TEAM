@@ -207,6 +207,26 @@ exit 17
                 self.assertIn("--cleanup", result.stdout)
                 self.assertNotIn("configuration file not found", result.stdout + result.stderr)
 
+    def test_powershell_targets_usage_names_the_ps1_wrapper(self) -> None:
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if not pwsh:
+            self.skipTest("PowerShell 7 is not installed")
+        for arguments in (["--help"], ["--format", "xml"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(
+                    [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "targets", *arguments],
+                    cwd=ROOT,
+                    env=dict(os.environ, PROJECT_ENV_FILE="/no/such/team-targets.env"),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                output = result.stdout + result.stderr
+                self.assertIn("usage: scripts/team.ps1 targets", output)
+                self.assertNotIn("scripts/team.sh targets", output)
+
     def test_top_level_help_lists_project_dev_test_options_in_both_wrappers(self) -> None:
         for entry in ("team.sh", "team.ps1"):
             if entry.endswith("ps1") and not _test_subprocess_safety.working_pwsh():

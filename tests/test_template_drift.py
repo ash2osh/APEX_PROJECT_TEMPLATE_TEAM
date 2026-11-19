@@ -65,6 +65,60 @@ class TemplateDriftTests(unittest.TestCase):
             report = inspect_template_drift(root)
             self.assertEqual(report["localFiles"][0]["status"], "missing")
 
+    def add_locked_file(self, root: Path, relative: str, content: bytes, present: bool) -> None:
+        manifest_path = root / "template-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["templateOwned"] = sorted(set(manifest["templateOwned"]) | {relative})
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        lock_path = root / ".template-lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["files"][relative] = normalized_sha256(content)
+        lock_path.write_text(json.dumps(lock) + "\n", encoding="utf-8")
+        if present:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+
+    def test_missing_cleanup_files_are_removed_by_cleanup_not_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.make_downstream(root)
+            self.add_locked_file(root, "tests/test_example.py", b"print('x')\n", present=False)
+            self.add_locked_file(root, ".github/workflows/ci.yml", b"name: ci\n", present=False)
+
+            report = inspect_template_drift(root)
+
+            statuses = {row["path"]: row["status"] for row in report["localFiles"]}
+            self.assertEqual(statuses["tests/test_example.py"], "removed-by-cleanup")
+            self.assertEqual(statuses[".github/workflows/ci.yml"], "removed-by-cleanup")
+            self.assertEqual(statuses["AGENTS.md"], "matches-lock")
+            self.assertEqual(report["status"], "current")
+
+    def test_missing_locked_file_outside_cleanup_prefixes_stays_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.make_downstream(root)
+            self.add_locked_file(root, "scripts/tool.py", b"print('x')\n", present=False)
+
+            report = inspect_template_drift(root)
+
+            statuses = {row["path"]: row["status"] for row in report["localFiles"]}
+            self.assertEqual(statuses["scripts/tool.py"], "missing")
+            self.assertEqual(report["status"], "attention")
+
+    def test_customized_test_file_is_still_customized(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.make_downstream(root)
+            self.add_locked_file(root, "tests/test_example.py", b"print('x')\n", present=True)
+            (root / "tests" / "test_example.py").write_text("print('edited')\n", encoding="utf-8")
+
+            report = inspect_template_drift(root)
+
+            statuses = {row["path"]: row["status"] for row in report["localFiles"]}
+            self.assertEqual(statuses["tests/test_example.py"], "customized")
+            self.assertEqual(report["status"], "attention")
+
     def test_untrusted_upstream_ref_is_rejected_without_invoking_git(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "project"

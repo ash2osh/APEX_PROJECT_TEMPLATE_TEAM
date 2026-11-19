@@ -1303,7 +1303,7 @@ class BaselineBuildIntegrationTests(unittest.TestCase):
                 "checks.json": "2562b9261c34b21e98816aefce1d93f1cb19858231e2617029ca606cb9cbeb1b",
             },
             "baseline-structure": {
-                "001-structure-delta.sql": "92f814e782896125d3d0ae0114d4bcf54696253091b55f17c0da0cf09ca4af77",
+                "001-structure-delta.sql": "a16bf31ba6f558f19690023c87feeac26b61fe899da61fd32ddf406c4bffda6d",
                 "README.md": "9c5d0dc56df15beeb62127357b5ad06989ff5e49daa69da2c131960383de2179",
                 "checks.json": "4b3cb31d677f53387a0b613a762337dd838da580a00e72f2b837ce61a2d5440a",
             },

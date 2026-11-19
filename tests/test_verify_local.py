@@ -599,6 +599,165 @@ APEX_EXPECTED_USER=DEMO
         report = build_report(self.repo, values, self.current_skills)
         self.assertFalse(any(row["check"] == "graphify_setup" for row in report["checks"]))
 
+    def add_cleanup_locked_files(self) -> None:
+        manifest_path = self.repo / "template-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["templateOwned"] = [*manifest["templateOwned"], "tests/**", ".github/**"]
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        lock_path = self.repo / ".template-lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["files"]["tests/test_example.py"] = hashlib.sha256(b"print('x')\n").hexdigest()
+        lock["files"][".github/workflows/ci.yml"] = hashlib.sha256(b"name: ci\n").hexdigest()
+        lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+
+    def test_removed_cleanup_files_do_not_fail_template_drift(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        self.create_valid_app()
+        self.add_cleanup_locked_files()
+        from scripts.local_config import read_project_env
+        values = read_project_env(self.repo / ".env")
+
+        report = build_report(self.repo, values, self.current_skills)
+        check = next(c for c in report["checks"] if c["check"] == "template_drift")
+        self.assertEqual(check["status"], "pass")
+        self.assertIn("2 removed by cleanup", check["message"])
+        self.assertIn("0 missing", check["message"])
+        self.assertEqual(report["exitCode"], 0)
+
+    def test_removed_cleanup_files_with_missing_script_require_attention(self) -> None:
+        self.write_valid_env()
+        self.create_valid_app()
+        lock_path = self.write_valid_lock()
+        self.add_cleanup_locked_files()
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["files"]["scripts/team.sh"] = hashlib.sha256(b"#!/bin/sh\n").hexdigest()
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        from scripts.local_config import read_project_env
+        values = read_project_env(self.repo / ".env")
+
+        report = build_report(self.repo, values, self.current_skills)
+        check = next(c for c in report["checks"] if c["check"] == "template_drift")
+        self.assertEqual(check["status"], "attention")
+        self.assertIn("1 missing", check["message"])
+        self.assertIn("2 removed by cleanup", check["message"])
+        self.assertEqual(report["exitCode"], 1)
+
+
+class OriginalTemplateDetectionTests(unittest.TestCase):
+    UPSTREAM = "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git"
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.temp_dir, ignore_errors=True))
+        self.root = Path(self.temp_dir)
+        self.manifest = {"schemaVersion": 2, "apexRelease": "26.2", "upstream": self.UPSTREAM}
+
+    def write_origin_config(self, git_dir: Path, url: str) -> None:
+        git_dir.mkdir(parents=True, exist_ok=True)
+        (git_dir / "config").write_text(f'[remote "origin"]\n\turl = {url}\n', encoding="utf-8")
+
+    def test_plain_git_directory_is_recognized(self) -> None:
+        from scripts.verify_local import is_original_template
+        checkout = self.root / "main"
+        self.write_origin_config(checkout / ".git", self.UPSTREAM)
+        self.assertTrue(is_original_template(checkout, self.manifest))
+
+    def test_linked_worktree_git_file_reads_common_config(self) -> None:
+        from scripts.verify_local import is_original_template
+        main = self.root / "main"
+        self.write_origin_config(main / ".git", self.UPSTREAM)
+        admin = main / ".git" / "worktrees" / "wt"
+        admin.mkdir(parents=True)
+        (admin / "commondir").write_text("../..\n", encoding="utf-8")
+        worktree = self.root / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        self.assertTrue(is_original_template(worktree, self.manifest))
+
+    def test_linked_worktree_without_commondir_reads_its_own_config(self) -> None:
+        from scripts.verify_local import is_original_template
+        admin = self.root / "admin"
+        self.write_origin_config(admin, self.UPSTREAM)
+        worktree = self.root / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        self.assertTrue(is_original_template(worktree, self.manifest))
+
+    def test_garbage_git_file_is_not_original_and_never_raises(self) -> None:
+        from scripts.verify_local import is_original_template
+        for content in ("not a git pointer\n", "", "gitdir: \x00/nowhere\n", "gitdir: /does/not/exist\n"):
+            with self.subTest(content=content):
+                checkout = self.root / "garbage"
+                checkout.mkdir(exist_ok=True)
+                (checkout / ".git").write_text(content, encoding="utf-8")
+                self.assertFalse(is_original_template(checkout, self.manifest))
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not on PATH")
+    def test_real_git_worktree_is_recognized_in_both_directories(self) -> None:
+        from scripts.verify_local import is_original_template
+        main = self.root / "main"
+        main.mkdir()
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", str(main)], check=True)
+        subprocess.run(["git", "-C", str(main), "remote", "add", "origin", self.UPSTREAM], check=True)
+        subprocess.run(["git", "-C", str(main), *identity, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        worktree = self.root / "wt"
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(worktree)], check=True)
+        self.assertTrue((worktree / ".git").is_file())
+        self.assertTrue(is_original_template(main, self.manifest))
+        self.assertTrue(is_original_template(worktree, self.manifest))
+
+
+class MalformedTemplateManifestTests(unittest.TestCase):
+    """verify_local must report an unreadable template release as a failed check, not a traceback."""
+
+    def run_verify_local(self, manifest_text: str, *extra: str) -> subprocess.CompletedProcess:
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        project = Path(temp_dir) / "project"
+        project.mkdir()
+        repo_scripts = Path(__file__).resolve().parents[1] / "scripts"
+        shutil.copytree(repo_scripts, project / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        (project / "template-manifest.json").write_text(manifest_text, encoding="utf-8")
+        env = {key: value for key, value in os.environ.items() if key != "PROJECT_ENV_FILE"}
+        return subprocess.run(
+            [sys.executable, str(project / "scripts" / "verify_local.py"), "--project-root", str(project), *extra],
+            capture_output=True,
+            text=True,
+            cwd=str(project),
+            env=env,
+            check=False,
+        )
+
+    def assert_single_release_failure(self, result: subprocess.CompletedProcess) -> None:
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["schemaVersion"], 1)
+        self.assertEqual(report["exitCode"], 2)
+        self.assertEqual(len(report["checks"]), 1)
+        check = report["checks"][0]
+        self.assertEqual(check["check"], "template_release")
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("template-manifest.json", check["message"])
+
+    def test_invalid_json_manifest_reports_template_release_failure(self) -> None:
+        result = self.run_verify_local('{"apexRelease": "9.9"', "--format", "json")
+        self.assert_single_release_failure(result)
+
+    def test_unknown_apex_release_reports_template_release_failure(self) -> None:
+        result = self.run_verify_local('{"apexRelease": "9.9"}', "--format", "json")
+        self.assert_single_release_failure(result)
+        self.assertIn("9.9", json.loads(result.stdout)["checks"][0]["message"])
+
+    def test_text_format_prints_failed_template_release_line(self) -> None:
+        result = self.run_verify_local('{"apexRelease": "9.9"}', "--format", "text")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("[FAIL] template_release:", result.stdout)
+        self.assertIn("Readiness exit code: 2", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

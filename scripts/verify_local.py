@@ -35,20 +35,64 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_repo_root))
 
 from scripts.deployment_descriptor import DescriptorError, read_descriptor
-from scripts.local_config import ConfigError, read_project_env
+from scripts.template_release import TemplateReleaseError
 from scripts.oracle_skills_status import inspect_oracle_skills
 from scripts.graphify_project import inspect_graphify
 from scripts.template_drift import inspect_template_drift
 from scripts.upgrade_template import UpgradeError, load_manifest, read_lock_with_hash
 from scripts.validate_app_source import validate_app_source
 
+# scripts/local_config.py reads template-manifest.json at import time. A malformed or unknown
+# manifest raises here, so keep the module importable and report it as a failed check in main().
+try:
+    from scripts.local_config import ConfigError, read_project_env
+    TEMPLATE_RELEASE_ERROR: str | None = None
+except TemplateReleaseError as _release_error:
+    ConfigError = None  # type: ignore[assignment,misc]
+    read_project_env = None  # type: ignore[assignment]
+    TEMPLATE_RELEASE_ERROR = str(_release_error)
+
+
+def _git_config_path(repo_root: Path) -> Path | None:
+    """Return the repository config file from local files only (no Git process, no network).
+
+    A plain checkout has a `.git` directory. A linked worktree or submodule has a `.git` file
+    holding `gitdir: <path>`; its shared settings live in the directory named by `commondir`
+    (for a worktree `<main>/.git/worktrees/<name>/commondir` holds `../..`).
+    """
+    dot_git = repo_root / '.git'
+    try:
+        if dot_git.is_dir():
+            return dot_git / 'config'
+        if not dot_git.is_file():
+            return None
+        lines = dot_git.read_text(encoding='utf-8').splitlines()
+        first = lines[0].strip() if lines else ''
+        if not first.startswith('gitdir:'):
+            return None
+        gitdir = Path(first[len('gitdir:'):].strip())
+        if not gitdir.is_absolute():
+            gitdir = repo_root / gitdir
+        gitdir = gitdir.resolve()
+        commondir_file = gitdir / 'commondir'
+        if commondir_file.is_file():
+            common = Path(commondir_file.read_text(encoding='utf-8').strip())
+            if not common.is_absolute():
+                common = gitdir / common
+            return common.resolve() / 'config'
+        return gitdir / 'config'
+    except (OSError, UnicodeError, ValueError):
+        return None
+
 
 def is_original_template(repo_root: Path, manifest: Mapping | None) -> bool:
     """Recognize the original repository from local Git metadata, without Git/network calls."""
     if not manifest or not isinstance(manifest.get('upstream'),str): return False
+    config_path = _git_config_path(repo_root)
+    if config_path is None: return False
     configuration = configparser.ConfigParser(interpolation=None)
     try:
-        configuration.read_string((repo_root / '.git' / 'config').read_text(encoding='utf-8'))
+        configuration.read_string(config_path.read_text(encoding='utf-8'))
         origin=configuration.get('remote "origin"','url')
     except (OSError,UnicodeError,configparser.Error):
         return False
@@ -282,7 +326,7 @@ def build_report(
     local_rows = drift.get("localFiles", [])
     counts = {
         state: sum(row.get("status") == state for row in local_rows)
-        for state in ("matches-lock", "customized", "missing", "unsafe")
+        for state in ("matches-lock", "customized", "missing", "removed-by-cleanup", "unsafe")
     }
     if drift_status == "unsafe":
         status = "fail"
@@ -298,7 +342,8 @@ def build_report(
         "path": str(lock_path),
         "message": (
             f"local lock comparison: {counts['matches-lock']} matches, "
-            f"{counts['customized']} customized, {counts['missing']} missing; "
+            f"{counts['customized']} customized, {counts['missing']} missing, "
+            f"{counts['removed-by-cleanup']} removed by cleanup; "
             "upstream not checked"
             + (f"; reason: {drift['reason']}" if drift.get("reason") else "")
         ),
@@ -578,6 +623,30 @@ def build_report(
     }
 
 
+def build_release_failure_report(repo_root: Path, error: str) -> dict:
+    """Schema-1 report for a template manifest whose release cannot be read (exit 2, one failed check)."""
+    return {
+        "schemaVersion": 1,
+        "checks": [{
+            "check": "template_release",
+            "status": "fail",
+            "path": str(repo_root / "template-manifest.json"),
+            "message": f"template release cannot be read: {error}",
+        }],
+        "exitCode": 2,
+    }
+
+
+def _emit_report(report: dict, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(report, indent=2))
+    else:
+        for c in report["checks"]:
+            tag = c["status"].upper()
+            print(f"[{tag}] {c['check']}: {c['message']} ({c['path']})")
+        print(f"Readiness exit code: {report['exitCode']}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--format", choices=["text", "json"], default="text", help="output format (default: text)")
@@ -587,6 +656,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root or Path.cwd()).resolve()
+
+    if TEMPLATE_RELEASE_ERROR is not None:
+        # The checks that need local_config cannot run; report the unreadable release, nothing more.
+        report = build_release_failure_report(repo_root, TEMPLATE_RELEASE_ERROR)
+        _emit_report(report, args.format)
+        return report["exitCode"]
 
     # Resolve env path (support PROJECT_ENV_FILE override)
     env_override = os.environ.get("PROJECT_ENV_FILE")
@@ -624,13 +699,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
 
-    if args.format == "json":
-        print(json.dumps(report, indent=2))
-    else:
-        for c in report["checks"]:
-            tag = c["status"].upper()
-            print(f"[{tag}] {c['check']}: {c['message']} ({c['path']})")
-        print(f"Readiness exit code: {report['exitCode']}")
+    _emit_report(report, args.format)
 
     return report["exitCode"]
 

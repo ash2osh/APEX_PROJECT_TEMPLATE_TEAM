@@ -174,6 +174,42 @@ def parse_evidence(data):
         raise LockError('invalid application lock evidence') from error
 
 
+def close_held_records(target, intent, run_dir):
+    """After a verified unlock, close earlier `held` records that the unlock provably ended.
+
+    Only sibling `run.*` directories of the unlock's own directory are inspected. A record closes only
+    when its status is `held`, its target equals this unlock's target, and its evidence has the same
+    application, workspace and parsing schema, and the same developer (case-insensitive). Anything else,
+    unreadable, or symlinked stays visible. Closing is best effort: a failure is reported on stderr and
+    never fails the verified unlock.
+    """
+    directory = Path(run_dir)
+    for candidate in sorted(directory.parent.glob('run.*')):
+        if candidate == directory or candidate.is_symlink() or not candidate.is_dir():
+            continue
+        record_path = candidate / 'recovery.json'
+        if not record_path.is_file() or record_path.is_symlink():
+            continue
+        try:
+            record = json.loads(record_path.read_text(encoding='utf-8'))
+            if not isinstance(record, dict) or record.get('status') != 'held' or record.get('target') != asdict(target):
+                continue
+            evidence = parse_evidence(record.get('evidence'))
+            if (evidence.app_id, evidence.workspace, evidence.schema) != (intent.app_id, intent.workspace, intent.schema):
+                continue
+            if evidence.developer.upper() != intent.developer.upper():
+                continue
+            record_target = Target(**record['target'])
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+            continue
+        try:
+            save_record(candidate, record_target, 'released', evidence)
+        except (OSError, LockError) as error:
+            print(f'could not close earlier held lock record in {candidate}: {error}', file=sys.stderr)
+            continue
+        print(f'closed earlier held lock record: {intent.app_id}/{candidate.name}')
+
+
 def acquire_lock(target, app_id, workspace, developer, run_dir, *, comment=''):
     validate_target(target,app_id,workspace,developer,run_dir)
     if (Path(run_dir)/'recovery.json').exists():
@@ -296,6 +332,7 @@ def main(argv=None):
             state=execute(target,args.run_dir,'unlock',manual_unlock_sql(target,args.app_id,args.workspace,args.developer,run_id))
             if state is not None: raise LockError('manual application unlock could not be verified')
             save_record(args.run_dir,target,'released',intent)
+            close_held_records(target,intent,args.run_dir)
         else:
             path=args.run_dir/'recovery.json'
             if path.is_symlink(): raise LockError('lock recovery record cannot be a symlink')

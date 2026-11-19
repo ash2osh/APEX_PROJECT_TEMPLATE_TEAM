@@ -48,6 +48,8 @@ These lines come from `scripts/team.sh verify-local` (step 8 of the getting star
 | `.template-lock.json is required in a downstream project` | The project has no template lock, so upgrades cannot tell your changes from template files. | Create it as the [post-clone cleanup](GETTING_STARTED.md#post-clone-cleanup) section describes. |
 | `[ATTENTION] oracle_skills:` with a message that the refresh is due, or the registry is missing | The SQLcl Oracle skills are missing or more than seven days old. | Run `sql /nolog`, then `skills sync -force`, then run `scripts/team.sh verify-local` again. |
 | `[ATTENTION] template_drift:` with a non-zero `missing` count, or a lock comparison that is `unknown` | A template-owned file named in the lock is missing, or there is no readable lock to compare against. A file you customized is not a problem: it is only counted and stays upgradeable. | Run `scripts/team.sh template-status` to list the files, then restore the missing template file. |
+| `removed-by-cleanup` in `template-status`, or `N removed by cleanup` in the `template_drift` message | Informational, not drift: a locked test under `tests/` or a `.github/` file is absent, as the [post-clone cleanup](GETTING_STARTED.md#post-clone-cleanup) intends. It does not make the status `attention`. | Nothing to do. Restore the file only if you want that inherited test or workflow back. |
+| `[FAIL] template_release: template release cannot be read: ...` | `template-manifest.json` is not valid JSON or names an unknown `apexRelease`. `verify-local` reports this one check and stops, rather than crashing. | Fix or restore `template-manifest.json` from the template, then run `scripts/team.sh verify-local` again. |
 
 ## Export and backup
 

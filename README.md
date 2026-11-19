@@ -686,7 +686,9 @@ local lock. It never fetches by default. For a read-only upstream comparison,
 pass both `--upstream` and an explicit `--ref`; the command reports the fetched
 commit and file statuses without installing or changing files. A missing lock
 in a downstream project is reported as unknown, while the original template
-repository does not require a downstream lock.
+repository does not require a downstream lock. Tests and `.github/` files that
+the post-clone cleanup removed are reported as `removed-by-cleanup`, which is
+informational and does not make the status `attention`.
 
 The lock also records the selected `templateRef` and `apexRelease`. Later runs
 reuse the recorded ref when `--ref` is omitted. Keep a 26.1 project on the 26.1

@@ -125,8 +125,8 @@
       "status": "intended",
       "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
       "blobs": [
-        "c844cd6500a44ab6e3a26aa2952014cc313d4d57",
-        "dd35f35fbc7b85f9644cd1c1b15004ab9406990f"
+        "8166c1d3fec4bf313596c8785ecda1be99a11969",
+        "3951f205d974b10efe088a19b38106a2cca4452c"
       ]
     },
     "TODO.md": {
@@ -165,8 +165,8 @@
       "status": "intended",
       "reason": "Each template keeps its own daily walkthrough of the 2026-11-19 review-fix branch; the shared changes are described in both.",
       "blobs": [
-        "0f898f518682b4ecbdb79f466040b9396318db68",
-        "f671589d8f880cb86f4dc24899f9b84175ab19a7"
+        "e36d7e7cb769e0169027fa7f601bc9d6fd408aa6",
+        "2b28fff7de1b36222e506f34b0122246162de295"
       ]
     },
     "docs/EXAMPLES.md": {
@@ -181,16 +181,16 @@
       "status": "intended",
       "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
       "blobs": [
-        "1b26c74eac66622e66aca8943d09b75a172e7d77",
-        "33bf9e40b6876b7b72d18ff0e3187c643e73e473"
+        "1d1ba5dcf33ce5714545ea69da185ad8daa3a525",
+        "de4d2979f4cc822d93557b7688b98c94bc2355d8"
       ]
     },
     "docs/TROUBLESHOOTING.md": {
       "status": "intended",
       "reason": "26.2 release-specific troubleshooting includes the offline Graphify update path and optional semantic context indexing; 26.1 maintains its own guidance. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
       "blobs": [
-        "12a3d15f3987002f586c446d128f8dd2864dae9a",
-        "2f5dc0313f7aa88876296a9187100b7d381c3b92"
+        "52c7f6e392165df55dd788f4720a8ae2f69daa32",
+        "dc7b75c5a2c2321b7930e822125f3d5db0cbd5a5"
       ]
     },
     "docs/baseline.md": {
@@ -205,8 +205,8 @@
       "status": "intended",
       "reason": "CI layout differs by release: 26.1 installs the Graphify extra in its latest-Python job, while 26.2 runs its own pinned graphify job and limits Windows tests to two workers.",
       "blobs": [
-        "73360ab02859e3e6d899d1dfe6331807e67228c6",
-        "8945fd8096d4e48f69b25f4b42e195c81f7c49bf"
+        "649039d8cbdff617681b3e0f2f15fbc49fd96d3e",
+        "5baeb98a73d16c96a7a11284875d90adf5574947"
       ]
     },
     "docs/compare-env.md": {
@@ -259,9 +259,9 @@
     },
     "docs/publish-rules.md": {
       "status": "intended",
-      "reason": "Release-specific publish rules: 26.2 documents native DEV locks, partial publish, normalized verification and runtime verification after import; 26.1 documents the no-lock race, the exact-bytes check and first publish of an absent app, which 26.2 refuses Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Release-specific publish rules: 26.2 documents native DEV locks, partial publish, normalized verification and runtime verification after import; 26.1 documents the no-lock race, the exact-bytes check and first publish of an absent app, which 26.2 refuses Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19: only 26.2 documents that a verified app-unlock closes earlier held lock records (26.1 has no application lock).",
       "blobs": [
-        "604cded8d7f985637ae7bca19f3bacdd6e0fb808",
+        "43f3a69efcc3cb5ced1741acd1c3fc900095004d",
         "b68512e4786f903ad2dcd266ab5b4bfc9e594084"
       ]
     },
@@ -563,10 +563,10 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines.",
       "blobs": [
-        "806479861ae0c16e37b25f578bff3668b52fcef3",
-        "1882ed609bbca9918bd2df0f1f03010cf4c2b075"
+        "04c01d489fb9a6046e029d612840d8185a3a3982",
+        "ce91b7d8dd7991a44749ac1beaaa5241b4b1bfde"
       ]
     },
     "scripts/team.sh": {
@@ -579,10 +579,10 @@
     },
     "scripts/template_drift.py": {
       "status": "intended",
-      "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1.",
+      "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1. Follow-up 2026-11-19: removed-by-cleanup and _git_config_path are the same on both lines; 26.1 keeps them here next to is_original_template.",
       "blobs": [
-        "cd178b49647c6b9ec0dc85a7f41e4dbd782eb93c",
-        "bfab86e07a5b43fd1b1ef89892c3db398fbe27aa"
+        "2d2775c167d4877ac2aaa847907f40bf6c5856dd",
+        "bcf1b18131ba5c7429bc55220cb022dfa1ce85db"
       ]
     },
     "scripts/upgrade_template.py": {
@@ -603,10 +603,10 @@
     },
     "scripts/verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now.",
+      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now. Follow-up 2026-11-19: the malformed-manifest guard, the removed-by-cleanup count and the linked-worktree config lookup are on both lines; 26.2 keeps is_original_template and _git_config_path here, 26.1 keeps them in scripts/template_drift.py.",
       "blobs": [
-        "91370e6827fa491e95197ef04734ad98d4d499c3",
-        "2b77daf5b597db01f50ba82bfaff9b1a702e281c"
+        "4b9ad8a0c2a37c92f67b3f3e0e379c3aea0a5f26",
+        "f4c8d9882364037ab980e9793d01a1d20906ccde"
       ]
     },
     "scripts/verify_publish_state.py": {
@@ -661,8 +661,8 @@
       "status": "intended",
       "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the rest are 26.1-specific (for example the 26.1 database tools have no 26.2 dependency). Both lines cover guarded output, unchanged payload bytes and scoped compilation.",
       "blobs": [
-        "48629788140344921b47310ec4e311e43c19f5db",
-        "0993fb7df61a16da5a1d823af72d5df7eb453721"
+        "612720ff9984c4c99603e040a5023a0609a3c4ff",
+        "568f7a1f8571256aed40e89a0a909057ac75cc74"
       ]
     },
     "tests/test_baseline_bundle.py": {
@@ -861,16 +861,16 @@
       "status": "feature",
       "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
       "blobs": [
-        "8cd31613c1f83260deac60009902186164c10ca4",
-        "c37821b6b1f1a44a9a8fdb7fda2d9dd97522dd63"
+        "f7a80970202ba7f9984281b48624569a6991f481",
+        "d039842e0aee0c6682bb6d4b6b9a21a424dd1db6"
       ]
     },
     "tests/test_template_drift.py": {
       "status": "intended",
       "reason": "Fixture is a 26.1 project (schema-1 manifest) in 26.1.",
       "blobs": [
-        "7a759aa3113922368faf87caf99f9d2e9b2db0a3",
-        "ed7794b188a3504c3ae52890298346bced3aae49"
+        "a5af26fc74ae46ffa2b03a38c49b31579c03309d",
+        "af1e68a5bc4fc62481cde080660e9102372904fc"
       ]
     },
     "tests/test_template_manifest.py": {
@@ -891,10 +891,10 @@
     },
     "tests/test_verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2",
+      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2 Follow-up 2026-11-19: the removed-by-cleanup, malformed-manifest and linked-worktree tests exist on both lines.",
       "blobs": [
-        "107d7e6715ccb8fa62d2139ef82cb74217e3e07c",
-        "1e6d6d9a0fbeb398865bcba596adf083fdf3edda"
+        "e1b50f1c8b7ec2250b3635b717f7ede9def28bc7",
+        "87b70583d6a4b1df642be0decd69edb54c543436"
       ]
     },
     "tests/test_verify_publish_state.py": {

@@ -32,6 +32,9 @@ from scripts.upgrade_template import (
 
 REPORT_SCHEMA_VERSION = 1
 SHA_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z", re.ASCII)
+# Locked paths that the post-clone cleanup removes on purpose (docs/GETTING_STARTED.md, "Post-clone cleanup").
+# A missing file under these prefixes is reported as removed-by-cleanup, which is informational, not drift.
+CLEANUP_PREFIXES = ("tests/", ".github/")
 
 
 def _original_template(repo_root: Path, manifest: dict) -> bool:
@@ -81,7 +84,8 @@ def _local_file_state(repo_root: Path, relative: str, expected: str) -> dict:
     except UpgradeError:
         return {"path": relative, "status": "unsafe"}
     if pair is None:
-        return {"path": relative, "status": "missing"}
+        status = "removed-by-cleanup" if relative.startswith(CLEANUP_PREFIXES) else "missing"
+        return {"path": relative, "status": status}
     return {
         "path": relative,
         "status": "matches-lock" if pair[1] == expected else "customized",

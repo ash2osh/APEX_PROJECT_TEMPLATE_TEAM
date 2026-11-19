@@ -206,10 +206,14 @@ def render_text(report: Mapping) -> str:
     return "\n".join(lines)
 
 
-def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None = None,
+    prog: str = "scripts/team.sh targets",
+) -> int:
     parser = argparse.ArgumentParser(
-        prog="scripts/team.sh targets",
-        description=__doc__,
+        prog=prog,
+        # The docstring names the shell wrapper; a PowerShell caller must not see that name in its help.
+        description=(__doc__ or "").replace("scripts/team.sh targets", prog),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--format", choices=("text", "json"), default="text",

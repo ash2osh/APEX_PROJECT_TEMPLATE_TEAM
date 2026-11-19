@@ -19,7 +19,7 @@ class PrePushCheckTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        for name in ("scripts/a.py", "scripts/run.sh", "scripts/sub/b.py", "tools/t.py", "tests/test_a.py", "tests/helper.py", "docs/x.py"):
+        for name in ("scripts/a.py", "scripts/run.sh", "scripts/sub/b.py", "tools/t.py", "tests/test_a.py", "tests/test_b.py", "tests/helper.py", "docs/x.py"):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("", encoding="utf-8")
@@ -32,7 +32,11 @@ class PrePushCheckTests(unittest.TestCase):
             "tests/test_a.py", "tests/test_a.py", "tests/test_b.py", "tests/helper.py", "tests/known_flaky.txt",
             "tests/fixtures/test_c.py", "scripts/test_d.py", "docs/x.md",
         ]
-        self.assertEqual(changed_test_files(paths), ["tests/test_a.py", "tests/test_b.py"])
+        self.assertEqual(changed_test_files(paths, self.root), ["tests/test_a.py", "tests/test_b.py"])
+
+    def test_a_deleted_test_module_is_not_run(self):
+        paths = ["tests/test_a.py", "tests/test_gone.py", "tests/test_gone.py"]
+        self.assertEqual(changed_test_files(paths, self.root), ["tests/test_a.py"])
 
     def test_changed_python_files_keeps_existing_code_files_in_the_code_folders(self):
         paths = ["scripts/a.py", "scripts/a.py", "scripts/sub/b.py", "tools/t.py", "tests/helper.py", "docs/x.py", "scripts/gone.py", "scripts/run.sh"]
@@ -195,6 +199,29 @@ class ToolStepTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(any(label.startswith("Shared core files") for label, _ in self.calls))
         self.assertIn("nothing to check", output)
+
+    def test_a_deleted_test_file_is_not_run_as_a_step(self):
+        (self.root / "tests").mkdir(exist_ok=True)
+        (self.root / "tests" / "test_kept.py").write_text("", encoding="utf-8")
+        code, _ = self.run_check([], ["tests/test_gone.py", "tests/test_kept.py"], {"ruff": "/fake/ruff"})
+        self.assertEqual(code, 0)
+        labels = [label for label, _ in self.calls]
+        self.assertIn("Changed test tests/test_kept.py", labels)
+        self.assertFalse(any("test_gone" in label for label in labels))
+
+    def test_the_core_stamp_step_is_skipped_when_a_template_lock_exists(self):
+        (self.root / ".core-stamp.json").write_text("{}", encoding="utf-8")
+        (self.root / "scripts" / "sync_core.py").write_text("", encoding="utf-8")
+        (self.root / ".template-lock.json").write_text("{}", encoding="utf-8")
+        code, _ = self.run_check([], [], {})
+        self.assertEqual(code, 0)
+        self.assertFalse(any(label.startswith("Shared core files") for label, _ in self.calls))
+
+        (self.root / ".template-lock.json").unlink()
+        self.calls.clear()
+        code, _ = self.run_check([], [], {})
+        self.assertEqual(code, 0)
+        self.assertTrue(any(label.startswith("Shared core files") for label, _ in self.calls))
 
     def test_a_real_syntax_error_names_its_step_on_the_last_line(self):
         (self.root / "scripts/bad.py").write_text("def broken(:\n", encoding="utf-8")
