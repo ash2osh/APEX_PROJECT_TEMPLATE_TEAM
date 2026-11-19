@@ -3,10 +3,10 @@
   "files": {
     ".agents/rules/agent-safety.md": {
       "status": "intended",
-      "reason": "26.2 includes mandatory Oracle skills refresh, guarded partial publish and automation recovery, and sets feature files as the default for stored-code changes.",
+      "reason": "26.2 includes mandatory Oracle skills refresh, guarded partial publish and automation recovery. Both lines now document guarded DEV feature apply and selecting dated migrations for structural and data changes.",
       "blobs": [
         "3530b1e9e76e27a289b1cb4fda9915b81689153a",
-        "14434ab47397d25c11a24ae20f9885968859c1c9"
+        "6e3db81340480b54d2e490ea87251cd39da4e2be"
       ]
     },
     ".agents/rules/graphify.md": {
@@ -123,10 +123,10 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. The 26.2 guide also describes the feature-first workflow.",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply.",
       "blobs": [
         "33767fcd336698abea2ec80d179529bca126104c",
-        "8b46f40372455410accac1d75ca4925261320004"
+        "3967dba461102c04f297f88ae4c0cb52875d2790"
       ]
     },
     "TODO.md": {
@@ -219,10 +219,10 @@
     },
     "docs/feature-releases.md": {
       "status": "intended",
-      "reason": "The 26.2 guide describes feature-first selection and how to order dependent migrations. Its dry run resolves target profiles before opening any session, while the 26.1 dry run stays local to capsule and manifest validation.",
+      "reason": "The 26.2 guide describes feature-first selection and how to order dependent migrations. Its dry run resolves target profiles before opening any session, while the 26.1 dry run stays local to capsule and manifest validation. Both guides document reviewed target-bound DEV baseline adoption.",
       "blobs": [
-        "12f04eff9567bb52d1c41f253887f67024dc4f7b",
-        "cdb2324f075a43887b634abfbacd03352ee1e8ff"
+        "c5efc8bd6d5097de081121d73c22d7940b08a0d2",
+        "e533d6318ac2674255cd7d778fc4ad8e4cef5cb2"
       ]
     },
     "docs/known-limitations.md": {
@@ -371,10 +371,10 @@
     },
     "scripts/compare_env_catalog.sql": {
       "status": "feature",
-      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency/synonym relationships; 26.1 does not include these catalog fields. The guarded DEV feature workflow and long-view transport changes are on both lines.",
+      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply.",
       "blobs": [
-        "01d8e78a97e18b3f1bc38a39af66924147828e49",
-        "d83e25e3e09f3466814361ea27b9570f4b385780"
+        "609ea023fc1363e2d48135d7b7d63e88307d433d",
+        "66f72a6ccb9980156a8e4c4da1b5cb520ac43cad"
       ]
     },
     "scripts/deploy.sh": {
@@ -555,10 +555,10 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile (APEX_WORKSPACE_USERNAME, release and workspace-user verification); 26.1 has none of them. The compare-env --help path is on both lines now. The guarded DEV feature workflow and long-view transport changes are on both lines.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths.",
       "blobs": [
-        "0dfa244b65319385defdf542d4a1f4f5d94e6997",
-        "3000270d1db77460c97d8f0180c45f1470b42a53"
+        "0a6fe0070965bea3cb65b11d02a30662b7c78ab1",
+        "933fcb4ba29b93f086a4790cfe05f6865b31a1c4"
       ]
     },
     "scripts/team.sh": {
@@ -851,10 +851,10 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2-only wrapper tests for its extra commands (automations, app-lock, query, feature help, strict-bytes deploy, verify-local dispatch and clean PYTHONPATH); the cygpath pin is ported and tested on both lines, and 26.1 has its own feature-init and template-status wiring tests",
+      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell.",
       "blobs": [
-        "38e08aea62989dadda08d748935611c10d0eba4f",
-        "d20d2d9d00860e73438599f991fe94f1cf3789ae"
+        "86e28c955abe1720290b9036be1985ca80fb6e63",
+        "2ea5caa708fd8c623f2825adef7ec873890c7504"
       ]
     },
     "tests/test_template_drift.py": {
