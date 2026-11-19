@@ -29,6 +29,8 @@ CAPSULE_SCHEMA_VERSION = 1
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 COMMIT_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z", re.ASCII)
 WORKFLOW_ENGINE_FILES = (
+    "scripts/feature_claims.py",
+    "scripts/feature_ddl_forms.py",
     "scripts/feature_manifest.py",
     "scripts/feature_sources.py",
     "scripts/feature_preflight.py",

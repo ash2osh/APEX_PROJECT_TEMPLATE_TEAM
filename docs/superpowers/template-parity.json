@@ -3,10 +3,10 @@
   "files": {
     ".agents/rules/agent-safety.md": {
       "status": "intended",
-      "reason": "26.2 adds the mandatory Oracle skills refresh, the --no-team-notice partial-publish rule, automations --yes and the verify/query rules; the TEAM_ACK_FROM_STDIN retirement is worded differently but behaves the same in both.",
+      "reason": "26.2 includes mandatory Oracle skills refresh, guarded partial publish and automation recovery. Both lines now document guarded DEV feature apply and selecting dated migrations for structural and data changes.",
       "blobs": [
-        "64d9a488bc8d5849a36f48edb31fd041dbdd5f15",
-        "14434ab47397d25c11a24ae20f9885968859c1c9"
+        "3530b1e9e76e27a289b1cb4fda9915b81689153a",
+        "6e3db81340480b54d2e490ea87251cd39da4e2be"
       ]
     },
     ".agents/rules/graphify.md": {
@@ -101,16 +101,16 @@
       "status": "intended",
       "reason": "attempt-event is now ignored in both (26.1 PR 24); only the uc-apx and .venv-graphify lines differ, as intended.",
       "blobs": [
-        "9974ddd4a98e28e4a99fce85519f7c7a7ca2c0fd",
-        "255792bc184094009a3cc2c3632ffd2b312476b7"
+        "e7b6a1130dca7af0f3b4c7d61c33710563db49aa",
+        "e3c7796b68e73d45e753fe5d7ee542dd4d462f72"
       ]
     },
     "AGENTS.md": {
       "status": "intended",
-      "reason": "26.2 documents its own release rules (SQLcl 26.3 floor, normalized publish verification, native DEV locks, partial publish, automation restore, Oracle skills refresh, pinned Graphify); it also documents a rollout transport preflight that the 26.1 rollout code lacks (see scripts/rollout.py).",
+      "reason": "26.2 documents its SQLcl floor, native locks, partial publish, runtime verification, Oracle skills refresh, pinned Graphify and feature-first database workflow.",
       "blobs": [
-        "d92fc204d76cd04b5982490cfaa60cbd6f7c3734",
-        "a9bb654839a7d1a627f47fc5c19af8972b4646f6"
+        "9084926b55771d9023b1197e276d53a51991e840",
+        "70c9b36dd678d95b8696b4f4fabb6d0f861619df"
       ]
     },
     "AGENTS.project.md": {
@@ -123,17 +123,17 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Release-specific README: 26.2 documents normalized verification, native DEV locks, partial publish, automations and the offline Graphify path; 26.1 documents byte-exact verification, its own release commands and a Recover an older template lock section that 26.2 lacks",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply.",
       "blobs": [
-        "a03d63c2359db6153fec710db0b273da55f0510e",
-        "8b46f40372455410accac1d75ca4925261320004"
+        "33767fcd336698abea2ec80d179529bca126104c",
+        "3967dba461102c04f297f88ae4c0cb52875d2790"
       ]
     },
     "TODO.md": {
       "status": "intended",
-      "reason": "Project-owned parked list: 26.2 parks a dry-run .env wording item tied to its target-resolving dry run (docs/feature-releases.md, README, docs/migration-rules.md); 26.1 has no such item because its dry run resolves no target",
+      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence.",
       "blobs": [
-        "ccb48afde46783705254c57422f01917c62c2c69",
+        "a9a03eed1dd40125d683a4719456c6e82055636e",
         "b570ce17cbd085d251fa566e8a7c5a22f01df05b"
       ]
     },
@@ -171,9 +171,9 @@
     },
     "docs/GETTING_STARTED.md": {
       "status": "intended",
-      "reason": "Release-specific setup: 26.1 requires APEX and SQLcl 26.1, has its own clone URL, 26.1 upgrade-lock recovery and 26.1 cleanup steps; 26.2 requires SQLcl 26.3.0.0.",
+      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow.",
       "blobs": [
-        "6a98ded806df77b87af30433917649ea54e10005",
+        "4c335f3f5f4607d805f3103f64a837c4b3cf7c3e",
         "8d1819f7b19f7d50d90a15afc203d79c9b634efd"
       ]
     },
@@ -209,12 +209,20 @@
         "84fb1931204a67b732e902add23612b6ca0e8556"
       ]
     },
+    "docs/feature-ownership.md": {
+      "status": "intended",
+      "reason": "The 26.2 ownership guide treats feature files as the default for new stored-code work and documents how dated migrations fit that workflow.",
+      "blobs": [
+        "5dd9382c89b6602e30f46342b97704eae2cdd3b8",
+        "ed33e9305fc8c1a2da41515754552c9c4c9ccb6f"
+      ]
+    },
     "docs/feature-releases.md": {
       "status": "intended",
-      "reason": "Release-specific dry run: 26.2 resolves each step target from the STAGING_* or PROD_* settings in the environment or .env at planning and opens no session (commit df22dbb); 26.1 dry run checks local source, manifest, capsule and hashes only, because its plan resolves no target",
+      "reason": "The 26.2 guide describes feature-first selection and how to order dependent migrations. Its dry run resolves target profiles before opening any session, while the 26.1 dry run stays local to capsule and manifest validation. Both guides document reviewed target-bound DEV baseline adoption.",
       "blobs": [
-        "bbae68a89641caa2c79efe38d076f6224105f49b",
-        "69ba702f161283730d93d0b5c307ffeb259bebd2"
+        "c5efc8bd6d5097de081121d73c22d7940b08a0d2",
+        "e533d6318ac2674255cd7d778fc4ad8e4cef5cb2"
       ]
     },
     "docs/known-limitations.md": {
@@ -235,9 +243,9 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "Release-specific rules: 26.2 documents MIGRATION_* owner profiles, schema-2 rehearsal metrics, the selected-target attempt policy, full-environment comparison and baseline generation; 26.1 documents its fail-closed every-chain attempt policy (decided 2026-10-20), planning reports, read-only verification and generated baseline migrations",
+      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow.",
       "blobs": [
-        "6dadf76dbd5fffe028b5236d664a6a5cfdf4ed37",
+        "c09a13df0d44fb5740fab574ebdd614747abb106",
         "34d3e61de73f81946fb1efbb3bef8099ef30d5f2"
       ]
     },
@@ -291,9 +299,9 @@
     },
     "migrations/README.md": {
       "status": "feature",
-      "reason": "26.2-only MIGRATION_* owner profiles are documented there; the migration-plan wording differs.",
+      "reason": "The 26.2 guide documents dedicated migration-owner profiles and reserves dated migrations for one-time effects and required transitions.",
       "blobs": [
-        "3fff6134c8b6032ce8499b90e8686c8222b20c8a",
+        "d35cd776bf4eb713b1c0ff8fc7f906db3d53d894",
         "cb4e4b97e4233636169961edf50f03b9a21f283c"
       ]
     },
@@ -363,10 +371,10 @@
     },
     "scripts/compare_env_catalog.sql": {
       "status": "feature",
-      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency/synonym relationships; 26.1 does not include these catalog fields.",
+      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply.",
       "blobs": [
-        "db3ade8e14a027fe3621eabda248a40bf64c14e4",
-        "362ae9e684ad3f9e4ff6b7c8eab9992baff81079"
+        "609ea023fc1363e2d48135d7b7d63e88307d433d",
+        "66f72a6ccb9980156a8e4c4da1b5cb520ac43cad"
       ]
     },
     "scripts/deploy.sh": {
@@ -547,18 +555,18 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile (APEX_WORKSPACE_USERNAME, release and workspace-user verification); 26.1 has none of them. The compare-env --help path is on both lines now.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths.",
       "blobs": [
-        "d0a6571c5d1bee211b7cfd4a5faa12d4cba5741f",
-        "8bc8af687d54d51548eae7795bb39e5f920173a6"
+        "0a6fe0070965bea3cb65b11d02a30662b7c78ab1",
+        "933fcb4ba29b93f086a4790cfe05f6865b31a1c4"
       ]
     },
     "scripts/team.sh": {
       "status": "feature",
-      "reason": "Ported to 26.2 (fix/parity-ports-2-262): migration-plan passes the repo root through cygpath -m -- with its comment. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile.",
+      "reason": "Ported to 26.2 (fix/parity-ports-2-262): migration-plan passes the repo root through cygpath -m -- with its comment. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile. The guarded DEV feature workflow and long-view transport changes are on both lines.",
       "blobs": [
-        "db0c71443ed1d6b00e1902dfe971815947c8bc20",
-        "ae6a67ac554eefa7b8fb5c4186f98eb69e189ff6"
+        "452e79e3f66d1199d447b69ccdf54e700ade344f",
+        "ffc537bf9e420fcba72efbe1c55daedcdbca4d0b"
       ]
     },
     "scripts/template_drift.py": {
@@ -675,10 +683,10 @@
     },
     "tests/test_compare_env.py": {
       "status": "intended",
-      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring.",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines.",
       "blobs": [
-        "f1e137bcf1344d0b727c7cd8f52c179fb97a76a4",
-        "557575bf1b860f40ba85c4147e1415eb2069dc38"
+        "2414e8b74b116fe0aa6192e175e06c4cfd08efa8",
+        "68d57f7dfc7c70c015520d97a1fc3b08fc7b5b90"
       ]
     },
     "tests/test_deployment_descriptor.py": {
@@ -843,10 +851,10 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2-only wrapper tests for its extra commands (automations, app-lock, query, feature help, strict-bytes deploy, verify-local dispatch and clean PYTHONPATH); the cygpath pin is ported and tested on both lines, and 26.1 has its own feature-init and template-status wiring tests",
+      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell.",
       "blobs": [
-        "38e08aea62989dadda08d748935611c10d0eba4f",
-        "d20d2d9d00860e73438599f991fe94f1cf3789ae"
+        "86e28c955abe1720290b9036be1985ca80fb6e63",
+        "2ea5caa708fd8c623f2825adef7ec873890c7504"
       ]
     },
     "tests/test_template_drift.py": {

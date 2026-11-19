@@ -7,6 +7,8 @@ import tempfile
 from dataclasses import replace
 import unittest
 import uuid
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -801,10 +803,12 @@ class FeaturePrepareTests(unittest.TestCase):
 
         missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}
         occupied = {"code": "LIVE_NAMESPACE_OCCUPIED", "name": "V", "namespace": "COMMON", "existing_types": ["TABLE"]}
+        failed_check = {"code": "CHECK_FAILED", "message": "required installed version is not present"}
         feature = {"type": "feature-migrate", "schema": "APP_CODE"}
         migrate = {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}
         cases = (
             ("occupied name", [feature, migrate], PreflightReport(1, (occupied,), (), {}), "LIVE_NAMESPACE_OCCUPIED"),
+            ("declared precondition", [feature, migrate], PreflightReport(1, (failed_check,), (), {}), "CHECK_FAILED"),
             ("missing prerequisite with no earlier step", [migrate], PreflightReport(1, (missing,), (), {}), "MISSING_PREREQUISITE"),
             (
                 "preflight error", [feature, migrate],
@@ -974,6 +978,76 @@ class FeaturePrepareTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(feature_release.FeatureReleaseError, "migration preflight refused.*MISSING_PREREQUISITE"):
             self._auxiliary_migration(steps, PreflightReport(1, (missing,), (), {}), environ=self.TWO_SCHEMAS)
+
+    def test_prepare_checks_preceding_migration_replacements_against_live_source(self) -> None:
+        from scripts import feature_release, migration_checks, rollout
+
+        desired = b"CREATE OR REPLACE PACKAGE BODY DISPATCH AS\n  PROCEDURE RUN IS BEGIN NULL; END;\nEND DISPATCH;\n/\n"
+        v1 = ["PACKAGE BODY DISPATCH AS\n", "  PROCEDURE RUN IS BEGIN RAISE NO_DATA_FOUND; END;\n", "END DISPATCH;\n"]
+        body = replace(
+            self.item, path="features/dispatch/APP_CODE/packages/dispatch.pkb.sql",
+            source=desired, sha256=hashlib.sha256(desired).hexdigest(),
+            unit=("APP_CODE", "PACKAGE BODY", "DISPATCH"),
+        )
+        checkpoint = replace(self.checkpoint, inputs=(body,))
+        capsule = replace(self.capsule, checkpoints=(checkpoint,))
+        checks = {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ready", "sql": "SELECT 1 FROM dual", "expected": 1}]}
+
+        def replacement(line: str) -> str:
+            return f"CREATE OR REPLACE PACKAGE BODY DISPATCH AS\n{line}END DISPATCH;\n/\n"
+
+        v2 = replacement("  PROCEDURE RUN IS BEGIN RAISE TOO_MANY_ROWS; END;\n")
+        equal = replacement(v1[1])
+        cases = (
+            ("same owner, different body", "APP_CODE", "APP_CODE", v2, True, False),
+            ("followed by DML", "APP_CODE", "APP_CODE", v2 + "UPDATE jobs SET status = 'READY';\n", True, False),
+            ("followed by a comment and lock", "APP_CODE", "APP_CODE", v2 + "COMMENT ON TABLE JOBS IS 'Ready';\nLOCK TABLE JOBS IN EXCLUSIVE MODE;\n", True, False),
+            ("mapped target owner", "APP_CODE", "APP_STAGE", v2, True, False),
+            ("same owner, equal body", "APP_CODE", "APP_CODE", equal, False, False),
+            ("last replacement matches live", "APP_CODE", "APP_CODE", v2 + equal, False, False),
+            ("different owner", "APP_OTHER", "APP_CODE", v2, False, False),
+            ("explicit selected owner from another login", "APP_OTHER", "APP_CODE", v2.replace("PACKAGE BODY DISPATCH", "PACKAGE BODY APP_CODE.DISPATCH"), True, False),
+            ("migrate switches to the selected owner", "APP_OTHER", "APP_CODE", "ALTER SESSION SET CURRENT_SCHEMA = APP_CODE;\n" + v2, True, False),
+            ("drops the selected body", "APP_CODE", "APP_CODE", "DROP PACKAGE BODY DISPATCH;\n", True, False),
+            ("recompiles the selected body", "APP_CODE", "APP_CODE", "ALTER PACKAGE DISPATCH COMPILE BODY;\n", True, False),
+            ("opaque SQL", "APP_CODE", "APP_CODE", v2 + "BEGIN NULL; END;\n/\n", False, True),
+        )
+        for label, migration_schema, feature_owner, source, refused, warning in cases:
+            with self.subTest(label=label):
+                folder = f"migrations/{migration_schema}/2026-01-01_legacy-r001"
+                for root in (self.root, capsule.root / "payload"):
+                    path = root / folder
+                    path.mkdir(parents=True, exist_ok=True)
+                    (path / "001-package-body.sql").write_text(source, encoding="utf-8", newline="\n")
+                    (path / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8", newline="\n")
+                steps = [
+                    {"type": "migrate", "folders": [folder]},
+                    {"type": "feature-migrate", "schema": "APP_CODE"},
+                ]
+                state = self._state(environment="staging")
+                state["sourceUnits"]["PACKAGE BODY:DISPATCH"] = {"lines": v1, "settings": dict(SETTINGS), "valid": True}
+                state["identity"].update(current_schema=feature_owner, session_user="STAGE_WRITER")
+                migration_owner = feature_owner if migration_schema == "APP_CODE" else migration_schema
+                migration_user = "STAGE_WRITER" if migration_owner == feature_owner else "OTHER_WRITER"
+                migration_identity = dict(state["identity"], current_schema=migration_owner, session_user=migration_user)
+                env = self.ONE_DEV_SCHEMA_MAPPED if feature_owner == "APP_STAGE" else self.TWO_SCHEMAS
+                stderr = StringIO()
+                with patch.object(feature_release.release_capsule, "load_capsule", return_value=capsule), \
+                     patch.object(feature_release, "_manifest_steps", return_value=steps), \
+                     patch.object(feature_release, "capture_selected_state", return_value=state), \
+                     patch.object(rollout, "_observe_target_identity", return_value=migration_identity), \
+                     patch.object(migration_checks, "_live_report", return_value=PreflightReport(0, (), (), {})), \
+                     redirect_stderr(stderr):
+                    if refused:
+                        plans = self.root / "scratch/feature-release-plans"
+                        previous = {path: path.read_bytes() for path in plans.rglob("*.json")}
+                        with self.assertRaisesRegex(feature_release.FeatureReleaseError, r"step 1.*PACKAGE BODY DISPATCH.*step 2"):
+                            feature_release.prepare_target(self.root, capsule, "staging", environ=env)
+                        self.assertEqual({path: path.read_bytes() for path in plans.rglob("*.json")}, previous)
+                    else:
+                        plan = feature_release.prepare_target(self.root, capsule, "staging", environ=env)
+                        self.assertEqual(plan.checkpoint_guards[0]["targetIdentity"]["current_schema"], feature_owner)
+                        self.assertEqual("review unmodeled source effects in preceding step(s) 1" in stderr.getvalue(), warning)
 
     def test_one_dev_schema_mapped_to_a_differently_named_staging_schema_defers_on_the_resolved_name(self) -> None:
         missing = {"code": "MISSING_PREREQUISITE", "name": "ORDERS", "required_by": "V"}

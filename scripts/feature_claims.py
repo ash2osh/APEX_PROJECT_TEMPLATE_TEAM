@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import feature_ddl_forms
 from .feature_manifest import (
     FEATURE_RE,
     SCHEMA_RE,
@@ -21,6 +22,7 @@ from .feature_manifest import (
 )
 from .migration_checks import MigrationAnalysisError, analyze_batch
 from .path_utils import relative_to_root
+from .validate_migration import statement_spans
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,12 @@ def _claims_for_file(feature: str, schema: str, relative: str, source: bytes) ->
         owner, object_type, name = unit
         return [Claim(feature, owner, object_type, name, relative)]
     claims: list[Claim] = []
-    for operation in analyze_batch((_analysis_migration((item,), schema),), schema):
+    operations = analyze_batch((_analysis_migration((item,), schema),), schema)
+    for operation in operations:
+        if operation.get("kind") in {"OPAQUE", "UNKNOWN"}:
+            text = source.decode("utf-8")
+            start, end = statement_spans(text)[operation["statement_index"] - 1]
+            operation = feature_ddl_forms._view(text[start:end], schema) or operation
         kind = operation.get("kind")
         owner = operation.get("owner", schema)
         if kind == "ALTER_ADD_COLUMN" and isinstance(operation.get("table"), str):

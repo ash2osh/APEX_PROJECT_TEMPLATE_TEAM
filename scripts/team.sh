@@ -57,7 +57,7 @@ Commands:
          [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Confirm and execute a frozen deployment manifest
-  feature <init|capture|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> ...
+  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> ...
                                               Create mutable feature sources and freeze version-2 release capsules;
                                               reconcile-run closes an unfinished run; convert-plan plans offline
   compare-schema [--from <env>] (--to <env>|--env <env>)
@@ -410,14 +410,14 @@ case "$command_name" in
       exec "$REPO_ROOT/scripts/rollout.sh" "$@"
     ;;
   feature)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh feature <init|capture|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> [arguments]"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> [arguments]"
     if [ "$1" = --help ] || [ "$1" = -h ]; then
       cd "$REPO_ROOT"
       exec python3 -m scripts.feature_cli --help
     fi
     feature_command="$1"
     case "$feature_command" in
-      init|diff|clean-capsule|reconcile-run|convert-plan) ;;
+      init|diff|clean-capsule|convert-plan) ;;
       freeze|doctor)
         # The comparison with DEV is optional: load the project file only when it exists
         # (and, for doctor, only for --live), so an offline freeze or doctor needs no .env.
@@ -437,11 +437,15 @@ case "$command_name" in
           fi
         fi
         ;;
-      capture)
-        [ "$#" -ge 2 ] || fail "usage: scripts/team.sh feature capture <slug> (--package NAME | --trigger NAME | --procedure NAME | --function NAME | --type NAME) --schema SCHEMA --env dev [--refresh]"
+      capture|apply|reconcile-run)
+        if [ "$feature_command" = capture ]; then
+          [ "$#" -ge 2 ] || fail "usage: scripts/team.sh feature capture <slug> (--package NAME | --trigger NAME | --procedure NAME | --function NAME | --type NAME) --schema SCHEMA --env dev [--refresh]"
+        fi
         feature_help=false
+        feature_offline=false
         for feature_argument in "$@"; do
           if [ "$feature_argument" = --help ] || [ "$feature_argument" = -h ]; then feature_help=true; fi
+          if [ "$feature_command" = apply ] && [ "$feature_argument" = --status ]; then feature_offline=true; fi
         done
         feature_environment=""
         feature_environment_count=0
@@ -450,31 +454,52 @@ case "$command_name" in
           case "${feature_arguments[$feature_index]}" in
             --env)
               feature_next=$((feature_index + 1))
-              [ "$feature_next" -lt "${#feature_arguments[@]}" ] || fail "feature capture requires --env dev"
+              [ "$feature_next" -lt "${#feature_arguments[@]}" ] || fail "feature $feature_command requires --env dev"
               feature_environment_count=$((feature_environment_count + 1))
-              [ "$feature_environment_count" -eq 1 ] || fail "feature capture accepts only one --env value"
+              [ "$feature_environment_count" -eq 1 ] || fail "feature $feature_command accepts only one --env value"
               feature_environment="${feature_arguments[$feature_next]}"
               ;;
             --env=*)
               feature_environment_count=$((feature_environment_count + 1))
-              [ "$feature_environment_count" -eq 1 ] || fail "feature capture accepts only one --env value"
+              [ "$feature_environment_count" -eq 1 ] || fail "feature $feature_command accepts only one --env value"
               feature_environment="${feature_arguments[$feature_index]#--env=}"
               ;;
           esac
         done
         if [ "$feature_help" = false ]; then
-          [ "$feature_environment" = dev ] || fail "feature capture is DEV-only; use --env dev"
+          if [ "$feature_command" != reconcile-run ]; then
+            [ "$feature_environment" = dev ] || fail "feature $feature_command is DEV-only; use --env dev"
+          fi
+        fi
+        feature_bind_env=false
+        if [ "$feature_help" = false ] && [ "$feature_offline" = false ] && [ "$feature_environment" = dev ]; then
           PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
           # shellcheck source=load_env.sh
-          source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+          if ! source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"; then
+            if [ "$feature_command" = capture ]; then exit 1; fi
+            fail "feature $feature_command requires a valid DEV configuration"
+          fi
+          if [ "$feature_command" != capture ]; then
+            case "$PROJECT_ENV_FILE" in
+              /*|[A-Za-z]:[/\\]*) ;;
+              *) PROJECT_ENV_FILE="$PWD/$PROJECT_ENV_FILE" ;;
+            esac
+            export PROJECT_ENV_FILE
+            feature_bind_env=true
+          fi
         fi
         ;;
-      *) fail "unknown feature command '$feature_command'; use init, capture, diff, doctor, freeze, clean-capsule, reconcile-run, or convert-plan" ;;
+      *) fail "unknown feature command '$feature_command'; use init, capture, apply, diff, doctor, freeze, clean-capsule, reconcile-run, or convert-plan" ;;
     esac
     feature_root="$REPO_ROOT"
     case "$(uname -s 2>/dev/null)" in
       MINGW*|MSYS*|CYGWIN*)
-        if command -v cygpath >/dev/null 2>&1; then feature_root="$(cygpath -m -- "$REPO_ROOT")"; fi
+        if command -v cygpath >/dev/null 2>&1; then
+          feature_root="$(cygpath -m -- "$REPO_ROOT")"
+          if [ "${feature_bind_env:-false}" = true ]; then
+            PROJECT_ENV_FILE="$(cygpath -m -- "$PROJECT_ENV_FILE")"
+          fi
+        fi
         ;;
     esac
     cd "$REPO_ROOT"

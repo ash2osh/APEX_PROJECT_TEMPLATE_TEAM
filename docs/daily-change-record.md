@@ -26,6 +26,10 @@ record keeps the readable diff and the day's evidence in one dated folder.
   `ai_generate/YYYY-MM-DD/feature-diffs/`. Add those generated diffs and the
   command result to the day's one `WALKTHROUGH.md`; the retained DEV capture is
   local review evidence, not a live release receipt.
+- A verified DEV feature apply or reconciliation to the intended state saves
+  the reviewed pre-apply diff under
+  `ai_generate/YYYY-MM-DD/feature-diffs/<feature>/<schema>/dev-apply/`.
+  Add the reported diff and result to the same walkthrough.
 - `WALKTHROUGH.md` tracks the day: what changed and why, the files and diffs, the
   commands run and their results, what was not verified, and what is open. Add to it as
   the day goes on. One walkthrough per day, never a second file.

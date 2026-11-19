@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "c16258a5b7f36be518545728d3d006d515803919",
+  "coreCommit": "47c9f6989085401c85f4b7d3eff9275d72030e5a",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -84,7 +84,7 @@
     },
     {
       "path": "scripts/compare_schema.py",
-      "sha256": "927d201577e41345f6d37ad98edad54a363f9ee6be77930a6ce5cb19a05ff333",
+      "sha256": "f0e982612d9cb068c031687a158d2e5b85110d3d7debe0d080ff3d6ff5885f78",
       "executable": false
     },
     {
@@ -179,12 +179,12 @@
     },
     {
       "path": "scripts/feature_claims.py",
-      "sha256": "63221824aed1d4010c718e77113d4821ea482ff352b63744638b57ce27b8f783",
+      "sha256": "464f7031385ee7fab38257a74f28495717b05e37ef40351e8c467774ef98a630",
       "executable": false
     },
     {
       "path": "scripts/feature_cli.py",
-      "sha256": "8c4cc7bb4dcaaeef113e486b7adb7b2c7c05e6997f5e4c4b51b833fcc348cb52",
+      "sha256": "816d11d3fa6356dc1e5b0a6c92b72c6407fd2819774682bfcf13d5f5964ac0e8",
       "executable": false
     },
     {
@@ -199,7 +199,17 @@
     },
     {
       "path": "scripts/feature_ddl_forms.py",
-      "sha256": "9cae769ba9077ef89ced0174f070724e9cf7cf59048f3438069c36ddd0a3b343",
+      "sha256": "ca12d5dbcacabcf2b31468e28a3751b51b67b3ccfe51fa38755d60fd623ea18e",
+      "executable": false
+    },
+    {
+      "path": "scripts/feature_dev.py",
+      "sha256": "b14f19ab6effde2bc90f1e234b9c27c943823657d195e15b62107f1efc900a11",
+      "executable": false
+    },
+    {
+      "path": "scripts/feature_dev_views.py",
+      "sha256": "809ea35da826eba9503a0955f7d9cb42a186706cbfb025e8d1f501b82fa16b1a",
       "executable": false
     },
     {
@@ -209,12 +219,12 @@
     },
     {
       "path": "scripts/feature_preflight.py",
-      "sha256": "816d83dc1147df5d3c9df749a5fb3de17c80d9b87c6c7cae44b91be29f87feac",
+      "sha256": "6561f70e791e8538586f28d4acd318ba4573dfd4d12728ffeea79e41f0fd6c24",
       "executable": false
     },
     {
       "path": "scripts/feature_release.py",
-      "sha256": "e50fef879b3a4d9d9e48f4cc692324db5a22e315f92ae4def56ce4276fc4fbe2",
+      "sha256": "04751348e0d70a01a3925f4eba02e8848973acc8338dabef829eb72023dbc581",
       "executable": false
     },
     {
@@ -364,7 +374,7 @@
     },
     {
       "path": "scripts/release_capsule.py",
-      "sha256": "5f2175fd9bb0cf63bdf6d25f4c2825709cc0028e1ae2399408f6f8ffb31e2925",
+      "sha256": "2c935045384e2c3bde1e6316f2358c715a2d3173d45312018c27f5bb600dea80",
       "executable": false
     },
     {
@@ -894,7 +904,7 @@
     },
     {
       "path": "tests/test_feature_convert.py",
-      "sha256": "0548a04921256bddabfb1fe3e660cf739c6780e50edcf8b0260cb7914971bd1b",
+      "sha256": "cc55a288ead378d882c9eb798ed2c1b4df07f8e64cd2b8976f983f078e65d259",
       "executable": false
     },
     {
@@ -905,6 +915,11 @@
     {
       "path": "tests/test_feature_ddl_forms.py",
       "sha256": "adb80790381929c813594155831953b3525022c05c1d17256a6efc84fc2aa33a",
+      "executable": false
+    },
+    {
+      "path": "tests/test_feature_dev.py",
+      "sha256": "9d1ed06c70206c716f41f1a336480c9fc6848e3b501603a0edff30ef86772665",
       "executable": false
     },
     {
@@ -929,7 +944,7 @@
     },
     {
       "path": "tests/test_feature_prepare.py",
-      "sha256": "03d7c960f3d974f6333ec3f635dd81a27a8fa41ba47d503b4dbfadbb443e33fb",
+      "sha256": "b759dbd6fcc545da3dbedc4df9e056648df808f5f12cea5fdb32cbd689e7595a",
       "executable": false
     },
     {
@@ -974,7 +989,7 @@
     },
     {
       "path": "tests/test_live_feature_release.py",
-      "sha256": "63b8872abfff7b4913d1f0b6c13c0c763426511067c7270a29136a4bd6cb81b4",
+      "sha256": "b2cb745e2c5f5afcf3371f7137db46be2e6012cb57e6bb1162cd12178f7c7d9b",
       "executable": false
     },
     {
@@ -1069,7 +1084,7 @@
     },
     {
       "path": "tests/test_release_capsule.py",
-      "sha256": "9ad5fe70757f30ba99de3561bcb80f79b5593fdada058e4076c5961f2aae288f",
+      "sha256": "e06e4b77b880bf6ff325e4c7c574c5822cc2809caf6e65b090f9dfd112562931",
       "executable": false
     },
     {

@@ -1,27 +1,143 @@
 # Feature-oriented releases
 
-Use mutable feature files for new object work that benefits from complete
-stored-unit sources, compact Git diffs, and one frozen payload for staging and
-production. Existing dated migrations and schema-version 1 rollout manifests
-keep their current behavior.
+Use mutable feature files as the default for packages, types, procedures,
+functions, triggers, and views. Keep successive edits in Git and select each
+final definition once for promotion. Use dated migrations for one-time changes
+and ordered transitions. One version-2 capsule can carry both.
 
-## Scope and revisit criteria
+## Scope and current DEV workflow
 
-Feature releases do not replace dated migrations yet. Today:
+1. Capture existing stored source from DEV or author the complete new source
+   under its owning feature. Put each new supported view in a separate
+   `views/<name>.sql` file so a later release can select it independently.
+   Use `feature doctor --live` to check DEV stored-source drift and
+   review the changes with `feature diff` or Git.
+2. Coordinate with the team and use the project's approved DEV delivery route
+   for the selected source. After applying, verify the installed source,
+   settings and validity, and run relevant behavior checks. Use the guarded
+   feature commands below to review and apply selected stored source on DEV.
+3. Commit the final definitions and any required dated migrations, then
+   freeze one release capsule. Apply and verify it on staging before promoting
+   that capsule to production.
 
-- `feature capture` reads one stored unit: a package or type (specification and
-  body), or a single trigger, procedure or function. Views go in the feature's
-  `ddl.sql`. Destructive DDL (`DROP`, `RENAME`, `TRUNCATE`) and anything the DDL
-  forms refuse stay in dated migrations started with
-  `scripts/team.sh new-migration --source`.
-- Feature files have no DEV apply path. `feature capture --env dev` reads DEV into
-  the repository and writes nothing to DEV. `rollout` refuses `--env dev` for a
-  feature capsule and runs only `--env staging` or `--env prod`.
+Use dated migrations for backfills, seeds, data fixes, destructive DDL, and
+changes requiring an intermediate definition. Existing modeled one-time DDL
+in feature checkpoints keeps its current release semantics. If a DEV write
+needs a dated compatibility migration, review its source against the feature
+files and decide which effects each delivery step owns. Keep required one-time
+effects in the promotion manifest. Omit a source-only revision from a release
+only after reviewing its replacement and original target evidence.
 
-Revisit whether dated migrations can be retired for object work only when all of
-these hold: one feature release has moved through DEV, then staging, then
-production under a frozen capsule; a DEV apply path for feature files is
-documented; and the data-step rule for features is settled.
+Prepare checks the target before any release step writes. The capsule order
+depends on which definition the backfill needs.
+
+- **Backfill uses the final definition.** Select the feature once, then
+  select the dated backfill. A declared migration precondition that fails
+  during preparation will refuse the release. In the migration SQL, check
+  the installed source, compiler settings, and validity before changing data
+  when those checks depend on the preceding feature step.
+- **Backfill needs an intermediate definition.** Select one reviewed dated
+  migration. Install the intermediate definition, assert its source, settings,
+  and validity, perform the backfill, then install the final definition.
+  Make the assertion raise on a mismatch. Verify the
+  last step against the canonical feature file at the release commit, then
+  check the installed final source, settings, validity, and resulting data.
+  Make the migration the sole writer of the unit in this capsule. Qualify
+  from the expected starting state, using a disposable copy if DEV already
+  has the final definition.
+
+Prepare refuses a directly identifiable earlier migration replacement that
+would change a later feature checkpoint's before-source on the same resolved
+target. Indirect effects, such as dynamic SQL, require operator review and
+can still trip the runtime guard. Ship a prerequisite in its own verified
+release if a dependent checkpoint needs it during preparation.
+
+## Prepare selected DEV source
+
+```bash
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev \
+  --unit "PACKAGE BODY:ITEM_LOOKUP" --prepare
+```
+
+Repeat `--unit` to include more units. Include the body when changing
+its package or type specification. The command uses the DEV migration profile,
+with the code profile as the fallback when no migration profile is configured.
+It reads the selected catalog and preconditions, then writes a private plan
+and source/settings review under `scratch/feature-dev/`. The plan binds the
+observed target and the exact source, check, and configuration inputs.
+
+Prepare uses the feature schema's `checks.json`. Repeat `--checks` with
+repository-relative paths under that feature schema's `checks/` directory
+when the selection needs its own checks. `PROJECT_ENV_FILE` must point to a
+regular file inside the checkout. If a unit has no baseline on this target,
+or its live definition or settings have changed, review the retained diff
+and observed before-state, reconcile the authored source, and prepare again
+with the displayed `--accept-live-baseline` digest. Acceptance preserves
+the authored feature files and records the observed state for that target.
+Preparation performs no database writes.
+
+Select a view with `--unit VIEW:ITEM_LOOKUP` and put its single
+`CREATE OR REPLACE VIEW` in `views/item_lookup.sql` under the feature schema.
+List the projected columns explicitly because Oracle expands top-level
+wildcards in stored view text. Use an explicit view column list when the
+projection does not name every output column. If the source omits `DEFAULT
+COLLATION`, prepare binds the effective schema or session default. The
+writer rechecks it before applying and verifies the installed collation.
+Keep one-time DDL and grants
+in separately selected files. When a capsule replaces an existing view,
+include the reviewed target precondition required by capsule preparation.
+See [Oracle's view creation notes](https://docs.oracle.com/en/database/oracle/oracle-database/19/admin/managing-views-sequences-and-synonyms.html).
+
+## Apply or recover a DEV plan
+
+Coordinate shared DEV writes with the team. Review the plan and its diff,
+then pass the reported path explicitly.
+
+```bash
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev \
+  --execute-plan scratch/feature-dev/prepare-example/plan.json
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev --status
+```
+
+Execution verifies the inputs and target again, then checks the before-state
+inside the write session. It verifies source, compiler settings, validity,
+and the selected postconditions on fresh connections. A verified no-op runs
+the checks without recompiling. Each verified plan is single-use. Baseline
+refresh uses verified installed source and preserves edits in the feature files.
+For views, execution also compares full catalog DDL in the write session
+and checks query text, aliases, access and editioning properties on read-back.
+A verified write saves the prepared diff under the day's `feature-diffs/`
+directory. Reconciliation saves it when it verifies the intended state.
+Include the reported diff in the [daily change record](daily-change-record.md).
+
+If execution reports an unknown outcome, retain the plan, review, and SQLcl
+evidence. The private marker under `releases/.dev-apply-attempts/` blocks
+further applies on the same physical target and remains visible in offline
+status after scratch cleanup. Restore the exact plan and input snapshots
+from retained evidence before reconciliation if they are missing.
+
+Before authorizing recovery, establish that the original operation ended.
+Inspect the current definition, compiler settings, validity, and dependencies.
+An invalid or partial change may need a separately authorized repair on the
+same target. Use the retained before-state and source diff to review a
+restore candidate, then verify the repair through the project's approved
+delivery route.
+
+Create reviewed JSON evidence with `schemaVersion` 1, `planId`, `planSha256`,
+and `targetScope` copied from the pending plan. Set `conclusion` to `before`
+or `intended`. Record who established the conclusion in `establishedBy`
+and what they checked in `notes`. The reconciliation command re-observes the
+selected target before it records closure.
+
+```bash
+scripts/team.sh feature reconcile-run prepare-example --env dev --evidence recovery.json
+```
+
+Type the displayed `RECONCILE-RUN <plan-id>` acknowledgment at a terminal.
+`--yes` records noninteractive acknowledgment after the same evidence
+requirements. Prepare a fresh plan when the attempt is closed. The lease
+coordinates participating commands in this checkout. Coordinate separately
+with standalone migrations and teammates in other checkouts.
 
 ## Create and review feature source
 
@@ -59,7 +175,12 @@ Capture preserves existing short source paths and uses a bounded hashed stem
 for longer quoted identifiers; metadata and review files retain the full
 case-sensitive identifier and source hashes.
 
-One-time DDL may live in `features/<slug>/<SCHEMA>/ddl.sql`. Complete stored
+Existing modeled one-time DDL may live in `features/<slug>/<SCHEMA>/ddl.sql`.
+Put each new supported `CREATE OR REPLACE VIEW` in
+`features/<slug>/<SCHEMA>/views/<name>.sql`. Existing mixed `ddl.sql` files
+are still valid release inputs. If a view in one of those files needs a
+separate release, move its definition after reviewing its dependencies and
+ownership. Complete stored
 units live under `features/<slug>/<SCHEMA>/`, one directory per unit group:
 `packages/` (`.pks.sql`, `.pkb.sql`), `types/` (`.tps.sql`, `.tpb.sql`),
 `triggers/` (`.trg.sql`), `procedures/` (`.prc.sql`) and `functions/`
@@ -73,7 +194,7 @@ export. Schema-version 1 keeps its explicit connection and expected-user fields.
 
 ### DDL a feature checkpoint accepts
 
-`feature freeze` and `rollout --prepare` read a `ddl.sql` with the same rules
+`feature freeze` and `rollout --prepare` read feature DDL files with the same rules
 (`scripts/feature_ddl_forms.py`), so a statement that freezes is also one that
 prepare can prove. Each form below names only objects of the checkpoint's own
 schema, and prepare generates a catalog check for it: a before-state check that
@@ -409,15 +530,15 @@ plan artifacts, keeps compact receipts and review diffs, and records which paths
 
 ## Converting an existing project later
 
-Template upgrade does not convert or archive downstream migrations. In a later
-project task, inventory and reconcile every old attempt first. Derive each
-final package spec/body once, keep DML separate, then checksum-archive the exact
-legacy SQL, checks, receipts, and attempt evidence. Verify the archive checksum
-and contents before removing converted active folders. Retire an old archive
-index only together with its entire converted legacy tree. Never leave active
-revision families pointing into a removed archive. Keep the archive and
-conversion review in project-owned paths; do not put customer source in this
-template guide or example.
+Inventory the legacy folders with `feature convert-plan`. Review each
+stored-code family's final definition against DEV and the release target.
+Retain any required one-time effects and state-dependent intermediate definitions
+in the ordered manifest. Check original-target attempts and reconcile ambiguous
+writes from their own evidence. Apply normal archive eligibility rules to the
+reviewed folders and keep the exact SQL, checks, receipts, and attempt evidence.
+Verify checksums and update consumers of old paths. Archived bytes record history.
+Successful delivery requires its own target verification. Template upgrades leave
+conversion and archival to the project's explicit workflow.
 
 ### Plan the conversion offline
 

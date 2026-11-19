@@ -162,7 +162,24 @@ owner-only commands retain their owner-login checks. See
   Never resume a workflow or repair a task automatically;
   `--force` does not bypass this gate. Follow
   [docs/publish-rules.md](docs/publish-rules.md#runtime-verification-after-import).
-- **Migrations:** Put each migration in
+- **Features first for stored code:** Keep one mutable definition per object in
+  `features/<slug>/<SCHEMA>/` for packages, types, procedures, functions,
+  triggers, and views. Use `feature capture` to start from live DEV stored
+  source, `feature doctor --live` to check ownership and drift, and
+  `feature diff` to review changes. Keep revisions in Git. Coordinate with the
+  team before replacing shared DEV objects and obtain authorization for the
+  write. Run `feature apply <slug> --schema NAME --env dev --prepare --unit TYPE:NAME`
+  to review the exact scope, target and before-state. Run `feature apply` with
+  `--execute-plan FILE` only for the authorized DEV write. For views, select
+  a dedicated `views/<name>.sql` definition with explicit projected columns.
+  Inspect unresolved attempts with `feature apply --status`. Use
+  `feature reconcile-run <plan-id> --env dev --evidence FILE` only after
+  reviewing same-target evidence and confirming the original operation ended.
+  Ship one final definition per object in the release capsule.
+  See [docs/feature-releases.md](docs/feature-releases.md).
+- **Dated migrations for one-time changes:** Use them for schema changes,
+  backfills, seed data, data fixes, and ordered transitions that require an
+  intermediate code version. Put each migration in
   an independently configured migration owner when needed: the optional
   `MIGRATION_SCHEMA`, `MIGRATION_SQLCL_CONNECTION`, `MIGRATION_EXPECTED_USER`
   triple and its `STAGING_` / `PROD_` equivalents must be configured together.
@@ -179,10 +196,10 @@ owner-only commands retain their owner-login checks. See
   only: the outcome and the evidence file must come from checks the agent actually ran (read-only),
   the evidence file says who established the outcome, and the record shows `acknowledgedBy: --yes`
   so a reviewer can tell it was not typed. Without `--yes` the acknowledgment is still typed at a
-  terminal. Start a code change with `scripts/team.sh new-migration
-  <name> --source "PACKAGE BODY:<NAME>" --env dev`: it copies the live DEV
-  source (not the mirror) into the steps, and its preconditions refuse the
-  apply if that source changes first. Run `scripts/team.sh check-conflicts <folder> --env dev`
+  terminal. For a legacy stored-code migration or a required intermediate
+  definition, `scripts/team.sh new-migration <name> --source "PACKAGE BODY:<NAME>" --env dev`
+  captures live DEV and generates a source drift precondition. Run
+  `scripts/team.sh check-conflicts <folder> --env dev`
   before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
   Keep `checks.json` schema 1 unchanged unless a reviewed rehearsal needs
   schema-2 `rehearsalMetrics`; those metrics run only under `--rehearse`, never
@@ -201,13 +218,11 @@ owner-only commands retain their owner-login checks. See
   `migrations/<SCHEMA>/…`; one migration changes one schema. See
   [docs/migration-rules.md](docs/migration-rules.md) for naming, ordering,
   recovery, and detection limits.
-- **Feature releases:** For new work that benefits from complete stored-unit source
-  (packages, types, triggers, procedures, functions) and a focused release capsule, use mutable `features/<slug>/<SCHEMA>/` files,
-  `scripts/team.sh feature capture` for reviewed DEV capture, and `feature diff`
-  for the daily readable source diff. Replace the scaffold check, commit all
-  selected sources and the version-2 manifest, then `feature freeze` before
-  preparing a staging or production target. Review the target plan and digests;
-  production also requires verified staging proof for the same capsule. An
+- **Feature promotion:** Select final feature files and the required one-time
+  migrations in execution order. Replace the scaffold check, commit the
+  selected inputs and version-2 manifest, then `feature freeze` once. Review
+  each target plan and its digests. Production requires verified staging proof
+  for the same capsule. An
   interrupted or unknown attempt needs reconciliation before recovery. Capsule
   timing covers selected feature checkpoints and migrate steps, not app imports or
   excluded unclassified object steps. Existing migrations and version-1 rollouts keep their

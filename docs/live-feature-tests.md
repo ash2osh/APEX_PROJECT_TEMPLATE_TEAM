@@ -35,10 +35,37 @@ with one database and two schemas (19 tests, two skipped). Run one test with `-k
 
 The `baseline` commands have their own opt-in module, `tests/test_live_baseline.py`; see [Live check](baseline.md#live-check).
 
+## Feature-first DEV, promotion, and timing
+
+Use the existing disposable fixture approval with the saved connection aliases
+and exact database names below. Choose one scenario with the unittest `-k`
+filter. Each new scenario checks the named target before creating its fixtures.
+
+| Scenario | Additional selection |
+| --- | --- |
+| `dedicated_long_view_create_and_replace_on_dev` | `TEMPLATE_LIVE_PROOF_DEV_DB_NAME` for the disposable DEV target. Creates a view with supplementary Unicode, changes a value beyond 32 KB, verifies that the writer refuses concurrent drift there, then verifies replacement and no-op detection. |
+| `dev_receipt_and_capsule_match_across_three_disposable_targets` | `TEMPLATE_LIVE_STAGING_CONNECTION`, `TEMPLATE_LIVE_PROOF_PRODUCTION_CONNECTION`, and `TEMPLATE_LIVE_PROOF_DEV_DB_NAME`, `TEMPLATE_LIVE_PROOF_STAGING_DB_NAME`, `TEMPLATE_LIVE_PROOF_PRODUCTION_DB_NAME`. Use three separate disposable databases with the same owner name. The scenario checks the DEV receipt against the capsule, tests a redirected saved alias and invalid staging proof, verifies the installed source and settings on all three targets, and retains an ambiguous DEV attempt. |
+| `staging_consolidation_benchmark_preserves_equivalent_effects` | `TEMPLATE_LIVE_FEATURE_BENCHMARK=1`, `TEMPLATE_LIVE_STAGING_CONNECTION`, and `TEMPLATE_LIVE_PROOF_STAGING_DB_NAME` for disposable staging separate from DEV. |
+
+The benchmark runs three rotated trials for batched legacy migrations, the
+consolidated feature capsule, and the bounded intermediate transition. Each
+sample starts with equivalent objects on the same staging connection. Each
+path verifies the same final body and backfilled data. The bounded migration
+asserts intermediate source, compiler settings, and validity before its data
+step. The report under `scratch/feature-benchmark-*.json` contains per-trial
+observations, medians, database and SQLcl versions, selected steps, body writes,
+connected SQLcl sessions, and authored and delivered SQL bytes. Delivered bytes
+include nested scripts and count marked check sections, including in-session
+checks. The report records preparation, catalog/identity sessions, apply,
+independent verification and total release time alongside the capsule's
+object-budget coverage and outcome. The connection probe includes a scalar round
+trip. Run the suite on approved targets before using its timings to estimate a
+release window.
+
 ## Safety
 
-- Each run copies this repository to a temporary directory and works there. It
-  does not write to your checkout.
+- Each run copies this repository to a temporary directory. The benchmark writes
+  its result under the checkout's ignored `scratch/` directory.
 - The product's production-name guard applies. A connection name containing a
   word such as `live`, `prod` or `prd` is refused, so name the connection and
   schema so they are clearly disposable. The module's own object names are not

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import time
 import uuid
@@ -47,6 +48,10 @@ REQUIRED_SETTINGS = tuple(SETTING_FIELDS.values())
 
 class FeatureReleaseError(ValueError):
     """Target preparation is unsafe or cannot produce complete evidence."""
+
+
+class DisabledTriggerError(FeatureReleaseError):
+    """The target trigger would change from disabled to enabled on replacement."""
 
 
 @dataclass(frozen=True)
@@ -177,16 +182,23 @@ def _selected_names(checkpoint: FeatureCheckpoint) -> tuple[list[str], list[str]
 
 def capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_dir: Path) -> dict:
     """Read only selected object structure and stored source/settings on the chosen target."""
+    if isinstance(target, Target) and target.environment not in PLAN_ENVIRONMENTS:
+        raise FeatureReleaseError("feature target preparation supports staging or prod")
+    return _capture_selected_state(target, checkpoint, run_dir)
+
+
+def _capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_dir: Path) -> dict:
     if not isinstance(target, Target) or not isinstance(checkpoint, FeatureCheckpoint):
         raise FeatureReleaseError("selected-state capture requires a target and validated feature checkpoint")
-    if target.environment not in PLAN_ENVIRONMENTS:
-        raise FeatureReleaseError("feature target preparation supports staging or prod")
     if checkpoint.schema != target.schema:
         raise FeatureReleaseError("feature checkpoint schema does not match the selected target")
     object_names, source_names = _selected_names(checkpoint)
+    view_names = [item.unit[2] for item in checkpoint.inputs if item.unit is not None and item.unit[1] == "VIEW"]
     sections = list(STRUCTURAL_SECTIONS)
     if source_names:
         sections.extend(("baseline-source", "baseline-settings"))
+    if view_names:
+        sections.append("baseline-views")
     # Dependency rows are private to feature preflight; they share the guarded
     # selected-name capture and do not assert whole-owner inventory coverage.
     if "feature-dependencies" not in sections:
@@ -199,7 +211,7 @@ def capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_di
             run_dir,
             dba_capture=False,
             baseline_capture=True,
-            baseline_names=source_names,
+            baseline_names=list(dict.fromkeys((*source_names, *view_names))),
             scope_names=object_names,
         )
         baseline._complete(catalog, sections)
@@ -256,6 +268,34 @@ def capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_di
             "valid": status == "VALID",
         }
 
+    view_collations = {}
+    if view_names:
+        if not isinstance(catalog.get("effectiveViewCollation"), str) or not catalog["effectiveViewCollation"].strip():
+            raise FeatureReleaseError("effective view default collation is unavailable in the selected catalog")
+        catalog_views = {row["name"]: row.get("status") for row in catalog["sections"]["views"]}
+        definitions: dict[str, dict] = {}
+        for row in catalog["sections"]["baseline-views"]:
+            name = row.get("name")
+            if name not in view_names and name in source_names:
+                continue
+            if name not in view_names or name in definitions:
+                raise FeatureReleaseError("selected view catalog returned unrelated or repeated definitions")
+            definitions[name] = row
+        for name in view_names:
+            metadata = definitions.get(name)
+            if metadata is None and name not in catalog_views:
+                continue
+            status = catalog_views.get(name)
+            if (
+                metadata is None or status not in {"VALID", "INVALID"}
+                or any(not isinstance(metadata.get(field), str) or not metadata[field].strip() for field in ("ddl", "text", "defaultCollation"))
+            ):
+                raise FeatureReleaseError(f"complete view catalog text, collation or validity is unavailable for {name}")
+            source_units[f"VIEW:{name}"] = {
+                "ddl": metadata["ddl"], "text": metadata["text"], "valid": status == "VALID",
+            }
+            view_collations[name] = metadata.get("defaultCollation")
+
     structural = {
         section: catalog["sections"].get(section, [])
         for section in STRUCTURAL_SECTIONS
@@ -264,6 +304,8 @@ def capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_di
         "schema": target.schema,
         "identity": identity,
         "sourceUnits": source_units,
+        "viewCollations": view_collations,
+        "effectiveViewCollation": catalog.get("effectiveViewCollation"),
         "structural": structural,
         "coverage": {
             "ownerComplete": False,
@@ -814,6 +856,120 @@ def _auxiliary_targets(root: Path, steps: Sequence[Mapping], environment: str, e
     return targets
 
 
+def _check_preceding_migration_sources(
+    capsule: release_capsule.ReleaseCapsule,
+    preceding_steps: Sequence[Mapping],
+    bindings: Mapping[str, Mapping],
+    checkpoint: FeatureCheckpoint,
+    state: Mapping,
+) -> None:
+    """Refuse a known source change before a checkpoint prepared against the live definition."""
+    scope = release_state.target_scope_from_identity(state["identity"])
+    selected = {
+        (scope["schema"], item.unit[1], item.unit[2])
+        for item in checkpoint.inputs
+        if item.category == "stored-source" and item.unit is not None
+    }
+    if not selected:
+        return
+    replacements: dict[tuple[str, str, str], tuple[int, list[str] | None]] = {}
+    uncertain_steps: set[int] = set()
+    for number, step in enumerate(preceding_steps, start=1):
+        kind = step["type"]
+        if kind == "app-deploy":
+            uncertain_steps.add(number)
+            replacements.clear()
+            continue
+        if kind not in {"migrate", "sql-script", "ords-import"}:
+            continue
+        binding = bindings[f"step:{number}"]
+        other_scope = release_state.target_scope_from_identity(binding["observed"])
+        if any(other_scope[field] != value for field, value in scope.items() if field != "schema"):
+            continue
+        if kind != "migrate":
+            uncertain_steps.add(number)
+            replacements.clear()
+            continue
+        try:
+            migrations = load_batch(capsule.root / "payload", step["folders"])
+        except (MigrationManifestError, OSError) as error:
+            raise FeatureReleaseError(f"cannot inspect frozen migration step {number}: {error}") from error
+        for migration in migrations:
+            schema = binding["schema"]
+            for file in migration.files:
+                source = file.source.decode("utf-8")
+                for start, end in statement_spans(source):
+                    sql = source[start:end]
+                    tokens = migration_checks._leading_tokens(sql)
+                    schema_change = migration_checks._current_schema_change(tokens)
+                    if schema_change is not None:
+                        schema = schema_change
+                        continue
+                    dropped = migration_checks._dropped_units(tokens, schema)
+                    compiled = migration_checks._compiled_unit(tokens, schema) if migration_checks._word(tokens, 0, "ALTER") else ()
+                    if dropped or compiled:
+                        for unit in [*dropped, *(row[:3] for row in compiled)]:
+                            owner, object_type, name = unit
+                            for key in (unit, (owner, object_type + " BODY", name)) if object_type in {"PACKAGE", "TYPE"} else (unit,):
+                                if key in selected:
+                                    replacements[key] = (number, None)
+                        continue
+                    if all(migration_checks._word(tokens, index, word) for index, word in enumerate(("CREATE", "OR", "REPLACE"))):
+                        units = migration_checks._compiled_unit(tokens, schema)
+                        if len(units) == 1 and units[0][1] in feature_manifest.STORED_SOURCE_TYPES:
+                            owner, object_type, name, _required = units[0]
+                            body = (owner, object_type + " BODY", name)
+                            if object_type in {"PACKAGE", "TYPE"} and body in selected:
+                                replacements[body] = (number, None)
+                            key = (owner, object_type, name)
+                            if key in selected:
+                                # statement_spans omits the SQLcl slash line.
+                                body = (sql + "/\n").encode("utf-8")
+                                item = FeatureInput(file.name, body, _sha256(body), key, "stored-source")
+                                try:
+                                    definition, _settings = _stored_source(item)
+                                except FeatureReleaseError:
+                                    replacements.pop(key, None)
+                                    uncertain_steps.add(number)
+                                else:
+                                    replacements[key] = (number, definition["lines"])
+                            continue
+                    if (
+                        not tokens or tokens[0].value in {"INSERT", "UPDATE", "DELETE", "MERGE"}
+                        or (migration_checks._word(tokens, 0, "COMMENT") and migration_checks._word(tokens, 1, "ON"))
+                        or (migration_checks._word(tokens, 0, "LOCK") and migration_checks._word(tokens, 1, "TABLE"))
+                        or feature_manifest._setting_name(sql) is not None
+                        or migration_checks._parse_operation(tokens, schema)["supported"]
+                    ):
+                        continue
+                    # Opaque SQL may supersede a direct replacement. Only a later known
+                    # replacement can restore certainty about that unit's final source.
+                    replacements.clear()
+                    uncertain_steps.add(number)
+
+    checkpoint_step = len(preceding_steps) + 1
+    for (_owner, kind, name), (number, lines) in sorted(replacements.items()):
+        before = state["sourceUnits"].get(f"{kind}:{name}")
+        if lines is None:
+            raise FeatureReleaseError(
+                f"migration step {number} drops or recompiles {kind} {name} in {scope['schema']} before feature step {checkpoint_step}; "
+                "deliver the ordered effects in one reviewed migration or qualify separate releases."
+            )
+        if before is None or not _same_stored_source(before["lines"], lines):
+            raise FeatureReleaseError(
+                f"migration step {number} replaces {kind} {name} in {scope['schema']} before feature step {checkpoint_step}; "
+                "its source differs from the feature step's prepared before-state. "
+                "Deliver the intermediate change, backfill and final source as one reviewed migration."
+            )
+    if uncertain_steps:
+        numbers = ", ".join(str(number) for number in sorted(uncertain_steps))
+        print(
+            f"Feature step {checkpoint_step}: review unmodeled source effects in preceding step(s) {numbers} "
+            f"before executing; the feature before-state is based on live {scope['schema']}.",
+            file=sys.stderr,
+        )
+
+
 def _manifest_steps(capsule: release_capsule.ReleaseCapsule) -> list[dict]:
     path = capsule.root / "capsule.json"
     try:
@@ -984,7 +1140,7 @@ def _refuse_disabled_triggers(
             continue
         status = str(rows.get(unit["name"], {}).get("status", "")).upper()
         if status == "DISABLED":
-            raise FeatureReleaseError(
+            raise DisabledTriggerError(
                 f"trigger {unit['name']} is DISABLED on {environment}; applying this feature file would re-create it enabled. "
                 "Handle the trigger in a reviewed migration (new-migration) and keep it out of this release."
             )
@@ -1076,7 +1232,8 @@ def prepare_target(
     earlier_effects_by_schema: dict[str, list[dict]] = {}
     day = datetime.now(timezone.utc).date().isoformat()
 
-    for checkpoint_number, checkpoint in enumerate(capsule.checkpoints, start=1):
+    checkpoint_steps = (number for number, step in enumerate(steps, start=1) if step["type"] == "feature-migrate")
+    for checkpoint_number, (step_number, checkpoint) in enumerate(zip(checkpoint_steps, capsule.checkpoints, strict=True), start=1):
         try:
             target = resolve_target(environ, environment, "migration", schema=checkpoint.schema)
         except TargetResolutionError as error:
@@ -1101,6 +1258,7 @@ def prepare_target(
             raise FeatureReleaseError("selected feature checkpoints have conflicting edition identities on one physical target")
         shared_identity[scope_key] = identity
         state = dict(state, identity=identity, environment=environment)
+        _check_preceding_migration_sources(capsule, steps[:step_number - 1], targets, checkpoint, state)
         source_guards = _source_guards(checkpoint, state, checkpoint_number)
         _refuse_disabled_triggers(checkpoint, state, source_guards, environment)
         _refuse_body_outside_release(checkpoint, state, source_guards, environment)
@@ -1507,7 +1665,7 @@ def _checkpoint_source_guard_map(guard: Mapping) -> dict[tuple[str, str], Mappin
 def _compile_units_for_apply(checkpoint: FeatureCheckpoint, source_guards: Mapping[tuple[str, str], Mapping]) -> tuple[tuple[str, str, str, bool], ...]:
     applied = {
         item.unit[1:] for item in checkpoint.inputs
-        if item.category == "stored-source" and item.unit is not None
+        if item.unit is not None and (item.category == "stored-source" or item.unit[1] == "VIEW")
         and source_guards.get(item.unit[1:]) is not None
         and source_guards[item.unit[1:]].get("noOp") is not True
     }
@@ -1582,26 +1740,33 @@ def _copy_capsule_driver(
         raw = source_path.read_bytes()
         if _sha256(raw) != expected:
             raise FeatureReleaseError(f"frozen checkpoint driver changed: {relative}")
-        text = raw.decode("utf-8")
-    except (OSError, UnicodeError) as error:
+    except OSError as error:
         raise FeatureReleaseError(f"frozen checkpoint driver is unavailable: {relative}") from error
+    staged_relative = f"payload/checkpoint-{checkpoint_number:03d}-input-{input_number:03d}.sql"
+    _stage_checkpoint_driver(run_dir, staged_relative, raw, relative)
+    return staged_relative, relative
+
+
+def _stage_checkpoint_driver(run_dir: Path, staged_relative: str, raw: bytes, label: str) -> None:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise FeatureReleaseError(f"checkpoint driver is not UTF-8: {label}") from error
     from .sqlcl_transport import generated_clob_assembly, lint_sqlcl_transport
 
     mode = "assembled" if generated_clob_assembly(text) else "direct"
     findings = lint_sqlcl_transport(text, mode)
     for finding in findings:
-        message = f"{relative}:{finding.line} ({finding.code}): {finding.message}"
+        message = f"{label}:{finding.line} ({finding.code}): {finding.message}"
         if finding.severity == "error":
             raise FeatureReleaseError(f"SQLcl transport preflight refused: {message}")
         print(f"feature release warning: SQLcl transport review: {message}", file=rollout.sys.stderr)
 
-    staged_relative = f"payload/checkpoint-{checkpoint_number:03d}-input-{input_number:03d}.sql"
     destination = run_dir / staged_relative
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     destination.write_bytes(raw)
     if os.name != "nt":
         destination.chmod(0o600)
-    return staged_relative, relative
 
 
 def _apply_checkpoint_session(
@@ -1634,6 +1799,27 @@ def _apply_checkpoint_session(
         )
         applied_drivers.append((staged_relative, settings_prologue, settings_prologue_sha256))
 
+    result = _run_apply_session(
+        checkpoint, target, expected_identity, preconditions, run_dir, source_guards, applied_drivers,
+        before_run=lambda: _validated_capsule(root, capsule),
+    )
+    if applied_drivers:
+        _validated_capsule(root, capsule)
+    return result
+
+
+def _run_apply_session(
+    checkpoint: FeatureCheckpoint,
+    target: Target,
+    expected_identity: Mapping[str, str],
+    preconditions: Sequence[QueryCheck],
+    run_dir: Path,
+    source_guards: Mapping[tuple[str, str], Mapping],
+    applied_drivers: Sequence[tuple[str, str | None, str | None]],
+    *,
+    before_run,
+    exact_before: Sequence[str] = (),
+) -> tuple[dict[str, str], int]:
     if not applied_drivers:
         return {}, 0
 
@@ -1659,6 +1845,7 @@ def _apply_checkpoint_session(
         lines.extend(migration_checks.render_in_session_check_driver(
             target, preconditions, "preconditions", fail_on_false=True,
         ).splitlines())
+    lines.extend(exact_before)
     for staged_relative, settings_prologue, _settings_prologue_sha256 in applied_drivers:
         if settings_prologue is not None:
             lines.extend(settings_prologue.rstrip("\n").splitlines())
@@ -1696,7 +1883,7 @@ def _apply_checkpoint_session(
         if found < 0:
             raise FeatureReleaseError("generated checkpoint driver does not contain its prepared compiler settings prologue")
         cursor = found + len(expected_segment)
-    capsule = _validated_capsule(root, capsule)
+    before_run()
     try:
         result = sqlcl_session.run_sqlcl(target, driver, run_dir, phase="apply")
     except (sqlcl_session.SqlclError, OSError, RuntimeError, ValueError) as error:
@@ -1717,7 +1904,6 @@ def _apply_checkpoint_session(
         migrate._assert_same_target(expected_identity, identity)
     except migrate.MigrationApplyError as error:
         raise FeatureReleaseError(str(error)) from error
-    _validated_capsule(root, capsule)
     return identity, 1
 
 

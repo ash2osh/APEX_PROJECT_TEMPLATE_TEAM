@@ -2,25 +2,28 @@
 
 Status: implemented (`feature doctor`, `feature capture --move-from`, the refresh guard and the freeze gate).
 
-A release capsule installs the **feature file**, not what is on DEV. Two things can therefore put an old
-version of a stored unit into a release without any command complaining:
+Guarded DEV apply resolves one owned file per selected unit from its SQL
+identity. A dedicated view file can be selected independently of the
+feature's one-time DDL and grants. An existing view requires a retained
+verified DEV baseline or explicit adoption of the reviewed live definition.
+See [DEV preparation and recovery](feature-releases.md#prepare-selected-dev-source).
 
-1. **Two features hold the same unit.** The copies drift apart; the release installs whichever feature it selects.
-2. **A feature file is older than DEV.** DEV was changed (compiled by hand, by a teammate, by another feature)
-   and the file was not refreshed.
+A release capsule installs the committed **feature file**. Give each object one owner and check its
+DEV baseline before selecting the file for a release. These checks catch competing definitions and
+edits made directly on DEV.
 
 ## What the template does today
 
 | Situation | Result today |
 | --- | --- |
 | A release selects both copies of a package | `feature freeze` refuses: `duplicate stored unit identity across selected release checkpoints` |
-| A release selects only the older copy | `feature freeze` succeeds and the capsule installs the older package |
+| A release selects one copy of an object held by two features | `feature freeze` refuses the selected object's duplicate ownership |
 | Two files of one feature define the same object | `feature doctor` reports `DUPLICATE FILE` (error); `feature freeze` refuses it for a selected feature, with a clear message; the loader already refuses two selected copies of one stored unit |
 | A feature SQL file cannot be analysed (CRLF line endings, a BOM, non-UTF-8 bytes, SQL the analyser cannot read) | `feature doctor` reports `NOT ANALYSED` (error, exit 1); `feature freeze` refuses before any DEV read, for any feature under `features/`. Before, the doctor printed a note and exited 0 |
 | A second feature runs `feature capture` for a package another feature holds | Refused, unless `--move-from` names the holder |
-| `feature capture --refresh` over a file that has lines DEV does not have | Overwrites without showing what disappears |
-| A feature file is older than DEV | Not detected: `freeze` and `rollout --prepare` compare the capsule with the *target*, never with DEV |
-| An owner decides a feature file keeps a line DEV lacks | There is nowhere to record it |
+| `feature capture --refresh` over a file with unapplied edits | Refuses and shows what would be lost, unless the operator explicitly chooses to discard those edits |
+| A feature file is older than DEV | `feature doctor --live` detects drift. Freeze refuses when the DEV comparison runs and finds unaccepted drift |
+| An owner approves a known difference from DEV | Record the exact difference in `accepted-differences.json` |
 
 ## Design
 
@@ -64,7 +67,7 @@ A refused freeze writes no record, because no capsule is built.
 | Source | Claim |
 | --- | --- |
 | `packages/*.pks.sql`, `*.pkb.sql`, `triggers/*.sql`, stored source files | `(schema, type, name)` |
-| `CREATE TABLE`, `SEQUENCE`, `INDEX`, `VIEW`, `SYNONYM` in `ddl.sql` | `(schema, type, name)` |
+| `CREATE TABLE`, `SEQUENCE`, `INDEX`, `VIEW`, `SYNONYM` in feature DDL files | `(schema, type, name)` |
 | `ALTER TABLE t ADD (c ...)` in `ddl.sql` | `(schema, "COLUMN", t.c)` |
 
 ### D3. Moving a unit between features: `feature capture --move-from <slug>`
@@ -101,7 +104,7 @@ from a DEV change, so an edited line shows as `DIVERGED` until a capture with `-
 | `BEHIND DEV` | DEV changed since the capture and the file lacks or still holds those lines; a release would undo them | error |
 | `DIVERGED` | the same, and the file also has edits of its own (or, without a baseline, both sides differ) | error |
 | `NOT ON DEV` | the stored unit is not in the schema on DEV | error |
-| `AHEAD OF DEV` | the file has edits or additions DEV lacks and DEV has not changed since the capture: new work not compiled yet (the template has no DEV apply path, so this is normal) | warning |
+| `AHEAD OF DEV` | the file has edits or additions DEV lacks and DEV has not changed since the capture. Qualify the edits through the [current DEV workflow](feature-releases.md#scope-and-current-dev-workflow). | warning |
 | `ACCEPTED` | the differing lines are exactly those recorded in `accepted-differences.json` | info |
 
 Only errors stop a freeze or give `feature doctor` a non-zero exit.

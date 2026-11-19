@@ -1413,6 +1413,23 @@ exit 17
             self.assertEqual(seen[0], str(ROOT / "scripts" / "compare_schema.sh"))
             self.assertEqual(seen[1:], ["--env", "dev", "--object", "CUSTOMERS"])
 
+            for command, flag, path in (
+                ("apply", "--checks", r"features\inventory\APP_CODE\checks\ready.json"),
+                ("apply", "--execute-plan", r"scratch\feature-dev\prepare-test\plan.json"),
+                ("reconcile-run", "--evidence", r"scratch\evidence.json"),
+            ):
+                with self.subTest(command=command, flag=flag):
+                    result = subprocess.run(
+                        [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"),
+                         "feature", command, flag, path],
+                        cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    seen = record.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(seen[0], str(ROOT / "scripts" / "team.sh"))
+                    expected = path.replace("\\", "/") if os.name == "nt" else path
+                    self.assertEqual(seen[1:], ["feature", command, flag, expected])
+
     @unittest.skipUnless(os.name == "nt", "the signal status is Git Bash's convention on Windows")
     def test_powershell_reports_git_bash_signal_statuses_as_bash_does(self) -> None:
         # A Git Bash process that a signal ended exits with the signal number times 256

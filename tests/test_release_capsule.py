@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -126,6 +131,42 @@ class ReleaseCapsuleTests(unittest.TestCase):
         self.assertEqual(loaded.engine_digest, first.engine_digest)
         self.assertEqual(loaded.checkpoints, first.checkpoints)
         self.assertTrue((first.root / "capsule.json").is_file())
+
+    def test_dedicated_view_release_does_not_replay_earlier_column_or_grant(self) -> None:
+        schema_path = self.root / "features/dispatch/APP_CODE"
+        earlier = schema_path / "ddl.sql"
+        earlier.write_text(
+            "ALTER TABLE APP_CODE.DISPATCH ADD LABEL VARCHAR2(30);\n"
+            "GRANT SELECT ON APP_CODE.DISPATCH TO REPORTING;\n"
+            "CREATE OR REPLACE VIEW APP_CODE.DISPATCH_V AS SELECT ID FROM APP_CODE.DISPATCH;\n",
+            encoding="utf-8",
+        )
+        self.commit("earlier whole feature with DDL, grant, and inline view")
+        legacy = self.build()
+        self.assertEqual(legacy.checkpoints[0].inputs[0].source, earlier.read_bytes())
+
+        # A reviewed split leaves one owner while later manifests select only the changed view.
+        earlier.write_text(
+            "ALTER TABLE APP_CODE.DISPATCH ADD LABEL VARCHAR2(30);\n"
+            "GRANT SELECT ON APP_CODE.DISPATCH TO REPORTING;\n",
+            encoding="utf-8",
+        )
+        view = schema_path / "views/dispatch_v.sql"
+        view.parent.mkdir()
+        view.write_text(
+            "CREATE OR REPLACE VIEW APP_CODE.DISPATCH_V AS SELECT ID, LABEL FROM APP_CODE.DISPATCH;\n",
+            encoding="utf-8",
+        )
+        relative = view.relative_to(self.root).as_posix()
+        self.manifest_path.write_text(json.dumps({
+            "schemaVersion": 2, "steps": [{"type": "feature-migrate", "schema": "APP_CODE", "inputs": [relative]}],
+        }) + "\n", encoding="utf-8")
+        self.commit("select only the dedicated view")
+        later = self.build()
+        selected, = later.checkpoints[0].inputs
+        self.assertEqual((selected.path, selected.source), (relative, view.read_bytes()))
+        frozen = later.root / "payload" / earlier.relative_to(self.root)
+        self.assertFalse(frozen.exists())
 
     def test_capsule_preserves_object_budget_for_stage_promotion_proof(self) -> None:
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
@@ -544,6 +585,8 @@ class ReleaseCapsuleTests(unittest.TestCase):
             "scripts/migrate.sql",
             "scripts/verify_migration_access.sql",
             "scripts/compare_env_catalog.sql",
+            "scripts/feature_claims.py",
+            "scripts/feature_ddl_forms.py",
             "scripts/feature_preflight.py",
             "scripts/schema_catalog.sql",
             "scripts/deploy.sh",
@@ -583,6 +626,284 @@ class ReleaseCapsuleTests(unittest.TestCase):
         document = json.loads((capsule.root / "capsule.json").read_text(encoding="utf-8"))
         self.assertEqual(document["checkpoints"], [])
         self.assertEqual([step["type"] for step in document["payloadDefinition"]["steps"]], ["migrate"])
+
+    def test_final_source_and_ordered_backfills_freeze_without_replaying_the_archive(self) -> None:
+        def source(version: int) -> str:
+            return (
+                "CREATE OR REPLACE PACKAGE BODY APP_CODE.DISPATCH AS\n"
+                f"  FUNCTION VERSION_NUMBER RETURN NUMBER IS BEGIN RETURN {version}; END;\n"
+                "END DISPATCH;\n/\n"
+            )
+
+        backfill = "UPDATE APP_CODE.JOBS SET VERSION_USED = APP_CODE.DISPATCH.VERSION_NUMBER();\n"
+        assert_version = (
+            "DECLARE\n  l_valid NUMBER;\nBEGIN\n"
+            "  SELECT COUNT(*) INTO l_valid FROM USER_OBJECTS\n"
+            "  WHERE OBJECT_NAME = 'DISPATCH' AND OBJECT_TYPE = 'PACKAGE BODY' AND STATUS = 'VALID';\n"
+            "  IF APP_CODE.DISPATCH.VERSION_NUMBER() <> 2 THEN\n"
+            "    RAISE_APPLICATION_ERROR(-20001, 'Expected version 2');\n"
+            "  END IF;\n"
+            "  IF l_valid <> 1 THEN RAISE_APPLICATION_ERROR(-20002, 'Intermediate body is invalid'); END IF;\n"
+            "END;\n/\n"
+        )
+        body_path = "features/dispatch/APP_CODE/packages/dispatch.pkb.sql"
+        body = self.root / body_path
+        body.parent.mkdir()
+        body.write_text(source(3), encoding="utf-8")
+        archive = self.root / "migrations-archive/APP_CODE/2026-01-01_dispatch-r001"
+        archive.mkdir(parents=True)
+        historical = {
+            archive / "001-package-body.sql": source(1),
+            archive / "status.dev.json": '{"status":"applied"}\n',
+        }
+        for path, content in historical.items():
+            path.write_text(content, encoding="utf-8")
+        archive_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in historical}
+
+        feature = {
+            "type": "feature-migrate", "schema": "APP_CODE", "inputs": [body_path],
+            "checks": ["features/dispatch/APP_CODE/checks.json"],
+        }
+        ordinary = "migrations/APP_CODE/2026-01-02_backfill-r001"
+        transition = "migrations/APP_CODE/2026-01-02_transition-r001"
+        jobs_exists = {"id": "jobs-exists", "sql": "SELECT COUNT(*) FROM APP_CODE.JOBS", "expected": 1}
+        backfill_complete = {"id": "backfill-complete", "sql": "SELECT COUNT(*) FROM APP_CODE.JOBS WHERE VERSION_USED = 3", "expected": 1}
+        for folder, sources, steps, checkpoint_count in (
+            (ordinary, {"001-backfill.sql": backfill}, [feature, {"type": "migrate", "folders": [ordinary]}], 1),
+            (transition, {
+                "001-intermediate.sql": source(2), "002-assert-version.sql": assert_version,
+                "003-backfill.sql": backfill.replace("VERSION_NUMBER()", "VERSION_NUMBER() + 1"), "004-final.sql": source(3),
+            }, [{"type": "migrate", "folders": [transition]}], 0),
+        ):
+            with self.subTest(folder=folder):
+                migration = self.root / folder
+                migration.mkdir(parents=True)
+                for filename, sql in sources.items():
+                    (migration / filename).write_text(sql, encoding="utf-8")
+                migration_checks = {
+                    "schemaVersion": 1,
+                    "preconditions": [jobs_exists],
+                    "postconditions": [backfill_complete],
+                }
+                (migration / "checks.json").write_text(json.dumps(migration_checks) + "\n", encoding="utf-8")
+                self.manifest_path.write_text(json.dumps({"schemaVersion": 2, "steps": steps}) + "\n", encoding="utf-8")
+                self.commit(folder)
+
+                capsule = self.build()
+                loaded = self.release_capsule.load_capsule(self.root, capsule.root)
+                document = json.loads((loaded.root / "capsule.json").read_bytes())
+
+                self.assertEqual(document["payloadDefinition"]["steps"], steps)
+                self.assertEqual(len(loaded.checkpoints), checkpoint_count)
+                frozen_sql = {
+                    row["sourcePath"]: (loaded.root / row["sourcePath"]).read_text(encoding="utf-8")
+                    for row in document["sourceInputs"] if row["sourcePath"].endswith(".sql")
+                }
+                expected = {f"payload/{folder}/{filename}": sql for filename, sql in sources.items()}
+                if checkpoint_count:
+                    expected[f"payload/{body_path}"] = source(3)
+                self.assertEqual(frozen_sql, expected)
+                self.assertEqual(
+                    {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in historical},
+                    archive_hashes,
+                )
+                expected_trace = ["body:3", "backfill:3"] if checkpoint_count else ["body:2", "assert:2", "backfill:3", "body:3"]
+                self._apply_consolidation_with_fake_sqlcl(source(0), expected_trace, capsule=loaded)
+
+        legacy = []
+        for version in (1, 2, 3):
+            folder = f"migrations/APP_CODE/2026-02-0{version}_legacy-history-r00{version}"
+            directory = self.root / folder
+            directory.mkdir()
+            (directory / "001-body.sql").write_text(source(version), encoding="utf-8")
+            if version == 3:
+                (directory / "002-backfill.sql").write_text(backfill, encoding="utf-8")
+            (directory / "checks.json").write_text(json.dumps({
+                "schemaVersion": 1, "preconditions": [jobs_exists],
+                "postconditions": [backfill_complete if version == 3 else CHECKS["postconditions"][0]],
+            }), encoding="utf-8")
+            legacy.append(folder)
+        self._apply_consolidation_with_fake_sqlcl(source(0), ["body:1", "body:2", "body:3", "backfill:3"], legacy=legacy)
+
+    def _apply_consolidation_with_fake_sqlcl(self, initial_body: str, expected_trace: list[str], *, capsule=None, legacy=()) -> None:
+        from dataclasses import replace
+
+        from scripts import feature_release, migrate, migration_checks
+        from scripts.db_targets import Target
+        from test_feature_runtime import SETTINGS
+        from test_migrate_cli import FakeDatabase
+
+        target = Target("staging", "stage-consolidation", "APP_CODE", "APP_CODE", "staging")
+        database = FakeDatabase(target)
+        database.objects[("JOBS", "TABLE")] = {"columns": {"VERSION_USED"}}
+        database.objects[("DISPATCH", "PACKAGE")] = {}
+        database.objects[("DISPATCH", "PACKAGE BODY")] = {}
+        identity = database.identity()
+        state = {
+            "schema": "APP_CODE", "identity": identity,
+            "sourceUnits": {"PACKAGE BODY:DISPATCH": {
+                "lines": feature_release._stored_source(replace(
+                    self.feature_manifest.FeatureInput("body.sql", b"", "", ("APP_CODE", "PACKAGE BODY", "DISPATCH"), "stored-source"),
+                    source=initial_body.encode("utf-8"),
+                ))[0]["lines"], "settings": SETTINGS, "valid": True,
+            }},
+            "structural": {section: [] for section in feature_release.STRUCTURAL_SECTIONS},
+            "coverage": {"ownerComplete": False, "selectedScopeComplete": True},
+        }
+        trace = []
+        version = 0
+        data = None
+
+        def fake_sqlcl(_target, driver, run_dir, **_kwargs):
+            nonlocal version, data
+            source = driver.read_text(encoding="utf-8")
+            payloads = re.findall(r"(?m)^PROMPT MIGRATION_PAYLOAD_STARTED:(\S+)\n@@(\S+)$", source)
+            self.assertTrue(payloads)
+            for _, relative in payloads:
+                raw = (run_dir / relative).read_bytes()
+                sql = raw.decode("utf-8")
+                if "CREATE OR REPLACE PACKAGE BODY" in sql:
+                    version = int(re.search(r"\bRETURN (\d+);", sql).group(1))
+                    item = self.feature_manifest.FeatureInput("body.sql", raw, "", ("APP_CODE", "PACKAGE BODY", "DISPATCH"), "stored-source")
+                    state["sourceUnits"]["PACKAGE BODY:DISPATCH"]["lines"] = feature_release._stored_source(item)[0]["lines"]
+                    trace.append(f"body:{version}")
+                elif "RAISE_APPLICATION_ERROR" in sql:
+                    self.assertIn("USER_OBJECTS", sql)
+                    self.assertEqual(version, 2)
+                    self.assertTrue(state["sourceUnits"]["PACKAGE BODY:DISPATCH"]["valid"])
+                    trace.append(f"assert:{version}")
+                elif sql.startswith("UPDATE APP_CODE.JOBS"):
+                    data = version + int("VERSION_NUMBER() + 1" in sql)
+                    trace.append(f"backfill:{data}")
+                else:
+                    self.fail(f"fixture SQLcl received an unexpected payload {relative}")
+            output = "\n".join([
+                "MIGRATION_IDENTITY_BEGIN", json.dumps(identity), "MIGRATION_IDENTITY_END", "MIGRATION_IDENTITY_VERIFIED",
+                *(f"MIGRATION_PAYLOAD_STARTED:{name}" for name, _ in payloads),
+                "MIGRATION_APPLY_COMPLETED", *(["FEATURE_CHECKPOINT_APPLY_COMPLETED"] if "FEATURE_CHECKPOINT_APPLY_COMPLETED" in source else []), "",
+            ])
+            (run_dir / "sqlcl-output.log").write_text(output, encoding="utf-8")
+            return SimpleNamespace(returncode=0, output=output, run_dir=run_dir)
+
+        def checks(target, selected, directory, *, phase="preconditions", **_kwargs):
+            if any(check.id == "backfill-complete" for check in selected):
+                self.assertEqual((version, data), (3, 3))
+            report = database.run_checks(target, selected, directory, phase=phase)
+            return replace(report, coverage={**report.coverage, "sessions": 1, "sessionIdentities": [identity]})
+
+        apply_batch = migrate.apply_batch
+
+        def run_batch(*args, **kwargs):
+            return apply_batch(
+                *args, **kwargs, capture_inventory_fn=database.capture_inventory,
+                capture_snapshot_fn=database.capture_snapshot, run_checks_fn=checks,
+            )
+
+        env = {
+            "STAGING_MIGRATION_SCHEMA": target.schema, "STAGING_MIGRATION_EXPECTED_USER": target.expected_user,
+            "STAGING_MIGRATION_SQLCL_CONNECTION": target.connection,
+        }
+        output = StringIO()
+        with patch.dict(os.environ, env), \
+             patch.object(feature_release, "capture_selected_state", return_value=state), \
+             patch.object(self.rollout, "_observe_target_identity", return_value=identity), \
+             patch.object(migration_checks, "_live_report", return_value=migration_checks.PreflightReport(0, (), (), {})), \
+             patch.object(migration_checks, "run_checks", side_effect=checks), \
+             patch.object(feature_release.sqlcl_session, "run_sqlcl", side_effect=fake_sqlcl), \
+             patch.object(migrate, "run_sqlcl", side_effect=fake_sqlcl), \
+             patch.object(migrate, "apply_batch", side_effect=run_batch), \
+             redirect_stdout(output), redirect_stderr(output):
+            if capsule is None:
+                result = migrate.main([*legacy, "--env", "staging", "--yes"], repo_root=self.root, environ=env)
+                self.assertEqual(result, 0, output.getvalue())
+            else:
+                report_path = self.root / "scratch" / f"consolidation-{capsule.payload_digest}.json"
+                options = {"repo_root": self.root, "capsule_path": capsule.root, "confirm": lambda _prompt: True, "report_path": report_path}
+                self.assertEqual(self.rollout.run_rollout(self.manifest_path, "staging", prepare_only=True, **options), 0, output.getvalue())
+                status = self.rollout.run_rollout(self.manifest_path, "staging", **options)
+                report = json.loads(report_path.read_bytes())
+                diagnostics = [
+                    (self.root / path).read_text(encoding="utf-8")
+                    for row in report["steps"] for path in row.get("evidencePaths", [])
+                    if path.endswith("step-output.log")
+                ]
+                self.assertEqual(status, 0, report.get("error", "") + "\n".join(diagnostics) if status else "")
+        self.assertEqual(trace, expected_trace)
+        self.assertEqual((version, data), (3, 3))
+
+    def test_final_body_guard_refuses_after_unmodeled_migration_replacement(self) -> None:
+        from scripts import feature_release, migration_checks
+        from test_feature_runtime import IDENTITY, SETTINGS
+
+        def body(version: int) -> str:
+            return (
+                "PACKAGE BODY DISPATCH AS\n"
+                f"  FUNCTION VERSION_NUMBER RETURN NUMBER IS BEGIN RETURN {version}; END;\n"
+                "END DISPATCH;\n"
+            )
+
+        feature = self.root / "features/dispatch/APP_CODE/packages/dispatch.pkb.sql"
+        feature.parent.mkdir()
+        feature.write_text(f"CREATE OR REPLACE {body(3)}/\n", encoding="utf-8")
+        folder = "migrations/APP_CODE/2026-01-02_intermediate-r001"
+        migration = self.root / folder
+        migration.mkdir(parents=True)
+        (migration / "001-package-body.sql").write_text(
+            f"BEGIN EXECUTE IMMEDIATE q'[CREATE OR REPLACE {body(2)}]'; END;\n/\n",
+            encoding="utf-8",
+        )
+        (migration / "checks.json").write_text(json.dumps(CHECKS) + "\n", encoding="utf-8")
+        steps = [
+            {"type": "migrate", "folders": [folder]},
+            {"type": "feature-migrate", "schema": "APP_CODE", "inputs": [feature.relative_to(self.root).as_posix()]},
+        ]
+        self.manifest_path.write_text(json.dumps({"schemaVersion": 2, "steps": steps}) + "\n", encoding="utf-8")
+        self.commit("rollout with unmodeled preceding source replacement")
+        capsule = self.build()
+        catalog = {
+            "schema": "APP_CODE",
+            "identity": dict(IDENTITY),
+            "sourceUnits": {
+                "PACKAGE BODY:DISPATCH": {"lines": body(1).splitlines(keepends=True), "settings": SETTINGS, "valid": True},
+            },
+            "structural": {section: [] for section in feature_release.STRUCTURAL_SECTIONS},
+            "coverage": {"ownerComplete": False, "selectedScopeComplete": True},
+        }
+        env = {
+            "STAGING_MIGRATION_SCHEMA": "APP_CODE", "STAGING_MIGRATION_EXPECTED_USER": "APP_CODE",
+            "STAGING_MIGRATION_SQLCL_CONNECTION": "staging-conn",
+        }
+
+        def simulate_verified_migration(step, **_kwargs):
+            self.assertEqual(step["type"], "migrate")
+            catalog["sourceUnits"]["PACKAGE BODY:DISPATCH"]["lines"] = body(2).splitlines(keepends=True)
+            return self.rollout.StepResult(0)
+
+        output = StringIO()
+        report_path = self.root / "scratch/test-rollout.json"
+        with patch.dict(os.environ, env), \
+             patch.object(feature_release, "capture_selected_state", return_value=catalog), \
+             patch.object(self.rollout, "_observe_target_identity", return_value=IDENTITY), \
+             patch.object(migration_checks, "_live_report", return_value=migration_checks.PreflightReport(0, (), (), {})), \
+             patch.object(self.rollout, "execute_step", side_effect=simulate_verified_migration) as migrate, \
+             patch.object(feature_release.sqlcl_session, "run_sqlcl") as apply, \
+             redirect_stdout(output), redirect_stderr(output):
+            run = {
+                "repo_root": self.root, "capsule_path": capsule.root,
+                "report_path": report_path, "confirm": lambda _prompt: True,
+            }
+            prepared = self.rollout.run_rollout(self.manifest_path, "staging", prepare_only=True, **run)
+            self.assertEqual(prepared, 0, output.getvalue())
+            result = self.rollout.run_rollout(self.manifest_path, "staging", **run)
+
+        self.assertEqual(result, 2, output.getvalue())
+        report = json.loads(report_path.read_bytes())
+        self.assertRegex(report["error"], r"(?i)(source|before-state).*(changed|drift)|changed.*source")
+        self.assertEqual([step["status"] for step in report["steps"]], ["succeeded", "failed"])
+        receipt = json.loads((self.root / report["steps"][0]["receiptPath"]).read_bytes())
+        self.assertEqual((receipt["status"], receipt["stepType"]), ("succeeded", "migrate"))
+        migrate.assert_called_once()
+        apply.assert_not_called()
 
     def test_release_with_neither_a_checkpoint_nor_a_migration_is_refused_at_freeze(self) -> None:
         self.manifest_path.write_text(
