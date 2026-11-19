@@ -311,6 +311,91 @@ class TableStatementTests(unittest.TestCase):
                     baseline_bundles._retarget_statement(statement, "APP_DEV", "APP_STAGE")
 
 
+class ColumnFlagTests(unittest.TestCase):
+    """Column catalog flags decide what the structure generator may add to an existing table.
+
+    scripts/compare_env_catalog.sql writes hidden and virtual as Y/N and user_generated as YES/NO, and other producers
+    use YES/NO, so both encodings are tested. A system-generated hidden column (SYS_NC...$) is skipped. A virtual column,
+    or a hidden column the user created, is refused rather than added as an ordinary column. A virtual flag that
+    differs between the two schemas is refused for a column that exists in both.
+    """
+
+    config = {"schemas": ["APP_DEV"], "prefixes": ["APP_"], "excludedObjects": [], "sequenceMappings": []}
+
+    @staticmethod
+    def _column(name: str, **flags: object) -> dict:
+        row = {
+            "table_name": "APP_ITEMS", "name": name, "data_type": "NUMBER", "data_precision": None,
+            "data_scale": None, "nullable": "Y", "hidden": "N", "virtual": "N", "user_generated": "YES",
+        }
+        row.update(flags)
+        return row
+
+    def _structure(self, source_columns: list[dict], target_columns: list[dict]) -> tuple[dict[str, str], dict]:
+        source = {"sections": {
+            "tables": [{"name": "APP_ITEMS"}], "columns": source_columns, "constraints": [], "indexes": [],
+            "sequences": [], "identity-columns": [],
+        }}
+        target = {"sections": {
+            "tables": [{"name": "APP_ITEMS"}], "columns": target_columns, "constraints": [], "indexes": [],
+            "sequences": [], "identity-columns": [],
+        }}
+        snapshot = SchemaSnapshot({}, {}, {}, {}, "", "")
+        return baseline._structure_bundle(self.config, "APP_DEV", "APP_TEST", source, target, snapshot)
+
+    def test_a_system_hidden_column_is_skipped_for_both_flag_encodings(self) -> None:
+        for hidden, user_generated in (("Y", "N"), ("YES", "NO")):
+            with self.subTest(hidden=hidden, user_generated=user_generated):
+                system_column = self._column(
+                    "SYS_NC00005$", hidden=hidden, virtual=hidden, user_generated=user_generated, nullable="N",
+                )
+                steps, checks = self._structure([self._column("ITEM_ID"), system_column], [self._column("ITEM_ID")])
+
+                self.assertEqual({}, steps)
+                self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_a_missing_virtual_column_is_refused_and_named(self) -> None:
+        for flag in ("Y", "YES"):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError, r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration",
+                ):
+                    self._structure([self._column("ITEM_ID"), self._column("TOTAL", virtual=flag)], [self._column("ITEM_ID")])
+
+    def test_a_missing_hidden_user_column_is_refused_and_not_guessed(self) -> None:
+        for hidden, user_generated in (("Y", "YES"), ("YES", "YES"), ("Y", None)):
+            with self.subTest(hidden=hidden, user_generated=user_generated):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError, r"hidden column APP_ITEMS\.NOTE_X needs a reviewed migration",
+                ):
+                    self._structure(
+                        [self._column("ITEM_ID"), self._column("NOTE_X", hidden=hidden, user_generated=user_generated)],
+                        [self._column("ITEM_ID")],
+                    )
+
+    def test_an_existing_column_whose_virtual_flag_differs_is_refused(self) -> None:
+        for source_flag, target_flag in (("Y", "N"), ("NO", "YES")):
+            with self.subTest(source_flag=source_flag, target_flag=target_flag):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError, r"column virtual/stored change needs a reviewed data migration: APP_ITEMS\.TOTAL",
+                ):
+                    self._structure([self._column("TOTAL", virtual=source_flag)], [self._column("TOTAL", virtual=target_flag)])
+
+    def test_an_unrecognised_virtual_flag_is_refused(self) -> None:
+        with self.assertRaisesRegex(baseline.BaselineError, "unrecognised virtual flag"):
+            self._structure([self._column("ITEM_ID")], [self._column("ITEM_ID", virtual="MAYBE")])
+
+    def test_an_ordinary_missing_column_still_gets_its_add(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("ITEM_NAME")], [self._column("ITEM_ID")],
+        )
+
+        sql = steps["001-structure-delta.sql"]
+        self.assertIn('ADD ("ITEM_NAME" NUMBER)', sql)
+        self.assertNotIn("SYS_NC", sql)
+        self.assertTrue(any("column-def-" in check["id"] for check in checks["postconditions"]))
+
+
 class CompileStepTests(unittest.TestCase):
     def test_the_compile_block_declares_its_variables_before_the_local_function(self) -> None:
         sql = baseline._compile_all_step("APP_STAGE", [("PACKAGE", "APP_PKG")])

@@ -141,9 +141,16 @@ several mirrors in one run all of them are installed or none.
 | Run | Replaced | Untouched |
 | --- | --- | --- |
 | `backup-ords` | `database/<SCHEMA>/ords/` for each exported schema | every other file in `database/` |
-| `backup-db`, schema has tables or code scopes and ORDS is selected | `database/<SCHEMA>/` as a whole, including `ords/` | other schemas |
-| `backup-db`, schema has tables or code scopes, ORDS not selected (no profile, or `--schema` outside it) | `database/<SCHEMA>/` as a whole, **except** its existing `ords/`, which is carried over unchanged | other schemas |
+| `backup-db`, schema has tables or code scopes and ORDS is selected | `database/<SCHEMA>/` as a whole, including `ords/`, except any table or code scope this run did not refresh (carried over unchanged, see below) | other schemas |
+| `backup-db`, schema has tables or code scopes, ORDS not selected (no profile, or `--schema` outside it) | `database/<SCHEMA>/` as a whole, **except** its existing `ords/` and any table or code scope this run did not refresh, which are carried over unchanged | other schemas |
 | `backup-db`, schema only in the ORDS profile | `database/<SCHEMA>/ords/` | that schema's other mirrors |
+
+A scope that a run did refresh is replaced whole, so its stale files disappear.
+A scope the run did not refresh is copied from the committed mirror byte for
+byte: a tables-only `backup-db` keeps the committed `views/`, `packages/`,
+`procedures/`, `functions/`, `triggers/`, `synonyms/` and `manifest-code.txt`,
+and a code-only run keeps `tables/` and `manifest-tables.txt`. Only what the
+committed mirror holds is copied. `backup_db.sh` and `backup_db.ps1` do the same.
 
 A dirty `database/<SCHEMA>/ords/` (uncommitted or untracked changes) blocks both
 commands before SQLcl starts. A dirty table or code mirror does not block

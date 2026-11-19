@@ -33,6 +33,14 @@ original template keeps them for its own validation. Always retain
 project-specific regression tests, linked project plans, durable docs, custom rules,
 operational scripts, `.env`, manifest and lock.
 
+## Daily choices
+
+- Export an app you changed in Builder so that Git records it: [Getting started, section 9A](docs/GETTING_STARTED.md#a-builder-first).
+- Publish a file edit to shared DEV with `scripts/team.sh publish <id> --env dev`: [publish rules](docs/publish-rules.md) list every refusal, and [partial publish](docs/partial-publish.md) covers existing pages only.
+- Change stored packages, procedures, triggers or views: [feature-oriented releases](docs/feature-releases.md).
+- Apply a one-time schema change, backfill or data fix: [migration rules](docs/migration-rules.md).
+- Promote a tested release to staging or production: [production deployment runbook](docs/production-deployment.md).
+
 ## What you get
 
 | Feature | What it does |
@@ -312,7 +320,7 @@ for the privilege and command limits.
 | --- | --- |
 | `doctor` | Checks every distinct `(connection, expected user, schema)` across the three profiles, and every ORDS target when that optional profile exists, with one read-only SQLcl identity check each. It reports each schema and fails if any check fails. `--schema` narrows it. |
 | `export <id>` | Reads the app's parsing schema from `APEX_APPLICATIONS` using the first `APEX_SQLCL_CONNECTION` entry, requires that schema in `APEX_PARSING_SCHEMA`, then reconnects with that schema's own connection and writes `apps/<SCHEMA>/<id>/`. `team.sh export` takes one ID. `scripts/export_apps.sh` with no argument resolves each configured app ID separately and installs all exports in one all-or-nothing mirror replacement. |
-| `backup-db` | Runs the tables scope for each tables schema and the code scope for each code schema, plus the ORDS scope for each ORDS schema when the optional ORDS profile exists. Each has a staging directory, a completeness check, and a dirty-mirror check. Nothing is installed until every schema verifies; one mirror replacement installs them all. `--schema` narrows the run. |
+| `backup-db` | Runs the tables scope for each tables schema and the code scope for each code schema, plus the ORDS scope for each ORDS schema when the optional ORDS profile exists. Each has a staging directory, a completeness check, and a dirty-mirror check. Nothing is installed until every schema verifies; one mirror replacement installs them all. A scope this run did not refresh (for example the code scope of a tables-only run) is carried over unchanged from the committed mirror, not deleted. `--schema` narrows the run. |
 | `backup-ords` | Exports each ORDS schema (`ORDS_SCHEMA`, optional) to `database/<SCHEMA>/ords/schema.sql` and replaces only that folder. `--schema` narrows the run; an ORDS-only schema is selectable. |
 | `publish <id>` | Imports to shared DEV only (`scripts/team.sh publish <id> [--env dev]` or `--file ...`). Requires the app folder, descriptor, and live app parsing schema to agree and be listed, then uses that schema's connection. Full mode keeps the app-wide drift guard; selected-page mode verifies a fresh merged snapshot. Promotion to staging or production uses `deploy`. |
 | `deploy <id> --env staging\|prod` | Confirms promotion to staging or production or prints a DBA runbook (`--manual`). The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection; imports restore previously active automations. |
@@ -342,98 +350,26 @@ Limits:
 
 ## Builder-first workflow
 
-Make and save the change in shared APEX Builder, then export that app's source:
+Make and save the change in shared APEX Builder, then run `scripts/team.sh export <id>`
+and review `git diff` before you commit. Export records the current Builder state and
+never imports the app back. It refuses to overwrite uncommitted local files, so commit
+or stash your own edits first.
 
-```bash
-scripts/team.sh export 100
-git status --short --untracked-files=all -- apps/DEMO/100/
-git diff -- apps/DEMO/100/
-```
-
-Review the APEXlang changes before committing. This route captures current
-Builder state; it does not import the app back into Builder. The exporter
-refuses to overwrite a dirty local source directory. It first exports into
-`scratch/`, checks the SQLcl result and Builder revision, then replaces the
-local source mirror while preserving its authored deployment descriptors.
+Steps: [Getting started, section 9A](docs/GETTING_STARTED.md#a-builder-first). Export
+and publish rules: [publish rules](docs/publish-rules.md#how-the-check-works).
 
 ## File-first APEXlang workflow
 
-Edit the APEXlang files and review them. Committing first is optional:
-publish imports the files on disk, and the shared database is the source of
-truth. Before importing into shared DEV, tell teammates which app ID is being published and check for
-unsaved or in-progress Builder edits. Then run:
+Edit the files and review them. Publish imports what is on disk, so committing first is
+optional. Tell your team which app you are publishing and check for unsaved Builder
+edits, then run `scripts/team.sh publish <id> --env dev`. Publish stamps a version tag
+into `application.apx`, refuses if the live app changed since your last export, and
+verifies the imported source. Commit the stamped file after a successful publish;
+`deploy` handles staging and production.
 
-```bash
-scripts/team.sh publish 100 --env dev
-```
-
-The exporter records the app's `last_updated_on` value from Oracle before it
-reads APEXlang, then checks the value again when the export completes. If the
-app changed during export, it refuses to install that source. The DEV drift
-guard compares the current Builder value with this database-time baseline, so
-the workstation's time zone does not affect the check. If Builder is newer,
-export and reconcile before importing. `--force` bypasses only the drift guard
-and should be used only after the discrepancy is reviewed. Oracle stores this
-revision at one-second precision; if the revision matches the database's
-current second, export and publish fail closed and ask you to retry after one
-second. This persisted timestamp cannot reveal unsaved Builder edits, so
-coordinate with teammates before publishing. Staging and production promotion
-uses the separate `deploy` command.
-
-APEX does not stamp `last_updated_on` while importing, so an app installed or
-published from APEXlang has no Builder timestamp until someone saves it in
-Builder. To make each import identifiable, a DEV publish first stamps a
-publish tag onto the end of the application version in `application.apx`:
-
-```text
-version: "V2 Powered By xxx [ASHARIF-2026-09-26r001]"
-```
-
-The tag is `DEVELOPER_NAME` from `.env`, the publish date, and a counter that
-counts up with each publish of that date, whoever published, and restarts at
-`r001` on a later date. The date never moves back, so a tag is never reused.
-The export marker records the live version with the Builder timestamp, and the
-drift guard refuses to publish when the live version differs from your
-baseline, which is how it detects a teammate's import. Commit the stamped
-`application.apx` after a successful publish. If the import fails, publish
-restores the unstamped file. The tag appears wherever the theme renders
-`#APP_VERSION#`, such as the Universal Theme footer, and `deploy` ships it to
-staging and production unchanged.
-
-After a successful import, `publish` restores exactly the automations recorded
-as ACTIVE before import, then prints their before/after status table. Full
-publish and deployment compare normalized APEXlang source, excluding local deployment
-descriptors and the export marker. Normalization removes `//` comment lines,
-sorts `textMessage` blocks by key and language, report `column` blocks by name,
-and `displayColumn` blocks by column, and strips trailing whitespace and blank
-lines. Real differences are reported for every file with its first differing
-line. Cosmetic-only differences pass with one summary line. Pass `--strict-bytes`
-to require raw byte equality; `--no-restore-automations` keeps the previous
-post-import automation behavior.
-
-DEV advances the drift baseline only when the imported source matches the
-normalized comparison, a second re-export has the same normalized form, and the
-live Builder revision stays stable across both exports. If SQLcl reports an
-error, the source differs, the second export is unstable, or the revision is
-ambiguous, publish fails and leaves the old baseline in place.
-SQLcl can exit successfully without importing, for example when a descriptor
-names an unknown workspace, so publish also requires its `Import successful.`
-line.
-Publish preflight also requires the selected application tree to be physically
-inside the checkout and rejects symbolic links and reparse points.
-
-The export marker includes `sourceProvenance` only when the guarded export
-observed the same exact APEX release before and after reading source. It binds
-that release and the database UTC observation time to the canonical source file
-set used by strict comparison. `sourceFormat.apexRelease` still identifies the
-26.2 format family. Local edits make provenance stale; legacy or manually
-staged source remains unknown. Publish reports an observed source/target APEX
-version pair when available, but the pair never relaxes byte verification.
-Stored database-code exports record their independently observed database
-release in `source-manifest.json`; they do not infer an APEX release.
-
-When publish refuses, see [docs/publish-rules.md](docs/publish-rules.md) for
-every rule, what each message means, and what to do.
+Steps: [Getting started, section 9B](docs/GETTING_STARTED.md#b-files-first). Every
+refusal and its fix: [publish rules](docs/publish-rules.md). Existing pages only:
+[partial publish](docs/partial-publish.md).
 
 ## Schema migrations
 
@@ -849,6 +785,7 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh app-unlock <id> --env dev` | Release only the configured developer's application lock after reconciliation. |
 | `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
 | `scripts/team.sh doctor` | Validate `.env`, check the DEV SQLcl identity and report the detected database version and `COMPATIBLE`. |
+| `scripts/team.sh targets [--format text\|json]` | Show, offline and read-only, the schema, SQLcl connection and expected login that each operation uses; a split owner appears as a `REFUSED` row where the command would refuse. Never connects and never starts SQLcl. |
 | `scripts/team.sh dev-test --env dev --schema NAME --plan\|--run` | Plan or run the six built-in DEV checks, or an explicitly selected project suite; fixtures are retained by default. See [DEV test runner](docs/dev-test.md). |
 | `scripts/team.sh dev-test --report <run-id> [--format text\|json\|markdown]` | Render saved evidence without connecting to a database. |
 | `scripts/team.sh dev-test --cleanup <run-id>` | Explicitly clean supported recorded artifacts; project suites without a cleanup contract remain manual. |

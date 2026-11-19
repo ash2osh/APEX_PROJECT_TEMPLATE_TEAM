@@ -102,8 +102,6 @@ class DocumentationContractTests(unittest.TestCase):
         readme = contents[ROOT / "README.md"]
         for command in (
             "doctor",
-            "export 100",
-            "publish 100",
             "check-conflicts",
             "team.sh migrate",
             "team.sh revise",
@@ -130,17 +128,23 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, readme)
-        self.assertIn("After a successful import", readme)
-        self.assertIn("normalized APEXlang source", readme)
-        self.assertIn("second re-export has the same normalized form", readme)
-        self.assertIn("--strict-bytes", readme)
-        self.assertIn("--no-restore-automations", readme)
-        self.assertIn("leaves the old baseline in place", readme)
         self.assertIn("commands such as `SET DEFINE`", readme)
-        self.assertIn("APEX does not stamp `last_updated_on` while importing", readme)
         self.assertIn("`CREATE MLE MODULE`", readme)
-        self.assertIn("[ASHARIF-2026-09-26r001]", readme)
-        self.assertIn("Commit the stamped", readme)
+        # The export and publish rules moved out of the README workflow sections (section 9 of the getting started
+        # guide and publish-rules.md own them now), so these assertions read those documents.
+        publish_rules = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
+        getting_started = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+        self.assertIn("observed as `ACTIVE` before import", publish_rules)
+        self.assertIn("--strict-bytes", publish_rules)
+        self.assertIn("--no-restore-automations", publish_rules)
+        self.assertIn("accept normalized `.apx` source", publish_rules)
+        self.assertIn("requires a second export with the same normalized source", publish_rules)
+        self.assertIn("fails and leaves the old baseline in place", publish_rules)
+        self.assertIn("APEX does not stamp `last_updated_on` while importing", publish_rules)
+        self.assertIn("[ASHARIF-2026-09-26r001]", publish_rules)
+        self.assertIn("Commit the stamped", getting_started)
+        self.assertIn("scripts/team.sh export 100", getting_started)
+        self.assertIn("scripts/team.sh publish 100 --env dev", getting_started)
         self.assertIn("DEVELOPER_NAME", contents[ROOT / "AGENTS.md"])
         self.assertIn("scripts/team.sh upgrade-template", readme)
         self.assertIn("AGENTS.project.md", readme)
@@ -575,6 +579,49 @@ class GuideContractTests(unittest.TestCase):
         self.assertIn("publish_app.sh`/`publish_app.ps1` script is an internal implementation helper", publish_rules)
         self.assertIn("Imports to shared DEV only", readme)
         self.assertIn("`scripts/team.sh publish` targets DEV only", getting_started)
+
+    def test_targets_report_is_in_both_full_usage_screens_and_the_guides_but_not_everyday(self) -> None:
+        # `targets` is the offline report of which profile each operation uses. It belongs in the full usage of both
+        # wrappers, in the README command reference and in the guides that explain the profiles, and not in the
+        # short "Everyday commands" list.
+        for script in ("team.sh", "team.ps1"):
+            with self.subTest(script=script):
+                self.assertIn("targets [--format text|json]", (ROOT / "scripts" / script).read_text(encoding="utf-8"))
+        everyday = subprocess.run(
+            [BASH, str(ROOT / "scripts" / "team.sh")], capture_output=True, text=True, check=True
+        ).stdout
+        self.assertIsNone(re.search(r"(?m)^  targets\b", everyday), "targets must not be an everyday command")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("scripts/team.sh targets [--format text\\|json]", readme)
+        getting_started = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+        self.assertIn("scripts/team.sh targets", getting_started)
+        self.assertIn("never connects to a database and never starts SQLcl", getting_started)
+        self.assertIn("scripts/team.sh targets", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
+        self.assertIn("`new-migration --source` reads the code profile", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
+
+    def test_getting_started_runs_verify_local_after_the_exports_not_before_the_first_one(self) -> None:
+        # verify-local reports every configured app with no folder as a failure until it is exported. A new developer
+        # therefore runs it at the end of step 8, after every listed app is exported, and step 7 checks only the
+        # configuration and the connection.
+        text = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+
+        def step(number: int) -> str:
+            start = text.index(f"\n## {number}. ")
+            return text[start:text.index("\n## ", start + 1)]
+
+        step7, step8 = step(7), step(8)
+        self.assertNotIn("scripts/team.sh verify-local", step7, "step 7 must not run verify-local before the exports")
+        self.assertIn("scripts/team.sh targets", step7)
+        self.assertIn("scripts/team.sh doctor", step7)
+        self.assertIn("Export every app ID listed in `APEX_APP_ID`", step8)
+        verify_at = step8.index("scripts/team.sh verify-local")
+        self.assertEqual(-1, step8.find("scripts/team.sh verify-local", verify_at + 1))
+        last_export = max(match.start() for match in re.finditer(r"scripts/team\.sh export \d+", step8))
+        self.assertLess(last_export, verify_at, "verify-local must follow every export in step 8")
+        self.assertLess(verify_at, step8.index("git add apps/"), "the exports and descriptors are committed after verify-local")
+        self.assertIn("TROUBLESHOOTING.md#local-readiness", step8)
+        troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        self.assertIn("## Local readiness", troubleshooting)
 
 
 if __name__ == "__main__":

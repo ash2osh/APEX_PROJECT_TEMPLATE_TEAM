@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 import shutil
+import signal
 import subprocess
+import time
 
 
 DEFAULT_TIMEOUT_SECONDS = 300
+# Seconds between the child's readiness marker and the interrupt. See interrupt_process_group.
+INTERRUPT_SETTLE_SECONDS = 0.1
 _original_run = subprocess.run
 _original_popen = subprocess.Popen
 
@@ -83,3 +88,19 @@ def working_windows_powershell() -> str | None:
     """Return Windows PowerShell only when its launcher can actually start."""
     executable = shutil.which("powershell")
     return executable if executable and _launcher_works(executable) else None
+
+
+def interrupt_process_group(process: subprocess.Popen, settle: float = INTERRUPT_SETTLE_SECONDS) -> None:
+    """Send SIGINT to the process group of a POSIX test child started with start_new_session=True.
+
+    Call it only after the child has printed or written its own readiness marker. The settle delay lets PowerShell's
+    native-process wait start before the signal arrives: an interrupt that lands while pwsh is still starting a native
+    process can abort pwsh instead of exercising the script's own cleanup. That is the suspected cause of a CI failure
+    reported as "pwsh exit -6". Every interrupt test should use this helper so the delay is the same everywhere.
+    """
+    if os.name == "nt":
+        raise RuntimeError("interrupt_process_group is POSIX only; Windows interrupt tests use the console Ctrl-C helper")
+    if settle < 0:
+        raise ValueError("settle must not be negative")
+    time.sleep(settle)
+    os.killpg(process.pid, signal.SIGINT)

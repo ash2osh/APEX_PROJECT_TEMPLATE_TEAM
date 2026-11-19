@@ -22,11 +22,26 @@ what the live app looked like at that moment:
 - **Version text**, which ends with a publish tag such as
   `[ASHARIF-2026-09-26r001]`. Each DEV publish stamps a new tag into
   `application.apx` before importing, so the version shows which import is
-  live.
+  live. The `rNNN` counter counts publishes of that date by anyone and restarts at
+  `r001` on a later date. The date never moves back, so a tag is never reused.
+  The tag appears wherever the theme renders `#APP_VERSION#`, such as the Universal
+  Theme footer; `deploy` ships it to staging and production unchanged.
+
+APEX does not stamp `last_updated_on` while importing, so an app installed or
+published from APEXlang has no Builder timestamp until someone saves it in Builder.
+
+The exporter reads `last_updated_on` before it reads the APEXlang and again when the
+export completes. If the app changed during the export (a Builder save or an import),
+it refuses to install that source; wait for Builder edits to stop, then export again.
+The drift guard compares Builder timestamps with the database-time baseline, so your
+workstation's time zone does not change the result. Oracle stores this value at
+one-second precision: when it falls in the database's current second, export and
+publish fail closed, and you retry after one second.
 
 A full guarded APEX export also records an optional `sourceProvenance` object
 with the exact observed APEX release, database UTC export time, and a digest of
-the canonical source file set. This is separate from `sourceFormat.apexRelease`,
+the canonical source file set. It is written only when the export observed the same
+exact APEX release before and after reading the source. This is separate from `sourceFormat.apexRelease`,
 which identifies the template's APEXlang format family. Older, manually staged,
 or edited source has unknown or stale provenance. Release pairs appear in
 verification and recovery summaries when available; they are diagnostic only.
@@ -35,7 +50,12 @@ documented deployment projections. Normalization removes standalone `//`
 comments, trailing whitespace and blank lines at EOF, and sorts only adjacent
 `textMessage`, `column` and `displayColumn` blocks with the same parent, kind
 and indentation. Every other source byte and the complete file set remain
-strict; `--strict-bytes` disables the `.apx` normalization. DEV baseline
+strict; `--strict-bytes` disables the `.apx` normalization. Normalization sorts
+`textMessage` blocks by key and language, report `column` blocks by name and
+`displayColumn` blocks by column; the comparison excludes the local deployment
+descriptors and the export marker. A difference that is only cosmetic passes with
+one summary line, `APEXlang cosmetic-only differences: <files>`. Every other difference is
+reported for each file with its first differing line, without printing source text. DEV baseline
 advancement also requires a second export with the same normalized source,
 application revision and APEX release. A missing target export observation,
 such as before a manual runbook connects, is reported as an unknown target
@@ -106,7 +126,8 @@ capture/verify gate and retain temporary evidence on failure.
 
 Full publish, selected-page publish and deployment restore exactly the
 automation static IDs observed as `ACTIVE` before import, unless
-`--no-restore-automations` is supplied. The restore step enables only those
+`--no-restore-automations` is supplied. Publish prints the status of those automations
+before import and after the restore in one table. The restore step enables only those
 IDs after its writer session confirms every captured database identity
 field, APEX release, workspace name and ID, application ID, and owner. It then
 reads the same target scope and automation state back; any identity drift,
@@ -264,12 +285,13 @@ live version, then reconcile and commit.
 | `interrupted while the import was running, so its result is unknown` | You (or a signal) stopped publish while SQLcl was importing, before publish read its output. SQLcl may already have finished: DEV may or may not run your source. Your old `application.apx` is put back. Commit your changes, run `scripts/team.sh export <id>`, and read the live version: the tag publish printed as stamped means the import completed. Then reconcile and commit. |
 | `SQLcl application import failed` | SQLcl exited with an error. Fix the reported problem and retry. |
 | `SQLcl reported a client or database error during the application import` | An `ORA-`, `SP2-`, `PLS-`, or `TNS-` error was printed. Fix it and retry. |
-| `SQLcl did not report a successful APEX import` | SQLcl skipped the import, for example because `dev.json` names a workspace that does not exist. Fix the descriptor. |
+| `SQLcl did not report a successful APEX import` | SQLcl skipped the import, for example because `dev.json` names a workspace that does not exist. A successful exit status is not enough: publish requires SQLcl's own `Import successful.` line before it verifies anything. Fix the descriptor. |
 | `SQLcl did not verify the imported application` | The import result is unknown. Export and compare before retrying. |
 
 **After import.** The import has already changed DEV, but publish could not
 prove the result, so it keeps your old baseline and the next publish refuses.
-Your stamped `application.apx` is kept, because that is what was imported.
+If SQLcl reports an error, the source differs, the second export is unstable, or the
+revision is ambiguous, publish fails and leaves the old baseline in place. Your stamped `application.apx` is kept, because that is what was imported.
 Commit it first (export refuses to write over uncommitted changes), then run
 `scripts/team.sh export <id>` to see exactly what is live, reconcile, and
 commit. Publish prints these steps when it stops here.

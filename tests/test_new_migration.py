@@ -137,6 +137,47 @@ class NewMigrationTests(unittest.TestCase):
             self.create(["PACKAGE:PKG"])
         self.assertEqual(self.calls, [])
 
+    def test_split_owners_are_refused_before_dev_is_read(self):
+        # migrate runs migrations as MIGRATION_SCHEMA, so a folder under the CODE_SCHEMA owner could never apply.
+        split = {
+            **ENV, "CODE_SCHEMA": "APPCODE", "CODE_EXPECTED_USER": "APPCODE",
+            "MIGRATION_SCHEMA": "APPDATA", "MIGRATION_SQLCL_CONNECTION": "dev_mig", "MIGRATION_EXPECTED_USER": "APPDATA",
+        }
+        with self.assertRaisesRegex(new_migration.NewMigrationError, "schema APPCODE") as raised:
+            new_migration.create(self.root, "change-pkg", ["PACKAGE:PKG"], environ=split,
+                                 capture=self.capture({("PACKAGE", "PKG"): SPEC}), now=lambda: NOW)
+        message = str(raised.exception)
+        self.assertIn("MIGRATION_SCHEMA APPDATA", message)
+        self.assertIn("scripts/team.sh targets", message)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(list((self.root / "migrations").iterdir()), [])
+
+    def test_overlapping_owners_are_accepted(self):
+        # APP is in both lists, so the folder lands under APP where migrate looks for it; APPX is refused.
+        overlap = {
+            **ENV, "CODE_SCHEMA": "APP,APPX", "CODE_SQLCL_CONNECTION": "dev_code,dev_code",
+            "CODE_EXPECTED_USER": "APP,APPX", "MIGRATION_SCHEMA": "APP",
+            "MIGRATION_SQLCL_CONNECTION": "dev_code", "MIGRATION_EXPECTED_USER": "APP",
+        }
+        units = {("PACKAGE BODY", "PKG"): BODY, ("PACKAGE", "PKG"): SPEC}
+        folder = new_migration.create(self.root, "change-pkg", ["PACKAGE:PKG"], environ=overlap,
+                                      schema="APP", capture=self.capture(units), now=lambda: NOW)
+        self.assertEqual(folder.relative_to(self.root).as_posix(), "migrations/APP/2026-10-19_change-pkg-r001")
+        self.assertEqual(self.calls, [("dev", "APP", new_migration.SECTIONS, ("PKG",))])
+        with self.assertRaisesRegex(new_migration.NewMigrationError, "schema APPX"):
+            new_migration.create(self.root, "other-pkg", ["PACKAGE:PKG"], environ=overlap,
+                                 schema="APPX", capture=self.capture(units), now=lambda: NOW)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_no_migration_profile_leaves_the_code_schemas_accepted(self):
+        # Without MIGRATION_* keys the migration list is the CODE list, so every named code schema is accepted.
+        two_codes = {**ENV, "CODE_SCHEMA": "APP,APPX", "CODE_SQLCL_CONNECTION": "dev_code,dev_code",
+                     "CODE_EXPECTED_USER": "APP,APPX"}
+        folder = new_migration.create(self.root, "change-pkg", ["PACKAGE:PKG"], environ=two_codes,
+                                      schema="APPX", capture=self.capture({("PACKAGE", "PKG"): SPEC}), now=lambda: NOW)
+        self.assertEqual(folder.relative_to(self.root).as_posix(), "migrations/APPX/2026-10-19_change-pkg-r001")
+        self.assertEqual(self.calls, [("dev", "APPX", new_migration.SECTIONS, ("PKG",))])
+
     def test_bad_names_and_sources_are_refused(self):
         for name, sources, message in (
             ("Bad_Name", ["PACKAGE:PKG"], "lowercase words"),

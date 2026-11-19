@@ -1136,6 +1136,148 @@ exit 17
                     self.assertIn(expected, result.stdout)
                     self.assertNotIn("configuration file", result.stderr)
 
+    def targets_wrappers(self):
+        entries = [("team.sh", [BASH])]
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if pwsh:
+            entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
+        return entries
+
+    @staticmethod
+    def _run_wrapper(launcher, name, environment, *arguments):
+        return subprocess.run(
+            [*launcher, str(ROOT / "scripts" / name), *arguments], cwd=ROOT, env=environment,
+            capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=120,
+        )
+
+    def test_targets_prints_the_configured_targets_offline_in_both_wrappers(self) -> None:
+        # `targets` reads .env and reports schema, connection and login. It must never start SQLcl.
+        for name, launcher in self.targets_wrappers():
+            with self.subTest(entry=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env_file = root / ".env"
+                env_file.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+                fake_bin = root / "bin"
+                started = root / "sqlcl-started"
+                fake_sqlcl.install(fake_bin, f": > '{started}'\nexit 97\n")
+                result = subprocess.run(
+                    [*launcher, str(ROOT / "scripts" / name), "targets"], cwd=ROOT,
+                    env=fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(env_file)),
+                    capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=120,
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(0, result.returncode, output)
+                self.assertIn("Effective database targets", result.stdout)
+                self.assertRegex(result.stdout, r"(?m)^dev\s+read\s+DEMO\s+docker-demo\s+DEMO\s+no\s+development\s+resolved")
+                self.assertIn("no connection is made", result.stdout)
+                self.assertFalse(started.exists(), f"targets started SQLcl: {output}")
+
+    def test_targets_shows_a_refused_row_for_a_split_owner_in_both_wrappers(self) -> None:
+        # CODE_SCHEMA and MIGRATION_SCHEMA name different owners: migrate must refuse the code schema.
+        for name, launcher in self.targets_wrappers():
+            with self.subTest(entry=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env_file = root / ".env"
+                split = (ROOT / ".env.example").read_text(encoding="utf-8")
+                split += "\nMIGRATION_SCHEMA=DATA_OWNER\nMIGRATION_SQLCL_CONNECTION=docker-demo\nMIGRATION_EXPECTED_USER=DATA_OWNER\n"
+                env_file.write_text(split, encoding="utf-8")
+                fake_bin = root / "bin"
+                started = root / "sqlcl-started"
+                fake_sqlcl.install(fake_bin, f": > '{started}'\nexit 97\n")
+                result = subprocess.run(
+                    [*launcher, str(ROOT / "scripts" / name), "targets", "--format", "json"], cwd=ROOT,
+                    env=fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(env_file)),
+                    capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=120,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                rows = json.loads(result.stdout)["rows"]
+                refused = [row for row in rows if row["purpose"] == "migration" and row["schema"] == "DEMO"]
+                self.assertEqual(["REFUSED"], [row["status"] for row in refused])
+                self.assertIn("MIGRATION_SCHEMA", refused[0]["message"])
+                resolved = [row for row in rows if row["purpose"] == "migration" and row["schema"] == "DATA_OWNER"]
+                self.assertEqual(["resolved"], [row["status"] for row in resolved])
+                self.assertFalse(started.exists(), "targets started SQLcl")
+
+    def test_targets_refuses_extra_and_schema_arguments_like_other_offline_commands(self) -> None:
+        for name, launcher in self.targets_wrappers():
+            with self.subTest(entry=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env_file = root / ".env"
+                env_file.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+                fake_bin = root / "bin"
+                started = root / "sqlcl-started"
+                fake_sqlcl.install(fake_bin, f": > '{started}'\nexit 97\n")
+                environment = fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(env_file))
+
+                reference = self._run_wrapper(launcher, name, environment, "template-status", "extra")
+                for arguments in (("targets", "extra"), ("targets", "--schema", "DEMO"), ("targets", "--format", "xml")):
+                    with self.subTest(arguments=arguments):
+                        result = self._run_wrapper(launcher, name, environment, *arguments)
+                        self.assertEqual(reference.returncode, result.returncode, result.stdout + result.stderr)
+                        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertFalse(started.exists(), "a refused argument still started SQLcl")
+
+    def test_targets_help_works_without_a_configured_env_in_both_wrappers(self) -> None:
+        for name, launcher in self.targets_wrappers():
+            with self.subTest(entry=name):
+                result = subprocess.run(
+                    [*launcher, str(ROOT / "scripts" / name), "targets", "--help"], cwd=ROOT,
+                    env=dict(os.environ, PROJECT_ENV_FILE="/no/such/targets.env"),
+                    capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=120,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("--format", result.stdout)
+                self.assertNotIn("configuration file", result.stdout + result.stderr)
+
+    def test_targets_works_without_an_env_file_in_both_wrappers(self) -> None:
+        # Like template-status, a missing .env is not an error: every row reads "not configured", SQLcl never starts,
+        # an inherited shell variable is not reported as configuration, and argument errors keep the status 2.
+        for name, launcher in self.targets_wrappers():
+            with self.subTest(entry=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fake_bin = root / "bin"
+                started = root / "sqlcl-started"
+                fake_sqlcl.install(fake_bin, f": > '{started}'\nexit 97\n")
+                environment = fake_sqlcl.environment(
+                    fake_bin, PROJECT_ENV_FILE=str(root / "missing.env"), CODE_SCHEMA="INHERITED_ONLY"
+                )
+
+                result = self._run_wrapper(launcher, name, environment, "targets", "--format", "json")
+                output = result.stdout + result.stderr
+                self.assertEqual(0, result.returncode, output)
+                rows = json.loads(result.stdout)["rows"]
+                self.assertTrue(rows)
+                self.assertEqual({"not configured"}, {row["status"] for row in rows}, output)
+                self.assertNotIn("INHERITED_ONLY", output)
+                self.assertFalse(started.exists(), f"targets started SQLcl: {output}")
+                text = self._run_wrapper(launcher, name, environment, "targets")
+                self.assertEqual(0, text.returncode, text.stdout + text.stderr)
+                self.assertIn("Effective database targets", text.stdout)
+                reference = self._run_wrapper(launcher, name, environment, "template-status", "extra")
+                for arguments in (("targets", "extra"), ("targets", "--schema", "DEMO")):
+                    with self.subTest(arguments=arguments):
+                        refused = self._run_wrapper(launcher, name, environment, *arguments)
+                        self.assertEqual(reference.returncode, refused.returncode, refused.stdout + refused.stderr)
+                        self.assertEqual(2, refused.returncode, refused.stdout + refused.stderr)
+                self.assertFalse(started.exists(), "a refused argument still started SQLcl")
+
+    def test_targets_ignores_an_inherited_project_schema_in_both_wrappers(self) -> None:
+        # targets reports every configured schema, so a PROJECT_SCHEMA left in the shell must not narrow it or refuse it.
+        for name, launcher in self.targets_wrappers():
+            with self.subTest(entry=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env_file = root / ".env"
+                env_file.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+                fake_bin = root / "bin"
+                started = root / "sqlcl-started"
+                fake_sqlcl.install(fake_bin, f": > '{started}'\nexit 97\n")
+                environment = fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(env_file), PROJECT_SCHEMA="NOT_CONFIGURED")
+                result = self._run_wrapper(launcher, name, environment, "targets")
+                output = result.stdout + result.stderr
+                self.assertEqual(0, result.returncode, output)
+                self.assertRegex(result.stdout, r"(?m)^dev\s+read\s+DEMO\s+docker-demo\s+DEMO\s+no\s+development\s+resolved")
+                self.assertFalse(started.exists(), f"targets started SQLcl: {output}")
+
     def test_argument_errors_read_and_exit_the_same_in_both_wrappers(self) -> None:
         # An uncaught throw makes PowerShell print an exception block with the
         # script path and line and exit 1; Bash prints one `team error:` line and
@@ -1222,13 +1364,13 @@ exit 17
                 while not started.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(started.exists(), "the helper never started")
-                os.killpg(process.pid, signal.SIGINT)
-                process.communicate(timeout=60)
+                _test_subprocess_safety.interrupt_process_group(process)
+                stdout, stderr = process.communicate(timeout=60)
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate()
-            self.assertEqual(process.returncode, 130)
+            self.assertEqual(process.returncode, 130, f"stdout: {stdout}\nstderr: {stderr}")
 
     @unittest.skipIf(os.name == "nt", "pwsh on Linux and macOS ends the tree with Kill(true); Windows twin: SqlclProcessTreeTests in test_windows_support.py")
     def test_powershell_ends_the_whole_sqlcl_tree_when_sqlcl_ignores_ctrl_c(self) -> None:
@@ -1265,9 +1407,8 @@ exit 17
                 child = int(child_pid.read_text())
                 # SQLcl can start before Start-Process has handed it to PowerShell; a Ctrl-C
                 # inside Start-Process cannot be handled, so let it return first.
-                time.sleep(1)
+                _test_subprocess_safety.interrupt_process_group(process, settle=1.0)
                 interrupted_at = time.monotonic()
-                os.killpg(process.pid, signal.SIGINT)
                 output, errors = process.communicate(timeout=60)
                 elapsed = time.monotonic() - interrupted_at
                 time.sleep(0.5)
@@ -1313,13 +1454,13 @@ exit 17
                 while not started.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(started.exists(), "the helper never started")
-                os.killpg(process.pid, signal.SIGINT)
-                process.communicate(timeout=60)
+                _test_subprocess_safety.interrupt_process_group(process)
+                stdout, stderr = process.communicate(timeout=60)
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate()
-            self.assertEqual(process.returncode, 2)
+            self.assertEqual(process.returncode, 2, f"stdout: {stdout}\nstderr: {stderr}")
 
     def test_yes_and_confirm_target_reach_their_helpers_and_both_usage_screens_list_them(self) -> None:
         # Production refusals come from the helpers before any connection; the wrappers must pass the flags through.
@@ -1613,13 +1754,13 @@ exit 17
                     while not started.exists() and time.monotonic() < deadline:
                         time.sleep(0.05)
                     self.assertTrue(started.exists(), "SQLcl never started")
-                    os.killpg(process.pid, signal.SIGINT)
-                    _, stderr = process.communicate(timeout=60)
+                    _test_subprocess_safety.interrupt_process_group(process)
+                    stdout, stderr = process.communicate(timeout=60)
                 finally:
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate()
-                self.assertEqual(process.returncode, 130, stderr)
+                self.assertEqual(process.returncode, 130, f"stdout: {stdout}\nstderr: {stderr}")
                 self.assertEqual(stderr.strip(), "preflight interrupted; it only reads, so nothing was changed")
                 self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
 
