@@ -242,6 +242,27 @@ def _assert_no_pending_release(root, scope):
         raise ValueError("unresolved release write evidence on this target; reconcile it before preparing DEV")
 
 
+def _assert_retained_attempts_verified(root, message):
+    """With no active migration folders, a retained attempt blocks only unless its run and every migration in it are verified.
+
+    The folders that the attempt evidence would be read from are archived, so the run manifest is the only record left.
+    An unreadable or malformed manifest, or any state other than verified, refuses with the given message.
+    """
+    for attempt in sorted((root / "scratch").glob("migration-attempt-*")):
+        manifest_path = attempt / "run-manifest.json"
+        try:
+            manifest = migration_manifest.decode_json(manifest_path.read_bytes(), str(manifest_path))
+        except (OSError, ValueError) as exc:
+            raise ValueError(message) from exc
+        migrations = manifest.get("migrations") if isinstance(manifest, dict) else None
+        if not isinstance(manifest, dict) or not isinstance(migrations, list):
+            raise ValueError(message)
+        if manifest.get("state") != "verified" or any(
+            not isinstance(item, dict) or item.get("state") != "verified" for item in migrations
+        ):
+            raise ValueError(message)
+
+
 def _assert_no_pending_migration(root, schema):
     # Legacy evidence may have only an environment and schema, so use its existing scoped reader.
     closed = {"no-attempt-or-receipt", "receipt:verified:dev", "attempt:frozen:dev", "attempt:verified:dev"}
@@ -250,12 +271,11 @@ def _assert_no_pending_migration(root, schema):
     closed.add("attempt:apply-not-started:dev")
     migrations = root / "migrations"
     if not migrations.exists() and not migrations.is_symlink():
-        if any((root / "scratch").glob("migration-attempt-*")):
-            raise ValueError("cannot verify retained migration attempts without their migrations directory")
+        _assert_retained_attempts_verified(root, "cannot verify retained migration attempts without their migrations directory")
         return
     folders = migration_manifest.list_migration_folders(root)
-    if not folders and any((root / "scratch").glob("migration-attempt-*")):
-        raise ValueError("cannot verify retained migration attempts without their migration folders")
+    if not folders:
+        _assert_retained_attempts_verified(root, "cannot verify retained migration attempts without their migration folders")
     for owner in (None, schema):
         index = migrations / owner / ".archived.json" if owner else migrations / ".archived.json"
         for archived in migration_manifest.load_archived_index(index, owner):

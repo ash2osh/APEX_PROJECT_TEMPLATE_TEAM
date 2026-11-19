@@ -27,7 +27,7 @@ class TemplateUpdateNoticeTests(unittest.TestCase):
         self.git("branch", "release-26.1")
         self.second = self.commit("second")
         self.lock = {"schemaVersion": 1, "upstream": str(self.source),
-                     "templateRef": "release-26.1", "commit": self.first, "files": {}}
+                     "templateRef": "release-26.1", "commit": self.first, "files": {"README.md": "0" * 64}}
 
     def git(self, *args):
         result = subprocess.run(["git", "-C", str(self.source), *args],

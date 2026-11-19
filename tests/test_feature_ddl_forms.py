@@ -156,6 +156,21 @@ class GrantAndGateTests(unittest.TestCase):
         multi = model("GRANT EXECUTE ON PKG TO U1, U2 WITH GRANT OPTION", "REVIEWED_OPERATION")
         self.assertEqual(("U1", "U2"), multi["grantees"])
 
+    def test_grant_all_privileges_is_refused_by_its_statement_form(self) -> None:
+        for statement in ("GRANT ALL PRIVILEGES ON APP_DATA.T TO APP_CODE", "GRANT ALL ON APP_DATA.T TO APP_CODE"):
+            with self.subTest(statement=statement):
+                with self.assertRaisesRegex(forms.FeatureDdlError, r"GRANT ALL.*individual object privileges"):
+                    model(statement, "REVIEWED_OPERATION")
+
+    def test_column_grant_is_refused_because_column_privileges_are_not_recorded_as_named(self) -> None:
+        with self.assertRaisesRegex(forms.FeatureDdlError, "column list"):
+            model("GRANT UPDATE (TOTAL) ON APP_DATA.T TO APP_CODE", "REVIEWED_OPERATION")
+
+    def test_grant_option_is_recorded_as_grantable(self) -> None:
+        plain = model("GRANT SELECT ON APP_DATA.T TO APP_CODE", "REVIEWED_OPERATION")
+        option = model("GRANT SELECT ON APP_DATA.T TO APP_CODE WITH GRANT OPTION", "REVIEWED_OPERATION")
+        self.assertEqual(("NO", "YES"), (plain["grantable"], option["grantable"]))
+
     def test_a_form_is_only_modelled_for_the_kind_the_analyzer_left_open(self) -> None:
         self.assertIsNone(model("COMMENT ON TABLE T IS 'x'", "REVIEWED_OPERATION"))
         self.assertIsNone(model("GRANT SELECT ON APP_DATA.T TO X", "OPAQUE"))

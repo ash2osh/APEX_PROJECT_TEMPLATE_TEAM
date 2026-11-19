@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "fa6f8c5468f36e6f64e996ba156b3d33d47a48b2",
+  "coreCommit": "244fcdf7c2237bbb85b56b0fd752565bc0494a5a",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -24,7 +24,7 @@
     },
     {
       "path": "scripts/baseline_bundles.py",
-      "sha256": "58456fc95b0525bb912375eb6ef477812a988d0b646e30e67eb9ba6713bc7e76",
+      "sha256": "d34700137a748e8f1c663c4f0df912bee4ecc43eeac49bf134d0ef1324c81b74",
       "executable": false
     },
     {
@@ -199,12 +199,12 @@
     },
     {
       "path": "scripts/feature_ddl_forms.py",
-      "sha256": "ca12d5dbcacabcf2b31468e28a3751b51b67b3ccfe51fa38755d60fd623ea18e",
+      "sha256": "1c829fef747354ff77dc0c7a50543b315fbdb06bbbbfcfbf43ce96c2212a6bf7",
       "executable": false
     },
     {
       "path": "scripts/feature_dev.py",
-      "sha256": "b14f19ab6effde2bc90f1e234b9c27c943823657d195e15b62107f1efc900a11",
+      "sha256": "adeb036aea32c421391db06b8794a0ff0e4a4737816bf4125ae039332675a3fe",
       "executable": false
     },
     {
@@ -219,7 +219,7 @@
     },
     {
       "path": "scripts/feature_preflight.py",
-      "sha256": "6561f70e791e8538586f28d4acd318ba4573dfd4d12728ffeea79e41f0fd6c24",
+      "sha256": "d07fa405c03cfec13daacb24e15afa0a4b6feca6ae32499ff61690456747b675",
       "executable": false
     },
     {
@@ -274,7 +274,7 @@
     },
     {
       "path": "scripts/migration_archive.py",
-      "sha256": "86f9b0e0b94f7cea725c57f4d18f35c93713268326952b9a22f00d4256c4df71",
+      "sha256": "23838c2a6dd7d31a2d98170913fa99aebb88c0fb0f16dea84fc7aa8e1bb92a03",
       "executable": false
     },
     {
@@ -354,7 +354,7 @@
     },
     {
       "path": "scripts/pre_push_check.py",
-      "sha256": "d494823b09095a3f8aeb054fc5324e76d5237be72643e3bb12b8ef7218157acc",
+      "sha256": "1ee3aa59e58700fd9904ad4db887f64dc5d2a38bcad40498e6dd1f9620d532d6",
       "executable": false
     },
     {
@@ -409,7 +409,7 @@
     },
     {
       "path": "scripts/schema_catalog.py",
-      "sha256": "0ca633cad64d1da28a52180042648c22d655ada7201cf1b2d5f7c9df05d5ba95",
+      "sha256": "16753b162aa4b5bf099444fd9a1d891756a8fd4b5cbc89575974916807c4a6d3",
       "executable": false
     },
     {
@@ -754,7 +754,7 @@
     },
     {
       "path": "tests/test_baseline_generated_sql.py",
-      "sha256": "44f56a5b9e88e54f2f4bf8bd596fc690b21f853c237bcde87dab50e835779ab6",
+      "sha256": "19db7fd4c218aabc1a2cac7e7ec431d86158dc8694e13ce2051ef5e3127db9cd",
       "executable": false
     },
     {
@@ -919,12 +919,12 @@
     },
     {
       "path": "tests/test_feature_ddl_forms.py",
-      "sha256": "adb80790381929c813594155831953b3525022c05c1d17256a6efc84fc2aa33a",
+      "sha256": "542f69ac7006f34e5f00da9e95cc0f03147c3cf3b462458990c0a07e877486c5",
       "executable": false
     },
     {
       "path": "tests/test_feature_dev.py",
-      "sha256": "9d1ed06c70206c716f41f1a336480c9fc6848e3b501603a0edff30ef86772665",
+      "sha256": "ebd973e7254e235bda49e1d44d4847f637527567c3ceedd6d7c0d548126abe6f",
       "executable": false
     },
     {
@@ -944,7 +944,7 @@
     },
     {
       "path": "tests/test_feature_preflight.py",
-      "sha256": "6acce3985cc2deb6eb317a16f01b7be74c8088f645ca1a3bcca8c2a01bf05c69",
+      "sha256": "43a30b554da03b2205a3463ea9724d558a1cd7ef9d97d5f4ad47404ee6f167c7",
       "executable": false
     },
     {
@@ -1005,6 +1005,11 @@
     {
       "path": "tests/test_login_differs_from_schema.py",
       "sha256": "da4fd79bfa3e14778a25adee06b1394a36b93b599ba1d90f78c008915e418808",
+      "executable": false
+    },
+    {
+      "path": "tests/test_migration_archive_followups.py",
+      "sha256": "87d13d0e4c90bb508c7b7a16783cdd2d3b7fd8583f48b64cdaab82450e7593b5",
       "executable": false
     },
     {
@@ -1069,7 +1074,7 @@
     },
     {
       "path": "tests/test_pre_push_check.py",
-      "sha256": "4a9c735b7e58e3f281fe6c82779026387ebd107fee9c5c77b26ade3dd1112af3",
+      "sha256": "a13c52cae91cc323b5a19878bb7645950f157272cffe432fb8979bd716b81736",
       "executable": false
     },
     {
@@ -1119,7 +1124,7 @@
     },
     {
       "path": "tests/test_schema_catalog.py",
-      "sha256": "882e4acb0865c2d1856fb394cba708946e2b74d6dd8b7958ba559647a7b218ca",
+      "sha256": "076c562f9e3c27c883ebd9dd298339a79cc7d60fea52d95fbd0c7ea267691f8d",
       "executable": false
     },
     {
@@ -1169,7 +1174,7 @@
     },
     {
       "path": "tests/test_template_update_notice.py",
-      "sha256": "2cfeaf3dd898dc5be57a50bdf7d84af49316cc70a28350263c8ab0cac036b2dd",
+      "sha256": "132c2c20e1326bc453721ebab8fec2fa7e4856a6999aea240d0f7190d1b40082",
       "executable": false
     },
     {

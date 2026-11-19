@@ -103,6 +103,79 @@ class PrePushCheckTests(unittest.TestCase):
         self.assertIn("exec python3 scripts/pre_push_check.py", HOOK)
 
 
+class ChangedPathsTests(unittest.TestCase):
+    """changed_paths() compares with the upstream branch or origin/main; with neither, it checks every tracked file."""
+
+    GIT_ENVIRONMENT = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        environment = {name: value for name, value in os.environ.items() if name not in self.GIT_ENVIRONMENT}
+        patcher = patch.dict(os.environ, environment, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args], check=True, capture_output=True, text=True)
+
+    def commit_file(self, name, message):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+        self.git("add", name)
+        self.git("-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "-m", message)
+
+    def init_repository(self):
+        self.git("init", "-q", "-b", "main")
+        self.commit_file("scripts/committed.py", "first commit")
+
+    def paths_for_this_repository(self):
+        with patch.object(pre_push_check, "ROOT", self.root):
+            return pre_push_check.changed_paths()
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_first_push_without_a_comparison_base_checks_every_committed_file(self):
+        self.init_repository()
+        self.commit_file("tests/test_committed.py", "second commit")
+        self.assertEqual(self.paths_for_this_repository(), ["scripts/committed.py", "tests/test_committed.py"])
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_without_a_comparison_base_uncommitted_and_untracked_files_are_still_included(self):
+        self.init_repository()
+        (self.root / "scripts" / "edited.py").write_text("", encoding="utf-8")
+        self.git("add", "scripts/edited.py")
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "new.py").write_text("", encoding="utf-8")
+        self.assertIn("tools/new.py", self.paths_for_this_repository())
+        self.assertIn("scripts/committed.py", self.paths_for_this_repository())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_with_origin_main_only_commits_after_it_are_compared(self):
+        self.init_repository()
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.commit_file("tests/test_new.py", "after origin main")
+        self.assertEqual(self.paths_for_this_repository(), ["tests/test_new.py"])
+
+    def test_main_prints_the_fallback_note_only_without_a_comparison_base(self):
+        with patch.object(pre_push_check, "ROOT", self.root), \
+                patch.object(pre_push_check, "changed_paths", return_value=[]), \
+                patch.object(pre_push_check, "comparison_base", return_value=None):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                pre_push_check.main([])
+        self.assertIn("note: no upstream branch or origin/main to compare with; checking every tracked file", output.getvalue())
+
+        output = io.StringIO()
+        with patch.object(pre_push_check, "ROOT", self.root), \
+                patch.object(pre_push_check, "changed_paths", return_value=[]), \
+                patch.object(pre_push_check, "comparison_base", return_value="origin/main"), \
+                contextlib.redirect_stdout(output):
+            pre_push_check.main([])
+        self.assertNotIn("note: no upstream branch", output.getvalue())
+
+
 class ToolStepTests(unittest.TestCase):
     """Failed steps are named, and ShellCheck and the PowerShell parse run only when their tool is present."""
 

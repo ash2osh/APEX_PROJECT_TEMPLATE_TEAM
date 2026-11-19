@@ -2,8 +2,8 @@
 """Run the quick CI checks locally before a push: syntax, Ruff, shell syntax, ShellCheck, PowerShell parsing and the tests you changed.
 
 By default it checks only the files you changed (against the upstream branch or origin/main, plus uncommitted and
-untracked files), so existing problems elsewhere in a project do not block you. `--all` checks every file under
-scripts/, tools/ and tests/, as CI does; use it before opening a pull request for a broad change.
+untracked files; with neither, every tracked file), so existing problems elsewhere in a project do not block you. `--all`
+compiles and lints every file under scripts/, tools/ and tests/, as CI does; use it before opening a pull request for a broad change.
 
 ShellCheck (error severity) runs when `shellcheck` is on PATH and the PowerShell parse runs when `pwsh` is on PATH;
 a missing tool prints a one-line note and does not fail the check.
@@ -86,10 +86,22 @@ def git_lines(*args: str) -> list[str]:
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
+def comparison_base() -> str | None:
+    """The upstream branch, else origin/main, that the changes are compared with; None when neither exists."""
+    return next((ref for ref in ("@{upstream}", "origin/main") if git_lines("rev-parse", "--verify", "-q", ref)), None)
+
+
 def changed_paths() -> list[str]:
-    """Files changed against the upstream branch (or origin/main), plus uncommitted and untracked ones."""
-    base = next((ref for ref in ("@{upstream}", "origin/main") if git_lines("rev-parse", "--verify", "-q", ref)), None)
-    names = set(git_lines("diff", "--name-only", f"{base}...HEAD") if base else [])
+    """Files changed against the upstream branch (or origin/main), plus uncommitted and untracked ones.
+
+    With no comparison base (for example the first push of a new branch), every tracked file is returned, so a
+    first push cannot pass having checked nothing.
+    """
+    base = comparison_base()
+    if base:
+        names = set(git_lines("diff", "--name-only", f"{base}...HEAD"))
+    else:
+        names = set(git_lines("ls-files"))
     names.update(git_lines("diff", "--name-only", "HEAD"))
     names.update(git_lines("ls-files", "--others", "--exclude-standard"))
     return sorted(names)
@@ -121,7 +133,7 @@ def install_hook() -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--all", action="store_true", help="check every file under scripts/, tools/ and tests/ (as CI does), not only your changes")
+    parser.add_argument("--all", action="store_true", help="compile and lint every file under scripts/, tools/ and tests/ (as CI does), not only your changes; tests still run only for the changed test modules, the full suite runs in CI")
     parser.add_argument("--install-hook", action="store_true", help="install a pre-push hook that runs this script")
     args = parser.parse_args(argv)
     if args.install_hook:
@@ -130,6 +142,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # repositories; inheriting these redirects their Git writes into this one.
     for name in git_lines("rev-parse", "--local-env-vars"):
         os.environ.pop(name, None)
+    if not args.all and comparison_base() is None:
+        print("note: no upstream branch or origin/main to compare with; checking every tracked file", flush=True)
     paths = changed_paths()
     if args.all:
         python_targets = existing(CODE_DIRS, ROOT)

@@ -151,6 +151,17 @@ def _grant(text: str, schema: str) -> dict | None:
     priv_parts = [p.strip() for p in priv_str.split(",") if p.strip()]
     if not priv_parts:
         return None
+    # ALL_TAB_PRIVS records individual object privileges, never ALL or a column grant, so these cannot be checked.
+    if any(_word(priv_tokens, position, "ALL") for position in range(len(priv_tokens))):
+        raise FeatureDdlError(
+            "GRANT ALL [PRIVILEGES] is not verifiable: ALL_TAB_PRIVS records individual object privileges, "
+            "so list each privilege separately, for example GRANT SELECT, INSERT ON ..."
+        )
+    if any(token.kind == "SYMBOL" and token.value in {"(", ")"} for token in priv_tokens):
+        raise FeatureDdlError(
+            "a GRANT with a column list is not verifiable: ALL_TAB_PRIVS does not record column grants; "
+            "grant the individual object privilege without a column list"
+        )
 
     try:
         owner, name, idx = _parse_name(tokens, idx, schema)
@@ -177,10 +188,12 @@ def _grant(text: str, schema: str) -> dict | None:
     if not grantees:
         return None
 
+    grant_option = False
     if idx < len(tokens) and _word(tokens, idx, "WITH"):
         if not (_word(tokens, idx + 1, "GRANT") and _word(tokens, idx + 2, "OPTION")):
             return None
         idx += 3
+        grant_option = True
 
     if idx != len(tokens):
         return None
@@ -194,6 +207,7 @@ def _grant(text: str, schema: str) -> dict | None:
         "name": name,
         "privileges": ", ".join(priv_parts),
         "grantees": tuple(grantees),
+        "grantable": "YES" if grant_option else "NO",
     }
 
 

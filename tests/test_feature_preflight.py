@@ -404,6 +404,23 @@ class FeaturePreflightTests(unittest.TestCase):
         record = feature_preflight.plan_to_dict(plan)
         feature_preflight.validate_plan_record(record, checkpoint, state["structural"])
 
+    def test_grant_option_is_checked_against_all_tab_privs_grantable(self) -> None:
+        checkpoint = _checkpoint("GRANT SELECT ON MY_SEQ TO REPORTER WITH GRANT OPTION;\n")
+        state = _state()
+        state["structural"]["sequences"] = [{"name": "MY_SEQ"}]
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+        before = "\n".join(check.sql for check in plan.preconditions)
+        after = "\n".join(check.sql for check in plan.postconditions)
+        self.assertIn("P.GRANTABLE = 'YES'", before)
+        self.assertIn("P.GRANTABLE = 'YES'", after)
+
+    def test_grant_all_privileges_is_refused_before_any_check_is_generated(self) -> None:
+        checkpoint = _checkpoint("GRANT ALL PRIVILEGES ON MY_SEQ TO REPORTER;\n")
+        state = _state()
+        state["structural"]["sequences"] = [{"name": "MY_SEQ"}]
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "GRANT ALL"):
+            feature_preflight.prepare_checkpoint(checkpoint, state, ())
+
     def test_unqualified_object_and_execute_grants(self) -> None:
         checkpoint = _checkpoint(
             "GRANT EXECUTE ON PKG TO REPORTER;\n"
