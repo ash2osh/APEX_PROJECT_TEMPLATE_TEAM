@@ -39,9 +39,11 @@ are fixed in the shared core and then synced into both templates. See the
 
 ### Open after the 2026-11-19 work
 
-- Virtual-column expression capture needs an edit in each template's `scripts/compare_env_catalog.sql`. That file is template-owned and is not in the shared core, so each template changes it separately.
-- Oracle's catalog representation of `INVISIBLE` columns has not been verified against a live database.
+- Virtual-column expression capture needs an edit in each template's `scripts/compare_env_catalog.sql`. That file is template-owned and is not in the shared core, so each template changes it separately. Checked 2026-11-19 on Oracle 23ai Free: `ALL_TAB_COLS.DATA_DEFAULT_VC` returns the expression (`"ID"*2`), but the Oracle 12.1 reference does not list that column and no 19c database was available, so capture is not implemented; virtual columns stay refused as a reviewed migration.
+- INVISIBLE columns: the catalog shows them as `HIDDEN_COLUMN = 'YES'` and `USER_GENERATED = 'YES'` (system-generated hidden columns have `USER_GENERATED = 'NO'`), verified 2026-11-19 on Oracle 23ai Free. The baseline generator now adds a missing one with `INVISIBLE` and refuses a visibility difference. Older Oracle releases were not available to check.
 - The PowerShell backup change was verified on PowerShell 7.7 on Linux only, not on Windows PowerShell 5.1.
+- SQLcl session cost, measured 2026-11-19 on the local Docker Oracle 23ai Free containers: about 2.1 s for one session (connect, one statement, exit). A flow that opens 13 sessions therefore costs about 27 s of session overhead on this setup; consolidating sessions was not attempted.
+- `app-unlock` closing earlier `held` lock records (26.2) could not be run live: the scratch databases have no APEX, so it ran only against the fake SQLcl harness.
 
 ### Configuration and adoption evidence
 
