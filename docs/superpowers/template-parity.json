@@ -165,8 +165,8 @@
       "status": "intended",
       "reason": "Each template keeps its own daily walkthrough of the 2026-11-19 review-fix branch; the shared changes are described in both.",
       "blobs": [
-        "5cde36553f4a0ab03c04c6d27852c0c9e2590693",
-        "80eea6510922cea546df1608430ed3e4085b22a7"
+        "28515f4911c3cb25b157a0ce06f6ee052225e9d7",
+        "7b2b33c05aa375b567eed66bc3899849c1c5ae8f"
       ]
     },
     "docs/EXAMPLES.md": {
