@@ -273,6 +273,111 @@ class BackupDbCliTests(unittest.TestCase):
                         self.assertEqual(len(list((mirror / "views").glob("*.sql"))), 1)
                         self.assertIn("PACKAGE BODY=0", (mirror / "manifest-code.txt").read_text())
 
+    # A committed mirror with every output of both scopes plus the ORDS export.
+    COMMITTED_MIRROR = {
+        "tables/OLD_TABLE.sql": b"old table bytes\n",
+        "views/OLD_VIEW.sql": b"old view bytes\n",
+        "packages/OLD_PACKAGE.sql": b"old package bytes\n",
+        "ords/OLD_MODULE.json": b'{"module": "old"}\n',
+        "manifest-tables.txt": b"OLD TABLE MANIFEST\n",
+        "manifest-code.txt": b"OLD CODE MANIFEST\n",
+    }
+    FAKE_CODE_MANIFEST = "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n"
+
+    def set_env_values(self, script: Path, values: dict[str, str]) -> None:
+        env_path = script.parents[1] / ".env"
+        lines = []
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            key = line.split("=", 1)[0]
+            lines.append(f"{key}={values[key]}" if key in values and "=" in line else line)
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def seed_committed_mirror(self, script: Path, files: dict[str, bytes]) -> Path:
+        root = script.parents[1]
+        mirror = root / "database" / "DEMO$"
+        for relative, data in files.items():
+            target = mirror / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        subprocess.run(["git", "-C", str(root), "add", "database"], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", "seed committed mirror"], check=True)
+        return mirror
+
+    def snapshot(self, mirror: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(mirror)).replace(os.sep, "/"): path.read_bytes()
+            for path in mirror.rglob("*")
+            if path.is_file()
+        }
+
+    def test_tables_only_run_keeps_the_committed_code_scope_and_ords_export(self) -> None:
+        for wrapper, powershell in self.wrappers():
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as temporary:
+                script = self.make_checkout(Path(temporary), powershell=powershell)
+                # DEMO$ lists the tables scope only: the code scope belongs to another schema.
+                self.set_env_values(script, {"CODE_SCHEMA": "CODE_OWNER", "CODE_EXPECTED_USER": "CODE_OWNER"})
+                mirror = self.seed_committed_mirror(script, self.COMMITTED_MIRROR)
+                committed = self.snapshot(mirror)
+
+                result = self.run_backup(script, powershell)
+
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                current = self.snapshot(mirror)
+                # The tables scope ran, so it is replaced whole.
+                self.assertEqual(current["tables/FAKE_TABLE.sql"], b"CREATE FAKE OBJECT;\n", output)
+                self.assertEqual(current["manifest-tables.txt"], b"TABLE=1\n", output)
+                self.assertNotIn("tables/OLD_TABLE.sql", current)
+                # The code scope did not run: its outputs and manifest are carried over unchanged.
+                for relative in ("views/OLD_VIEW.sql", "packages/OLD_PACKAGE.sql", "manifest-code.txt"):
+                    self.assertEqual(current.get(relative), committed[relative], f"{wrapper}: {relative}")
+                self.assertEqual(current.get("ords/OLD_MODULE.json"), committed["ords/OLD_MODULE.json"], wrapper)
+
+    def test_code_only_run_keeps_the_committed_tables_scope_and_ords_export(self) -> None:
+        for wrapper, powershell in self.wrappers():
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as temporary:
+                script = self.make_checkout(Path(temporary), powershell=powershell)
+                # DEMO$ lists the code scope only: the tables scope belongs to another schema.
+                self.set_env_values(script, {"TABLES_SCHEMA": "TABLE_OWNER", "TABLES_EXPECTED_USER": "TABLE_OWNER"})
+                mirror = self.seed_committed_mirror(script, self.COMMITTED_MIRROR)
+                committed = self.snapshot(mirror)
+
+                result = self.run_backup(script, powershell)
+
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                current = self.snapshot(mirror)
+                # The code scope ran, so it is replaced whole: the stale view and package are gone.
+                self.assertEqual(current["views/FAKE_VIEW.sql"], b"CREATE FAKE OBJECT;\n", output)
+                self.assertEqual(current["manifest-code.txt"], self.FAKE_CODE_MANIFEST.encode(), output)
+                self.assertNotIn("views/OLD_VIEW.sql", current)
+                self.assertNotIn("packages/OLD_PACKAGE.sql", current)
+                # The tables scope did not run: its output and manifest are carried over unchanged.
+                for relative in ("tables/OLD_TABLE.sql", "manifest-tables.txt"):
+                    self.assertEqual(current.get(relative), committed[relative], f"{wrapper}: {relative}")
+                self.assertEqual(current.get("ords/OLD_MODULE.json"), committed["ords/OLD_MODULE.json"], wrapper)
+
+    def test_run_with_both_scopes_replaces_both_and_keeps_ords_export(self) -> None:
+        for wrapper, powershell in self.wrappers():
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as temporary:
+                script = self.make_checkout(Path(temporary), powershell=powershell)
+                mirror = self.seed_committed_mirror(script, self.COMMITTED_MIRROR)
+                committed = self.snapshot(mirror)
+
+                result = self.run_backup(script, powershell)
+
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                current = self.snapshot(mirror)
+                self.assertEqual(current["tables/FAKE_TABLE.sql"], b"CREATE FAKE OBJECT;\n", output)
+                self.assertEqual(current["views/FAKE_VIEW.sql"], b"CREATE FAKE OBJECT;\n", output)
+                self.assertEqual(current["manifest-tables.txt"], b"TABLE=1\n", output)
+                self.assertEqual(current["manifest-code.txt"], self.FAKE_CODE_MANIFEST.encode(), output)
+                for stale in ("tables/OLD_TABLE.sql", "views/OLD_VIEW.sql", "packages/OLD_PACKAGE.sql"):
+                    self.assertNotIn(stale, current, f"{wrapper}: {stale} should be replaced")
+                # No ORDS scope in this run: the committed export is carried over unchanged.
+                self.assertEqual(current.get("ords/OLD_MODULE.json"), committed["ords/OLD_MODULE.json"], wrapper)
+
     def test_sql_driver_uses_wrapper_supplied_safe_schema_directory(self) -> None:
         script = (ROOT / "scripts" / "backup_db.sql").read_text(encoding="utf-8")
         self.assertIn("DEFINE spool_schema = '&6'", script)

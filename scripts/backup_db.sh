@@ -76,9 +76,10 @@ for ((index = 0; index < ${#CODE_SCHEMAS[@]}; index++)); do add_backup_schema "$
 for ((index = 0; index < ${#ORDS_SCHEMAS[@]}; index++)); do add_backup_schema "${ORDS_SCHEMAS[$index]}"; done
 
 # A schema whose table or code scope runs is replaced as a whole mirror
-# (database/<SCHEMA>). A schema that only has an ORDS scope in this run is not:
-# only database/<SCHEMA>/ords is replaced, so mirrors this run did not export
-# survive untouched.
+# (database/<SCHEMA>). A scope this run did not export is carried over from the
+# committed mirror first (carry_over_unrefreshed_scopes), so the replacement does
+# not delete it. A schema that only has an ORDS scope in this run is not
+# replaced: only database/<SCHEMA>/ords is.
 schema_in() {
   # schema_in <schema> <array-name>
   local -n members="$2"
@@ -162,6 +163,39 @@ scope_directories() {
     code)   printf '%s\n' views packages procedures functions triggers synonyms ;;
     *) echo "unsupported backup scope: $1" >&2; return 1 ;;
   esac
+}
+
+# scope_ran <scope> <schema>: whether this run exports that scope for the schema.
+scope_ran() {
+  local schema="$2"
+  case "$1" in
+    tables) schema_in "$schema" TABLES_SCHEMAS ;;
+    code) schema_in "$schema" CODE_SCHEMAS ;;
+    *) return 1 ;;
+  esac
+}
+
+# carry_over_unrefreshed_scopes <schema> <staged-schema-directory>: the staged
+# mirror replaces the whole committed one, so each scope this run did not export
+# is copied from the committed mirror first, using the same outputs as
+# scope_directories and manifest-<scope>.txt. Only what the committed mirror
+# holds is copied. A scope that ran is never copied: it is replaced whole.
+carry_over_unrefreshed_scopes() {
+  local schema="$1"
+  local staged="$2"
+  local scope entry
+  local -a entries
+  for scope in tables code; do
+    if scope_ran "$scope" "$schema"; then continue; fi
+    entries=()
+    while IFS= read -r entry; do entries+=("$entry"); done < <(scope_directories "$scope")
+    entries+=("manifest-$scope.txt")
+    for entry in "${entries[@]}"; do
+      if [ -e "$REPO_ROOT/database/$schema/$entry" ]; then
+        cp -R -- "$REPO_ROOT/database/$schema/$entry" "$staged/$entry"
+      fi
+    done
+  done
 }
 
 # A failed SPOOL inside the generated driver prints an SP2- message that does
@@ -292,6 +326,9 @@ for schema in "${BACKUP_SCHEMAS[@]}"; do
       # replace_mirror, which refuses a dirty mirror.
       cp -R -- "$REPO_ROOT/database/$schema/ords" "$STAGING_DIR/database/$schema/ords"
     fi
+    # The same replacement would delete a table or code scope this run did not
+    # refresh, so carry those committed outputs over too.
+    carry_over_unrefreshed_scopes "$schema" "$STAGING_DIR/database/$schema"
     # A scope that produced no objects of one type leaves an empty directory that
     # would otherwise be installed, implying "none exist" where the truth is
     # "none were looked for". Prune after verification, before replacement.
