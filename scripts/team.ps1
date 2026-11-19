@@ -90,7 +90,7 @@ Commands:
          [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Confirm and execute a frozen deployment manifest
-  feature <init|capture|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> ...
+  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> ...
                                               Create mutable feature sources and freeze version-2 release capsules;
                                               reconcile-run closes an unfinished run; convert-plan plans offline
   compare-schema [--from <env>] (--to <env>|--env <env>)
@@ -553,7 +553,7 @@ try {
       Invoke-TeamBash -ScriptName "rollout.sh" -ScriptArguments $rolloutArguments
     }
     "feature" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 feature <init|capture|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> [arguments]" }
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> [arguments]" }
       $featureArguments = @($Arguments)
       if ($featureArguments[0] -ceq "freeze" -and $featureArguments.Count -gt 1) {
         $featureArguments[1] = ConvertTo-MigrationFolderArgument ([string] $featureArguments[1])

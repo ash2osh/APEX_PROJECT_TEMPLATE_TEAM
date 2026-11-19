@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import tempfile
 import time
@@ -45,6 +46,9 @@ SECOND_CONNECTION = os.environ.get("TEMPLATE_LIVE_SECOND_CONNECTION", "")
 SECOND_SCHEMA = os.environ.get("TEMPLATE_LIVE_SECOND_SCHEMA", "").upper()
 STAGING_CONNECTION = os.environ.get("TEMPLATE_LIVE_STAGING_CONNECTION", "")
 STAGING_DB = STAGING_CONNECTION or CONNECTION
+PROOF_PRODUCTION_CONNECTION = os.environ.get("TEMPLATE_LIVE_PROOF_PRODUCTION_CONNECTION", "")
+PROOF_TARGET_NAMES = tuple(os.environ.get(f"TEMPLATE_LIVE_PROOF_{role}_DB_NAME", "") for role in ("DEV", "STAGING", "PRODUCTION"))
+BENCHMARK_ENABLED = os.environ.get("TEMPLATE_LIVE_FEATURE_BENCHMARK") == "1"
 ENABLED = os.environ.get("TEMPLATE_LIVE_DISPOSABLE") == "1" and bool(CONNECTION and SCHEMA)
 SKIP_REASON = (
     "live feature checks need TEMPLATE_LIVE_DISPOSABLE=1, TEMPLATE_LIVE_CONNECTION and "
@@ -132,6 +136,31 @@ def _database_name(connection: str, workdir: str, env: dict) -> str:
     return name
 
 
+def _fixture_identity(connection: str, workdir: str, env: dict, expected: str | None = None) -> dict[str, str]:
+    from scripts.migrate import IDENTITY_SQL_EXPRESSIONS
+
+    reads = "\n".join(
+        f"  DBMS_OUTPUT.PUT_LINE('FIXTURE_ID:{field}:' || ({expression}));"
+        for field, expression in IDENTITY_SQL_EXPRESSIONS.items()
+    )
+    output = _sqlcl(connection, f"set serveroutput on size unlimited\nBEGIN\n{reads}\nEND;\n/\n", workdir, env)
+    identity = dict(re.findall(r"^\s*FIXTURE_ID:([a-z_]+):([^\r\n]+)", output, re.MULTILINE))
+    identity = {field: value.strip() for field, value in identity.items()}
+    if identity.keys() != IDENTITY_SQL_EXPRESSIONS.keys() or not all(identity.values()):
+        raise RuntimeError("disposable fixture target identity is incomplete")
+    if identity["session_user"] != SCHEMA or identity["current_schema"] != SCHEMA:
+        raise RuntimeError("disposable fixture owner or current schema differs from the selected owner")
+    if expected is not None and identity["db_unique_name"] != expected:
+        raise RuntimeError("disposable fixture database differs from the approved database name")
+    return identity
+
+
+def _disposable_guard(identity: dict[str, str]) -> str:
+    from scripts.migrate import _identity_guard_lines
+
+    return "\n".join(_identity_guard_lines(identity)) + "\n"
+
+
 def _env_text() -> str:
     schemas = [SCHEMA, *([SECOND_SCHEMA] if SECOND_SCHEMA else [])]
     connections = [CONNECTION, *([SECOND_CONNECTION] if SECOND_SCHEMA else [])]
@@ -169,6 +198,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         env_file.write_text(_env_text(), encoding="utf-8")
         cls.env = {**os.environ, "PROJECT_ENV_FILE": str(env_file)}
         cls.drops: list[tuple[str, str]] = []
+        cls.legacy_staging_identity: dict[str, str] | None = None
         cls.sequence = 0
         # Production runs need the observed name: the production profile is this same database.
         cls.prod_db_name = _database_name(CONNECTION, cls.workdir.name, cls.env)
@@ -184,10 +214,11 @@ class LiveFeatureReleaseTests(unittest.TestCase):
                 _sqlcl(connection, statement, cls.workdir.name, cls.env)
             except RuntimeError as error:
                 failures.append(f"{statement}: {error}")
-        if STAGING_DB != CONNECTION:
+        if cls.legacy_staging_identity is not None:
             # Objects that staging checkpoints create on their own database never reach the drops above.
             try:
-                _sqlcl(STAGING_DB, _sweep_token(cls.token), cls.workdir.name, cls.env)
+                guard = _disposable_guard(cls.legacy_staging_identity)
+                _sqlcl(STAGING_DB, guard + _sweep_token(cls.token), cls.workdir.name, cls.env)
             except RuntimeError as error:
                 failures.append(f"sweep of {cls.token} on the staging database: {error}")
         cls.workdir.cleanup()
@@ -274,7 +305,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
 
     def _rollout(self, environment: str, *, capsule: str | None = None, prepare: bool = False,
                  stage_report: str | None = None, recover: str | None = None,
-                 confirm: bool = True) -> tuple[subprocess.CompletedProcess, dict]:
+                 confirm: bool = True, env: dict | None = None, confirm_target: str | None = None) -> tuple[subprocess.CompletedProcess, dict]:
         """Run a rollout. A run is confirmed by -y; production also names the observed database."""
         report = f"scratch/live-{environment}-{self._next_number()}.json"
         args = ["rollout", "releases/current.json", "--env", environment, "--report", report]
@@ -288,13 +319,30 @@ class LiveFeatureReleaseTests(unittest.TestCase):
             args += ["--stage-report", stage_report]
         if confirm and not prepare:
             args.append("-y")
-            if environment == "prod":
-                args += ["--confirm-target", type(self).prod_db_name]
-        result = self._team(*args)
+            if environment == "prod" or confirm_target is not None:
+                args += ["--confirm-target", confirm_target or type(self).prod_db_name]
+        if environment == "staging" and env is None and not prepare:
+            self._track_legacy_staging_writes()
+        result = self._team(*args, env=env)
         path = self.project / report
         document = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         document["reportPath"] = report
         return result, document
+
+    def _track_legacy_staging_writes(self) -> None:
+        if STAGING_DB != CONNECTION and type(self).legacy_staging_identity is None:
+            type(self).legacy_staging_identity = _fixture_identity(STAGING_DB, self.workdir.name, self.env)
+
+    def _assert_capsule_target(self, capsule, environment: str, identity: dict[str, str]) -> None:
+        from scripts import feature_release, release_capsule
+
+        loaded = release_capsule.load_capsule(self.project, self.project / capsule) if isinstance(capsule, str) else capsule
+        target_plan = feature_release.load_target_plan(self.project, loaded, environment)
+        self.assertTrue(target_plan.targets)
+        for record in target_plan.targets.values():
+            self.assertEqual(record["observed"], identity)
+        for checkpoint in target_plan.checkpoint_guards:
+            self.assertEqual(checkpoint["targetIdentity"], identity)
 
     def _staged(self, capsule: str) -> dict:
         """Prepare and run staging, assert success, and return the report document."""
@@ -304,6 +352,481 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(document["status"], "success")
         return document
+
+    def _dev_environment(self, tag: str, *, production_connection: str = CONNECTION) -> dict:
+        # The DEV engine takes a digest of the effective dotenv file within the checkout.
+        path = self.project / "scratch" / f"{tag}.env"
+        path.parent.mkdir(exist_ok=True)
+        values = [
+            f"PROD_SQLCL_CONNECTION={production_connection}" if line.startswith("PROD_SQLCL_CONNECTION=") else line
+            for line in _env_text().splitlines()
+        ]
+        path.write_text("\n".join(values) + "\n", encoding="utf-8")
+        return {**self.env, "PROJECT_ENV_FILE": str(path)}
+
+    def _prepare_dev_feature(self, slug: str, selector: str, env: dict, identity: dict[str, str]) -> str:
+        result = self._team("feature", "apply", slug, "--schema", SCHEMA, "--env", "dev", "--unit", selector, "--prepare", env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        match = re.search(r"^Plan (scratch/feature-dev/prepare-[^\r\n]+/plan\.json)$", result.stdout, re.MULTILINE)
+        self.assertIsNotNone(match, result.stdout)
+        plan = match.group(1)
+        observed = json.loads((self.project / plan).read_bytes())["observedIdentity"]
+        self.assertEqual(observed, identity)
+        return plan
+
+    def _execute_dev_feature(self, slug: str, plan: str, env: dict) -> subprocess.CompletedProcess:
+        return self._team("feature", "apply", slug, "--schema", SCHEMA, "--env", "dev", "--execute-plan", plan, env=env)
+
+    def _sqlcl_proxy(self, tag: str, env: dict, code: str) -> dict:
+        bin_dir = self.project / "scratch" / f"{tag}-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        real = shutil.which("sql", path=env.get("PATH"))
+        self.assertIsNotNone(real, "SQLcl must be on PATH")
+        proxy = bin_dir / "sql"
+        proxy.write_text("#!/usr/bin/env python3\n" + code, encoding="utf-8")
+        proxy.chmod(0o700)
+        return {**env, "PATH": str(bin_dir) + os.pathsep + env["PATH"], "FIXTURE_REAL_SQL": real}
+
+    def test_dedicated_long_view_create_and_replace_on_dev(self) -> None:
+        if os.environ.get("TEMPLATE_LIVE_PROOF_DEV_DB_NAME", "") != self.prod_db_name:
+            self.skipTest("set the approved DEV database name with TEMPLATE_LIVE_PROOF_DEV_DB_NAME")
+        identity = _fixture_identity(CONNECTION, self.workdir.name, self.env, PROOF_TARGET_NAMES[0])
+        guard = _disposable_guard(identity)
+        slug = self._name("longview")
+        view = f"LIVE_{self.token}_LONG_V"
+        self._feature(slug)
+        self._register_drops(CONNECTION, guard + _drop_if_present("view", view, (-942,)))
+        self._checks(slug, f"SELECT COUNT(*) FROM USER_OBJECTS WHERE OBJECT_TYPE = 'VIEW' AND OBJECT_NAME = '{view}' AND STATUS = 'VALID'")
+        path = self.project / "features" / slug / SCHEMA / "views" / f"{view.lower()}.sql"
+        path.parent.mkdir()
+        original_tail, intended_tail, concurrent_tail = map(chr, (0x10400, 0x10401, 0x10402))
+        query = ",\n".join(f"'{original_tail * 800}' AS C{i}" for i in range(12))
+        authored = f"CREATE OR REPLACE VIEW {SCHEMA}.{view} AS SELECT {query} FROM DUAL;\n"
+        prefix, _, suffix = authored.rpartition(original_tail)
+        self.assertGreater(len(prefix.encode("utf-8")), 32768)
+        path.write_text(authored, encoding="utf-8")
+        env = self._dev_environment(slug)
+        plan = self._prepare_dev_feature(slug, f"VIEW:{view}", env, identity)
+        result = self._execute_dev_feature(slug, plan, env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._count(f"select count(*) from {view} where substr4(C11, -1) = '{original_tail}'"), 1)
+        path.write_text(prefix + intended_tail + suffix, encoding="utf-8")
+        plan = self._prepare_dev_feature(slug, f"VIEW:{view}", env, identity)
+        retained = json.loads((self.project / plan).read_bytes())["beforeState"]["units"][0]["state"]
+        self.assertIn(original_tail * 800 + "' AS C11", retained["text"].encode("utf-8")[32768:].decode("utf-8", errors="ignore"))
+        concurrent = self.project / "scratch" / f"{slug}-concurrent.sql"
+        concurrent.write_text("whenever sqlerror exit failure rollback\nset encoding UTF-8\nset define off\n" + guard + prefix + concurrent_tail + suffix + "exit\n", encoding="utf-8")
+        late_env = self._sqlcl_proxy(slug, {**env, "FIXTURE_CONCURRENT_SQL": str(concurrent)}, """
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+args = sys.argv[1:]
+real = os.environ["FIXTURE_REAL_SQL"]
+driver = next((Path(arg[1:]) for arg in args if arg.startswith("@")), None)
+if driver and driver.is_file() and b"MIGRATION_APPLY_COMPLETED" in driver.read_bytes():
+    altered = ["@" + os.environ["FIXTURE_CONCURRENT_SQL"] if arg.startswith("@") else arg for arg in args]
+    subprocess.run([real, *altered], check=True)
+os.execv(real, [real, *args])
+""")
+        refused = self._execute_dev_feature(slug, plan, late_env)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        marker = self.project / "releases/.dev-apply-attempts" / f"{Path(plan).parent.name}.json"
+        evidence = json.loads(marker.read_bytes())["evidencePaths"]
+        log = next(path for path in evidence if path.endswith("/sqlcl-output.log"))
+        transcript = (self.project / log).read_text(encoding="utf-8")
+        self.assertIn("FEATURE_VIEW_GUARD_REFUSED", transcript)
+        self.assertNotIn("MIGRATION_PAYLOAD_STARTED:", transcript)
+        self.assertEqual(self._count(f"select count(*) from {view} where substr4(C11, -1) = '{concurrent_tail}'"), 1)
+        self._sql(CONNECTION, guard + authored)
+        plan = self._prepare_dev_feature(slug, f"VIEW:{view}", env, identity)
+        result = self._execute_dev_feature(slug, plan, env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._count(f"select count(*) from {view} where substr4(C11, -1) = '{intended_tail}'"), 1)
+        no_op = self._prepare_dev_feature(slug, f"VIEW:{view}", env, identity)
+        self.assertTrue(json.loads((self.project / no_op).read_bytes())["noOp"])
+
+    def test_dev_receipt_and_capsule_match_across_three_disposable_targets(self) -> None:
+        if not (STAGING_CONNECTION and PROOF_PRODUCTION_CONNECTION and all(PROOF_TARGET_NAMES)) or SECOND_SCHEMA:
+            self.skipTest("three-target proof requires explicit DEV, staging and production database names and saved connections")
+        from scripts import feature_manifest, feature_release, release_capsule
+        from scripts.db_targets import Target
+
+        connections = (CONNECTION, STAGING_CONNECTION, PROOF_PRODUCTION_CONNECTION)
+        self.assertEqual(len(set(PROOF_TARGET_NAMES)), 3, "the proof requires three separate databases")
+        identities = tuple(_fixture_identity(alias, self.workdir.name, self.env, name) for alias, name in zip(connections, PROOF_TARGET_NAMES, strict=True))
+        dev_identity, stage_identity, prod_identity = identities
+
+        slug = self._name("proof")
+        package = f"LIVE_{self.token}_PROOF"
+        initial = f"""create or replace package {package} as
+  function revision return number;
+end {package};
+/
+create or replace package body {package} as
+  function revision return number is begin return 1; end;
+end {package};
+/
+"""
+        for connection, identity in zip(connections, identities, strict=True):
+            guard = _disposable_guard(identity)
+            self._sql(connection, guard + initial, drops=(guard + _drop_package(package),))
+        self._feature(slug)
+        captured = self._capture(slug, package)
+        body = next(path for path in captured if path.endswith(".pkb.sql"))
+        authored = self.project / body
+        original = authored.read_text(encoding="utf-8")
+        changed, matches = re.subn(r"(?i)return\s+1;", "return 2;", original)
+        self.assertEqual(matches, 1)
+        authored.write_text(changed, encoding="utf-8")
+        self._checks(slug, self._valid_body_check(package))
+        env = self._dev_environment(slug, production_connection=PROOF_PRODUCTION_CONNECTION)
+        plan_path = self._prepare_dev_feature(slug, f"PACKAGE BODY:{package}", env, dev_identity)
+        wrong_env = self._dev_environment(slug + "-wrong", production_connection=PROOF_PRODUCTION_CONNECTION)
+        path = Path(wrong_env["PROJECT_ENV_FILE"])
+        path.write_text(path.read_text().replace(f"MIGRATION_SQLCL_CONNECTION={CONNECTION}\n", f"MIGRATION_SQLCL_CONNECTION={STAGING_CONNECTION}\n"))
+        blocked = self._execute_dev_feature(slug, plan_path, wrong_env)
+        self.assertEqual(blocked.returncode, 2, blocked.stdout + blocked.stderr)
+        self.assertIn("configuration changed", blocked.stderr)
+        redirected = self._sqlcl_proxy(slug, {**env, "FIXTURE_ALIAS": CONNECTION, "FIXTURE_REDIRECT": STAGING_CONNECTION}, """
+import os
+import sys
+
+real = os.environ["FIXTURE_REAL_SQL"]
+args = sys.argv[1:]
+if "-name" in args and args[args.index("-name") + 1] == os.environ["FIXTURE_ALIAS"]:
+    args[args.index("-name") + 1] = os.environ["FIXTURE_REDIRECT"]
+os.execv(real, [real, *args])
+""")
+        blocked = self._execute_dev_feature(slug, plan_path, redirected)
+        self.assertEqual(blocked.returncode, 2, blocked.stdout + blocked.stderr)
+        self.assertIn("observed DEV identity changed", blocked.stderr)
+        self.assertFalse(list((self.project / plan_path).parent.glob("apply-*/sqlcl-output.log")))
+        result = self._execute_dev_feature(slug, plan_path, env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan = json.loads((self.project / plan_path).read_bytes())
+        receipt = json.loads((self.project / "releases/.dev-apply-attempts" / f"{plan['planId']}.json").read_bytes())
+        self.assertEqual(receipt["state"], "verified")
+        evidence = (self.project / receipt["evidencePaths"][1]).read_bytes()
+        self.assertEqual(hashlib.sha256(evidence).hexdigest(), receipt["reportSha256"])
+        applied = json.loads(evidence)["units"][0]["sourceSha256"]
+
+        step = {"type": "feature-migrate", "schema": SCHEMA, "inputs": [body]}
+        self._manifest([step])
+        _commit(self.project, "live checks: promote the reviewed DEV definition")
+        capsule = self._freeze()
+        loaded = release_capsule.load_capsule(self.project, self.project / capsule)
+        checkpoint = feature_manifest.load_feature_checkpoint(self.project, step)
+        self.assertEqual(loaded.checkpoints[0].inputs[0].sha256, applied)
+
+        result, _ = self._rollout("staging", capsule=capsule, prepare=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self._assert_capsule_target(loaded, "staging", stage_identity)
+        result, staging = self._rollout("staging", capsule=capsule, env=env, confirm_target=PROOF_TARGET_NAMES[1])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result, _ = self._rollout("prod", capsule=capsule, prepare=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self._assert_capsule_target(loaded, "prod", prod_identity)
+        self.assertNotEqual(self._rollout("prod", capsule=capsule, confirm_target=PROOF_TARGET_NAMES[2], env=env)[0].returncode, 0)
+        wrong = self.project / "scratch" / f"{slug}-wrong-staging.json"
+        wrong.write_text(json.dumps({**staging, "payloadDigest": "0" * 64}), encoding="utf-8")
+        self.assertNotEqual(self._rollout("prod", capsule=capsule, stage_report=wrong.relative_to(self.project).as_posix(), confirm_target=PROOF_TARGET_NAMES[2], env=env)[0].returncode, 0)
+        self.assertEqual(self._count(f"select count(*) from dual where {package}.revision() = 1", PROOF_PRODUCTION_CONNECTION), 1)
+        result, promoted = self._rollout("prod", capsule=capsule, stage_report=staging["reportPath"], confirm_target=PROOF_TARGET_NAMES[2], env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(promoted["status"], "success")
+        self.assertEqual(self._count(f"select count(*) from dual where {package}.revision() = 2", PROOF_PRODUCTION_CONNECTION), 1)
+        for environment, connection, identity in zip(("dev", "staging", "prod"), connections, identities, strict=True):
+            classification = {"dev": "development", "staging": "staging", "prod": "production"}[environment]
+            target = Target(environment, connection, SCHEMA, SCHEMA, classification)
+            state = feature_release._capture_selected_state(target, checkpoint, self.project / "scratch" / f"{slug}-{environment}-catalog")
+            self.assertEqual(state["identity"], identity)
+            actual = state["sourceUnits"][f"PACKAGE BODY:{package}"]
+            expected, settings = feature_release._stored_source(checkpoint.inputs[0])
+            self.assertTrue(actual["valid"])
+            self.assertTrue(feature_release._same_stored_source(actual["lines"], expected["lines"]))
+            self.assertTrue(feature_release._same_settings(actual["settings"], settings))
+
+        # Only the approved disposable DEV object is used to exercise a failed replacement.
+        authored.write_text(changed.replace("return 2;", "return absent_fixture_identifier;", 1), encoding="utf-8")
+        uncertain = self._prepare_dev_feature(slug, f"PACKAGE BODY:{package}", env, dev_identity)
+        failure = self._execute_dev_feature(slug, uncertain, env)
+        self.assertEqual(failure.returncode, 2, failure.stdout + failure.stderr)
+        status = self._team("feature", "apply", slug, "--schema", SCHEMA, "--env", "dev", "--status", env=env)
+        self.assertEqual(status.returncode, 1, status.stdout + status.stderr)
+        self.assertIn(Path(uncertain).parent.name + " pending", status.stdout)
+        refused = self._team("feature", "apply", slug, "--schema", SCHEMA, "--env", "dev", "--unit", f"PACKAGE BODY:{package}", "--prepare", env=env)
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertIn("unresolved DEV apply", refused.stderr)
+
+    def _benchmark_trace(self) -> tuple[dict, Path]:
+        trace = self.project / "scratch" / "benchmark-sqlcl.jsonl"
+        env = self._sqlcl_proxy("benchmark", self.env, r"""
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+
+def script_bytes(path, ancestors=()):
+    path = path.resolve()
+    if path in ancestors:
+        raise RuntimeError("benchmark SQLcl script includes itself")
+    raw = path.read_bytes()
+    children = []
+    for line in raw.splitlines():
+        match = re.match(rb"\s*(@@?|(?i:START)\s+)(\S.*)$", line)
+        if match:
+            relative, arguments = match.groups()
+            include = shlex.split(arguments.decode("utf-8"))[0]
+            base = path.parent if relative == b"@@" else Path.cwd()
+            include = base / include
+            if not include.suffix:
+                include = include.with_suffix(".sql")
+            children.extend(script_bytes(include, (*ancestors, path)))
+    return [raw, *children]
+
+
+script = next((Path(arg[1:]) for arg in sys.argv[1:] if arg.startswith("@")), None)
+scripts = script_bytes(script) if script is not None and script.is_file() else [b""]
+raw = scripts[0]
+if b"MIGRATION_APPLY_COMPLETED" in raw:
+    phase = "apply"
+elif b"CHECK_PAYLOAD_BEGIN:postconditions" in raw:
+    phase = "verification"
+elif b"CHECK_PAYLOAD_BEGIN:" in raw:
+    phase = "checks"
+else:
+    phase = "catalogOrIdentity"
+started = time.perf_counter()
+result = subprocess.run([os.environ["FIXTURE_REAL_SQL"], *sys.argv[1:]], capture_output=True)
+elapsed = time.perf_counter() - started
+markers = [
+    line.decode("ascii", "replace").removeprefix("MIGRATION_PAYLOAD_STARTED:")
+    for line in result.stdout.splitlines() if line.startswith(b"MIGRATION_PAYLOAD_STARTED:")
+]
+record = {
+    "connect": "-name" in sys.argv, "phase": phase, "seconds": elapsed,
+    "entryDriverBytes": len(raw), "deliveredSqlBytes": sum(map(len, scripts)), "payloadStarts": markers,
+    "checkMarkerSectionBytes": sum(
+        len(match[0]) for source in scripts
+        for match in re.finditer(rb"(?m)^.*CHECK_PAYLOAD_BEGIN:(\w+)[^\n]*\n(?s:.*?)^.*CHECK_PAYLOAD_END:\1[^\n]*\n?", source)
+    ),
+}
+fd = os.open(os.environ["BENCHMARK_TRACE"], os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+try:
+    os.write(fd, (json.dumps(record) + "\n").encode("ascii"))
+finally:
+    os.close(fd)
+sys.stdout.buffer.write(result.stdout)
+sys.stderr.buffer.write(result.stderr)
+raise SystemExit(result.returncode)
+""")
+        return {**env, "BENCHMARK_TRACE": str(trace)}, trace
+
+    def test_staging_consolidation_benchmark_preserves_equivalent_effects(self) -> None:
+        expected = os.environ.get("TEMPLATE_LIVE_PROOF_STAGING_DB_NAME")
+        if not (BENCHMARK_ENABLED and STAGING_CONNECTION and expected):
+            self.skipTest("benchmark needs explicit staging approval, saved connection and database name")
+        self.assertNotEqual(self.prod_db_name, expected, "benchmark staging must be separate from DEV")
+        stage_identity = _fixture_identity(STAGING_CONNECTION, self.workdir.name, self.env, expected)
+        from scripts import baseline, feature_release
+        from scripts.db_targets import Target
+        from scripts.feature_manifest import FeatureCheckpoint, FeatureInput
+
+        target = Target("staging", STAGING_CONNECTION, SCHEMA, SCHEMA, "staging")
+        target_guard = _disposable_guard(stage_identity)
+        trace_env, trace = self._benchmark_trace()
+        samples = []
+
+        def run_ok(*args, env=None):
+            result = self._team(*args, env=env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return result
+
+        strategies = ("legacy", "feature", "transition")
+        for trial in range(1, 4):
+            for strategy in (*strategies[trial - 1:], *strategies[:trial - 1]):
+                tag = f"{strategy}{trial}"
+                suffix = f"{strategy[0].upper()}{trial}"
+                package, table = f"LIVE_{self.token}_P{suffix}", f"LIVE_{self.token}_T{suffix}"
+
+                def body(version, package=package):
+                    backfill_branch = "RETURN 3;" if version == 2 else "RAISE PROGRAM_ERROR;"
+                    return (
+                        f"CREATE OR REPLACE PACKAGE BODY {package} AS\n"
+                        f"  FUNCTION revision RETURN NUMBER IS BEGIN RETURN {version}; END;\n"
+                        f"  FUNCTION intermediate_value RETURN NUMBER IS BEGIN {backfill_branch} END;\n"
+                        f"END {package};\n/\n"
+                    )
+
+                self._sql(STAGING_CONNECTION, target_guard + (
+                    f"CREATE TABLE {table} (ID NUMBER PRIMARY KEY, VERSION_USED NUMBER);\n"
+                    f"INSERT INTO {table} VALUES (1, 0);\nCOMMIT;\n"
+                    f"CREATE OR REPLACE PACKAGE {package} AS FUNCTION revision RETURN NUMBER; "
+                    f"FUNCTION intermediate_value RETURN NUMBER; END {package};\n/\n"
+                    + body(0)
+                ), drops=(target_guard + _drop_table(table), target_guard + _drop_package(package)))
+                backfill = f"UPDATE {table} SET VERSION_USED = {package}.revision() WHERE ID = 1;\n"
+                before = {"id": "before-data", "sql": f"SELECT COUNT(*) FROM {table} WHERE ID = 1 AND VERSION_USED = 0", "expected": 1}
+                check = {"id": "data", "sql": f"SELECT COUNT(*) FROM {table} WHERE ID = 1 AND VERSION_USED = 3", "expected": 1}
+                valid = {"id": "body-valid", "sql": self._valid_body_check(package), "expected": 1}
+                final_sql = body(3).encode("utf-8")
+                item = FeatureInput("body.sql", final_sql, hashlib.sha256(final_sql).hexdigest(), (SCHEMA, "PACKAGE BODY", package), "stored-source")
+                selected = FeatureCheckpoint(SCHEMA, (item,), (), (), ((SCHEMA, package),))
+                before_catalog = feature_release.capture_selected_state(target, selected, self.project / "scratch" / f"{tag}-initial")
+                self.assertEqual(before_catalog["identity"], stage_identity)
+                initial_body = before_catalog["sourceUnits"][f"PACKAGE BODY:{package}"]
+                self.assertTrue(initial_body["valid"])
+                self.assertEqual(self._count(f"select count(*) from {table} where id = 1 and version_used = 0 and {package}.revision() = 0", STAGING_CONNECTION), 1)
+                capsule = None
+                apply_report = f"scratch/{tag}-apply-report.json"
+                if strategy == "legacy":
+                    folders = [
+                        self._migration(
+                            f"{tag}-rev{version}",
+                            {"001-body.sql": body(version), **({"002-backfill.sql": backfill} if version == 3 else {})},
+                            preconditions=(before,),
+                            postconditions=(valid, check) if version == 3 else (valid,),
+                        )
+                        for version in (1, 2, 3)
+                    ]
+                    prepare = ("check-conflicts", *folders, "--env", "staging")
+                    apply = ("migrate", *folders, "--env", "staging", "--yes", "--confirm-target", expected)
+                    authored = sum(len(body(version).encode("utf-8")) for version in (1, 2, 3))
+                elif strategy == "feature":
+                    slug = self._name(tag)
+                    self._feature(slug)
+                    self._checks(slug, valid["sql"])
+                    source = self.project / "features" / slug / SCHEMA / "packages" / f"{package.lower()}.pkb.sql"
+                    source.parent.mkdir()
+                    source.write_text(body(3), encoding="utf-8")
+                    folder = self._migration(f"{tag}-data", {"001-backfill.sql": backfill}, preconditions=(before,), postconditions=(check,))
+                    self._manifest([
+                        {"type": "feature-migrate", "schema": SCHEMA, "inputs": [source.relative_to(self.project).as_posix()]},
+                        {"type": "migrate", "folders": [folder]},
+                    ])
+                    _commit(self.project, f"live benchmark: {tag}")
+                    frozen = run_ok("feature", "freeze", "releases/current.json", "--no-live", "Staging-only disposable benchmark")
+                    capsule = re.search(r"^Capsule: (\S+)$", frozen.stdout, re.MULTILINE).group(1)
+                    prepare = ("rollout", "releases/current.json", "--env", "staging", "--capsule", capsule, "--prepare")
+                    apply = ("rollout", "releases/current.json", "--env", "staging", "--capsule", capsule, "--yes", "--confirm-target", expected, "--report", apply_report)
+                    authored = len(body(3).encode("utf-8"))
+                else:
+                    # Qualify the exact intermediate source/settings, then restore the common starting state.
+                    self._sql(STAGING_CONNECTION, target_guard + body(2))
+                    state = feature_release.capture_selected_state(target, selected, self.project / "scratch" / f"{tag}-intermediate")
+                    reference = state["sourceUnits"][f"PACKAGE BODY:{package}"]
+                    self.assertTrue(reference["valid"])
+                    self._sql(STAGING_CONNECTION, target_guard + body(0))
+                    source_checks = baseline._source_check_queries({"name": package, "type": "PACKAGE BODY", "lines": reference["lines"]}, SCHEMA)
+                    settings_check = baseline._exact_settings_check(reference["settings"], package, "PACKAGE BODY", SCHEMA)
+                    guard = ["DECLARE", "  l_pass NUMBER;", "BEGIN"]
+                    for probe in [*source_checks, settings_check, valid]:
+                        guard.extend((
+                            f"  SELECT ({probe['sql']}) INTO l_pass FROM DUAL;",
+                            "  IF NVL(l_pass, 0) != 1 THEN RAISE_APPLICATION_ERROR(-20001, 'Intermediate definition did not verify'); END IF;",
+                        ))
+                    guard.extend(("END;", "/", ""))
+                    middle = baseline._session_settings_sql(reference["settings"]) + "\n" + body(2)
+                    backfill = f"UPDATE {table} SET VERSION_USED = {package}.intermediate_value() WHERE ID = 1;\n"
+                    transition = {
+                        "001-body.sql": middle, "002-assert-body.sql": "\n".join(guard),
+                        "003-backfill.sql": backfill, "004-body.sql": body(3),
+                    }
+                    folder = self._migration(f"{tag}-bounded", transition, preconditions=(before,), postconditions=(valid, check))
+                    self._manifest([{"type": "migrate", "folders": [folder]}])
+                    _commit(self.project, f"live benchmark: {tag}")
+                    capsule = self._freeze()
+                    prepare = ("rollout", "releases/current.json", "--env", "staging", "--capsule", capsule, "--prepare")
+                    apply = ("rollout", "releases/current.json", "--env", "staging", "--capsule", capsule, "--yes", "--confirm-target", expected, "--report", apply_report)
+                    authored = sum(len(sql.encode("utf-8")) for name, sql in transition.items() if name != "003-backfill.sql")
+
+                started = time.perf_counter()
+                self._count("select 1 from dual", STAGING_CONNECTION)
+                connection_probe = time.perf_counter() - started
+                trace.unlink(missing_ok=True)
+                started = time.perf_counter()
+                run_ok(*prepare, env=trace_env)
+                prepared = time.perf_counter()
+                prepare_events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+                if capsule is not None:
+                    self._assert_capsule_target(capsule, "staging", stage_identity)
+                trace.unlink()
+                apply_started = time.perf_counter()
+                run_ok(*apply, env=trace_env)
+                applied = time.perf_counter()
+                apply_events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+                verify_started = time.perf_counter()
+                self.assertEqual(self._count(f"select count(*) from {table} where id = 1 and version_used = 3 and {package}.revision() = 3", STAGING_CONNECTION), 1)
+                self.assertEqual(self._count(valid["sql"], STAGING_CONNECTION), 1)
+                observed = feature_release.capture_selected_state(target, selected, self.project / "scratch" / f"{tag}-verification")
+                verified = time.perf_counter()
+                self.assertEqual(observed["identity"], stage_identity)
+                installed = observed["sourceUnits"][f"PACKAGE BODY:{package}"]
+                self.assertTrue(installed["valid"])
+                self.assertTrue(feature_release._same_stored_source(installed["lines"], feature_release._stored_source(item)[0]["lines"]))
+                self.assertTrue(feature_release._same_settings(installed["settings"], initial_body["settings"]))
+                events = [*prepare_events, *apply_events]
+                markers = [marker for event in apply_events for marker in event["payloadStarts"]]
+                writes = sum(marker in {"001-body.sql", "004-body.sql"} or marker.startswith("checkpoint-") for marker in markers)
+                self.assertEqual(writes, {"legacy": 3, "feature": 1, "transition": 2}[strategy])
+                if strategy == "transition":
+                    self.assertEqual(markers, ["001-body.sql", "002-assert-body.sql", "003-backfill.sql", "004-body.sql"])
+                else:
+                    self.assertEqual(len(markers), writes + 1)
+                budget = None
+                if capsule is not None:
+                    rollout = json.loads((self.project / apply_report).read_bytes())
+                    self.assertEqual(rollout["status"], "success")
+                    budget = rollout["objectBudget"]
+                samples.append({
+                    "trial": trial, "strategy": strategy, "connectionProbeSeconds": connection_probe,
+                    "preparationSeconds": prepared - started, "applyCommandSeconds": applied - apply_started,
+                    "verificationSeconds": verified - verify_started,
+                    "totalReleaseSeconds": (prepared - started) + (applied - apply_started) + (verified - verify_started),
+                    "preparationCatalogOrIdentitySqlclSeconds": sum(event["seconds"] for event in prepare_events if event["phase"] == "catalogOrIdentity"),
+                    "applySqlclSeconds": sum(event["seconds"] for event in apply_events if event["phase"] == "apply"),
+                    "verificationSqlclSecondsWithinApply": sum(event["seconds"] for event in apply_events if event["phase"] == "verification"),
+                    "connectedSqlclSessions": sum(event["connect"] for event in events),
+                    "entryDriverBytes": sum(event["entryDriverBytes"] for event in events),
+                    "deliveredSqlBytes": sum(event["deliveredSqlBytes"] for event in events),
+                    "checkMarkerSectionBytes": sum(event["checkMarkerSectionBytes"] for event in events),
+                    "authoredPayloadBytes": authored + len(backfill.encode("utf-8")),
+                    "packageBodyWrites": writes, "selectedSqlSteps": len(markers),
+                    "objectBudget": budget,
+                })
+
+        medians = {}
+        for strategy in strategies:
+            group = [sample for sample in samples if sample["strategy"] == strategy]
+            medians[strategy] = {
+                key: statistics.median(sample[key] for sample in group)
+                for key in group[0] if key not in {"strategy", "trial", "objectBudget"}
+            }
+        report = ROOT / "scratch" / f"feature-benchmark-{self.token}.json"
+        report.parent.mkdir(exist_ok=True)
+        database = self._sql(STAGING_CONNECTION, "set heading off feedback off\nselect version_full from product_component_version where product like 'Oracle%Database%';")
+        sqlcl = _run([trace_env["FIXTURE_REAL_SQL"], "-version"], cwd=self.project, env=self.env)
+        self.assertEqual(sqlcl.returncode, 0, sqlcl.stderr)
+        with report.open("x", encoding="utf-8") as file:
+            json.dump({
+                "schemaVersion": 1, "sampleCountPerStrategy": 3, "samples": samples, "medians": medians,
+                "databaseVersion": database.strip().splitlines()[-1], "sqlclVersion": sqlcl.stdout.strip(),
+                "notes": [
+                    "Each sample starts with equivalent objects on one approved staging connection. The connection probe includes one SELECT round trip.",
+                    "Total release time sums the preparation command, apply command, and independent outcome verification. Fixture setup and report instrumentation are outside these intervals.",
+                    "SQLcl sessions and byte counts cover both commands. Delivered SQL bytes include explicit local script includes. Check section bytes count the SQL between the generated BEGIN and END markers, including in-session checks.",
+                    "The capsule budget covers its selected object steps. Legacy migrate has no capsule budget.",
+                ],
+            }, file, indent=2)
+            file.write("\n")
+        print(f"Benchmark evidence {report}")
 
     def _wait_until_settled(self, package: str, *, connection: str = CONNECTION,
                             quiet_seconds: int = 10, limit_seconds: int = 180) -> None:
@@ -998,6 +1521,7 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         # Start the run, then kill its whole process group once an attempt is mid-write.
+        self._track_legacy_staging_writes()
         report = f"scratch/live-staging-{self._next_number()}.json"
         process = subprocess.Popen(
             [str(self.project / "scripts" / "team.sh"), "rollout", "releases/current.json", "--env", "staging",

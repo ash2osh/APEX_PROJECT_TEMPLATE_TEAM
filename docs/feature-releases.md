@@ -14,10 +14,8 @@ and ordered transitions. One version-2 capsule can carry both.
    review the changes with `feature diff` or Git.
 2. Coordinate with the team and use the project's approved DEV delivery route
    for the selected source. After applying, verify the installed source,
-   settings and validity, and run relevant behavior checks. The template
-   currently provides read-only capture and comparison for DEV. Its guarded
-   feature DEV apply command is planned, and `rollout` accepts feature capsules
-   for staging and production.
+   settings and validity, and run relevant behavior checks. Use the guarded
+   feature commands below to review and apply selected stored source on DEV.
 3. Commit the final definitions and any required dated migrations, then
    freeze one release capsule. Apply and verify it on staging before promoting
    that capsule to production.
@@ -53,6 +51,89 @@ would change a later feature checkpoint's before-source on the same resolved
 target. Indirect effects, such as dynamic SQL, require operator review and
 can still trip the runtime guard. Ship a prerequisite in its own verified
 release if a dependent checkpoint needs it during preparation.
+
+## Prepare selected DEV source
+
+```bash
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev \
+  --unit "PACKAGE BODY:ITEM_LOOKUP" --prepare
+```
+
+Repeat `--unit` to include more units. Include the body when changing
+its package or type specification. The command uses the DEV migration profile,
+with the code profile as the fallback when no migration profile is configured.
+It reads the selected catalog and preconditions, then writes a private plan
+and source/settings review under `scratch/feature-dev/`. The plan binds the
+observed target and the exact source, check, and configuration inputs.
+
+Prepare uses the feature schema's `checks.json`. Repeat `--checks` with
+repository-relative paths under that feature schema's `checks/` directory
+when the selection needs its own checks. For an existing unit without a
+retained baseline, review the displayed before-state and diff, then prepare
+again with the displayed `--accept-live-baseline` digest. Adoption preserves
+the authored feature files. Preparation performs no database writes.
+
+Select a view with `--unit VIEW:ITEM_LOOKUP` and put its single
+`CREATE OR REPLACE VIEW` in `views/item_lookup.sql` under the feature schema.
+List the projected columns explicitly because Oracle expands top-level
+wildcards in stored view text. Use an explicit view column list when the
+projection does not name every output column. Declare `DEFAULT COLLATION`
+in the source when Oracle's metadata reports a default collation for the
+view, so the read-back can verify the intended value. Keep one-time DDL and grants
+in separately selected files. When a capsule replaces an existing view,
+include the reviewed target precondition required by capsule preparation.
+See [Oracle's view creation notes](https://docs.oracle.com/en/database/oracle/oracle-database/19/admin/managing-views-sequences-and-synonyms.html).
+
+## Apply or recover a DEV plan
+
+Coordinate shared DEV writes with the team. Review the plan and its diff,
+then pass the reported path explicitly.
+
+```bash
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev \
+  --execute-plan scratch/feature-dev/prepare-example/plan.json
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev --status
+```
+
+Execution verifies the inputs and target again, then checks the before-state
+inside the write session. It verifies source, compiler settings, validity,
+and the selected postconditions on fresh connections. A verified no-op runs
+the checks without recompiling. Each verified plan is single-use. Baseline
+refresh uses verified installed source and preserves edits in the feature files.
+For views, execution also compares full catalog DDL in the write session
+and checks query text, aliases, access and editioning properties on read-back.
+A verified write saves the prepared diff under the day's `feature-diffs/`
+directory. Reconciliation saves it when it verifies the intended state.
+Include the reported diff in the [daily change record](daily-change-record.md).
+
+If execution reports an unknown outcome, retain the plan, review, and SQLcl
+evidence. The private marker under `releases/.dev-apply-attempts/` blocks
+further applies on the same physical target and remains visible in offline
+status after scratch cleanup. Restore the exact plan and input snapshots
+from retained evidence before reconciliation if they are missing.
+
+Before authorizing recovery, establish that the original operation ended.
+Inspect the current definition, compiler settings, validity, and dependencies.
+An invalid or partial change may need a separately authorized repair on the
+same target. Use the retained before-state and source diff to review a
+restore candidate, then verify the repair through the project's approved
+delivery route.
+
+Create reviewed JSON evidence with `schemaVersion` 1, `planId`, `planSha256`,
+and `targetScope` copied from the pending plan. Set `conclusion` to `before`
+or `intended`. Record who established the conclusion in `establishedBy`
+and what they checked in `notes`. The reconciliation command re-observes the
+selected target before it records closure.
+
+```bash
+scripts/team.sh feature reconcile-run prepare-example --env dev --evidence recovery.json
+```
+
+Type the displayed `RECONCILE-RUN <plan-id>` acknowledgment at a terminal.
+`--yes` records noninteractive acknowledgment after the same evidence
+requirements. Prepare a fresh plan when the attempt is closed. The lease
+coordinates participating commands in this checkout. Coordinate separately
+with standalone migrations and teammates in other checkouts.
 
 ## Create and review feature source
 

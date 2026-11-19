@@ -911,6 +911,10 @@ def _view(text: str, schema: str) -> dict | None:
     if not _word(tokens, 0, "CREATE"):
         return None
     idx, replace = _skip_create_modifiers(tokens, 1)
+    if _word(tokens, idx, "NOFORCE"):
+        idx, _ = _skip_create_modifiers(tokens, idx + 1)
+    elif _word(tokens, idx, "NO") and _word(tokens, idx + 1, "FORCE"):
+        idx, _ = _skip_create_modifiers(tokens, idx + 2)
     if not _word(tokens, idx, "VIEW"):
         return None
     idx += 1
@@ -925,6 +929,15 @@ def _view(text: str, schema: str) -> dict | None:
             return None
         idx = closing + 1
 
+    if _word(tokens, idx, "DEFAULT") and _word(tokens, idx + 1, "COLLATION"):
+        if idx + 2 >= len(tokens) or tokens[idx + 2].kind not in {"WORD", "QIDENT"}:
+            return None
+        idx += 3
+    if _word(tokens, idx, "BEQUEATH"):
+        if not (_word(tokens, idx + 1, "DEFINER") or _word(tokens, idx + 1, "CURRENT_USER")):
+            return None
+        idx += 2
+
     if not _word(tokens, idx, "AS"):
         return None
     idx += 1
@@ -933,7 +946,13 @@ def _view(text: str, schema: str) -> dict | None:
     if not query_tokens:
         return None
 
-    # Strip trailing WITH READ ONLY / WITH CHECK OPTION
+    # Strip trailing WITH READ ONLY / WITH CHECK OPTION and its optional name.
+    if (
+        len(query_tokens) >= 5
+        and all(_word(query_tokens, -5 + offset, name) for offset, name in enumerate(("WITH", "CHECK", "OPTION", "CONSTRAINT")))
+        and query_tokens[-1].kind in {"WORD", "QIDENT"}
+    ):
+        query_tokens = query_tokens[:-2]
     if (
         len(query_tokens) >= 3
         and _word(query_tokens, -3, "WITH")

@@ -223,6 +223,18 @@ def _parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("--schema", required=True, help="uppercase Oracle schema")
     diff_parser.add_argument("--day", default=date.today().isoformat(), help="review directory date, YYYY-MM-DD")
 
+    apply_parser = subparsers.add_parser("apply", help="prepare or execute a guarded DEV feature plan")
+    apply_parser.add_argument("feature", help="lowercase feature slug")
+    apply_parser.add_argument("--schema", required=True, action="append", help="one Oracle schema")
+    apply_parser.add_argument("--env", required=True, action="append", choices=("dev",))
+    apply_mode = apply_parser.add_mutually_exclusive_group(required=True)
+    apply_mode.add_argument("--prepare", action="store_true", help="read DEV and write a private plan")
+    apply_mode.add_argument("--execute-plan", metavar="FILE", help="apply the reviewed plan to DEV")
+    apply_mode.add_argument("--status", action="store_true", help="read retained DEV attempts offline")
+    apply_parser.add_argument("--unit", action="append", default=[], metavar="TYPE:NAME")
+    apply_parser.add_argument("--checks", action="append", default=[], metavar="PATH")
+    apply_parser.add_argument("--accept-live-baseline", metavar="SHA256")
+
     freeze_parser = subparsers.add_parser("freeze", help="validate committed inputs and build a frozen release capsule")
     freeze_parser.add_argument("manifest", type=Path, help="schema-version 2 rollout manifest")
     freeze_parser.add_argument(
@@ -242,7 +254,8 @@ def _parser() -> argparse.ArgumentParser:
         help="close an unfinished rollout run that has no checkpoint to recover, after an acknowledgment",
     )
     reconcile_parser.add_argument("run_id", help="rollout run id from the local release state")
-    reconcile_parser.add_argument("--env", required=True, choices=("staging", "prod"), help="the run's environment")
+    reconcile_parser.add_argument("--env", required=True, choices=("dev", "staging", "prod"), help="the run's environment")
+    reconcile_parser.add_argument("--evidence", type=Path, help="reviewed evidence file for DEV reconciliation")
     reconcile_parser.add_argument("-y", "--yes", action="store_true", help="accept the acknowledgment without typing at a terminal")
     convert_parser = subparsers.add_parser(
         "convert-plan",
@@ -373,6 +386,43 @@ def main(
             for path in artifacts:
                 print(f"Wrote {relative_to_root(path, root).as_posix()}")
             return 0
+        if args.command == "apply":
+            from scripts import feature_dev
+
+            if len(args.env) != 1 or len(args.schema) != 1:
+                raise FeatureCliError("feature apply requires exactly one --env dev and one --schema")
+            if not args.prepare and (args.unit or args.checks or args.accept_live_baseline is not None):
+                raise FeatureCliError("--unit, --checks and --accept-live-baseline require --prepare")
+            try:
+                if args.status:
+                    return feature_dev.dev_apply_status(root, args.feature, args.schema[0])
+                if args.execute_plan:
+                    return feature_dev.execute_dev_apply(root, args.feature, args.schema[0], args.execute_plan, environ=environment)
+                path = feature_dev.prepare_dev_apply(
+                    root, args.feature, args.schema[0], args.unit, environ=environment,
+                    check_paths=args.checks, accepted_baseline_sha256=args.accept_live_baseline,
+                )
+                plan = json.loads(path.read_bytes())
+            except feature_dev.DevPrepareRefusal as error:
+                print(f"feature prepare refused: {error}", file=sys.stderr)
+                return 1
+            except KeyboardInterrupt:
+                return feature_dev.interrupted_execute_status(root, args.execute_plan) if args.execute_plan else 130
+            except (OSError, ValueError) as error:
+                raise FeatureCliError(str(error)) from error
+            target, scope = plan["target"], plan["targetScope"]
+            print(f"DEV {target['profile']} profile via {target['connection']} as {target['expectedUser']}")
+            print(f"Target {scope['dbUniqueName']} / {scope['containerId']} / {scope['schema']} / {scope['edition']}")
+            if target["configurationFile"] is not None:
+                print(f"Configuration {target['configurationFile']['path']}")
+            for unit, guard in zip(plan["units"], plan["sourceGuards"], strict=True):
+                print(f"{unit['type']} {unit['name']} ({'no-op' if guard['noOp'] else 'apply planned'})")
+            for owner, name, kind, subobject in plan["structuralPlan"]["prerequisiteKeys"]:
+                print(f"Dependency {kind} {owner}.{name}" + (f".{subobject}" if subobject else ""))
+            print(f"Plan SHA-256 {plan['planSha256']}")
+            print(f"Plan {relative_to_root(path, root).as_posix()}")
+            print(f"Source and settings review {relative_to_root(path.parent / plan['reviewPath'], root).as_posix()}")
+            return 0
         if args.command == "freeze":
             manifest = rollout.load_manifest(args.manifest, root, version=2)
             checkpoints = tuple(
@@ -397,6 +447,22 @@ def main(
             print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
             return 0
         if args.command == "reconcile-run":
+            if args.env == "dev":
+                from scripts import feature_dev
+
+                if args.evidence is None:
+                    raise FeatureCliError("DEV reconciliation requires --evidence")
+                try:
+                    return feature_dev.reconcile_dev_apply(
+                        root, args.run_id, args.evidence, environ=environment,
+                        read_acknowledgment=read_acknowledgment or _reconcile_ack_from_terminal, yes=args.yes,
+                    )
+                except KeyboardInterrupt:
+                    return 130
+                except (OSError, ValueError) as error:
+                    raise FeatureCliError(str(error)) from error
+            if args.evidence is not None:
+                raise FeatureCliError("--evidence is available only for DEV reconciliation")
             return _reconcile_run(
                 root, args.run_id, args.env, read_acknowledgment or _reconcile_ack_from_terminal,
                 yes=args.yes,

@@ -2,6 +2,12 @@
 
 Status: implemented (`feature doctor`, `feature capture --move-from`, the refresh guard and the freeze gate).
 
+Guarded DEV apply resolves one owned file per selected unit from its SQL
+identity. A dedicated view file can be selected independently of the
+feature's one-time DDL and grants. An existing view requires a retained
+verified DEV baseline or explicit adoption of the reviewed live definition.
+See [DEV preparation and recovery](feature-releases.md#prepare-selected-dev-source).
+
 A release capsule installs the committed **feature file**. Give each object one owner and check its
 DEV baseline before selecting the file for a release. These checks catch competing definitions and
 edits made directly on DEV.

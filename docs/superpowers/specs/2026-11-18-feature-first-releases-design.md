@@ -163,8 +163,9 @@ scripts/team.sh feature reconcile-run <run-id> --env dev --evidence <file>
   Reuse the full `baseline-views` LONG-to-CLOB reader with exact owner and
   name selection through the baseline names filter. Compare query text and
   definition attributes, including
-  column aliases and order, CHECK OPTION or READ ONLY, editioning and
-  BEQUEATH, using the captured DDL and catalog as appropriate. Qualify the
+  column aliases and order, CHECK OPTION or READ ONLY, editioning,
+  BEQUEATH and explicit default collation. When captured DDL includes a
+  default collation, require the source to name the intended value. Qualify the
   complete read and guard for long definitions and supplementary Unicode.
   Refuse a view when complete evidence is
   unavailable. A no-op requires

@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import _no_real_sqlcl  # noqa: F401 (keeps tests away from a real SQLcl)
 
-from scripts import feature_cli, feature_convert
+from scripts import feature_cli, feature_convert, migration_archive
 from scripts import migration_manifest as manifest
 
 
@@ -218,6 +218,48 @@ class FeatureConvertTests(unittest.TestCase):
         self.assertEqual(0, status)
         self.assertIn("archive, do not copy", stdout)
         self.assertIn(f"scripts/team.sh archive-migrations {folder}", stdout)
+
+    def test_three_body_revisions_archive_with_original_receipts_and_keep_required_backfill_active(self) -> None:
+        revisions = []
+        evidence = {}
+        for version in (1, 2, 3):
+            folder = self.write_folder(f"migrations/APP_CODE/2026-01-0{version}_lookup-r00{version}", {
+                "001-body.sql": (
+                    "CREATE OR REPLACE PACKAGE BODY ITEM_LOOKUP AS\n"
+                    f"  FUNCTION VERSION_NUMBER RETURN NUMBER IS BEGIN RETURN {version}; END;\n"
+                    "END ITEM_LOOKUP;\n/\n"
+                ),
+            })
+            self.install_dev_receipt(folder)
+            revisions.append(folder)
+            evidence[Path(folder).name] = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (self.root / folder).iterdir()
+            }
+        backfill = self.write_folder("migrations/APP_CODE/2026-01-04_backfill-r001", {
+            "001-backfill.sql": "UPDATE JOBS SET VERSION_USED = ITEM_LOOKUP.VERSION_NUMBER();\n",
+        })
+
+        status, output, error = self.run_cli(*revisions, backfill, "--feature", "inventory", "--format", "json")
+        self.assertEqual(status, 0, error)
+        conversion = json.loads(output)
+        self.assertEqual(conversion["archive"], revisions)
+        self.assertEqual(self.folder_record(conversion, backfill)["verdict"], "stays a migration")
+
+        result = migration_archive.archive_migrations(self.root, revisions, yes=True, reason="Consolidated in inventory")
+        archived = manifest.load_archived_index(self.root / "migrations/APP_CODE/.archived.json", "APP_CODE")
+        self.assertEqual([row["folder"] for row in archived], [Path(path).name for path in revisions])
+        self.assertEqual(len(result.entries), 3)
+        for row in archived:
+            destination = self.root / row["destination"]
+            migration = manifest.load_archived_migration(self.root, row["destination"], "APP_CODE")
+            self.assertEqual(migration.payload_digest, row["payloadDigest"])
+            self.assertIn("status.dev.json (verified)", row["evidence"])
+            self.assertEqual(
+                {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in destination.iterdir()},
+                evidence[row["folder"]],
+            )
+        self.assertEqual(manifest.list_migration_folders(self.root), (self.root / backfill,))
 
     def test_a_later_revision_is_not_archived_while_an_earlier_one_of_its_family_stays(self) -> None:
         earlier = self.write_folder("migrations/APP_CODE/2026-01-26_family-r001", {

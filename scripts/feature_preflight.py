@@ -829,6 +829,8 @@ def prepare_checkpoint(
     checkpoint: FeatureCheckpoint,
     state: Mapping,
     earlier_effects: Sequence[Mapping],
+    *,
+    guarded_view_replacements: frozenset[str] = frozenset(),
 ) -> StructuralPlan:
     """Prove the ordered selected DDL against exact selected catalog evidence."""
     if not isinstance(checkpoint, FeatureCheckpoint) or not isinstance(state, Mapping):
@@ -889,7 +891,10 @@ def prepare_checkpoint(
         replace_existing_view = False
         if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE"}:
             existing = common.get(name, set())
-            replace_view = kind == "CREATE_VIEW" and operation.get("replace") is True and "VIEW" in existing and bool(checkpoint.preconditions)
+            replace_view = (
+                kind == "CREATE_VIEW" and operation.get("replace") is True and existing == {"VIEW"}
+                and (bool(checkpoint.preconditions) or name in guarded_view_replacements)
+            )
             replace_existing_view = replace_view
             if name in staged_names or (existing and not replace_view):
                 raise StructuralPreflightError(f"object namespace is occupied for {name}: {sorted(existing)}{OCCUPIED_HINT}")

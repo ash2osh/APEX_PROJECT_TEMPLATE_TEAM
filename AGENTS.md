@@ -168,9 +168,14 @@ owner-only commands retain their owner-login checks. See
   source, `feature doctor --live` to check ownership and drift, and
   `feature diff` to review changes. Keep revisions in Git. Coordinate with the
   team before replacing shared DEV objects and obtain authorization for the
-  write. The guarded feature DEV apply command is planned. Until it ships,
-  use the project's approved DEV route and verify the result against the
-  feature files. Ship one final definition per object in the release capsule.
+  write. Run `feature apply <slug> --schema NAME --env dev --prepare --unit TYPE:NAME`
+  to review the exact scope, target and before-state. Run `feature apply` with
+  `--execute-plan FILE` only for the authorized DEV write. For views, select
+  a dedicated `views/<name>.sql` definition with explicit projected columns.
+  Inspect unresolved attempts with `feature apply --status`. Use
+  `feature reconcile-run <plan-id> --env dev --evidence FILE` only after
+  reviewing same-target evidence and confirming the original operation ended.
+  Ship one final definition per object in the release capsule.
   See [docs/feature-releases.md](docs/feature-releases.md).
 - **Dated migrations for one-time changes:** Use them for schema changes,
   backfills, seed data, data fixes, and ordered transitions that require an

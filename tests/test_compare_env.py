@@ -84,6 +84,36 @@ def _without_sql_literals(source: str) -> str:
 
 
 class EnvironmentComparisonTests(unittest.TestCase):
+    def test_baseline_view_reader_filters_exact_names_and_decodes_the_complete_long(self) -> None:
+        sql = (ROOT / "scripts/compare_env_catalog.sql").read_text(encoding="utf-8")
+        view_reader = sql.split("PROCEDURE add_baseline_views IS", 1)[1].split("PROCEDURE add_triggers IS", 1)[0]
+        self.assertIn("v.view_name = n.object_name", view_reader)
+        self.assertIn("DBMS_LOB.GETLENGTH(c_baseline_names_json) <= 2", view_reader)
+        self.assertIn("SUBSTR(v.view_name, 1, LENGTH(p.prefix)) = UPPER(p.prefix)", view_reader)
+        append = "DBMS_LOB.WRITEAPPEND(view_bytes, view_piece_length, UTL_RAW.CAST_TO_RAW(view_piece))"
+        self.assertIn(append, view_reader)
+        self.assertLess(view_reader.index("DBMS_SQL.CLOSE_CURSOR(view_cursor)", view_reader.index(append)),
+                        view_reader.index("DBMS_LOB.CONVERTTOCLOB("))
+        self.assertIn("NLS_CHARSET_ID(value)", view_reader)
+        self.assertIn("view_warning != DBMS_LOB.NO_WARNING", view_reader)
+        self.assertIn("view_json.put('valueEncoding', 'utf8-base64-v1')", view_reader)
+
+    def test_baseline_view_transport_preserves_long_unicode_and_refuses_invalid_bytes(self) -> None:
+        payload = catalog("dev")
+        original = "SELECT '" + chr(0x10400) * 9000 + "' FROM DUAL"
+        encoded = base64.b64encode(original.encode("utf-8")).decode("ascii")
+        row = {"name": "V_TEST", "text": encoded, "ddl": encoded, "valueEncoding": "utf8-base64-v1"}
+        payload["sections"]["baseline-views"] = [row]
+        payload["coverage"]["sections"]["baseline-views"] = {"complete": True, "pages": [1]}
+
+        def parse():
+            return parse_environment_catalog_output(framed(payload), sections=("baseline-views",), baseline_capture=True)
+
+        self.assertEqual(parse()["sections"]["baseline-views"], [{"name": "V_TEST", "text": original, "ddl": original}])
+        row["ddl"] = "/w=="
+        with self.assertRaisesRegex(CatalogError, "invalid UTF-8 baseline view"):
+            parse()
+
     def test_apex_version_capture_queries_release_view(self) -> None:
         source = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
 

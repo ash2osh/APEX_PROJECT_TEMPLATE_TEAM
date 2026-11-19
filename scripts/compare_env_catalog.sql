@@ -52,10 +52,6 @@ DECLARE
   l_raw CLOB;
   l_blob BLOB;
   l_gzip BLOB;
-  l_dest INTEGER := 1;
-  l_src INTEGER := 1;
-  l_ctx INTEGER := 0;
-  l_warning INTEGER;
   l_pos PLS_INTEGER;
   l_piece RAW(12000);
   l_chunk VARCHAR2(32767);
@@ -817,17 +813,74 @@ DECLARE
       RAISE;
   END;
 
+  FUNCTION catalog_utf8(p_value CLOB) RETURN BLOB IS
+    result BLOB;
+    dest_offset INTEGER := 1;
+    src_offset INTEGER := 1;
+    lang_context INTEGER := DBMS_LOB.DEFAULT_LANG_CTX;
+    warning INTEGER;
+  BEGIN
+    DBMS_LOB.CREATETEMPORARY(result, TRUE);
+    DBMS_LOB.CONVERTTOBLOB(
+      result, p_value, DBMS_LOB.LOBMAXSIZE, dest_offset, src_offset,
+      NLS_CHARSET_ID('AL32UTF8'), lang_context, warning
+    );
+    IF warning != DBMS_LOB.NO_WARNING THEN
+      RAISE_APPLICATION_ERROR(-20997, 'Unicode conversion warning during compare-env capture');
+    END IF;
+    RETURN result;
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF DBMS_LOB.ISTEMPORARY(result) = 1 THEN DBMS_LOB.FREETEMPORARY(result); END IF;
+      RAISE;
+  END;
+
   PROCEDURE add_baseline_views IS
     view_cursor INTEGER;
     view_execute INTEGER;
     view_offset INTEGER;
     view_piece_length INTEGER;
     view_piece VARCHAR2(32767);
+    view_bytes BLOB;
+    view_charset NUMBER;
+    view_dest_offset INTEGER;
+    view_src_offset INTEGER;
+    view_context INTEGER;
+    view_warning INTEGER;
     view_text CLOB;
     view_ddl CLOB;
+    view_text_encoded CLOB;
+    view_ddl_encoded CLOB;
     view_json JSON_OBJECT_T;
+
+    FUNCTION encode_view_value(p_value CLOB) RETURN CLOB IS
+      value_bytes BLOB;
+      result CLOB;
+      byte_offset INTEGER := 1;
+      piece RAW(12000);
+      encoded VARCHAR2(32767);
+    BEGIN
+      value_bytes := catalog_utf8(p_value);
+      DBMS_LOB.CREATETEMPORARY(result, TRUE);
+      WHILE byte_offset <= DBMS_LOB.GETLENGTH(value_bytes) LOOP
+        -- A multiple of three puts Base64 padding only at the end of the whole value.
+        piece := DBMS_LOB.SUBSTR(value_bytes, 12000, byte_offset);
+        encoded := REPLACE(REPLACE(UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE(piece)), CHR(13), ''), CHR(10), '');
+        DBMS_LOB.WRITEAPPEND(result, LENGTH(encoded), encoded);
+        byte_offset := byte_offset + UTL_RAW.LENGTH(piece);
+      END LOOP;
+      DBMS_LOB.FREETEMPORARY(value_bytes);
+      RETURN result;
+    EXCEPTION
+      WHEN OTHERS THEN
+        IF DBMS_LOB.ISTEMPORARY(value_bytes) = 1 THEN DBMS_LOB.FREETEMPORARY(value_bytes); END IF;
+        IF DBMS_LOB.ISTEMPORARY(result) = 1 THEN DBMS_LOB.FREETEMPORARY(result); END IF;
+        RAISE;
+    END;
   BEGIN
     IF NOT selected('baseline-views') THEN RETURN; END IF;
+    SELECT NLS_CHARSET_ID(value) INTO view_charset
+      FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET';
     l_rows := JSON_ARRAY_T();
     l_pages := JSON_ARRAY_T();
     l_offset := 0;
@@ -838,9 +891,13 @@ DECLARE
         SELECT v.view_name
           FROM all_views v
          WHERE v.owner = c_schema
-           AND (DBMS_LOB.GETLENGTH(c_baseline_prefixes_json) <= 2 OR EXISTS (
-             SELECT 1 FROM JSON_TABLE(c_baseline_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) p
-              WHERE SUBSTR(v.view_name, 1, LENGTH(p.prefix)) = UPPER(p.prefix)))
+           AND ((DBMS_LOB.GETLENGTH(c_baseline_names_json) > 2 AND EXISTS (
+             SELECT 1 FROM JSON_TABLE(c_baseline_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) n
+              WHERE v.view_name = n.object_name))
+             OR (DBMS_LOB.GETLENGTH(c_baseline_names_json) <= 2 AND
+               (DBMS_LOB.GETLENGTH(c_baseline_prefixes_json) <= 2 OR EXISTS (
+                 SELECT 1 FROM JSON_TABLE(c_baseline_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) p
+                  WHERE SUBSTR(v.view_name, 1, LENGTH(p.prefix)) = UPPER(p.prefix)))))
            AND (DBMS_LOB.GETLENGTH(c_baseline_excluded_json) <= 2 OR NOT EXISTS (
              SELECT 1 FROM JSON_TABLE(c_baseline_excluded_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) e
               WHERE v.view_name = UPPER(e.object_name)))
@@ -849,7 +906,7 @@ DECLARE
         IF l_total >= c_max_rows THEN
           RAISE_APPLICATION_ERROR(-20995, 'compare-env baseline-views exceeded its 100000-row cap');
         END IF;
-        DBMS_LOB.CREATETEMPORARY(view_text, TRUE);
+        DBMS_LOB.CREATETEMPORARY(view_bytes, TRUE);
         view_cursor := DBMS_SQL.OPEN_CURSOR;
         DBMS_SQL.PARSE(view_cursor,
           'SELECT text FROM all_views WHERE owner = :owner AND view_name = :name', DBMS_SQL.NATIVE);
@@ -864,18 +921,37 @@ DECLARE
         LOOP
           DBMS_SQL.COLUMN_VALUE_LONG(view_cursor, 1, 32767, view_offset, view_piece, view_piece_length);
           EXIT WHEN view_piece_length = 0;
-          DBMS_LOB.WRITEAPPEND(view_text, LENGTH(view_piece), view_piece);
+          -- LONG offsets are bytes and a piece can end inside a character.
+          DBMS_LOB.WRITEAPPEND(view_bytes, view_piece_length, UTL_RAW.CAST_TO_RAW(view_piece));
           view_offset := view_offset + view_piece_length;
         END LOOP;
         DBMS_SQL.CLOSE_CURSOR(view_cursor);
         view_cursor := NULL;
+        DBMS_LOB.CREATETEMPORARY(view_text, TRUE);
+        view_dest_offset := 1;
+        view_src_offset := 1;
+        view_context := DBMS_LOB.DEFAULT_LANG_CTX;
+        DBMS_LOB.CONVERTTOCLOB(
+          view_text, view_bytes, DBMS_LOB.LOBMAXSIZE, view_dest_offset, view_src_offset,
+          view_charset, view_context, view_warning
+        );
+        IF view_warning != DBMS_LOB.NO_WARNING THEN
+          RAISE_APPLICATION_ERROR(-20996, 'compare-env could not decode ALL_VIEWS.TEXT for ' || view_row.view_name);
+        END IF;
+        DBMS_LOB.FREETEMPORARY(view_bytes);
         view_ddl := read_view_ddl(view_row.view_name);
+        -- Serialize ASCII values so Oracle's JSON writer cannot split a supplementary character.
+        view_text_encoded := encode_view_value(view_text);
+        view_ddl_encoded := encode_view_value(view_ddl);
         view_json := JSON_OBJECT_T();
         view_json.put('name', view_row.view_name);
-        view_json.put('text', view_text);
-        view_json.put('ddl', view_ddl);
+        view_json.put('valueEncoding', 'utf8-base64-v1');
+        view_json.put('text', view_text_encoded);
+        view_json.put('ddl', view_ddl_encoded);
         l_rows.append(view_json);
         DBMS_LOB.FREETEMPORARY(view_text);
+        DBMS_LOB.FREETEMPORARY(view_text_encoded);
+        DBMS_LOB.FREETEMPORARY(view_ddl_encoded);
         l_page_count := l_page_count + 1;
         l_total := l_total + 1;
       END LOOP;
@@ -891,7 +967,10 @@ DECLARE
   EXCEPTION
     WHEN OTHERS THEN
       IF view_cursor IS NOT NULL AND DBMS_SQL.IS_OPEN(view_cursor) THEN DBMS_SQL.CLOSE_CURSOR(view_cursor); END IF;
+      IF DBMS_LOB.ISTEMPORARY(view_bytes) = 1 THEN DBMS_LOB.FREETEMPORARY(view_bytes); END IF;
       IF DBMS_LOB.ISTEMPORARY(view_text) = 1 THEN DBMS_LOB.FREETEMPORARY(view_text); END IF;
+      IF DBMS_LOB.ISTEMPORARY(view_text_encoded) = 1 THEN DBMS_LOB.FREETEMPORARY(view_text_encoded); END IF;
+      IF DBMS_LOB.ISTEMPORARY(view_ddl_encoded) = 1 THEN DBMS_LOB.FREETEMPORARY(view_ddl_encoded); END IF;
       RAISE;
   END;
 
@@ -1328,13 +1407,7 @@ BEGIN
   IF DBMS_LOB.GETLENGTH(l_raw) > 128 * 1024 * 1024 THEN
     RAISE_APPLICATION_ERROR(-20996, 'compare-env catalog exceeded its 128 MiB payload cap');
   END IF;
-  DBMS_LOB.CREATETEMPORARY(l_blob, TRUE);
-  DBMS_LOB.CONVERTTOBLOB(
-    dest_lob => l_blob, src_clob => l_raw, amount => DBMS_LOB.LOBMAXSIZE,
-    dest_offset => l_dest, src_offset => l_src, blob_csid => NLS_CHARSET_ID('AL32UTF8'),
-    lang_context => l_ctx, warning => l_warning
-  );
-  IF l_warning != 0 THEN RAISE_APPLICATION_ERROR(-20997, 'Unicode conversion warning during compare-env catalog compression'); END IF;
+  l_blob := catalog_utf8(l_raw);
   IF DBMS_LOB.GETLENGTH(l_blob) > 128 * 1024 * 1024 THEN
     RAISE_APPLICATION_ERROR(-20996, 'compare-env catalog exceeded its 128 MiB UTF-8 payload cap');
   END IF;

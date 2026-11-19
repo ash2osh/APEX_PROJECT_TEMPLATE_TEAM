@@ -13,6 +13,12 @@ to freeze once, verify staging, and promote the same capsule. Use baseline
 generation when provisioning or reconciling drift calls for a separately
 reviewed set of changes.
 
+Before updating the release engine, inventory capsules with prepared plans
+or verified staging proof. Finish those releases from the retained checkout
+with the matching engine, capsule, plan, and original evidence. If those
+artifacts are unavailable, review a new release and produce fresh staging
+proof. Preserve already verified effects when planning a continuation.
+
 ## Before the window
 
 1. **Freeze and identify the release.** Name the release commit, migration

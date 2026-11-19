@@ -102,18 +102,18 @@ with `scripts/feature_cli.py`, `scripts/feature_manifest.py`,
 `scripts/feature_claims.py`, `scripts/feature_release.py`,
 `scripts/feature_sources.py`, and `scripts/db_targets.py` as needed for reuse.
 
-- [ ] Add `test_prepare_refuses_invalid_selection_before_sqlcl` for input
+- [x] Add `test_prepare_refuses_invalid_selection_before_sqlcl` for input
   and schema escapes, duplicate ownership and unsupported SQL. Test a
   quoted unit with a hashed file stem loads successfully. Add
   `test_prepare_refuses_changed_spec_without_live_body_selection` with
   a catalog that shows the body exists. Assert zero payload writes.
-- [ ] Implement preparation as `prepare_dev_apply(repo_root, feature, schema,
+- [x] Implement preparation as `prepare_dev_apply(repo_root, feature, schema,
   selectors, *, environ, check_paths=(), accepted_baseline_sha256=None) -> Path`. Resolve scoped claims,
   build validated checkpoint inputs, and reuse selected state capture and
   guard generation. Keep the existing staging/production guards on the
   public promotion entry points. Permit existing scoped check files when a
   feature-wide check assumes prerequisites outside this DEV selection.
-- [ ] Test exact selected-source baseline and before-state with fake catalogs.
+- [x] Test exact selected-source baseline and before-state with fake catalogs.
   Cover a lost DEV edit, formatting that would change a literal, missing
   or incomplete settings for a new unit, disabled trigger replacement,
   and a no-op candidate. Test same physical target through two intended
@@ -124,16 +124,20 @@ with `scripts/feature_cli.py`, `scripts/feature_manifest.py`,
   of invalid objects and pending or unreadable target evidence. Preparation
   opens no write session. Pin exit 0 for preparation, 1 for a verified
   pre-write check refusal, and 2 for invalid input or unavailable evidence.
-- [ ] Expose `feature apply ... --prepare --unit TYPE:NAME` with repeatable
+- [x] Expose `feature apply ... --prepare --unit TYPE:NAME` with repeatable
   `--checks PATH` and `--accept-live-baseline SHA256` as prepare-only options.
   Emit the private plan plus a readable diff. Bind identity, selected source
   and check hashes, generated drivers, and before-state. Keep a DEV-only
   lazy import from the CLI so later changes to the DEV module leave the
   promotion digest intact. Test bad and changed
   local paths, and record the effective project env file without dumping it.
-- [ ] Run `PYTHONPATH=tests python3 -m unittest test_feature_dev test_feature_cli
+- [x] Run `PYTHONPATH=tests python3 -m unittest test_feature_dev test_feature_cli
   test_feature_preflight test_feature_sources test_db_targets`. Confirm all
-  new cases pass and previous feature behavior still passes.
+  new cases pass and previous feature behavior still passes. The focused
+  suite with promotion regressions passed 209 tests on each template release
+  in detached worktrees with the shared core changes overlaid.
+  The full offline suites reported zero failures before the final
+  malformed-baseline refusal check, which was covered by the focused rerun.
 
 ## Task 2 — Execute and reconcile a prepared DEV apply
 
@@ -144,11 +148,11 @@ with `scripts/feature_cli.py`, `scripts/feature_manifest.py`,
 Update `scripts/feature_cli.py` and the help/dispatch in `scripts/team.sh`
 and `scripts/team.ps1`.
 
-- [ ] Test `--execute-plan FILE` refusing changed source, checks, plan,
+- [x] Test `--execute-plan FILE` refusing changed source, checks, plan,
   generated driver, target config, observed target, and before-state
   before any SQL payload marker. Test the writer lease with two processes
   using the same plan and with another plan for the same physical target.
-- [ ] Implement `execute_dev_apply(repo_root, feature, schema, plan_path,
+- [x] Implement `execute_dev_apply(repo_root, feature, schema, plan_path,
   *, environ) -> int`. Treat `--execute-plan FILE` as the explicit write
   action, print the selected target and units, and require no second prompt.
   Verify the plan inside the lease, persist the pending marker under
@@ -156,7 +160,7 @@ and `scripts/team.ps1`.
   precondition checks. Refactor the session assembly to accept validated
   staged drivers so both capsule and DEV paths use it. DDL application
   keeps existing spec/body ordering and compiler/trigger checks.
-- [ ] Test fresh postcondition and source/settings/validity verification.
+- [x] Test fresh postcondition and source/settings/validity verification.
   Require matching read-back for success. Cover a no-op, failure after the
   first payload marker, failed verification, timeout, process loss, and
   receipt-write failure. Persist the consumed plan ID and digest for a
@@ -167,53 +171,63 @@ and `scripts/team.ps1`.
   including exit 130 only with proof of no write and exit 2 when a payload
   might have started. Preserve successful receipts on local baseline-refresh
   attention. Test interrupted receipt finalization.
-- [ ] Add offline `feature apply <slug> --schema NAME --env dev --status`
+- [x] Add offline `feature apply <slug> --schema NAME --env dev --status`
   to list all local attempts in the schema and display their target scopes,
   run IDs and missing evidence. Give the wrappers an offline status route.
   Test removing scratch after a pending write. The private marker remains,
   status exits 1 and names the missing evidence, and a new apply still
   refuses. Test unreadable or malformed markers returning 2, and valid
   markers in independent scopes.
-- [ ] Add `feature reconcile-run <run-id> --env dev --evidence <file>`.
+- [x] Add `feature reconcile-run <run-id> --env dev --evidence <file>`.
   Validate the private attempt, acquire the lease, and use reviewed
   same-target read-only evidence for the before or intended state.
   Add tests for wrong-target evidence, unverifiable state, normal
   acknowledgment and recorded `--yes`. Require `--evidence` on DEV and
   preserve the staging/production parser and rollout state route. A fresh
   plan is required after reconciliation.
-- [ ] Refresh retained DEV baselines only after verification. Keep the
-  pre-apply diff. Test that feature files and later working-tree edits
+- [x] Refresh retained DEV baselines only after verification. Copy the
+  pre-apply diff into the daily change record after a verified write or
+  reconciliation to the intended state. Test that feature files and later working-tree edits
   survive the refresh. Report local refresh failure separately from the
   verified database result.
-- [ ] Retain before-source, settings and dependency context for an operator
+- [x] Retain before-source, settings and dependency context for an operator
   to review a restore candidate. In a fake invalid-body case, assert the
   command reports the affected object, preserves its original evidence,
   and blocks further feature applies. Document separately authorized
   same-target repair and verification before reconciliation. Leave actual
   repair under the project's existing approved delivery route. Document
   the lease boundary for standalone migration and independent checkouts.
-- [ ] Run `PYTHONPATH=tests python3 -m unittest test_feature_dev test_feature_cli
+- [x] Run `PYTHONPATH=tests python3 -m unittest test_feature_dev test_feature_cli
   test_release_state test_rollout test_release_capsule test_migrate_cli`.
   Exercise the feature CLI from both wrappers with fake SQLcl, including
   a DEV-only target refusal, an alternate `PROJECT_ENV_FILE`, and missing
   profile refusals for prepare, execute and DEV reconciliation. The DEV
   reconciliation path loads the selected dotenv file. Keep unresolved
   attempts visible in help and error messages.
+  The combined offline regression suites passed 350 tests on 26.2 and 344
+  on 26.1. Bash and PowerShell each passed six smoke checks per release
+  with a fake SQLcl, including offline status and alternate dotenv selection.
 
 ## Task 3 — Add supported view selection
+
+Dedicated DEV view selection, apply, read-back and reconciliation are implemented.
+The baseline catalog reader filters by exact selected names, reassembles the
+complete `LONG` bytes, and encodes the full view text and DDL for lossless JSON
+transport. Oracle 23.26.3.0.0 with `COMPATIBLE=23.6.0` and SQLcl 26.3.0.0
+verified the long-view scenario on both template lines.
 
 **Files** Extend `scripts/feature_dev.py`, `scripts/feature_manifest.py`,
 `scripts/feature_preflight.py`, and use the existing view capture in
 `scripts/compare_env_catalog.sql`. Extend `tests/test_feature_dev.py` and
 `tests/test_feature_preflight.py`.
 
-- [ ] Add `test_view_apply_accepts_one_dedicated_definition` using a
+- [x] Add `test_view_apply_accepts_one_dedicated_definition` using a
   `views/customer_lookup.sql` file alongside separate one-time DDL.
   Assert the staged payload contains only the selected view and mixed
   files refuse DEV apply. Test duplicate identity, unsupported
   dependencies, incomplete catalog text, a literal-only change, and
   mutation of the view file after preparation.
-- [ ] Validate one supported `CREATE OR REPLACE VIEW` statement. Reuse
+- [x] Validate one supported `CREATE OR REPLACE VIEW` statement. Reuse
   structural and dependency checks plus the `baseline-views` LONG-to-CLOB
   capture in `scripts/compare_env_catalog.sql` for review. Make
   `add_baseline_views` handle `c_baseline_names_json` with exact matches and
@@ -222,19 +236,21 @@ and `scripts/team.ps1`.
   the write session.
   Add `test_view_apply_refuses_late_definition_drift_in_write_session`
   and verify reconciled view definition and validity using the same
-  comparison as apply. Qualify exact selected-name capture and writer
-  checks with a view definition over 32 KB and supplementary Unicode.
+  comparison as apply. Exercise exact selected-name capture and the generated
+  writer guard offline with a view over 32 KB and supplementary Unicode.
   Test unchanged query text with a changed column alias or read/check
   property. Require a refusal for definition drift or incomplete proof.
-- [ ] Keep complete legacy `ddl.sql` files valid for capsule promotion.
+- [x] Keep complete legacy `ddl.sql` files valid for capsule promotion.
   Add a fixture where a later capsule selects just the dedicated view.
   Assert it retains the changed definition and does not select or replay
   the earlier column change and grant.
-- [ ] Run `PYTHONPATH=tests python3 -m unittest test_feature_dev
+- [x] Run `PYTHONPATH=tests python3 -m unittest test_feature_dev
   test_feature_preflight test_feature_manifest test_release_capsule`.
   Treat the catalog helper and any hashed CLI/shared-driver edit as an
   engine change. Apply the in-flight capsule upgrade procedure before
   distributing each changed engine.
+- [x] Run the disposable Oracle view scenario. Verify a change beyond 32 KB
+  reaches the catalog and that concurrent drift there refuses the writer.
 
 ## Task 4 — Prove consolidation, recovery, and delivery cost
 
@@ -245,18 +261,18 @@ Update `docs/feature-releases.md`, `docs/feature-ownership.md`,
 `README.md`, `AGENTS.md`, and `.agents/rules/agent-safety.md` when the
 corresponding command is ready.
 
-- [ ] Extend Task 0's fixture with three immutable historical versions
+- [x] Extend Task 0's fixture with three immutable historical versions
   and the normal archive and evidence workflow. Use `feature convert-plan`
   for active folders and verify archived bytes and lookup separately.
   Execute the normal capsule and the bounded-transition capsule with
-  fake SQLcl and in opt-in disposable staging qualification. Count body
+  fake SQLcl. Count body
   writes and compare with the three legacy writes. Require one final
   body write plus the backfill in the normal case, and two body writes
   around one backfill in the bounded transition. Assert the intermediate
   source and validity guard runs before data changes and the final
   source and data both verify. Keep the paired fixtures' starting
   state and verifiable end effects equivalent.
-- [ ] Build an opt-in live scenario on approved disposable targets. Apply
+- [x] Build the opt-in live scenario. It applies
   the feature working-tree source to DEV and verify it. Commit the
   fixture inputs, freeze once, then prepare and execute staging. Confirm
   the DEV receipt's authored source digest matches the capsule input,
@@ -265,7 +281,11 @@ corresponding command is ready.
   the matching verified staging report. Use a third disposable target for
   an authorized execution of the production path. Exercise a changed
   target and an ambiguous failure as refusals.
-- [ ] Compare batched legacy `migrate` against the capsule on equivalent
+- [x] Run the live scenario against three authorized disposable targets.
+  Both template lines verified the same DEV receipt and capsule source,
+  rejected an altered target and invalid staging proof, and promoted successfully
+  through the isolated staging and production-role databases.
+- [x] Run the benchmark comparing batched legacy `migrate` against the capsule on equivalent
   reset disposable targets. Verify the same final effects with comparable
   connection setup. Run repeated trials and record the sample count,
   median and observations. Count selected steps, unit executions, SQLcl
@@ -273,18 +293,37 @@ corresponding command is ready.
   preparation, apply and verification separately, using existing timings
   where they measure the same interval. Keep preparation and the object
   budget visible alongside total release time.
-- [ ] Document the supported DEV commands, explicit execution and recovery acknowledgment.
+- [x] Document the supported DEV commands, explicit execution and recovery acknowledgment.
   Include a short author → DEV → freeze → staging → production example,
   the split-owner case, and the recovery route. Update operational guidance
   when Task 2 ships for stored units, and include views after Task 3. Add
   the in-flight capsule upgrade rule to the release notes and guide.
   Use generic names in template fixtures and docs. Keep the downstream
   database and archived artifacts outside the qualification fixture.
-- [ ] Run focused offline regressions, the changed-file pre-push check,
-  shared core consistency checks, and the template parity report. Run
-  authorized disposable qualification before advertising live correctness
-  or a staging speedup. Record environment versions, skips, and evidence
-  limitations in the implementation report.
+- [x] Run offline regressions and the changed-file pre-push check.
+  Compare the shared worktree overlays to the working core manifest and run
+  the committed template parity report. Full Linux suites completed with zero
+  failures or errors on both lines using Python 3.14.4. APEX 26.2 ran 3,179
+  tests with 70 skips and 26.1 ran 2,793 with 72 skips. Both template worktrees
+  were then synced from shared-core commits `b8fe6e798bea` and `7b1b24230434`.
+  Stamp verification matched all 239 shared paths in each worktree, and both
+  changed-file pre-push checks passed after the final sync.
+- [x] Record the authorized live outcomes, database and SQLcl versions, and
+  benchmark timings. The final Docker run used Oracle 23.26.3.0.0 with
+  `COMPATIBLE=23.6.0` and SQLcl 26.3.0.0. All nine samples independently
+  verified the same final data, stored source, validity, and compiler settings.
+  Each capsule sample stayed within its 120-second object budget.
+
+  | Strategy | Median total | Median apply command | Package body writes | SQLcl sessions |
+  | --- | ---: | ---: | ---: | ---: |
+  | Batched legacy migrations | 45.55 s | 35.17 s | 3 | 19 |
+  | Consolidated capsule | 42.63 s | 27.65 s | 1 | 17 |
+  | Bounded transition | 31.92 s | 19.27 s | 2 | 12 |
+
+  The consolidated capsule took 6.4% less total time on this fixture. Its
+  median preparation took 8.92 seconds versus 4.30 seconds for batch legacy.
+  The raw run report under ignored `scratch/` includes per-trial preparation,
+  verification, SQL/check bytes, and object-budget coverage.
 
 ## Implementation order
 

@@ -37,9 +37,10 @@
 - Use `features/<slug>/<SCHEMA>/` as the default source for stored code.
   Capture from DEV, check ownership and drift, and review the source diff.
   Coordinate shared DEV writes and require explicit authorization for the
-  selected target and units. Guarded feature DEV apply is planned. Use an
-  approved DEV route in the meantime. Use dated migrations for one-time
-  changes and required intermediate definitions.
+  selected target and units. Use read-only `feature apply --prepare`, then
+  use `--execute-plan FILE` for the authorized DEV write. Preserve pending
+  markers and evidence when the outcome needs reconciliation. Use dated
+  migrations for one-time changes and required intermediate definitions.
 - For feature capsules, select each final definition once, together with the
   required migrations in dependency order. Replace the scaffold check and
   commit every selected input and the schema-version 2 manifest before

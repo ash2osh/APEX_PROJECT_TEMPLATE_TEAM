@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fnmatch
 import hashlib
 import json
@@ -597,6 +598,19 @@ def _ace_bounds_timezone_are_provable(row: Mapping) -> bool:
     return True
 
 
+def _decode_baseline_view(row: dict) -> dict:
+    if "valueEncoding" not in row:
+        return row
+    if row["valueEncoding"] != "utf8-base64-v1" or not all(isinstance(row.get(field), str) for field in ("text", "ddl")):
+        raise CatalogError("compare-env baseline view has invalid encoding metadata")
+    try:
+        text = base64.b64decode(row["text"], validate=True).decode("utf-8")
+        ddl = base64.b64decode(row["ddl"], validate=True).decode("utf-8")
+    except ValueError as error:
+        raise CatalogError("compare-env capture contains invalid UTF-8 baseline view bytes") from error
+    return {**{key: value for key, value in row.items() if key != "valueEncoding"}, "text": text, "ddl": ddl}
+
+
 def parse_environment_catalog_output(
     output: str,
     *,
@@ -685,7 +699,7 @@ def parse_environment_catalog_output(
                     )
         elif section not in unavailable:
             raise CatalogError(f"compare-env {section} capture is incomplete")
-        rows_by_section[section] = rows
+        rows_by_section[section] = [_decode_baseline_view(row) for row in rows] if section == "baseline-views" else rows
 
     parsed = dict(payload)
     parsed["sections"] = rows_by_section

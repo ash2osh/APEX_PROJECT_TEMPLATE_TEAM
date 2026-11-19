@@ -632,9 +632,10 @@ Use mutable feature directories as the default for packages, types, triggers,
 procedures, functions, and views. Review successive edits in Git, then select
 each final definition once. Keep required one-time migrations in the release's
 explicit dependency order. `feature capture` reads DEV and `feature diff` is
-offline. Guarded DEV apply from feature files is planned. The
-[feature guide](docs/feature-releases.md#scope-and-current-dev-workflow)
-describes the current route. Freeze committed inputs once, prepare each target
+offline. Guarded DEV apply prepares a private plan from selected stored
+units or dedicated view files and verifies writes from that plan. The
+[feature guide](docs/feature-releases.md#apply-or-recover-a-dev-plan)
+covers execution and recovery. Freeze committed inputs once, prepare each target
 separately, and promote the same capsule from staging to production.
 
 ```bash
@@ -642,6 +643,8 @@ scripts/team.sh feature init inventory --schema APP_CODE
 scripts/team.sh feature capture inventory --package ITEM_LOOKUP --schema APP_CODE --env dev
 scripts/team.sh feature capture inventory --trigger ORDERS_TRG --schema APP_CODE --env dev
 scripts/team.sh feature diff inventory --schema APP_CODE
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev --unit "PACKAGE BODY:ITEM_LOOKUP" --prepare
+scripts/team.sh feature apply inventory --schema APP_CODE --env dev --execute-plan scratch/feature-dev/prepare-example/plan.json
 scripts/team.sh feature freeze releases/current.json
 scripts/team.sh rollout releases/current.json --env staging --dry-run --capsule <capsule-dir>
 scripts/team.sh rollout releases/current.json --env staging --prepare --capsule <capsule-dir> --report scratch/staging-prepare.json
