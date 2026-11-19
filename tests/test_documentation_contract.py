@@ -102,8 +102,6 @@ class DocumentationContractTests(unittest.TestCase):
         readme = contents[ROOT / "README.md"]
         for command in (
             "doctor",
-            "export 100",
-            "publish 100",
             "check-conflicts",
             "team.sh migrate",
             "team.sh revise",
@@ -130,17 +128,23 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, readme)
-        self.assertIn("After a successful import", readme)
-        self.assertIn("normalized APEXlang source", readme)
-        self.assertIn("second re-export has the same normalized form", readme)
-        self.assertIn("--strict-bytes", readme)
-        self.assertIn("--no-restore-automations", readme)
-        self.assertIn("leaves the old baseline in place", readme)
         self.assertIn("commands such as `SET DEFINE`", readme)
-        self.assertIn("APEX does not stamp `last_updated_on` while importing", readme)
         self.assertIn("`CREATE MLE MODULE`", readme)
-        self.assertIn("[ASHARIF-2026-09-26r001]", readme)
-        self.assertIn("Commit the stamped", readme)
+        # The export and publish rules moved out of the README workflow sections (section 9 of the getting started
+        # guide and publish-rules.md own them now), so these assertions read those documents.
+        publish_rules = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
+        getting_started = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+        self.assertIn("observed as `ACTIVE` before import", publish_rules)
+        self.assertIn("--strict-bytes", publish_rules)
+        self.assertIn("--no-restore-automations", publish_rules)
+        self.assertIn("accept normalized `.apx` source", publish_rules)
+        self.assertIn("requires a second export with the same normalized source", publish_rules)
+        self.assertIn("fails and leaves the old baseline in place", publish_rules)
+        self.assertIn("APEX does not stamp `last_updated_on` while importing", publish_rules)
+        self.assertIn("[ASHARIF-2026-09-26r001]", publish_rules)
+        self.assertIn("Commit the stamped", getting_started)
+        self.assertIn("scripts/team.sh export 100", getting_started)
+        self.assertIn("scripts/team.sh publish 100 --env dev", getting_started)
         self.assertIn("DEVELOPER_NAME", contents[ROOT / "AGENTS.md"])
         self.assertIn("scripts/team.sh upgrade-template", readme)
         self.assertIn("AGENTS.project.md", readme)

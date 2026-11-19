@@ -416,9 +416,18 @@ There are two ways to change an app. Use whichever suits the task.
 
 ```bash
 scripts/team.sh export 100
+git status --short --untracked-files=all -- apps/DEMO/100/
 git diff apps/DEMO/100/
 git add apps/ && git commit -m "Change the dashboard title"
 ```
+
+Review the APEXlang changes before you commit. The export captures the current
+Builder state; it does not import the app back into Builder. It refuses to overwrite
+uncommitted local files, so commit or stash your own edits before you export. It
+exports into `scratch/` first, checks SQLcl's result and the Builder revision, and only
+then replaces the local source mirror, keeping your authored deployment descriptors.
+[Publish rules](publish-rules.md#how-the-check-works) explain the baseline that the
+Builder timestamp is compared against.
 
 ### B. Files first
 
