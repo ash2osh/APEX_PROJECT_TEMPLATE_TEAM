@@ -47,7 +47,7 @@ These lines come from `scripts/team.sh verify-local` (step 8 of the getting star
 | `missing DEV deployment descriptor: <path>` | The app folder has no `deployments/dev.json`. | Copy `apps/templates/deployments/dev.json` into the app's `deployments/` folder and set the workspace, app ID and parsing schema (step 8). |
 | `.template-lock.json is required in a downstream project` | The project has no template lock, so upgrades cannot tell your changes from template files. | Create it as the [post-clone cleanup](GETTING_STARTED.md#post-clone-cleanup) section describes. |
 | `[ATTENTION] oracle_skills:` with a message that the refresh is due, or the registry is missing | The SQLcl Oracle skills are missing or more than seven days old. | Run `sql /nolog`, then `skills sync -force`, then run `scripts/team.sh verify-local` again. |
-| `[ATTENTION] template_drift:` with `customized` or `missing` counts, or a lock comparison that is `unknown` | Template-owned files differ from the lock, a file is missing, or there is no lock to compare against. | Run `scripts/team.sh template-status` to list the files. Restore a missing template file; keep a customized file only when the change is deliberate. |
+| `[ATTENTION] template_drift:` with a non-zero `missing` count, or a lock comparison that is `unknown` | A template-owned file named in the lock is missing, or there is no readable lock to compare against. A file you customized is not a problem: it is only counted and stays upgradeable. | Run `scripts/team.sh template-status` to list the files, then restore the missing template file. |
 
 ## Export and backup
 
