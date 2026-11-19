@@ -37,6 +37,18 @@ for migration rules see [migration-rules.md](migration-rules.md).
 | `team error: TEAM_BASH is set but is not a file: <path>` from `scripts/team.ps1` | The `TEAM_BASH` environment variable names a file that does not exist (a stale or misspelled override). `team.ps1` trusts it before it looks for Git Bash anywhere else. | Point it at Git for Windows' `bash.exe` (for example `$env:TEAM_BASH = 'C:\Program Files\Git\bin\bash.exe'`) or drop it for this session with `Remove-Item Env:TEAM_BASH`; remove it from your profile or the system settings if it is set there. |
 | `Bash is required for '<script>.sh'` from `scripts/team.ps1` on Windows | The migration, comparison and deployment helpers run in Bash. `team.ps1` looks for Git Bash next to `git.exe` and in Git for Windows' usual install folders, and skips the WSL `bash.exe`, which cannot run a Windows path. None was found. | Install Git for Windows, or set `TEAM_BASH` to the full path of its `bash.exe` (for example `$env:TEAM_BASH = 'C:\Program Files\Git\bin\bash.exe'`), or run `scripts/team.sh` from Git Bash. |
 
+## Local readiness
+
+These lines come from `scripts/team.sh verify-local` (step 8 of the getting started guide). A `FAIL` line makes the command exit 2; an `ATTENTION` line with no `FAIL` makes it exit 1.
+
+| You see | What it means | What to do |
+| --- | --- | --- |
+| `[FAIL] configured_app_<id>: configured application <id> directory not found under apps/` | `APEX_APP_ID` lists an app you have not exported. Before your first export every configured app shows this. | Run `scripts/team.sh export <id>`, or remove `<id>` from `APEX_APP_ID` if you do not use it. |
+| `missing DEV deployment descriptor: <path>` | The app folder has no `deployments/dev.json`. | Copy `apps/templates/deployments/dev.json` into the app's `deployments/` folder and set the workspace, app ID and parsing schema (step 8). |
+| `.template-lock.json is required in a downstream project` | The project has no template lock, so upgrades cannot tell your changes from template files. | Create it as the [post-clone cleanup](GETTING_STARTED.md#post-clone-cleanup) section describes. |
+| `[ATTENTION] oracle_skills:` with a message that the refresh is due, or the registry is missing | The SQLcl Oracle skills are missing or more than seven days old. | Run `sql /nolog`, then `skills sync -force`, then run `scripts/team.sh verify-local` again. |
+| `[ATTENTION] template_drift:` with `customized` or `missing` counts, or a lock comparison that is `unknown` | Template-owned files differ from the lock, a file is missing, or there is no lock to compare against. | Run `scripts/team.sh template-status` to list the files. Restore a missing template file; keep a customized file only when the change is deliberate. |
+
 ## Export and backup
 
 | You see | What it means | What to do |

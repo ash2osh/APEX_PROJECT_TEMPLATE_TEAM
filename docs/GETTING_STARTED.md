@@ -284,15 +284,21 @@ It only reads `.env`: it never connects to a database and never starts SQLcl. A
 `CODE_SCHEMA` that the migration profile does not list. The schema-owner rules
 are in [migration-rules.md](migration-rules.md#environment-targets).
 
-## 7. Check local readiness and database connection
+## 7. Check configuration and the database connection
 
-First check local configuration, lock, app descriptors and native Oracle skills offline:
+Check which schema, connection and login each operation uses. This command reads
+`.env` only and never connects:
 
 ```bash
-scripts/team.sh verify-local
+scripts/team.sh targets
 ```
 
-Then check the DEV database connection with `doctor`:
+The `dev` rows should read `resolved` with your schema, connection and expected
+login. The `staging` and `prod` rows read `not configured` until you set those
+profiles, which is expected for a new project. A `REFUSED` row names a setting to fix.
+
+Then check the DEV database connection with `doctor`, the one command in this step
+that connects:
 
 ```bash
 scripts/team.sh doctor
@@ -308,8 +314,12 @@ APEX_DOCTOR_VERIFIED:DEMO
 Doctor checks passed for the configured DEV connection.
 ```
 
-Both commands only read. If either fails, [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists
-each message and what to do.
+If `doctor` fails, [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists each message and what
+to do.
+
+`verify-local` checks the whole project, so you run it at the end of step 8, after the
+exports. If you run it earlier, it reports each configured application as missing
+(`directory not found`). That is expected before the first export.
 
 
 After validation, review your root `.env` and version it in your own downstream
@@ -318,13 +328,19 @@ names in it; credentials stay in SQLcl's secure store. The root `.env` is
 available to Git, while nested `.env` files and `.env.*` variants are ignored.
 Template upgrades preserve your `.env`, including when it is tracked.
 
-## 8. Export your first app
+## 8. Export your apps
+
+Export every app ID listed in `APEX_APP_ID`. The example lists `100,200`; use your own
+IDs, or remove the IDs you do not use from `APEX_APP_ID` first. `verify-local` expects
+a folder for each listed ID, so exporting only some of them leaves the rest reported as
+missing.
 
 ```bash
 scripts/team.sh export 100
+scripts/team.sh export 200
 ```
 
-Use one of your own app IDs. You should see lines like:
+You should see lines like:
 
 ```text
 Exporting Workspace DEMO - application 100:Employee Self Service
@@ -345,20 +361,15 @@ apps/DEMO/100/
 └── apex-team-export.json  records when the export was taken (used by publish)
 ```
 
-Commit the result:
-
-```bash
-git add apps/
-git commit -m "Export app 100"
-```
-
 ### Tell the template where the app deploys
 
-Publishing needs a small descriptor that names the workspace, the app ID, and
-the parsing schema. Copy the example and edit the three values:
+Publishing needs a small descriptor for each app that names the workspace, the app ID,
+and the parsing schema. For each app folder, copy the example and edit the three values
+(for app 200, set `"id": 200`):
 
 ```bash
 cp apps/templates/deployments/dev.json apps/DEMO/100/deployments/dev.json
+cp apps/templates/deployments/dev.json apps/DEMO/200/deployments/dev.json
 ```
 
 ```json
@@ -372,6 +383,26 @@ cp apps/templates/deployments/dev.json apps/DEMO/100/deployments/dev.json
 ```
 
 The same folder can hold `staging.json` and `prod.json` later.
+
+### Check the whole project
+
+Once every configured app is exported and has its descriptor, run:
+
+```bash
+scripts/team.sh verify-local
+```
+
+Expect PASS for every configured application. If a line says `ATTENTION` or `FAIL`,
+read its message: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#local-readiness) lists the fix
+for each one. Exit status 0 means every required check passes, 1 means attention without
+a failure, and 2 means a failed check.
+
+Commit the exports and descriptors together:
+
+```bash
+git add apps/
+git commit -m "Export apps 100 and 200"
+```
 
 ## 9. Make a change
 

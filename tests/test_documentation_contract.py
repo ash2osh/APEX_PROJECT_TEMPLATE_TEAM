@@ -595,6 +595,30 @@ class GuideContractTests(unittest.TestCase):
         self.assertIn("scripts/team.sh targets", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
         self.assertIn("`new-migration --source` reads the code profile", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
 
+    def test_getting_started_runs_verify_local_after_the_exports_not_before_the_first_one(self) -> None:
+        # verify-local reports every configured app with no folder as a failure until it is exported. A new developer
+        # therefore runs it at the end of step 8, after every listed app is exported, and step 7 checks only the
+        # configuration and the connection.
+        text = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+
+        def step(number: int) -> str:
+            start = text.index(f"\n## {number}. ")
+            return text[start:text.index("\n## ", start + 1)]
+
+        step7, step8 = step(7), step(8)
+        self.assertNotIn("scripts/team.sh verify-local", step7, "step 7 must not run verify-local before the exports")
+        self.assertIn("scripts/team.sh targets", step7)
+        self.assertIn("scripts/team.sh doctor", step7)
+        self.assertIn("Export every app ID listed in `APEX_APP_ID`", step8)
+        verify_at = step8.index("scripts/team.sh verify-local")
+        self.assertEqual(-1, step8.find("scripts/team.sh verify-local", verify_at + 1))
+        last_export = max(match.start() for match in re.finditer(r"scripts/team\.sh export \d+", step8))
+        self.assertLess(last_export, verify_at, "verify-local must follow every export in step 8")
+        self.assertLess(verify_at, step8.index("git add apps/"), "the exports and descriptors are committed after verify-local")
+        self.assertIn("TROUBLESHOOTING.md#local-readiness", step8)
+        troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        self.assertIn("## Local readiness", troubleshooting)
+
 
 if __name__ == "__main__":
     unittest.main()
