@@ -787,6 +787,45 @@ def _new_table_order(names: Sequence[str], constraints: Mapping) -> list[str]:
     return ordered
 
 
+_TRUE_FLAG_VALUES = frozenset({"Y", "YES", "TRUE"})
+_FALSE_FLAG_VALUES = frozenset({"N", "NO", "FALSE"})
+
+
+def _column_flag(row: Mapping, key: str, where: str) -> bool | None:
+    """Read a catalog column flag written as Y/N, YES/NO or TRUE/FALSE; None when the producer did not write it.
+
+    An unrecognised value is refused rather than guessed.
+    """
+    value = row.get(key)
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in _TRUE_FLAG_VALUES:
+        return True
+    if text in _FALSE_FLAG_VALUES:
+        return False
+    raise baseline.BaselineError(f"{where} has an unrecognised {key} flag: {value!r}")
+
+
+def _column_kind(row: Mapping) -> str:
+    """Classify a source column for a table that exists in both schemas: 'system', 'virtual', 'hidden' or 'ordinary'.
+
+    'system' is a hidden column the user did not generate (for example SYS_NC...$ behind a function-based index). The
+    object that owns it recreates it, so the generator skips it. A hidden column whose user_generated flag is missing
+    is 'hidden', not 'system': it cannot be shown to be system-generated, so it is refused.
+    """
+    where = f"column {row.get('table_name')}.{row.get('name')}"
+    hidden = _column_flag(row, "hidden", where) is True
+    user_generated = _column_flag(row, "user_generated", where)
+    if hidden and user_generated is False:
+        return "system"
+    if _column_flag(row, "virtual", where) is True:
+        return "virtual"
+    if hidden:
+        return "hidden"
+    return "ordinary"
+
+
 def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, source: Mapping, target: Mapping, snapshot: SchemaSnapshot) -> tuple[dict[str, str], dict]:
     left, right = source["sections"], target["sections"]
     source_tables = {row["name"]: row for row in left.get("tables", []) if baseline._schema_filter(config, source_schema, row.get("name", ""))}
@@ -827,8 +866,19 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         table_name, column_name = key
         if table_name not in target_tables:
             continue
+        kind = _column_kind(row)
+        if kind == "system":
+            continue
         existing = target_columns.get(key)
         if existing is None:
+            if kind == "virtual":
+                raise baseline.BaselineError(
+                    f"virtual column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture its expression)"
+                )
+            if kind == "hidden":
+                raise baseline.BaselineError(
+                    f"hidden column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture how Oracle represents it)"
+                )
             column_ddl = _column_sql(row)
             identity = source_identity.get(key)
             if identity is not None:
@@ -853,6 +903,9 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             changed = [field for field in type_fields if row.get(field) != existing.get(field)]
             if changed:
                 raise baseline.BaselineError(f"column type changes need a reviewed data migration: {table_name}.{column_name} ({', '.join(changed)})")
+            where = f"column {table_name}.{column_name}"
+            if (_column_flag(row, "virtual", where) is True) != (_column_flag(existing, "virtual", where) is True):
+                raise baseline.BaselineError(f"column virtual/stored change needs a reviewed data migration: {table_name}.{column_name}")
             if row.get("nullable") == "N" and existing.get("nullable") == "Y":
                 to_make_not_null.add(key)
                 preconditions.append(_count_check(

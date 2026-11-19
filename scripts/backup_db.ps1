@@ -243,6 +243,24 @@ try {
         # replace_mirror, which refuses a dirty mirror.
         Copy-Item -LiteralPath $liveOrds -Destination (Join-Path $stagingPath "database/$schema/ords") -Recurse
       }
+      # The whole schema mirror is replaced, so a scope this run did not export must be carried over from the committed
+      # mirror, or it is deleted. Only the outputs of the scope that did not run are copied: tables/ and
+      # manifest-tables.txt, or the code directories and manifest-code.txt (scope_directories in backup_db.sh). Only
+      # what the committed mirror holds is copied. A scope that ran is replaced whole, so its stale files still go.
+      $liveMirror = Join-Path $repoRoot "database/$schema"
+      $scopesRun = @($backupTargets | Where-Object { $_.Schema -ceq $schema } | ForEach-Object { $_.Scope })
+      foreach ($scopeName in @("tables", "code")) {
+        if ($scopesRun -ccontains $scopeName) { continue }
+        foreach ($entry in @(@(Get-ScopeDirectory -Scope $scopeName) + "manifest-$scopeName.txt")) {
+          $liveEntry = Join-Path $liveMirror $entry
+          $stagedEntry = Join-Path $stagingPath "database/$schema/$entry"
+          if (Test-Path -LiteralPath $liveEntry -PathType Container) {
+            Copy-Item -LiteralPath $liveEntry -Destination $stagedEntry -Recurse
+          } elseif (Test-Path -LiteralPath $liveEntry -PathType Leaf) {
+            Copy-Item -LiteralPath $liveEntry -Destination $stagedEntry
+          }
+        }
+      }
       # A scope that produced no objects of one type leaves an empty directory
       # that would otherwise be installed. Prune after verification. Descending
       # order empties the deepest directories first, so a parent left empty by

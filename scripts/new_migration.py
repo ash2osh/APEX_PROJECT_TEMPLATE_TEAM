@@ -43,7 +43,7 @@ from .baseline import (
     _sql_literal,
 )
 from .compare_schema import CatalogError
-from .db_targets import TargetResolutionError, resolve_target
+from .db_targets import TargetResolutionError, configured_migration_schemas, resolve_target
 from .migration_manifest import FOLDER_RE, MigrationManifestError, _migration_directories, load_migration
 from .path_utils import relative_to_root
 from .sqlcl_session import SqlclError
@@ -166,8 +166,16 @@ def create(
         raise NewMigrationError(f"a migration named {name} already exists; edit it or use scripts/team.sh revise")
     try:
         schema = resolve_target(environ, "dev", "read", schema=schema).schema
+        migration_schemas = configured_migration_schemas(environ, "dev")
     except TargetResolutionError as error:
         raise NewMigrationError(str(error)) from error
+    # migrate applies a folder only as a MIGRATION_SCHEMA owner, so refuse a code owner it would reject, before DEV is read.
+    if schema not in migration_schemas:
+        raise NewMigrationError(
+            f"schema {schema} is not a migration schema for dev: migrations for this project run as "
+            f"MIGRATION_SCHEMA {', '.join(migration_schemas)}; use a --schema listed in both CODE_SCHEMA and "
+            "MIGRATION_SCHEMA, or review the profile with scripts/team.sh targets"
+        )
     started = now()
     read_at = started.strftime("%Y-%m-%d %H:%M:%S UTC")
     scratch = root / "scratch" / "new-migration" / started.strftime("%Y%m%dT%H%M%S%fZ")
