@@ -86,9 +86,12 @@ use `scripts/team.sh app-unlock <id> --env dev` to release only your own lock;
 coordinate with the owner if another developer holds it. The PowerShell
 commands have the same behavior. A verified `app-unlock` also closes earlier `held`
 records of the same app, workspace, developer and target, so they stop showing as
-unresolved recovery evidence. Records it cannot match exactly (another developer,
-workspace, app or target, an `acquisition-unknown` or `release-unknown` record, or an
-unreadable or symlinked record) stay visible. Keep `.sync-state/application-locks/` recovery
+unresolved recovery evidence. It inspects both `run.*` and `publish.*` records in the
+app's lock directory, and only each record's `recovery.json` status changes. A record
+written after the unlock started (a lock acquired after it began) stays `held`. Records
+it cannot match exactly (another developer, workspace, app or target, an
+`acquisition-unknown` or `release-unknown` record, or an unreadable or symlinked record)
+stay visible. Keep `.sync-state/application-locks/` recovery
 notes until the incident is reconciled.
 
 Raw SQLcl imports bypass these native locks. The API also permits same-account

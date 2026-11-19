@@ -1803,5 +1803,160 @@ class ConservativeOwnershipUpgradeTests(unittest.TestCase):
         self.assertEqual((self.project / "AGENTS.md.template-new").read_text(encoding="utf-8"), "upstream rules v2\n")
 
 
+SYNTHETIC_CREDENTIAL_URL = "https://synthuser:synthsecret@example.invalid/owner/repo.git"
+
+
+class SourceCredentialTests(unittest.TestCase):
+    """Template sources must not carry credentials into the lock, errors or git arguments."""
+
+    def test_allowed_source_forms_are_accepted(self) -> None:
+        for source in (
+            "ssh://git@github.com/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "https://github.com/owner/repo.git",
+            "/home/dev/template",
+            "../template",
+        ):
+            with self.subTest(source=source):
+                upgrade_engine._reject_credentials(source)
+
+    def test_credential_forms_are_refused_without_echoing_the_secret(self) -> None:
+        for source in (
+            SYNTHETIC_CREDENTIAL_URL,
+            "https://synthuser@example.invalid/owner/repo.git",
+            "http://synthuser@example.invalid/owner/repo.git",
+            "https://:synthsecret@example.invalid/owner/repo.git",
+            "ssh://synthuser:synthsecret@example.invalid/owner/repo.git",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+                    upgrade_engine._reject_credentials(source)
+                self.assertIn("template source must not contain credentials", str(caught.exception))
+                self.assertNotIn("synthsecret", str(caught.exception))
+
+    def test_lock_bytes_refuses_a_credential_upstream(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+            upgrade_engine._lock_bytes(SYNTHETIC_CREDENTIAL_URL, "a" * 40, {"AGENTS.md": "b" * 64})
+        self.assertIn("remove it from .template-lock.json", str(caught.exception))
+        self.assertNotIn("synthsecret", str(caught.exception))
+        with self.assertRaises(upgrade_engine.UpgradeError):
+            upgrade_engine._lock_bytes("https://synthuser@example.invalid/owner/repo.git", "a" * 40, {})
+
+    def test_lock_read_refuses_a_credential_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = {"schemaVersion": 1, "upstream": SYNTHETIC_CREDENTIAL_URL, "commit": "a" * 40,
+                    "files": {"AGENTS.md": "b" * 64}}
+            (root / ".template-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+            with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+                upgrade_engine.read_lock(root)
+            self.assertNotIn("synthsecret", str(caught.exception))
+
+    def test_run_git_error_text_redacts_the_userinfo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+                upgrade_engine.run_git(
+                    root, "clone", "--quiet", "--", "https://synthuser:synthsecret@127.0.0.1:9/x.git", str(root / "dest")
+                )
+            self.assertNotIn("synthsecret", str(caught.exception))
+            self.assertNotIn("synthuser", str(caught.exception))
+            self.assertIn("***@", str(caught.exception))
+
+    def test_cli_refuses_credential_source_before_any_git_command(self) -> None:
+        import contextlib
+        import io
+
+        calls: list[tuple] = []
+
+        def forbidden_git(*args: str) -> str:
+            calls.append(args)
+            raise AssertionError("git must not run for a credential source")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(upgrade_engine, "run_git", side_effect=forbidden_git):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    code = upgrade_engine.main(
+                        ["--project-root", temporary, "--source", SYNTHETIC_CREDENTIAL_URL, "--dry-run"]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("template source must not contain credentials", stderr.getvalue())
+        self.assertNotIn("synthsecret", stderr.getvalue())
+        self.assertEqual(calls, [])
+
+
+class LockReadStateTests(unittest.TestCase):
+    """A lock read from disk must record an installed commit and at least one file."""
+
+    def read_payload(self, payload: dict) -> dict:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".template-lock.json").write_text(json.dumps(payload), encoding="utf-8")
+            return upgrade_engine.read_lock(root)
+
+    def test_empty_files_lock_is_refused_on_read(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+            self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                               "commit": "a" * 40, "files": {}})
+        self.assertIn("must record the installed commit and at least one installed file", str(caught.exception))
+
+    def test_missing_commit_is_refused_on_read(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+            self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                               "files": {"AGENTS.md": "b" * 64}})
+        self.assertIn("must record the installed commit and at least one installed file", str(caught.exception))
+
+    def test_non_hex_commit_is_refused_on_read(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError):
+            self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                               "commit": "main", "files": {"AGENTS.md": "b" * 64}})
+
+    def test_normal_lock_still_reads(self) -> None:
+        lock = self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                                  "commit": "a" * 40, "files": {"AGENTS.md": "b" * 64}})
+        self.assertEqual(lock["commit"], "a" * 40)
+
+    def test_absent_lock_is_still_the_internal_first_install_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertEqual(upgrade_engine.read_lock(Path(temporary)), {"files": {}})
+
+
+class ProjectDataProtectionTests(unittest.TestCase):
+    """features/ and releases/ hold downstream feature and release data, as in the 26.1 engine."""
+
+    def test_feature_and_release_data_is_protected(self) -> None:
+        for path in (
+            "features/dispatch/APP_CODE/packages/dispatch.pks.sql",
+            "features/dispatch/APP_CODE/checks.json",
+            "releases/current.json",
+            "releases/.local-state.json",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(upgrade_engine.protected_project_path(path))
+
+    def test_placeholder_keep_files_are_not_protected(self) -> None:
+        for path in ("features/.gitkeep", "releases/.gitkeep"):
+            with self.subTest(path=path):
+                self.assertFalse(upgrade_engine.protected_project_path(path))
+
+    def test_samples_cover_feature_and_release_data(self) -> None:
+        for sample in ("features/example/APP_CODE/packages/example.pks.sql", "releases/current.json",
+                       "releases/.local-state.json"):
+            with self.subTest(sample=sample):
+                self.assertIn(sample, upgrade_engine.PROTECTED_SAMPLES)
+                self.assertTrue(upgrade_engine.protected_project_path(sample))
+
+    def test_manifest_cannot_assign_feature_or_release_data_to_the_template(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pattern in ("features/**", "releases/**"):
+                with self.subTest(pattern=pattern):
+                    manifest = {**MANIFEST, "templateOwned": [pattern]}
+                    (root / "template-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                    with self.assertRaises(upgrade_engine.UpgradeError):
+                        upgrade_engine.load_manifest(root)
+
+
 if __name__ == "__main__":
     unittest.main()

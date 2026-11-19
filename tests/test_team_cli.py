@@ -2330,5 +2330,50 @@ exit 17
             self.assertFalse((project / ".template-lock.json").exists())
 
 
+class TeamPs1EnvironmentTests(unittest.TestCase):
+    """team.ps1 must leave the caller's PROJECT_SCHEMA as it found it, in a persistent session."""
+
+    def run_session(self, setup: str, command: str) -> str:
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if not pwsh:
+            self.skipTest("PowerShell 7 is not installed")
+        script = (
+            f"{setup}; & ./scripts/team.ps1 {command} | Out-Null; "
+            "if ($null -eq $env:PROJECT_SCHEMA) { 'UNSET' } else { $env:PROJECT_SCHEMA }"
+        )
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-Command", script],
+            cwd=ROOT,
+            env=dict(os.environ, PROJECT_ENV_FILE="/no/such/team-targets.env"),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+        )
+        self.assertNotIn("Traceback", result.stderr)
+        return result.stdout.strip().splitlines()[-1]
+
+    def test_targets_keeps_an_inherited_schema_selection(self) -> None:
+        self.assertEqual(self.run_session("$env:PROJECT_SCHEMA = 'KEEP'", "targets --help"), "KEEP")
+
+    def test_targets_leaves_an_unset_schema_unset(self) -> None:
+        self.assertEqual(
+            self.run_session("Remove-Item -LiteralPath Env:PROJECT_SCHEMA -ErrorAction SilentlyContinue", "targets --help"),
+            "UNSET",
+        )
+
+    def test_refused_schema_argument_does_not_leak_into_the_session(self) -> None:
+        # The identifier check refuses before any command dispatches, so nothing connects.
+        self.assertEqual(
+            self.run_session("$env:PROJECT_SCHEMA = 'KEEP'", "doctor --schema lowercase_name"), "KEEP"
+        )
+        self.assertEqual(
+            self.run_session("Remove-Item -LiteralPath Env:PROJECT_SCHEMA -ErrorAction SilentlyContinue",
+                             "doctor --schema lowercase_name"),
+            "UNSET",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

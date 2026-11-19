@@ -86,9 +86,11 @@ def _local_file_state(repo_root: Path, relative: str, expected: str) -> dict:
     if pair is None:
         status = "removed-by-cleanup" if relative.startswith(CLEANUP_PREFIXES) else "missing"
         return {"path": relative, "status": status}
+    # Older locks recorded the raw digest, which the upgrade planner also accepts;
+    # either digest of the same bytes counts as the locked version.
     return {
         "path": relative,
-        "status": "matches-lock" if pair[1] == expected else "customized",
+        "status": "matches-lock" if expected in pair else "customized",
     }
 
 

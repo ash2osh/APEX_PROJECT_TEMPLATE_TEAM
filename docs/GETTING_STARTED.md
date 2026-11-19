@@ -174,7 +174,9 @@ sweeps (never delete a file simply because it lives under `tests/` or
 
 ```bash
 # Example: selectively remove only inherited template-maintenance CI and tests if not needed downstream
-git rm --ignore-unmatch .github/workflows/*.yml .github/dependabot.yml
+# (`git ls-files .github` lists what the template ships; a project's own workflows, for example a deployment
+# workflow, must be listed and kept before anything is removed. Never remove by glob.)
+git rm --ignore-unmatch .github/workflows/template-checks.yml .github/dependabot.yml
 # The shared-core stamp belongs to the template repository's shared-core check. A project created from the
 # template inherits it, but it is not part of a downstream project; upgrade-template never ships it.
 git rm --ignore-unmatch .core-stamp.json
