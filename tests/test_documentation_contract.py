@@ -576,6 +576,25 @@ class GuideContractTests(unittest.TestCase):
         self.assertIn("Imports to shared DEV only", readme)
         self.assertIn("`scripts/team.sh publish` targets DEV only", getting_started)
 
+    def test_targets_report_is_in_both_full_usage_screens_and_the_guides_but_not_everyday(self) -> None:
+        # `targets` is the offline report of which profile each operation uses. It belongs in the full usage of both
+        # wrappers, in the README command reference and in the guides that explain the profiles, and not in the
+        # short "Everyday commands" list.
+        for script in ("team.sh", "team.ps1"):
+            with self.subTest(script=script):
+                self.assertIn("targets [--format text|json]", (ROOT / "scripts" / script).read_text(encoding="utf-8"))
+        everyday = subprocess.run(
+            [BASH, str(ROOT / "scripts" / "team.sh")], capture_output=True, text=True, check=True
+        ).stdout
+        self.assertIsNone(re.search(r"(?m)^  targets\b", everyday), "targets must not be an everyday command")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("scripts/team.sh targets [--format text\\|json]", readme)
+        getting_started = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+        self.assertIn("scripts/team.sh targets", getting_started)
+        self.assertIn("never connects to a database and never starts SQLcl", getting_started)
+        self.assertIn("scripts/team.sh targets", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
+        self.assertIn("`new-migration --source` reads the code profile", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

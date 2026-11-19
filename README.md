@@ -849,6 +849,7 @@ unknown. Version and compatibility do not prove feature privileges or availabili
 | `scripts/team.sh app-unlock <id> --env dev` | Release only the configured developer's application lock after reconciliation. |
 | `scripts/team.sh upgrade-apexlang <id> --env dev --mode builder\|files` | Explicitly convert clean app source to canonical 26.2; see [source upgrade](docs/apexlang-upgrade.md). |
 | `scripts/team.sh doctor` | Validate `.env`, check the DEV SQLcl identity and report the detected database version and `COMPATIBLE`. |
+| `scripts/team.sh targets [--format text\|json]` | Show, offline and read-only, the schema, SQLcl connection and expected login that each operation uses; a split owner appears as a `REFUSED` row where the command would refuse. Never connects and never starts SQLcl. |
 | `scripts/team.sh dev-test --env dev --schema NAME --plan\|--run` | Plan or run the six built-in DEV checks, or an explicitly selected project suite; fixtures are retained by default. See [DEV test runner](docs/dev-test.md). |
 | `scripts/team.sh dev-test --report <run-id> [--format text\|json\|markdown]` | Render saved evidence without connecting to a database. |
 | `scripts/team.sh dev-test --cleanup <run-id>` | Explicitly clean supported recorded artifacts; project suites without a cleanup contract remain manual. |

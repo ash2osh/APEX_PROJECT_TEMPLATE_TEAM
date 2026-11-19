@@ -52,6 +52,7 @@ Usage: scripts/team.ps1 <command> [arguments]
 
 Commands:
   doctor                                      Validate .env and the DEV SQLcl identities (ORDS too, when configured)
+  targets [--format text|json]                Show the schema, connection and login each operation uses (offline; never connects)
   export <app_id>                             Export one numeric APEX app from DEV
   upgrade-apexlang <app_id> --env dev --mode builder|files
                                               Convert source explicitly to canonical APEX 26.2
@@ -258,7 +259,7 @@ if ($Command -in @("--help", "-h")) {
 
 # --schema NAME is the one selection channel: strip it and set PROJECT_SCHEMA so
 # every child script's loader narrows to that schema.
-if ($Command -notin @("upgrade-template", "verify-local", "template-status", "migration-plan", "archive-migrations", "dev-test", "skills", "mcp", "feature", "reconcile-migration")) {
+if ($Command -notin @("upgrade-template", "verify-local", "template-status", "targets", "migration-plan", "archive-migrations", "dev-test", "skills", "mcp", "feature", "reconcile-migration")) {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
@@ -664,6 +665,38 @@ try {
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "workflow_skills.py") --repo-root $repoRoot @Arguments
       Exit-Team $LASTEXITCODE
+    }
+    "targets" {
+      # Offline and read-only: the report reads the loaded .env names and never connects or starts SQLcl.
+      # Help is argparse-only and must work without a configured .env, as in compare-env.
+      $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      # Resolve a relative PROJECT_ENV_FILE as load_env.ps1 does: the caller's directory first, then the repository root.
+      $targetsEnvFile = if ([string]::IsNullOrWhiteSpace($env:PROJECT_ENV_FILE)) { Join-Path $repoRoot ".env" } else { $env:PROJECT_ENV_FILE }
+      if (-not [System.IO.Path]::IsPathRooted($targetsEnvFile) -and -not (Test-Path -LiteralPath $targetsEnvFile -PathType Leaf)) {
+        $targetsEnvFile = Join-Path $repoRoot $targetsEnvFile
+      }
+      $targetsHelp = ($Arguments -ccontains "--help" -or $Arguments -ccontains "-h")
+      if (-not $targetsHelp -and (Test-Path -LiteralPath $targetsEnvFile -PathType Leaf)) {
+        . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $env:PROJECT_ENV_FILE
+      }
+      . (Join-Path $PSScriptRoot "resolve_python.ps1")
+      $python = Resolve-TeamPython
+      if ($null -eq $python) { Fail "Python 3.10 or newer is required to show the configured targets (python3, python or py -3)" }
+      # Extra or unknown arguments are refused by the module's parser (exit 2), as template-status refuses them.
+      Push-Location -LiteralPath $repoRoot
+      try {
+        if ($targetsHelp -or (Test-Path -LiteralPath $targetsEnvFile -PathType Leaf)) {
+          & $python.Path @($python.Prefix) -m scripts.show_targets @Arguments
+        } else {
+          # No .env is not an error here, as for template-status: every row reports "not configured". The module reads
+          # the process environment, so an empty mapping stops a shell variable such as CODE_SCHEMA from appearing as configuration.
+          & $python.Path @($python.Prefix) -c 'import sys; from scripts.show_targets import main; raise SystemExit(main(sys.argv[1:], environ={}))' @Arguments
+        }
+        $targetsStatus = $LASTEXITCODE
+      } finally {
+        Pop-Location
+      }
+      Exit-Team $targetsStatus
     }
     "template-status" {
       . (Join-Path $PSScriptRoot "resolve_python.ps1")

@@ -19,6 +19,7 @@ Usage: scripts/team.sh <command> [arguments]
 
 Commands:
   doctor                                      Validate .env and the DEV SQLcl identities (ORDS too, when configured)
+  targets [--format text|json]                Show the schema, connection and login each operation uses (offline; never connects)
   export <app_id>                             Export one numeric APEX app from DEV
   upgrade-apexlang <app_id> --env dev --mode builder|files
                                               Convert source explicitly to canonical APEX 26.2
@@ -140,7 +141,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != targets ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -297,6 +298,32 @@ case "$command_name" in
     else
       printf 'Doctor checks passed for all %s configured DEV schema connections.\n' "$doctor_total"
     fi
+    ;;
+  targets)
+    # Offline and read-only: the report reads the loaded .env names and never connects or starts SQLcl.
+    # Help is argparse-only and must work without a configured .env, as in compare-env.
+    for targets_argument in "$@"; do
+      if [ "$targets_argument" = "--help" ] || [ "$targets_argument" = "-h" ]; then
+        cd "$REPO_ROOT"
+        exec python3 -m scripts.show_targets "$@"
+      fi
+    done
+    targets_env_file="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    # Resolve a relative PROJECT_ENV_FILE as load_env.sh does: the caller's directory first, then the repository root.
+    case "$targets_env_file" in
+      /*|[A-Za-z]:[/\\]*) ;;
+      *) [ -f "$targets_env_file" ] || targets_env_file="$REPO_ROOT/$targets_env_file" ;;
+    esac
+    cd "$REPO_ROOT"
+    if [ -f "$targets_env_file" ]; then
+      # shellcheck source=load_env.sh
+      source "$REPO_ROOT/scripts/load_env.sh" "$targets_env_file"
+      # Extra or unknown arguments are refused by the module's parser (exit 2), as template-status refuses them.
+      exec python3 -m scripts.show_targets "$@"
+    fi
+    # No .env is not an error here, as for template-status: every row reports "not configured". The module reads
+    # os.environ, so an empty mapping stops a shell variable such as CODE_SCHEMA from appearing as configuration.
+    exec python3 -c 'import sys; from scripts.show_targets import main; raise SystemExit(main(sys.argv[1:], environ={}))' "$@"
     ;;
   export)
     [ "$#" -eq 1 ] || fail "usage: scripts/team.sh export <numeric_app_id>"

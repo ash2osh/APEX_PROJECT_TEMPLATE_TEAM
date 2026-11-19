@@ -277,6 +277,13 @@ The example uses the same schema, connection and user for tables, code and APEX,
 which is right for most projects. If you work with an AI assistant, you can ask
 it to run `/init` and it will ask these questions for you.
 
+To see which schema, SQLcl connection and login each operation uses with these
+values, run `scripts/team.sh targets` (or `pwsh -File scripts/team.ps1 targets`).
+It only reads `.env`: it never connects to a database and never starts SQLcl. A
+`REFUSED` row marks a split owner that the command would refuse, for example a
+`CODE_SCHEMA` that the migration profile does not list. The schema-owner rules
+are in [migration-rules.md](migration-rules.md#environment-targets).
+
 ## 7. Check local readiness and database connection
 
 First check local configuration, lock, app descriptors and native Oracle skills offline:
@@ -483,6 +490,7 @@ revision folder instead (`...-r002`). Commit the folder.
 | I want to… | Run |
 | --- | --- |
 | check my setup | `scripts/team.sh doctor` |
+| see which schema, connection and login each operation uses (offline, never connects) | `scripts/team.sh targets` |
 | copy a live app into Git | `scripts/team.sh export <app-id>` |
 | push my edited files to the live app | `scripts/team.sh publish <app-id> --env dev` |
 | refresh the read-only database copy | `scripts/team.sh backup-db` |
