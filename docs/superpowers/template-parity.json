@@ -165,8 +165,8 @@
       "status": "intended",
       "reason": "Each template keeps its own daily walkthrough of the 2026-11-19 review-fix branch; the shared changes are described in both.",
       "blobs": [
-        "ca1f10a706f1b571d636ce1501d6859c52e2705c",
-        "7edcb5f51b5c9308d6d692c3563a8881831e0f4a"
+        "5cde36553f4a0ab03c04c6d27852c0c9e2590693",
+        "80eea6510922cea546df1608430ed3e4085b22a7"
       ]
     },
     "docs/EXAMPLES.md": {
@@ -589,8 +589,8 @@
       "status": "intended",
       "reason": "26.2 reads schema-2 manifests and apexRelease; 26.1 reads schema 1. Follow-up 2026-11-19 (pass 2): the credential refusal and the installed-state check on a lock read from disk are the same on both lines, and both lines now protect features/ and releases/ as project data.",
       "blobs": [
-        "9a42bf0f9b95459de4b18c3015720f3b468e16ce",
-        "eec14b45bc33d712cd641bd651278c2e462b38f8"
+        "eac23770b433e04d2a42620036323e740059d3b0",
+        "010d32c91c3fc4e8e72758edd8a136fd108b812c"
       ]
     },
     "scripts/validate_app_source.py": {
@@ -869,8 +869,8 @@
       "status": "intended",
       "reason": "Tests the schema-2 / apexRelease handling (26.2 only). Follow-up 2026-11-19 (pass 2): the credential, installed-state and redaction tests are on both lines; the features/releases protection tests were already in 26.1 and are now in 26.2.",
       "blobs": [
-        "759d5c6214b0b2ecee0a7735d4fc8fcb59e7d073",
-        "ae326e7b0eba9cb88a21d30f6151c248e2d2f43e"
+        "d0f3196a8c2f6bf425ff9fb2c03a942fa9edf0ea",
+        "19cfd419c1923370f769ca8313e77354ff96056b"
       ]
     },
     "tests/test_verify_local.py": {
