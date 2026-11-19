@@ -867,6 +867,7 @@ def _run_capsule_rollout(
                                 confirm_target=step_target_name if environment == "prod" else confirm_target,
                                 rollout_confirmed_by=report["confirmedBy"],
                                 accept_pauses=yes,
+                                writer_lease=lease,
                             )
                     else:
                         result = rollout.execute_step(

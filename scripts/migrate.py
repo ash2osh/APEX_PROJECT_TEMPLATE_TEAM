@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -50,7 +51,7 @@ from .migration_manifest import (
     validate_receipt,
     verify_loaded_input_hashes,
 )
-from . import terminal_confirm
+from . import release_ownership, terminal_confirm
 from .path_utils import relative_to_root
 from .migration_attempts import MigrationAttemptError, not_started_reason, write_attempt_event
 from .migration_resolution import MigrationResolutionError, read_resolution, reconcile_command
@@ -952,6 +953,7 @@ def apply_batch(
     yes: bool = False,
     expected_db_unique_name: str | None = None,
     rollout_confirmed_by: str | None = None,
+    writer_lease: release_ownership.TargetWriterLease | None = None,
 ) -> int:
     """Freeze, preflight, confirm when needed, apply in input order, and verify.
 
@@ -1038,250 +1040,262 @@ def apply_batch(
                 return 1
             _atomic_write_json(manifest_path, run_manifest)
 
-        # Re-read original bytes after review and before any write.
-        for item in frozen:
-            relative = relative_to_root(item.original.folder, repo_root).as_posix()
-            current = load_migration(repo_root, relative)
-            if current.payload_digest != item.original.payload_digest:
-                raise MigrationApplyError(f"source changed after preflight: {item.original.folder.name}")
-            _verify_staged_payload(item.staged)
+        scope = release_ownership.scope_from_observed_identity(initial_target_identity)
+        if writer_lease is None:
+            ownership = release_ownership.target_writer_lease(repo_root, scope, {
+                "purpose": "migrate", "runId": run_dir.name, "environment": target.environment,
+            })
+        else:
+            if not writer_lease.holds(repo_root, scope):
+                raise MigrationApplyError("the rollout writer lease does not cover the observed migration target")
+            ownership = contextlib.nullcontext()
+        with ownership:
+            # A run that finished while confirmation was open may already own the receipt.
+            _verify_receipts_and_attempts(repo_root, migrations, initial_target_identity)
+            # Re-read original bytes after review and before any write.
+            for item in frozen:
+                relative = relative_to_root(item.original.folder, repo_root).as_posix()
+                current = load_migration(repo_root, relative)
+                if current.payload_digest != item.original.payload_digest:
+                    raise MigrationApplyError(f"source changed after preflight: {item.original.folder.name}")
+                _verify_staged_payload(item.staged)
 
-        for folder_index, item in enumerate(frozen, start=1):
-            original = item.original
-            staged = item.staged
-            # Every folder boundary gets a fresh identity, complete inventory,
-            # generated catalog preflight, and its explicit preconditions.
-            current_inventory, current_snapshot, current_checks, current_preflight = _preflight_snapshot(
-                (original,), target, run_dir / f"boundary-{folder_index:03d}",
-                capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
-            )
-            current_identity = _identity_for_receipt(current_inventory, target)
-            _assert_same_target(initial_target_identity, current_identity)
-            _assert_check_identity(initial_target_identity, current_checks)
-            if current_preflight.exit_code != 0:
-                raise MigrationApplyError(
-                    f"live preflight refused {original.folder.name} at its apply boundary: "
-                    + json.dumps(current_preflight.to_dict(), ensure_ascii=False, sort_keys=True)
+            for folder_index, item in enumerate(frozen, start=1):
+                original = item.original
+                staged = item.staged
+                # Every folder boundary gets a fresh identity, complete inventory,
+                # generated catalog preflight, and its explicit preconditions.
+                current_inventory, current_snapshot, current_checks, current_preflight = _preflight_snapshot(
+                    (original,), target, run_dir / f"boundary-{folder_index:03d}",
+                    capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
                 )
-            _preflight_transport(staged.files, announce=True)
-            record = _receipt_record(original, {"migrations": records})
-            attempt_id = str(uuid.uuid4())
-            pending_event = _attempt_event(
-                repo_root,
-                original,
-                current_identity,
-                run_dir.name,
-                attempt_id,
-                state="pending",
-                write_attempted=True,
-            )
-            write_attempt_event(original.folder, pending_event)
-            record["attemptEventIds"] = [pending_event["eventId"]]
-            record["writeAttempted"] = True
-            record["state"] = "write-attempted"
-            record["writeStartedAt"] = _utc_now()
-            attempted = True
-            run_manifest = {
-                "schemaVersion": 2,
-                "state": "write-attempted",
-                "createdAt": run_manifest["createdAt"],
-                "target": dict(initial_target_identity),
-                "migrations": records,
-                "confirmation": run_manifest.get("confirmation"),
-                "confirmedBy": run_manifest.get("confirmedBy"),
-            }
-            _atomic_write_json(manifest_path, run_manifest)
-
-            folder_run_dir = run_dir / f"apply-{folder_index:03d}"
-            try:
-                apply_evidence = apply_folder_fn(staged, target, folder_run_dir, expected_identity=initial_target_identity)
-            except KeyboardInterrupt:
-                # SQLcl may have finished or stopped part-way: the outcome is unknown.
-                record["state"] = "apply-failed-or-unknown"
-                record["error"] = "interrupted"
-                run_manifest["state"] = "apply-failed-or-unknown"
-                _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(
-                    f"{original.folder.name} was interrupted and may be partially applied; stop and reconcile: "
-                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
-                ) from None
-            except (MigrationApplyError, OSError, RuntimeError) as error:
-                output_path = folder_run_dir / "sqlcl-output.log"
-                try:
-                    output = output_path.read_text(encoding="utf-8", errors="replace") if not output_path.is_symlink() else ""
-                except OSError:
-                    output = ""
-                not_started = not_started_reason(output)
-                if not_started is not None:
-                    record["state"] = "apply-not-started"
-                    record["applyStartClassification"] = not_started
-                    record["error"] = str(error)
-                    no_write_event_installed = False
-                    try:
-                        output_digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
-                        no_write_event = _attempt_event(
-                            repo_root,
-                            original,
-                            current_identity,
-                            run_dir.name,
-                            attempt_id,
-                            state="apply-not-started",
-                            write_attempted=False,
-                            predecessor_event_id=pending_event["eventId"],
-                            evidence=({
-                                "kind": "no-write-sqlcl-output",
-                                "path": relative_to_root(output_path, repo_root).as_posix(),
-                                "sha256": output_digest,
-                                "classification": not_started,
-                            },),
-                        )
-                        write_attempt_event(original.folder, no_write_event)
-                        record["attemptEventIds"].append(no_write_event["eventId"])
-                        no_write_event_installed = True
-                    except (MigrationAttemptError, OSError, ValueError):
-                        # Keep the pending event as the durable lock when proof cannot
-                        # be installed or its output file is unavailable.
-                        no_write_event_installed = False
-                    if no_write_event_installed:
-                        record["writeAttempted"] = False
-                    run_manifest["state"] = "apply-not-started"
-                    _atomic_write_json(manifest_path, run_manifest)
-                    if no_write_event_installed:
-                        raise MigrationApplyError(
-                            f"{original.folder.name} did not start applying: no payload statement started "
-                            f"({not_started}); retry is permitted. {error}. Evidence: {run_dir}"
-                        ) from error
+                current_identity = _identity_for_receipt(current_inventory, target)
+                _assert_same_target(initial_target_identity, current_identity)
+                _assert_check_identity(initial_target_identity, current_checks)
+                if current_preflight.exit_code != 0:
                     raise MigrationApplyError(
-                        f"{original.folder.name} has no durable no-write proof; the pending event keeps it locked. "
-                        f"Reconcile before retrying: {_reconcile_command(repo_root, original, target.environment)}. {error}. Evidence: {run_dir}"
+                        f"live preflight refused {original.folder.name} at its apply boundary: "
+                        + json.dumps(current_preflight.to_dict(), ensure_ascii=False, sort_keys=True)
+                    )
+                _preflight_transport(staged.files, announce=True)
+                record = _receipt_record(original, {"migrations": records})
+                attempt_id = str(uuid.uuid4())
+                pending_event = _attempt_event(
+                    repo_root,
+                    original,
+                    current_identity,
+                    run_dir.name,
+                    attempt_id,
+                    state="pending",
+                    write_attempted=True,
+                )
+                write_attempt_event(original.folder, pending_event)
+                record["attemptEventIds"] = [pending_event["eventId"]]
+                record["writeAttempted"] = True
+                record["state"] = "write-attempted"
+                record["writeStartedAt"] = _utc_now()
+                attempted = True
+                run_manifest = {
+                    "schemaVersion": 2,
+                    "state": "write-attempted",
+                    "createdAt": run_manifest["createdAt"],
+                    "target": dict(initial_target_identity),
+                    "migrations": records,
+                    "confirmation": run_manifest.get("confirmation"),
+                    "confirmedBy": run_manifest.get("confirmedBy"),
+                }
+                _atomic_write_json(manifest_path, run_manifest)
+
+                folder_run_dir = run_dir / f"apply-{folder_index:03d}"
+                try:
+                    apply_evidence = apply_folder_fn(staged, target, folder_run_dir, expected_identity=initial_target_identity)
+                except KeyboardInterrupt:
+                    # SQLcl may have finished or stopped part-way: the outcome is unknown.
+                    record["state"] = "apply-failed-or-unknown"
+                    record["error"] = "interrupted"
+                    run_manifest["state"] = "apply-failed-or-unknown"
+                    _atomic_write_json(manifest_path, run_manifest)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} was interrupted and may be partially applied; stop and reconcile: "
+                        f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                    ) from None
+                except (MigrationApplyError, OSError, RuntimeError) as error:
+                    output_path = folder_run_dir / "sqlcl-output.log"
+                    try:
+                        output = output_path.read_text(encoding="utf-8", errors="replace") if not output_path.is_symlink() else ""
+                    except OSError:
+                        output = ""
+                    not_started = not_started_reason(output)
+                    if not_started is not None:
+                        record["state"] = "apply-not-started"
+                        record["applyStartClassification"] = not_started
+                        record["error"] = str(error)
+                        no_write_event_installed = False
+                        try:
+                            output_digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
+                            no_write_event = _attempt_event(
+                                repo_root,
+                                original,
+                                current_identity,
+                                run_dir.name,
+                                attempt_id,
+                                state="apply-not-started",
+                                write_attempted=False,
+                                predecessor_event_id=pending_event["eventId"],
+                                evidence=({
+                                    "kind": "no-write-sqlcl-output",
+                                    "path": relative_to_root(output_path, repo_root).as_posix(),
+                                    "sha256": output_digest,
+                                    "classification": not_started,
+                                },),
+                            )
+                            write_attempt_event(original.folder, no_write_event)
+                            record["attemptEventIds"].append(no_write_event["eventId"])
+                            no_write_event_installed = True
+                        except (MigrationAttemptError, OSError, ValueError):
+                            # Keep the pending event as the durable lock when proof cannot
+                            # be installed or its output file is unavailable.
+                            no_write_event_installed = False
+                        if no_write_event_installed:
+                            record["writeAttempted"] = False
+                        run_manifest["state"] = "apply-not-started"
+                        _atomic_write_json(manifest_path, run_manifest)
+                        if no_write_event_installed:
+                            raise MigrationApplyError(
+                                f"{original.folder.name} did not start applying: no payload statement started "
+                                f"({not_started}); retry is permitted. {error}. Evidence: {run_dir}"
+                            ) from error
+                        raise MigrationApplyError(
+                            f"{original.folder.name} has no durable no-write proof; the pending event keeps it locked. "
+                            f"Reconcile before retrying: {_reconcile_command(repo_root, original, target.environment)}. {error}. Evidence: {run_dir}"
+                        ) from error
+                    record["state"] = "apply-failed-or-unknown"
+                    record["error"] = str(error)
+                    run_manifest["state"] = "apply-failed-or-unknown"
+                    _atomic_write_json(manifest_path, run_manifest)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} may be partially applied; stop and reconcile: "
+                        f"{_reconcile_command(repo_root, original, target.environment)}. "
+                        f"{error}. Evidence: {run_dir}"
                     ) from error
-                record["state"] = "apply-failed-or-unknown"
-                record["error"] = str(error)
-                run_manifest["state"] = "apply-failed-or-unknown"
+                if apply_evidence.get("committed") is not True:
+                    record["state"] = "apply-failed-or-unknown"
+                    run_manifest["state"] = record["state"]
+                    _atomic_write_json(manifest_path, run_manifest)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} did not provide commit evidence; stop and reconcile: "
+                        f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                    )
+                record["state"] = "committed-unverified"
+                record["applyStartedAt"] = apply_evidence.get("applyStartedAt")
+                record["applyCompletedAt"] = apply_evidence.get("applyCompletedAt")
+                record["applyPayloadDigest"] = apply_evidence.get("payloadDigest")
+                run_manifest["state"] = "committed-unverified"
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(
-                    f"{original.folder.name} may be partially applied; stop and reconcile: "
-                    f"{_reconcile_command(repo_root, original, target.environment)}. "
-                    f"{error}. Evidence: {run_dir}"
-                ) from error
-            if apply_evidence.get("committed") is not True:
-                record["state"] = "apply-failed-or-unknown"
-                run_manifest["state"] = record["state"]
-                _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(
-                    f"{original.folder.name} did not provide commit evidence; stop and reconcile: "
-                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
-                )
-            record["state"] = "committed-unverified"
-            record["applyStartedAt"] = apply_evidence.get("applyStartedAt")
-            record["applyCompletedAt"] = apply_evidence.get("applyCompletedAt")
-            record["applyPayloadDigest"] = apply_evidence.get("payloadDigest")
-            run_manifest["state"] = "committed-unverified"
-            _atomic_write_json(manifest_path, run_manifest)
 
-            apply_identity = apply_evidence.get("identity")
-            if not isinstance(apply_identity, Mapping):
-                raise MigrationApplyError(
-                    f"{original.folder.name} committed, but apply identity is unavailable; reconcile: "
-                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
-                )
-            _assert_same_target(initial_target_identity, apply_identity)
-            operations = analyze_batch((original,), target.schema)
-            selected_keys = _selected_keys(operations)
-            retries = preflight_inventory_retries(os.environ)
-            if selected_keys:
-                fresh_inventory, fresh_snapshot = capture_inventory_snapshot_with_retries(
-                    target, selected_keys, run_dir / f"verify-inventory-{folder_index:03d}",
-                    retries=retries,
-                    _capture_inventory=capture_inventory_fn,
-                    _capture_snapshot=capture_snapshot_fn,
-                )
-            else:
-                fresh_inventory = capture_inventory_fn(target, run_dir / f"verify-inventory-{folder_index:03d}")
-                fresh_snapshot = SchemaSnapshot(fresh_inventory.identity, fresh_inventory.objects, {}, fresh_inventory.coverage, fresh_inventory.started_at, fresh_inventory.completed_at)
-            fresh_identity = _identity_for_receipt(fresh_inventory, target)
-            _assert_same_target(initial_target_identity, fresh_identity)
-            post_checks = _check_report(target, (original,), "postconditions", run_dir / f"postconditions-{folder_index:03d}", run_checks_fn)
-            _assert_check_identity(initial_target_identity, post_checks)
-            catalog_results, catalog_errors = _verify_structural_postconditions(original, fresh_snapshot, target.schema)
-            if not post_checks.complete or not post_checks.passed or catalog_errors:
-                record["state"] = "committed-verification-failed"
-                record["verificationErrors"] = [*post_checks.errors, *catalog_errors]
-                failed_check_ids = post_checks.coverage.get("failedCheckIds")
-                if not isinstance(failed_check_ids, list):
-                    failed_check_ids = []
-                if not failed_check_ids:
-                    failed_check_ids = list(dict.fromkeys(
-                        error["check"] for error in post_checks.errors
-                        if isinstance(error.get("check"), str)
-                    ))
-                record["failedCheckIds"] = failed_check_ids
-                record["verificationEvidence"] = post_checks.coverage.get("evidence")
-                record["verificationOutputAvailable"] = post_checks.coverage.get("outputAvailable")
-                run_manifest["state"] = record["state"]
-                _atomic_write_json(manifest_path, run_manifest)
-                details = _verification_failure_details(post_checks, catalog_errors, verbose=verbose)
-                raise MigrationApplyError(
-                    f"{original.folder.name} committed but fresh verification failed; no receipt was written. "
-                    f"{details}. Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
-                )
+                apply_identity = apply_evidence.get("identity")
+                if not isinstance(apply_identity, Mapping):
+                    raise MigrationApplyError(
+                        f"{original.folder.name} committed, but apply identity is unavailable; reconcile: "
+                        f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                    )
+                _assert_same_target(initial_target_identity, apply_identity)
+                operations = analyze_batch((original,), target.schema)
+                selected_keys = _selected_keys(operations)
+                retries = preflight_inventory_retries(os.environ)
+                if selected_keys:
+                    fresh_inventory, fresh_snapshot = capture_inventory_snapshot_with_retries(
+                        target, selected_keys, run_dir / f"verify-inventory-{folder_index:03d}",
+                        retries=retries,
+                        _capture_inventory=capture_inventory_fn,
+                        _capture_snapshot=capture_snapshot_fn,
+                    )
+                else:
+                    fresh_inventory = capture_inventory_fn(target, run_dir / f"verify-inventory-{folder_index:03d}")
+                    fresh_snapshot = SchemaSnapshot(fresh_inventory.identity, fresh_inventory.objects, {}, fresh_inventory.coverage, fresh_inventory.started_at, fresh_inventory.completed_at)
+                fresh_identity = _identity_for_receipt(fresh_inventory, target)
+                _assert_same_target(initial_target_identity, fresh_identity)
+                post_checks = _check_report(target, (original,), "postconditions", run_dir / f"postconditions-{folder_index:03d}", run_checks_fn)
+                _assert_check_identity(initial_target_identity, post_checks)
+                catalog_results, catalog_errors = _verify_structural_postconditions(original, fresh_snapshot, target.schema)
+                if not post_checks.complete or not post_checks.passed or catalog_errors:
+                    record["state"] = "committed-verification-failed"
+                    record["verificationErrors"] = [*post_checks.errors, *catalog_errors]
+                    failed_check_ids = post_checks.coverage.get("failedCheckIds")
+                    if not isinstance(failed_check_ids, list):
+                        failed_check_ids = []
+                    if not failed_check_ids:
+                        failed_check_ids = list(dict.fromkeys(
+                            error["check"] for error in post_checks.errors
+                            if isinstance(error.get("check"), str)
+                        ))
+                    record["failedCheckIds"] = failed_check_ids
+                    record["verificationEvidence"] = post_checks.coverage.get("evidence")
+                    record["verificationOutputAvailable"] = post_checks.coverage.get("outputAvailable")
+                    run_manifest["state"] = record["state"]
+                    _atomic_write_json(manifest_path, run_manifest)
+                    details = _verification_failure_details(post_checks, catalog_errors, verbose=verbose)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} committed but fresh verification failed; no receipt was written. "
+                        f"{details}. Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                    )
 
-            source_relative = relative_to_root(original.folder, repo_root).as_posix()
-            current_source = load_migration(repo_root, source_relative)
-            staged_digest = _verify_staged_payload(staged)
-            if current_source.payload_digest != original.payload_digest or staged_digest != original.payload_digest:
-                record["state"] = "committed-source-or-payload-changed"
-                run_manifest["state"] = record["state"]
-                _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(
-                    f"{original.folder.name} committed from frozen bytes, but local source changed during apply; no receipt was written. "
-                    f"Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
-                )
+                source_relative = relative_to_root(original.folder, repo_root).as_posix()
+                current_source = load_migration(repo_root, source_relative)
+                staged_digest = _verify_staged_payload(staged)
+                if current_source.payload_digest != original.payload_digest or staged_digest != original.payload_digest:
+                    record["state"] = "committed-source-or-payload-changed"
+                    run_manifest["state"] = record["state"]
+                    _atomic_write_json(manifest_path, run_manifest)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} committed from frozen bytes, but local source changed during apply; no receipt was written. "
+                        f"Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                    )
 
-            resolution_path = original.folder / f"resolution.{target.environment}.json"
-            if resolution_path.exists() or resolution_path.is_symlink():
-                # A resolution written during this apply closes the folder: no receipt may follow it.
-                record["state"] = "committed-receipt-failed"
-                record["receiptError"] = f"resolution.{target.environment}.json exists"
-                run_manifest["state"] = record["state"]
-                _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(
-                    f"{original.folder.name} committed, but resolution.{target.environment}.json exists; no receipt was written. "
-                    f"Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                resolution_path = original.folder / f"resolution.{target.environment}.json"
+                if resolution_path.exists() or resolution_path.is_symlink():
+                    # A resolution written during this apply closes the folder: no receipt may follow it.
+                    record["state"] = "committed-receipt-failed"
+                    record["receiptError"] = f"resolution.{target.environment}.json exists"
+                    run_manifest["state"] = record["state"]
+                    _atomic_write_json(manifest_path, run_manifest)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} committed, but resolution.{target.environment}.json exists; no receipt was written. "
+                        f"Reconcile: {_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                    )
+                receipt = build_receipt(original, initial_target_identity, apply_evidence, fresh_snapshot, post_checks, catalog_results)
+                receipt_path = original.folder / f"status.{target.environment}.json"
+                try:
+                    receipt_installer(receipt_path, receipt)
+                except (MigrationManifestError, OSError) as error:
+                    record["state"] = "committed-receipt-failed"
+                    record["receiptError"] = str(error)
+                    run_manifest["state"] = record["state"]
+                    _atomic_write_json(manifest_path, run_manifest)
+                    raise MigrationApplyError(
+                        f"{original.folder.name} committed and verified, but receipt installation failed; reconcile: "
+                        f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
+                    ) from error
+                verified_event = _attempt_event(
+                    repo_root,
+                    original,
+                    current_identity,
+                    run_dir.name,
+                    attempt_id,
+                    state="verified",
+                    write_attempted=True,
+                    predecessor_event_id=pending_event["eventId"],
                 )
-            receipt = build_receipt(original, initial_target_identity, apply_evidence, fresh_snapshot, post_checks, catalog_results)
-            receipt_path = original.folder / f"status.{target.environment}.json"
-            try:
-                receipt_installer(receipt_path, receipt)
-            except (MigrationManifestError, OSError) as error:
-                record["state"] = "committed-receipt-failed"
-                record["receiptError"] = str(error)
-                run_manifest["state"] = record["state"]
+                write_attempt_event(original.folder, verified_event)
+                record["attemptEventIds"].append(verified_event["eventId"])
+                record["state"] = "verified"
+                record["verifiedAt"] = receipt["verifiedAt"]
+                record["receipt"] = receipt_path.name
+                run_manifest["state"] = "verified"
                 _atomic_write_json(manifest_path, run_manifest)
-                raise MigrationApplyError(
-                    f"{original.folder.name} committed and verified, but receipt installation failed; reconcile: "
-                    f"{_reconcile_command(repo_root, original, target.environment)}. Evidence: {run_dir}"
-                ) from error
-            verified_event = _attempt_event(
-                repo_root,
-                original,
-                current_identity,
-                run_dir.name,
-                attempt_id,
-                state="verified",
-                write_attempted=True,
-                predecessor_event_id=pending_event["eventId"],
-            )
-            write_attempt_event(original.folder, verified_event)
-            record["attemptEventIds"].append(verified_event["eventId"])
-            record["state"] = "verified"
-            record["verifiedAt"] = receipt["verifiedAt"]
-            record["receipt"] = receipt_path.name
-            run_manifest["state"] = "verified"
-            _atomic_write_json(manifest_path, run_manifest)
-            print(f"Applied and verified {original.folder.name} on {target.environment}; receipt {receipt_path.name}.")
+                print(f"Applied and verified {original.folder.name} on {target.environment}; receipt {receipt_path.name}.")
 
-        return 0
+            return 0
     except KeyboardInterrupt:
         if attempted and run_dir is not None:
             print(
@@ -1347,6 +1361,7 @@ def main(
     expected_input_hashes: Mapping[str, str] | None = None,
     expected_db_unique_name: str | None = None,
     rollout_confirmed_by: str | None = None,
+    writer_lease: release_ownership.TargetWriterLease | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folders", nargs="*")
@@ -1408,7 +1423,8 @@ def main(
     if args.rehearse:
         return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report, yes=args.yes)
     status = apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose, confirm_target=args.confirm_target,
-                         yes=args.yes, expected_db_unique_name=expected_db_unique_name, rollout_confirmed_by=rollout_confirmed_by)
+                         yes=args.yes, expected_db_unique_name=expected_db_unique_name, rollout_confirmed_by=rollout_confirmed_by,
+                         writer_lease=writer_lease)
     if status == 0 and target.environment == "dev":
         record_daily_diffs(Path(repo_root), migrations)
     return status

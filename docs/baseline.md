@@ -146,6 +146,18 @@ families are:
 - `baseline-data`: natural-key-guarded inserts, target-label foreign-key
   resolution, identity-generator advancement, and count-based checks.
 
+Generated code baselines bind their first SQL step to the database, container,
+schema, and edition observed at capture. It checks that replacements still
+match the captured source and compiler settings or view definition, and that
+new units are still absent. In a combined bundle, this guard runs before the
+structure, grant, and code changes. Recompilation is limited to reviewed units
+and uses their stored compiler settings.
+
+If the target has changed, review a fresh build before applying it. If
+`migrate` reports a write attempt, follow its reconciliation instructions
+before replacing or retrying that revision. This guard checks the target at
+apply time. Coordinate other sessions that can change the target during a run.
+
 Plain source scripts are used when safe. A unit with a whitespace-only line or
 a line ending in `-` is assembled as a CLOB to preserve the text SQLcl would
 otherwise trim or continue. CLOB source chunks are at most 32 characters. The
@@ -277,9 +289,10 @@ the schema out of the exports. Use the saved connections of a disposable schema 
 | `test_data_family_resolves_parents_by_label_and_guards_every_insert` | A foreign key is resolved from the parent's label and never copied by id, quotes and newlines survive, every insert is guarded by its natural key, and the identity generator is moved past the seeded ids. |
 | `test_the_excluded_column_never_reaches_a_file` | The values of an excluded column (and the staging row's own value) appear in no exported or generated file. |
 | `test_the_target_differences_are_reported_not_hidden` | An existing staging row that differs in a captured column is reported and preserved. |
-| `test_bundle_build_combines_structure_grants_and_code_and_keeps_data_apart` | `--bundle` makes one bundle folder (structure, grants and code steps in order, with a provenance table) beside the data folder. |
+| `test_bundle_build_combines_structure_grants_and_code_and_keeps_data_apart` | `--bundle` puts the guard first, followed by structure, grants and code. The data folder stays separate. |
 | `test_a_second_identical_build_leaves_every_folder_byte_identical` | Building again changes nothing and says so. |
-| `test_a_generated_folder_without_preconditions_is_refused_by_migrate` | As generated, the structure, grants and code folders have postconditions only, so `migrate` refuses the structure folder (exit 2, `UNSUPPORTED_OPERATION`) and writes nothing. A reviewer adds a precondition first. |
-| `test_a_reviewed_build_applies_to_staging_and_leaves_nothing_to_build` | After the test adds a precondition to each folder, as a reviewer would, all four folders apply to staging in order, the objects, the grant and the rows are read back, and a fresh build finds no grant or code difference and nothing left to create (the structure folder keeps only its sequence and identity synchronization, and the data folder its guarded inserts). |
+| `test_view_drift_refuses_the_combined_bundle_before_any_ddl` | A view changed after capture causes the first SQL step to refuse. The missing table stays absent and the old function still returns the original result. |
+| `test_a_generated_folder_without_preconditions_is_refused_by_migrate` | The fixture's structure and grants folders need a reviewed precondition. Applying the structure folder without one refuses before any write. |
+| `test_a_reviewed_build_applies_to_staging_and_leaves_nothing_to_build` | The test adds preconditions for structure and grants and uses the generated checks for code and data. All four folders apply in order. A fresh build finds no code or grant changes. |
 
 `export-grants` is not covered: its system-privilege part needs a DBA login, and these checks never use one.

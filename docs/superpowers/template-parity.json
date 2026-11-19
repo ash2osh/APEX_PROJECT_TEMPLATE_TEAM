@@ -187,10 +187,10 @@
     },
     "docs/baseline.md": {
       "status": "intended",
-      "reason": "Describes each line's baseline contract (26.2 bound manifest, SQLcl 26.3).",
+      "reason": "Describes each line's baseline contract (26.2 bound manifest, SQLcl 26.3). Both lines document the captured-target guard and its bundled ordering.",
       "blobs": [
-        "d1e76e5e372137aef0f4596e9db67b78ac2b5309",
-        "df4d1cb9c3ada9963ce4ad9ef8d81c90ae9e07f4"
+        "9d57163386225d5940834433ce1d17179a0e4804",
+        "50aea17ea39bc735fd1505b155864b0dc00a7b3c"
       ]
     },
     "docs/ci-checks.md": {
@@ -243,10 +243,10 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow.",
+      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck.",
       "blobs": [
-        "c09a13df0d44fb5740fab574ebdd614747abb106",
-        "34d3e61de73f81946fb1efbb3bef8099ef30d5f2"
+        "831d62f6ec11a622f0049f1283c3bcaefce6c3ab",
+        "e41c8e76f17c2d990d6db0094b284c934289b8fa"
       ]
     },
     "docs/publish-rules.md": {
@@ -339,10 +339,10 @@
     },
     "scripts/baseline_bundle.py": {
       "status": "intended",
-      "reason": "Both validate bundle components with 23 refusals each; the helpers are structured differently (26.1 _validate_check_list/_validate_component_steps, 26.2 _append_checks/_ordered_steps).",
+      "reason": "Both validate bundle components with 23 refusals each; the helpers are structured differently (26.1 _validate_check_list/_validate_component_steps, 26.2 _append_checks/_ordered_steps). Both lines schedule the generated code guard first and preserve its checks and provenance.",
       "blobs": [
-        "d9c904ef75eddf47043274de5ea7d7c6a6d61e4d",
-        "b315388db2876a3da0c5481b17554db9685720cd"
+        "0d94eab13123fe3d4bcfb0ae851fa9c239f51fad",
+        "199d4b787e753ab3ead2b41c38c76be811afa16e"
       ]
     },
     "scripts/check_db_target.ps1": {
@@ -531,18 +531,18 @@
     },
     "scripts/rollout.py": {
       "status": "missed",
-      "reason": "Missed: 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA.",
+      "reason": "Missed: 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate.",
       "blobs": [
-        "292b5ef494d41ab8ffcbd394d96dfe512df01049",
-        "a672e9a1940f2479e18c8b888e458fdfae3283d9"
+        "6371436540cb92183ee0083bf70af1c44beaca09",
+        "96ce1597b28228c3094500c54092f56e11c1c22e"
       ]
     },
     "scripts/rollout_capsule.py": {
       "status": "intended",
-      "reason": "Schema-2 capsule only: 26.2 passes capsule=True to rollout._target_binding, and the function and import order differ; the logic is otherwise the same.",
+      "reason": "Schema-2 capsule only: 26.2 passes capsule=True to rollout._target_binding, and the function and import order differ; the logic is otherwise the same. Both lines supply the acquired writer lease to the migration step.",
       "blobs": [
-        "ad09a4f2ac13d221118bd227d2d481e3c0d30c8c",
-        "ebe61549e604b59f8d77fc66353f412b61ff3008"
+        "8af288369094569003aaf5bdf62c58d6c48f100d",
+        "3a36f2f4b68cf623fe8ddb0e17feba375fabcdf5"
       ]
     },
     "scripts/setup_graphify_apx.py": {
@@ -651,26 +651,26 @@
     },
     "tests/test_baseline.py": {
       "status": "intended",
-      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the rest are 26.1-specific (for example the 26.1 database tools have no 26.2 dependency).",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the rest are 26.1-specific (for example the 26.1 database tools have no 26.2 dependency). Both lines cover guarded output, unchanged payload bytes and scoped compilation.",
       "blobs": [
-        "75eed4ce4dba0fcd31437126305ebcd2c7054fd9",
-        "939f3932d290d8a8204121f94c00948a351eeabf"
+        "48629788140344921b47310ec4e311e43c19f5db",
+        "0993fb7df61a16da5a1d823af72d5df7eb453721"
       ]
     },
     "tests/test_baseline_bundle.py": {
       "status": "intended",
-      "reason": "Tests each line's bundle helpers; classified with scripts/baseline_bundle.py.",
+      "reason": "Tests each line's bundle helpers; classified with scripts/baseline_bundle.py. Both lines cover ordering, check namespaces and provenance for the leading code guard.",
       "blobs": [
-        "5ff0f67272f651a850ea1eb6cb8036d430cd722f",
-        "e7ac47a17c353abc7d3c97c33ac6fcb264bc5a09"
+        "24bd6a3552f84c73e67c96b37deb6d9efb101ce9",
+        "4530e09bf4ec0fb7002c132f60ae09881f38a64d"
       ]
     },
     "tests/test_baseline_bundle_cli.py": {
       "status": "intended",
-      "reason": "Fixture writes the reference-data export differently: 26.1 writes JSON through baseline._json_bytes with a literal schema version 2, 26.2 writes json.dumps text with DATA_EXPORT_MANIFEST_VERSION and imports BaselineError from scripts.baseline; the same 15 tests run on both lines",
+      "reason": "Fixture writes the reference-data export differently: 26.1 writes JSON through baseline._json_bytes with a literal schema version 2, 26.2 writes json.dumps text with DATA_EXPORT_MANIFEST_VERSION and imports BaselineError from scripts.baseline; the same 15 tests run on both lines. Both lines assert the guard precedes the preserved DDL in a combined bundle.",
       "blobs": [
-        "e3fe3e7df950f33a5e3ccdb2b6713fc2d39c9d0c",
-        "80b97fa4bab2234bf96ebfc2f211026759aa5beb"
+        "1771e5304fec6861045cd1f1a869b0f8fa1e3884",
+        "1197108d3cfeb602288a3983db5bdb9cc34077f7"
       ]
     },
     "tests/test_chrome_devtools_docs.py": {
@@ -723,10 +723,10 @@
     },
     "tests/test_feature_rollout.py": {
       "status": "feature",
-      "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now.",
+      "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now. Both lines assert that a migration receives the active capsule writer lease.",
       "blobs": [
-        "311025f89a944d9e8228329683ad017194accc2c",
-        "866d141435823d9918611b1025bd50aafcb5ce9a"
+        "08e6d644b5ec95d47ed2d4fa581c4b6dce310ff8",
+        "0879a6b51536f22ac84508d260a922eda460d0f4"
       ]
     },
     "tests/test_graphify_corpus.py": {
@@ -739,10 +739,10 @@
     },
     "tests/test_migrate_cli.py": {
       "status": "intended",
-      "reason": "26.2 keeps the selected-target attempt policy with its own test (test_receipt_for_another_environment_does_not_block_selected_apply), while 26.1 keeps the fail-closed every-chain policy decided on 2026-10-20.",
+      "reason": "26.2 keeps the selected-target attempt policy with its own test (test_receipt_for_another_environment_does_not_block_selected_apply), while 26.1 keeps the fail-closed every-chain policy decided on 2026-10-20. Both lines cover confirmation-time replay, lock contention and lease reuse.",
       "blobs": [
-        "8c575df70462aa73519edf3f0a4919b3bc931035",
-        "8636c15fa17b943d3c5ddc2cf755a8bc63751c86"
+        "a7f3d8e21af52ef3984666dc6959842b199f099f",
+        "e3ac599f3032105f0e13f1fee733fc6508a0cb89"
       ]
     },
     "tests/test_migration_archive.py": {
@@ -835,10 +835,10 @@
     },
     "tests/test_rollout.py": {
       "status": "missed",
-      "reason": "Missed: 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py).",
+      "reason": "Missed: 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py). Both lines assert that a version-1 rollout uses the normal direct migration lease path.",
       "blobs": [
-        "3bb9bfac0502012054f9c9a88011e9231be2bfe1",
-        "359748107e82c09735ac7a0b2661e216f3593a14"
+        "1fdc2d41628090eed22ca1c8347016f194b80f9e",
+        "b762c9ebec178124d00f040dd36e59a8212ef2cb"
       ]
     },
     "tests/test_setup_graphify.py": {

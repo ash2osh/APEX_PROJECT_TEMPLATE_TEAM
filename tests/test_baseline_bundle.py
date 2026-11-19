@@ -133,7 +133,7 @@ class BaselineBundleTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(api.BaselineBundleError):
                 api.combine_baseline_components([_component(api, kind)])
 
-    def test_grants_and_code_preconditions_are_refused(self) -> None:
+    def test_grants_and_code_without_a_leading_guard_cannot_move_preconditions(self) -> None:
         api = _bundle_api(self)
         precondition = {"id": "ready", "sql": "SELECT 1 FROM DUAL", "expected": 1}
         for kind in ("grants", "code"):
@@ -141,6 +141,34 @@ class BaselineBundleTests(unittest.TestCase):
                 api.combine_baseline_components(
                     [_component(api, kind, preconditions=(precondition,))]
                 )
+
+    def test_code_guard_precedes_structure_and_preserves_provenance_and_checks(self) -> None:
+        api = _bundle_api(self)
+        guard = "BEGIN NULL; END;\n/\n"
+        code = _component(
+            api, "code",
+            [("001-verify-code-before.sql", guard), ("002-source-package.sql", "SELECT 1 FROM DUAL;\n")],
+            preconditions=({"id": "before-source", "sql": "SELECT COUNT(*) FROM ALL_SOURCE", "expected": 1},),
+        )
+        structure = _component(api, "structure", [("001-table.sql", "CREATE TABLE T (ID NUMBER);\n")])
+        grants = _component(api, "grants", [("001-grant.sql", "GRANT SELECT ON T TO READER;\n")])
+
+        result = api.combine_baseline_components([grants, code, structure])
+
+        self.assertEqual(list(result.steps), [
+            "001-code-verify-code-before.sql", "002-structure-table.sql",
+            "003-grants-grant.sql", "004-code-source-package.sql",
+        ])
+        self.assertEqual(result.steps["001-code-verify-code-before.sql"], guard)
+        self.assertEqual(result.provenance[0], {
+            "kind": "code",
+            "originalName": "001-verify-code-before.sql",
+            "generatedName": "001-code-verify-code-before.sql",
+            "sqlSha256": hashlib.sha256(guard.encode("utf-8")).hexdigest(),
+        })
+        self.assertEqual(result.checks["preconditions"], [
+            {"id": "code-before-source", "sql": "SELECT COUNT(*) FROM ALL_SOURCE", "expected": 1},
+        ])
 
     def test_structure_preconditions_remain_at_the_initial_boundary(self) -> None:
         api = _bundle_api(self)

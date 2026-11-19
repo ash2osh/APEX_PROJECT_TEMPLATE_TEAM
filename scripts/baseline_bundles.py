@@ -13,11 +13,13 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal
 
 from .baseline_sql import _check, _q_literal, _safe_check_slug, _sql_identifier, _sql_literal, retarget_sql_identifiers, sql_tokens
+from .migration_checks import COMMON_NAMESPACE_TYPES
 from .migration_manifest import validate_sql_only
 from .schema_catalog import ObjectKey, SchemaSnapshot
 
 
 _PLSQL_SOURCE_CHUNK_CHARS = 32
+_CODE_BEFORE_STEP_FILE = "001-verify-code-before.sql"
 
 
 def _ddl_without_terminator(ddl: str) -> str:
@@ -324,7 +326,15 @@ def _view_validity_check(schema: str, name: str) -> dict:
     return _check(check_id, sql)
 
 
-def _source_line_predicate(line_number: int, line: str, *, final: bool) -> str:
+def _source_line_predicate(line_number: int, line: str, *, final: bool, binary: bool = False) -> str:
+    if binary:
+        value = line.removesuffix("\n") if final else line
+        alternatives = (value, value + "\n") if final else (value,)
+        text = " OR ".join(
+            f"S.TEXT COLLATE BINARY = {_sql_literal(candidate)}" if candidate else "(S.TEXT || CHR(1)) COLLATE BINARY = CHR(1)"
+            for candidate in alternatives
+        )
+        return f"(S.LINE = {line_number} AND ({text}))"
     exact = _sql_literal(line[:-1] if final and line.endswith("\n") else line)
     text = f"(S.TEXT || CHR(1)) = ({exact} || CHR(1))"
     if final:
@@ -336,24 +346,27 @@ def _source_line_predicate(line_number: int, line: str, *, final: bool) -> str:
     return f"(S.LINE = {line_number} AND ({text}))"
 
 
-def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000) -> list[dict]:
+def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000, before: bool = False) -> list[dict]:
     name, object_type = str(unit["name"]), str(unit["type"])
     lines = unit["lines"]
     slug = _safe_check_slug(f"{name}-{object_type}")
+    check_prefix = "before-source" if before else "source"
+    catalog = "SYS.ALL_SOURCE" if before else "ALL_SOURCE"
+    collation = " COLLATE BINARY" if before else ""
     expected_rows = list(enumerate(lines, start=1))
 
     def query(rows: Sequence[tuple[int, str]]) -> str:
         predicates = [
-            _source_line_predicate(line_no, text, final=line_no == len(lines))
+            _source_line_predicate(line_no, text, final=line_no == len(lines), binary=before)
             for line_no, text in rows
         ]
         text_match = " OR ".join(predicates) if predicates else "1 = 0"
         return (
             "SELECT CASE WHEN COUNT(*) = "
             f"{len(lines)} AND COUNT(DISTINCT CASE WHEN {text_match} THEN S.LINE END) = {len(rows)} "
-            "THEN 1 ELSE 0 END FROM ALL_SOURCE S "
-            f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} "
-            f"AND S.TYPE = {_sql_literal(object_type)}"
+            f"THEN 1 ELSE 0 END FROM {catalog} S "
+            f"WHERE S.OWNER{collation} = {_sql_literal(schema)} AND S.NAME{collation} = {_sql_literal(name)} "
+            f"AND S.TYPE{collation} = {_sql_literal(object_type)}"
         )
 
     result: list[dict] = []
@@ -361,7 +374,7 @@ def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000)
     for row in expected_rows:
         candidate = bucket + [row]
         if len(query(candidate).encode("utf-8")) > max_bytes and bucket:
-            result.append(_check(f"source-{slug}-{len(result) + 1:03d}", query(bucket)))
+            result.append(_check(f"{check_prefix}-{slug}-{len(result) + 1:03d}", query(bucket)))
             bucket = [row]
             if len(query(bucket).encode("utf-8")) > max_bytes:
                 raise baseline.BaselineError(f"one stored-source line exceeds the exact-check SQL limit: {name} {object_type} line {row[0]}")
@@ -370,7 +383,7 @@ def _source_check_queries(unit: Mapping, schema: str, *, max_bytes: int = 24000)
         if len(query(bucket).encode("utf-8")) > max_bytes:
             raise baseline.BaselineError(f"one stored-source line exceeds the exact-check SQL limit: {name} {object_type} line {row[0]}")
     if bucket or not result:
-        result.append(_check(f"source-{slug}-{len(result) + 1:03d}", query(bucket)))
+        result.append(_check(f"{check_prefix}-{slug}-{len(result) + 1:03d}", query(bucket)))
     return result
 
 
@@ -474,67 +487,61 @@ def _exact_source_step(unit: Mapping, settings: Mapping | None) -> str:
     return _clob_source_step(unit, settings) if _needs_clob_assembly(unit["lines"]) else _direct_source_step(unit, settings)
 
 
-def _exact_settings_check(settings: Mapping, name: str, object_type: str, schema: str) -> dict:
-    clauses = [
-        f"S.PLSQL_OPTIMIZE_LEVEL = {_sql_literal(str(settings['plsql_optimize_level']))}",
-        f"S.PLSQL_CODE_TYPE = {_sql_literal(str(settings['plsql_code_type']))}",
-        f"S.PLSQL_DEBUG = {_sql_literal(str(settings['plsql_debug']))}",
-        f"S.PLSQL_WARNINGS = {_sql_literal(str(settings['plsql_warnings']))}",
-        f"S.NLS_LENGTH_SEMANTICS = {_sql_literal(str(settings['nls_length_semantics']))}",
-        f"S.PLSCOPE_SETTINGS = {_sql_literal(str(settings['plscope_settings'] or ''))}",
-    ]
-    # An empty flag string is stored as NULL, and '' = NULL is never true.
-    clauses.append("S.PLSQL_CCFLAGS IS NULL" if not settings["plsql_ccflags"] else f"S.PLSQL_CCFLAGS = {_sql_literal(str(settings['plsql_ccflags']))}")
-    query = (
-        "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_PLSQL_OBJECT_SETTINGS S "
-        f"WHERE S.OWNER = {_sql_literal(schema)} AND S.NAME = {_sql_literal(name)} AND S.TYPE = {_sql_literal(object_type)} AND "
-        + " AND ".join(clauses) + ") THEN 1 ELSE 0 END FROM DUAL"
+def _exact_settings_check(settings: Mapping, name: str, object_type: str, schema: str, *, before: bool = False) -> dict:
+    collation = " COLLATE BINARY" if before else ""
+    catalog = "SYS.ALL_PLSQL_OBJECT_SETTINGS" if before else "ALL_PLSQL_OBJECT_SETTINGS"
+    dual = "SYS.DUAL" if before else "DUAL"
+    fields = (
+        "plsql_optimize_level", "plsql_code_type", "plsql_debug", "plsql_warnings",
+        "nls_length_semantics", "plscope_settings", "plsql_ccflags",
     )
-    return _check(f"settings-{_safe_check_slug(name + '-' + object_type)}", query)
+    clauses = []
+    for field in fields:
+        value = settings[field]
+        column = "S." + field.upper()
+        if value is None or value == "":
+            clauses.append(f"{column} IS NULL")
+        else:
+            comparison = "" if field == "plsql_optimize_level" else collation
+            clauses.append(f"{column}{comparison} = {_sql_literal(str(value))}")
+    query = (
+        f"SELECT CASE WHEN EXISTS (SELECT 1 FROM {catalog} S "
+        f"WHERE S.OWNER{collation} = {_sql_literal(schema)} AND S.NAME{collation} = {_sql_literal(name)} "
+        f"AND S.TYPE{collation} = {_sql_literal(object_type)} AND "
+        + " AND ".join(clauses) + f") THEN 1 ELSE 0 END FROM {dual}"
+    )
+    prefix = "before-settings" if before else "settings"
+    return _check(f"{prefix}-{_safe_check_slug(name + '-' + object_type)}", query)
 
 
-def _compile_all_step(schema: str, prefixes: Sequence[str]) -> str:
-    escaped = [prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%") + "%" for prefix in prefixes]
-    def like_patterns(column: str) -> str:
-        if not escaped:
-            return "1 = 1"
-        return " OR ".join(f"{column} LIKE {_sql_literal(pattern)} ESCAPE '\\'" for pattern in escaped)
-
+def _compile_all_step(schema: str, units: Sequence[tuple[str, str]]) -> str:
+    pairs = ",\n".join(f"        ({_sql_literal(name)}, {_sql_literal(object_type)})" for object_type, name in sorted(units))
     return (
-        "-- Recompile configured invalid stored units in dependency passes.\n"
+        "-- Recompile invalid stored units reviewed by this migration in dependency passes.\n"
         "DECLARE\n"
         "  l_previous PLS_INTEGER := -1;\n  l_current PLS_INTEGER := 0;\n  l_pass PLS_INTEGER := 0;\n  l_name VARCHAR2(261);\n"
-        "  FUNCTION quoted(p_value VARCHAR2) RETURN VARCHAR2 IS BEGIN RETURN '''' || REPLACE(p_value, '''', '''''') || ''''; END;\n"
-        f"BEGIN\n  LOOP\n    SELECT COUNT(*) INTO l_current FROM ALL_OBJECTS WHERE OWNER = {_sql_literal(schema)} AND STATUS = 'INVALID' AND ("
-        f"{like_patterns('OBJECT_NAME')});\n"
+        "  CURSOR invalid_units IS\n"
+        "    SELECT object_name, object_type FROM SYS.ALL_OBJECTS\n"
+        f"    WHERE owner = {_sql_literal(schema)} AND status = 'INVALID'\n"
+        "      AND (object_name COLLATE BINARY, object_type COLLATE BINARY) IN (\n"
+        f"{pairs}\n      ) ORDER BY CASE object_type WHEN 'TYPE' THEN 1 WHEN 'PACKAGE' THEN 2 ELSE 3 END, object_name;\n"
+        "  FUNCTION invalid_count RETURN PLS_INTEGER IS\n"
+        "    l_count PLS_INTEGER := 0;\n"
+        "  BEGIN\n    FOR r IN invalid_units LOOP l_count := l_count + 1; END LOOP;\n    RETURN l_count;\n  END;\n"
+        "BEGIN\n  LOOP\n    l_current := invalid_count;\n"
         "    EXIT WHEN l_current = 0 OR l_current = l_previous OR l_pass >= 10;\n"
         "    l_previous := l_current;\n    l_pass := l_pass + 1;\n"
-        "    FOR r IN (SELECT O.OBJECT_NAME, O.OBJECT_TYPE, S.PLSQL_OPTIMIZE_LEVEL, S.PLSQL_CODE_TYPE, S.PLSQL_DEBUG, "
-        "S.PLSQL_WARNINGS, S.PLSQL_CCFLAGS, S.NLS_LENGTH_SEMANTICS, S.PLSCOPE_SETTINGS "
-        "FROM ALL_OBJECTS O LEFT JOIN ALL_PLSQL_OBJECT_SETTINGS S ON S.OWNER = O.OWNER AND S.NAME = O.OBJECT_NAME AND S.TYPE = O.OBJECT_TYPE "
-        f"WHERE O.OWNER = {_sql_literal(schema)} AND O.STATUS = 'INVALID' AND O.OBJECT_TYPE IN "
-        "('PACKAGE','PACKAGE BODY','FUNCTION','PROCEDURE','TYPE','TYPE BODY','TRIGGER','VIEW') AND ("
-        f"{like_patterns('O.OBJECT_NAME')}) ORDER BY CASE O.OBJECT_TYPE WHEN 'TYPE' THEN 1 WHEN 'PACKAGE' THEN 2 ELSE 3 END, O.OBJECT_NAME) LOOP\n"
-        "      l_name := '\"' || REPLACE(r.OBJECT_NAME, '\"', '\"\"') || '\"';\n"
+        "    FOR r IN invalid_units LOOP\n"
+        f"      l_name := {_sql_literal(_sql_identifier(schema) + '.')} || '\"' || REPLACE(r.object_name, '\"', '\"\"') || '\"';\n"
         "      BEGIN\n"
-        "        IF r.PLSQL_OPTIMIZE_LEVEL IS NOT NULL THEN\n"
-        "          EXECUTE IMMEDIATE 'ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL = ' || TO_CHAR(r.PLSQL_OPTIMIZE_LEVEL);\n"
-        "          EXECUTE IMMEDIATE 'ALTER SESSION SET PLSQL_CODE_TYPE = ' || r.PLSQL_CODE_TYPE;\n"
-        "          EXECUTE IMMEDIATE 'ALTER SESSION SET PLSQL_DEBUG = ' || r.PLSQL_DEBUG;\n"
-        "          EXECUTE IMMEDIATE 'ALTER SESSION SET PLSQL_WARNINGS = ' || quoted(r.PLSQL_WARNINGS);\n"
-        "          EXECUTE IMMEDIATE 'ALTER SESSION SET PLSQL_CCFLAGS = ' || quoted(r.PLSQL_CCFLAGS);\n"
-        "          EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_LENGTH_SEMANTICS = ' || r.NLS_LENGTH_SEMANTICS;\n"
-        "          EXECUTE IMMEDIATE 'ALTER SESSION SET PLSCOPE_SETTINGS = ' || quoted(r.PLSCOPE_SETTINGS);\n"
-        "        END IF;\n"
-        "        IF r.OBJECT_TYPE = 'PACKAGE BODY' THEN EXECUTE IMMEDIATE 'ALTER PACKAGE ' || l_name || ' COMPILE BODY';\n"
-        "        ELSIF r.OBJECT_TYPE = 'PACKAGE' THEN EXECUTE IMMEDIATE 'ALTER PACKAGE ' || l_name || ' COMPILE SPECIFICATION';\n"
-        "        ELSIF r.OBJECT_TYPE = 'TYPE BODY' THEN EXECUTE IMMEDIATE 'ALTER TYPE ' || l_name || ' COMPILE BODY';\n"
-        "        ELSIF r.OBJECT_TYPE = 'TYPE' THEN EXECUTE IMMEDIATE 'ALTER TYPE ' || l_name || ' COMPILE SPECIFICATION';\n"
-        "        ELSE EXECUTE IMMEDIATE 'ALTER ' || r.OBJECT_TYPE || ' ' || l_name || ' COMPILE'; END IF;\n"
+        "        IF r.object_type = 'PACKAGE BODY' THEN EXECUTE IMMEDIATE 'ALTER PACKAGE ' || l_name || ' COMPILE BODY REUSE SETTINGS';\n"
+        "        ELSIF r.object_type = 'PACKAGE' THEN EXECUTE IMMEDIATE 'ALTER PACKAGE ' || l_name || ' COMPILE SPECIFICATION REUSE SETTINGS';\n"
+        "        ELSIF r.object_type = 'TYPE BODY' THEN EXECUTE IMMEDIATE 'ALTER TYPE ' || l_name || ' COMPILE BODY REUSE SETTINGS';\n"
+        "        ELSIF r.object_type = 'TYPE' THEN EXECUTE IMMEDIATE 'ALTER TYPE ' || l_name || ' COMPILE SPECIFICATION REUSE SETTINGS';\n"
+        "        ELSIF r.object_type = 'VIEW' THEN EXECUTE IMMEDIATE 'ALTER VIEW ' || l_name || ' COMPILE';\n"
+        "        ELSE EXECUTE IMMEDIATE 'ALTER ' || r.object_type || ' ' || l_name || ' COMPILE REUSE SETTINGS'; END IF;\n"
         "      EXCEPTION WHEN OTHERS THEN NULL;\n      END;\n    END LOOP;\n  END LOOP;\n"
-        f"  SELECT COUNT(*) INTO l_current FROM ALL_OBJECTS WHERE OWNER = {_sql_literal(schema)} AND STATUS = 'INVALID' AND ("
-        f"{like_patterns('OBJECT_NAME')});\n"
-        "  IF l_current > 0 THEN RAISE_APPLICATION_ERROR(-20989, 'configured stored units remain invalid after compile passes'); END IF;\nEND;\n/\n"
+        "  IF invalid_count > 0 THEN RAISE_APPLICATION_ERROR(-20989, 'reviewed stored units remain invalid after compile passes'); END IF;\nEND;\n/\n"
     )
 
 
@@ -995,6 +1002,111 @@ def _grant_bundle(config: Mapping, source_schema: str, target_schema: str, sourc
     return steps, {"preconditions": [], "postconditions": checks}
 
 
+def _code_object_before_check(schema: str, name: str, object_type: str, *, present: bool) -> dict:
+    slug = _safe_check_slug(f"{name}-{object_type}")
+    kinds = COMMON_NAMESPACE_TYPES if not present and object_type in {"PACKAGE", "TYPE", "FUNCTION", "PROCEDURE", "VIEW"} else {object_type}
+    type_values = ", ".join(_sql_literal(kind) for kind in sorted(kinds))
+    return _check(
+        f"before-{'present' if present else 'absent'}-{slug}",
+        f"SELECT CASE WHEN (SELECT COUNT(*) FROM SYS.ALL_OBJECTS WHERE OWNER COLLATE BINARY = {_sql_literal(schema)} "
+        f"AND OBJECT_NAME COLLATE BINARY = {_sql_literal(name)} AND OBJECT_TYPE IN ({type_values}) "
+        f"AND SUBOBJECT_NAME IS NULL) = {int(present)} THEN 1 ELSE 0 END FROM SYS.DUAL",
+    )
+
+
+def _code_before_step(target_schema: str, target: Mapping, checks: Sequence[Mapping], views: Mapping[str, str]) -> str:
+    identity = baseline._source_identity(target.get("identity"), "baseline target")
+    if identity["current_schema"] != target_schema:
+        raise baseline.BaselineError("baseline target capture does not match the schema selected for code generation")
+    attributes = (
+        ("db_unique_name", "DB_UNIQUE_NAME", None),
+        ("container_id", "CON_ID", "0"),
+        ("container_name", "CON_NAME", "NON-CDB"),
+        ("current_schema", "CURRENT_SCHEMA", None),
+        ("edition", "CURRENT_EDITION_NAME", "<NONEDITIONED>"),
+    )
+    lines = ["-- Verify the captured target code before any baseline DDL.", "BEGIN"]
+    for field, attribute, default in attributes:
+        context = f"SYS_CONTEXT('USERENV', '{attribute}')"
+        if default is not None:
+            context = f"NVL({context}, {_sql_literal(default)})"
+        expected = _sql_literal(identity[field])
+        lines.extend((
+            f"  IF NVL(SYS.UTL_RAW.COMPARE(SYS.UTL_RAW.CAST_TO_RAW({context}), SYS.UTL_RAW.CAST_TO_RAW({expected})), 1) != 0 THEN",
+            f"    RAISE_APPLICATION_ERROR(-20978, 'Baseline target differs from capture: {field}');",
+            "  END IF;",
+        ))
+    lines.extend(("END;", "/"))
+
+    # Break at character boundaries and emit ASCII only. This keeps literal line
+    # breaks, trailing spaces, and supplementary characters out of SQLcl input.
+    def append_hex(value: str) -> None:
+        for index in range(0, len(value), 120):
+            chunk = value[index:index + 120].encode("utf-8").hex().upper()
+            lines.append(f"  append_hex('{chunk}');")
+
+    lob_declarations = (
+        "  l_expected CLOB;",
+        "  PROCEDURE append_hex(p_value VARCHAR2) IS",
+        "  BEGIN",
+        "    SYS.DBMS_LOB.APPEND(l_expected, TO_CLOB(SYS.UTL_I18N.RAW_TO_CHAR(HEXTORAW(p_value), 'AL32UTF8')));",
+        "  END;",
+    )
+
+    # Anonymous blocks are bounded so a large catalog does not put all source
+    # checks in a single compiled PL/SQL unit. ALL_OBJECTS can omit objects in
+    # another schema. Prove absence through DBA_OBJECTS when acting as its owner.
+    for index in range(0, len(checks), 20):
+        lines.extend((
+            "DECLARE",
+            "  l_value NUMBER;",
+            *lob_declarations,
+            "  PROCEDURE assert_query(p_check VARCHAR2, p_absence BOOLEAN) IS",
+            "  BEGIN",
+            "    IF p_absence AND SYS.UTL_RAW.COMPARE(SYS.UTL_RAW.CAST_TO_RAW(SYS_CONTEXT('USERENV', 'SESSION_USER')),",
+            f"        SYS.UTL_RAW.CAST_TO_RAW({_sql_literal(target_schema)})) != 0 THEN",
+            "      EXECUTE IMMEDIATE REGEXP_REPLACE(l_expected, 'FROM SYS[.]ALL_OBJECTS ', 'FROM SYS.DBA_OBJECTS ', 1, 1, 'c') INTO l_value;",
+            "    ELSE",
+            "      EXECUTE IMMEDIATE l_expected INTO l_value;",
+            "    END IF;",
+            "    IF l_value IS NULL OR l_value != 1 THEN",
+            "      RAISE_APPLICATION_ERROR(-20978, 'Baseline target code differs from capture: ' || p_check);",
+            "    END IF;",
+            "    SYS.DBMS_LOB.TRIM(l_expected, 0);",
+            "  END;",
+            "BEGIN",
+            "  SYS.DBMS_LOB.CREATETEMPORARY(l_expected, TRUE, SYS.DBMS_LOB.CALL);",
+        ))
+        for check in checks[index:index + 20]:
+            append_hex(check["sql"])
+            absent = "TRUE" if check["id"].startswith("before-absent-") else "FALSE"
+            lines.append(f"  assert_query({_sql_literal(check['id'])}, {absent});")
+        lines.extend(("  SYS.DBMS_LOB.FREETEMPORARY(l_expected);", "END;", "/"))
+
+    for name, ddl in views.items():
+        lines.extend((
+            "DECLARE",
+            "  l_actual CLOB;",
+            *lob_declarations,
+            "BEGIN",
+            "  SYS.DBMS_LOB.CREATETEMPORARY(l_expected, TRUE, SYS.DBMS_LOB.CALL);",
+        ))
+        append_hex(ddl)
+        lines.extend((
+            # Match the capture's SQLcl session transforms, including its SQL terminator.
+            f"  l_actual := SYS.DBMS_METADATA.GET_DDL('VIEW', {_sql_literal(name)}, {_sql_literal(target_schema)});",
+            "  IF l_actual IS NULL OR SYS.DBMS_LOB.GETLENGTH(l_actual) != SYS.DBMS_LOB.GETLENGTH(l_expected)",
+            "      OR NVL(SYS.DBMS_LOB.COMPARE(l_actual, l_expected), -1) != 0 THEN",
+            f"    RAISE_APPLICATION_ERROR(-20978, 'Baseline target view DDL differs from capture: ' || {_sql_literal(name)});",
+            "  END IF;",
+            "  IF SYS.DBMS_LOB.ISTEMPORARY(l_actual) = 1 THEN SYS.DBMS_LOB.FREETEMPORARY(l_actual); END IF;",
+            "  SYS.DBMS_LOB.FREETEMPORARY(l_expected);",
+            "END;",
+            "/",
+        ))
+    return "\n".join(lines) + "\n"
+
+
 def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source: Mapping, target: Mapping) -> tuple[dict[str, str], dict]:
     source_units = baseline._source_units(source, config, source_schema)
     target_units = baseline._source_units(target, config, target_schema)
@@ -1012,14 +1124,17 @@ def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source
             selected.append((key, unit, settings))
 
     steps: dict[str, str] = {}
+    preconditions: list[dict] = []
     postconditions: list[dict] = []
-    sequence = 1
-    for (object_type, name), unit, settings in sorted(selected, key=lambda item: (order.get(item[0][0], 9), item[0][1])):
-        sql = _exact_source_step(unit, settings)
-        validate_sql_only(sql)
+    view_ddls_before: dict[str, str] = {}
+    compile_units = {key for key, _, _ in selected}
+    before_units = compile_units | {
+        (object_type + " BODY", name) for object_type, name in compile_units if object_type in {"PACKAGE", "TYPE"}
+    }
+
+    def prove_unit(unit: Mapping, settings: Mapping) -> None:
+        name, object_type = unit["name"], unit["type"]
         slug = _safe_check_slug(name + "-" + object_type)
-        steps[f"{sequence:03d}-source-{slug}.sql"] = sql
-        sequence += 1
         postconditions.extend(_source_check_queries(unit, target_schema))
         postconditions.append(_exact_settings_check(settings, name, object_type, target_schema))
         postconditions.append(_count_check(
@@ -1033,6 +1148,29 @@ def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source
             f"AND OBJECT_TYPE = {_sql_literal(object_type)} AND STATUS = 'VALID') THEN 1 ELSE 0 END FROM DUAL",
         ))
 
+    for object_type, name in sorted(before_units):
+        before = target_units.get((object_type, name))
+        if before is None:
+            if (object_type, name) in target_settings:
+                raise baseline.BaselineError(f"target compiler settings exist without stored source for {object_type} {name}")
+            preconditions.append(_code_object_before_check(target_schema, name, object_type, present=False))
+            continue
+        settings_before = _setting_row(target_settings.values(), name, object_type)
+        preconditions.extend(_source_check_queries(before, target_schema, before=True))
+        preconditions.append(_exact_settings_check(settings_before, name, object_type, target_schema, before=True))
+        if (object_type, name) not in compile_units:
+            compile_units.add((object_type, name))
+            prove_unit(before, settings_before)
+
+    sequence = 2  # The before-state guard is step 001 whenever there is code DDL.
+    for (object_type, name), unit, settings in sorted(selected, key=lambda item: (order.get(item[0][0], 9), item[0][1])):
+        sql = _exact_source_step(unit, settings)
+        validate_sql_only(sql)
+        slug = _safe_check_slug(name + "-" + object_type)
+        steps[f"{sequence:03d}-source-{slug}.sql"] = sql
+        sequence += 1
+        prove_unit(unit, settings)
+
     source_views = {
         row["name"]: row for row in source.get("sections", {}).get("baseline-views", [])
         if isinstance(row.get("name"), str) and baseline._schema_filter(config, source_schema, row["name"])
@@ -1045,11 +1183,17 @@ def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source
         source_ddl = row.get("ddl")
         if not isinstance(source_ddl, str):
             raise baseline.BaselineError(f"stored view metadata DDL for {name} is missing")
-        target_row = target_views.get(name, {})
+        target_row = target_views.get(name)
         mapped_ddl = _replace_create_header(source_ddl, "VIEW", source_schema, target_schema)
         mapped_ddl = retarget_sql_identifiers(mapped_ddl, source_schema, target_schema)
-        if target_row.get("text") == row.get("text") and target_row.get("ddl") == mapped_ddl:
+        if target_row is not None and target_row.get("text") == row.get("text") and target_row.get("ddl") == mapped_ddl:
             continue
+        preconditions.append(_code_object_before_check(target_schema, name, "VIEW", present=target_row is not None))
+        if target_row is not None:
+            target_ddl = target_row.get("ddl")
+            if not isinstance(target_ddl, str) or not target_ddl.strip():
+                raise baseline.BaselineError(f"target view metadata DDL for {name} is unavailable")
+            view_ddls_before[name] = target_ddl
         ddl = source_ddl
         if not isinstance(ddl, str) or not re.match(
             r"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?VIEW\b", ddl,
@@ -1058,14 +1202,17 @@ def _code_bundle(config: Mapping, source_schema: str, target_schema: str, source
         ddl = mapped_ddl
         steps[f"{sequence:03d}-view-{_safe_check_slug(name)}.sql"] = _clob_ddl_step(f"VIEW {name}", _ddl_without_terminator(ddl))
         sequence += 1
+        compile_units.add(("VIEW", name))
         postconditions.append(_count_check(
             f"view-{_safe_check_slug(name)}",
             f"ALL_VIEWS WHERE OWNER = {_sql_literal(target_schema)} AND VIEW_NAME = {_sql_literal(name)}", 1,
         ))
         postconditions.append(_view_validity_check(target_schema, name))
     if selected:
-        steps[f"{sequence:03d}-compile-all.sql"] = _compile_all_step(target_schema, config.get("prefixes", []))
-    return steps, {"preconditions": [], "postconditions": postconditions}
+        steps[f"{sequence:03d}-compile-all.sql"] = _compile_all_step(target_schema, sorted(compile_units))
+    if steps:
+        steps = {_CODE_BEFORE_STEP_FILE: _code_before_step(target_schema, target, preconditions, view_ddls_before), **steps}
+    return steps, {"preconditions": preconditions, "postconditions": postconditions}
 
 
 def _migration_bytes(steps: Mapping[str, str], checks: Mapping, readme: str) -> dict[str, bytes]:
@@ -1092,7 +1239,11 @@ def _bundle_readme(
     *,
     has_data: bool,
 ) -> str:
-    categories = tuple(dict.fromkeys(str(item["kind"]) for item in provenance))
+    has_guard = any(item["originalName"] == _CODE_BEFORE_STEP_FILE for item in provenance)
+    categories = tuple(dict.fromkeys(
+        str(item["kind"]) for item in provenance if item["originalName"] != _CODE_BEFORE_STEP_FILE
+    ))
+    guard_note = "The first SQL step checks the captured target and its code before the generated DDL.\n\n" if has_guard else ""
     mapping = [
         "| Category | Original SQL file | Bundled SQL file | SHA-256 |",
         "| --- | --- | --- | --- |",
@@ -1105,7 +1256,8 @@ def _bundle_readme(
         f"# Baseline Bundle: {name}\n\n"
         f"Source: {source_environment} / {source_schema}. Target: {target_environment} / {target_schema}.\n\n"
         "Included categories, in execution order: " + ", ".join(categories) + ".\n\n"
-        "## Ordered SQL provenance\n\n"
+        + guard_note
+        + "## Ordered SQL provenance\n\n"
         + "\n".join(mapping)
         + "\n\n## Review and checks\n\n"
         "Review every generated SQL step and `checks.json`. Evaluate the declared preconditions before applying and the postconditions after applying with the existing migration verification workflow. Keep this folder immutable after any write attempt; use a new revision for a correction.\n\n"

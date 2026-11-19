@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.release_ownership import TargetWriterBusy, target_writer_lease, target_writer_lock_path
 
@@ -107,6 +108,19 @@ except TargetWriterBusy:
             with target_writer_lease(self.root, {"schema": "APP_CODE"}, self.identity):
                 pass
         self.assertFalse((self.root / "releases").exists())
+
+    def test_interrupted_lease_acquisition_releases_the_kernel_lock(self) -> None:
+        path = target_writer_lock_path(self.root, self.scope)
+        path.parent.mkdir()
+        path.write_bytes(b"stale owner\n")
+
+        with patch("scripts.release_ownership.os.fsync", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                with target_writer_lease(self.root, self.scope, self.identity):
+                    self.fail("interrupted lease acquisition entered the write boundary")
+
+        with target_writer_lease(self.root, self.scope, self.identity):
+            pass
 
 
 if __name__ == "__main__":

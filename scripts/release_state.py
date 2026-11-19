@@ -954,20 +954,11 @@ def _atomic_update(root: Path, update) -> dict:
         return updated
 
 
-def _physical_scope(identity: Mapping[str, str]) -> dict[str, str]:
-    return {
-        "dbUniqueName": identity["db_unique_name"].upper(),
-        "containerId": identity["container_id"],
-        "schema": identity["current_schema"].upper(),
-        "edition": identity["edition"].upper(),
-    }
-
-
 def target_scope_from_identity(identity: Mapping[str, str]) -> dict[str, str]:
     observed = complete_observed_identity(identity)
     if observed is None:
         raise ReleaseStateError("target writer lease requires a complete observed target identity")
-    return _physical_scope(observed)
+    return release_ownership.scope_from_observed_identity(observed)
 
 
 def _attempt_plan(capsule: ReleaseCapsule, plan: TargetPlan, checkpoint: int) -> tuple[dict, dict, dict]:
@@ -1016,7 +1007,7 @@ def _attempt_plan(capsule: ReleaseCapsule, plan: TargetPlan, checkpoint: int) ->
         or key != f"schema:{schema}"
     ):
         raise ReleaseStateError("attempt target descriptor does not match its observed schema identity")
-    scope = _physical_scope(observed)
+    scope = release_ownership.scope_from_observed_identity(observed)
     descriptor = {
         "environment": plan.environment,
         "connection": target.get("connection"),
