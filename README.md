@@ -6,6 +6,8 @@ SQLcl 26.3.0.0 or newer for APEX operations. APEX 26.1 projects use the separate
 plain Git source, explicit deployment JSON, and dated, ordered SQL migration
 folders. No custom team metadata schema or database lock tables are required.
 
+**Supported databases:** Oracle Database 23ai and newer (this includes 26ai). The tools are tested only there. An older database such as 19c is not refused: `doctor` and the commands that write to a target print a warning and continue on a best-effort basis, and some features that need 23ai catalog columns (for example virtual-column expressions) are not available on it.
+
 Projects created from this template use one Git repository per developer.
 Those repositories do not share commits or a remote; developers coordinate
 through the shared development database and APEX Builder workspace. Branches

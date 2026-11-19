@@ -305,6 +305,8 @@ The example uses the same schema, connection and user for tables, code and APEX,
 which is right for most projects. If you work with an AI assistant, you can ask
 it to run `/init` and it will ask these questions for you.
 
+To keep `.env` short for one DEV connection, set `DEV_SCHEMA`, `DEV_SQLCL_CONNECTION` and `DEV_EXPECTED_USER` together (all three or none) and leave out the `TABLES_*`, `CODE_*` and `APEX_*` profile keys. Every profile that has none of its own keys takes these three values, and `TABLES_PREFIXES` and `CODE_PREFIXES` default to `*`. The expected user is never defaulted. A profile that sets some of its own keys keeps its own checks, and the staging, production, migration and ORDS profiles are unchanged.
+
 To see which schema, SQLcl connection and login each operation uses with these
 values, run `scripts/team.sh targets` (or `pwsh -File scripts/team.ps1 targets`).
 It only reads `.env`: it never connects to a database and never starts SQLcl. A
