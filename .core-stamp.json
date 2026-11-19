@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "244fcdf7c2237bbb85b56b0fd752565bc0494a5a",
+  "coreCommit": "3d96643634d66848531eeeef1fe8b6ecc38183ba",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -1009,7 +1009,7 @@
     },
     {
       "path": "tests/test_migration_archive_followups.py",
-      "sha256": "87d13d0e4c90bb508c7b7a16783cdd2d3b7fd8583f48b64cdaab82450e7593b5",
+      "sha256": "bbec636849f09681981d23a9ed28eaea7a8673be3c6336430e9d2d549a0e37a4",
       "executable": false
     },
     {
