@@ -83,10 +83,10 @@
     },
     ".env.example": {
       "status": "intended",
-      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT.",
+      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT. Follow-up 2026-11-20: both examples describe the DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER shorthand.",
       "blobs": [
-        "67df24266ec3f262d46d1fcfe14d12c3a4b2bcb2",
-        "34a22c159abe48f1f3ab272e3ed43fb49befefd1"
+        "39a3ec847cd38644b3c0f76ed69a9d007296f2f8",
+        "b6bacd5129442469869555b1c119a12f6c25c0ac"
       ]
     },
     ".github/workflows/template-checks.yml": {
@@ -123,18 +123,18 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor.",
       "blobs": [
-        "dda8b59578eb464cc33f5d57a6078912edf130f4",
-        "859f9c4567b6e458ae59c23dfd44e95fec3555da"
+        "eed6ff76da91a3f0333695eb23b3a460eaa88fed",
+        "d05f40c57527b0c24556cc5be7e5f6c0641d789b"
       ]
     },
     "TODO.md": {
       "status": "intended",
-      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 3): both record the Oracle 23ai checks (INVISIBLE columns, DATA_DEFAULT_VC, SQLcl session cost); only 26.2 lists the app-unlock live gap.",
+      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 3): both record the Oracle 23ai checks (INVISIBLE columns, DATA_DEFAULT_VC, SQLcl session cost); only 26.2 lists the app-unlock live gap. Follow-up 2026-11-20: both record the verified virtual-column capture; 26.2 also records the app-unlock live check.",
       "blobs": [
-        "f89515382c99fd7c762ff2b5dabda2762f328a80",
-        "86be65aa8fcf37184d3ad08a0ec3f1b66def623b"
+        "72fb12fe075ef438441917fde7bdc7ad301293d8",
+        "1b513a323377ec97f6f4aaecb98bc1d04d80802c"
       ]
     },
     "ai_generate/2026-11-14/WALKTHROUGH.md": {
@@ -179,10 +179,10 @@
     },
     "docs/GETTING_STARTED.md": {
       "status": "intended",
-      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): both guides now clean up by file-level provenance and list inherited workflows by name; they differ in the SQLcl floor, release commands and the 26.1 lock-based test listing. Follow-up 2026-11-19 (pass 3): both guides carry the section for existing projects; the 26.2 guide also clarifies which engine accepts --apex-release.",
+      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): both guides now clean up by file-level provenance and list inherited workflows by name; they differ in the SQLcl floor, release commands and the 26.1 lock-based test listing. Follow-up 2026-11-19 (pass 3): both guides carry the section for existing projects; the 26.2 guide also clarifies which engine accepts --apex-release. Follow-up 2026-11-20: both guides describe the DEV shorthand.",
       "blobs": [
-        "8798cc80eb26afe144b9df360028a47dcb114f53",
-        "c268e48ff8a92adbdf1e50d80c8d0e0a6068afc1"
+        "ac7cde34baf6dc0d1421eda71d562a35b7f64a00",
+        "d1d8294d2676073eb326f78430b33db543acfb6b"
       ]
     },
     "docs/TROUBLESHOOTING.md": {
@@ -235,9 +235,9 @@
     },
     "docs/known-limitations.md": {
       "status": "intended",
-      "reason": "Release-specific limits: 26.2 lists native-lock, partial-publish, normalization, rehearsal and capsule-budget limits; 26.1 lists its no-lock publish race and the -y flags for reconcile and rollout recovery.",
+      "reason": "Release-specific limits: 26.2 lists native-lock, partial-publish, normalization, rehearsal and capsule-budget limits; 26.1 lists its no-lock publish race and the -y flags for reconcile and rollout recovery. Follow-up 2026-11-20: both note that 19c is no longer a supported floor.",
       "blobs": [
-        "427119cf29946151848209a424dff8c78072f69e",
+        "d54f368d49901d354c70472e5002a1cd97405e3b",
         "ea52aa6d17b35d8590f46bfd8b070229c1a0117f"
       ]
     },
@@ -379,10 +379,10 @@
     },
     "scripts/compare_env_catalog.sql": {
       "status": "feature",
-      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply.",
+      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply. Follow-up 2026-11-20: both lines now capture `virtual_expression` (DATA_DEFAULT_VC when the database has it, NULL otherwise) in the columns section; the same change, so the remaining difference is unchanged.",
       "blobs": [
-        "609ea023fc1363e2d48135d7b7d63e88307d433d",
-        "66f72a6ccb9980156a8e4c4da1b5cb520ac43cad"
+        "5fb1d7ba419f80a696addf4aad526ae416e81d67",
+        "13152d39a829b4881f721af55ab3432381ce35c0"
       ]
     },
     "scripts/deploy.sh": {
@@ -538,8 +538,8 @@
       ]
     },
     "scripts/rollout.py": {
-      "status": "missed",
-      "reason": "Missed: 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate.",
+      "status": "intended",
+      "reason": "Not ported (was missed): 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard.",
       "blobs": [
         "6371436540cb92183ee0083bf70af1c44beaca09",
         "96ce1597b28228c3094500c54092f56e11c1c22e"
@@ -587,10 +587,10 @@
     },
     "scripts/upgrade_template.py": {
       "status": "intended",
-      "reason": "26.2 reads schema-2 manifests and apexRelease; 26.1 reads schema 1. Follow-up 2026-11-19 (pass 2): the credential refusal and the installed-state check on a lock read from disk are the same on both lines, and both lines now protect features/ and releases/ as project data.",
+      "reason": "26.2 reads schema-2 manifests and apexRelease; 26.1 reads schema 1. Follow-up 2026-11-19 (pass 2): the credential refusal and the installed-state check on a lock read from disk are the same on both lines, and both lines now protect features/ and releases/ as project data. Follow-up 2026-11-20: both lines run the post-upgrade Graphify sync only when the project already uses it (graphify-out; 26.2 also .venv-graphify) and deliver an upstream executable-bit fix; the same behaviour on both lines.",
       "blobs": [
-        "eac23770b433e04d2a42620036323e740059d3b0",
-        "010d32c91c3fc4e8e72758edd8a136fd108b812c"
+        "6889063f97c1b4850f69d9766a4d2f04fc27fe40",
+        "e8bdcd10396aef3ad57a0dde4fecc9987e8153f8"
       ]
     },
     "scripts/validate_app_source.py": {
@@ -691,10 +691,10 @@
     },
     "tests/test_compare_env.py": {
       "status": "intended",
-      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines.",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines. Follow-up 2026-11-20: both lines pin the virtual_expression probe, token and key in the catalog SQL.",
       "blobs": [
-        "2414e8b74b116fe0aa6192e175e06c4cfd08efa8",
-        "68d57f7dfc7c70c015520d97a1fc3b08fc7b5b90"
+        "2d993f776d43c4312f0928f753417f0de343bef4",
+        "a57730bed4e47767cab62fc18767d691e11211be"
       ]
     },
     "tests/test_deployment_descriptor.py": {
@@ -826,8 +826,8 @@
       ]
     },
     "tests/test_rollout.py": {
-      "status": "missed",
-      "reason": "Missed: 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py). Both lines assert that a version-1 rollout uses the normal direct migration lease path.",
+      "status": "intended",
+      "reason": "Not ported (was missed): 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py). Both lines assert that a version-1 rollout uses the normal direct migration lease path. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard.",
       "blobs": [
         "1fdc2d41628090eed22ca1c8347016f194b80f9e",
         "b762c9ebec178124d00f040dd36e59a8212ef2cb"
@@ -867,10 +867,10 @@
     },
     "tests/test_upgrade_template.py": {
       "status": "intended",
-      "reason": "Tests the schema-2 / apexRelease handling (26.2 only). Follow-up 2026-11-19 (pass 2): the credential, installed-state and redaction tests are on both lines; the features/releases protection tests were already in 26.1 and are now in 26.2.",
+      "reason": "Tests the schema-2 / apexRelease handling (26.2 only). Follow-up 2026-11-19 (pass 2): the credential, installed-state and redaction tests are on both lines; the features/releases protection tests were already in 26.1 and are now in 26.2. Follow-up 2026-11-20: both lines test the Graphify gate and the mode-only update.",
       "blobs": [
-        "d0f3196a8c2f6bf425ff9fb2c03a942fa9edf0ea",
-        "19cfd419c1923370f769ca8313e77354ff96056b"
+        "c5107daada4e99f8d3603ffa620a39877879dcdf",
+        "f48c289e8105eae696bb7faed27a723799a7472a"
       ]
     },
     "tests/test_verify_local.py": {
