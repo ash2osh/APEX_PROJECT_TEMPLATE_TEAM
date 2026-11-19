@@ -314,8 +314,10 @@ class LiveBaselineTests(unittest.TestCase):
         # expression text is the catalog's DATA_DEFAULT_VC form (Oracle 23ai quotes the column name).
         self.assertIn(f'"{SCHEMA}"."{p}_NOTES" ADD ("NOTE_TOTAL" NUMBER GENERATED ALWAYS AS ("NOTE_ID"*2) VIRTUAL)', text)
         self.assertIn(f'"{SCHEMA}"."{p}_NOTES" ADD ("NOTE_FLAG" NUMBER INVISIBLE)', text)
-        self.assertIn("VIRTUAL_COLUMN = 'YES'", text)
-        self.assertIn("HIDDEN_COLUMN = 'YES'", text)
+        # Their postconditions are in the family's checks.json, not in the step text.
+        checks_text = (self.world.family("structure", self.families_dir) / "checks.json").read_text(encoding="utf-8")
+        self.assertIn("VIRTUAL_COLUMN = 'YES'", checks_text)
+        self.assertIn("HIDDEN_COLUMN = 'YES'", checks_text)
         self.assertIn(f'CREATE SEQUENCE  "{SCHEMA}"."{p}_ITEMS_SEQ"', text)
         for constraint in (f"{p}_ITEMS_FK", f"{p}_ITEMS_PRICE_CK"):
             self.assertIn(constraint, text)

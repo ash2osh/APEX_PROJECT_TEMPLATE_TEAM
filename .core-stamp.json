@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "593c857e5f18ee80560d4722cf3e6dce24481c81",
+  "coreCommit": "09de87f57244923abb51b86ba8b5e16d7dc69de0",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -1004,7 +1004,7 @@
     },
     {
       "path": "tests/test_live_baseline.py",
-      "sha256": "8f43a0d9053042f7d41d550aa96af012bcb84a8b4b51a7c4ae1348b3e3d0968c",
+      "sha256": "9bd6ca2da602f2c452ef4ed48236f6579a1968f4559f5283c4e76216f395eb9f",
       "executable": false
     },
     {
