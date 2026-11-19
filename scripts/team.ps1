@@ -570,6 +570,17 @@ try {
           }
         }
       }
+      if ($featureArguments[0] -ceq "apply" -or $featureArguments[0] -ceq "reconcile-run") {
+        for ($featureIndex = 1; $featureIndex -lt $featureArguments.Count; $featureIndex++) {
+          $featureValue = [string] $featureArguments[$featureIndex]
+          if ($featureValue -cmatch '^--(?:checks|execute-plan|evidence)$' -and $featureIndex + 1 -lt $featureArguments.Count) {
+            $featureIndex++
+            $featureArguments[$featureIndex] = ConvertTo-MigrationFolderArgument ([string] $featureArguments[$featureIndex])
+          } elseif ($featureValue -cmatch '^(--(?:checks|execute-plan|evidence)=)(.*)$') {
+            $featureArguments[$featureIndex] = $Matches[1] + (ConvertTo-MigrationFolderArgument $Matches[2])
+          }
+        }
+      }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("feature") + $featureArguments)
     }
     "compare-schema" {

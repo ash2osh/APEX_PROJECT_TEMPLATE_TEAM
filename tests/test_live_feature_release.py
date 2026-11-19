@@ -364,8 +364,11 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         path.write_text("\n".join(values) + "\n", encoding="utf-8")
         return {**self.env, "PROJECT_ENV_FILE": str(path)}
 
-    def _prepare_dev_feature(self, slug: str, selector: str, env: dict, identity: dict[str, str]) -> str:
-        result = self._team("feature", "apply", slug, "--schema", SCHEMA, "--env", "dev", "--unit", selector, "--prepare", env=env)
+    def _prepare_dev_feature(self, slug: str, selector: str, env: dict, identity: dict[str, str], *, adopt: str | None = None) -> str:
+        args = ["feature", "apply", slug, "--schema", SCHEMA, "--env", "dev", "--unit", selector, "--prepare"]
+        if adopt is not None:
+            args.extend(("--accept-live-baseline", adopt))
+        result = self._team(*args, env=env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         match = re.search(r"^Plan (scratch/feature-dev/prepare-[^\r\n]+/plan\.json)$", result.stdout, re.MULTILINE)
         self.assertIsNotNone(match, result.stdout)
@@ -439,8 +442,12 @@ os.execv(real, [real, *args])
         self.assertIn("FEATURE_VIEW_GUARD_REFUSED", transcript)
         self.assertNotIn("MIGRATION_PAYLOAD_STARTED:", transcript)
         self.assertEqual(self._count(f"select count(*) from {view} where substr4(C11, -1) = '{concurrent_tail}'"), 1)
-        self._sql(CONNECTION, guard + authored)
-        plan = self._prepare_dev_feature(slug, f"VIEW:{view}", env, identity)
+        drift = self._team("feature", "apply", slug, "--schema", SCHEMA, "--env", "dev", "--unit", f"VIEW:{view}", "--prepare", env=env)
+        self.assertEqual(drift.returncode, 1, drift.stdout + drift.stderr)
+        self.assertIn("changed since the retained baseline", drift.stderr)
+        adoption = re.search(r"--accept-live-baseline ([a-f0-9]{64})", drift.stderr)
+        self.assertIsNotNone(adoption, drift.stderr)
+        plan = self._prepare_dev_feature(slug, f"VIEW:{view}", env, identity, adopt=adoption.group(1))
         result = self._execute_dev_feature(slug, plan, env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self._count(f"select count(*) from {view} where substr4(C11, -1) = '{intended_tail}'"), 1)
@@ -503,6 +510,7 @@ os.execv(real, [real, *args])
         self.assertEqual(blocked.returncode, 2, blocked.stdout + blocked.stderr)
         self.assertIn("observed DEV identity changed", blocked.stderr)
         self.assertFalse(list((self.project / plan_path).parent.glob("apply-*/sqlcl-output.log")))
+        plan_path = self._prepare_dev_feature(slug, f"PACKAGE BODY:{package}", env, dev_identity)
         result = self._execute_dev_feature(slug, plan_path, env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         plan = json.loads((self.project / plan_path).read_bytes())

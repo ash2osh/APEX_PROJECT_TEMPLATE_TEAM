@@ -1001,10 +1001,15 @@ class FeaturePrepareTests(unittest.TestCase):
         cases = (
             ("same owner, different body", "APP_CODE", "APP_CODE", v2, True, False),
             ("followed by DML", "APP_CODE", "APP_CODE", v2 + "UPDATE jobs SET status = 'READY';\n", True, False),
+            ("followed by a comment and lock", "APP_CODE", "APP_CODE", v2 + "COMMENT ON TABLE JOBS IS 'Ready';\nLOCK TABLE JOBS IN EXCLUSIVE MODE;\n", True, False),
             ("mapped target owner", "APP_CODE", "APP_STAGE", v2, True, False),
             ("same owner, equal body", "APP_CODE", "APP_CODE", equal, False, False),
             ("last replacement matches live", "APP_CODE", "APP_CODE", v2 + equal, False, False),
             ("different owner", "APP_OTHER", "APP_CODE", v2, False, False),
+            ("explicit selected owner from another login", "APP_OTHER", "APP_CODE", v2.replace("PACKAGE BODY DISPATCH", "PACKAGE BODY APP_CODE.DISPATCH"), True, False),
+            ("migrate switches to the selected owner", "APP_OTHER", "APP_CODE", "ALTER SESSION SET CURRENT_SCHEMA = APP_CODE;\n" + v2, True, False),
+            ("drops the selected body", "APP_CODE", "APP_CODE", "DROP PACKAGE BODY DISPATCH;\n", True, False),
+            ("recompiles the selected body", "APP_CODE", "APP_CODE", "ALTER PACKAGE DISPATCH COMPILE BODY;\n", True, False),
             ("opaque SQL", "APP_CODE", "APP_CODE", v2 + "BEGIN NULL; END;\n/\n", False, True),
         )
         for label, migration_schema, feature_owner, source, refused, warning in cases:
@@ -1034,9 +1039,11 @@ class FeaturePrepareTests(unittest.TestCase):
                      patch.object(migration_checks, "_live_report", return_value=PreflightReport(0, (), (), {})), \
                      redirect_stderr(stderr):
                     if refused:
+                        plans = self.root / "scratch/feature-release-plans"
+                        previous = {path: path.read_bytes() for path in plans.rglob("*.json")}
                         with self.assertRaisesRegex(feature_release.FeatureReleaseError, r"step 1.*PACKAGE BODY DISPATCH.*step 2"):
                             feature_release.prepare_target(self.root, capsule, "staging", environ=env)
-                        self.assertFalse((self.root / "scratch/feature-release-plans").exists())
+                        self.assertEqual({path: path.read_bytes() for path in plans.rglob("*.json")}, previous)
                     else:
                         plan = feature_release.prepare_target(self.root, capsule, "staging", environ=env)
                         self.assertEqual(plan.checkpoint_guards[0]["targetIdentity"]["current_schema"], feature_owner)

@@ -68,18 +68,22 @@ observed target and the exact source, check, and configuration inputs.
 
 Prepare uses the feature schema's `checks.json`. Repeat `--checks` with
 repository-relative paths under that feature schema's `checks/` directory
-when the selection needs its own checks. For an existing unit without a
-retained baseline, review the displayed before-state and diff, then prepare
-again with the displayed `--accept-live-baseline` digest. Adoption preserves
-the authored feature files. Preparation performs no database writes.
+when the selection needs its own checks. `PROJECT_ENV_FILE` must point to a
+regular file inside the checkout. If a unit has no baseline on this target,
+or its live definition or settings have changed, review the retained diff
+and observed before-state, reconcile the authored source, and prepare again
+with the displayed `--accept-live-baseline` digest. Acceptance preserves
+the authored feature files and records the observed state for that target.
+Preparation performs no database writes.
 
 Select a view with `--unit VIEW:ITEM_LOOKUP` and put its single
 `CREATE OR REPLACE VIEW` in `views/item_lookup.sql` under the feature schema.
 List the projected columns explicitly because Oracle expands top-level
 wildcards in stored view text. Use an explicit view column list when the
-projection does not name every output column. Declare `DEFAULT COLLATION`
-in the source when Oracle's metadata reports a default collation for the
-view, so the read-back can verify the intended value. Keep one-time DDL and grants
+projection does not name every output column. If the source omits `DEFAULT
+COLLATION`, prepare binds the effective schema or session default. The
+writer rechecks it before applying and verifies the installed collation.
+Keep one-time DDL and grants
 in separately selected files. When a capsule replaces an existing view,
 include the reviewed target precondition required by capsule preparation.
 See [Oracle's view creation notes](https://docs.oracle.com/en/database/oracle/oracle-database/19/admin/managing-views-sequences-and-synonyms.html).

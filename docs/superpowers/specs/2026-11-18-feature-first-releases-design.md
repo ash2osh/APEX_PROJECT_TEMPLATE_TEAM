@@ -132,15 +132,16 @@ scripts/team.sh feature reconcile-run <run-id> --env dev --evidence <file>
   scope, before/after diff, dependency and compiler-settings decisions, and
   the plan digest. For existing stored units, use exact capture or last
   verified DEV evidence so an old feature file cannot silently erase newer
-  DEV work. When that baseline disagrees, reconcile the source first. For
-  any existing unit or view with no retained baseline, prepare shows the
-  complete observed definition, the proposed diff, and a target-bound
-  before-state digest. A second preparation can record that reviewed
-  baseline using `--accept-live-baseline <before-state-sha256>`. The digest
-  must match a fresh observation. This option is prepare-only, applies
-  only to absent baselines, and preserves edited feature files. Refuse this
-  route when the observed unit is invalid, its state is incomplete, or the
-  target scope has unresolved write evidence.
+  DEV work. When the baseline is missing or disagrees with a fresh target
+  observation, prepare shows the observed definition or absence, changes
+  since the retained baseline, and the proposed source change. A second
+  preparation can accept the reviewed state using
+  `--accept-live-baseline <before-state-sha256>`. The digest must match a
+  fresh observation. Acceptance is prepare-only, preserves edited feature
+  files, and saves evidence for the observed physical target. Refuse to
+  adopt an invalid object, incomplete state, or a target with unresolved
+  write evidence. A previously verified unchanged definition can be
+  repaired when only its validity changed.
   New objects require verified absence and the existing explicit compiler
   settings where applicable. For a view, use an untruncated catalog definition
   and preserve literal text when comparing it. Unavailable source, settings,
@@ -164,8 +165,9 @@ scripts/team.sh feature reconcile-run <run-id> --env dev --evidence <file>
   name selection through the baseline names filter. Compare query text and
   definition attributes, including
   column aliases and order, CHECK OPTION or READ ONLY, editioning,
-  BEQUEATH and explicit default collation. When captured DDL includes a
-  default collation, require the source to name the intended value. Qualify the
+  BEQUEATH and default collation. When source omits `DEFAULT COLLATION`,
+  bind the effective schema/session default during preparation and guard it
+  in the write session. Read back the actual catalog collation. Qualify the
   complete read and guard for long definitions and supplementary Unicode.
   Refuse a view when complete evidence is
   unavailable. A no-op requires
@@ -212,8 +214,10 @@ same-target read-only evidence and the normal recorded acknowledgment.
 Close a proven before-state or intended state as reconciled. A partial or
 unclassifiable state needs separately authorized repair before closing it.
 Reconciliation records an outcome and never creates staging proof. A
-verified plan is single-use. After a refusal or reconciliation, prepare a
-fresh plan before any new write.
+verified plan is single-use. A connected pre-write refusal consumes the
+reviewed plan with a `not-started` record. Invalid command arguments or
+unverified plan files establish no attempt. Prepare a fresh plan after a
+connected refusal or reconciliation.
 
 Record verified no-ops as consumed using the same plan ID and digest as a
 verified write. A repeat rejects from local evidence before connecting.

@@ -206,7 +206,10 @@ def _config_binding(root, values, target):
         if ".." in requested.parts:
             raise ValueError("effective project environment file cannot contain .. components")
         candidate = root / requested
-        relative = relative_to_root(candidate, root).as_posix()
+        try:
+            relative = relative_to_root(candidate, root).as_posix()
+        except ValueError as error:
+            raise ValueError("DEV feature apply requires PROJECT_ENV_FILE inside the checkout") from error
         _, path = feature_manifest._resolve_file(root, relative, "effective project environment file")
         configuration = {"path": relative, "sha256": _sha256(path.read_bytes())}
     return {
@@ -270,6 +273,10 @@ def _assert_no_pending_migration(root, schema):
 
 def _retained_source(root, item, baseline_path, scope):
     raw = feature_sources._ordinary_file(baseline_path, root)
+    legacy = raw is None
+    if legacy:
+        legacy_path = baseline_path.with_name(f"{_sha256(_canonical_bytes(item.unit))}.json")
+        raw = feature_sources._ordinary_file(legacy_path, root)
     if raw is not None:
         record = migration_manifest.decode_json(raw, "retained DEV baseline")
         if (
@@ -277,9 +284,14 @@ def _retained_source(root, item, baseline_path, scope):
             or type(record["schemaVersion"]) is not int or record["schemaVersion"] != 1
         ):
             raise ValueError(f"retained DEV baseline is malformed for {item.path}")
-        if record["unit"] != list(item.unit) or record["targetScope"] != scope:
+        saved_scope = release_ownership._scope_record(record["targetScope"])
+        if record["unit"] != list(item.unit) or (not legacy and saved_scope != scope):
             raise ValueError(f"retained DEV baseline belongs to a different unit or physical target: {item.path}")
         state = record["state"]
+        if legacy and saved_scope != scope:
+            return None
+        if state is None:
+            return None
         if item.unit[1] == "VIEW":
             if (
                 not isinstance(state, dict) or set(state) != {"ddl", "text", "valid"} or state["valid"] is not True
@@ -302,7 +314,7 @@ def _retained_source(root, item, baseline_path, scope):
         return None
     text, identity = retained
     if release_state.target_scope_from_identity(identity) != scope:
-        raise ValueError(f"captured DEV baseline belongs to a different physical target: {item.path}")
+        return None
     stored, settings = feature_release._stored_source(replace(item, source=text.encode("utf-8")))
     return {"lines": stored["lines"], "settings": settings}
 
@@ -317,8 +329,9 @@ def _before_state(feature, scope, checkpoint, state):
     }
 
 
-def _baseline_path(root, feature, unit):
-    return root / "scratch" / "feature-dev" / "baselines" / feature / unit[0] / f"{_sha256(_canonical_bytes(unit))}.json"
+def _baseline_path(root, feature, unit, scope):
+    key = _sha256(_canonical_bytes([unit, scope]))
+    return root / "scratch" / "feature-dev" / "baselines" / feature / unit[0] / f"{key}.json"
 
 
 def _baseline_record(unit, scope, state):
@@ -328,31 +341,44 @@ def _baseline_record(unit, scope, state):
 def _before_and_reviews(root, run_dir, feature, checkpoint, state, guards, scope, accepted):
     schema = checkpoint.schema
     review = []
-    missing = {}
+    adoption = {}
+    changed = []
     for item, guard in zip(checkpoint.inputs, guards, strict=True):
         _, kind, name = item.unit
         current = state["sourceUnits"].get(f"{kind}:{name}")
         present = current is not None
-        unit_path = _baseline_path(root, feature, item.unit)
+        unit_path = _baseline_path(root, feature, item.unit, scope)
+        previous = feature_sources._ordinary_file(unit_path, root)
         retained = _retained_source(root, item, unit_path, scope)
+        matches = not present and retained is None
         if retained is not None:
             if kind == "VIEW":
-                matches = current == retained
+                matches = present and (current["ddl"], current["text"]) == (retained["ddl"], retained["text"])
             else:
                 lines = retained["lines"]
                 if not isinstance(lines, list) or not lines or any(not isinstance(line, str) for line in lines):
                     raise ValueError(f"retained source is incomplete for {kind} {name}")
                 settings = feature_release._validated_settings(name, kind, retained["settings"])
                 matches = present and feature_release._same_stored_source(current["lines"], lines) and feature_release._same_settings(current["settings"], settings)
-            if not matches:
-                raise DevPrepareRefusal(f"live DEV source or settings changed since the retained baseline for {kind} {name}; reconcile before preparing")
-        elif present:
-            if current["valid"] is not True:
+        if not matches:
+            if present and current["valid"] is not True:
                 raise ValueError(f"cannot adopt an invalid DEV unit: {kind} {name}")
-            missing[unit_path] = _baseline_record(item.unit, scope, current)
+            adoption[unit_path] = (previous, _baseline_record(item.unit, scope, current))
+            if retained is not None:
+                changed.append(f"{kind} {name}")
+                old_source = retained["ddl"] if kind == "VIEW" else "".join(retained["lines"])
+                live_source = (current["ddl"] if kind == "VIEW" else "".join(current["lines"])) if present else ""
+                review.append(f"\nChanges since the retained DEV baseline for {kind} {name}\n")
+                if kind != "VIEW":
+                    review.append(f"  Retained compiler settings: {retained['settings']}\n")
+                review.append(feature_sources._review_diff(old_source, live_source, feature, schema, (kind, name)).decode("utf-8"))
         label = f"{kind} {name}"
         review.append(f"\n{label}\n  {item.path}\n  {'No-op' if guard['noOp'] else 'Apply planned'}\n")
         if kind == "VIEW":
+            if guard["observedCollation"] is not None:
+                review.append(f"  Observed view collation: {guard['observedCollation']}\n")
+            if guard["defaultCollation"] is not None:
+                review.append(f"  Planned session/schema default collation: {guard['defaultCollation']}\n")
             before = current["ddl"] if present else ""
             after = item.source.decode("utf-8")
         else:
@@ -365,18 +391,19 @@ def _before_and_reviews(root, run_dir, feature, checkpoint, state, guards, scope
     observed = _before_state(feature, scope, checkpoint, state)
     observed_digest = _sha256(_canonical_bytes(observed))
     release_capsule._write_stage_file(run_dir, "source-review.diff", "".join(review).encode("utf-8"))
-    if missing:
+    if adoption:
         _assert_no_pending_migration(root, schema)
         release_capsule._write_stage_file(run_dir, "before-state.json", _canonical_bytes(observed) + b"\n")
         if accepted != observed_digest:
             relative = relative_to_root(run_dir, root).as_posix()
+            drift = f"live DEV source or settings changed since the retained baseline for {', '.join(changed)}. " if changed else ""
             raise DevPrepareRefusal(
-                f"review the live definition in {relative}/before-state.json and the diff in {relative}/source-review.diff. "
+                f"{drift}Review the live definition in {relative}/before-state.json and the diff in {relative}/source-review.diff. "
                 f"To adopt this live baseline, prepare again with --accept-live-baseline {observed_digest}"
             )
     elif accepted is not None:
-        raise ValueError("--accept-live-baseline applies only to existing units without a retained baseline")
-    return observed, observed_digest, missing
+        raise ValueError("--accept-live-baseline requires a live state without a matching retained baseline")
+    return observed, observed_digest, adoption
 
 
 def _structural_plan(checkpoint, state):
@@ -403,10 +430,19 @@ def _source_and_structure_guards(checkpoint, claims, state):
             or any(not isinstance(observed.get(field), str) or not observed[field].strip() for field in ("ddl", "text"))
         ):
             raise ValueError(f"complete view catalog text or validity is unavailable for {name}")
+        default_collation = None
+        if feature_dev_views.definition(item.source.decode("utf-8"), owner)["collation"] is None:
+            default_collation = state.get("effectiveViewCollation")
+            if not isinstance(default_collation, str) or not default_collation:
+                raise ValueError(f"effective default collation is unavailable for {name}")
+        observed_collation = state.get("viewCollations", {}).get(name)
         view_guards[item.unit] = {
             "unit": {"owner": owner, "type": kind, "name": name},
             "targetExists": observed is not None,
-            "noOp": observed is not None and feature_dev_views.matches(item, observed),
+            "defaultCollation": default_collation, "observedCollation": observed_collation,
+            "noOp": observed is not None and feature_dev_views.matches(
+                item, observed, default_collation=default_collation, actual_collation=observed_collation,
+            ),
         }
     structural = feature_preflight.plan_to_dict(_structural_plan(checkpoint, state))
     guards = feature_release._source_guards(checkpoint, state, 1)
@@ -510,12 +546,11 @@ def prepare_dev_apply(
         document["planSha256"] = _sha256(_canonical_bytes(document))
         plan_bytes = _canonical_bytes(document) + b"\n"
         if adopted:
-            # Two different target scopes can still contend for the same feature/schema baseline.
             with release_state._writer_lock(root):
-                if any(feature_sources._ordinary_file(path, root) is not None for path in adopted):
-                    raise ValueError("a retained DEV baseline appeared during preparation; review it and prepare again")
+                if any(feature_sources._ordinary_file(path, root) != previous for path, (previous, _) in adopted.items()):
+                    raise ValueError("a retained DEV baseline changed during preparation; review it and prepare again")
                 feature_release._secure_directory(next(iter(adopted)).parent, root)
-                outputs = {path: _canonical_bytes(record) + b"\n" for path, record in adopted.items()}
+                outputs = {path: _canonical_bytes(record) + b"\n" for path, (_, record) in adopted.items()}
                 outputs[run_dir / "plan.json"] = plan_bytes
                 feature_sources._atomic_group_write(root, outputs)
         else:
@@ -629,6 +664,22 @@ def _sync_attempt_directory(directory):
         os.close(descriptor)
 
 
+def _write_attempt(root, plan, relative, state, evidence):
+    directory = root / ATTEMPT_DIRECTORY
+    feature_release._secure_directory(directory, root)
+    _assert_dev_available(root, plan["targetScope"], plan["planId"])
+    marker = directory / f"{plan['planId']}.json"
+    record = {
+        "schemaVersion": 1, "planId": plan["planId"], "planSha256": plan["planSha256"], "feature": plan["feature"],
+        "planPath": relative.as_posix(), "targetScope": plan["targetScope"], "state": state,
+        "evidencePaths": [relative.as_posix(), *evidence],
+    }
+    release_capsule._write_stage_file(directory, marker.name, _canonical_bytes(record) + b"\n")
+    _sync_attempt_directory(directory)
+    _sync_attempt_directory(directory.parent)
+    return marker, record
+
+
 def _retained_preconditions_refused(output, checks, identity):
     lines = set(output.splitlines())
     if (
@@ -646,7 +697,7 @@ def _refresh_baselines(root, feature, scope, checkpoint, state):
     outputs = {}
     for item in checkpoint.inputs:
         current = state["sourceUnits"][f"{item.unit[1]}:{item.unit[2]}"]
-        path = _baseline_path(root, feature, item.unit)
+        path = _baseline_path(root, feature, item.unit, scope)
         outputs[path] = item, _canonical_bytes(_baseline_record(item.unit, scope, current)) + b"\n"
     with release_state._writer_lock(root):
         for path, (item, _) in outputs.items():
@@ -661,7 +712,10 @@ def _intended_source_matches(checkpoint, observed, source_guards):
         key = item.unit[1:]
         state = observed["sourceUnits"].get(":".join(key))
         if item.unit[1] == "VIEW":
-            if state is None or not feature_dev_views.matches(item, state):
+            if state is None or not feature_dev_views.matches(
+                item, state, default_collation=source_guards[key].get("defaultCollation"),
+                actual_collation=observed.get("viewCollations", {}).get(item.unit[2]),
+            ):
                 return False
             continue
         expected, _ = feature_release._stored_source(item)
@@ -693,20 +747,28 @@ def execute_dev_apply(repo_root: Path, feature: str, schema: str, plan_path: Pat
         if (root / relative).read_bytes() != raw:
             raise ValueError("DEV apply plan changed before acquiring its target lease")
         run_dir = Path(tempfile.mkdtemp(prefix="apply-", dir=(root / relative).parent))
-        observed = feature_release._capture_selected_state(target, checkpoint, run_dir / "catalog-before")
-        if feature_release._identity(target, observed["identity"]) != identity:
-            raise ValueError("observed DEV identity changed after preparation")
-        if _sha256(_canonical_bytes(_before_state(feature, scope, checkpoint, observed))) != plan["beforeStateSha256"]:
-            raise DevPrepareRefusal("live DEV before-state changed after preparation")
-        guards, structure = _source_and_structure_guards(checkpoint, claims, observed)
-        if (
-            _canonical_bytes(guards) != _canonical_bytes(plan["sourceGuards"])
-            or _canonical_bytes(structure) != _canonical_bytes(plan["structuralPlan"])
-        ):
-            raise DevPrepareRefusal("live DEV source, settings or structural guards changed after preparation")
-        guard = {"sourceGuards": guards, "structuralPlan": structure}
-        pre, post = feature_release._checkpoint_runtime_checks(checkpoint, guard)
-        pre_report = _read_checks(target, pre, run_dir / "preconditions", identity, "preconditions")
+        report_path = relative_to_root(run_dir / "checkpoint-report.json", root).as_posix()
+        try:
+            observed = feature_release._capture_selected_state(target, checkpoint, run_dir / "catalog-before")
+            if feature_release._identity(target, observed["identity"]) != identity:
+                raise ValueError("observed DEV identity changed after preparation")
+            if _sha256(_canonical_bytes(_before_state(feature, scope, checkpoint, observed))) != plan["beforeStateSha256"]:
+                raise DevPrepareRefusal("live DEV before-state changed after preparation")
+            guards, structure = _source_and_structure_guards(checkpoint, claims, observed)
+            if (
+                _canonical_bytes(guards) != _canonical_bytes(plan["sourceGuards"])
+                or _canonical_bytes(structure) != _canonical_bytes(plan["structuralPlan"])
+            ):
+                raise DevPrepareRefusal("live DEV source, settings or structural guards changed after preparation")
+            guard = {"sourceGuards": guards, "structuralPlan": structure}
+            pre, post = feature_release._checkpoint_runtime_checks(checkpoint, guard)
+            pre_report = _read_checks(target, pre, run_dir / "preconditions", identity, "preconditions")
+        except ValueError as error:
+            feature_release._write_checkpoint_report(run_dir, {
+                "planId": plan_id, "databaseState": "not-started", "error": str(error),
+            })
+            _write_attempt(root, plan, relative, "not-started", [report_path])
+            raise
         source_guards = feature_release._checkpoint_source_guard_map(guard)
         drivers = []
         for number, item in enumerate(checkpoint.inputs, 1):
@@ -737,11 +799,7 @@ def execute_dev_apply(repo_root: Path, feature: str, schema: str, plan_path: Pat
         recheck_inputs()
         if _recovery_checkpoint(root, relative, plan) != checkpoint:
             raise ValueError("retained DEV inputs do not match the selected checkpoint")
-        directory = root / ATTEMPT_DIRECTORY
-        feature_release._secure_directory(directory, root)
-        _assert_dev_available(root, scope, plan_id)
-        marker = directory / f"{plan_id}.json"
-        trail = [relative.as_posix(), relative_to_root(run_dir / "checkpoint-report.json", root).as_posix()]
+        trail = [report_path]
         if drivers:
             trail.append(relative_to_root(run_dir / "sqlcl-output.log", root).as_posix())
         trail.extend(
@@ -750,13 +808,7 @@ def execute_dev_apply(repo_root: Path, feature: str, schema: str, plan_path: Pat
             for index, _ in enumerate(records, 1)
         )
         trail.append((relative.parent / plan["reviewPath"]).as_posix())
-        pending = {
-            "schemaVersion": 1, "planId": plan_id, "planSha256": plan["planSha256"], "feature": feature,
-            "planPath": relative.as_posix(), "targetScope": scope, "state": "pending", "evidencePaths": trail,
-        }
-        release_capsule._write_stage_file(directory, marker.name, _canonical_bytes(pending) + b"\n")
-        _sync_attempt_directory(directory)
-        _sync_attempt_directory(directory.parent)
+        marker, pending = _write_attempt(root, plan, relative, "pending", trail)
         started = time.perf_counter()
         crossed_boundary = False
 
@@ -911,9 +963,12 @@ def reconcile_dev_apply(repo_root, plan_id, evidence_path, *, environ, read_ackn
         if evidence["conclusion"] == "before":
             before = _before_state(plan["feature"], scope, checkpoint, observed)
             structural = _structural_plan(checkpoint, observed)
+            view_collations = observed.get("viewCollations", {})
             if (
                 _sha256(_canonical_bytes(before)) != plan["beforeStateSha256"]
                 or structural.expected_before_sha256 != plan["structuralPlan"]["expectedBeforeSha256"]
+                or any(row.get("observedCollation") is not None and view_collations.get(row["unit"]["name"]) != row["observedCollation"]
+                       for row in plan["sourceGuards"] if row["unit"]["type"] == "VIEW")
             ):
                 raise ValueError("DEV reconciliation could not prove the prepared before-state")
             checks, phase = pre, "preconditions"

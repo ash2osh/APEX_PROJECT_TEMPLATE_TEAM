@@ -43,6 +43,7 @@ class FeatureDevTests(unittest.TestCase):
         )
         self.state = {
             "identity": self.identity, "schema": "APP_CODE",
+            "effectiveViewCollation": "USING_NLS_COMP",
             "sourceUnits": {},
             "structural": {section: [] for section in feature_release.STRUCTURAL_SECTIONS},
             "coverage": {"ownerComplete": False, "selectedScopeComplete": True},
@@ -198,6 +199,9 @@ class FeatureDevTests(unittest.TestCase):
         result, output = self.prepare()
         self.assertEqual(result, 1, output)
         self.assertIn("changed since the retained baseline", output)
+        result, output = self.prepare("--accept-live-baseline", self.baseline_digest(output))
+        self.assertEqual(result, 0, output)
+        self.assertEqual(source.read_bytes(), desired)
         baseline, = self.root.glob("scratch/feature-dev/baselines/**/*.json")
         damaged = json.loads(baseline.read_bytes())
         damaged["state"]["settings"] = None
@@ -206,7 +210,7 @@ class FeatureDevTests(unittest.TestCase):
         self.assertEqual(result, 2, output)
         self.assertIn("incomplete state", output)
 
-    def test_capture_baseline_allows_different_logins_but_refuses_conflicting_scope(self):
+    def test_capture_baseline_allows_different_logins_but_requires_review_for_another_scope(self):
         path, lines = self.add_source()
         self.existing(lines)
         observed = dict(self.identity, session_user="CAPTURE_USER", service_name="dev-other-service.example.invalid")
@@ -223,8 +227,21 @@ class FeatureDevTests(unittest.TestCase):
             ):
                 with self.subTest(field=field), patch.dict(observed, {field: value}):
                     result, output = self.prepare()
-                    self.assertEqual(result, 2, output)
-                    self.assertIn("different physical target", output)
+                    self.assertEqual(result, 1, output)
+                    self.baseline_digest(output)
+
+    def test_retained_baselines_are_independent_on_reconfigured_targets(self):
+        _, lines = self.add_source()
+        self.existing(lines)
+        result, output = self.prepare()
+        self.assertEqual(result, 1, output)
+        self.assertEqual(self.prepare("--accept-live-baseline", self.baseline_digest(output))[0], 0)
+        with patch.dict(self.identity, {"container_id": "9"}):
+            result, output = self.prepare()
+            self.assertEqual(result, 1, output)
+            self.assertEqual(self.prepare("--accept-live-baseline", self.baseline_digest(output))[0], 0)
+        self.assertEqual(self.prepare()[0], 0)
+        self.assertEqual(len(list(self.root.glob("scratch/feature-dev/baselines/**/*.json"))), 2)
 
     def test_prepare_requires_settings_for_new_units_and_refuses_disabled_trigger(self):
         path, _ = self.add_source(settings=False)
@@ -734,10 +751,14 @@ with patch.object(feature_release, '_run_apply_session', side_effect=disconnect)
             result, output = self.execute(plan)
             self.assertEqual(result, 2, output)
             self.assertIn("observed DEV identity changed", output)
+        self.assertIn("consumed", self.execute(plan)[1])
+        self.assertEqual(self.prepare()[0], 0)
+        new_plan, = (candidate for candidate in self.plans() if candidate != plan)
         self.existing(["PROCEDURE RUN_JOB AS\n", "BEGIN NULL; END;\n"])
-        result, output = self.execute(plan)
+        result, output = self.execute(new_plan)
         self.assertEqual(result, 1, output)
         self.assertIn("before-state changed", output)
+        self.assertIn("consumed", self.execute(new_plan)[1])
         self.apply.assert_not_called()
 
     def view_source(self, statement="CREATE OR REPLACE VIEW CUSTOMER_LOOKUP AS SELECT 1 AS ID FROM DUAL;\n"):
@@ -752,6 +773,29 @@ with patch.object(feature_release, '_run_apply_session', side_effect=disconnect)
             "valid": True,
         }
         self.state["structural"]["views"] = [{"name": "CUSTOMER_LOOKUP", "status": "VALID"}]
+
+    def test_view_replacement_with_a_same_named_public_synonym(self):
+        self.view_source()
+        self.existing_view()
+        self.state["structural"]["synonyms"] = [{"owner": "PUBLIC", "name": "CUSTOMER_LOOKUP"}]
+        result, output = self.prepare(selector="VIEW:CUSTOMER_LOOKUP")
+        self.assertEqual(result, 1, output)
+        result, output = self.prepare("--accept-live-baseline", self.baseline_digest(output), selector="VIEW:CUSTOMER_LOOKUP")
+        self.assertEqual(result, 0, output)
+
+    def test_verified_view_baseline_allows_repair_after_validity_only_changes(self):
+        self.view_source()
+        self.existing_view()
+        result, output = self.prepare(selector="VIEW:CUSTOMER_LOOKUP")
+        self.assertEqual(result, 1, output)
+        self.assertEqual(self.prepare("--accept-live-baseline", self.baseline_digest(output), selector="VIEW:CUSTOMER_LOOKUP")[0], 0)
+        old_plan, = self.plans()
+        self.state["sourceUnits"]["VIEW:CUSTOMER_LOOKUP"]["valid"] = False
+        self.state["structural"]["views"][0]["status"] = "INVALID"
+        result, output = self.prepare(selector="VIEW:CUSTOMER_LOOKUP")
+        self.assertEqual(result, 0, output)
+        plan, = (candidate for candidate in self.plans() if candidate != old_plan)
+        self.assertFalse(json.loads(plan.read_bytes())["noOp"])
 
     def test_view_apply_accepts_one_dedicated_definition(self):
         path = self.view_source()
@@ -850,11 +894,36 @@ with patch.object(feature_release, '_run_apply_session', side_effect=disconnect)
         implicit = feature_dev_views.selected_view(path.relative_to(self.root).as_posix(), path.read_bytes(), name)
         with self.assertRaisesRegex(ValueError, "declare DEFAULT COLLATION explicitly"):
             feature_dev_views.matches(implicit, observed)
+        self.assertTrue(feature_dev_views.matches(implicit, observed, default_collation="BINARY_CI"))
+        self.assertFalse(feature_dev_views.matches(implicit, observed, default_collation="BINARY"))
         for collation in ("BINARY_CI", "BINARY"):
             with self.subTest(collation=collation):
                 path = self.view_source(f"CREATE OR REPLACE VIEW CUSTOMER_LOOKUP DEFAULT COLLATION {collation} AS SELECT 1 AS ID FROM DUAL;\n")
                 item = feature_dev_views.selected_view(path.relative_to(self.root).as_posix(), path.read_bytes(), name)
                 self.assertEqual(feature_dev_views.matches(item, observed), collation == "BINARY_CI")
+
+    def test_new_view_binds_and_verifies_the_observed_implicit_collation(self):
+        self.view_source()
+        self.state["effectiveViewCollation"] = "BINARY_CI"
+        result, output = self.prepare(selector="VIEW:CUSTOMER_LOOKUP")
+        self.assertEqual(result, 0, output)
+        plan, = self.plans()
+        self.assertEqual(json.loads(plan.read_bytes())["sourceGuards"][0]["defaultCollation"], "BINARY_CI")
+
+        def apply(*_args, **kwargs):
+            guard = "\n".join(kwargs["exact_before"])
+            self.assertIn("SESSION_DEFAULT_COLLATION", guard)
+            self.assertIn("'BINARY_CI'", guard)
+            kwargs["before_run"]()
+            self.existing_view()
+            observed = self.state["sourceUnits"]["VIEW:CUSTOMER_LOOKUP"]
+            observed["ddl"] = observed["ddl"].replace(") AS ", ") DEFAULT COLLATION BINARY_CI AS ")
+            self.state["viewCollations"] = {"CUSTOMER_LOOKUP": "BINARY_CI"}
+            return self.identity, 1
+
+        with patch.object(feature_release, "_run_apply_session", side_effect=apply):
+            code, output = self.execute(plan)
+        self.assertEqual(code, 0, output)
 
     def test_long_view_driver_and_before_guard_round_trip_supplementary_unicode(self):
         projections = ",\n".join(f"'{chr(0x10400) * 800}' AS C{index}" for index in range(12))

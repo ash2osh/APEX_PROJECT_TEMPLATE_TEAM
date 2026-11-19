@@ -218,7 +218,7 @@ def selected_view(relative, raw, unit):
     return FeatureInput(relative, raw, _sha256(raw), unit, "ddl")
 
 
-def matches(item, observed):
+def matches(item, observed, *, default_collation=None, actual_collation=None):
     actual = definition(observed["ddl"], item.unit[0])
     text = observed["text"]
     query, access, check = _split_query_options(_tokens(text))
@@ -227,7 +227,15 @@ def matches(item, observed):
     if actual["name"] != item.unit[2] or actual["aliases"] is None:
         raise ValueError(f"complete output aliases are unavailable for view {item.unit[2]}")
     expected = definition(item.source.decode("utf-8"), item.unit[0])
-    if expected["collation"] is None and actual["collation"] is not None:
+    if actual_collation is not None:
+        if actual["collation"] not in (None, actual_collation):
+            raise ValueError(f"view catalog collation and DDL disagree for {item.unit[2]}")
+        actual["collation"] = actual_collation
+    if expected["collation"] is None and default_collation is not None:
+        expected["collation"] = default_collation
+        if actual["collation"] is None:
+            actual["collation"] = "USING_NLS_COMP"
+    elif expected["collation"] is None and actual["collation"] is not None:
         raise ValueError(f"declare DEFAULT COLLATION explicitly to verify view {item.unit[2]}'s collation")
     return observed["valid"] is True and actual == expected
 
@@ -262,10 +270,28 @@ def before_guards(checkpoint, observed):
         where = f"owner = {_sql_literal(owner)} AND object_name = {_sql_literal(name)} AND object_type = 'VIEW'"
         refusal = f"RAISE_APPLICATION_ERROR(-20984, {_sql_literal('FEATURE_VIEW_GUARD_REFUSED: ' + name)});"
         lines.extend(("DECLARE", "  l_count PLS_INTEGER;", "  l_actual CLOB;", "  l_expected CLOB;", "BEGIN"))
+        if definition(item.source.decode("utf-8"), owner)["collation"] is None:
+            default_collation = observed.get("effectiveViewCollation")
+            if not isinstance(default_collation, str) or not default_collation:
+                raise ValueError(f"effective default collation is unavailable for {name}")
+            lines.extend((
+                "  SELECT COUNT(*) INTO l_count FROM all_users "
+                f"WHERE username = {_sql_literal(owner)} AND "
+                "COALESCE(NULLIF(SYS_CONTEXT('USERENV', 'SESSION_DEFAULT_COLLATION'), 'NONE'), "
+                f"default_collation, 'USING_NLS_COMP') = {_sql_literal(default_collation)};",
+                f"  IF l_count != 1 THEN {refusal} END IF;",
+            ))
         if actual is None:
             lines.extend((f"  SELECT COUNT(*) INTO l_count FROM all_objects WHERE {where};", f"  IF l_count != 0 THEN {refusal} END IF;"))
         else:
             status = "'VALID'" if actual["valid"] else "'INVALID'"
+            collation = observed.get("viewCollations", {}).get(name)
+            if collation is not None:
+                lines.extend((
+                    f"  SELECT COUNT(*) INTO l_count FROM all_views WHERE owner = {_sql_literal(owner)} "
+                    f"AND view_name = {_sql_literal(name)} AND NVL(default_collation, 'USING_NLS_COMP') = {_sql_literal(collation)};",
+                    f"  IF l_count != 1 THEN {refusal} END IF;",
+                ))
             lines.extend((
                 f"  SELECT COUNT(*) INTO l_count FROM all_objects WHERE {where} AND status = {status};",
                 f"  IF l_count != 1 THEN {refusal} END IF;",

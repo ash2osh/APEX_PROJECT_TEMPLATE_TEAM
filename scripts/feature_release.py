@@ -268,7 +268,10 @@ def _capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_d
             "valid": status == "VALID",
         }
 
+    view_collations = {}
     if view_names:
+        if not isinstance(catalog.get("effectiveViewCollation"), str) or not catalog["effectiveViewCollation"].strip():
+            raise FeatureReleaseError("effective view default collation is unavailable in the selected catalog")
         catalog_views = {row["name"]: row.get("status") for row in catalog["sections"]["views"]}
         definitions: dict[str, dict] = {}
         for row in catalog["sections"]["baseline-views"]:
@@ -285,12 +288,13 @@ def _capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_d
             status = catalog_views.get(name)
             if (
                 metadata is None or status not in {"VALID", "INVALID"}
-                or any(not isinstance(metadata.get(field), str) or not metadata[field].strip() for field in ("ddl", "text"))
+                or any(not isinstance(metadata.get(field), str) or not metadata[field].strip() for field in ("ddl", "text", "defaultCollation"))
             ):
-                raise FeatureReleaseError(f"complete view catalog text or validity is unavailable for {name}")
+                raise FeatureReleaseError(f"complete view catalog text, collation or validity is unavailable for {name}")
             source_units[f"VIEW:{name}"] = {
                 "ddl": metadata["ddl"], "text": metadata["text"], "valid": status == "VALID",
             }
+            view_collations[name] = metadata.get("defaultCollation")
 
     structural = {
         section: catalog["sections"].get(section, [])
@@ -300,6 +304,8 @@ def _capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_d
         "schema": target.schema,
         "identity": identity,
         "sourceUnits": source_units,
+        "viewCollations": view_collations,
+        "effectiveViewCollation": catalog.get("effectiveViewCollation"),
         "structural": structural,
         "coverage": {
             "ownerComplete": False,
@@ -866,18 +872,19 @@ def _check_preceding_migration_sources(
     }
     if not selected:
         return
-    replacements: dict[tuple[str, str, str], tuple[int, list[str]]] = {}
+    replacements: dict[tuple[str, str, str], tuple[int, list[str] | None]] = {}
     uncertain_steps: set[int] = set()
     for number, step in enumerate(preceding_steps, start=1):
         kind = step["type"]
-        if kind == "app-deploy" and replacements:
+        if kind == "app-deploy":
             uncertain_steps.add(number)
             replacements.clear()
             continue
         if kind not in {"migrate", "sql-script", "ords-import"}:
             continue
         binding = bindings[f"step:{number}"]
-        if release_state.target_scope_from_identity(binding["observed"]) != scope:
+        other_scope = release_state.target_scope_from_identity(binding["observed"])
+        if any(other_scope[field] != value for field, value in scope.items() if field != "schema"):
             continue
         if kind != "migrate":
             uncertain_steps.add(number)
@@ -898,10 +905,22 @@ def _check_preceding_migration_sources(
                     if schema_change is not None:
                         schema = schema_change
                         continue
+                    dropped = migration_checks._dropped_units(tokens, schema)
+                    compiled = migration_checks._compiled_unit(tokens, schema) if migration_checks._word(tokens, 0, "ALTER") else ()
+                    if dropped or compiled:
+                        for unit in [*dropped, *(row[:3] for row in compiled)]:
+                            owner, object_type, name = unit
+                            for key in (unit, (owner, object_type + " BODY", name)) if object_type in {"PACKAGE", "TYPE"} else (unit,):
+                                if key in selected:
+                                    replacements[key] = (number, None)
+                        continue
                     if all(migration_checks._word(tokens, index, word) for index, word in enumerate(("CREATE", "OR", "REPLACE"))):
                         units = migration_checks._compiled_unit(tokens, schema)
                         if len(units) == 1 and units[0][1] in feature_manifest.STORED_SOURCE_TYPES:
                             owner, object_type, name, _required = units[0]
+                            body = (owner, object_type + " BODY", name)
+                            if object_type in {"PACKAGE", "TYPE"} and body in selected:
+                                replacements[body] = (number, None)
                             key = (owner, object_type, name)
                             if key in selected:
                                 # statement_spans omits the SQLcl slash line.
@@ -917,6 +936,8 @@ def _check_preceding_migration_sources(
                             continue
                     if (
                         not tokens or tokens[0].value in {"INSERT", "UPDATE", "DELETE", "MERGE"}
+                        or (migration_checks._word(tokens, 0, "COMMENT") and migration_checks._word(tokens, 1, "ON"))
+                        or (migration_checks._word(tokens, 0, "LOCK") and migration_checks._word(tokens, 1, "TABLE"))
                         or feature_manifest._setting_name(sql) is not None
                         or migration_checks._parse_operation(tokens, schema)["supported"]
                     ):
@@ -929,6 +950,11 @@ def _check_preceding_migration_sources(
     checkpoint_step = len(preceding_steps) + 1
     for (_owner, kind, name), (number, lines) in sorted(replacements.items()):
         before = state["sourceUnits"].get(f"{kind}:{name}")
+        if lines is None:
+            raise FeatureReleaseError(
+                f"migration step {number} drops or recompiles {kind} {name} in {scope['schema']} before feature step {checkpoint_step}; "
+                "deliver the ordered effects in one reviewed migration or qualify separate releases."
+            )
         if before is None or not _same_stored_source(before["lines"], lines):
             raise FeatureReleaseError(
                 f"migration step {number} replaces {kind} {name} in {scope['schema']} before feature step {checkpoint_step}; "

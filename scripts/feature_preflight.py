@@ -892,7 +892,7 @@ def prepare_checkpoint(
         if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE"}:
             existing = common.get(name, set())
             replace_view = (
-                kind == "CREATE_VIEW" and operation.get("replace") is True and existing == {"VIEW"}
+                kind == "CREATE_VIEW" and operation.get("replace") is True and "VIEW" in existing
                 and (bool(checkpoint.preconditions) or name in guarded_view_replacements)
             )
             replace_existing_view = replace_view

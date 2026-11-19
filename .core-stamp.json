@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "43ef6edddb3d64b96c82896b4e403211cc965ad1",
+  "coreCommit": "47c9f6989085401c85f4b7d3eff9275d72030e5a",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -204,12 +204,12 @@
     },
     {
       "path": "scripts/feature_dev.py",
-      "sha256": "8de1989222fd7b2edb2f50e5abf083f9d30767b62c18e554f14adfb848db1cdf",
+      "sha256": "b14f19ab6effde2bc90f1e234b9c27c943823657d195e15b62107f1efc900a11",
       "executable": false
     },
     {
       "path": "scripts/feature_dev_views.py",
-      "sha256": "325cf0736a51e5a288aeda40db037b71eea04d6f3a253e70f82676485636cf55",
+      "sha256": "809ea35da826eba9503a0955f7d9cb42a186706cbfb025e8d1f501b82fa16b1a",
       "executable": false
     },
     {
@@ -219,12 +219,12 @@
     },
     {
       "path": "scripts/feature_preflight.py",
-      "sha256": "0e6b2181cc6dee4977450d1317a2a112c890dad7151a052339487688c5825074",
+      "sha256": "6561f70e791e8538586f28d4acd318ba4573dfd4d12728ffeea79e41f0fd6c24",
       "executable": false
     },
     {
       "path": "scripts/feature_release.py",
-      "sha256": "748db71b6d02d6ffe1b1aec5269a8f40ffc2a6eb2fd6b95f9f895ce8b88697dd",
+      "sha256": "04751348e0d70a01a3925f4eba02e8848973acc8338dabef829eb72023dbc581",
       "executable": false
     },
     {
@@ -919,7 +919,7 @@
     },
     {
       "path": "tests/test_feature_dev.py",
-      "sha256": "a8862120700fc3d0e8ab2dc813bbd8584ae92f429ad4d901fa12d95bb2f289be",
+      "sha256": "9d1ed06c70206c716f41f1a336480c9fc6848e3b501603a0edff30ef86772665",
       "executable": false
     },
     {
@@ -944,7 +944,7 @@
     },
     {
       "path": "tests/test_feature_prepare.py",
-      "sha256": "1078dca2c814b8ba4aebf630fe628fc4bf47acc150d5fd7072ed42a5d259a6d8",
+      "sha256": "b759dbd6fcc545da3dbedc4df9e056648df808f5f12cea5fdb32cbd689e7595a",
       "executable": false
     },
     {
@@ -989,7 +989,7 @@
     },
     {
       "path": "tests/test_live_feature_release.py",
-      "sha256": "a958157e9bb096564ed1aafb67257df02075077f3fbf13e3aae99ca02b452fbd",
+      "sha256": "b2cb745e2c5f5afcf3371f7137db46be2e6012cb57e6bb1162cd12178f7c7d9b",
       "executable": false
     },
     {

@@ -49,6 +49,7 @@ DECLARE
   l_pages JSON_ARRAY_T;
   l_page JSON_OBJECT_T;
   l_row_json CLOB;
+  l_view_default_collation VARCHAR2(100);
   l_raw CLOB;
   l_blob BLOB;
   l_gzip BLOB;
@@ -879,6 +880,9 @@ DECLARE
     END;
   BEGIN
     IF NOT selected('baseline-views') THEN RETURN; END IF;
+    SELECT COALESCE(NULLIF(SYS_CONTEXT('USERENV', 'SESSION_DEFAULT_COLLATION'), 'NONE'),
+                    default_collation, 'USING_NLS_COMP')
+      INTO l_view_default_collation FROM all_users WHERE username = c_schema;
     SELECT NLS_CHARSET_ID(value) INTO view_charset
       FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET';
     l_rows := JSON_ARRAY_T();
@@ -888,7 +892,7 @@ DECLARE
     LOOP
       l_page_count := 0;
       FOR view_row IN (
-        SELECT v.view_name
+        SELECT v.view_name, NVL(v.default_collation, 'USING_NLS_COMP') default_collation
           FROM all_views v
          WHERE v.owner = c_schema
            AND ((DBMS_LOB.GETLENGTH(c_baseline_names_json) > 2 AND EXISTS (
@@ -945,6 +949,7 @@ DECLARE
         view_ddl_encoded := encode_view_value(view_ddl);
         view_json := JSON_OBJECT_T();
         view_json.put('name', view_row.view_name);
+        view_json.put('defaultCollation', view_row.default_collation);
         view_json.put('valueEncoding', 'utf8-base64-v1');
         view_json.put('text', view_text_encoded);
         view_json.put('ddl', view_ddl_encoded);
@@ -1401,6 +1406,7 @@ BEGIN
   l_payload.put('completed_at', l_completed_at);
   l_payload.put('coverage', l_coverage);
   l_payload.put('sections', l_sections);
+  IF selected('baseline-views') THEN l_payload.put('effectiveViewCollation', l_view_default_collation); END IF;
   l_payload.put('unavailable', l_unavailable);
 
   l_raw := l_payload.to_clob();
