@@ -84,7 +84,11 @@ proven run-owned lock. An attempted but unverified import retains the old
 baseline, lock and diagnostics. Review the live app, reconcile source, then
 use `scripts/team.sh app-unlock <id> --env dev` to release only your own lock;
 coordinate with the owner if another developer holds it. The PowerShell
-commands have the same behavior. Keep `.sync-state/application-locks/` recovery
+commands have the same behavior. A verified `app-unlock` also closes earlier `held`
+records of the same app, workspace, developer and target, so they stop showing as
+unresolved recovery evidence. Records it cannot match exactly (another developer,
+workspace, app or target, an `acquisition-unknown` or `release-unknown` record, or an
+unreadable or symlinked record) stay visible. Keep `.sync-state/application-locks/` recovery
 notes until the incident is reconciled.
 
 Raw SQLcl imports bypass these native locks. The API also permits same-account

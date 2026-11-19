@@ -69,8 +69,9 @@ lists each one with its SHA-256 and the core commit it came from. Do not edit th
 
 `python3 scripts/pre_push_check.py` runs `scripts/sync_core.py check .` and fails when a shared file differs from its
 stamp. The `offline` job runs the same check against a clone of the core repository (`check --core`), which also
-proves that the stamp matches the core at its commit. `.core-stamp.json` is template-only: downstream projects do not
-receive it, and their `pre_push_check` skips the check.
+proves that the stamp matches the core at its commit. `upgrade-template` never ships `.core-stamp.json`. A project
+cloned from the template inherits a copy, and its `pre_push_check` skips the check once `.template-lock.json` exists.
+The [post-clone cleanup](GETTING_STARTED.md#post-clone-cleanup) removes the file.
 
 ## Skips that fail the run
 

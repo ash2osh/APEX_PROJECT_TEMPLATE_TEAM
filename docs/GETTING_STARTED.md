@@ -175,9 +175,16 @@ sweeps (never delete a file simply because it lives under `tests/` or
 ```bash
 # Example: selectively remove only inherited template-maintenance CI and tests if not needed downstream
 git rm --ignore-unmatch .github/workflows/*.yml .github/dependabot.yml
+# The shared-core stamp belongs to the template repository's shared-core check. A project created from the
+# template inherits it, but it is not part of a downstream project; upgrade-template never ships it.
+git rm --ignore-unmatch .core-stamp.json
 # Review tests/ and remove only inherited template-maintenance tests, keeping any project regression tests
 git status --short
 ```
+
+After this cleanup, `scripts/team.sh template-status` reports removed tests and
+`.github/` files as `removed-by-cleanup`. That state is informational, not drift:
+the status stays `current` when nothing else differs.
 
 Explicitly preserve:
 - Project-specific regression and unit tests in `tests/`
@@ -191,7 +198,8 @@ Explicitly preserve:
 
 The original template repository retains all tests and CI workflows. Keep
 `scripts/`, operational documentation, `.agents/`, `.claude/`,
-`template-manifest.json`, and `.template-lock.json`. Configure the credential-free
+`template-manifest.json`, and `.template-lock.json`; remove `.core-stamp.json`
+as shown above. Configure the credential-free
 root `.env` in step 6 and keep it in your own Git repository after validation.
 Review the cleanup, commit it, and then push to your downstream remote.
 

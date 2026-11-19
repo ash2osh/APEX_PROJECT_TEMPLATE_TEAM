@@ -1,7 +1,9 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -31,9 +33,9 @@ class ApplicationLockTests(unittest.TestCase):
             raise RuntimeError('connection lost after write')
         if phase == 'acquire':
             # The result carries what the database read back after COMMIT.
-            intent = json.loads((self.directory / 'recovery.json').read_text(encoding='utf-8'))
+            intent = json.loads((directory.parent / 'recovery.json').read_text(encoding='utf-8'))
             self.observed = dict(intent['evidence'], locked_on='2026-10-08T11:00:00.000000')
-        elif phase == 'release':
+        elif phase in ('release', 'unlock'):
             self.observed = None
         return SimpleNamespace(output='APEX_LOCK_STATE:' + json.dumps(self.observed) + '\nAPEX_LOCK_VERIFIED:' + phase + '\n')
 
@@ -149,6 +151,122 @@ class ApplicationLockTests(unittest.TestCase):
         self.assertNotIn('from apex_applications where application_id=', sql)
         self.assertNotIn('lock_application(', sql)
         self.assertNotIn('commit;', sql)
+
+    OWNER = "Dev.O'Neil@example.com"
+
+    def held_evidence(self, **changes):
+        base = locks.LockEvidence(100, 'TEAM', 'DEMO', self.OWNER, 'b' * 32,
+                                  '2026-10-08T11:00:00.000000', 'apex-team:' + 'b' * 32)
+        return replace(base, **changes)
+
+    def write_record(self, run_dir, status='held', target=None, evidence=None):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / 'recovery.json'
+        data = {'schemaVersion': 1, 'target': asdict(self.target if target is None else target),
+                'status': status, 'evidence': asdict(self.held_evidence() if evidence is None else evidence)}
+        path.write_text(json.dumps(data), encoding='utf-8')
+        return path
+
+    def apps_dir(self):
+        return self.directory / 'locks' / '100'
+
+    def unlock(self, run_dir, developer=None):
+        developer = self.OWNER.upper() if developer is None else developer
+        argv = ['unlock', '--connection', 'docker-demo', '--expected-user', 'DEMO', '--schema', 'DEMO',
+                '--workspace', 'TEAM', '--developer', developer, '--app-id', '100', '--run-dir', str(run_dir)]
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(locks, 'require_client'), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = locks.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_verified_unlock_closes_matching_earlier_held_record_keeping_its_evidence(self):
+        path = self.write_record(self.apps_dir() / 'run.aaaaaa')
+        before = json.loads(path.read_text(encoding='utf-8'))
+        code, out, err = self.unlock(self.apps_dir() / 'run.bbbbbb')
+        self.assertEqual(code, 0, err)
+        after = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(after['status'], 'released')
+        self.assertEqual(after['target'], before['target'])
+        self.assertEqual(after['evidence'], before['evidence'])
+        self.assertEqual(after['schemaVersion'], 1)
+        self.assertIn('closed earlier held lock record: 100/run.aaaaaa', out)
+        own = json.loads((self.apps_dir() / 'run.bbbbbb' / 'recovery.json').read_text(encoding='utf-8'))
+        self.assertEqual(own['status'], 'released')
+
+    def test_unmatched_records_are_left_exactly_as_they_were(self):
+        other_target = replace(self.target, connection='other-dev')
+        cases = {
+            'run.other1': dict(evidence=self.held_evidence(developer='OTHER')),
+            'run.other2': dict(evidence=self.held_evidence(workspace='OTHER_WS')),
+            'run.other3': dict(evidence=self.held_evidence(app_id=101)),
+            'run.other4': dict(evidence=self.held_evidence(schema='OTHER')),
+            'run.other5': dict(target=other_target),
+            'run.other6': dict(status='acquisition-unknown'),
+            'run.other7': dict(status='release-unknown'),
+        }
+        paths = {name: self.write_record(self.apps_dir() / name, **kwargs) for name, kwargs in cases.items()}
+        before = {name: path.read_bytes() for name, path in paths.items()}
+        broken = self.apps_dir() / 'run.other8'
+        broken.mkdir(parents=True)
+        (broken / 'recovery.json').write_text('{not json', encoding='utf-8')
+        outside = self.directory / 'outside-recovery.json'
+        outside.write_text(json.dumps({'schemaVersion': 1, 'target': asdict(self.target), 'status': 'held',
+                                       'evidence': asdict(self.held_evidence())}), encoding='utf-8')
+        link_dir = self.apps_dir() / 'run.other9'
+        link_dir.mkdir(parents=True)
+        (link_dir / 'recovery.json').symlink_to(outside)
+        other_app = self.directory / 'locks' / '101' / 'run.aaaaaa'
+        self.write_record(other_app, evidence=self.held_evidence(app_id=101))
+        other_app_before = (other_app / 'recovery.json').read_bytes()
+
+        code, out, err = self.unlock(self.apps_dir() / 'run.bbbbbb')
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn('closed earlier', out)
+        for name, data in before.items():
+            self.assertEqual(paths[name].read_bytes(), data, name)
+        self.assertEqual((broken / 'recovery.json').read_text(encoding='utf-8'), '{not json')
+        self.assertTrue((link_dir / 'recovery.json').is_symlink())
+        self.assertEqual(json.loads(outside.read_text(encoding='utf-8'))['status'], 'held')
+        self.assertEqual((other_app / 'recovery.json').read_bytes(), other_app_before)
+
+    def test_close_never_touches_the_unlocks_own_directory(self):
+        own = self.apps_dir() / 'run.own000'
+        path = self.write_record(own)
+        before = path.read_bytes()
+        intent = locks.LockEvidence(100, 'TEAM', 'DEMO', self.OWNER, 'c' * 32, '', 'manual owner-filtered unlock')
+        locks.close_held_records(self.target, intent, own)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unverified_unlock_closes_nothing(self):
+        path = self.write_record(self.apps_dir() / 'run.aaaaaa')
+        before = path.read_bytes()
+        with patch.object(locks, 'execute', side_effect=locks.LockError('unverified unlock')):
+            code, out, err = self.unlock(self.apps_dir() / 'run.bbbbbb')
+        self.assertEqual(code, 2)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn('closed earlier', out)
+
+    def test_closing_failure_is_reported_and_other_record_still_closes(self):
+        failing_path = self.write_record(self.apps_dir() / 'run.aaaaaa')
+        ok_path = self.write_record(self.apps_dir() / 'run.cccccc')
+        real_save = locks.save_record
+
+        def flaky(directory, target, status, evidence):
+            if Path(directory).name == 'run.aaaaaa' and status == 'released':
+                raise OSError('directory is read-only')
+            return real_save(directory, target, status, evidence)
+
+        with patch.object(locks, 'save_record', side_effect=flaky):
+            code, out, err = self.unlock(self.apps_dir() / 'run.bbbbbb')
+
+        self.assertEqual(code, 0, err)
+        self.assertIn('could not close earlier held lock record', err)
+        self.assertIn('run.aaaaaa', err)
+        self.assertIn('closed earlier held lock record: 100/run.cccccc', out)
+        self.assertNotIn('run.aaaaaa', out)
+        self.assertEqual(json.loads(failing_path.read_text(encoding='utf-8'))['status'], 'held')
+        self.assertEqual(json.loads(ok_path.read_text(encoding='utf-8'))['status'], 'released')
 
     def test_reacquire_never_overwrites_unresolved_recovery_proof(self):
         self.acquire()

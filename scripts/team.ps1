@@ -693,11 +693,12 @@ try {
       Push-Location -LiteralPath $repoRoot
       try {
         if ($targetsHelp -or (Test-Path -LiteralPath $targetsEnvFile -PathType Leaf)) {
-          & $python.Path @($python.Prefix) -m scripts.show_targets @Arguments
+          # The prog name is single-quoted inside the Python source: Windows PowerShell drops embedded double quotes from native arguments.
+          & $python.Path @($python.Prefix) -c 'import sys; from scripts.show_targets import main; raise SystemExit(main(sys.argv[1:], environ=None, prog=''scripts/team.ps1 targets''))' @Arguments
         } else {
           # No .env is not an error here, as for template-status: every row reports "not configured". The module reads
           # the process environment, so an empty mapping stops a shell variable such as CODE_SCHEMA from appearing as configuration.
-          & $python.Path @($python.Prefix) -c 'import sys; from scripts.show_targets import main; raise SystemExit(main(sys.argv[1:], environ={}))' @Arguments
+          & $python.Path @($python.Prefix) -c 'import sys; from scripts.show_targets import main; raise SystemExit(main(sys.argv[1:], environ={}, prog=''scripts/team.ps1 targets''))' @Arguments
         }
         $targetsStatus = $LASTEXITCODE
       } finally {
