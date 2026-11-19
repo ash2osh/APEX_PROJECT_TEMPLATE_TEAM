@@ -867,11 +867,11 @@ with patch.object(feature_release, '_run_apply_session', side_effect=disconnect)
         code, output = self.prepare("--accept-live-baseline", self.baseline_digest(output), selector="VIEW:CUSTOMER_LOOKUP")
         self.assertEqual(code, 0, output)
         plan, = self.plans()
-        driver = (plan.parent / "drivers/001.sql").read_text()
+        driver = (plan.parent / "drivers/001.sql").read_text(encoding="utf-8")
         checkpoint = self.capture.call_args.args[1]
         before = "\n".join(feature_dev_views.before_guards(checkpoint, self.state))
         for generated, expected in (
-            (driver, path.read_text().strip().removesuffix(";")),
+            (driver, path.read_text(encoding="utf-8").strip().removesuffix(";")),
             (before, self.state["sourceUnits"]["VIEW:CUSTOMER_LOOKUP"]["ddl"]),
         ):
             chunks = re.findall(r"HEXTORAW\('([0-9A-Fa-f]+)'\)", generated)
