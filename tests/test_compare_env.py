@@ -540,6 +540,31 @@ class EnvironmentComparisonTests(unittest.TestCase):
 
         self.assertEqual(1, len(parsed["sections"]["columns"]))
 
+    def test_capture_parser_accepts_an_invisible_user_column_proven_by_its_internal_position(self) -> None:
+        payload = catalog("dev")
+        payload["sections"]["columns"] = [{
+            "table_name": "T_ORDER", "name": "NOTE_FLAG", "data_type": "NUMBER",
+            "column_position": None, "internal_column_id": 4, "hidden": "Y", "user_generated": "YES",
+        }]
+        payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+
+        parsed = parse_environment_catalog_output(framed(payload), sections=("columns",))
+
+        self.assertEqual(1, len(parsed["sections"]["columns"]))
+
+    def test_capture_parser_rejects_a_hidden_user_column_with_no_position_at_all(self) -> None:
+        for extra in ({}, {"internal_column_id": None}, {"internal_column_id": 0}, {"internal_column_id": "4"}):
+            with self.subTest(extra=extra):
+                payload = catalog("dev")
+                payload["sections"]["columns"] = [{
+                    "table_name": "T_ORDER", "name": "NOTE_FLAG", "data_type": "NUMBER",
+                    "column_position": None, "hidden": "Y", "user_generated": "YES", **extra,
+                }]
+                payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+
+                with self.assertRaisesRegex(CatalogError, "column position"):
+                    parse_environment_catalog_output(framed(payload), sections=("columns",))
+
     def test_dba_script_refuses_inverted_or_unknown_network_aces(self) -> None:
         for inverted_principal in ("YES", None, "UNKNOWN"):
             with self.subTest(inverted_principal=inverted_principal):

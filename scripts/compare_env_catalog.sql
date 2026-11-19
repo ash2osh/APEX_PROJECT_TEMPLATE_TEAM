@@ -1142,7 +1142,7 @@ BEGIN
   add_query_section('columns', q'~
     SCOPE_WITH
     SELECT JSON_OBJECT('table_name' VALUE c.table_name, 'name' VALUE c.column_name,
-      'column_position' VALUE c.column_id, 'user_generated' VALUE c.user_generated,
+      'column_position' VALUE c.column_id, 'internal_column_id' VALUE c.internal_column_id, 'user_generated' VALUE c.user_generated,
       'data_type' VALUE c.data_type, 'data_type_mod' VALUE c.data_type_mod,
       'data_type_owner' VALUE c.data_type_owner, 'data_length' VALUE c.data_length,
       'data_precision' VALUE c.data_precision, 'data_scale' VALUE c.data_scale,
