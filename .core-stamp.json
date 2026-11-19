@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "e911c06ddb45e64f428d56bf5ee5c8fe80640724",
+  "coreCommit": "968d50863fdc54aa36675b0ac5ce9747030d9e6e",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -1164,7 +1164,7 @@
     },
     {
       "path": "tests/test_subprocess_safety_helpers.py",
-      "sha256": "6698b0a60bf80ba3909b3c4d8f52d91c432dc6ce6f0b0fbc0e42168aec12aeab",
+      "sha256": "d0c213831d75072961a7a660be2b020dfe94b7b847b29f3ca5723f31f1ce4898",
       "executable": false
     },
     {

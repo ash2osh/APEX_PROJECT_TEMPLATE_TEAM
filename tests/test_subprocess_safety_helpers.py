@@ -47,7 +47,8 @@ class InterruptProcessGroupTests(unittest.TestCase):
         calls = []
         with patch.object(safety.os, "name", "nt"), \
                 patch.object(safety.time, "sleep", side_effect=lambda seconds: calls.append(("sleep", seconds))), \
-                patch.object(safety.os, "killpg", side_effect=lambda pid, number: calls.append(("killpg", pid, number))):
+                patch.object(safety.os, "killpg", create=True,  # Windows has no os.killpg; this test also runs there
+                             side_effect=lambda pid, number: calls.append(("killpg", pid, number))):
             with self.assertRaisesRegex(RuntimeError, "POSIX only"):
                 interrupt_process_group(_FakeProcess())
         self.assertEqual([], calls)
