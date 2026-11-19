@@ -348,6 +348,37 @@ class PartialWorkflowTests(unittest.TestCase):
             self.assertIn('release', backend.calls)
             self.assertLess(backend.calls.index('compile'), backend.calls.index('import'))
 
+    def test_success_hashes_the_live_export_a_fixed_number_of_times_whatever_the_file_count(self):
+        # The changed-file report used to hash the whole live export once per file name, so a large app
+        # cost one full scan per file. Unrelated live-only files make the list grow without changing the publish.
+        from scripts.partial_publish import publish_partial
+        import scripts.partial_publish as partial_module
+        counts = {}
+        for label, extra_count in (('few', 3), ('many', 120)):
+            with self.subTest(files=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source, backend = self.prepare(root)
+                extra_names = []
+                for index in range(extra_count):
+                    name = f'unrelated/extra-{index:03d}.txt'
+                    target = backend.live / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(f'teammate live work {index}\n', encoding='utf-8')
+                    extra_names.append(name)
+                counted = []
+                real_tree_hashes = tree_hashes
+
+                def counting_tree_hashes(path):
+                    counted.append(path)
+                    return real_tree_hashes(path)
+
+                with mock.patch.object(partial_module, 'tree_hashes', counting_tree_hashes):
+                    publish_partial(source, 100, ['pages/p00001-home.apx'], 'DEMO', root / 'run', backend, 'ALICE')
+                counts[label] = len(counted)
+                report = json.loads((root / 'run/partial.json').read_text())
+                self.assertEqual(report['status'], 'verified')
+                self.assertEqual(report['changedLiveFiles'], sorted(['application.apx', *extra_names]))
+        self.assertEqual(counts['few'], counts['many'], counts)
+
     def test_prewrite_failure_releases_but_unknown_write_retains_native_lock(self):
         from scripts.partial_publish import publish_partial
         for failure in ('compile', 'import', 'stamp', 'version', 'unselected'):

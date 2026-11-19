@@ -252,9 +252,11 @@ def publish_partial(source: Path, app_id: int, files: list[str], workspace: str,
             preserve_source_provenance(source),
         )
         (canonical / 'apex-team-export.json').write_text(json.dumps(new_marker, indent=2) + '\n', encoding='utf-8')
+        # live is the verified export, so it is hashed once; hashing it per file name made large apps slow.
+        live_hashes = tree_hashes(live)
         report.update(status='verified', noTeamNoticeEligible=no_team_notice,
-                      changedLiveFiles=sorted(name for name in baseline.keys() | tree_hashes(live).keys()
-                                              if baseline.get(name) != tree_hashes(live).get(name)))
+                      changedLiveFiles=sorted(name for name in baseline.keys() | live_hashes.keys()
+                                              if baseline.get(name) != live_hashes.get(name)))
         return canonical
     except BaseException:
         report['status'] = 'failed'
