@@ -60,6 +60,7 @@ DECLARE
   l_page_count PLS_INTEGER;
   l_row_count PLS_INTEGER;
   l_total PLS_INTEGER;
+  l_virtual_expr_captured PLS_INTEGER;
   l_started_at VARCHAR2(40) := TO_CHAR(SYSTIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"');
   l_completed_at VARCHAR2(40);
   l_db_version VARCHAR2(128);
@@ -252,7 +253,9 @@ DECLARE
   -- A section query may use three tokens, expanded here so each query stays one readable SQL text:
   --   SCOPE_WITH          leading CTEs for prefix and exact-name filters;
   --   SCOPE_ALL           true when neither prefixes nor exact names were requested;
-  --   SCOPE_MATCH(expr)   true when expr matches a requested prefix or exact name.
+  --   SCOPE_MATCH(expr)   true when expr matches a requested prefix or exact name;
+  --   VIRTUAL_EXPR        the virtual-column expression: DATA_DEFAULT_VC when the database has it (Oracle 23ai or newer),
+  --                       otherwise NULL, so the same query text runs on older databases.
   -- Dependent objects (indexes, triggers, constraints, columns, identity sequences) are matched through their
   -- parent table in the query itself, so an object named without the prefix is kept when its table has it.
   FUNCTION expand_scope(p_query VARCHAR2) RETURN VARCHAR2 IS
@@ -262,6 +265,9 @@ DECLARE
       'WITH sp AS (SELECT UPPER(x.prefix) prefix FROM JSON_TABLE(:scope_prefixes, ''$[*]'' COLUMNS (prefix VARCHAR2(128) PATH ''$'')) x), '
       || 'sn AS (SELECT x.object_name FROM JSON_TABLE(:scope_names, ''$[*]'' COLUMNS (object_name VARCHAR2(128) PATH ''$'')) x)');
     l_text := REPLACE(l_text, 'SCOPE_ALL', 'NOT EXISTS (SELECT 1 FROM sp) AND NOT EXISTS (SELECT 1 FROM sn)');
+    -- DATA_DEFAULT_VC is named in the query only when the probe found it; older databases never parse that name.
+    l_text := REPLACE(l_text, 'VIRTUAL_EXPR',
+      CASE WHEN l_virtual_expr_captured > 0 THEN 'c.data_default_vc' ELSE 'CAST(NULL AS VARCHAR2(4000))' END);
     l_text := REGEXP_REPLACE(l_text, 'SCOPE_MATCH\(([A-Za-z0-9_.]+)\)',
       '(EXISTS (SELECT 1 FROM sp WHERE SUBSTR(\1, 1, LENGTH(sp.prefix)) = sp.prefix) '
       || 'OR EXISTS (SELECT 1 FROM sn WHERE sn.object_name = \1))');
@@ -1120,6 +1126,10 @@ BEGIN
   l_identity.put('edition', SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'));
   l_identity.put('database_version', TO_CHAR(DBMS_DB_VERSION.VERSION) || '.' || TO_CHAR(DBMS_DB_VERSION.RELEASE));
 
+  -- One probe, before any section is built: the dictionary column that holds a virtual column's expression.
+  SELECT COUNT(*) INTO l_virtual_expr_captured FROM all_tab_columns
+   WHERE owner = 'SYS' AND table_name = 'ALL_TAB_COLS' AND column_name = 'DATA_DEFAULT_VC';
+
   add_query_section('tables', q'~
     SCOPE_WITH
     SELECT JSON_OBJECT('name' VALUE t.table_name, 'temporary' VALUE t.temporary,
@@ -1138,7 +1148,8 @@ BEGIN
       'data_precision' VALUE c.data_precision, 'data_scale' VALUE c.data_scale,
       'char_used' VALUE c.char_used, 'char_length' VALUE c.char_length,
       'nullable' VALUE c.nullable, 'hidden' VALUE CASE WHEN c.hidden_column = 'YES' THEN 'Y' ELSE 'N' END,
-      'virtual' VALUE CASE WHEN c.virtual_column = 'YES' THEN 'Y' ELSE 'N' END RETURNING CLOB) row_json
+      'virtual' VALUE CASE WHEN c.virtual_column = 'YES' THEN 'Y' ELSE 'N' END,
+      'virtual_expression' VALUE CASE WHEN c.virtual_column = 'YES' THEN VIRTUAL_EXPR END RETURNING CLOB) row_json
       FROM all_tab_cols c WHERE c.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(c.table_name))
      ORDER BY c.table_name, c.column_id NULLS LAST, c.internal_column_id OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
 

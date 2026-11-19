@@ -446,6 +446,20 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertNotIn("CAST(NULL AS CLOB)", sql)
         self.assertEqual(sql.count("TO_CLOB(NULL)"), 3)
 
+    def test_virtual_expression_names_the_dictionary_column_only_when_the_probe_finds_it(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        probe = "SELECT COUNT(*) INTO l_virtual_expr_captured FROM all_tab_columns"
+
+        self.assertEqual(sql.count(probe), 1)
+        self.assertLess(sql.index(probe), sql.index("add_query_section('tables'"))
+        self.assertIn("WHERE owner = 'SYS' AND table_name = 'ALL_TAB_COLS' AND column_name = 'DATA_DEFAULT_VC';", sql)
+        self.assertIn(
+            "CASE WHEN l_virtual_expr_captured > 0 THEN 'c.data_default_vc' ELSE 'CAST(NULL AS VARCHAR2(4000))' END",
+            sql,
+        )
+        self.assertEqual(sql.count("c.data_default_vc"), 1, "only the token replacement may name the 23ai-only column")
+        self.assertIn("'virtual_expression' VALUE CASE WHEN c.virtual_column = 'YES' THEN VIRTUAL_EXPR END", sql)
+
     def test_unselected_prefix_grants_are_not_reported(self) -> None:
         source = catalog("dev")
         target = catalog("staging")
