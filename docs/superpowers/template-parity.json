@@ -131,10 +131,10 @@
     },
     "TODO.md": {
       "status": "intended",
-      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 3): both record the Oracle 23ai checks (INVISIBLE columns, DATA_DEFAULT_VC, SQLcl session cost); only 26.2 lists the app-unlock live gap.",
       "blobs": [
-        "999dd0410b38311669a051262a085dce50014343",
-        "a24bb4fcf60c525a003b749e13f40012f578dc33"
+        "f89515382c99fd7c762ff2b5dabda2762f328a80",
+        "86be65aa8fcf37184d3ad08a0ec3f1b66def623b"
       ]
     },
     "ai_generate/2026-11-14/WALKTHROUGH.md": {
@@ -179,10 +179,10 @@
     },
     "docs/GETTING_STARTED.md": {
       "status": "intended",
-      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): both guides now clean up by file-level provenance and list inherited workflows by name; they differ in the SQLcl floor, release commands and the 26.1 lock-based test listing.",
+      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): both guides now clean up by file-level provenance and list inherited workflows by name; they differ in the SQLcl floor, release commands and the 26.1 lock-based test listing. Follow-up 2026-11-19 (pass 3): both guides carry the section for existing projects; the 26.2 guide also clarifies which engine accepts --apex-release.",
       "blobs": [
-        "4b2d3b501e057f99d4effbf0ea0bd916d4b1c967",
-        "24bd95117a4052dd8bddf031e089f62cb922efc9"
+        "8798cc80eb26afe144b9df360028a47dcb114f53",
+        "c268e48ff8a92adbdf1e50d80c8d0e0a6068afc1"
       ]
     },
     "docs/TROUBLESHOOTING.md": {
@@ -753,14 +753,6 @@
         "e3ac599f3032105f0e13f1fee733fc6508a0cb89"
       ]
     },
-    "tests/test_migration_archive.py": {
-      "status": "intended",
-      "reason": "Fixture names and test order only: 26.1 uses APP_ONE and 26.2 uses APP_DEV; the same archive cases run in both.",
-      "blobs": [
-        "016809f532a5b6761c61a1fcf071fbeda81b8b1a",
-        "01dcfab5d61b6ca884c1944dd28885951e68d68d"
-      ]
-    },
     "tests/test_migration_checks.py": {
       "status": "feature",
       "reason": "Goes with scripts/migration_checks.py: the 26.2-only metric-phase tests. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
@@ -807,14 +799,6 @@
       "blobs": [
         "13f23e36e4bdc62aeeb360a09cec7935c42c80c3",
         "318841ee0a3dff05a676c93a8ed4074300be2b24"
-      ]
-    },
-    "tests/test_path_utils.py": {
-      "status": "intended",
-      "reason": "Wording only: scripts/path_utils.py is identical; 26.1 renames one test and adds a not-None guard on the imported helper, 26.2 has neither",
-      "blobs": [
-        "d9c2c28a9a9638b29191a63306dfe5707b66f047",
-        "214eea2bb4e66e3d8ed7f9687e24d805370ef5e0"
       ]
     },
     "tests/test_publish_cli.py": {
@@ -906,10 +890,10 @@
       ]
     },
     "tests/test_windows_support.py": {
-      "status": "missed",
-      "reason": "Missed (tests only, the code is identical on both lines): 26.2 tests that Wait-SqlclProcess waits for pending output after the process exits (SqlclOutputCompletionTests, scripts/invoke_sqlcl.ps1) and tests the optional DBA alias in scripts/load_env.ps1; 26.1 has neither test (it tests process-tree waiting instead). Its other 26.2-only tests cover 26.2 PowerShell commands (baseline, compare-env, migration rehearsal).",
+      "status": "feature",
+      "reason": "The tests that 26.1 lacked (Wait-SqlclProcess waiting for pending output, the optional DBA alias in load_env.ps1) now live in the core as tests/test_windows_support_shared.py, so both lines run them. What still differs: 26.2 tests its 26.2-only PowerShell commands (baseline, compare-env, migration rehearsal); 26.1 tests process-tree waiting instead.",
       "blobs": [
-        "26450d83118408677490dd49352455aa0d47e931",
+        "1afa45f3a3f6f070cc86a44cdd0f97926a16f7a1",
         "23e565e2a40cf32c3bafc4cda0bbc000cbbb088c"
       ]
     }
