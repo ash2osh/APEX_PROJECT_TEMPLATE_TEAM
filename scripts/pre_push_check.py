@@ -72,9 +72,13 @@ def powershell_parse_command(pwsh: str, files: Sequence[str]) -> list[str]:
     return [pwsh, "-NoProfile", "-Command", script]
 
 
-def changed_test_files(paths: Sequence[str]) -> list[str]:
-    """Test modules among the changed paths: tests/test_*.py, sorted, each once."""
-    return sorted({p for p in paths if p.startswith("tests/") and "/" not in p[len("tests/"):] and Path(p).name.startswith("test_") and p.endswith(".py")})
+def changed_test_files(paths: Sequence[str], root: Path = ROOT) -> list[str]:
+    """Test modules among the changed paths that still exist: tests/test_*.py, sorted, each once."""
+    return sorted({
+        p for p in paths
+        if p.startswith("tests/") and "/" not in p[len("tests/"):] and Path(p).name.startswith("test_") and p.endswith(".py")
+        and (root / p).is_file()
+    })
 
 
 def git_lines(*args: str) -> list[str]:
@@ -166,13 +170,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             results.append((label, step(label, powershell_parse_command(pwsh, powershell_targets))))
         else:
             print("note: pwsh is not on PATH, so the PowerShell parse was not run (CI runs it on Linux and Windows)", flush=True)
-    for test in changed_test_files(paths):
+    for test in changed_test_files(paths, ROOT):
         label = f"Changed test {test}"
         results.append((label, step(label, [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", Path(test).name, "-v"])))
     # A template carries the shared core files with a stamp. Editing one of them in the template fails here:
-    # fix it in the core repository and sync it. A downstream project has no stamp, so nothing runs.
+    # fix it in the core repository and sync it. A downstream project has no stamp, so nothing runs. A downstream
+    # project can still inherit a stale .core-stamp.json; its .template-lock.json marks it as downstream, so skip then.
     stamp, checker = ROOT / ".core-stamp.json", ROOT / "scripts" / "sync_core.py"
-    if stamp.is_file() and checker.is_file():
+    if stamp.is_file() and checker.is_file() and not (ROOT / ".template-lock.json").exists():
         label = "Shared core files (edit them in APEX_TEMPLATE_CORE, then sync)"
         results.append((label, step(label, [sys.executable, str(checker), "check", str(ROOT)])))
     if not results:

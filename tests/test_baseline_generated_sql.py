@@ -524,5 +524,216 @@ class ImportOrderTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr[-600:])
 
 
+def _declare_order_violations(sql: str) -> list[str]:
+    """Lines of each DECLARE section that follow a local subprogram without belonging to one.
+
+    A subprogram starts at exactly two spaces with FUNCTION or PROCEDURE and ends at its own two-space END. Inside it,
+    two-space BEGIN and END lines and deeper body lines are allowed. After the first subprogram, any other declaration
+    (or any deeper line outside a subprogram) is a variable or type declared after a subprogram, which Oracle rejects
+    with PLS-00103.
+    """
+    problems: list[str] = []
+    lines = sql.split("\n")
+    index = 0
+    while index < len(lines):
+        if lines[index] != "DECLARE":
+            index += 1
+            continue
+        index += 1
+        seen_subprogram = in_subprogram = False
+        while index < len(lines) and lines[index] != "BEGIN":
+            line = lines[index]
+            index += 1
+            text = line.strip()
+            indent = len(line) - len(line.lstrip(" "))
+            if not text:
+                continue
+            if indent == 2 and text.startswith(("FUNCTION ", "PROCEDURE ")):
+                seen_subprogram = in_subprogram = True
+            elif in_subprogram:
+                if indent == 2 and text.startswith("END"):
+                    in_subprogram = False
+                elif indent == 2 and text != "BEGIN":
+                    problems.append(line)
+            elif seen_subprogram:
+                problems.append(line)
+    return problems
+
+
+def _constraint_row(condition: str, **extra: object) -> dict:
+    return {
+        "table_name": "APP_ITEMS", "name": "APP_ITEMS_PRICE_CK", "constraint_type": "C", "columns": [],
+        "condition": condition, "status": "ENABLED", "validated": "VALIDATED", **extra,
+    }
+
+
+class DeclareOrderTests(unittest.TestCase):
+    def test_the_order_helper_accepts_variables_before_subprograms(self) -> None:
+        good = (
+            "DECLARE\n  l_x NUMBER;\n  FUNCTION f RETURN NUMBER IS\n    l_y NUMBER := 1;\n  BEGIN\n"
+            "    RETURN l_y;\n  END;\nBEGIN\n  NULL;\nEND;\n/\n"
+        )
+        self.assertEqual([], _declare_order_violations(good))
+
+    def test_the_order_helper_rejects_a_variable_declared_after_a_subprogram(self) -> None:
+        bad = (
+            "DECLARE\n  FUNCTION f RETURN NUMBER IS\n  BEGIN\n    RETURN 1;\n  END;\n"
+            "  l_x NUMBER;\nBEGIN\n  NULL;\nEND;\n/\n"
+        )
+        self.assertEqual(["  l_x NUMBER;"], _declare_order_violations(bad))
+
+    def test_the_order_helper_rejects_the_old_replacement_block_shape(self) -> None:
+        old_shape = (
+            "DECLARE\n  FUNCTION normalized(p_value VARCHAR2) RETURN VARCHAR2 IS\n    l_result VARCHAR2(4000) := '';\n"
+            "  BEGIN\n    RETURN l_result;\n  END;\n  l_status VARCHAR2(8);\n  l_condition VARCHAR2(4000);\nBEGIN\n"
+            "  NULL;\nEND;\n/\n"
+        )
+        self.assertEqual(
+            ["  l_status VARCHAR2(8);", "  l_condition VARCHAR2(4000);"], _declare_order_violations(old_shape),
+        )
+
+    def test_generated_declare_blocks_declare_variables_before_subprograms(self) -> None:
+        replace_sql = baseline_bundles._wrap_constraint(
+            _constraint_row("price >= 5"), "APP_DEV", "APP_DEV", replace_check=True, reviewed_condition="price >= 2",
+        )
+        plain_sql = baseline_bundles._wrap_constraint(_constraint_row("price >= 0"), "APP_DEV", "APP_DEV")
+        not_null_sql = baseline_bundles._wrap_not_null("APP_DEV", "APP_ITEMS", "PRICE")
+        sequence_sql = baseline_bundles._sync_sequence_sql(
+            "APP_DEV", {"name": "ITEM_SEQ", "increment_by": 1}, {"table": "APP_ITEMS", "column": "ITEM_ID"},
+        )
+        compile_sql = baseline._compile_all_step("APP_STAGE", [("PACKAGE", "APP_PKG")])
+        for label, sql in (
+            ("replace-check", replace_sql), ("plain constraint", plain_sql), ("not null", not_null_sql),
+            ("sequence sync", sequence_sql), ("compile all", compile_sql),
+        ):
+            with self.subTest(block=label):
+                self.assertIn("DECLARE", sql)
+                self.assertEqual([], _declare_order_violations(sql))
+
+    def test_code_bundle_declare_blocks_declare_variables_before_subprograms(self) -> None:
+        settings = {
+            "plsql_optimize_level": "2", "plsql_code_type": "INTERPRETED", "plsql_debug": "FALSE",
+            "plsql_warnings": "DISABLE:ALL", "plsql_ccflags": None, "nls_length_semantics": "BYTE",
+            "plscope_settings": "IDENTIFIERS:NONE",
+        }
+        spec = {"name": "Pkg", "type": "PACKAGE"}
+        body = {"name": "Pkg", "type": "PACKAGE BODY"}
+        procedure = {"name": "Added", "type": "PROCEDURE"}
+        source = {"sections": {
+            "baseline-source": [
+                {**spec, "line": 1, "text": "PACKAGE Pkg AS PROCEDURE p; END;\n"},
+                {**body, "line": 1, "text": "PACKAGE BODY Pkg AS PROCEDURE p IS BEGIN NULL; END; END;\n"},
+                {**procedure, "line": 1, "text": "PROCEDURE Added AS BEGIN NULL; END;\n"},
+            ],
+            "baseline-settings": [{**unit, **settings} for unit in (spec, body, procedure)],
+            "baseline-views": [
+                {"name": "View Mixed", "ddl": 'CREATE OR REPLACE VIEW "APP_DEV"."View Mixed" AS SELECT 2 X FROM DUAL'},
+            ],
+        }}
+        target = {
+            "identity": {
+                "session_user": "CAPTURE_LOGIN", "current_schema": "APP_STAGE", "db_name": "CDB",
+                "db_unique_name": "STAGE_DB", "service_name": "STAGE_SERVICE", "container_id": "5",
+                "container_name": "STAGE_PDB", "edition": "RELEASE_2", "database_version": "23.0",
+            },
+            "sections": {
+                "baseline-source": [
+                    {**spec, "line": 1, "text": "PACKAGE Pkg AS PROCEDURE old; END;\n"},
+                    source["sections"]["baseline-source"][1],
+                ],
+                "baseline-settings": [{**spec, **settings, "plsql_optimize_level": "1"}, {**body, **settings}],
+                "baseline-views": [{"name": "View Mixed", "ddl": 'CREATE OR REPLACE VIEW "APP_STAGE"."View Mixed" AS SELECT 1 X FROM DUAL'}],
+            },
+        }
+        steps, _checks = baseline_bundles._code_bundle({}, "APP_DEV", "APP_STAGE", source, target)
+
+        declaring = [name for name, sql in steps.items() if "DECLARE" in sql]
+        self.assertGreaterEqual(len(declaring), 3)
+        for name in declaring:
+            with self.subTest(step=name):
+                self.assertEqual([], _declare_order_violations(steps[name]))
+
+
+class CheckReplacementTests(unittest.TestCase):
+    config = {"schemas": ["APP_DEV"], "prefixes": ["APP_"], "excludedObjects": [], "sequenceMappings": []}
+
+    def _structure(self, source_row: dict, target_row: dict) -> dict[str, str]:
+        key = ObjectKey("APP_DEV", source_row["name"], "CONSTRAINT")
+        table = [{"name": "APP_ITEMS"}]
+        source = {"sections": {
+            "tables": table, "columns": [], "constraints": [source_row], "indexes": [], "sequences": [],
+            "identity-columns": [],
+        }}
+        target = {"sections": {
+            "tables": table, "columns": [], "constraints": [target_row], "indexes": [], "sequences": [],
+            "identity-columns": [],
+        }}
+        snapshot = SchemaSnapshot({}, {}, {key: ObjectDefinition(key, {}, "", (), True)}, {}, "", "")
+        steps, _checks = baseline._structure_bundle(self.config, "APP_DEV", "APP_DEV", source, target, snapshot)
+        return steps
+
+    def test_the_replacement_block_has_the_reviewed_shape(self) -> None:
+        sql = baseline_bundles._wrap_constraint(
+            _constraint_row("price >= 5"), "APP_DEV", "APP_DEV", replace_check=True, reviewed_condition="price >= 2",
+        )
+
+        for text in ("CONSTRAINT_TYPE", "-20993", "-20994", "-20995", "'price>=5'", "'price>=2'"):
+            self.assertIn(text, sql)
+        self.assertLess(sql.index("l_type VARCHAR2(1);"), sql.index("FUNCTION normalized"))
+        self.assertLess(sql.index("l_condition VARCHAR2(4000);"), sql.index("FUNCTION normalized"))
+        self.assertEqual([], _declare_order_violations(sql))
+
+    def test_the_replacement_block_refuses_to_guess_the_reviewed_condition(self) -> None:
+        with self.assertRaises(baseline.BaselineError):
+            baseline_bundles._wrap_constraint(_constraint_row("price >= 5"), "APP_DEV", "APP_DEV", replace_check=True)
+
+    def test_generations_that_differ_only_in_the_live_condition_produce_different_sql(self) -> None:
+        source = _constraint_row("price >= 5")
+        at_two = self._structure(source, _constraint_row("price >= 2"))["001-structure-delta.sql"]
+        at_three = self._structure(source, _constraint_row("price >= 3"))["001-structure-delta.sql"]
+
+        self.assertNotEqual(at_two, at_three)
+        self.assertIn("'price>=2'", at_two)
+        self.assertIn("'price>=3'", at_three)
+        self.assertNotIn("'price>=2'", at_three)
+
+    def test_a_changed_condition_with_alternative_quoting_needs_a_reviewed_migration(self) -> None:
+        for source_condition, target_condition in (
+            ("S <> q'[it's a b]'", "S <> q'[it's ab]'"),
+            ("S <> q'[a b]'", "S <> q'[ab]'"),
+        ):
+            with self.subTest(source=source_condition, target=target_condition):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError, "same-name constraint differences need a reviewed migration",
+                ):
+                    self._structure(_constraint_row(source_condition), _constraint_row(target_condition))
+
+
+class ConditionKeyTests(unittest.TestCase):
+    def test_only_space_tab_lf_and_cr_are_stripped_outside_strings(self) -> None:
+        self.assertEqual("a\x0bb", baseline_bundles._condition_key("a\x0bb"))
+        self.assertEqual("a b", baseline_bundles._condition_key("a b"))
+        self.assertEqual("ab", baseline_bundles._condition_key("a \t\r\nb"))
+        self.assertEqual("C='a  b'", baseline_bundles._condition_key("C = 'a  b'"))
+
+    def test_alternative_quoted_conditions_are_returned_unchanged(self) -> None:
+        value = "S <> q'[a  b]'"
+        self.assertEqual(value, baseline_bundles._condition_key(value))
+
+    def test_an_apostrophe_inside_an_alternative_quote_keeps_its_whitespace(self) -> None:
+        self.assertNotEqual(
+            baseline_bundles._condition_key("S <> q'[it's a b]'"),
+            baseline_bundles._condition_key("S <> q'[it's ab]'"),
+        )
+
+    def test_alternative_quote_detection(self) -> None:
+        for value in ("q'[x]'", "Q'(x)'", "nq'{x}'", "S <> q'[a]'"):
+            with self.subTest(value=value):
+                self.assertTrue(baseline_bundles._has_alternative_quote(value))
+        for value in ("'abq'", "'it''s'", "faq'"):
+            with self.subTest(value=value):
+                self.assertFalse(baseline_bundles._has_alternative_quote(value))
+
+
 if __name__ == "__main__":
     unittest.main()

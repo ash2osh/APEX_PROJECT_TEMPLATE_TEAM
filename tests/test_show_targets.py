@@ -129,6 +129,20 @@ class ShowTargetsTests(unittest.TestCase):
                 show_targets.main(["--format", "xml"], environ=SINGLE_OWNER)
         self.assertEqual(2, exit_status.exception.code)
 
+    def test_help_and_usage_name_the_prog_the_caller_passes(self):
+        help_output, usage_output = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(help_output), self.assertRaises(SystemExit) as help_exit:
+            show_targets.main(["--help"], environ=SINGLE_OWNER, prog="scripts/team.ps1 targets")
+        self.assertEqual(0, help_exit.exception.code)
+        self.assertIn("scripts/team.ps1 targets", help_output.getvalue())
+        self.assertNotIn("scripts/team.sh targets", help_output.getvalue())
+
+        with contextlib.redirect_stderr(usage_output), self.assertRaises(SystemExit) as usage_exit:
+            show_targets.main(["--format", "xml"], environ=SINGLE_OWNER, prog="scripts/team.ps1 targets")
+        self.assertEqual(2, usage_exit.exception.code)
+        self.assertIn("usage: scripts/team.ps1 targets", usage_output.getvalue())
+        self.assertNotIn("scripts/team.sh targets", usage_output.getvalue())
+
     def test_no_database_client_or_subprocess_is_started(self):
         def refuse(*args, **kwargs):
             raise AssertionError("show_targets must not start a process")

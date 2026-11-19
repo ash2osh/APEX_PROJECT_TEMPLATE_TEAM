@@ -608,7 +608,19 @@ def _constraint_ddl(row: Mapping, source_schema: str, target_schema: str) -> str
     return f"ALTER TABLE {_sql_identifier(target_schema)}.{_sql_identifier(table)} ADD CONSTRAINT {_sql_identifier(name)} {clause} {' '.join(attributes)}"
 
 
+_ALTERNATIVE_QUOTE = re.compile(r"(?<![\w$#\"])[nN]?[qQ]'")
+
+
+def _has_alternative_quote(value: str) -> bool:
+    return _ALTERNATIVE_QUOTE.search(value) is not None
+
+
 def _condition_key(value: str) -> str:
+    # An alternative-quoted literal (q'[...]') can hold an apostrophe that the plain-string scan below would
+    # misread, so such a condition is compared exactly instead of being normalised.
+    if _has_alternative_quote(value):
+        return value
+    # Strip exactly what the PL/SQL normalized() function strips: space, TAB, LF and CR outside strings.
     output = []
     index = 0
     in_string = False
@@ -621,16 +633,47 @@ def _condition_key(value: str) -> str:
                 index += 2
                 continue
             in_string = not in_string
-        elif in_string or not char.isspace():
+        elif in_string or char not in " \t\r\n":
             output.append(char)
         index += 1
     return "".join(output)
 
 
-def _wrap_constraint(row: Mapping, source_schema: str, target_schema: str, *, replace_check: bool = False) -> str:
+_NORMALIZED_FUNCTION = (
+    "  FUNCTION normalized(p_value VARCHAR2) RETURN VARCHAR2 IS\n"
+    "    l_result VARCHAR2(4000) := '';\n"
+    "    l_index PLS_INTEGER := 1;\n"
+    "    l_char VARCHAR2(1);\n"
+    "    l_in_string BOOLEAN := FALSE;\n"
+    "  BEGIN\n"
+    "    WHILE l_index <= LENGTH(p_value) LOOP\n"
+    "      l_char := SUBSTR(p_value, l_index, 1);\n"
+    "      IF l_char = '''' THEN\n"
+    "        l_result := l_result || l_char;\n"
+    "        IF l_in_string AND SUBSTR(p_value, l_index + 1, 1) = '''' THEN\n"
+    "          l_result := l_result || ''''; l_index := l_index + 2;\n"
+    "        ELSE\n"
+    "          l_in_string := NOT l_in_string; l_index := l_index + 1;\n"
+    "        END IF;\n"
+    "      ELSIF l_in_string OR l_char NOT IN (' ', CHR(9), CHR(10), CHR(13)) THEN\n"
+    "        l_result := l_result || l_char; l_index := l_index + 1;\n"
+    "      ELSE\n"
+    "        l_index := l_index + 1;\n"
+    "      END IF;\n"
+    "    END LOOP;\n"
+    "    RETURN l_result;\n"
+    "  END;\n"
+)
+
+
+def _wrap_constraint(
+    row: Mapping, source_schema: str, target_schema: str, *,
+    replace_check: bool = False, reviewed_condition: str | None = None,
+) -> str:
     ddl = _constraint_ddl(row, source_schema, target_schema)
     table, name = str(row["table_name"]), str(row["name"])
     lookup = _sql_literal(name)
+    owner = _sql_literal(target_schema)
     enable_state = "VALIDATE" if str(row.get("validated", "NOT VALIDATED")).upper() == "VALIDATED" else "NOVALIDATE"
     enable = (
         f"ALTER TABLE {_sql_identifier(target_schema)}.{_sql_identifier(table)} ENABLE {enable_state}"
@@ -641,41 +684,47 @@ def _wrap_constraint(row: Mapping, source_schema: str, target_schema: str, *, re
         if row.get("rely") == "RELY" else ""
     )
     if replace_check:
-        normalized = _condition_key(str(row["condition"]))
+        if reviewed_condition is None:
+            raise baseline.BaselineError(f"replacing check constraint {name} needs the reviewed target condition")
+        desired = _condition_key(str(row["condition"]))
+        reviewed = _condition_key(reviewed_condition)
         drop = f"ALTER TABLE {_sql_identifier(target_schema)}.{_sql_identifier(table)} DROP CONSTRAINT {_sql_identifier(name)}"
+        not_check = _sql_literal(
+            f"constraint {name} exists on the target but is not a check constraint; review it and write a migration")
+        changed = _sql_literal(f"constraint {name} on the target changed after the baseline was reviewed; regenerate the baseline")
+        not_reviewed = _sql_literal(f"constraint {name} does not have the reviewed condition after the replacement")
         return (
             "DECLARE\n"
-            "  FUNCTION normalized(p_value VARCHAR2) RETURN VARCHAR2 IS\n"
-            "    l_result VARCHAR2(4000) := '';\n"
-            "    l_index PLS_INTEGER := 1;\n"
-            "    l_char VARCHAR2(1);\n"
-            "    l_in_string BOOLEAN := FALSE;\n"
-            "  BEGIN\n"
-            "    WHILE l_index <= LENGTH(p_value) LOOP\n"
-            "      l_char := SUBSTR(p_value, l_index, 1);\n"
-            "      IF l_char = '''' THEN\n"
-            "        l_result := l_result || l_char;\n"
-            "        IF l_in_string AND SUBSTR(p_value, l_index + 1, 1) = '''' THEN\n"
-            "          l_result := l_result || ''''; l_index := l_index + 2;\n"
-            "        ELSE\n"
-            "          l_in_string := NOT l_in_string; l_index := l_index + 1;\n"
-            "        END IF;\n"
-            "      ELSIF l_in_string OR l_char NOT IN (' ', CHR(9), CHR(10), CHR(13)) THEN\n"
-            "        l_result := l_result || l_char; l_index := l_index + 1;\n"
-            "      ELSE\n"
-            "        l_index := l_index + 1;\n"
-            "      END IF;\n"
-            "    END LOOP;\n"
-            "    RETURN l_result;\n"
-            "  END;\n"
-            "  l_status VARCHAR2(8);\n  l_condition VARCHAR2(4000);\nBEGIN\n  BEGIN\n"
-            f"    SELECT STATUS, SEARCH_CONDITION_VC INTO l_status, l_condition FROM ALL_CONSTRAINTS WHERE OWNER = {_sql_literal(target_schema)} AND CONSTRAINT_NAME = {lookup};\n"
+            "  l_status VARCHAR2(8);\n"
+            "  l_type VARCHAR2(1);\n"
+            "  l_condition VARCHAR2(4000);\n"
+            + _NORMALIZED_FUNCTION
+            + "BEGIN\n  BEGIN\n"
+            f"    SELECT STATUS, CONSTRAINT_TYPE, SEARCH_CONDITION_VC INTO l_status, l_type, l_condition FROM ALL_CONSTRAINTS WHERE OWNER = {owner} AND CONSTRAINT_NAME = {lookup};\n"
             "  EXCEPTION WHEN NO_DATA_FOUND THEN l_status := NULL;\n  END;\n"
-            f"  IF l_status IS NOT NULL AND (l_condition IS NULL OR normalized(l_condition) <> {_sql_literal(normalized)}) THEN\n"
-            f"    EXECUTE IMMEDIATE {_q_literal(drop)};\n    l_status := NULL;\n  END IF;\n"
-            f"  IF l_status IS NULL THEN\n    EXECUTE IMMEDIATE {_q_literal(ddl)};\n"
-            f"  ELSIF l_status = 'DISABLED' THEN\n    EXECUTE IMMEDIATE {_q_literal(enable)};\n"
-            f"{enable_rely}  END IF;\nEND;\n/\n"
+            "  IF l_status IS NOT NULL THEN\n"
+            "    IF l_type <> 'C' OR l_condition IS NULL THEN\n"
+            f"      RAISE_APPLICATION_ERROR(-20993, {not_check});\n"
+            f"    ELSIF normalized(l_condition) = {_sql_literal(desired)} THEN\n"
+            "      NULL;\n"
+            f"    ELSIF normalized(l_condition) = {_sql_literal(reviewed)} THEN\n"
+            f"      EXECUTE IMMEDIATE {_q_literal(drop)};\n"
+            "      l_status := NULL;\n"
+            "    ELSE\n"
+            f"      RAISE_APPLICATION_ERROR(-20994, {changed});\n"
+            "    END IF;\n"
+            "  END IF;\n"
+            "  IF l_status IS NULL THEN\n"
+            f"    EXECUTE IMMEDIATE {_q_literal(ddl)};\n"
+            "  ELSIF l_status = 'DISABLED' THEN\n"
+            f"    EXECUTE IMMEDIATE {_q_literal(enable)};\n"
+            f"{enable_rely}"
+            "  END IF;\n"
+            f"  SELECT SEARCH_CONDITION_VC INTO l_condition FROM ALL_CONSTRAINTS WHERE OWNER = {owner} AND CONSTRAINT_NAME = {lookup};\n"
+            f"  IF l_condition IS NULL OR normalized(l_condition) <> {_sql_literal(desired)} THEN\n"
+            f"    RAISE_APPLICATION_ERROR(-20995, {not_reviewed});\n"
+            "  END IF;\n"
+            "END;\n/\n"
         )
     return (
         "DECLARE\n  l_status VARCHAR2(8);\nBEGIN\n  BEGIN\n"
@@ -945,6 +994,8 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             existing and changed_fields == ["condition"]
             and row.get("constraint_type") == "C" and existing.get("constraint_type") == "C"
             and not truncated_condition
+            and not _has_alternative_quote(str(row.get("condition") or ""))
+            and not _has_alternative_quote(str(existing.get("condition") or ""))
         )
         if existing is not None and changed_fields and not replace_check:
             raise baseline.BaselineError(
@@ -954,7 +1005,10 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         if existing is None or replace_check:
             if ObjectKey(source_schema, name, "CONSTRAINT") not in definitions:
                 raise baseline.BaselineError(f"source constraint definition is missing for {table_name}.{name}")
-            chunks.append(_wrap_constraint(row, source_schema, target_schema, replace_check=replace_check))
+            chunks.append(_wrap_constraint(
+                row, source_schema, target_schema, replace_check=replace_check,
+                reviewed_condition=str(existing["condition"]) if replace_check else None,
+            ))
             posts.append(_count_check(
                 f"constraint-{_safe_check_slug(table_name + '-' + name)}",
                 f"ALL_CONSTRAINTS WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(table_name)} AND CONSTRAINT_NAME = {_sql_literal(name)} "
