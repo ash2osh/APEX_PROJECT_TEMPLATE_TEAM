@@ -400,6 +400,68 @@ APEX_EXPECTED_USER=DEMO
             self.assertNotIn("/private/secret", res["message"])
             self.assertEqual(res["message"], "live doctor invocation unavailable: tool launch failed")
 
+    def test_live_doctor_decodes_utf8_output_on_any_code_page(self) -> None:
+        # SQLcl writes UTF-8. The second byte of U+0641 (0xD9 0x81) is undefined in cp1252, so a
+        # locale-default decode failed inside subprocess.run and the doctor result was lost.
+        from scripts.sqlcl_session import bash_command
+        from scripts.verify_local import run_live_doctor
+        if bash_command() == "bash" and shutil.which("bash") is None:
+            self.skipTest("no usable bash found to run the team.sh doctor reproduction")
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        project = Path(temp_dir) / "project"
+        (project / "scripts").mkdir(parents=True)
+        (project / "scripts" / "team.sh").write_bytes(
+            b'#!/bin/bash\nprintf "SQLcl target: db_name=\xd9\x81\\n"\nexit 0\n'
+        )
+        res = run_live_doctor(project)
+        self.assertEqual(res["status"], "pass", res["message"])
+
+    def test_live_doctor_failure_output_with_utf8_is_classified_not_lost(self) -> None:
+        # On Windows the undecodable line is dropped with the reader thread's stdout, so an "unavailable"
+        # message printed after a non-cp1252 byte was reported as a plain "fail" instead.
+        from scripts.sqlcl_session import bash_command
+        from scripts.verify_local import run_live_doctor
+        if bash_command() == "bash" and shutil.which("bash") is None:
+            self.skipTest("no usable bash found to run the team.sh doctor reproduction")
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        project = Path(temp_dir) / "project"
+        (project / "scripts").mkdir(parents=True)
+        (project / "scripts" / "team.sh").write_bytes(
+            b'#!/bin/bash\nprintf "SQLcl unavailable: db_name=\xd9\x81\\n"\nexit 1\n'
+        )
+        res = run_live_doctor(project)
+        self.assertEqual(res["status"], "unavailable", res["message"])
+
+    def test_live_doctor_subprocess_decodes_output_as_utf8(self) -> None:
+        from scripts.verify_local import run_live_doctor
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        with patch("scripts.verify_local.subprocess.run", return_value=completed) as mock_run:
+            res = run_live_doctor(self.repo)
+        self.assertEqual(res["status"], "pass")
+        self.assertEqual(mock_run.call_args.kwargs.get("encoding"), "utf-8")
+        self.assertEqual(mock_run.call_args.kwargs.get("errors"), "replace")
+
+    def test_graphify_verify_subprocess_decodes_output_as_utf8(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        self.create_valid_app()
+        graphify_dir = self.repo / "graphify-out"
+        graphify_dir.mkdir(parents=True)
+        (graphify_dir / "graph.json").write_text("{}", encoding="utf-8")
+        setup_script = self.repo / "scripts" / "setup_graphify_apx.py"
+        setup_script.parent.mkdir(parents=True, exist_ok=True)
+        setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        from scripts.local_config import read_project_env
+        values = read_project_env(self.repo / ".env")
+
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="OK\n", stderr="")
+        with patch("subprocess.run", return_value=completed) as mock_run:
+            build_report(self.repo, values, self.current_skills)
+        self.assertEqual(mock_run.call_args.kwargs.get("encoding"), "utf-8")
+        self.assertEqual(mock_run.call_args.kwargs.get("errors"), "replace")
+
     def test_upgrade_conflicts_ancestor_scratch_does_not_mask_conflicts(self) -> None:
         scratch_ancestor_repo = Path(self.temp_dir) / "scratch_fixture" / "my_repo"
         scratch_ancestor_repo.mkdir(parents=True)
@@ -692,6 +754,14 @@ class OriginalTemplateDetectionTests(unittest.TestCase):
                 checkout.mkdir(exist_ok=True)
                 (checkout / ".git").write_text(content, encoding="utf-8")
                 self.assertFalse(is_original_template(checkout, self.manifest))
+
+    def test_gitdir_pointer_with_nul_is_not_original_and_never_raises(self) -> None:
+        from scripts.verify_local import is_original_template
+        checkout = self.root / "nul-pointer"
+        checkout.mkdir()
+        # Windows resolve() keeps the NUL, so opening the config raises ValueError; that must mean "not original".
+        (checkout / ".git").write_text("gitdir: C:\\x\x00y\n", encoding="utf-8")
+        self.assertFalse(is_original_template(checkout, self.manifest))
 
     @unittest.skipIf(shutil.which("git") is None, "git is not on PATH")
     def test_real_git_worktree_is_recognized_in_both_directories(self) -> None:
