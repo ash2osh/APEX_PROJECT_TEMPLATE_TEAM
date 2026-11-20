@@ -213,7 +213,7 @@ function Invoke-Sqlcl {
           [System.IO.File]::WriteAllText($TranscriptFile, $transcript)
         } catch {
           if (-not $waitInterrupted) { throw }
-          Write-Warning "SQLcl diagnostics could not be captured after interruption: $TranscriptFile"
+          [Console]::Error.WriteLine("WARNING: " + "SQLcl diagnostics could not be captured after interruption: $TranscriptFile")
         } finally {
           Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
         }
@@ -293,7 +293,7 @@ function Invoke-OrdsExportHelper {
   $previous = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $text = (& $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "ords_export.py") @HelperArguments 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $text = (& $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "ords_export.py") @HelperArguments 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { [string] $_.Exception.Message } else { "$_" } }) -join "`n"
     $status = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previous
@@ -330,6 +330,15 @@ function Assert-SqlclApexVersion {
   . (Join-Path $PSScriptRoot "resolve_python.ps1")
   $python = Resolve-TeamPython
   if ($null -eq $python) { throw "Python 3.10 or newer is required for APEX compatibility checks" }
-  $message = & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "apex_compatibility.py") sqlcl-version $transcript 2>&1
-  if ($LASTEXITCODE -ne 0) { throw ($message -join [Environment]::NewLine) }
+  # The refusal is written to stderr. Windows PowerShell 5.1 turns native stderr into a
+  # terminating error under "Stop" (the callers' preference), so relax it for this call only.
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $message = @(& $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "apex_compatibility.py") sqlcl-version $transcript 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { [string] $_.Exception.Message } else { "$_" } })
+    $checkStatus = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+  if ($checkStatus -ne 0) { throw ($message -join [Environment]::NewLine) }
 }

@@ -1,7 +1,8 @@
 """Shared Windows regression tests: PowerShell output completion and the optional DBA alias.
 
 Copied from the 26.2 test_windows_support.py so that 26.1 and 26.2 carry the same
-checks. The classes need PowerShell 7 (pwsh) for the first class; the second needs bash.
+checks. The first class needs PowerShell 7 (pwsh) on POSIX; the interrupt-warning class
+needs Windows PowerShell 5.1 on Windows; the DBA alias class needs bash.
 """
 
 import os
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import _test_subprocess_safety  # noqa: F401
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
+import fake_sqlcl
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +38,55 @@ if (-not $process.OutputComplete) { Write-Error 'output processing is still pend
             result = subprocess.run(["pwsh", "-NoProfile", "-File", str(driver),
                                      str(ROOT / "scripts/invoke_sqlcl.ps1")], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+# Windows PowerShell 5.1 hard-wraps Write-Warning text at the console width when its output is
+# redirected, which split a path a user would copy. The driver starts SQLcl through Invoke-Sqlcl,
+# then ends the wait with an exception, as Ctrl-C does, so the interrupted-diagnostics warning runs.
+# The transcript path is a directory, so writing the transcript fails inside that catch block.
+INTERRUPT_WARNING_DRIVER = '''param([string] $Helper, [string] $WorkDirectory, [string] $StdInFile, [string] $Transcript)
+. $Helper
+function Wait-SqlclProcess {
+  param($Process)
+  throw "simulated interruption"
+}
+try {
+  $null = Invoke-Sqlcl -Arguments @("-V") -WorkingDirectory $WorkDirectory -StdInFile $StdInFile -TranscriptFile $Transcript
+} catch {
+  # Expected: the interruption propagates once the warning has been written.
+}
+exit 0
+'''
+
+
+@unittest.skipUnless(os.name == "nt" and _test_subprocess_safety.working_windows_powershell(),
+                     "needs Windows PowerShell 5.1 on Windows")
+class SqlclInterruptWarningTests(unittest.TestCase):
+    def test_interrupted_diagnostics_warning_keeps_the_transcript_path_on_one_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / "diagnostics-directory-with-a-name-long-enough-to-pass-the-console-width"
+            transcript.mkdir()
+            work = root / "work"
+            work.mkdir()
+            stdin_file = work / ".sqlcl-stdin"
+            stdin_file.write_text("", encoding="utf-8")
+            driver = root / "interrupt.ps1"
+            driver.write_text(INTERRUPT_WARNING_DRIVER, encoding="utf-8")
+            # Invoke-Sqlcl starts `sql` by name, so a fake one goes first on PATH and the real SQLcl is never started.
+            fake_bin = fake_sqlcl.install(root / "bin", "exit 0\n")
+            result = subprocess.run(
+                [_test_subprocess_safety.working_windows_powershell(), "-NoProfile", "-File", str(driver),
+                 str(ROOT / "scripts" / "invoke_sqlcl.ps1"), str(work), str(stdin_file), str(transcript)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=fake_sqlcl.environment(fake_bin),
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn(f"WARNING: SQLcl diagnostics could not be captured after interruption: {transcript}",
+                      output.splitlines(), output)
 
 
 def write_script(path: Path, body: str) -> None:

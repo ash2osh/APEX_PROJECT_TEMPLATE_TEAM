@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "c43df432222fd88de0b97bde5b6fe5776fd44b66",
+  "coreCommit": "68d9a2287dd4456bde1338b3b09ebd3311fcaa50",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -244,7 +244,7 @@
     },
     {
       "path": "scripts/invoke_sqlcl.ps1",
-      "sha256": "93d326ded00db14e95bcc697cf066638ecbe6871b1da72c8b4c2a8fff36c8dbb",
+      "sha256": "928c93af4051122e5d47117b8f6663a84af6e27a7af75551580853d2634c16bf",
       "executable": false
     },
     {
@@ -254,7 +254,7 @@
     },
     {
       "path": "scripts/load_env.ps1",
-      "sha256": "2f938405f1121ddedc483b4f404c153dfad7754d3305c738fe28da47d3c1d8ea",
+      "sha256": "b1c1782fb54f06716ea61012fec759bb58fbcb600e0303dc0bedaa396b043b29",
       "executable": false
     },
     {
@@ -524,7 +524,7 @@
     },
     {
       "path": "scripts/windows_check.ps1",
-      "sha256": "e1aa07e489105bad6b47c5c920f2f7e1b70512cd8c8aa04e79d1d378a5d144b0",
+      "sha256": "8864aaa1507c1981afc5353aefa294fa43c8fd6d88d47237fb739bf1db2bf33c",
       "executable": false
     },
     {
@@ -1249,7 +1249,7 @@
     },
     {
       "path": "tests/test_windows_support_shared.py",
-      "sha256": "4588284ff44441262aabbdd6dec4439fa23b5cca7680f53833d957cbcdf5653e",
+      "sha256": "c7f1830703515c8382375b5776af6a221589c64ad35a123d37e6a14920d006bd",
       "executable": false
     },
     {

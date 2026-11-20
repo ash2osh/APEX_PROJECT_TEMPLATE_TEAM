@@ -100,7 +100,7 @@ function Invoke-Native([string] $Program, [string[]] $Arguments) {
   $lines = @()
   try {
     $global:LASTEXITCODE = 0
-    $lines = @(& $Program @Arguments 2>&1 | ForEach-Object { "$_" })
+    $lines = @(& $Program @Arguments 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { [string] $_.Exception.Message } else { "$_" } })
     $code = $global:LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previous
