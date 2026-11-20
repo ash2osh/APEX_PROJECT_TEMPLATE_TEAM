@@ -1,7 +1,9 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
+import time
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -235,7 +237,7 @@ class ApplicationLockTests(unittest.TestCase):
         path = self.write_record(own)
         before = path.read_bytes()
         intent = locks.LockEvidence(100, 'TEAM', 'DEMO', self.OWNER, 'c' * 32, '', 'manual owner-filtered unlock')
-        locks.close_held_records(self.target, intent, own)
+        locks.close_held_records(self.target, intent, own, time.time())
         self.assertEqual(path.read_bytes(), before)
 
     def test_unverified_unlock_closes_nothing(self):
@@ -267,6 +269,35 @@ class ApplicationLockTests(unittest.TestCase):
         self.assertNotIn('run.aaaaaa', out)
         self.assertEqual(json.loads(failing_path.read_text(encoding='utf-8'))['status'], 'held')
         self.assertEqual(json.loads(ok_path.read_text(encoding='utf-8'))['status'], 'released')
+
+    def test_record_written_after_the_unlock_started_stays_held(self):
+        path = self.write_record(self.apps_dir() / 'run.aaaaaa')
+        later = time.time() + 3600
+        os.utime(path, (later, later))
+        before = path.read_bytes()
+        code, out, err = self.unlock(self.apps_dir() / 'run.bbbbbb')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn('run.aaaaaa', out)
+
+    def test_matching_publish_record_closes_and_keeps_its_evidence(self):
+        path = self.write_record(self.apps_dir() / 'publish.aaaaaa')
+        before = json.loads(path.read_text(encoding='utf-8'))
+        code, out, err = self.unlock(self.apps_dir() / 'run.bbbbbb')
+        self.assertEqual(code, 0, err)
+        after = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(after['status'], 'released')
+        self.assertEqual(after['target'], before['target'])
+        self.assertEqual(after['evidence'], before['evidence'])
+        self.assertIn('closed earlier held lock record: 100/publish.aaaaaa', out)
+
+    def test_non_matching_publish_record_stays_held(self):
+        path = self.write_record(self.apps_dir() / 'publish.aaaaaa', evidence=self.held_evidence(developer='OTHER'))
+        before = path.read_bytes()
+        code, out, err = self.unlock(self.apps_dir() / 'run.bbbbbb')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn('closed earlier', out)
 
     def test_reacquire_never_overwrites_unresolved_recovery_proof(self):
         self.acquire()

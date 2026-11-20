@@ -19,5 +19,10 @@ BEGIN
   DBMS_OUTPUT.PUT_LINE('Database version: ' || v_full_version
     || '; internal version: ' || v_version || '; COMPATIBLE: ' || v_compatibility);
   DBMS_OUTPUT.PUT_LINE('DATABASE_VERSION_VERIFIED:' || v_full_version || ':' || v_compatibility);
+  -- 23ai is the supported floor; older versions warn and continue (the same text as scripts/database_support.py).
+  IF TO_NUMBER(REGEXP_SUBSTR(v_full_version, '^[0-9]+')) < 23 THEN
+    DBMS_OUTPUT.PUT_LINE('warning: Oracle Database ' || v_full_version || ' is older than 23ai, the supported floor. '
+      || 'The template tools are tested on 23ai and newer; this run continues on a best-effort basis.');
+  END IF;
 END;
 /

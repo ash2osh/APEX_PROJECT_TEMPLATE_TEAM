@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -174,23 +175,29 @@ def parse_evidence(data):
         raise LockError('invalid application lock evidence') from error
 
 
-def close_held_records(target, intent, run_dir):
+def close_held_records(target, intent, run_dir, started):
     """After a verified unlock, close earlier `held` records that the unlock provably ended.
 
-    Only sibling `run.*` directories of the unlock's own directory are inspected. A record closes only
+    Sibling `run.*` (acquire, check, release) and `publish.*` (scripts/publish_app.sh and
+    publish_app.ps1) directories of the unlock's own directory are inspected. A record closes only
     when its status is `held`, its target equals this unlock's target, and its evidence has the same
     application, workspace and parsing schema, and the same developer (case-insensitive). Anything else,
-    unreadable, or symlinked stays visible. Closing is best effort: a failure is reported on stderr and
-    never fails the verified unlock.
+    unreadable, or symlinked stays visible. Only `recovery.json` changes; the rest of a publish
+    directory is left as it is. `started` is the time just before the unlock SQL ran: a record written
+    after it belongs to a lock acquired after this unlock began and stays `held`. Closing is best
+    effort: a failure is reported on stderr and never fails the verified unlock.
     """
     directory = Path(run_dir)
-    for candidate in sorted(directory.parent.glob('run.*')):
+    candidates = sorted([*directory.parent.glob('run.*'), *directory.parent.glob('publish.*')])
+    for candidate in candidates:
         if candidate == directory or candidate.is_symlink() or not candidate.is_dir():
             continue
         record_path = candidate / 'recovery.json'
         if not record_path.is_file() or record_path.is_symlink():
             continue
         try:
+            if record_path.stat().st_mtime > started:
+                continue
             record = json.loads(record_path.read_text(encoding='utf-8'))
             if not isinstance(record, dict) or record.get('status') != 'held' or record.get('target') != asdict(target):
                 continue
@@ -329,10 +336,11 @@ def main(argv=None):
             run_id=uuid.uuid4().hex
             intent=LockEvidence(args.app_id,args.workspace,args.schema,args.developer,run_id,'','manual owner-filtered unlock')
             save_record(args.run_dir,target,'release-unknown',intent)
+            started=time.time()
             state=execute(target,args.run_dir,'unlock',manual_unlock_sql(target,args.app_id,args.workspace,args.developer,run_id))
             if state is not None: raise LockError('manual application unlock could not be verified')
             save_record(args.run_dir,target,'released',intent)
-            close_held_records(target,intent,args.run_dir)
+            close_held_records(target,intent,args.run_dir,started)
         else:
             path=args.run_dir/'recovery.json'
             if path.is_symlink(): raise LockError('lock recovery record cannot be a symlink')

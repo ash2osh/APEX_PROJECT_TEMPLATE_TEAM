@@ -1009,5 +1009,105 @@ with patch.object(feature_release, '_run_apply_session', side_effect=disconnect)
         self.assertEqual(daily.read_bytes(), (plan.parent / "source-review.diff").read_bytes())
 
 
+class PendingMigrationGuardTests(unittest.TestCase):
+    """With no active migration folders, retained attempts block DEV work only unless every one is fully verified."""
+
+    MESSAGE = "cannot verify retained migration attempts without their migration folders"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        (self.root / "migrations").mkdir()
+
+    def write_attempt(self, name, manifest=None, raw=None):
+        attempt = self.root / "scratch" / f"migration-attempt-{name}"
+        attempt.mkdir(parents=True, exist_ok=True)
+        text = raw if raw is not None else json.dumps(manifest) + "\n"
+        (attempt / "run-manifest.json").write_text(text, encoding="utf-8", newline="\n")
+        return attempt
+
+    @staticmethod
+    def manifest(state="verified", migration_states=("verified",)):
+        return {
+            "schemaVersion": 2,
+            "state": state,
+            "target": {"environment": "dev", "current_schema": "APP_CODE"},
+            "migrations": [{"folder": f"2026-10-01_seed-r{index + 1:03d}", "state": item} for index, item in enumerate(migration_states)],
+        }
+
+    def assert_refused(self, message=None):
+        with self.assertRaisesRegex(ValueError, re.escape(message or self.MESSAGE)):
+            feature_dev._assert_no_pending_migration(self.root, "APP_CODE")
+
+    def test_zero_folders_with_only_verified_attempts_passes(self):
+        self.write_attempt("one", self.manifest())
+        self.write_attempt("two", self.manifest(migration_states=("verified", "verified")))
+        feature_dev._assert_no_pending_migration(self.root, "APP_CODE")
+
+    def test_zero_folders_and_no_attempts_passes(self):
+        feature_dev._assert_no_pending_migration(self.root, "APP_CODE")
+
+    def test_zero_folders_with_one_frozen_attempt_refuses(self):
+        self.write_attempt("verified", self.manifest())
+        self.write_attempt("frozen", self.manifest(state="frozen", migration_states=("frozen",)))
+        self.assert_refused()
+
+    def test_a_verified_run_with_an_unverified_migration_entry_refuses(self):
+        self.write_attempt("partial", self.manifest(migration_states=("verified", "apply-not-started")))
+        self.assert_refused()
+
+    def test_a_malformed_manifest_refuses(self):
+        self.write_attempt("broken", raw="{\"schemaVersion\": 2, \"state\": \"verified\",\n")
+        self.assert_refused()
+
+    def test_a_manifest_missing_its_migrations_list_refuses(self):
+        self.write_attempt("no-list", {"schemaVersion": 2, "state": "verified", "target": {}})
+        self.assert_refused()
+
+    def test_an_attempt_without_a_run_manifest_refuses(self):
+        (self.root / "scratch" / "migration-attempt-empty").mkdir(parents=True)
+        self.assert_refused()
+
+    def test_missing_migrations_directory_passes_only_when_every_attempt_is_verified(self):
+        (self.root / "migrations").rmdir()
+        self.write_attempt("one", self.manifest())
+        feature_dev._assert_no_pending_migration(self.root, "APP_CODE")
+        self.write_attempt("two", self.manifest(state="apply-failed-or-unknown", migration_states=("write-attempted",)))
+        self.assert_refused("cannot verify retained migration attempts without their migrations directory")
+
+
+class ObservedDatabaseVersionWarningTests(unittest.TestCase):
+    """The feature path's observed identity warns on stderr for older releases and never changes its result."""
+
+    def setUp(self):
+        from scripts import database_support
+        from scripts.db_targets import Target
+
+        database_support._warned_versions.clear()
+        self.addCleanup(database_support._warned_versions.clear)
+        self.target = Target("dev", "dev-owner", "APP_CODE", "APP_CODE", "development")
+
+    def _observe(self, version):
+        identity = dict(IDENTITY, database_version=version)
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            result = feature_release._identity(self.target, identity)
+        return result, out.getvalue(), err.getvalue()
+
+    def test_older_database_warns_on_stderr_and_result_is_unchanged(self):
+        result, out, err = self._observe("19.0.0.0")
+        self.assertIn("19.0.0.0", err)
+        self.assertIn("23ai", err)
+        self.assertEqual(out, "")
+        self.assertEqual(result, dict(IDENTITY, database_version="19.0.0.0"))
+
+    def test_supported_database_prints_nothing(self):
+        result, out, err = self._observe("23.26.3.0.0")
+        self.assertEqual(err, "")
+        self.assertEqual(out, "")
+        self.assertEqual(result, dict(IDENTITY, database_version="23.26.3.0.0"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -135,10 +135,12 @@ those three.
 
 ### Post-clone cleanup
 
-For a 26.1 downstream project, use
+To follow the 26.1 line from a project cloned from this repository (it holds the 26.2 engine,
+which accepts `--apex-release`), use
 `--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_26_1.git --ref main --apex-release 26.1`
-instead of the 26.2 commands below. The lock preserves that ref for later
-upgrades. To cross from 26.1 to 26.2, first review and replace the old
+instead of the 26.2 commands below. A project cloned from the 26.1 repository has the 26.1
+engine, which has no `--apex-release` option: it passes `--ref main` and no release. The lock
+preserves the chosen ref for later upgrades. To cross from 26.1 to 26.2, first review and replace the old
 `scripts/upgrade_template.py` with the new engine from the selected template
 ref; the old engine refuses the schema-2 manifest before changing files.
 Then explicitly choose the 26.2 ref and `--apex-release 26.2`. Upgrading files
@@ -174,7 +176,9 @@ sweeps (never delete a file simply because it lives under `tests/` or
 
 ```bash
 # Example: selectively remove only inherited template-maintenance CI and tests if not needed downstream
-git rm --ignore-unmatch .github/workflows/*.yml .github/dependabot.yml
+# (`git ls-files .github` lists what the template ships; a project's own workflows, for example a deployment
+# workflow, must be listed and kept before anything is removed. Never remove by glob.)
+git rm --ignore-unmatch .github/workflows/template-checks.yml .github/dependabot.yml
 # The shared-core stamp belongs to the template repository's shared-core check. A project created from the
 # template inherits it, but it is not part of a downstream project; upgrade-template never ships it.
 git rm --ignore-unmatch .core-stamp.json
@@ -207,6 +211,22 @@ An upgrade keeps previously installed files deleted (`KEEP-DELETED`), but may
 introduce new template test/workflow files. Review those after every upgrade.
 Never delete your project's own regression tests or project plans as part of
 repeated cleanup.
+
+### Existing projects: picking up the 2026-11-19 fixes
+
+A project that finished its cleanup earlier gets these changes with
+`scripts/team.sh upgrade-template` (run `--dry-run` first and review it). Afterwards:
+
+- Remove an inherited `.core-stamp.json` (`git rm --ignore-unmatch .core-stamp.json`).
+  `pre_push_check` skips the shared-core check once `.template-lock.json` exists, but the
+  file is not part of a downstream project.
+- `scripts/team.sh template-status` now reports the tests and `.github/` files you removed
+  as `removed-by-cleanup`. That is informational; the status is no longer `attention` because of them.
+- A lock that does not record the installed commit, or lists no files, is refused when it is
+  read. Restore it from Git (`git checkout -- .template-lock.json`); do not delete it, because a
+  missing lock makes the next upgrade re-create everything you removed.
+- `--source` and a lock `upstream` that embed credentials are refused. Use a Git credential
+  helper or an SSH key instead, and remove the credential from `.template-lock.json`.
 
 ## 5. Save your SQLcl connection
 
@@ -284,6 +304,8 @@ do not add spaces or trailing comments.
 The example uses the same schema, connection and user for tables, code and APEX,
 which is right for most projects. If you work with an AI assistant, you can ask
 it to run `/init` and it will ask these questions for you.
+
+To keep `.env` short for one DEV connection, set `DEV_SCHEMA`, `DEV_SQLCL_CONNECTION` and `DEV_EXPECTED_USER` together (all three or none) and leave out the `TABLES_*`, `CODE_*` and `APEX_*` profile keys. Every profile that has none of its own keys takes these three values, and `TABLES_PREFIXES` and `CODE_PREFIXES` default to `*`. The expected user is never defaulted. A profile that sets some of its own keys keeps its own checks, and the staging, production, migration and ORDS profiles are unchanged.
 
 To see which schema, SQLcl connection and login each operation uses with these
 values, run `scripts/team.sh targets` (or `pwsh -File scripts/team.ps1 targets`).

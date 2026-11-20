@@ -51,7 +51,7 @@ from .migration_manifest import (
     validate_receipt,
     verify_loaded_input_hashes,
 )
-from . import release_ownership, terminal_confirm
+from . import database_support, release_ownership, terminal_confirm
 from .path_utils import relative_to_root
 from .migration_attempts import MigrationAttemptError, not_started_reason, write_attempt_event
 from .migration_resolution import MigrationResolutionError, read_resolution, reconcile_command
@@ -251,6 +251,7 @@ def _identity_for_receipt(inventory: SchemaInventory | SchemaSnapshot, target: T
         raise MigrationApplyError("observed target identity does not match its configured user and schema")
     if target.environment != "prod" and looks_like_production_identity(identity["db_name"], identity["db_unique_name"], identity["service_name"]):
         raise MigrationApplyError("observed database/service identity resembles production but the selected environment is not prod")
+    database_support.warn_once(identity["database_version"])  # 23ai is the supported floor; older versions warn and continue.
     return {
         "environment": target.environment,
         "connection": target.connection,

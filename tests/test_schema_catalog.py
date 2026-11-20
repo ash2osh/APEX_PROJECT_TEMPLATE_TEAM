@@ -440,6 +440,50 @@ class SchemaCatalogTests(unittest.TestCase):
             self.assertIn(ObjectKey("APP_DEV", "CUSTOMERS", "TABLE"), snap.objects)
 
 
+class PublicSynonymDuplicateTests(unittest.TestCase):
+    """Autonomous Database containers can list one PUBLIC synonym twice (SYS and C##CLOUD$SERVICE); keep the SYS row."""
+
+    @staticmethod
+    def row(owner: str, name: str, table_owner: str, table_name: str = "CUSTOMERS") -> dict:
+        return {
+            "owner": owner, "name": name, "table_owner": table_owner, "table_name": table_name,
+            "db_link": None, "target_exists": True, "target_type": "TABLE",
+        }
+
+    def rows(self, *rows: dict):
+        return schema_catalog._synonym_rows(list(rows), "APP")
+
+    def test_sys_first_then_cloud_service_keeps_the_sys_row(self) -> None:
+        synonyms = self.rows(
+            self.row("PUBLIC", "ZZ_CUSTOMERS", "SYS"),
+            self.row("PUBLIC", "ZZ_CUSTOMERS", "C##CLOUD$SERVICE"),
+        )
+        self.assertEqual([(item.owner, item.name, item.table_owner) for item in synonyms], [("PUBLIC", "ZZ_CUSTOMERS", "SYS")])
+
+    def test_cloud_service_first_then_sys_keeps_the_sys_row(self) -> None:
+        synonyms = self.rows(
+            self.row("PUBLIC", "ZZ_CUSTOMERS", "C##CLOUD$SERVICE"),
+            self.row("PUBLIC", "ZZ_CUSTOMERS", "SYS"),
+        )
+        self.assertEqual([(item.owner, item.name, item.table_owner) for item in synonyms], [("PUBLIC", "ZZ_CUSTOMERS", "SYS")])
+
+    def test_duplicate_public_synonym_with_two_other_owners_still_raises(self) -> None:
+        with self.assertRaisesRegex(CatalogError, r"catalog repeats synonym PUBLIC\.ZZ_CUSTOMERS"):
+            self.rows(self.row("PUBLIC", "ZZ_CUSTOMERS", "DATA_OWNER"), self.row("PUBLIC", "ZZ_CUSTOMERS", "OTHER_OWNER"))
+
+    def test_duplicate_public_synonym_with_sys_and_another_owner_still_raises(self) -> None:
+        with self.assertRaisesRegex(CatalogError, r"catalog repeats synonym PUBLIC\.ZZ_CUSTOMERS"):
+            self.rows(self.row("PUBLIC", "ZZ_CUSTOMERS", "SYS"), self.row("PUBLIC", "ZZ_CUSTOMERS", "DATA_OWNER"))
+
+    def test_duplicate_non_public_synonym_with_sys_and_cloud_service_still_raises(self) -> None:
+        with self.assertRaisesRegex(CatalogError, r"catalog repeats synonym APP\.ZZ_CUSTOMERS"):
+            self.rows(self.row("APP", "ZZ_CUSTOMERS", "SYS"), self.row("APP", "ZZ_CUSTOMERS", "C##CLOUD$SERVICE"))
+
+    def test_two_identical_public_rows_still_raise(self) -> None:
+        with self.assertRaisesRegex(CatalogError, r"catalog repeats synonym PUBLIC\.ZZ_CUSTOMERS"):
+            self.rows(self.row("PUBLIC", "ZZ_CUSTOMERS", "SYS"), self.row("PUBLIC", "ZZ_CUSTOMERS", "SYS"))
+
+
 class SchemaCatalogIdentity:
     @staticmethod
     def same_database_scope(left: dict, right: dict) -> bool:

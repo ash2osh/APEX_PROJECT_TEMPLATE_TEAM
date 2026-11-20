@@ -231,21 +231,21 @@ class TableStatementTests(unittest.TestCase):
     def test_parents_are_created_before_the_tables_that_reference_them(self) -> None:
         constraints = {("A_CHILD", "A_CHILD_FK"): _fk("A_CHILD", "B_PARENT"), ("C_SELF", "C_SELF_FK"): _fk("C_SELF", "C_SELF")}
 
-        order = baseline_bundles._new_table_order(["A_CHILD", "B_PARENT", "C_SELF"], constraints)
+        order = baseline_bundles._new_table_order(["A_CHILD", "B_PARENT", "C_SELF"], constraints, "APP_DEV")
 
         self.assertEqual(["B_PARENT", "A_CHILD", "C_SELF"], order)
-        self.assertEqual(["A", "B"], baseline_bundles._new_table_order(["A", "B"], {}), "without foreign keys the order stays alphabetical")
+        self.assertEqual(["A", "B"], baseline_bundles._new_table_order(["A", "B"], {}, "APP_DEV"), "without foreign keys the order stays alphabetical")
 
     def test_a_foreign_key_to_a_table_that_already_exists_does_not_reorder(self) -> None:
         constraints = {("A_CHILD", "A_CHILD_FK"): _fk("A_CHILD", "EXISTING")}
 
-        self.assertEqual(["A_CHILD", "B_OTHER"], baseline_bundles._new_table_order(["A_CHILD", "B_OTHER"], constraints))
+        self.assertEqual(["A_CHILD", "B_OTHER"], baseline_bundles._new_table_order(["A_CHILD", "B_OTHER"], constraints, "APP_DEV"))
 
     def test_a_cycle_between_new_tables_is_refused(self) -> None:
         constraints = {("A", "A_FK"): _fk("A", "B"), ("B", "B_FK"): _fk("B", "A")}
 
         with self.assertRaises(baseline.BaselineError) as raised:
-            baseline_bundles._new_table_order(["A", "B"], constraints)
+            baseline_bundles._new_table_order(["A", "B"], constraints, "APP_DEV")
 
         self.assertIn("cycle", str(raised.exception))
 
@@ -316,8 +316,9 @@ class ColumnFlagTests(unittest.TestCase):
 
     scripts/compare_env_catalog.sql writes hidden and virtual as Y/N and user_generated as YES/NO, and other producers
     use YES/NO, so both encodings are tested. A system-generated hidden column (SYS_NC...$) is skipped. A virtual column,
-    or a hidden column the user created, is refused rather than added as an ordinary column. A virtual flag that
-    differs between the two schemas is refused for a column that exists in both.
+    or a hidden column whose user_generated flag is missing, is refused. A user-generated INVISIBLE column is added with
+    INVISIBLE and checked with HIDDEN_COLUMN = 'YES'. A virtual flag or an invisible state that differs between the two
+    schemas is refused for a column that exists in both.
     """
 
     config = {"schemas": ["APP_DEV"], "prefixes": ["APP_"], "excludedObjects": [], "sequenceMappings": []}
@@ -343,6 +344,13 @@ class ColumnFlagTests(unittest.TestCase):
         snapshot = SchemaSnapshot({}, {}, {}, {}, "", "")
         return baseline._structure_bundle(self.config, "APP_DEV", "APP_TEST", source, target, snapshot)
 
+    def _definition_check(self, checks: dict, column: str) -> dict:
+        """Return the one column-definition postcondition for APP_ITEMS.<column>; its id carries a hash suffix."""
+        prefix = "column-def-" + baseline_bundles._safe_check_slug("APP_ITEMS-" + column)
+        matches = [check for check in checks["postconditions"] if check["id"].startswith(prefix)]
+        self.assertEqual(1, len(matches), f"no single column-definition check for {column}")
+        return matches[0]
+
     def test_a_system_hidden_column_is_skipped_for_both_flag_encodings(self) -> None:
         for hidden, user_generated in (("Y", "N"), ("YES", "NO")):
             with self.subTest(hidden=hidden, user_generated=user_generated):
@@ -358,20 +366,159 @@ class ColumnFlagTests(unittest.TestCase):
         for flag in ("Y", "YES"):
             with self.subTest(flag=flag):
                 with self.assertRaisesRegex(
-                    baseline.BaselineError, r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration",
+                    baseline.BaselineError,
+                    r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration \(its expression was not captured; capture needs Oracle 23ai or newer\)",
                 ):
                     self._structure([self._column("ITEM_ID"), self._column("TOTAL", virtual=flag)], [self._column("ITEM_ID")])
 
-    def test_a_missing_hidden_user_column_is_refused_and_not_guessed(self) -> None:
-        for hidden, user_generated in (("Y", "YES"), ("YES", "YES"), ("Y", None)):
-            with self.subTest(hidden=hidden, user_generated=user_generated):
+    def test_a_missing_virtual_column_without_a_usable_expression_keeps_the_refusal(self) -> None:
+        for expression in (None, "", "   ", 5, ["x"]):
+            with self.subTest(expression=expression):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError,
+                    r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration \(its expression was not captured",
+                ):
+                    self._structure(
+                        [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression=expression)],
+                        [self._column("ITEM_ID")],
+                    )
+
+    def test_a_missing_virtual_column_with_an_expression_is_added_as_a_generated_column(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="YES", virtual_expression='"ITEM_ID"*2')],
+            [self._column("ITEM_ID")],
+        )
+
+        sql = steps["001-structure-delta.sql"]
+        self.assertIn('ADD ("TOTAL" NUMBER GENERATED ALWAYS AS ("ITEM_ID"*2) VIRTUAL)', sql)
+        self.assertNotIn("INVISIBLE", sql)
+        post = self._definition_check(checks, "TOTAL")
+        self.assertIn("VIRTUAL_COLUMN = 'YES'", post["sql"])
+        self.assertNotIn("HIDDEN_COLUMN", post["sql"])
+
+    def test_an_invisible_virtual_column_puts_invisible_before_generated(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", hidden="Y", virtual="Y", virtual_expression='"ITEM_ID"*2')],
+            [self._column("ITEM_ID")],
+        )
+
+        sql = steps["001-structure-delta.sql"]
+        self.assertIn('ADD ("TOTAL" NUMBER INVISIBLE GENERATED ALWAYS AS ("ITEM_ID"*2) VIRTUAL)', sql)
+        post = self._definition_check(checks, "TOTAL")
+        self.assertIn("VIRTUAL_COLUMN = 'YES'", post["sql"])
+        self.assertIn("HIDDEN_COLUMN = 'YES'", post["sql"])
+
+    def test_a_virtual_expression_naming_the_source_schema_is_retargeted(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='APP_DEV.FN_TAX("ITEM_ID")')],
+            [self._column("ITEM_ID")],
+        )
+
+        sql = steps["001-structure-delta.sql"]
+        self.assertIn('GENERATED ALWAYS AS ("APP_TEST".FN_TAX("ITEM_ID")) VIRTUAL', sql)
+        self.assertNotIn("APP_DEV", sql)
+
+    def test_equal_virtual_expressions_on_both_sides_generate_nothing(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID"*2')],
+            [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID" * 2')],
+        )
+
+        self.assertEqual({}, steps)
+        self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_differing_virtual_expressions_on_both_sides_are_refused(self) -> None:
+        with self.assertRaisesRegex(
+            baseline.BaselineError, r"virtual column expression change needs a reviewed migration: APP_ITEMS\.TOTAL",
+        ):
+            self._structure(
+                [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID"*2')],
+                [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression='"ITEM_ID"*3')],
+            )
+
+    def test_a_virtual_expression_missing_on_either_side_generates_nothing_more(self) -> None:
+        for source_expr, target_expr in ((None, '"ITEM_ID"*2'), ('"ITEM_ID"*2', None), (None, None)):
+            with self.subTest(source=source_expr, target=target_expr):
+                steps, checks = self._structure(
+                    [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression=source_expr)],
+                    [self._column("ITEM_ID"), self._column("TOTAL", virtual="Y", virtual_expression=target_expr)],
+                )
+
+                self.assertEqual({}, steps)
+                self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_a_system_column_with_an_expression_is_still_skipped(self) -> None:
+        steps, checks = self._structure(
+            [
+                self._column("ITEM_ID"),
+                self._column("SYS_NC00005$", hidden="Y", virtual="Y", user_generated="NO", virtual_expression='"ITEM_ID"*2'),
+            ],
+            [self._column("ITEM_ID")],
+        )
+
+        self.assertEqual({}, steps)
+        self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_a_hidden_column_with_no_user_generated_flag_is_still_refused_and_not_guessed(self) -> None:
+        for hidden in ("Y", "YES"):
+            with self.subTest(hidden=hidden):
                 with self.assertRaisesRegex(
                     baseline.BaselineError, r"hidden column APP_ITEMS\.NOTE_X needs a reviewed migration",
                 ):
                     self._structure(
-                        [self._column("ITEM_ID"), self._column("NOTE_X", hidden=hidden, user_generated=user_generated)],
+                        [self._column("ITEM_ID"), self._column("NOTE_X", hidden=hidden, user_generated=None)],
                         [self._column("ITEM_ID")],
                     )
+
+    def test_a_missing_invisible_user_column_is_added_invisible_and_checked(self) -> None:
+        for hidden, user_generated in (("Y", "YES"), ("YES", "TRUE")):
+            with self.subTest(hidden=hidden, user_generated=user_generated):
+                steps, checks = self._structure(
+                    [self._column("ITEM_ID"), self._column("NOTE_X", hidden=hidden, user_generated=user_generated)],
+                    [self._column("ITEM_ID")],
+                )
+
+                sql = steps["001-structure-delta.sql"]
+                self.assertIn('ADD ("NOTE_X" NUMBER INVISIBLE)', sql)
+                post = self._definition_check(checks, "NOTE_X")
+                self.assertIn("HIDDEN_COLUMN = 'YES'", post["sql"])
+
+    def test_a_visible_column_has_no_invisible_clause_or_hidden_predicate(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("ITEM_NAME")], [self._column("ITEM_ID")],
+        )
+
+        self.assertNotIn("INVISIBLE", steps["001-structure-delta.sql"])
+        post = self._definition_check(checks, "ITEM_NAME")
+        self.assertNotIn("HIDDEN_COLUMN", post["sql"])
+        self.assertNotIn("VIRTUAL_COLUMN", post["sql"])
+
+    def test_an_invisible_column_present_on_both_sides_with_equal_visibility_generates_nothing(self) -> None:
+        steps, checks = self._structure(
+            [self._column("ITEM_ID"), self._column("NOTE_X", hidden="Y")],
+            [self._column("ITEM_ID"), self._column("NOTE_X", hidden="YES")],
+        )
+
+        self.assertEqual({}, steps)
+        self.assertEqual({"preconditions": [], "postconditions": []}, checks)
+
+    def test_an_existing_column_whose_visibility_differs_is_refused(self) -> None:
+        for source_hidden, target_hidden in (("Y", "N"), ("N", "YES")):
+            with self.subTest(source_hidden=source_hidden, target_hidden=target_hidden):
+                with self.assertRaisesRegex(
+                    baseline.BaselineError, r"column visibility change needs a reviewed migration: APP_ITEMS\.NOTE_X",
+                ):
+                    self._structure(
+                        [self._column("NOTE_X", hidden=source_hidden)],
+                        [self._column("NOTE_X", hidden=target_hidden)],
+                    )
+
+    def test_a_virtual_column_is_still_refused_even_when_hidden(self) -> None:
+        with self.assertRaisesRegex(baseline.BaselineError, r"virtual column APP_ITEMS\.TOTAL needs a reviewed migration"):
+            self._structure(
+                [self._column("ITEM_ID"), self._column("TOTAL", hidden="Y", virtual="Y")],
+                [self._column("ITEM_ID")],
+            )
 
     def test_an_existing_column_whose_virtual_flag_differs_is_refused(self) -> None:
         for source_flag, target_flag in (("Y", "N"), ("NO", "YES")):
@@ -595,6 +742,7 @@ class DeclareOrderTests(unittest.TestCase):
     def test_generated_declare_blocks_declare_variables_before_subprograms(self) -> None:
         replace_sql = baseline_bundles._wrap_constraint(
             _constraint_row("price >= 5"), "APP_DEV", "APP_DEV", replace_check=True, reviewed_condition="price >= 2",
+            reviewed_status="ENABLED",
         )
         plain_sql = baseline_bundles._wrap_constraint(_constraint_row("price >= 0"), "APP_DEV", "APP_DEV")
         not_null_sql = baseline_bundles._wrap_not_null("APP_DEV", "APP_ITEMS", "PRICE")
@@ -675,6 +823,7 @@ class CheckReplacementTests(unittest.TestCase):
     def test_the_replacement_block_has_the_reviewed_shape(self) -> None:
         sql = baseline_bundles._wrap_constraint(
             _constraint_row("price >= 5"), "APP_DEV", "APP_DEV", replace_check=True, reviewed_condition="price >= 2",
+            reviewed_status="ENABLED",
         )
 
         for text in ("CONSTRAINT_TYPE", "-20993", "-20994", "-20995", "'price>=5'", "'price>=2'"):
@@ -733,6 +882,252 @@ class ConditionKeyTests(unittest.TestCase):
         for value in ("'abq'", "'it''s'", "faq'"):
             with self.subTest(value=value):
                 self.assertFalse(baseline_bundles._has_alternative_quote(value))
+
+
+def _constraint_structure(source_row: dict, target_row: dict) -> tuple[dict[str, str], dict]:
+    key = ObjectKey("APP_DEV", source_row["name"], "CONSTRAINT")
+    table = [{"name": "APP_ITEMS"}]
+    source = {"sections": {
+        "tables": table, "columns": [], "constraints": [source_row], "indexes": [], "sequences": [], "identity-columns": [],
+    }}
+    target = {"sections": {
+        "tables": table, "columns": [], "constraints": [target_row], "indexes": [], "sequences": [], "identity-columns": [],
+    }}
+    snapshot = SchemaSnapshot({}, {}, {key: ObjectDefinition(key, {}, "", (), True)}, {}, "", "")
+    return baseline._structure_bundle(CheckReplacementTests.config, "APP_DEV", "APP_DEV", source, target, snapshot)
+
+
+class CheckReplacementPreconditionTests(unittest.TestCase):
+    def _checks(self, **extra: object) -> dict:
+        _steps, checks = _constraint_structure(_constraint_row("price >= 5", **extra), _constraint_row("price >= 2", **extra))
+        return checks
+
+    def test_a_validated_replacement_adds_one_precondition_that_names_the_condition(self) -> None:
+        found = [item for item in self._checks()["preconditions"] if item["id"].startswith("check-replacement-no-violations-")]
+
+        self.assertEqual(1, len(found))
+        self.assertIn('FROM "APP_DEV"."APP_ITEMS" WHERE NOT (price >= 5)', found[0]["sql"])
+        self.assertIn(") = 0 THEN", found[0]["sql"])
+
+    def test_a_novalidate_or_disabled_replacement_adds_no_such_precondition(self) -> None:
+        for extra in ({"validated": "NOT VALIDATED"}, {"status": "DISABLED"}):
+            with self.subTest(extra=extra):
+                ids = [item["id"] for item in self._checks(**extra)["preconditions"]]
+                self.assertFalse([item for item in ids if item.startswith("check-replacement-no-violations-")])
+
+    def test_the_precondition_id_is_stable(self) -> None:
+        first = [item["id"] for item in self._checks()["preconditions"] if item["id"].startswith("check-replacement")]
+        second = [item["id"] for item in self._checks()["preconditions"] if item["id"].startswith("check-replacement")]
+
+        self.assertEqual(first, second)
+        self.assertEqual(1, len(first))
+
+
+class CheckReplacementStatusTests(unittest.TestCase):
+    def test_a_disabled_desired_check_is_not_enabled_by_a_rerun(self) -> None:
+        sql = baseline_bundles._wrap_constraint(
+            _constraint_row("price >= 5", status="DISABLED"), "APP_DEV", "APP_DEV",
+            replace_check=True, reviewed_condition="price >= 2", reviewed_status="DISABLED",
+        )
+
+        self.assertNotIn("ENABLE", sql)
+        self.assertIn("DISABLE", sql)
+
+    def test_an_enabled_desired_check_still_enables_a_disabled_live_one(self) -> None:
+        sql = baseline_bundles._wrap_constraint(
+            _constraint_row("price >= 5"), "APP_DEV", "APP_DEV",
+            replace_check=True, reviewed_condition="price >= 2", reviewed_status="ENABLED",
+        )
+
+        self.assertIn("ENABLE VALIDATE CONSTRAINT", sql)
+
+    def test_the_drop_branch_requires_the_reviewed_status_literal(self) -> None:
+        sql = baseline_bundles._wrap_constraint(
+            _constraint_row("price >= 5"), "APP_DEV", "APP_DEV",
+            replace_check=True, reviewed_condition="price >= 2", reviewed_status="DISABLED",
+        )
+
+        self.assertIn("ELSIF normalized(l_condition) = 'price>=2' AND l_status = 'DISABLED' THEN", sql)
+
+    def test_a_replacement_without_a_reviewed_status_is_refused(self) -> None:
+        with self.assertRaises(baseline.BaselineError):
+            baseline_bundles._wrap_constraint(
+                _constraint_row("price >= 5"), "APP_DEV", "APP_DEV",
+                replace_check=True, reviewed_condition="price >= 2",
+            )
+
+
+class CatalogLengthLimitTests(unittest.TestCase):
+    def test_the_replacement_refuses_a_condition_at_the_catalog_limit_before_comparing(self) -> None:
+        sql = baseline_bundles._wrap_constraint(
+            _constraint_row("price >= 5"), "APP_DEV", "APP_DEV",
+            replace_check=True, reviewed_condition="price >= 2", reviewed_status="ENABLED",
+        )
+
+        self.assertIn("-20996", sql)
+        self.assertEqual(2, sql.count("LENGTHB"))
+        self.assertIn("constraint APP_ITEMS_PRICE_CK has a condition at the 4000-byte catalog limit", sql)
+        self.assertLess(sql.index("LENGTHB"), sql.index("normalized(l_condition)"))
+        self.assertEqual([], _declare_order_violations(sql))
+
+
+class ForeignKeyCatalogOrderTests(unittest.TestCase):
+    def test_catalog_shaped_references_order_the_parent_first(self) -> None:
+        constraints = {("A_CHILD", "A_CHILD_FK"): _fk("A_CHILD", "<CONFIGURED_SCHEMA>.Z_PARENT")}
+
+        self.assertEqual(
+            ["Z_PARENT", "A_CHILD"], baseline_bundles._new_table_order(["A_CHILD", "Z_PARENT"], constraints, "APP_DEV"),
+        )
+
+    def test_a_cycle_written_in_catalog_format_is_refused(self) -> None:
+        constraints = {
+            ("A", "A_FK"): _fk("A", "<CONFIGURED_SCHEMA>.B"),
+            ("B", "B_FK"): _fk("B", "<CONFIGURED_SCHEMA>.A"),
+        }
+
+        with self.assertRaisesRegex(baseline.BaselineError, "cycle"):
+            baseline_bundles._new_table_order(["A", "B"], constraints, "APP_DEV")
+
+    def test_bare_and_source_schema_qualified_names_still_order(self) -> None:
+        bare = {("A_CHILD", "A_CHILD_FK"): _fk("A_CHILD", "Z_PARENT")}
+        qualified = {("A_CHILD", "A_CHILD_FK"): _fk("A_CHILD", "APP_DEV.Z_PARENT")}
+
+        self.assertEqual(["Z_PARENT", "A_CHILD"], baseline_bundles._new_table_order(["A_CHILD", "Z_PARENT"], bare, "APP_DEV"))
+        self.assertEqual(["Z_PARENT", "A_CHILD"], baseline_bundles._new_table_order(["A_CHILD", "Z_PARENT"], qualified, "APP_DEV"))
+
+    def test_a_reference_to_another_owner_is_ignored(self) -> None:
+        constraints = {("A_CHILD", "A_CHILD_FK"): _fk("A_CHILD", "OTHER_OWNER.Z_PARENT")}
+
+        self.assertEqual(["A_CHILD", "Z_PARENT"], baseline_bundles._new_table_order(["A_CHILD", "Z_PARENT"], constraints, "APP_DEV"))
+
+
+class SequenceSyncTargetIncrementTests(unittest.TestCase):
+    def test_the_sync_restores_the_target_increment_read_from_the_catalog(self) -> None:
+        sql = baseline_bundles._sync_sequence_sql(
+            "APP_STAGE", {"name": "ITEM_SEQ", "increment_by": 7}, {"table": "APP_ITEMS", "column": "ITEM_ID"},
+        )
+
+        self.assertIn("SELECT INCREMENT_BY INTO l_original_increment FROM ALL_SEQUENCES", sql)
+        self.assertEqual(2, sql.count("TO_CHAR(l_original_increment)"))
+        self.assertNotIn("INCREMENT BY 7", sql)
+        self.assertEqual([], _declare_order_violations(sql))
+        self.assertLess(sql.index("l_original_increment NUMBER;"), sql.index("BEGIN\n"))
+
+
+class IndexUniquenessTests(unittest.TestCase):
+    def _steps(self, source_indexes: list[dict], target_indexes: list[dict]) -> dict[str, str]:
+        source = {"sections": {"tables": [{"name": "APP_ITEMS"}], "columns": [], "constraints": [], "indexes": source_indexes,
+                               "sequences": [], "identity-columns": []}}
+        target = {"sections": {"tables": [{"name": "APP_ITEMS"}], "columns": [], "constraints": [], "indexes": target_indexes,
+                               "sequences": [], "identity-columns": []}}
+        steps, _checks = baseline._structure_bundle(
+            CheckReplacementTests.config, "APP_DEV", "APP_DEV", source, target, SchemaSnapshot({}, {}, {}, {}, "", ""),
+        )
+        return steps
+
+    def test_a_unique_source_index_is_not_satisfied_by_a_nonunique_target_on_the_same_columns(self) -> None:
+        source = [{"name": "APP_IX_PRICE", "table_name": "APP_ITEMS", "uniqueness": "UNIQUE", "columns": ["PRICE"]}]
+        target = [{"name": "APP_IX_OTHER", "table_name": "APP_ITEMS", "uniqueness": "NONUNIQUE", "columns": ["PRICE"]}]
+
+        with self.assertRaisesRegex(baseline.BaselineError, "differs in uniqueness from the target index APP_IX_OTHER"):
+            self._steps(source, target)
+
+    def test_the_same_name_with_different_uniqueness_is_refused(self) -> None:
+        source = [{"name": "APP_IX_PRICE", "table_name": "APP_ITEMS", "uniqueness": "UNIQUE", "columns": ["PRICE"]}]
+        target = [{"name": "APP_IX_PRICE", "table_name": "APP_ITEMS", "uniqueness": "NONUNIQUE", "columns": ["PRICE"]}]
+
+        with self.assertRaisesRegex(baseline.BaselineError, "differs in uniqueness"):
+            self._steps(source, target)
+
+    def test_equal_uniqueness_on_the_same_columns_is_skipped(self) -> None:
+        source = [{"name": "APP_IX_PRICE", "table_name": "APP_ITEMS", "uniqueness": "UNIQUE", "columns": ["PRICE"]}]
+        target = [{"name": "APP_IX_OTHER", "table_name": "APP_ITEMS", "uniqueness": "UNIQUE", "columns": ["PRICE"]}]
+
+        self.assertEqual({}, self._steps(source, target))
+
+    def test_missing_uniqueness_on_both_sides_is_skipped(self) -> None:
+        source = [{"name": "APP_IX_PRICE", "table_name": "APP_ITEMS", "columns": ["PRICE"]}]
+        target = [{"name": "APP_IX_OTHER", "table_name": "APP_ITEMS", "columns": ["PRICE"]}]
+
+        self.assertEqual({}, self._steps(source, target))
+
+
+class ColumnObjectTypeOwnerTests(unittest.TestCase):
+    def _steps(self, source_row: dict, target_rows: list[dict], target_schema: str) -> tuple[dict[str, str], dict]:
+        source = {"sections": {"tables": [{"name": "APP_ITEMS"}], "columns": [source_row], "constraints": [], "indexes": [],
+                               "sequences": [], "identity-columns": []}}
+        target = {"sections": {"tables": [{"name": "APP_ITEMS"}], "columns": target_rows, "constraints": [], "indexes": [],
+                               "sequences": [], "identity-columns": []}}
+        return baseline._structure_bundle(
+            CheckReplacementTests.config, "APP_DEV", target_schema, source, target, SchemaSnapshot({}, {}, {}, {}, "", ""),
+        )
+
+    @staticmethod
+    def _row(owner: str | None, table_owner_type: str = "ADDRESS_T", **extra: object) -> dict:
+        row = {"table_name": "APP_ITEMS", "name": "ADDR", "data_type": table_owner_type, "nullable": "Y", **extra}
+        if owner is not None:
+            row["data_type_owner"] = owner
+        return row
+
+    def test_an_object_type_column_keeps_its_owner_in_the_ddl_and_the_postcondition(self) -> None:
+        steps, checks = self._steps(self._row("GEO"), [], "APP_DEV")
+
+        ddl = steps["001-structure-delta.sql"]
+        self.assertIn('ADD ("ADDR" "GEO"."ADDRESS_T")', ddl)
+        column_check = [item for item in checks["postconditions"] if item["id"].startswith("column-def-")][0]
+        self.assertIn("DATA_TYPE_OWNER = 'GEO'", column_check["sql"])
+
+    def test_an_owner_equal_to_the_source_schema_is_retargeted(self) -> None:
+        steps, checks = self._steps(self._row("APP_DEV"), [], "APP_STAGE")
+
+        self.assertIn('ADD ("ADDR" "APP_STAGE"."ADDRESS_T")', steps["001-structure-delta.sql"])
+        column_check = [item for item in checks["postconditions"] if item["id"].startswith("column-def-")][0]
+        self.assertIn("DATA_TYPE_OWNER = 'APP_STAGE'", column_check["sql"])
+
+    def test_two_existing_columns_differing_only_in_type_owner_are_refused(self) -> None:
+        target = self._row("OTHER_OWNER")
+
+        with self.assertRaisesRegex(baseline.BaselineError, "column type changes need a reviewed data migration"):
+            self._steps(self._row("GEO"), [target], "APP_DEV")
+
+    def test_existing_columns_with_the_same_type_owner_are_not_refused(self) -> None:
+        steps, _checks = self._steps(self._row("GEO"), [self._row("GEO")], "APP_DEV")
+
+        self.assertEqual({}, steps)
+
+    def test_a_built_in_column_is_unchanged(self) -> None:
+        row = {"table_name": "APP_ITEMS", "name": "PRICE", "data_type": "NUMBER", "data_precision": 10, "data_scale": 2}
+
+        self.assertEqual('"PRICE" NUMBER(10,2)', baseline_bundles._column_sql(row, "APP_DEV", "APP_STAGE"))
+        self.assertNotIn("DATA_TYPE_OWNER", baseline_bundles._column_definition_check("APP_STAGE", row, "APP_DEV")["sql"])
+
+
+class ConditionKeyQuotedIdentifierTests(unittest.TestCase):
+    def test_a_quoted_identifier_keeps_its_inner_space(self) -> None:
+        self.assertEqual('"A B">0', baseline_bundles._condition_key('"A B" > 0'))
+
+    def test_identifiers_that_differ_only_inside_quotes_get_different_keys(self) -> None:
+        self.assertNotEqual(
+            baseline_bundles._condition_key('"A B" + "AB" > 0'),
+            baseline_bundles._condition_key('"AB" + "AB" > 0'),
+        )
+
+    def test_a_doubled_quote_and_an_apostrophe_inside_an_identifier_are_kept(self) -> None:
+        self.assertEqual('"A""B">0', baseline_bundles._condition_key('"A""B" > 0'))
+        self.assertEqual('"it\'s">0', baseline_bundles._condition_key('"it\'s" > 0'))
+
+    def test_a_double_quote_inside_a_string_is_an_ordinary_character(self) -> None:
+        self.assertEqual("C='a\"b'", baseline_bundles._condition_key("C = 'a\"b'"))
+
+    def test_whitespace_outside_quotes_still_compares_equal(self) -> None:
+        self.assertEqual(baseline_bundles._condition_key('"A" >  0'), baseline_bundles._condition_key('"A"> 0'))
+
+    def test_the_generated_normalized_function_handles_quoted_identifiers(self) -> None:
+        sql = "DECLARE\n" + baseline_bundles._NORMALIZED_FUNCTION + "BEGIN\n  NULL;\nEND;\n/\n"
+
+        self.assertIn("l_in_ident BOOLEAN := FALSE;", sql)
+        self.assertIn("ELSIF l_char = '\"' AND NOT l_in_string THEN", sql)
+        self.assertEqual([], _declare_order_violations(sql))
 
 
 if __name__ == "__main__":

@@ -44,6 +44,8 @@ def _attempt_matches_receipt_target(root: Path, folder: Path, env: str, receipt_
         return False
     run_ids: set[str] = set()
     unresolved_runs: set[str] = set()
+    # A folder under migrations/<SCHEMA>/ belongs to that schema; a run for a same-named folder elsewhere is not its evidence.
+    folder_schema = folder.parent.name if folder.parent != root / "migrations" else None
     scratch = root / "scratch"
     if scratch.is_dir():
         for attempt_dir in scratch.iterdir():
@@ -60,6 +62,10 @@ def _attempt_matches_receipt_target(root: Path, folder: Path, env: str, receipt_
                 continue
             target = manifest.get("target")
             if not isinstance(target, dict) or target.get("environment") != env:
+                continue
+            # migrate.py records the schema it wrote to as target.current_schema.
+            run_schema = target.get("current_schema")
+            if folder_schema and run_schema and str(run_schema).upper() != folder_schema.upper():
                 continue
             for rec in manifest.get("migrations", []):
                 if isinstance(rec, dict) and rec.get("folder") == folder.name:
@@ -600,6 +606,130 @@ def _index_matches_original(index: ArchiveIndex) -> bool:
         return False
 
 
+def _roll_back_archive(
+    plan: ArchivePlan,
+    moved: Sequence[tuple[Path, Path]],
+    created_directories: Sequence[Path],
+    archive_bytes_by_path: Mapping[Path, bytes],
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Undo a partly applied archive; return the rollback errors and the (path, reason) pairs retained for recovery."""
+    root = plan.repo_root
+    migrations_dir = root / "migrations"
+    # A rename can finish just before its bookkeeping runs (an interrupt in between), so a folder that is
+    # missing from its source and present at its destination was moved by this run and is rolled back too.
+    moved_folders = {source for source, _destination in moved}
+    recorded = [
+        (entry.folder, entry.destination)
+        for entry in plan.entries
+        if entry.folder in moved_folders
+        or (not os.path.lexists(entry.folder) and os.path.lexists(entry.destination))
+    ]
+    rollback_errors = []
+    indexes_not_restored: set[Path] = set()
+    retained_index_reasons: dict[Path, str] = {}
+    entries_by_folder = {entry.folder: entry for entry in plan.entries}
+    entries_by_index: dict[Path, list[ArchiveEntry]] = {index.path: [] for index in plan.indexes}
+    for entry in plan.entries:
+        entries_by_index[_index_path_for_entry(migrations_dir, entry)].append(entry)
+    for index in reversed(plan.indexes):
+        if _index_matches_original(index):
+            continue
+        try:
+            planned_index_is_current = (
+                not index.path.is_symlink()
+                and index.path.read_bytes() == archive_bytes_by_path[index.path]
+            )
+        except OSError:
+            planned_index_is_current = False
+        if not planned_index_is_current:
+            indexes_not_restored.add(index.path)
+            retained_index_reasons[index.path] = (
+                "index contents do not match the original or planned archive index"
+            )
+            continue
+        try:
+            if index.original_bytes is None:
+                index.path.unlink(missing_ok=True)
+            else:
+                _atomic_write(index.path, index.original_bytes)
+        except OSError as rollback_error:
+            rollback_errors.append(str(rollback_error))
+        if not _index_matches_original(index):
+            indexes_not_restored.add(index.path)
+            retained_index_reasons[index.path] = "the original index could not be restored"
+    folder_rollback_failures: set[Path] = set()
+    for source, destination in reversed(recorded):
+        index_path = _index_path_for_entry(migrations_dir, entries_by_folder[source])
+        if index_path in indexes_not_restored:
+            continue
+        try:
+            source.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(destination, source)
+        except OSError as rollback_error:
+            rollback_errors.append(str(rollback_error))
+            folder_rollback_failures.add(index_path)
+    for index_path in sorted(folder_rollback_failures, key=str):
+        recovery_failed = False
+        for entry in entries_by_index[index_path]:
+            source_exists = os.path.lexists(entry.folder)
+            destination_exists = os.path.lexists(entry.destination)
+            if source_exists and destination_exists:
+                rollback_errors.append(
+                    f"both source and archive folders exist for {entry.relative_folder}"
+                )
+                recovery_failed = True
+                continue
+            if not destination_exists:
+                if not source_exists:
+                    rollback_errors.append(
+                        f"both source and archive folders are missing for {entry.relative_folder}"
+                    )
+                    recovery_failed = True
+                    continue
+                try:
+                    entry.destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(entry.folder, entry.destination)
+                except OSError as recovery_error:
+                    rollback_errors.append(str(recovery_error))
+                    recovery_failed = True
+        if not recovery_failed:
+            try:
+                _atomic_write(index_path, archive_bytes_by_path[index_path])
+            except OSError as recovery_error:
+                rollback_errors.append(str(recovery_error))
+                recovery_failed = True
+        indexes_not_restored.add(index_path)
+        retained_index_reasons[index_path] = (
+            "folder rollback failed; matching archived folders and index were retained"
+            if not recovery_failed
+            else "folder rollback recovery failed; inspect the folders and index"
+        )
+    for directory in reversed(created_directories):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    retained = sorted(
+        (path.relative_to(root).as_posix(), retained_index_reasons[path])
+        for path in indexes_not_restored
+    )
+    return rollback_errors, retained
+
+
+def _archive_failure_message(cause: str, rollback_errors: Sequence[str], retained: Sequence[tuple[str, str]]) -> str:
+    details = []
+    if rollback_errors:
+        details.append(f"rollback errors: {'; '.join(rollback_errors)}")
+    if retained:
+        details.append("archived folders retained for recovery: " + ", ".join(
+            f"{path} ({reason})" for path, reason in retained
+        ))
+    if details:
+        detail = "; " + "; ".join(details)
+        return f"archive move failed; rollback is incomplete: {cause}{detail}"
+    return f"archive move failed and was rolled back: {cause}"
+
+
 def execute_archive_plan(plan: ArchivePlan) -> None:
     """Move each selected tree and atomically update its schema index."""
     root = plan.repo_root
@@ -697,107 +827,19 @@ def execute_archive_plan(plan: ArchivePlan) -> None:
             moved.append((entry.folder, entry.destination))
 
         for index in plan.indexes:
+            # Another archive run may have finished since validation; writing now would drop its records.
+            current_index = index.path.read_bytes() if index.path.exists() else None
+            if current_index != index.original_bytes:
+                raise MigrationArchiveError("archived index changed while archiving; rerun the archive")
             _atomic_write(index.path, archive_bytes_by_path[index.path])
+    except KeyboardInterrupt:
+        rollback_errors, retained = _roll_back_archive(plan, moved, created_directories, archive_bytes_by_path)
+        if rollback_errors or retained:
+            print(_archive_failure_message("interrupted", rollback_errors, retained), file=sys.stderr)
+        raise
     except (OSError, MigrationManifestError, MigrationArchiveError) as exc:
-        rollback_errors = []
-        indexes_not_restored: set[Path] = set()
-        retained_index_reasons: dict[Path, str] = {}
-        entries_by_folder = {entry.folder: entry for entry in plan.entries}
-        for index in reversed(plan.indexes):
-            if _index_matches_original(index):
-                continue
-            try:
-                planned_index_is_current = (
-                    not index.path.is_symlink()
-                    and index.path.read_bytes() == archive_bytes_by_path[index.path]
-                )
-            except OSError:
-                planned_index_is_current = False
-            if not planned_index_is_current:
-                indexes_not_restored.add(index.path)
-                retained_index_reasons[index.path] = (
-                    "index contents do not match the original or planned archive index"
-                )
-                continue
-            try:
-                if index.original_bytes is None:
-                    index.path.unlink(missing_ok=True)
-                else:
-                    _atomic_write(index.path, index.original_bytes)
-            except OSError as rollback_error:
-                rollback_errors.append(str(rollback_error))
-            if not _index_matches_original(index):
-                indexes_not_restored.add(index.path)
-                retained_index_reasons[index.path] = "the original index could not be restored"
-        folder_rollback_failures: set[Path] = set()
-        for source, destination in reversed(moved):
-            index_path = _index_path_for_entry(migrations_dir, entries_by_folder[source])
-            if index_path in indexes_not_restored:
-                continue
-            try:
-                source.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(destination, source)
-            except OSError as rollback_error:
-                rollback_errors.append(str(rollback_error))
-                folder_rollback_failures.add(index_path)
-        for index_path in sorted(folder_rollback_failures, key=str):
-            recovery_failed = False
-            for entry in entries_by_index[index_path]:
-                source_exists = os.path.lexists(entry.folder)
-                destination_exists = os.path.lexists(entry.destination)
-                if source_exists and destination_exists:
-                    rollback_errors.append(
-                        f"both source and archive folders exist for {entry.relative_folder}"
-                    )
-                    recovery_failed = True
-                    continue
-                if not destination_exists:
-                    if not source_exists:
-                        rollback_errors.append(
-                            f"both source and archive folders are missing for {entry.relative_folder}"
-                        )
-                        recovery_failed = True
-                        continue
-                    try:
-                        entry.destination.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(entry.folder, entry.destination)
-                    except OSError as recovery_error:
-                        rollback_errors.append(str(recovery_error))
-                        recovery_failed = True
-            if not recovery_failed:
-                try:
-                    _atomic_write(index_path, archive_bytes_by_path[index_path])
-                except OSError as recovery_error:
-                    rollback_errors.append(str(recovery_error))
-                    recovery_failed = True
-            indexes_not_restored.add(index_path)
-            retained_index_reasons[index_path] = (
-                "folder rollback failed; matching archived folders and index were retained"
-                if not recovery_failed
-                else "folder rollback recovery failed; inspect the folders and index"
-            )
-        for directory in reversed(created_directories):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-        retained = sorted(
-            (path.relative_to(root).as_posix(), retained_index_reasons[path])
-            for path in indexes_not_restored
-        )
-        details = []
-        if rollback_errors:
-            details.append(f"rollback errors: {'; '.join(rollback_errors)}")
-        if retained:
-            details.append("archived folders retained for recovery: " + ", ".join(
-                f"{path} ({reason})" for path, reason in retained
-            ))
-        if details:
-            detail = "; " + "; ".join(details)
-            message = f"archive move failed; rollback is incomplete: {exc}{detail}"
-        else:
-            message = f"archive move failed and was rolled back: {exc}"
-        raise MigrationArchiveError(message) from exc
+        rollback_errors, retained = _roll_back_archive(plan, moved, created_directories, archive_bytes_by_path)
+        raise MigrationArchiveError(_archive_failure_message(str(exc), rollback_errors, retained)) from exc
 
 
 def archive_migrations(

@@ -709,6 +709,80 @@ class OriginalTemplateDetectionTests(unittest.TestCase):
         self.assertTrue(is_original_template(worktree, self.manifest))
 
 
+class OriginalTemplateRemoteTests(unittest.TestCase):
+    """Origin and manifest upstream are compared by (host, path), not by spelling."""
+    UPSTREAM = "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git"
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.temp_dir, ignore_errors=True))
+        self.checkout = Path(self.temp_dir) / "checkout"
+        (self.checkout / ".git").mkdir(parents=True)
+        self.manifest = {"schemaVersion": 2, "apexRelease": "26.2", "upstream": self.UPSTREAM}
+
+    def set_config(self, text: str) -> None:
+        (self.checkout / ".git" / "config").write_text(text, encoding="utf-8")
+
+    def assert_origin(self, origin: str, expected: bool) -> None:
+        from scripts.verify_local import is_original_template
+        self.set_config(f'[remote "origin"]\n\turl = {origin}\n')
+        with self.subTest(origin=origin):
+            self.assertIs(is_original_template(self.checkout, self.manifest), expected)
+
+    def test_two_fetch_lines_in_the_origin_section_are_still_recognized(self) -> None:
+        from scripts.verify_local import is_original_template
+        self.set_config(
+            '[remote "origin"]\n'
+            f"\turl = {self.UPSTREAM}\n"
+            "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+            "\tfetch = +refs/pull/*:refs/remotes/origin/pr/*\n"
+        )
+        self.assertTrue(is_original_template(self.checkout, self.manifest))
+
+    def test_equivalent_remote_spellings_match_the_same_upstream(self) -> None:
+        for origin in (
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git/",
+            "https://GitHub.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/",
+            "http://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "git://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "ssh://git@github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "ssh://git@github.com:22/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "git@github.com:ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+        ):
+            self.assert_origin(origin, True)
+
+    def test_a_different_repository_or_host_does_not_match(self) -> None:
+        for origin in (
+            "https://github.com/ash2osh/OTHER_PROJECT.git",
+            "https://github.example.invalid/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "git@github.com:someone-else/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/extra.git",
+        ):
+            self.assert_origin(origin, False)
+
+    def test_local_path_upstream_still_matches_its_own_origin(self) -> None:
+        self.manifest["upstream"] = "/srv/git/template.git"
+        self.assert_origin("/srv/git/template", True)
+        self.assert_origin("/srv/git/other.git", False)
+
+    def test_garbage_origin_is_never_original_and_never_raises(self) -> None:
+        for origin in ("not a remote", "https://", "ssh://", "ftp://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+                       "relative/path.git", "", ":::"):
+            self.assert_origin(origin, False)
+
+    def test_normalizer_reduces_each_form_to_host_and_path(self) -> None:
+        from scripts.verify_local import _normalized_remote
+        expected = ("github.com", "ash2osh/APEX_PROJECT_TEMPLATE_TEAM")
+        self.assertEqual(_normalized_remote(self.UPSTREAM), expected)
+        self.assertEqual(_normalized_remote("git@github.com:ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git"), expected)
+        self.assertEqual(_normalized_remote("ssh://git@GitHub.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/"), expected)
+        self.assertIsNone(_normalized_remote("not a remote"))
+        self.assertIsNone(_normalized_remote("https://github.com/"))
+        self.assertIsNone(_normalized_remote(None))
+
+
 class MalformedTemplateManifestTests(unittest.TestCase):
     """verify_local must report an unreadable template release as a failed check, not a traceback."""
 

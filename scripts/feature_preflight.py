@@ -707,6 +707,9 @@ def _effect_queries(
     elif kind == "GRANT_OBJECT":
         grantees = tuple(operation.get("grantees", ()))
         privileges = str(operation.get("privileges", "")).split(",")
+        grantable = operation.get("grantable")
+        if grantable not in {"YES", "NO"}:
+            raise StructuralPreflightError(f"object grant on {name} has no grant-option evidence; restate the grant")
         for ordinal, grantee in enumerate(grantees, 1):
             for privilege_index, privilege in enumerate(privileges, 1):
                 privilege = privilege.strip().upper()
@@ -715,13 +718,13 @@ def _effect_queries(
                     "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_OBJECTS O WHERE O.OWNER = :target_schema "
                     f"AND O.OBJECT_NAME = {_literal(name)}) AND NOT EXISTS (SELECT 1 FROM ALL_TAB_PRIVS P "
                     f"WHERE P.TABLE_SCHEMA = :target_schema AND P.TABLE_NAME = {_literal(name)} AND P.GRANTEE = {_literal(grantee)} "
-                    f"AND P.PRIVILEGE = {_literal(privilege)}) THEN 1 ELSE 0 END FROM DUAL",
+                    f"AND P.PRIVILEGE = {_literal(privilege)} AND P.GRANTABLE = {_literal(grantable)}) THEN 1 ELSE 0 END FROM DUAL",
                 ))
                 after.append(_query(
                     f"structural-after-{index:04d}-{ordinal:02d}-{privilege_index:02d}",
                     "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_PRIVS P WHERE P.TABLE_SCHEMA = :target_schema "
                     f"AND P.TABLE_NAME = {_literal(name)} AND P.GRANTEE = {_literal(grantee)} "
-                    f"AND P.PRIVILEGE = {_literal(privilege)}) THEN 1 ELSE 0 END FROM DUAL",
+                    f"AND P.PRIVILEGE = {_literal(privilege)} AND P.GRANTABLE = {_literal(grantable)}) THEN 1 ELSE 0 END FROM DUAL",
                 ))
     elif kind == "CREATE_SYNONYM":
         synonym_owner = str(operation.get("owner", owner))

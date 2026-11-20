@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import _test_subprocess_safety  # noqa: F401
@@ -28,6 +29,7 @@ class TemplateDriftTests(unittest.TestCase):
             "schemaVersion": 1,
             "apexRelease": "26.2",
             "upstream": manifest["upstream"],
+            "commit": "a" * 40,
             "files": {"AGENTS.md": normalized_sha256(b"template guidance\n")},
         }
         (root / ".template-lock.json").write_text(json.dumps(lock) + "\n", encoding="utf-8")
@@ -127,6 +129,70 @@ class TemplateDriftTests(unittest.TestCase):
                 report = inspect_template_drift(root, upstream=True, ref="--upload-pack=evil")
 
             self.assertEqual(report["upstreamComparison"]["status"], "unavailable")
+
+    def set_agents_with_lock_value(self, root: Path, content: bytes, lock_value: str) -> None:
+        self.make_downstream(root)
+        (root / "AGENTS.md").write_bytes(content)
+        lock_path = root / ".template-lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["files"]["AGENTS.md"] = lock_value
+        lock_path.write_text(json.dumps(lock) + "\n", encoding="utf-8")
+
+    def test_legacy_raw_hash_lock_recognizes_a_crlf_file(self):
+        content = b"template guidance\r\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.set_agents_with_lock_value(root, content, hashlib.sha256(content).hexdigest())
+
+            report = inspect_template_drift(root)
+
+            self.assertEqual(report["localFiles"][0]["status"], "matches-lock")
+            self.assertEqual(report["status"], "current")
+
+    def test_crlf_file_with_an_unrelated_lock_hash_is_customized(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.set_agents_with_lock_value(root, b"template guidance\r\n", hashlib.sha256(b"other\n").hexdigest())
+
+            report = inspect_template_drift(root)
+
+            self.assertEqual(report["localFiles"][0]["status"], "customized")
+
+    def test_lf_file_matches_the_normalized_lock_hash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.make_downstream(root)
+
+            report = inspect_template_drift(root)
+
+            self.assertEqual(report["localFiles"][0]["status"], "matches-lock")
+
+    def test_lock_with_empty_files_is_unsafe_not_current(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.make_downstream(root)
+            lock_path = root / ".template-lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["files"] = {}
+            lock_path.write_text(json.dumps(lock) + "\n", encoding="utf-8")
+
+            report = inspect_template_drift(root)
+
+            self.assertEqual(report["status"], "unsafe")
+            self.assertNotEqual(report["status"], "current")
+
+    def test_lock_without_commit_is_unsafe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            self.make_downstream(root)
+            lock_path = root / ".template-lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            del lock["commit"]
+            lock_path.write_text(json.dumps(lock) + "\n", encoding="utf-8")
+
+            report = inspect_template_drift(root)
+
+            self.assertEqual(report["status"], "unsafe")
 
 
 if __name__ == "__main__":

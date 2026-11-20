@@ -6,6 +6,7 @@ evaluation, command substitution, or disclosing secret values in errors.
 
 from __future__ import annotations
 
+import itertools
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,13 @@ from scripts.template_release import is_apex_26_2
 ROOT = Path(__file__).resolve().parents[1]
 APEX_26_2 = is_apex_26_2(ROOT)
 
+# A configuration with no profile keys: the DEV trio alone supplies the TABLES, CODE and APEX profiles.
+DEV_HEADER = """PROJECT_NAME=DEMO
+DEVELOPER_NAME=ASHARIF
+DB_ENVIRONMENT=development
+APEX_APP_ID=100
+"""
+DEV_TRIO = "DEV_SCHEMA=DEMO\nDEV_SQLCL_CONNECTION=DEV\nDEV_EXPECTED_USER=DEMO\n"
 
 VALID_BASE_CONFIG = """# Valid baseline test config
 PROJECT_NAME=DEMO
@@ -388,6 +396,101 @@ class LocalConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigError) as ctx:
                     read_project_env(self.write_env(VALID_BASE_CONFIG + f"DEV_DBA_SQLCL_CONNECTION={invalid}\n"))
                 self.assertIn("DEV_DBA_SQLCL_CONNECTION contains unsupported characters", str(ctx.exception))
+
+    def test_dev_trio_fills_tables_code_and_apex_profiles(self) -> None:
+        values = read_project_env(self.write_env(DEV_HEADER + DEV_TRIO))
+        for prefix in ("TABLES", "CODE"):
+            self.assertEqual(values[f"{prefix}_SCHEMA"], "DEMO")
+            self.assertEqual(values[f"{prefix}_SQLCL_CONNECTION"], "DEV")
+            self.assertEqual(values[f"{prefix}_EXPECTED_USER"], "DEMO")
+            self.assertEqual(values[f"{prefix}_PREFIXES"], "*")
+        self.assertEqual(values["APEX_PARSING_SCHEMA"], "DEMO")
+        self.assertEqual(values["APEX_SQLCL_CONNECTION"], "DEV")
+        self.assertEqual(values["APEX_EXPECTED_USER"], "DEMO")
+        # Staging, production and migration profiles are never filled from the DEV trio.
+        for key in ("STAGING_SCHEMA", "STAGING_SQLCL_CONNECTION", "PROD_SCHEMA", "PROD_SQLCL_CONNECTION",
+                    "MIGRATION_SCHEMA", "STAGING_MIGRATION_SCHEMA", "PROD_MIGRATION_SCHEMA"):
+            self.assertNotIn(key, values)
+
+    def test_dev_trio_lists_fill_every_profile_aligned(self) -> None:
+        content = DEV_HEADER + "DEV_SCHEMA=ONE,TWO\nDEV_SQLCL_CONNECTION=conn-one,conn-two\nDEV_EXPECTED_USER=ONE,TWO\n"
+        values = read_project_env(self.write_env(content))
+        for schema_key, connection_key, user_key in (
+            ("TABLES_SCHEMA", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER"),
+            ("CODE_SCHEMA", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER"),
+            ("APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER"),
+        ):
+            self.assertEqual(values[schema_key], "ONE,TWO")
+            self.assertEqual(values[connection_key], "conn-one,conn-two")
+            self.assertEqual(values[user_key], "ONE,TWO")
+
+    def test_profile_with_its_own_values_wins_over_the_dev_trio(self) -> None:
+        content = DEV_HEADER + DEV_TRIO + (
+            "TABLES_SCHEMA=OWN\nTABLES_PREFIXES=OWN_\nTABLES_SQLCL_CONNECTION=own-conn\nTABLES_EXPECTED_USER=OWN\n"
+        )
+        values = read_project_env(self.write_env(content))
+        self.assertEqual(
+            [values[k] for k in ("TABLES_SCHEMA", "TABLES_PREFIXES", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER")],
+            ["OWN", "OWN_", "own-conn", "OWN"],
+        )
+        self.assertEqual(values["CODE_SCHEMA"], "DEMO")
+        self.assertEqual(values["CODE_SQLCL_CONNECTION"], "DEV")
+
+    def test_filled_profile_keeps_its_own_prefixes(self) -> None:
+        values = read_project_env(self.write_env(DEV_HEADER + DEV_TRIO + "TABLES_PREFIXES=OWN_\n"))
+        self.assertEqual(values["TABLES_PREFIXES"], "OWN_")
+        self.assertEqual(values["TABLES_SCHEMA"], "DEMO")
+        self.assertEqual(values["CODE_PREFIXES"], "*")
+
+    def test_partially_configured_profile_is_not_filled_from_the_dev_trio(self) -> None:
+        content = DEV_HEADER + DEV_TRIO + "TABLES_SCHEMA=OWN\nTABLES_PREFIXES=*\n"
+        with self.assertRaises(ConfigError) as ctx:
+            read_project_env(self.write_env(content))
+        self.assertIn("TABLES_SQLCL_CONNECTION is required in", str(ctx.exception))
+
+    def test_partial_dev_trio_is_refused_without_naming_values(self) -> None:
+        pairs = {
+            "DEV_SCHEMA": "SECRET_DEV_SCHEMA_VALUE",
+            "DEV_SQLCL_CONNECTION": "SECRET_DEV_CONN_VALUE",
+            "DEV_EXPECTED_USER": "SECRET_DEV_USER_VALUE",
+        }
+        message = "configure DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER together"
+        for size in (1, 2):
+            for subset in itertools.combinations(pairs, size):
+                with self.subTest(keys=subset):
+                    content = DEV_HEADER + "".join(f"{key}={pairs[key]}\n" for key in subset)
+                    with self.assertRaises(ConfigError) as ctx:
+                        read_project_env(self.write_env(content))
+                    self.assertEqual(str(ctx.exception), message)
+                    for value in pairs.values():
+                        self.assertNotIn(value, str(ctx.exception))
+
+    def test_dev_trio_without_expected_user_is_refused(self) -> None:
+        content = DEV_HEADER + "DEV_SCHEMA=DEMO\nDEV_SQLCL_CONNECTION=DEV\n"
+        with self.assertRaises(ConfigError) as ctx:
+            read_project_env(self.write_env(content))
+        self.assertEqual(str(ctx.exception), "configure DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER together")
+
+    def test_dev_lists_must_align_like_profile_lists(self) -> None:
+        content = DEV_HEADER + "DEV_SCHEMA=ONE,TWO\nDEV_SQLCL_CONNECTION=conn-one\nDEV_EXPECTED_USER=ONE,TWO\n"
+        with self.assertRaises(ConfigError) as ctx:
+            read_project_env(self.write_env(content))
+        self.assertIn("must list the same number of entries", str(ctx.exception))
+
+    def test_dev_values_are_validated_and_never_echoed(self) -> None:
+        secret = "lower_secret_dev_value"
+        content = DEV_HEADER + f"DEV_SCHEMA={secret}\nDEV_SQLCL_CONNECTION=DEV\nDEV_EXPECTED_USER=DEMO\n"
+        with self.assertRaises(ConfigError) as ctx:
+            read_project_env(self.write_env(content))
+        self.assertIn("must be an uppercase Oracle identifier", str(ctx.exception))
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_unknown_key_is_still_rejected_next_to_the_dev_trio(self) -> None:
+        content = DEV_HEADER + DEV_TRIO + "DEV_OTHER_SETTING=1\n"
+        with self.assertRaises(ConfigError) as ctx:
+            read_project_env(self.write_env(content))
+        self.assertIn("unsupported setting in", str(ctx.exception))
+        self.assertIn("DEV_OTHER_SETTING", str(ctx.exception))
 
 
 if __name__ == "__main__":

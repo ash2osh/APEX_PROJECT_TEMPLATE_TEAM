@@ -24,6 +24,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 
 MANIFEST_NAME = "template-manifest.json"
@@ -31,6 +32,10 @@ LOCK_NAME = ".template-lock.json"
 CONFLICT_SUFFIX = ".template-new"
 ATTENTION = {"CONFLICT", "KEEP-DELETED", "KEEP-REMOVED"}
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+CREDENTIAL_MESSAGE = "template source must not contain credentials; use a Git credential helper or an SSH key"
+# scheme://userinfo@ in a URL printed by git (the userinfo is replaced by ***@).
+USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/]*@")
 PROTECTED_SAMPLES = (
     "apps/DEMO/100/application.apx",
     "database/DEMO/tables/T.sql",
@@ -38,6 +43,9 @@ PROTECTED_SAMPLES = (
     "app_context/100/purpose.md",
     "dev-tests/suites/orders.json",
     "dev-tests/suites/sql/create-orders.sql",
+    "features/example/APP_CODE/packages/example.pks.sql",
+    "releases/current.json",
+    "releases/.local-state.json",
     ".env",
     LOCK_NAME,
 )
@@ -107,6 +115,10 @@ def protected_project_path(path: str) -> bool:
         return False
     if path.startswith("migrations/"):
         return True
+    if path in {"features/.gitkeep", "releases/.gitkeep"}:
+        return False
+    if path.startswith("features/") or path.startswith("releases/"):
+        return True
     if path == "app_context/README.md":
         return False
     if path.startswith("app_context/"):
@@ -136,13 +148,38 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("^" + "".join(parts) + "$")
 
 
+def redact_userinfo(text: str) -> str:
+    """Replace the user[:password] of any scheme://user[:password]@ URL with ***@."""
+    return USERINFO_RE.sub(r"\1***@", text)
+
+
 def run_git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
     )
     if result.returncode != 0:
-        raise UpgradeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+        raise UpgradeError(
+            f"git {redact_userinfo(' '.join(args))} failed: {redact_userinfo(result.stderr.strip())}"
+        )
     return result.stdout
+
+
+def _has_credentials(source: str) -> bool:
+    """A password anywhere, or a username on http(s), is a credential. ssh://user@host and
+    scp-style git@host:path carry only the login name a Git SSH key needs, so they are allowed."""
+    parsed = urlsplit(source)
+    if parsed.password is not None:
+        return True
+    return parsed.scheme in ("http", "https") and parsed.username is not None
+
+
+def _reject_credentials(source: str, *, suffix: str = "") -> None:
+    try:
+        credentialed = _has_credentials(source)
+    except ValueError:
+        raise UpgradeError("template source is not a valid Git URL or path") from None
+    if credentialed:
+        raise UpgradeError(CREDENTIAL_MESSAGE + suffix)
 
 
 def _lstat(path: Path) -> os.stat_result | None:
@@ -354,7 +391,18 @@ def read_lock_with_hash(project_root: Path) -> tuple[dict, str | None]:
         lock = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise UpgradeError(f"{LOCK_NAME} is invalid: {exc}") from exc
-    return _validated_lock(lock), hashlib.sha256(raw).hexdigest()
+    lock = _validated_lock(lock)
+    _require_installed_state(lock)
+    return lock, hashlib.sha256(raw).hexdigest()
+
+
+def _require_installed_state(lock: dict) -> None:
+    """A lock read from disk must name the installed commit and at least one file. An empty
+    lock would compare zero files, report current, and the next upgrade would re-create
+    everything the project removed."""
+    commit = lock.get("commit")
+    if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit) or not lock["files"]:
+        raise UpgradeError(f"{LOCK_NAME} must record the installed commit and at least one installed file")
 
 
 def _validated_lock(lock: object) -> dict:
@@ -369,6 +417,8 @@ def _validated_lock(lock: object) -> dict:
     for key in ("upstream", "commit", "templateRef"):
         if key in lock and not isinstance(lock[key], str):
             raise UpgradeError(f"{LOCK_NAME} has an invalid {key}")
+    if "upstream" in lock:
+        _reject_credentials(lock["upstream"], suffix=" (remove it from .template-lock.json)")
     if "templateRef" in lock and (not lock["templateRef"] or lock["templateRef"].startswith("-")
                                   or any(char in lock["templateRef"] for char in "\0\r\n")):
         raise UpgradeError(f"{LOCK_NAME} has an invalid templateRef")
@@ -417,6 +467,27 @@ def check_project(project_root: Path) -> None:
         raise UpgradeError(f"resolve and delete {CONFLICT_SUFFIX} files first: {', '.join(pending)}")
 
 
+def _exec_bit_differs(target: Path, source: Path) -> bool:
+    """True when the template file is executable and the project's copy is not.
+
+    An upstream commit can change only the Git executable bit (same blob). The
+    content digests then match, and without this check a copy installed as 0644
+    would stay non-executable. Only this direction is acted on: a file system that
+    cannot record the bit (for example a Windows drive mounted on Linux) reports
+    every file as executable, and that must not make every file look changed.
+    Always False on Windows and when either file is missing or not a regular file.
+    """
+    if os.name == "nt":
+        return False
+    target_info = _lstat(target)
+    source_info = _lstat(source)
+    if target_info is None or source_info is None:
+        return False
+    if not stat.S_ISREG(target_info.st_mode) or not stat.S_ISREG(source_info.st_mode):
+        return False
+    return bool(stat.S_IMODE(source_info.st_mode) & 0o111) and not bool(stat.S_IMODE(target_info.st_mode) & 0o111)
+
+
 def _new_file_hash(template_root: Path, relative: str) -> tuple[str, str]:
     digests = sha256_pair(template_root / relative)
     if digests is None:
@@ -449,7 +520,9 @@ def plan_upgrade(
         if local_pair is None:
             kind = "CREATE" if last is None else "KEEP-DELETED"
         elif local_pair[1] == new_normalized:
-            kind = "UNCHANGED"
+            # Same bytes, but an upstream commit may have changed only the Git
+            # executable bit. UPDATE rewrites the file with the template's mode.
+            kind = "UPDATE" if _exec_bit_differs(target, template_root / path) else "UNCHANGED"
         elif last in local_pair:
             kind = "UPDATE"
         elif last in (new_raw, new_normalized):
@@ -687,6 +760,7 @@ def apply_actions(
 
 
 def _normalize_source(source: str) -> str:
+    _reject_credentials(source)
     candidate = Path(source).expanduser()
     if candidate.exists():
         return str(candidate.resolve())
@@ -708,6 +782,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.source is not None:
+            # Refused before any git command runs, so a credential never reaches git or the lock.
+            _reject_credentials(args.source)
         project_root = Path(run_git(args.project_root, "rev-parse", "--show-toplevel").strip()).resolve()
         check_project(project_root)
         lock, lock_hash = read_lock_with_hash(project_root)
@@ -788,20 +865,20 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _post_upgrade_sync(project_root: Path, actions: list[Action]) -> None:
-    """Refresh optional Graphify integration after an upgrade changes its code."""
+    """Refresh the Graphify integration, but only in a project that already uses it.
+
+    Runs setup_graphify_apx.py when the project has a graphify-out directory or
+    the project-local .venv-graphify environment. Updating the extractor alone
+    does not trigger it.
+    """
     setup_script = project_root / "scripts" / "setup_graphify_apx.py"
     if not setup_script.is_file():
         return
+    # Optional tooling is never installed by an upgrade: a project that has never
+    # used Graphify gets the new extractor file but no environment or packages.
     graphify_out = project_root / "graphify-out"
-    touched_extractor = any(
-        action.path in (
-            "scripts/graphify_apexlang_extractor.py",
-            "scripts/setup_graphify_apx.py",
-        )
-        and action.kind in ("CREATE", "UPDATE")
-        for action in actions
-    )
-    if not (graphify_out.is_dir() or touched_extractor):
+    project_venv = project_root / ".venv-graphify"
+    if not (graphify_out.is_dir() or project_venv.is_dir()):
         return
 
     try:

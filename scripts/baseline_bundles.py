@@ -193,17 +193,62 @@ def _table_column_type(row: Mapping) -> str:
     return value
 
 
-def _column_sql(row: Mapping) -> str:
-    return f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
+def _type_owner(row: Mapping, source_schema: str | None, target_schema: str | None) -> str | None:
+    """The owner of a user-defined column type, or None for a built-in type.
+
+    An owner that is the source schema (or the configured-schema placeholder) becomes the target schema; any other
+    owner is kept as the catalog wrote it.
+    """
+    owner = row.get("data_type_owner")
+    if owner is None or owner == "":
+        return None
+    if not isinstance(owner, str):
+        raise baseline.BaselineError(f"column {row.get('table_name')}.{row.get('name')} has invalid data_type_owner: {owner!r}")
+    if target_schema is not None and owner in {"<CONFIGURED_SCHEMA>", source_schema}:
+        return target_schema
+    return owner
 
 
-def _column_definition_check(schema: str, row: Mapping) -> dict:
+def _column_sql(row: Mapping, source_schema: str | None = None, target_schema: str | None = None, *, invisible: bool | None = None) -> str:
+    owner = _type_owner(row, source_schema, target_schema)
+    if owner is None:
+        definition = f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
+    else:
+        type_name = row.get("data_type")
+        if not isinstance(type_name, str) or not type_name:
+            raise baseline.BaselineError(f"column {row.get('table_name')}.{row.get('name')} has invalid data_type: {type_name!r}")
+        definition = f"{_sql_identifier(str(row['name']))} {_sql_identifier(owner)}.{_sql_identifier(type_name)}"
+    if (_is_invisible(row) if invisible is None else invisible):
+        definition += " INVISIBLE"
+    return definition
+
+
+def _virtual_expression(row: Mapping) -> str | None:
+    """The captured expression of a virtual column, or None when it was not captured (an older database or catalog).
+
+    The catalog writes it only for virtual rows, on Oracle 23ai or newer. An empty, blank or non-string value counts as
+    not captured.
+    """
+    value = row.get("virtual_expression")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _is_hidden_user_column(row: Mapping) -> bool:
+    """True for a hidden column the user generated, virtual or not; a virtual column's INVISIBLE clause uses it."""
+    where = f"column {row.get('table_name')}.{row.get('name')}"
+    return _column_flag(row, "hidden", where) is True and _column_flag(row, "user_generated", where) is True
+
+
+def _column_definition_check(schema: str, row: Mapping, source_schema: str | None = None) -> dict:
     table_name = str(row["table_name"])
     column_name = str(row["name"])
     data_type_raw = row.get("data_type")
     if isinstance(data_type_raw, bool) or not isinstance(data_type_raw, str):
         raise baseline.BaselineError(f"column {table_name}.{column_name} has invalid data_type: {data_type_raw!r}")
     data_type = data_type_raw.upper()
+    type_owner = _type_owner(row, source_schema, schema)
 
     predicates = [
         f"OWNER = {_sql_literal(schema)}",
@@ -211,7 +256,11 @@ def _column_definition_check(schema: str, row: Mapping) -> dict:
         f"COLUMN_NAME = {_sql_literal(column_name)}",
     ]
 
-    if data_type.startswith("NUMBER"):
+    if type_owner is not None:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type_raw)}")
+        predicates.append(f"DATA_TYPE_OWNER = {_sql_literal(type_owner)}")
+
+    elif data_type.startswith("NUMBER"):
         predicates.append("DATA_TYPE = 'NUMBER'")
         precision = row.get("data_precision")
         scale = row.get("data_scale")
@@ -298,6 +347,13 @@ def _column_definition_check(schema: str, row: Mapping) -> dict:
 
     else:
         predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+
+    if _column_flag(row, "virtual", f"column {table_name}.{column_name}") is True:
+        predicates.append("VIRTUAL_COLUMN = 'YES'")
+        if _is_hidden_user_column(row):
+            predicates.append("HIDDEN_COLUMN = 'YES'")
+    elif _is_invisible(row):
+        predicates.append("HIDDEN_COLUMN = 'YES'")
 
     where_clause = " AND ".join(predicates)
     sql = f"SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_COLS WHERE {where_clause}) THEN 1 ELSE 0 END FROM DUAL"
@@ -620,20 +676,31 @@ def _condition_key(value: str) -> str:
     # misread, so such a condition is compared exactly instead of being normalised.
     if _has_alternative_quote(value):
         return value
-    # Strip exactly what the PL/SQL normalized() function strips: space, TAB, LF and CR outside strings.
+    # Strip exactly what the PL/SQL normalized() function strips: space, TAB, LF and CR outside quotes. Text inside a
+    # 'string' or a "quoted identifier" is copied verbatim; a doubled quote of the same kind is an escaped quote, and
+    # the other kind of quote is an ordinary character there.
     output = []
     index = 0
     in_string = False
+    in_ident = False
     while index < len(value):
         char = value[index]
-        if char == "'":
+        following = value[index + 1] if index + 1 < len(value) else ""
+        if in_string or in_ident:
             output.append(char)
-            if in_string and index + 1 < len(value) and value[index + 1] == "'":
-                output.append("'")
-                index += 2
-                continue
-            in_string = not in_string
-        elif in_string or char not in " \t\r\n":
+            if char == ("'" if in_string else '"'):
+                if following == char:
+                    output.append(char)
+                    index += 2
+                    continue
+                in_string = in_ident = False
+        elif char == "'":
+            in_string = True
+            output.append(char)
+        elif char == '"':
+            in_ident = True
+            output.append(char)
+        elif char not in " \t\r\n":
             output.append(char)
         index += 1
     return "".join(output)
@@ -645,16 +712,27 @@ _NORMALIZED_FUNCTION = (
     "    l_index PLS_INTEGER := 1;\n"
     "    l_char VARCHAR2(1);\n"
     "    l_in_string BOOLEAN := FALSE;\n"
+    "    l_in_ident BOOLEAN := FALSE;\n"
     "  BEGIN\n"
     "    WHILE l_index <= LENGTH(p_value) LOOP\n"
     "      l_char := SUBSTR(p_value, l_index, 1);\n"
-    "      IF l_char = '''' THEN\n"
+    "      IF l_in_ident THEN\n"
+    "        l_result := l_result || l_char;\n"
+    "        IF l_char = '\"' AND SUBSTR(p_value, l_index + 1, 1) = '\"' THEN\n"
+    "          l_result := l_result || '\"'; l_index := l_index + 2;\n"
+    "        ELSE\n"
+    "          IF l_char = '\"' THEN l_in_ident := FALSE; END IF;\n"
+    "          l_index := l_index + 1;\n"
+    "        END IF;\n"
+    "      ELSIF l_char = '''' THEN\n"
     "        l_result := l_result || l_char;\n"
     "        IF l_in_string AND SUBSTR(p_value, l_index + 1, 1) = '''' THEN\n"
     "          l_result := l_result || ''''; l_index := l_index + 2;\n"
     "        ELSE\n"
     "          l_in_string := NOT l_in_string; l_index := l_index + 1;\n"
     "        END IF;\n"
+    "      ELSIF l_char = '\"' AND NOT l_in_string THEN\n"
+    "        l_result := l_result || l_char; l_in_ident := TRUE; l_index := l_index + 1;\n"
     "      ELSIF l_in_string OR l_char NOT IN (' ', CHR(9), CHR(10), CHR(13)) THEN\n"
     "        l_result := l_result || l_char; l_index := l_index + 1;\n"
     "      ELSE\n"
@@ -668,7 +746,7 @@ _NORMALIZED_FUNCTION = (
 
 def _wrap_constraint(
     row: Mapping, source_schema: str, target_schema: str, *,
-    replace_check: bool = False, reviewed_condition: str | None = None,
+    replace_check: bool = False, reviewed_condition: str | None = None, reviewed_status: str | None = None,
 ) -> str:
     ddl = _constraint_ddl(row, source_schema, target_schema)
     table, name = str(row["table_name"]), str(row["name"])
@@ -686,13 +764,18 @@ def _wrap_constraint(
     if replace_check:
         if reviewed_condition is None:
             raise baseline.BaselineError(f"replacing check constraint {name} needs the reviewed target condition")
+        if reviewed_status is None:
+            raise baseline.BaselineError(f"replacing check constraint {name} needs the reviewed target status")
         desired = _condition_key(str(row["condition"]))
         reviewed = _condition_key(reviewed_condition)
+        reviewed_state = _sql_literal(str(reviewed_status).upper())
         drop = f"ALTER TABLE {_sql_identifier(target_schema)}.{_sql_identifier(table)} DROP CONSTRAINT {_sql_identifier(name)}"
         not_check = _sql_literal(
             f"constraint {name} exists on the target but is not a check constraint; review it and write a migration")
         changed = _sql_literal(f"constraint {name} on the target changed after the baseline was reviewed; regenerate the baseline")
         not_reviewed = _sql_literal(f"constraint {name} does not have the reviewed condition after the replacement")
+        too_long = _sql_literal(
+            f"constraint {name} has a condition at the 4000-byte catalog limit; review it and write a migration")
         return (
             "DECLARE\n"
             "  l_status VARCHAR2(8);\n"
@@ -703,11 +786,12 @@ def _wrap_constraint(
             f"    SELECT STATUS, CONSTRAINT_TYPE, SEARCH_CONDITION_VC INTO l_status, l_type, l_condition FROM ALL_CONSTRAINTS WHERE OWNER = {owner} AND CONSTRAINT_NAME = {lookup};\n"
             "  EXCEPTION WHEN NO_DATA_FOUND THEN l_status := NULL;\n  END;\n"
             "  IF l_status IS NOT NULL THEN\n"
+            f"    IF LENGTHB(l_condition) >= 4000 THEN RAISE_APPLICATION_ERROR(-20996, {too_long}); END IF;\n"
             "    IF l_type <> 'C' OR l_condition IS NULL THEN\n"
             f"      RAISE_APPLICATION_ERROR(-20993, {not_check});\n"
             f"    ELSIF normalized(l_condition) = {_sql_literal(desired)} THEN\n"
             "      NULL;\n"
-            f"    ELSIF normalized(l_condition) = {_sql_literal(reviewed)} THEN\n"
+            f"    ELSIF normalized(l_condition) = {_sql_literal(reviewed)} AND l_status = {reviewed_state} THEN\n"
             f"      EXECUTE IMMEDIATE {_q_literal(drop)};\n"
             "      l_status := NULL;\n"
             "    ELSE\n"
@@ -716,11 +800,10 @@ def _wrap_constraint(
             "  END IF;\n"
             "  IF l_status IS NULL THEN\n"
             f"    EXECUTE IMMEDIATE {_q_literal(ddl)};\n"
-            "  ELSIF l_status = 'DISABLED' THEN\n"
-            f"    EXECUTE IMMEDIATE {_q_literal(enable)};\n"
-            f"{enable_rely}"
-            "  END IF;\n"
+            + (f"  ELSIF l_status = 'DISABLED' THEN\n    EXECUTE IMMEDIATE {_q_literal(enable)};\n{enable_rely}" if row.get("status", "ENABLED") == "ENABLED" else "")
+            + "  END IF;\n"
             f"  SELECT SEARCH_CONDITION_VC INTO l_condition FROM ALL_CONSTRAINTS WHERE OWNER = {owner} AND CONSTRAINT_NAME = {lookup};\n"
+            f"  IF LENGTHB(l_condition) >= 4000 THEN RAISE_APPLICATION_ERROR(-20996, {too_long}); END IF;\n"
             f"  IF l_condition IS NULL OR normalized(l_condition) <> {_sql_literal(desired)} THEN\n"
             f"    RAISE_APPLICATION_ERROR(-20995, {not_reviewed});\n"
             "  END IF;\n"
@@ -772,9 +855,17 @@ def _sync_sequence_sql(target_schema: str, row: Mapping, mapping: Mapping) -> st
     table_ref = f"{_sql_identifier(target_schema)}.{_sql_identifier(table)}"
     next_query = _sql_literal(f"SELECT {sequence_ref}.NEXTVAL FROM DUAL")
     max_query = _sql_literal(f"SELECT NVL(MAX({_sql_identifier(column)}), 0) FROM {table_ref}")
+    # The sequence is advanced with a temporary increment and then restored to the increment the target has now, read
+    # from the catalog. The source increment is validated above but not applied to the target.
+    catalog_query = (
+        "SELECT INCREMENT_BY INTO l_original_increment FROM ALL_SEQUENCES "
+        f"WHERE SEQUENCE_OWNER = {_sql_literal(target_schema)} AND SEQUENCE_NAME = {_sql_literal(name)}"
+    )
+    restore = _sql_literal(f"ALTER SEQUENCE {sequence_ref} INCREMENT BY ") + " || TO_CHAR(l_original_increment)"
     return (
         f"-- Move {name} past existing ids in {table}.{column}.\n"
-        "DECLARE\n  l_next NUMBER;\n  l_max NUMBER;\n  l_increment_changed BOOLEAN := FALSE;\nBEGIN\n"
+        "DECLARE\n  l_next NUMBER;\n  l_max NUMBER;\n  l_original_increment NUMBER;\n  l_increment_changed BOOLEAN := FALSE;\nBEGIN\n"
+        f"  {catalog_query};\n"
         f"  EXECUTE IMMEDIATE {next_query} INTO l_next;\n"
         f"  EXECUTE IMMEDIATE {max_query} INTO l_max;\n"
         "  IF l_next <= l_max THEN\n"
@@ -782,10 +873,10 @@ def _sync_sequence_sql(target_schema: str, row: Mapping, mapping: Mapping) -> st
         "    l_increment_changed := TRUE;\n"
         "    BEGIN\n"
         f"    EXECUTE IMMEDIATE {next_query} INTO l_next;\n"
-        f"    EXECUTE IMMEDIATE {_sql_literal(f'ALTER SEQUENCE {sequence_ref} INCREMENT BY {increment}')};\n"
+        f"    EXECUTE IMMEDIATE {restore};\n"
         "      l_increment_changed := FALSE;\n"
         "    EXCEPTION WHEN OTHERS THEN\n"
-        f"      IF l_increment_changed THEN EXECUTE IMMEDIATE {_sql_literal(f'ALTER SEQUENCE {sequence_ref} INCREMENT BY {increment}')}; END IF;\n"
+        f"      IF l_increment_changed THEN EXECUTE IMMEDIATE {restore}; END IF;\n"
         "      RAISE;\n"
         "    END;\n  END IF;\nEND;\n/\n"
     )
@@ -813,13 +904,29 @@ def _table_statements(raw_ddl: str, source_schema: str, target_schema: str) -> l
     return [header, *(retarget_sql_identifiers(statement, source_schema, target_schema) for statement in statements[1:])]
 
 
-def _new_table_order(names: Sequence[str], constraints: Mapping) -> list[str]:
+def _same_schema_parent(reference: object, source_schema: str) -> str | None:
+    """The parent table name of a foreign key when it is in the source schema, else None.
+
+    The catalog writes a same-schema reference as <CONFIGURED_SCHEMA>.PARENT (or with the schema name); a bare name is
+    also same-schema. A reference to another owner is not a parent of a table in this schema.
+    """
+    if not isinstance(reference, str):
+        return None
+    owner, dot, name = reference.rpartition(".")
+    if not dot:
+        owner, name = "", reference
+    if owner in {"", "<CONFIGURED_SCHEMA>", source_schema}:
+        return name
+    return None
+
+
+def _new_table_order(names: Sequence[str], constraints: Mapping, source_schema: str) -> list[str]:
     """Alphabetical, except that a table follows the new tables its foreign keys reference."""
     new = set(names)
     parents: dict[str, set[str]] = {name: set() for name in names}
     for (table, _constraint), row in constraints.items():
-        parent = row.get("referenced_table")
-        if table in new and row.get("constraint_type") == "R" and isinstance(parent, str) and parent in new and parent != table:
+        parent = _same_schema_parent(row.get("referenced_table"), source_schema)
+        if table in new and row.get("constraint_type") == "R" and parent in new and parent != table:
             parents[table].add(parent)
     ordered: list[str] = []
     placed: set[str] = set()
@@ -875,6 +982,20 @@ def _column_kind(row: Mapping) -> str:
     return "ordinary"
 
 
+def _is_invisible(row: Mapping) -> bool:
+    """True for a user-created INVISIBLE column: hidden, user generated and not virtual.
+
+    A system-generated hidden column (user_generated false) and a hidden column whose user_generated flag is missing are
+    not invisible user columns, so they never match here.
+    """
+    where = f"column {row.get('table_name')}.{row.get('name')}"
+    return (
+        _column_flag(row, "hidden", where) is True
+        and _column_flag(row, "user_generated", where) is True
+        and _column_flag(row, "virtual", where) is not True
+    )
+
+
 def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, source: Mapping, target: Mapping, snapshot: SchemaSnapshot) -> tuple[dict[str, str], dict]:
     left, right = source["sections"], target["sections"]
     source_tables = {row["name"]: row for row in left.get("tables", []) if baseline._schema_filter(config, source_schema, row.get("name", ""))}
@@ -901,7 +1022,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
     posts: list[dict] = []
     preconditions: list[dict] = []
 
-    for name in _new_table_order([name for name in sorted(source_tables) if name not in target_tables], source_constraints):
+    for name in _new_table_order([name for name in sorted(source_tables) if name not in target_tables], source_constraints, source_schema):
         definition = definitions.get(ObjectKey(source_schema, name, "TABLE"))
         if definition is None:
             raise baseline.BaselineError(f"source table DDL is missing for {name}")
@@ -921,16 +1042,23 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         existing = target_columns.get(key)
         if existing is None:
             if kind == "virtual":
-                raise baseline.BaselineError(
-                    f"virtual column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture its expression)"
-                )
-            if kind == "hidden":
-                raise baseline.BaselineError(
-                    f"hidden column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture how Oracle represents it)"
-                )
-            column_ddl = _column_sql(row)
+                expression = _virtual_expression(row)
+                if expression is None:
+                    raise baseline.BaselineError(
+                        f"virtual column {table_name}.{column_name} needs a reviewed migration "
+                        "(its expression was not captured; capture needs Oracle 23ai or newer)"
+                    )
+                target_expression = retarget_sql_identifiers(expression, source_schema, target_schema)
+                column_ddl = _column_sql(row, source_schema, target_schema, invisible=_is_hidden_user_column(row))
+                column_ddl += f" GENERATED ALWAYS AS ({target_expression}) VIRTUAL"
+            else:
+                if kind == "hidden" and not _is_invisible(row):
+                    raise baseline.BaselineError(
+                        f"hidden column {table_name}.{column_name} needs a reviewed migration (the catalog does not capture how Oracle represents it)"
+                    )
+                column_ddl = _column_sql(row, source_schema, target_schema)
             identity = source_identity.get(key)
-            if identity is not None:
+            if identity is not None and kind != "virtual":
                 generation = str(identity.get("generation_type", "BY DEFAULT")).upper()
                 if generation not in {"ALWAYS", "BY DEFAULT", "BY DEFAULT ON NULL"}:
                     raise baseline.BaselineError(f"unsupported identity generation type {generation!r} for {table_name}.{column_name}")
@@ -938,7 +1066,7 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             ddl = f"ALTER TABLE {_sql_identifier(target_schema)}.{_sql_identifier(table_name)} ADD ({column_ddl})"
             exists_query = f"ALL_TAB_COLS WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(table_name)} AND COLUMN_NAME = {_sql_literal(column_name)}"
             chunks.append(_wrap_guarded_ddl(exists_query, ddl))
-            posts.append(_column_definition_check(target_schema, row))
+            posts.append(_column_definition_check(target_schema, row, source_schema))
             if row.get("nullable") == "N":
                 to_make_not_null.add(key)
                 if table_name not in checked_empty_tables:
@@ -950,11 +1078,23 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
         else:
             type_fields = ("data_type", "data_length", "data_precision", "data_scale", "char_used", "char_length")
             changed = [field for field in type_fields if row.get(field) != existing.get(field)]
+            if _type_owner(row, source_schema, target_schema) != (existing.get("data_type_owner") or None):
+                changed.append("data_type_owner")
             if changed:
                 raise baseline.BaselineError(f"column type changes need a reviewed data migration: {table_name}.{column_name} ({', '.join(changed)})")
             where = f"column {table_name}.{column_name}"
             if (_column_flag(row, "virtual", where) is True) != (_column_flag(existing, "virtual", where) is True):
                 raise baseline.BaselineError(f"column virtual/stored change needs a reviewed data migration: {table_name}.{column_name}")
+            if _column_flag(row, "virtual", where) is True:
+                source_expression = _virtual_expression(row)
+                target_expression = _virtual_expression(existing)
+                if source_expression is not None and target_expression is not None and (
+                    _condition_key(retarget_sql_identifiers(source_expression, source_schema, target_schema))
+                    != _condition_key(target_expression)
+                ):
+                    raise baseline.BaselineError(f"virtual column expression change needs a reviewed migration: {table_name}.{column_name}")
+            if _is_invisible(row) != _is_invisible(existing):
+                raise baseline.BaselineError(f"column visibility change needs a reviewed migration: {table_name}.{column_name}")
             if row.get("nullable") == "N" and existing.get("nullable") == "Y":
                 to_make_not_null.add(key)
                 preconditions.append(_count_check(
@@ -1008,7 +1148,14 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             chunks.append(_wrap_constraint(
                 row, source_schema, target_schema, replace_check=replace_check,
                 reviewed_condition=str(existing["condition"]) if replace_check else None,
+                reviewed_status=str(existing.get("status", "ENABLED")).upper() if replace_check else None,
             ))
+            if replace_check and str(row.get("status", "ENABLED")).upper() == "ENABLED" and str(row.get("validated", "NOT VALIDATED")).upper() == "VALIDATED":
+                # The replacement adds the CHECK VALIDATE, so every existing row must already satisfy the new condition.
+                preconditions.append(_count_check(
+                    f"check-replacement-no-violations-{_safe_check_slug(table_name + '-' + name)}",
+                    f"{_sql_identifier(target_schema)}.{_sql_identifier(table_name)} WHERE NOT ({row['condition']})", 0,
+                ))
             posts.append(_count_check(
                 f"constraint-{_safe_check_slug(table_name + '-' + name)}",
                 f"ALL_CONSTRAINTS WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(table_name)} AND CONSTRAINT_NAME = {_sql_literal(name)} "
@@ -1017,10 +1164,19 @@ def _structure_bundle(config: Mapping, source_schema: str, target_schema: str, s
             ))
 
     for name, row in sorted(source_indexes.items()):
-        if name in target_indexes or any(
-            row.get("table_name") == target_row.get("table_name") and _columns_signature(row) and _columns_signature(row) == _columns_signature(target_row)
-            for target_row in target_indexes.values()
-        ):
+        matches = [(name, target_indexes[name])] if name in target_indexes else []
+        matches += [
+            (target_name, target_row) for target_name, target_row in target_indexes.items()
+            if target_name != name and row.get("table_name") == target_row.get("table_name")
+            and _columns_signature(row) and _columns_signature(row) == _columns_signature(target_row)
+        ]
+        if matches:
+            source_uniqueness = str(row.get("uniqueness") or "NONUNIQUE").upper()
+            for target_name, target_row in matches:
+                if str(target_row.get("uniqueness") or "NONUNIQUE").upper() != source_uniqueness:
+                    raise baseline.BaselineError(
+                        f"index {name} differs in uniqueness from the target index {target_name}; needs a reviewed migration"
+                    )
             continue
         definition = definitions.get(ObjectKey(source_schema, name, "INDEX"))
         if definition is None:

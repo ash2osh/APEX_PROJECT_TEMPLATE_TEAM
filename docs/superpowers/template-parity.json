@@ -83,10 +83,10 @@
     },
     ".env.example": {
       "status": "intended",
-      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT.",
+      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT. Follow-up 2026-11-20: both examples describe the DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER shorthand.",
       "blobs": [
-        "67df24266ec3f262d46d1fcfe14d12c3a4b2bcb2",
-        "34a22c159abe48f1f3ab272e3ed43fb49befefd1"
+        "39a3ec847cd38644b3c0f76ed69a9d007296f2f8",
+        "b6bacd5129442469869555b1c119a12f6c25c0ac"
       ]
     },
     ".github/workflows/template-checks.yml": {
@@ -123,18 +123,18 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor.",
       "blobs": [
-        "8166c1d3fec4bf313596c8785ecda1be99a11969",
-        "3951f205d974b10efe088a19b38106a2cca4452c"
+        "eed6ff76da91a3f0333695eb23b3a460eaa88fed",
+        "d05f40c57527b0c24556cc5be7e5f6c0641d789b"
       ]
     },
     "TODO.md": {
       "status": "intended",
-      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 3): both record the Oracle 23ai checks (INVISIBLE columns, DATA_DEFAULT_VC, SQLcl session cost); only 26.2 lists the app-unlock live gap. Follow-up 2026-11-20: both record the verified virtual-column capture; 26.2 also records the app-unlock live check.",
       "blobs": [
-        "999dd0410b38311669a051262a085dce50014343",
-        "a24bb4fcf60c525a003b749e13f40012f578dc33"
+        "72fb12fe075ef438441917fde7bdc7ad301293d8",
+        "1b513a323377ec97f6f4aaecb98bc1d04d80802c"
       ]
     },
     "ai_generate/2026-11-14/WALKTHROUGH.md": {
@@ -165,8 +165,8 @@
       "status": "intended",
       "reason": "Each template keeps its own daily walkthrough of the 2026-11-19 review-fix branch; the shared changes are described in both.",
       "blobs": [
-        "e36d7e7cb769e0169027fa7f601bc9d6fd408aa6",
-        "2b28fff7de1b36222e506f34b0122246162de295"
+        "28515f4911c3cb25b157a0ce06f6ee052225e9d7",
+        "7b2b33c05aa375b567eed66bc3899849c1c5ae8f"
       ]
     },
     "docs/EXAMPLES.md": {
@@ -179,10 +179,10 @@
     },
     "docs/GETTING_STARTED.md": {
       "status": "intended",
-      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): both guides now clean up by file-level provenance and list inherited workflows by name; they differ in the SQLcl floor, release commands and the 26.1 lock-based test listing. Follow-up 2026-11-19 (pass 3): both guides carry the section for existing projects; the 26.2 guide also clarifies which engine accepts --apex-release. Follow-up 2026-11-20: both guides describe the DEV shorthand.",
       "blobs": [
-        "1d1ba5dcf33ce5714545ea69da185ad8daa3a525",
-        "de4d2979f4cc822d93557b7688b98c94bc2355d8"
+        "ac7cde34baf6dc0d1421eda71d562a35b7f64a00",
+        "d1d8294d2676073eb326f78430b33db543acfb6b"
       ]
     },
     "docs/TROUBLESHOOTING.md": {
@@ -235,9 +235,9 @@
     },
     "docs/known-limitations.md": {
       "status": "intended",
-      "reason": "Release-specific limits: 26.2 lists native-lock, partial-publish, normalization, rehearsal and capsule-budget limits; 26.1 lists its no-lock publish race and the -y flags for reconcile and rollout recovery.",
+      "reason": "Release-specific limits: 26.2 lists native-lock, partial-publish, normalization, rehearsal and capsule-budget limits; 26.1 lists its no-lock publish race and the -y flags for reconcile and rollout recovery. Follow-up 2026-11-20: both note that 19c is no longer a supported floor.",
       "blobs": [
-        "427119cf29946151848209a424dff8c78072f69e",
+        "d54f368d49901d354c70472e5002a1cd97405e3b",
         "ea52aa6d17b35d8590f46bfd8b070229c1a0117f"
       ]
     },
@@ -259,9 +259,9 @@
     },
     "docs/publish-rules.md": {
       "status": "intended",
-      "reason": "Release-specific publish rules: 26.2 documents native DEV locks, partial publish, normalized verification and runtime verification after import; 26.1 documents the no-lock race, the exact-bytes check and first publish of an absent app, which 26.2 refuses Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19: only 26.2 documents that a verified app-unlock closes earlier held lock records (26.1 has no application lock).",
+      "reason": "Release-specific publish rules: 26.2 documents native DEV locks, partial publish, normalized verification and runtime verification after import; 26.1 documents the no-lock race, the exact-bytes check and first publish of an absent app, which 26.2 refuses Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19: only 26.2 documents that a verified app-unlock closes earlier held lock records (26.1 has no application lock). Follow-up 2026-11-19 (pass 2): only 26.2 documents that app-unlock closes held run.* and publish.* records (26.1 has no application lock).",
       "blobs": [
-        "43f3a69efcc3cb5ced1741acd1c3fc900095004d",
+        "7003f1666f8067a35af76980ef82e1df65137358",
         "b68512e4786f903ad2dcd266ab5b4bfc9e594084"
       ]
     },
@@ -379,10 +379,10 @@
     },
     "scripts/compare_env_catalog.sql": {
       "status": "feature",
-      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply.",
+      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply. Follow-up 2026-11-20: both lines now capture `virtual_expression` (DATA_DEFAULT_VC when the database has it, NULL otherwise) in the columns section; the same change, so the remaining difference is unchanged. The columns section also carries internal_column_id (the position evidence of an invisible column) on both lines.",
       "blobs": [
-        "609ea023fc1363e2d48135d7b7d63e88307d433d",
-        "66f72a6ccb9980156a8e4c4da1b5cb520ac43cad"
+        "f18f3ac8511b3ff7b2a0aa33fb74fde9608b4b8e",
+        "b4ac0629f77cfae9c2437057b8c4214938bbba5b"
       ]
     },
     "scripts/deploy.sh": {
@@ -538,8 +538,8 @@
       ]
     },
     "scripts/rollout.py": {
-      "status": "missed",
-      "reason": "Missed: 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate.",
+      "status": "intended",
+      "reason": "Not ported (was missed): 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard.",
       "blobs": [
         "6371436540cb92183ee0083bf70af1c44beaca09",
         "96ce1597b28228c3094500c54092f56e11c1c22e"
@@ -563,10 +563,10 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines. Follow-up 2026-11-19 (pass 2): both lines restore the caller PROJECT_SCHEMA after every command.",
       "blobs": [
-        "04c01d489fb9a6046e029d612840d8185a3a3982",
-        "ce91b7d8dd7991a44749ac1beaaa5241b4b1bfde"
+        "1b48e7170121e057ff76eb2e53479fb0c1892837",
+        "c7194ddaa69240823305d63937d0316b51b78f5d"
       ]
     },
     "scripts/team.sh": {
@@ -579,18 +579,18 @@
     },
     "scripts/template_drift.py": {
       "status": "intended",
-      "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1. Follow-up 2026-11-19: removed-by-cleanup and _git_config_path are the same on both lines; 26.1 keeps them here next to is_original_template.",
+      "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1. Follow-up 2026-11-19: removed-by-cleanup and _git_config_path are the same on both lines; 26.1 keeps them here next to is_original_template. Follow-up 2026-11-19 (pass 2): the raw-or-normalized digest match, the strict=False config parser and _normalized_remote are the same on both lines; 26.1 keeps them here next to is_original_template.",
       "blobs": [
-        "2d2775c167d4877ac2aaa847907f40bf6c5856dd",
-        "bcf1b18131ba5c7429bc55220cb022dfa1ce85db"
+        "bf014bd2ad1b6516368ca3c91ce440250c83f22e",
+        "2808ace31369f17033c90eb58c7ca763aadc5dd1"
       ]
     },
     "scripts/upgrade_template.py": {
       "status": "intended",
-      "reason": "26.2 reads schema-2 manifests and apexRelease; 26.1 reads schema 1.",
+      "reason": "26.2 reads schema-2 manifests and apexRelease; 26.1 reads schema 1. Follow-up 2026-11-19 (pass 2): the credential refusal and the installed-state check on a lock read from disk are the same on both lines, and both lines now protect features/ and releases/ as project data. Follow-up 2026-11-20: both lines run the post-upgrade Graphify sync only when the project already uses it (graphify-out; 26.2 also .venv-graphify) and deliver an upstream executable-bit fix; the same behaviour on both lines.",
       "blobs": [
-        "55fb9a2beb2025e5542e65db8a200e6e03e4017c",
-        "6c0f115f11950d60fc7f228c42de4faffe28307b"
+        "6889063f97c1b4850f69d9766a4d2f04fc27fe40",
+        "e8bdcd10396aef3ad57a0dde4fecc9987e8153f8"
       ]
     },
     "scripts/validate_app_source.py": {
@@ -603,9 +603,9 @@
     },
     "scripts/verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now. Follow-up 2026-11-19: the malformed-manifest guard, the removed-by-cleanup count and the linked-worktree config lookup are on both lines; 26.2 keeps is_original_template and _git_config_path here, 26.1 keeps them in scripts/template_drift.py.",
+      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now. Follow-up 2026-11-19: the malformed-manifest guard, the removed-by-cleanup count and the linked-worktree config lookup are on both lines; 26.2 keeps is_original_template and _git_config_path here, 26.1 keeps them in scripts/template_drift.py. Follow-up 2026-11-19 (pass 2): _normalized_remote and the strict=False parser are the same on both lines; 26.2 keeps them here, 26.1 in scripts/template_drift.py.",
       "blobs": [
-        "4b9ad8a0c2a37c92f67b3f3e0e379c3aea0a5f26",
+        "a8c52fdb9c2acbf9ecfcb93e1ea122c8495c90e9",
         "f4c8d9882364037ab980e9793d01a1d20906ccde"
       ]
     },
@@ -661,8 +661,8 @@
       "status": "intended",
       "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the rest are 26.1-specific (for example the 26.1 database tools have no 26.2 dependency). Both lines cover guarded output, unchanged payload bytes and scoped compilation.",
       "blobs": [
-        "612720ff9984c4c99603e040a5023a0609a3c4ff",
-        "568f7a1f8571256aed40e89a0a909057ac75cc74"
+        "1c5c73f7d0ec3728bf335a09f38d68eb5f217f12",
+        "b557decc2fe37f8bd6b10793b2c9cbf819af9b64"
       ]
     },
     "tests/test_baseline_bundle.py": {
@@ -691,10 +691,10 @@
     },
     "tests/test_compare_env.py": {
       "status": "intended",
-      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines.",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines. Follow-up 2026-11-20: both lines pin the virtual_expression probe, token and key in the catalog SQL. Both lines test that an invisible user column is accepted with a positive internal_column_id and refused without one.",
       "blobs": [
-        "2414e8b74b116fe0aa6192e175e06c4cfd08efa8",
-        "68d57f7dfc7c70c015520d97a1fc3b08fc7b5b90"
+        "e5be1fd1ef7d9b523ce4415b419cdb8d803f715f",
+        "15a7b38b69b4ca0d16f9bd04e99eb735092ff24f"
       ]
     },
     "tests/test_deployment_descriptor.py": {
@@ -753,14 +753,6 @@
         "e3ac599f3032105f0e13f1fee733fc6508a0cb89"
       ]
     },
-    "tests/test_migration_archive.py": {
-      "status": "intended",
-      "reason": "Fixture names and test order only: 26.1 uses APP_ONE and 26.2 uses APP_DEV; the same archive cases run in both.",
-      "blobs": [
-        "016809f532a5b6761c61a1fcf071fbeda81b8b1a",
-        "01dcfab5d61b6ca884c1944dd28885951e68d68d"
-      ]
-    },
     "tests/test_migration_checks.py": {
       "status": "feature",
       "reason": "Goes with scripts/migration_checks.py: the 26.2-only metric-phase tests. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
@@ -809,14 +801,6 @@
         "318841ee0a3dff05a676c93a8ed4074300be2b24"
       ]
     },
-    "tests/test_path_utils.py": {
-      "status": "intended",
-      "reason": "Wording only: scripts/path_utils.py is identical; 26.1 renames one test and adds a not-None guard on the imported helper, 26.2 has neither",
-      "blobs": [
-        "d9c2c28a9a9638b29191a63306dfe5707b66f047",
-        "214eea2bb4e66e3d8ed7f9687e24d805370ef5e0"
-      ]
-    },
     "tests/test_publish_cli.py": {
       "status": "intended",
       "reason": "Release-specific publish tests: 26.2 has 16 tests this line lacks (native-lock refusals, partial publish, strict bytes, workspace-user checks, refusing a first publish of an absent app before import); 26.1 has 4 it lacks (byte-exact drift guard, first import of an absent app)",
@@ -842,8 +826,8 @@
       ]
     },
     "tests/test_rollout.py": {
-      "status": "missed",
-      "reason": "Missed: 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py). Both lines assert that a version-1 rollout uses the normal direct migration lease path.",
+      "status": "intended",
+      "reason": "Not ported (was missed): 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py). Both lines assert that a version-1 rollout uses the normal direct migration lease path. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard.",
       "blobs": [
         "1fdc2d41628090eed22ca1c8347016f194b80f9e",
         "b762c9ebec178124d00f040dd36e59a8212ef2cb"
@@ -859,18 +843,18 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines.",
       "blobs": [
-        "f7a80970202ba7f9984281b48624569a6991f481",
-        "d039842e0aee0c6682bb6d4b6b9a21a424dd1db6"
+        "0939d1588af1d2949347e5778e9462bc11b4f5c8",
+        "51756f50228f771da8fb2ccc2b26bba847c61182"
       ]
     },
     "tests/test_template_drift.py": {
       "status": "intended",
-      "reason": "Fixture is a 26.1 project (schema-1 manifest) in 26.1.",
+      "reason": "Fixture is a 26.1 project (schema-1 manifest) in 26.1. Follow-up 2026-11-19 (pass 2): the legacy-digest and installed-state tests are on both lines.",
       "blobs": [
-        "a5af26fc74ae46ffa2b03a38c49b31579c03309d",
-        "af1e68a5bc4fc62481cde080660e9102372904fc"
+        "3522915245fe115409e32752a9f9fb77d8b1ece2",
+        "f4882251480aa0ded67766bbab9760ff149321dd"
       ]
     },
     "tests/test_template_manifest.py": {
@@ -883,18 +867,18 @@
     },
     "tests/test_upgrade_template.py": {
       "status": "intended",
-      "reason": "Tests the schema-2 / apexRelease handling (26.2 only).",
+      "reason": "Tests the schema-2 / apexRelease handling (26.2 only). Follow-up 2026-11-19 (pass 2): the credential, installed-state and redaction tests are on both lines; the features/releases protection tests were already in 26.1 and are now in 26.2. Follow-up 2026-11-20: both lines test the Graphify gate and the mode-only update.",
       "blobs": [
-        "1c1de69d81f45a98f17ef215bfff61640cef43a8",
-        "dc61b8acd7e06faec71fec6da393c7fccb6bf906"
+        "c5107daada4e99f8d3603ffa620a39877879dcdf",
+        "f48c289e8105eae696bb7faed27a723799a7472a"
       ]
     },
     "tests/test_verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2 Follow-up 2026-11-19: the removed-by-cleanup, malformed-manifest and linked-worktree tests exist on both lines.",
+      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2 Follow-up 2026-11-19: the removed-by-cleanup, malformed-manifest and linked-worktree tests exist on both lines. Follow-up 2026-11-19 (pass 2): the remote-normalization and strict-parser tests are on both lines.",
       "blobs": [
-        "e1b50f1c8b7ec2250b3635b717f7ede9def28bc7",
-        "87b70583d6a4b1df642be0decd69edb54c543436"
+        "41c29478b554e182dc16b24546313b79926ae852",
+        "5b12a07f4d00f0de11261627e6245f68b5c02847"
       ]
     },
     "tests/test_verify_publish_state.py": {
@@ -906,10 +890,10 @@
       ]
     },
     "tests/test_windows_support.py": {
-      "status": "missed",
-      "reason": "Missed (tests only, the code is identical on both lines): 26.2 tests that Wait-SqlclProcess waits for pending output after the process exits (SqlclOutputCompletionTests, scripts/invoke_sqlcl.ps1) and tests the optional DBA alias in scripts/load_env.ps1; 26.1 has neither test (it tests process-tree waiting instead). Its other 26.2-only tests cover 26.2 PowerShell commands (baseline, compare-env, migration rehearsal).",
+      "status": "feature",
+      "reason": "The tests that 26.1 lacked (Wait-SqlclProcess waiting for pending output, the optional DBA alias in load_env.ps1) now live in the core as tests/test_windows_support_shared.py, so both lines run them. What still differs: 26.2 tests its 26.2-only PowerShell commands (baseline, compare-env, migration rehearsal); 26.1 tests process-tree waiting instead.",
       "blobs": [
-        "26450d83118408677490dd49352455aa0d47e931",
+        "1afa45f3a3f6f070cc86a44cdd0f97926a16f7a1",
         "23e565e2a40cf32c3bafc4cda0bbc000cbbb088c"
       ]
     }

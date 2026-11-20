@@ -446,6 +446,20 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertNotIn("CAST(NULL AS CLOB)", sql)
         self.assertEqual(sql.count("TO_CLOB(NULL)"), 3)
 
+    def test_virtual_expression_names_the_dictionary_column_only_when_the_probe_finds_it(self) -> None:
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        probe = "SELECT COUNT(*) INTO l_virtual_expr_captured FROM all_tab_columns"
+
+        self.assertEqual(sql.count(probe), 1)
+        self.assertLess(sql.index(probe), sql.index("add_query_section('tables'"))
+        self.assertIn("WHERE owner = 'SYS' AND table_name = 'ALL_TAB_COLS' AND column_name = 'DATA_DEFAULT_VC';", sql)
+        self.assertIn(
+            "CASE WHEN l_virtual_expr_captured > 0 THEN 'c.data_default_vc' ELSE 'CAST(NULL AS VARCHAR2(4000))' END",
+            sql,
+        )
+        self.assertEqual(sql.count("c.data_default_vc"), 1, "only the token replacement may name the 23ai-only column")
+        self.assertIn("'virtual_expression' VALUE CASE WHEN c.virtual_column = 'YES' THEN VIRTUAL_EXPR END", sql)
+
     def test_unselected_prefix_grants_are_not_reported(self) -> None:
         source = catalog("dev")
         target = catalog("staging")
@@ -525,6 +539,31 @@ class EnvironmentComparisonTests(unittest.TestCase):
         parsed = parse_environment_catalog_output(framed(payload), sections=("columns",))
 
         self.assertEqual(1, len(parsed["sections"]["columns"]))
+
+    def test_capture_parser_accepts_an_invisible_user_column_proven_by_its_internal_position(self) -> None:
+        payload = catalog("dev")
+        payload["sections"]["columns"] = [{
+            "table_name": "T_ORDER", "name": "NOTE_FLAG", "data_type": "NUMBER",
+            "column_position": None, "internal_column_id": 4, "hidden": "Y", "user_generated": "YES",
+        }]
+        payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+
+        parsed = parse_environment_catalog_output(framed(payload), sections=("columns",))
+
+        self.assertEqual(1, len(parsed["sections"]["columns"]))
+
+    def test_capture_parser_rejects_a_hidden_user_column_with_no_position_at_all(self) -> None:
+        for extra in ({}, {"internal_column_id": None}, {"internal_column_id": 0}, {"internal_column_id": "4"}):
+            with self.subTest(extra=extra):
+                payload = catalog("dev")
+                payload["sections"]["columns"] = [{
+                    "table_name": "T_ORDER", "name": "NOTE_FLAG", "data_type": "NUMBER",
+                    "column_position": None, "hidden": "Y", "user_generated": "YES", **extra,
+                }]
+                payload["coverage"]["sections"]["columns"] = {"complete": True, "pages": [1]}
+
+                with self.assertRaisesRegex(CatalogError, "column position"):
+                    parse_environment_catalog_output(framed(payload), sections=("columns",))
 
     def test_dba_script_refuses_inverted_or_unknown_network_aces(self) -> None:
         for inverted_principal in ("YES", None, "UNKNOWN"):

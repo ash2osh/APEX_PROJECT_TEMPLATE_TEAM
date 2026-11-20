@@ -15,14 +15,32 @@ $global:LASTEXITCODE = 0
 # an exit status. The finally block at the bottom treats any other end as Ctrl-C.
 $finished = $false
 
+# --schema and the targets command change PROJECT_SCHEMA for this run only. The caller's
+# value (null when unset) is kept here and put back before every exit, so a persistent
+# PowerShell session does not see the previous command's selection.
+$script:callerProjectSchema = [Environment]::GetEnvironmentVariable("PROJECT_SCHEMA")
+$script:callerSchemaRestored = $false
+
+function Restore-CallerProjectSchema {
+  if ($script:callerSchemaRestored) { return }
+  $script:callerSchemaRestored = $true
+  if ($null -eq $script:callerProjectSchema) {
+    Remove-Item -LiteralPath Env:PROJECT_SCHEMA -ErrorAction SilentlyContinue
+  } else {
+    [Environment]::SetEnvironmentVariable("PROJECT_SCHEMA", $script:callerProjectSchema)
+  }
+}
+
 function Fail([string] $Message) {
   [Console]::Error.WriteLine("team error: $Message")
   $script:finished = $true
+  Restore-CallerProjectSchema
   exit 2
 }
 
 function Exit-Team([int] $Code) {
   $script:finished = $true
+  Restore-CallerProjectSchema
   exit $Code
 }
 
@@ -757,10 +775,14 @@ try {
       $refusalStatus = 1
     }
     [Console]::Error.WriteLine($refusal)
+    Restore-CallerProjectSchema
     exit $refusalStatus
   }
   throw
 } finally {
+  # Every command ends here, including the ones that exit early through Exit-Team or Fail:
+  # the caller's PROJECT_SCHEMA is put back before the script's status is reported.
+  Restore-CallerProjectSchema
   # Ctrl-C stops this script as well as the helper it was running, so nothing
   # after the helper runs and pwsh would exit 0, which a caller reads as success.
   # It does not run the catch block, so a script that ended without finishing was

@@ -558,12 +558,13 @@ def _column_order_is_provable(row: Mapping) -> bool:
     position = row.get("column_position")
     if type(position) is int and position > 0:
         return True
-    is_system_hidden = (
-        position is None
-        and str(row.get("hidden", "")).upper() in {"Y", "YES", "TRUE"}
-        and str(row.get("user_generated", "")).upper() in {"N", "NO", "FALSE"}
-    )
-    return is_system_hidden
+    hidden = position is None and str(row.get("hidden", "")).upper() in {"Y", "YES", "TRUE"}
+    user_generated = str(row.get("user_generated", "")).upper()
+    if hidden and user_generated in {"N", "NO", "FALSE"}:
+        return True
+    # An INVISIBLE user column has no COLUMN_ID, but Oracle still numbers it with INTERNAL_COLUMN_ID.
+    internal_position = row.get("internal_column_id")
+    return hidden and user_generated in {"Y", "YES", "TRUE"} and type(internal_position) is int and internal_position > 0
 
 
 def _mle_language_is_provable(row: Mapping) -> bool:

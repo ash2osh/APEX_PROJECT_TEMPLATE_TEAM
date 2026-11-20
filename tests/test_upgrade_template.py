@@ -1426,11 +1426,12 @@ class PostUpgradeGraphifyTests(unittest.TestCase):
         })
         post_sync.assert_called_once_with(project, actions)
 
-    def test_post_upgrade_sync_runs_setup_graphify_when_extractor_touched(self) -> None:
+    def test_post_upgrade_sync_runs_setup_graphify_when_extractor_touched_and_graph_in_use(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
             scripts = project / "scripts"
             scripts.mkdir(parents=True, exist_ok=True)
+            (project / "graphify-out").mkdir()
             setup_script = scripts / "setup_graphify_apx.py"
             setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
@@ -1448,12 +1449,13 @@ class PostUpgradeGraphifyTests(unittest.TestCase):
                     timeout=60,
                 )
 
-    def test_post_upgrade_sync_runs_setup_graphify_when_extractor_is_created(self) -> None:
+    def test_post_upgrade_sync_runs_setup_graphify_when_extractor_is_created_and_graph_in_use(self) -> None:
         # An upgrade that adds the extractor reports CREATE, never ADD.
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
             scripts = project / "scripts"
             scripts.mkdir(parents=True, exist_ok=True)
+            (project / "graphify-out").mkdir()
             setup_script = scripts / "setup_graphify_apx.py"
             setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
@@ -1468,6 +1470,56 @@ class PostUpgradeGraphifyTests(unittest.TestCase):
                     text=True,
                     timeout=60,
                 )
+
+    def test_post_upgrade_sync_skipped_when_extractor_created_but_graphify_never_used(self) -> None:
+        # Shipping a new extractor must not install Graphify into a project that lacks it.
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            scripts = project / "scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            (scripts / "setup_graphify_apx.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            actions = [
+                upgrade_engine.Action("CREATE", "scripts/graphify_apexlang_extractor.py"),
+                upgrade_engine.Action("UPDATE", "scripts/setup_graphify_apx.py"),
+            ]
+            with patch("subprocess.run") as mock_run:
+                upgrade_engine._post_upgrade_sync(project, actions)
+                mock_run.assert_not_called()
+
+    def test_post_upgrade_sync_runs_setup_graphify_when_project_venv_exists_without_graph(self) -> None:
+        # The project-local .venv-graphify (see project_graphify_environment in graphify_project.py) marks use.
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            scripts = project / "scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            (project / ".venv-graphify").mkdir()
+            setup_script = scripts / "setup_graphify_apx.py"
+            setup_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            actions = [upgrade_engine.Action("UPDATE", "AGENTS.md")]
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+                upgrade_engine._post_upgrade_sync(project, actions)
+                mock_run.assert_called_once_with(
+                    [sys.executable, str(setup_script)],
+                    cwd=project,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+    def test_post_upgrade_sync_skipped_without_setup_script_even_with_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            (project / "scripts").mkdir(parents=True, exist_ok=True)
+            (project / "graphify-out").mkdir()
+            (project / ".venv-graphify").mkdir()
+
+            actions = [upgrade_engine.Action("UPDATE", "scripts/graphify_apexlang_extractor.py")]
+            with patch("subprocess.run") as mock_run:
+                upgrade_engine._post_upgrade_sync(project, actions)
+                mock_run.assert_not_called()
 
     def test_post_upgrade_sync_skipped_when_extractor_untouched_and_no_graph(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1605,6 +1657,82 @@ class LineEndingPlanTests(unittest.TestCase):
             self.assertEqual((project / "AGENTS.md").read_bytes(), b"rules v1\n")
             self.assertFalse((project / upgrade_engine.LOCK_NAME).exists())
 
+
+class ModeOnlyPlanTests(unittest.TestCase):
+    """A Git executable-bit change with identical bytes must reach the project.
+
+    scripts/build_release.sh changed 100644 -> 100755 upstream with no content
+    change. The digest matched, so the file was UNCHANGED and stayed
+    non-executable in downstream copies.
+    """
+
+    CONTENT = b"echo v1\n"
+    LOCK_HASH = hashlib.sha256(b"echo v1\n").hexdigest()
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        base = Path(self.temporary.name)
+        self.template = base / "template"
+        self.project = base / "project"
+        (self.template / "scripts").mkdir(parents=True)
+        (self.project / "scripts").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def install(self, template_bytes: bytes, template_mode: int, project_bytes: bytes, project_mode: int) -> None:
+        template_file = self.template / "scripts" / "tool.sh"
+        project_file = self.project / "scripts" / "tool.sh"
+        template_file.write_bytes(template_bytes)
+        template_file.chmod(template_mode)
+        project_file.write_bytes(project_bytes)
+        project_file.chmod(project_mode)
+
+    def plan(self, lock_hash: str):
+        actions, new_lock = upgrade_engine.plan_upgrade(
+            self.project, self.template, ["scripts/tool.sh"], [], {"files": {"scripts/tool.sh": lock_hash}}
+        )
+        return {action.path: action for action in actions}, new_lock
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable bits")
+    def test_mode_only_upstream_change_is_an_update_that_sets_the_bit(self) -> None:
+        self.install(self.CONTENT, 0o755, self.CONTENT, 0o644)
+
+        actions, new_lock = self.plan(self.LOCK_HASH)
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UPDATE")
+
+        upgrade_engine.apply_actions(
+            self.project, self.template, list(actions.values()), "unused", "0" * 40, new_lock
+        )
+        target = self.project / "scripts" / "tool.sh"
+        self.assertEqual(target.read_bytes(), self.CONTENT)
+        self.assertTrue(target.stat().st_mode & 0o111, "executable bit was not applied")
+
+    def test_identical_content_and_mode_stays_unchanged(self) -> None:
+        self.install(self.CONTENT, 0o644, self.CONTENT, 0o644)
+
+        actions, _ = self.plan(self.LOCK_HASH)
+
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UNCHANGED")
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable bits")
+    def test_identical_content_with_an_extra_local_executable_bit_is_left_alone(self) -> None:
+        # Only a template-executable, project-non-executable file is acted on: a file system that cannot record the
+        # bit reports every file as executable, which must not make every file look changed.
+        self.install(self.CONTENT, 0o644, self.CONTENT, 0o755)
+
+        actions, _ = self.plan(self.LOCK_HASH)
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UNCHANGED")
+
+    def test_content_and_mode_both_differing_keeps_the_content_decision(self) -> None:
+        # The template changed and the project was edited: a conflict, as before.
+        self.install(b"echo v2\n", 0o755, b"our edit\n", 0o644)
+        actions, _ = self.plan(hashlib.sha256(b"echo v1\n").hexdigest())
+        self.assertEqual(actions["scripts/tool.sh"].kind, "CONFLICT")
+
+        # The lock records the project's own bytes: an update, as before.
+        actions, _ = self.plan(hashlib.sha256(b"our edit\n").hexdigest())
+        self.assertEqual(actions["scripts/tool.sh"].kind, "UPDATE")
 
 
 class ConservativeOwnershipUpgradeTests(unittest.TestCase):
@@ -1801,6 +1929,161 @@ class ConservativeOwnershipUpgradeTests(unittest.TestCase):
         self.assertIn("CONFLICT AGENTS.md", res2.stdout)
         self.assertEqual((self.project / "AGENTS.md").read_text(encoding="utf-8"), "customized rules\n")
         self.assertEqual((self.project / "AGENTS.md.template-new").read_text(encoding="utf-8"), "upstream rules v2\n")
+
+
+SYNTHETIC_CREDENTIAL_URL = "https://synthuser:synthsecret@example.invalid/owner/repo.git"
+
+
+class SourceCredentialTests(unittest.TestCase):
+    """Template sources must not carry credentials into the lock, errors or git arguments."""
+
+    def test_allowed_source_forms_are_accepted(self) -> None:
+        for source in (
+            "ssh://git@github.com/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "https://github.com/owner/repo.git",
+            "/home/dev/template",
+            "../template",
+        ):
+            with self.subTest(source=source):
+                upgrade_engine._reject_credentials(source)
+
+    def test_credential_forms_are_refused_without_echoing_the_secret(self) -> None:
+        for source in (
+            SYNTHETIC_CREDENTIAL_URL,
+            "https://synthuser@example.invalid/owner/repo.git",
+            "http://synthuser@example.invalid/owner/repo.git",
+            "https://:synthsecret@example.invalid/owner/repo.git",
+            "ssh://synthuser:synthsecret@example.invalid/owner/repo.git",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+                    upgrade_engine._reject_credentials(source)
+                self.assertIn("template source must not contain credentials", str(caught.exception))
+                self.assertNotIn("synthsecret", str(caught.exception))
+
+    def test_lock_bytes_refuses_a_credential_upstream(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+            upgrade_engine._lock_bytes(SYNTHETIC_CREDENTIAL_URL, "a" * 40, {"AGENTS.md": "b" * 64})
+        self.assertIn("remove it from .template-lock.json", str(caught.exception))
+        self.assertNotIn("synthsecret", str(caught.exception))
+        with self.assertRaises(upgrade_engine.UpgradeError):
+            upgrade_engine._lock_bytes("https://synthuser@example.invalid/owner/repo.git", "a" * 40, {})
+
+    def test_lock_read_refuses_a_credential_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = {"schemaVersion": 1, "upstream": SYNTHETIC_CREDENTIAL_URL, "commit": "a" * 40,
+                    "files": {"AGENTS.md": "b" * 64}}
+            (root / ".template-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+            with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+                upgrade_engine.read_lock(root)
+            self.assertNotIn("synthsecret", str(caught.exception))
+
+    def test_run_git_error_text_redacts_the_userinfo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+                upgrade_engine.run_git(
+                    root, "clone", "--quiet", "--", "https://synthuser:synthsecret@127.0.0.1:9/x.git", str(root / "dest")
+                )
+            self.assertNotIn("synthsecret", str(caught.exception))
+            self.assertNotIn("synthuser", str(caught.exception))
+            self.assertIn("***@", str(caught.exception))
+
+    def test_cli_refuses_credential_source_before_any_git_command(self) -> None:
+        import contextlib
+        import io
+
+        calls: list[tuple] = []
+
+        def forbidden_git(*args: str) -> str:
+            calls.append(args)
+            raise AssertionError("git must not run for a credential source")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(upgrade_engine, "run_git", side_effect=forbidden_git):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    code = upgrade_engine.main(
+                        ["--project-root", temporary, "--source", SYNTHETIC_CREDENTIAL_URL, "--dry-run"]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("template source must not contain credentials", stderr.getvalue())
+        self.assertNotIn("synthsecret", stderr.getvalue())
+        self.assertEqual(calls, [])
+
+
+class LockReadStateTests(unittest.TestCase):
+    """A lock read from disk must record an installed commit and at least one file."""
+
+    def read_payload(self, payload: dict) -> dict:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".template-lock.json").write_text(json.dumps(payload), encoding="utf-8")
+            return upgrade_engine.read_lock(root)
+
+    def test_empty_files_lock_is_refused_on_read(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+            self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                               "commit": "a" * 40, "files": {}})
+        self.assertIn("must record the installed commit and at least one installed file", str(caught.exception))
+
+    def test_missing_commit_is_refused_on_read(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError) as caught:
+            self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                               "files": {"AGENTS.md": "b" * 64}})
+        self.assertIn("must record the installed commit and at least one installed file", str(caught.exception))
+
+    def test_non_hex_commit_is_refused_on_read(self) -> None:
+        with self.assertRaises(upgrade_engine.UpgradeError):
+            self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                               "commit": "main", "files": {"AGENTS.md": "b" * 64}})
+
+    def test_normal_lock_still_reads(self) -> None:
+        lock = self.read_payload({"schemaVersion": 1, "upstream": "https://example.invalid/t.git",
+                                  "commit": "a" * 40, "files": {"AGENTS.md": "b" * 64}})
+        self.assertEqual(lock["commit"], "a" * 40)
+
+    def test_absent_lock_is_still_the_internal_first_install_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertEqual(upgrade_engine.read_lock(Path(temporary)), {"files": {}})
+
+
+class ProjectDataProtectionTests(unittest.TestCase):
+    """features/ and releases/ hold downstream feature and release data, as in the 26.1 engine."""
+
+    def test_feature_and_release_data_is_protected(self) -> None:
+        for path in (
+            "features/dispatch/APP_CODE/packages/dispatch.pks.sql",
+            "features/dispatch/APP_CODE/checks.json",
+            "releases/current.json",
+            "releases/.local-state.json",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(upgrade_engine.protected_project_path(path))
+
+    def test_placeholder_keep_files_are_not_protected(self) -> None:
+        for path in ("features/.gitkeep", "releases/.gitkeep"):
+            with self.subTest(path=path):
+                self.assertFalse(upgrade_engine.protected_project_path(path))
+
+    def test_samples_cover_feature_and_release_data(self) -> None:
+        for sample in ("features/example/APP_CODE/packages/example.pks.sql", "releases/current.json",
+                       "releases/.local-state.json"):
+            with self.subTest(sample=sample):
+                self.assertIn(sample, upgrade_engine.PROTECTED_SAMPLES)
+                self.assertTrue(upgrade_engine.protected_project_path(sample))
+
+    def test_manifest_cannot_assign_feature_or_release_data_to_the_template(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pattern in ("features/**", "releases/**"):
+                with self.subTest(pattern=pattern):
+                    manifest = {**MANIFEST, "templateOwned": [pattern]}
+                    (root / "template-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                    with self.assertRaises(upgrade_engine.UpgradeError):
+                        upgrade_engine.load_manifest(root)
 
 
 if __name__ == "__main__":
