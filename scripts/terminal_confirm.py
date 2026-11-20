@@ -10,8 +10,11 @@ The recorded way to skip a prompt is `-y` / `--yes`; on production a run also ne
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import TextIO
+
+_IS_WINDOWS = os.name == "nt"
 
 YES_REFUSAL = (
     "refused: this confirmation is read from a terminal; piped or redirected answers are not accepted. "
@@ -22,13 +25,48 @@ PRODUCTION_NAME_REQUIRED = "production also needs --confirm-target <db_unique_na
 
 
 def stdin_is_terminal(stream: TextIO | None = None) -> bool:
-    """True when the answer can be typed: standard input (or the given stream) is a terminal."""
+    """True when the answer can be typed: standard input (or the given stream) is a terminal.
+
+    On Windows isatty() is also True for the NUL device (`< nul`, and the standard input of many
+    non-interactive callers), so a file-backed stream must also be a console handle.
+    """
     stream = sys.stdin if stream is None else stream
     if stream is None:
         return False
     try:
-        return bool(stream.isatty())
+        if not stream.isatty():
+            return False
     except (AttributeError, OSError, ValueError):
+        return False
+    if not _IS_WINDOWS:
+        return True
+    return _windows_console_stream(stream)
+
+
+def _windows_console_stream(stream: TextIO) -> bool:
+    try:
+        fileno = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        # Not backed by a file descriptor (a test double): isatty() is the only evidence there is.
+        return True
+    return _console_mode_answers(fileno)
+
+
+def _console_mode_answers(fileno: int) -> bool:
+    """True when the descriptor's handle is a console: GetConsoleMode succeeds only for a console handle."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        import msvcrt
+        handle = msvcrt.get_osfhandle(fileno)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_console_mode = kernel32.GetConsoleMode
+        get_console_mode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        get_console_mode.restype = wintypes.BOOL
+        mode = wintypes.DWORD(0)
+        return bool(get_console_mode(handle, ctypes.byref(mode)))
+    except (ImportError, OSError, ValueError, AttributeError):
         return False
 
 

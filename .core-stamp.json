@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "eb2bb5f2def30627275cbf2af7565aa8abad25af",
+  "coreCommit": "118876716e416df40c57cf30edb6c974e7e53f05",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -489,7 +489,7 @@
     },
     {
       "path": "scripts/terminal_confirm.py",
-      "sha256": "443da6eb37c2b2bfb51f065d07d05e076c78fc86ac598ac45b082e319e69805a",
+      "sha256": "4aacfb0becd041260735613379245fac644e33c2b406beb82f4fc4ed6519f96f",
       "executable": false
     },
     {
@@ -1224,7 +1224,7 @@
     },
     {
       "path": "tests/test_terminal_confirm.py",
-      "sha256": "32fab3ebf6cb98f8435efdc49224f6031bb65d5310cc86dc98513a11375917fc",
+      "sha256": "9b003779651a9538a71ad553ea86fa22e5eeff08b16d916bdb7956e4e4878201",
       "executable": false
     },
     {

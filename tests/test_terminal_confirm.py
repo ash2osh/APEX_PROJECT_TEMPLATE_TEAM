@@ -35,6 +35,34 @@ class TerminalConfirmTests(unittest.TestCase):
             self.assertFalse(terminal_confirm.stdin_is_terminal(None))
         self.assertFalse(terminal_confirm.stdin_is_terminal(object()))
 
+    def test_nul_device_is_not_a_terminal(self):
+        # On Windows isatty() is True for the NUL device; only a console handle may answer a prompt.
+        with open(os.devnull) as nul:
+            self.assertFalse(terminal_confirm.stdin_is_terminal(nul))
+
+    def test_windows_file_backed_stream_needs_a_console_handle(self):
+        class FileBacked(FakeStream):
+            def fileno(self):
+                return 7
+
+        with patch.object(terminal_confirm, "_IS_WINDOWS", True), \
+                patch.object(terminal_confirm, "_console_mode_answers", return_value=False) as console:
+            self.assertFalse(terminal_confirm.stdin_is_terminal(FileBacked(True)))
+            console.assert_called_once_with(7)
+        with patch.object(terminal_confirm, "_IS_WINDOWS", True), \
+                patch.object(terminal_confirm, "_console_mode_answers", return_value=True):
+            self.assertTrue(terminal_confirm.stdin_is_terminal(FileBacked(True)))
+        # A stream with no descriptor keeps the isatty() answer, and a non-terminal never asks the descriptor.
+        with patch.object(terminal_confirm, "_IS_WINDOWS", True):
+            self.assertTrue(terminal_confirm.stdin_is_terminal(FakeStream(True)))
+            self.assertFalse(terminal_confirm.stdin_is_terminal(FakeStream(False)))
+        with patch.object(terminal_confirm, "_IS_WINDOWS", True), \
+                patch.object(terminal_confirm, "_console_mode_answers", side_effect=AssertionError("descriptor asked")):
+            self.assertFalse(terminal_confirm.stdin_is_terminal(FileBacked(False)))
+
+    def test_console_mode_is_false_for_an_unknown_descriptor(self):
+        self.assertFalse(terminal_confirm._console_mode_answers(-1))
+
     def test_yes_gate_refuses_with_the_one_message_that_names_yes(self):
         stderr = io.StringIO()
         with patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), contextlib.redirect_stderr(stderr):
