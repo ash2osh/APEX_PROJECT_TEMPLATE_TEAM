@@ -137,7 +137,10 @@ repository, not in the template copy, then sync it back as described in
   repository, or a project file in the project.
 - `team-offline`: read the `verify-local` lines printed above the FAIL. An application source or
   descriptor problem is fixed in the project. A problem in `scripts/team.ps1` is a core change.
-- `tests`: rerun the failing module on its own with `python -m unittest tests.<module>`. Fix a shared test
+- `tests`: rerun the failing module on its own with
+  `python -m unittest discover -s tests -p "test_<module>.py"`, for example
+  `-p "test_verify_local.py"`. `python -m unittest tests.<module>` does not work: the test
+  modules import shared helpers such as `_test_subprocess_safety` as top-level modules. Fix a shared test
   in the core repository. Do not add a test to `tests/known_flaky.txt` without evidence that it passes on
   unchanged code.
 - `pre-push`: run `python3 scripts/pre_push_check.py --all` on a machine that has the tools, and fix the

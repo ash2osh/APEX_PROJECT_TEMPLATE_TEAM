@@ -90,6 +90,10 @@ an optional `evidence` list with the plan's evidence strings; an index without
 that key loads unchanged. Unknown keys or malformed records make migration
 discovery refuse the index.
 
+A folder with no attempt or receipt evidence, such as one that was never applied, is not
+refused. Its dry-run plan shows the evidence `no-attempt-or-receipt`; check that line before
+you add `--yes`.
+
 A folder with an attempt record but no verified receipt is refused, and the
 refusal names the `reconcile-migration` command. Three ways through:
 
@@ -324,8 +328,10 @@ scripts/team.sh verify migrations/DEMO/2026-09-27_create-customers-r001 \
 
 `--phase pre`, `--phase post` and `--phase both` select preconditions,
 postconditions or both; each selected folder's checks are evaluated. The
-default is `both`. `--only-failed` hides rows that returned their expected
-value, and `--format json` emits a versioned JSON report. `--jobs N` allows up
+default is `both`. After a migration has applied, its preconditions are false by
+design, so `--phase both` exits 1 for that folder; use `--phase post` to check an
+applied folder. `--only-failed` hides rows that returned their expected value, and
+`--format json` emits a versioned JSON report. `--jobs N` allows up
 to N batched SQLcl check sessions to run concurrently; its default is 1. Each
 session keeps the same read-only transaction, disabled-commit guard and
 per-session target identity verification used by `migrate`. The command runs

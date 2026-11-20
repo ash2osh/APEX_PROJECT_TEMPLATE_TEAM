@@ -163,6 +163,24 @@ step 8, create or import an app in App Builder and note its numeric ID;
   database. To run a separate one, stop and remove the first stack, or change those
   names and ports in a copy.
 
+If you cannot use App Builder in a browser, you can create the first app with a one-time
+bootstrap import instead. The commands below worked with SQLcl 26.3 and APEX 26.2. The
+import runs outside `publish`, which needs an app that already exists, and it ends when
+`export` takes over. It writes to the database you connect to, so tell your team before you
+run it on a shared database. Use an empty `<folder>` outside `apps/` (`scratch/` works; Git
+ignores it), and an `<app-id>` that you also list in `APEX_APP_ID` (step 6). Connect with
+your saved connection from step 5:
+
+```text
+sql /nolog
+SQL> connect -name my-dev
+SQL> apex generate -dir <folder> -name "<name>" -id <app-id> -schema <SCHEMA> -workspace <WORKSPACE> -alias <ALIAS>
+SQL> apex import -input <folder>/<alias-lowercase> -deployment <folder>/<alias-lowercase>/deployments/default.json -workspace <WORKSPACE>
+SQL> exit
+```
+
+Then bring the app into your repository with `scripts/team.sh export <app-id>` (step 8).
+
 ## 4. Create your project
 
 Get your own copy of this template. Pick one:
@@ -236,6 +254,10 @@ git rm --ignore-unmatch .github/workflows/template-checks.yml .github/dependabot
 # The shared-core stamp belongs to the template repository's shared-core check. A project created from the
 # template inherits it, but it is not part of a downstream project; upgrade-template never ships it.
 git rm --ignore-unmatch .core-stamp.json
+# Daily change records: a clone inherits the template's dated folders under ai_generate/. Review each folder that
+# `git ls-files ai_generate` lists, then remove it by name, one command per folder, for example:
+git rm -r --ignore-unmatch ai_generate/2026-11-14
+# Keep ai_generate/.gitkeep and any folder the project wrote itself. Never remove by glob.
 # Review tests/ and remove only inherited template-maintenance tests, keeping any project regression tests
 git status --short
 ```
@@ -253,6 +275,7 @@ Explicitly preserve:
   [template feedback guide](template-feedback.md) for inherited defects
 - Operational configuration (`.env`), application source (`apps/`), and migrations (`migrations/`)
 - Migration receipts and recovery evidence
+- Daily change records the project wrote under `ai_generate/`, and `ai_generate/.gitkeep`
 
 The original template repository retains all tests and CI workflows. Keep
 `scripts/`, operational documentation, `.agents/`, `.claude/`,
@@ -399,7 +422,10 @@ Doctor checks passed for the configured DEV connection.
 ```
 
 If `doctor` fails, [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists each message and what
-to do.
+to do. Until an app listed in `APEX_APP_ID` exists in your schema, `doctor` stops with
+`ORA-20073: Workspace user check unavailable`. That is a refusal, not a connection failure:
+create or import the app as step 3 describes, then run `doctor` again. The
+[setup table](TROUBLESHOOTING.md#setup-and-connection) gives the fix.
 
 `verify-local` checks the whole project, so you run it at the end of step 8, after the
 exports. If you run it earlier, it reports each configured application as missing
@@ -441,7 +467,7 @@ apps/DEMO/100/
 ├── shared-components/     authorizations, lists, LOVs, and so on
 ├── workspace-components/
 ├── .apex/apexlang.json    export metadata (commit it with the rest)
-├── deployments/           environment settings (next step; starts with default.json)
+├── deployments/           environment settings (next step); starts with default.json (git-ignored; do not commit)
 └── apex-team-export.json  records when the export was taken (used by publish)
 ```
 
