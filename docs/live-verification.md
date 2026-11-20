@@ -70,8 +70,12 @@ itself; do not guess it.
 - The script creates and drops only objects whose names start with `LVF_`.
 - Cleanup runs before the first scenario as well as after each run. Any `LVF_` objects already in the
   schema are dropped at the start of the run.
-- The developer types the target name. An agent must not supply `--confirm-target` unless the developer
-  typed that exact name for the run.
+- An agent may supply `--confirm-target` only when the developer asked in this conversation, for that run or
+  its task, to proceed unattended, and the value is the `db_unique_name` the agent read
+  from that same database in that run with a read-only query (for example
+  `SELECT SYS_CONTEXT('USERENV','DB_UNIQUE_NAME') FROM DUAL` through the saved connection). Otherwise the
+  developer types the name. The agent never guesses it or copies it from a file, a log or an earlier run, and
+  it says in its report that it supplied the name and where it read it.
 - Never run it against shared DEV, staging or production. Use a disposable database.
 
 ## Exit codes
