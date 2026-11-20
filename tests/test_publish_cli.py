@@ -1109,6 +1109,11 @@ class PublishAppCliTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("changed while publishing; left as is", result.stdout + result.stderr)
+            # Windows PowerShell 5.1 used to wrap this warning, which split the recovery path across lines.
+            recovery = [line for line in (result.stdout + result.stderr).splitlines()
+                        if "preserve lock recovery evidence at" in line]
+            self.assertTrue(recovery, result.stdout + result.stderr)
+            self.assertIn("recovery.json", recovery[0], result.stdout + result.stderr)
             self.assertIn("// saved during publish", (app / "application.apx").read_text(encoding="utf-8"))
 
     def test_powershell_import_session_receives_the_approved_live_state(self) -> None:

@@ -16,6 +16,20 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKS = json.dumps({"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]}) + "\n"
 
 
+def minimal_environment() -> dict[str, str]:
+    """PATH and HOME only (no project settings), plus the system variables Windows programs need.
+
+    Without LOCALAPPDATA the Python install manager's python3 alias downloads a whole
+    runtime into the current directory, which here is the repository root.
+    """
+    environment = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")}
+    if os.name == "nt":
+        for name in ("SystemRoot", "LOCALAPPDATA", "APPDATA", "USERPROFILE", "TEMP", "TMP", "COMSPEC", "PATHEXT"):
+            if name in os.environ:
+                environment[name] = os.environ[name]
+    return environment
+
+
 def add_folder(root: Path, relative: str, sql: str = "CREATE TABLE T1 (ID NUMBER);\n") -> Path:
     folder = root / relative
     folder.mkdir(parents=True)
@@ -129,10 +143,9 @@ class SchemaFolderCliTests(unittest.TestCase):
         (self.root / "migrations").mkdir()
 
     def run_checker(self, *arguments: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        base = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")}
         return subprocess.run(
             [BASH, str(ROOT / "scripts" / "check_conflicts.sh"), "--repo-root", str(self.root), *arguments],
-            cwd=ROOT, text=True, capture_output=True, check=False, env={**base, **(environment or {})},
+            cwd=ROOT, text=True, capture_output=True, check=False, env={**minimal_environment(), **(environment or {})},
         )
 
     def test_local_check_accepts_a_schema_folder(self) -> None:
@@ -218,6 +231,19 @@ class CompareSchemaOptionTests(unittest.TestCase):
         }
         code = compare_schema.main(["--env", "staging", "--object", "T1"], environ=environment)
         self.assertNotEqual(0, code)
+
+
+class ChildEnvironmentTests(unittest.TestCase):
+    def test_child_environment_keeps_windows_system_variables_and_no_project_settings(self) -> None:
+        from unittest.mock import patch
+        project = {"DEV_SQLCL_CONNECTION": "conn-dev", "TABLES_SCHEMA": "APP_TWO", "CODE_SCHEMA": "APP_TWO", "APEX_WORKSPACE": "WORKSPACE", "PROJECT_SCHEMA": "APP_TWO"}
+        with patch.dict(os.environ, {**project, "LOCALAPPDATA": r"C:\Users\example\AppData\Local"}):
+            environment = minimal_environment()
+        self.assertIn("PATH", environment)
+        self.assertIn("HOME", environment)
+        self.assertEqual([], [name for name in environment if name.startswith(("DEV_", "TABLES_", "CODE_", "APEX_", "PROJECT_"))])
+        if os.name == "nt":
+            self.assertEqual(r"C:\Users\example\AppData\Local", environment.get("LOCALAPPDATA"))
 
 
 if __name__ == "__main__":

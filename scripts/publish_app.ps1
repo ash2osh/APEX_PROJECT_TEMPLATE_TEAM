@@ -340,6 +340,9 @@ $importRunning = $false
 $lockRecovery = $null
 $lockHeld = $false
 $importAttempted = $false
+# Set while the pre-publication lifecycle capture runs and cleared once it succeeds. A failed capture's message
+# names the SQLcl diagnostics file, so the scratch folder is kept for that file rather than deleted under the message.
+$lifecycleDiagnostics = $false
 $lockArguments = @()
 
 # .NET rather than Get-FileHash: a Windows PowerShell that inherited PowerShell 7's
@@ -379,7 +382,7 @@ function Invoke-SwapIfUnchanged([string]$Target, [string]$Expected, [string]$Rep
   }
   if ($null -ne $acl) {
     try { Set-Acl -LiteralPath $Target -AclObject $acl } catch {
-      Write-Warning "publish warning: could not restore the Windows permissions of ${Target}: $($_.Exception.Message)"
+      [Console]::Error.WriteLine("WARNING: " + "publish warning: could not restore the Windows permissions of ${Target}: $($_.Exception.Message)")
     }
   }
   return "swapped"
@@ -410,8 +413,14 @@ try {
   if ($null -eq $lifecyclePython) { throw 'Python 3.10 or newer is required for lifecycle verification' }
   $lifecycleArguments = @('--connection', $sqlclConnection, '--expected-user', $expectedUser, '--schema', $parsingSchema,
     '--workspace', [string]$deployment.workspace.name, '--app-id', $AppId, '--environment', $appEnvironment)
+  # Set before the capture so that a non-zero exit is covered even when PowerShell's native-command error
+  # preference ends the script at the capture line, before $LASTEXITCODE is checked.
+  $lifecycleDiagnostics = $true
   & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') capture @lifecycleArguments --run-dir (Join-Path $publishWorkDir 'lifecycle-before')
-  if ($LASTEXITCODE -ne 0) { throw 'publish error: pre-publication lifecycle observation is unavailable; nothing imported' }
+  if ($LASTEXITCODE -ne 0) {
+    throw 'publish error: pre-publication lifecycle observation is unavailable; nothing imported'
+  }
+  $lifecycleDiagnostics = $false
   $identitySnapshot = Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json'
   $identityJson = Get-Content -LiteralPath $identitySnapshot -Raw | ConvertFrom-Json
   $identityFields = @('db_unique_name','service_name','container_id','container_name','edition','server_host','session_user','current_schema')
@@ -641,15 +650,15 @@ if ($appEnvironment -eq "dev" -and -not $force) {
       if ($LASTEXITCODE -eq 0) { $lockHeld = $false }
     }
     if ($lockHeld -or $importAttempted) {
-      Write-Warning "publish: preserve lock recovery evidence at $lockRecovery/recovery.json; inspect the live application and coordinate recovery before app-unlock."
+      [Console]::Error.WriteLine("WARNING: " + "publish: preserve lock recovery evidence at $lockRecovery/recovery.json; inspect the live application and coordinate recovery before app-unlock.")
     }
   }
   if ($importRunning) {
     if ($appEnvironment -eq "dev") {
       $stampedText = if ($publishedVersion) { $publishedVersion } else { "the version you published" }
-      Write-Warning "publish: interrupted while the import was running, so its result is unknown: DEV may or may not run your source. Commit your changes, run scripts/team.ps1 export $AppId, and read the live version; $stampedText means the import completed."
+      [Console]::Error.WriteLine("WARNING: " + "publish: interrupted while the import was running, so its result is unknown: DEV may or may not run your source. Commit your changes, run scripts/team.ps1 export $AppId, and read the live version; $stampedText means the import completed.")
     } else {
-      Write-Warning "publish: interrupted while the import into $targetLabel was running, so its result is unknown; inspect $targetLabel before importing again."
+      [Console]::Error.WriteLine("WARNING: " + "publish: interrupted while the import into $targetLabel was running, so its result is unknown; inspect $targetLabel before importing again.")
     }
   }
   if ($importUnverified) {
@@ -659,9 +668,9 @@ if ($appEnvironment -eq "dev" -and -not $force) {
         $relativeStamped = $applicationSource.Substring($repoRoot.Length).TrimStart('\', '/')
         $nextStep = "Commit the stamped $relativeStamped first (it is what was imported), then run scripts/team.ps1 export $AppId to see what is live, reconcile, and commit."
       }
-      Write-Warning "publish: DEV now runs the imported source, but it was not verified. $nextStep"
+      [Console]::Error.WriteLine("WARNING: " + "publish: DEV now runs the imported source, but it was not verified. $nextStep")
     } else {
-      Write-Warning "publish: $targetLabel now runs the imported source, but it was not verified; compare it with the committed source before importing again."
+      [Console]::Error.WriteLine("WARNING: " + "publish: $targetLabel now runs the imported source, but it was not verified; compare it with the committed source before importing again.")
     }
   }
   if ($restoreUnstamped -and (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
@@ -669,19 +678,23 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     $restoreResult = Invoke-SwapIfUnchanged -Target $applicationSource -Expected $stampedSource `
       -Replacement $restoreSource -Aside (Join-Path $publishWorkDir "application.apx.displaced")
     if ($restoreResult -eq "changed") {
-      Write-Warning "publish warning: $applicationSource changed while publishing; left as is (check its version line)"
+      [Console]::Error.WriteLine("WARNING: " + "publish warning: $applicationSource changed while publishing; left as is (check its version line)")
     } elseif ($restoreResult -ne "swapped") {
-      Write-Warning "publish warning: could not remove the publish tag from $applicationSource ($restoreResult); restore its version line by hand"
+      [Console]::Error.WriteLine("WARNING: " + "publish warning: could not remove the publish tag from $applicationSource ($restoreResult); restore its version line by hand")
     }
   }
   # Interrupted or failed between moving application.apx aside and installing
   # its replacement: put the moved-aside file back before scratch is deleted.
   $keepPublishWorkDir = $importAttempted
-  if ($keepPublishWorkDir) { Write-Warning "publish: unverified import diagnostics retained at $publishWorkDir" }
+  if ($keepPublishWorkDir) { [Console]::Error.WriteLine("WARNING: " + "publish: unverified import diagnostics retained at $publishWorkDir") }
+  if ($lifecycleDiagnostics) {
+    $keepPublishWorkDir = $true
+    [Console]::Error.WriteLine("WARNING: " + "publish: lifecycle diagnostics retained at $publishWorkDir")
+  }
   foreach ($aside in @((Join-Path $publishWorkDir "application.apx.before-stamp"), (Join-Path $publishWorkDir "application.apx.displaced"))) {
     if (-not (Test-Path -LiteralPath $applicationSource) -and (Test-Path -LiteralPath $aside -PathType Leaf)) {
       try { [System.IO.File]::Move($aside, $applicationSource) } catch {
-        Write-Warning "publish error: could not put application.apx back; recover it from $aside"
+        [Console]::Error.WriteLine("WARNING: " + "publish error: could not put application.apx back; recover it from $aside")
         $keepPublishWorkDir = $true
       }
     }
@@ -691,7 +704,7 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     Remove-Item -LiteralPath $publishWorkDir -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $publishWorkDir) {
       $relativeWorkDir = $publishWorkDir.Substring($repoRoot.Length).TrimStart('\', '/')
-      Write-Warning "publish warning: could not remove the temporary directory $relativeWorkDir; delete it after closing whatever holds a file in it"
+      [Console]::Error.WriteLine("WARNING: " + "publish warning: could not remove the temporary directory $relativeWorkDir; delete it after closing whatever holds a file in it")
     }
   }
 }

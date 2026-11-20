@@ -1,9 +1,10 @@
 """Offline checks for scripts/windows_check.ps1, the Windows PowerShell 5.1 readiness script.
 
-Only the script's own behaviour is tested here, with pwsh standing in for the engine. The tests
-never run the `tests` or `pre-push` steps, which would run the whole suite again, and they do not
-read the developer's .env: each run removes PROJECT_ENV_FILE from the child environment, and the
-loader probe names its own file.
+Only the script's own behaviour is tested here, with pwsh standing in for the engine. The real
+`tests` and `pre-push` steps never run here, since they would run the whole suite again: the `tests`
+step runs only against a fake root holding two small unittest modules. The tests also do not read
+the developer's .env: each run removes PROJECT_ENV_FILE from the child environment, and the loader
+probe names its own file.
 """
 
 from __future__ import annotations
@@ -187,9 +188,43 @@ class WindowsCheckScriptRunTests(unittest.TestCase):
         self.assertIn("RESULT environment PASS", allowed.stdout)
 
         refused = run_windows_check(SCRIPT, "-Only", "environment")
+        if _test_subprocess_safety.selected_powershell_engine() == "powershell":
+            # The refusal is for PowerShell 6 or newer; Windows PowerShell 5.1 passes without the switch.
+            self.assertEqual(0, refused.returncode, refused.stdout + refused.stderr)
+            self.assertIn("RESULT environment PASS", refused.stdout)
+            return
         self.assertEqual(1, refused.returncode, refused.stdout + refused.stderr)
         self.assertIn("RESULT environment FAIL", refused.stdout)
         self.assertIn("run this script with powershell.exe", refused.stdout)
+
+
+# A stub that behaves like the real descriptor check: targets names the DEV schema of the temporary .env, and
+# verify-local fails any dev.json whose parsingSchema is not that schema (as verify_local.py does). verify-local also
+# writes the DEV schema it read to scripts/dev_schema.txt as UTF-8, so a test can compare the exact characters.
+STUB_TEAM_DESCRIPTOR = r"""$command = [string] $args[0]
+$envFile = [Environment]::GetEnvironmentVariable('PROJECT_ENV_FILE')
+$values = @{}
+foreach ($line in [System.IO.File]::ReadAllLines($envFile)) {
+  if ($line -match '^([A-Z_]+)=(.*)$') { $values[$Matches[1]] = $Matches[2] }
+}
+if ($command -eq 'targets') { Write-Output ('dev ' + $values['DEV_SCHEMA']); exit 0 }
+if ($command -eq 'verify-local') {
+  $schema = $values['DEV_SCHEMA']
+  [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'dev_schema.txt'), $schema, (New-Object System.Text.UTF8Encoding($false)))
+  $failed = $false
+  $appsRoot = Join-Path $PSScriptRoot '..\apps'
+  foreach ($file in @(Get-ChildItem -LiteralPath $appsRoot -Recurse -Filter dev.json)) {
+    $match = [regex]::Match([System.IO.File]::ReadAllText($file.FullName), '"parsingSchema"\s*:\s*"([^"]+)"')
+    if ($match.Success -and ($match.Groups[1].Value -ne $schema)) {
+      Write-Output ('[FAIL] app_descriptor_dev: parsingSchema (' + $match.Groups[1].Value + ') is not in configured APEX_PARSING_SCHEMA (' + $schema + ')')
+      $failed = $true
+    }
+  }
+  if ($failed) { exit 2 }
+  exit 0
+}
+exit 2
+"""
 
 
 STUB_TEAM = (
@@ -215,13 +250,14 @@ STUB_TEAM = (
 class TeamOfflineStubTests(unittest.TestCase):
     """team-offline against a stub team.ps1 in a temporary fake root; the real verify-local never runs."""
 
-    def make_root(self, directory: Path, verify_lines: list[str], code: int, apps: tuple[str, ...] = ()) -> Path:
+    def make_root(self, directory: Path, verify_lines: list[str], code: int, apps: tuple[str, ...] = (),
+                  stub: str = STUB_TEAM) -> Path:
         scripts = directory / "scripts"
         scripts.mkdir()
         shutil.copy2(SCRIPT, scripts / "windows_check.ps1")
         for name in ("load_env.ps1", "template_release.ps1", "resolve_python.ps1"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
-        (scripts / "team.ps1").write_bytes(STUB_TEAM.encode("ascii"))
+        (scripts / "team.ps1").write_bytes(stub.encode("ascii"))
         (scripts / "verify.txt").write_bytes(("".join(line + "\n" for line in verify_lines)).encode("ascii"))
         (scripts / "verify.code").write_bytes(str(code).encode("ascii"))
         for app in apps:
@@ -261,6 +297,47 @@ class TeamOfflineStubTests(unittest.TestCase):
             self.assertIn("RESULT team-offline PASS", result.stdout)
             self.assertIn("APEX_APP_ID=150", result.stdout)
 
+    def test_temporary_env_uses_the_schema_of_the_lowest_applications_descriptor(self) -> None:
+        # The team's app parses as E2E_WIN. A fixed SCHEMA1 .env would make verify-local refuse that descriptor.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, [], 0, stub=STUB_TEAM_DESCRIPTOR)
+            descriptor = root / "apps" / "E2E_WIN" / "100" / "deployments" / "dev.json"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.write_text(
+                '{"workspace": {"name": "E2E_WIN"}, "app": {"id": 100, "databaseSession": {"parsingSchema": "E2E_WIN"}}}\n',
+                encoding="ascii",
+            )
+            result = self.run_team_offline(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT team-offline PASS", result.stdout)
+            self.assertIn("DEV_SCHEMA=E2E_WIN", result.stdout)
+            self.assertIn("targets lists E2E_WIN and verify-local exits 0", result.stdout)
+
+    def test_non_ascii_parsing_schema_reaches_the_temporary_env_unchanged(self) -> None:
+        # Windows PowerShell 5.1 reads a file with no byte-order mark in the ANSI code page, so the UTF-8 letter below
+        # would reach the temporary .env as two other characters. The stub reads the .env and the descriptor as UTF-8.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, [], 0, apps=("SCHEMA1/100",), stub=STUB_TEAM_DESCRIPTOR)
+            descriptor = root / "apps" / "SCHEMA1" / "100" / "deployments" / "dev.json"
+            descriptor.parent.mkdir(parents=True, exist_ok=True)
+            descriptor.write_bytes('{"app": {"id": 100, "databaseSession": {"parsingSchema": "CAF\u00c9"}}}\n'.encode())
+            result = self.run_team_offline(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT team-offline PASS", result.stdout)
+            recorded = (root / "scripts" / "dev_schema.txt").read_bytes()
+            self.assertEqual("CAF\u00c9".encode(), recorded, "the temporary .env must hold the descriptor's exact schema name")
+
+    def test_schema_folder_names_the_temporary_schema_when_no_descriptor_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, [], 0, apps=("CUSTDATA/100",), stub=STUB_TEAM_DESCRIPTOR)
+            result = self.run_team_offline(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("DEV_SCHEMA=CUSTDATA", result.stdout)
+            self.assertIn("RESULT team-offline PASS", result.stdout)
+
     def test_missing_directory_of_a_real_application_is_not_excused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -268,6 +345,142 @@ class TeamOfflineStubTests(unittest.TestCase):
             result = self.run_team_offline(script, root)
             self.assertEqual(1, result.returncode, result.stdout + result.stderr)
             self.assertIn("RESULT team-offline FAIL", result.stdout)
+
+
+# Fake unittest modules for the tests step. The noisy one prints summary look-alikes to stdout. A pipe makes
+# stdout block-buffered, so that text is flushed at exit, after unittest's own summary on stderr.
+NOISY_PASSING_MODULE = r'''import unittest
+
+
+class NoisyPassTests(unittest.TestCase):
+    def test_passes_but_prints_look_alikes(self):
+        print(r"OK   C:\fake\path: ok")
+        print("FAILED-looking noise")
+        self.assertTrue(True)
+'''
+
+FAILING_MODULE = r'''import unittest
+
+
+class BrokenTests(unittest.TestCase):
+    def test_fails(self):
+        self.fail("boom")
+
+    def test_errors(self):
+        raise RuntimeError("x")
+'''
+
+# A passing module that prints a status-shaped line that is not one of unittest's counters. The line goes to stderr from
+# an atexit handler, so it comes after unittest's summary, which is also written to stderr: both lines share one stream,
+# in a fixed order. Only the counter check keeps the line from being taken as the summary.
+FIXTURE_LOOK_ALIKE_MODULE = r'''import atexit
+import sys
+import unittest
+
+
+def print_after_the_summary():
+    print("OK (fixture initialized)", file=sys.stderr, flush=True)
+
+
+atexit.register(print_after_the_summary)
+
+
+class FixtureTests(unittest.TestCase):
+    def test_passes(self):
+        self.assertTrue(True)
+'''
+
+# A passing run with one skipped test: unittest's real counter, OK (skipped=1), must still be the summary.
+SKIPPED_MODULE = r'''import unittest
+
+
+class SkipTests(unittest.TestCase):
+    def test_passes(self):
+        self.assertTrue(True)
+
+    @unittest.skip("not on this platform")
+    def test_skipped(self):
+        pass
+'''
+
+HAVE_PYTHON = bool(shutil.which("python") or shutil.which("python3"))
+
+
+@unittest.skipUnless(PWSH, "PowerShell engine is not installed")
+@unittest.skipUnless(HAVE_PYTHON, "python or python3 is not on PATH")
+class TestsStepTests(unittest.TestCase):
+    """The tests step against a fake root with a small unittest package, failing or passing."""
+
+    def make_root(self, directory: Path, modules: dict[str, str]) -> Path:
+        scripts = directory / "scripts"
+        scripts.mkdir()
+        shutil.copy2(SCRIPT, scripts / "windows_check.ps1")
+        shutil.copy2(ROOT / "scripts" / "resolve_python.ps1", scripts / "resolve_python.ps1")
+        tests = directory / "tests"
+        tests.mkdir()
+        for name, text in modules.items():
+            (tests / name).write_bytes(text.encode("ascii"))
+        return scripts / "windows_check.ps1"
+
+    def run_tests_step(self, script: Path, root: Path) -> subprocess.CompletedProcess[str]:
+        return run_windows_check(script, "-AllowPowerShellCore", "-RepoRoot", str(root), "-Only", "tests", cwd=root)
+
+    @staticmethod
+    def result_line(output: str) -> str:
+        matches = [line for line in output.splitlines() if line.startswith("RESULT tests ")]
+        return matches[0] if matches else ""
+
+    def test_failing_run_names_the_failing_tests_and_keeps_the_real_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_noisy.py": NOISY_PASSING_MODULE, "test_broken.py": FAILING_MODULE})
+            result = self.run_tests_step(script, root)
+            output = result.stdout
+            self.assertEqual(1, result.returncode, output + result.stderr)
+            self.assertIn("RESULT tests FAIL", output)
+            detail = self.result_line(output)
+            self.assertIn("FAILED (failures=1, errors=1)", detail)
+            self.assertNotIn("OK   C:\\fake", detail)
+            self.assertIn("2 failing test(s)", detail)
+
+            lines = output.splitlines()
+            self.assertIn("  failing tests (2):", lines)
+            heading = lines.index("  failing tests (2):")
+            headers = [line.strip() for line in lines[heading + 1 : heading + 3]]
+            self.assertTrue(any(header.startswith("FAIL: ") for header in headers), headers)
+            self.assertTrue(any(header.startswith("ERROR: ") for header in headers), headers)
+            self.assertLess(heading, lines.index("  last 60 lines of output:"))
+
+    def test_passing_run_reports_unittests_summary_not_the_printed_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_noisy.py": NOISY_PASSING_MODULE})
+            result = self.run_tests_step(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT tests PASS", result.stdout)
+            detail = self.result_line(result.stdout)
+            self.assertIn("Ran 1 test in", detail)
+            self.assertIn("; OK", detail)
+            self.assertNotIn("OK   C:\\fake", detail)
+
+    def test_a_status_shaped_line_printed_by_a_test_is_not_the_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_fixture.py": FIXTURE_LOOK_ALIKE_MODULE})
+            result = self.run_tests_step(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT tests PASS", result.stdout)
+            detail = self.result_line(result.stdout)
+            self.assertTrue(detail.endswith("; OK"), detail)
+            self.assertNotIn("fixture initialized", detail)
+
+    def test_unittests_skip_counter_is_still_the_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_skipped.py": SKIPPED_MODULE})
+            result = self.run_tests_step(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertTrue(self.result_line(result.stdout).endswith("; OK (skipped=1)"), self.result_line(result.stdout))
 
 
 if __name__ == "__main__":

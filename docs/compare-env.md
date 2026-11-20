@@ -139,7 +139,7 @@ under **not compared**.
 | --- | --- |
 | 0 | Every selected section was compared and no difference or blocker was found. |
 | 1 | Catalog coverage was complete and one or more differences were found. |
-| 2 | Capture failed or was incomplete, a row/payload cap was reached, an object is invalid, or a selected DBA section had no usable DBA connection. |
+| 2 | Capture failed or was incomplete, a row/payload cap was reached, an object is invalid, a selected DBA section had no usable DBA connection, or both sides resolve to the same database (see Limits). |
 
 Each section is read in ordered pages of 500 rows. The capture fails if a
 section exceeds 100,000 rows or if the compressed payload exceeds 128 MiB; it
@@ -166,10 +166,12 @@ end.
   database versions before using the report for a production rollout.
 - Oracle catalog columns and ORDS metadata views vary by database/ORDS release.
   Unsupported or unreadable sections are blockers, not identical results.
-- Environments must have distinct database identities. The comparison refuses a
-  source and target that resolve to the same database, container, schema and
-  edition, and it reports `SELF_COMPARISON`. Containers built from the same Oracle Free
-  image all report `FREE` and `FREEPDB1`, so a rehearsal across them cannot be compared.
+- Environments must have distinct database identities. compare-env reports an
+  `identity` blocker. Its message is "source and target resolve to the same observed
+  database, container, schema, and edition scope." The command exits 2.
+  `compare-schema` reports `SELF_COMPARISON` for the same case. Containers built
+  from the same Oracle Free image all report `FREE` and `FREEPDB1`, so a rehearsal
+  across them cannot be compared.
   Give each environment its own `DB_UNIQUE_NAME`. The same limit applies to a release
   guard: when identities match, nothing in the identity can tell a mis-pointed
   connection from the right one, so connection names and profiles carry that check.

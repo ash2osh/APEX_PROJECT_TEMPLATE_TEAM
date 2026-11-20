@@ -331,7 +331,9 @@ source release never changes source comparison or selects a tolerant profile.
 
 **A new app from `apex generate`.** DEV publish requires an existing app to
 acquire its native lock. Coordinate initial creation in Builder, or a separately
-requested bootstrap import, before the normal publish workflow. Export the live
+requested bootstrap import, before the normal publish workflow. Its commands are in
+[getting started, step 3](GETTING_STARTED.md#3-no-apex-database-yet-run-one-on-your-computer).
+Export the live
 app through the template to obtain its canonical source and database baseline,
 then merge your authored changes. SQLcl starter files can contain an extra blank line
 at the end and an empty deinstall reference that a canonical export removes;

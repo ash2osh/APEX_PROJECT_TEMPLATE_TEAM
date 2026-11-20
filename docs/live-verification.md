@@ -70,8 +70,12 @@ itself; do not guess it.
 - The script creates and drops only objects whose names start with `LVF_`.
 - Cleanup runs before the first scenario as well as after each run. Any `LVF_` objects already in the
   schema are dropped at the start of the run.
-- The developer types the target name. An agent must not supply `--confirm-target` unless the developer
-  typed that exact name for the run.
+- An agent may supply `--confirm-target` only when the developer asked in this conversation, for that run or
+  its task, to proceed unattended, and the value is the `db_unique_name` the agent read
+  from that same database in that run with a read-only query (for example
+  `SELECT SYS_CONTEXT('USERENV','DB_UNIQUE_NAME') FROM DUAL` through the saved connection). Otherwise the
+  developer types the name. The agent never guesses it or copies it from a file, a log or an earlier run, and
+  it says in its report that it supplied the name and where it read it.
 - Never run it against shared DEV, staging or production. Use a disposable database.
 
 ## Exit codes
@@ -97,8 +101,10 @@ remaining `LVF_` objects in the throwaway schema before the next run.
 ## Known limits
 
 - The checks cover the generator and the catalog on one Oracle release at a time.
-- The script has not yet been run on Windows.
-- A temporary-directory path that contains spaces has not been tried with SQLcl on Windows.
+- The script has not yet been run against a live database on Windows. On Windows it starts SQLcl with an empty input
+  pipe (SQLcl aborts with `java.io.IOException: Incorrect function` and still exits 0 when its input is the NUL device)
+  and inside a job object, so a timeout ends the java.exe that sql.exe starts.
+- An `@script` path that contains spaces worked with SQLcl 26.3 on Windows in a check without a database connection.
 
 See also [Live feature-release checks](live-feature-tests.md) for the feature-release path, and
 [Local qualification](local-qualification.md) for the read-only observations against a local target.

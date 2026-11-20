@@ -314,6 +314,56 @@ for ((index = 0; index < ${#ORDS_SCHEMAS[@]}; index++)); do
   run_ords_scope "${ORDS_SCHEMAS[$index]}" "${ORDS_CONNECTIONS[$index]}" "${ORDS_USERS[$index]}"
 done
 
+# SQLcl's SPOOL writes the platform line ending, so on Windows each staged mirror file arrives with CRLF. The committed
+# mirror is LF (.gitattributes forces eol=lf): every .sql and .txt file under the directory has its CRLF pairs turned into
+# LF. The bytes are rewritten directly, so the UTF-8 encoding, a byte-order mark and every other byte are kept.
+# A symbolic link or a Windows junction is never followed: a link to a file outside the mirror would otherwise be rewritten
+# through, and a linked directory is not entered. replace_mirror.sh refuses a stage that holds a link, so it is left as is.
+normalize_mirror_lf() {
+  python3 - "$1" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+# A junction is a reparse point that os.path.islink() does not report, so both are checked.
+REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def is_link_status(status):
+    if stat.S_ISLNK(status.st_mode):
+        return True
+    return bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+
+
+def is_link(path):
+    return is_link_status(os.lstat(path))
+
+
+root = sys.argv[1]
+if not os.path.lexists(root):
+    sys.exit(0)  # replace_mirror.sh reports a missing staging directory
+if is_link(root):
+    print(f"refusing to convert a mirror that is a symbolic link or junction: {root}", file=sys.stderr)
+    sys.exit(2)
+for directory, subdirectories, files in os.walk(root, followlinks=False):
+    # os.walk would enter a junction, so linked directories are removed from the walk here.
+    subdirectories[:] = [name for name in subdirectories if not is_link(os.path.join(directory, name))]
+    for name in files:
+        path = pathlib.Path(directory, name)
+        if path.suffix.lower() not in (".sql", ".txt"):
+            continue
+        # One lstat decides both checks. A link or junction is skipped as before, and so is anything else that is not
+        # a regular file: a FIFO named x.sql would block read_bytes forever.
+        status = os.lstat(path)
+        if is_link_status(status) or not stat.S_ISREG(status.st_mode):
+            continue
+        data = path.read_bytes()
+        if b"\r\n" in data:
+            path.write_bytes(data.replace(b"\r\n", b"\n"))
+PY
+}
+
 REPLACE_ARGS=()
 for schema in "${BACKUP_SCHEMAS[@]}"; do
   spool_schema="$(schema_stage_directory "$schema")"
@@ -339,5 +389,8 @@ for schema in "${BACKUP_SCHEMAS[@]}"; do
     mv -- "$STAGING_DIR/database/$spool_schema/ords" "$STAGING_DIR/ords-install/$schema"
     REPLACE_ARGS+=("$STAGING_DIR/ords-install/$schema" "database/$schema/ords")
   fi
+done
+for ((pair = 0; pair < ${#REPLACE_ARGS[@]}; pair += 2)); do
+  normalize_mirror_lf "${REPLACE_ARGS[$pair]}"
 done
 "$REPO_ROOT/scripts/replace_mirror.sh" "${REPLACE_ARGS[@]}"

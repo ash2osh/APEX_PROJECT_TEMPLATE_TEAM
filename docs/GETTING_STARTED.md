@@ -73,9 +73,46 @@ Notes:
   refuses to run scripts until `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`,
   and migration files must be saved as UTF-8 without a BOM and with LF line
   endings; see the Windows notes in the [README](../README.md#quickstart) and
-  [Troubleshooting](TROUBLESHOOTING.md).
+  [Troubleshooting](TROUBLESHOOTING.md). A clone can fail with `Filename too long`, because Git for Windows does not use
+  long paths by default even when Windows has them enabled, and some test fixture paths are about 150 characters below the
+  checkout. Clone into a short folder (for example `C:\src`), or clone with `git clone -c core.longpaths=true <url>`, which
+  sets it for that repository only.
 - Optional: `uv` and Graphify for the [knowledge graph](../README.md#optional-knowledge-graph),
   and an AI coding assistant such as Claude Code or Codex.
+
+### Windows machines
+
+Required:
+
+- **Git for Windows.** It provides Git Bash, which runs the migration, comparison
+  and deployment helpers. `team.ps1` looks for `bash.exe` beside `git.exe` and in
+  the usual install folders. To name another copy, set `TEAM_BASH` to its full path.
+- **Python 3.10 or newer**, from python.org or winget. `team.ps1` finds `python3`,
+  `python` or `py -3`, in that order.
+- **SQLcl 26.3.0.0 or newer** on `PATH`, for APEX operations. SQLcl needs a Java
+  runtime; see the installation section of
+  [Oracle's SQLcl documentation](https://docs.oracle.com/en/database/oracle/sql-developer-command-line/)
+  for the version your release requires.
+- **Windows PowerShell 5.1** (built into Windows) or **PowerShell 7.3 or newer**,
+  to run `scripts/team.ps1`. For the script execution policy, see the
+  [Windows notes](../README.md#quickstart).
+
+Optional:
+
+- **PowerShell 7.3 or newer** (`pwsh`) is recommended. Under Windows PowerShell 5.1,
+  `team.ps1` refuses an empty argument, a double quote, or a value with a space that
+  ends in a backslash. See the [Windows notes](../README.md#quickstart).
+- **Docker Desktop or Podman**, only to run a local practice database in section 3.
+  The template's scripts never call Docker.
+- **ShellCheck and Ruff**, only for maintainers who run `scripts/pre_push_check.py`.
+  A missing ShellCheck prints a note. A missing Ruff fails the check.
+
+Not needed:
+
+- **WSL.** The template's scripts never use it. The `bash.exe` launcher in
+  `C:\Windows\System32` (and in `WindowsApps`) belongs to WSL. `team.ps1`, the Python
+  helpers and the pre-push check skip it and use Git Bash. Docker Desktop may use
+  WSL 2 as its own engine; that is Docker's choice.
 
 ## 3. No APEX database yet? Run one on your computer
 
@@ -111,6 +148,39 @@ This gives you a schema and a workspace, **not an APEX application**. Before
 step 8, create or import an app in App Builder and note its numeric ID;
 `export` can only export an app that already exists.
 
+- The project's documentation recommends WSL2 on Windows. On one Windows 11 machine,
+  its `install.sh`, `local-26ai.sh` and `create-user` also ran from Git Bash (Git for
+  Windows 2.54) without WSL. Two caveats:
+  - If `ORACLE_HOME` names a missing folder, SQLcl prints `ORACLE_HOME ... does not
+    exist` first. The installer misreads that line as an existing APEX install and
+    skips the APEX install. Run it with `env -u ORACLE_HOME ./install.sh`.
+  - `create-user` printed `Error creating connections directory` and did not save the
+    connection, although it reported `saved sqlcl connection`. Check with
+    `connmgr list`; if it is missing, save it with `conn -save <name> -savepwd`.
+- Its compose file fixes the project name, the container names (`local-26ai`,
+  `local-26ai-ords`), the volume (`oradata-26ai`) and the host ports (1521, 8181,
+  8443). A second copy on the same machine reuses the first one's containers and
+  database. To run a separate one, stop and remove the first stack, or change those
+  names and ports in a copy.
+
+If you cannot use App Builder in a browser, you can create the first app with a one-time
+bootstrap import instead. The commands below worked with SQLcl 26.3 and APEX 26.2. The
+import runs outside `publish`, which needs an app that already exists, and it ends when
+`export` takes over. It writes to the database you connect to, so tell your team before you
+run it on a shared database. Use an empty `<folder>` outside `apps/` (`scratch/` works; Git
+ignores it), and an `<app-id>` that you also list in `APEX_APP_ID` (step 6). Connect with
+your saved connection from step 5:
+
+```text
+sql /nolog
+SQL> connect -name my-dev
+SQL> apex generate -dir <folder> -name "<name>" -id <app-id> -schema <SCHEMA> -workspace <WORKSPACE> -alias <ALIAS>
+SQL> apex import -input <folder>/<alias-lowercase> -deployment <folder>/<alias-lowercase>/deployments/default.json -workspace <WORKSPACE>
+SQL> exit
+```
+
+Then bring the app into your repository with `scripts/team.sh export <app-id>` (step 8).
+
 ## 4. Create your project
 
 Get your own copy of this template. Pick one:
@@ -127,6 +197,8 @@ cd my-apex-project
 git remote rename origin template     # keep the template as a separate remote
 git remote add origin <your-new-repository-url>
 ```
+
+On Windows, if the clone fails with `Filename too long`, use `git clone -c core.longpaths=true <url> my-apex-project` instead; it sets long paths for this repository only.
 
 Either way, the files `AGENTS.project.md`, `PROJECT.md` and
 `.agents/rules/project.md` are yours. Put your project's own notes there,
@@ -182,6 +254,10 @@ git rm --ignore-unmatch .github/workflows/template-checks.yml .github/dependabot
 # The shared-core stamp belongs to the template repository's shared-core check. A project created from the
 # template inherits it, but it is not part of a downstream project; upgrade-template never ships it.
 git rm --ignore-unmatch .core-stamp.json
+# Daily change records: a clone inherits the template's dated folders under ai_generate/. Review each folder that
+# `git ls-files ai_generate` lists, then remove it by name, one command per folder, for example:
+git rm -r --ignore-unmatch ai_generate/2026-11-14
+# Keep ai_generate/.gitkeep and any folder the project wrote itself. Never remove by glob.
 # Review tests/ and remove only inherited template-maintenance tests, keeping any project regression tests
 git status --short
 ```
@@ -199,6 +275,7 @@ Explicitly preserve:
   [template feedback guide](template-feedback.md) for inherited defects
 - Operational configuration (`.env`), application source (`apps/`), and migrations (`migrations/`)
 - Migration receipts and recovery evidence
+- Daily change records the project wrote under `ai_generate/`, and `ai_generate/.gitkeep`
 
 The original template repository retains all tests and CI workflows. Keep
 `scripts/`, operational documentation, `.agents/`, `.claude/`,
@@ -345,7 +422,10 @@ Doctor checks passed for the configured DEV connection.
 ```
 
 If `doctor` fails, [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists each message and what
-to do.
+to do. Until an app listed in `APEX_APP_ID` exists in your schema, `doctor` stops with
+`ORA-20073: Workspace user check unavailable`. That is a refusal, not a connection failure:
+create or import the app as step 3 describes, then run `doctor` again. The
+[setup table](TROUBLESHOOTING.md#setup-and-connection) gives the fix.
 
 `verify-local` checks the whole project, so you run it at the end of step 8, after the
 exports. If you run it earlier, it reports each configured application as missing
@@ -387,7 +467,7 @@ apps/DEMO/100/
 ├── shared-components/     authorizations, lists, LOVs, and so on
 ├── workspace-components/
 ├── .apex/apexlang.json    export metadata (commit it with the rest)
-├── deployments/           environment settings (next step; starts with default.json)
+├── deployments/           environment settings (next step); starts with default.json (git-ignored; do not commit)
 └── apex-team-export.json  records when the export was taken (used by publish)
 ```
 

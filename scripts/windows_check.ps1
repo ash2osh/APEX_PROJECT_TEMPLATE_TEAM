@@ -35,8 +35,8 @@ $script:HasResolver = $false
 
 # A minimal valid .env for the offline checks: the loader requires the project header, and the
 # DEV shorthand trio (DEV_SCHEMA, DEV_SQLCL_CONNECTION, DEV_EXPECTED_USER) is what this script checks.
-function New-DevEnvText([string] $AppId) {
-  return "PROJECT_NAME=DEMO`nDEVELOPER_NAME=ALICE`nDB_ENVIRONMENT=development`nAPEX_APP_ID=" + $AppId + "`nDEV_SCHEMA=SCHEMA1`nDEV_SQLCL_CONNECTION=conn_one`nDEV_EXPECTED_USER=SCHEMA1`n"
+function New-DevEnvText([string] $AppId, [string] $Schema) {
+  return "PROJECT_NAME=DEMO`nDEVELOPER_NAME=ALICE`nDB_ENVIRONMENT=development`nAPEX_APP_ID=" + $AppId + "`nDEV_SCHEMA=" + $Schema + "`nDEV_SQLCL_CONNECTION=conn_one`nDEV_EXPECTED_USER=" + $Schema + "`n"
 }
 
 # Numeric application directories under apps/<schema>/<id>, lowest first (empty on a bare template).
@@ -50,6 +50,32 @@ function Get-ApplicationIds {
     }
   }
   return @($ids | Sort-Object { [decimal] $_ })
+}
+
+# The parsing schema of application <AppId>: its dev.json descriptor's parsingSchema, else the schema folder it
+# sits in. A descriptor names the schema the team's app really parses as, so the temporary .env must use it:
+# a fixed name would make verify-local refuse every real descriptor. A bare template uses SCHEMA1.
+function Get-ApplicationSchema([string] $AppId) {
+  $appsRoot = Join-Path $RepoRoot "apps"
+  if (-not (Test-Path -LiteralPath $appsRoot -PathType Container)) { return "SCHEMA1" }
+  foreach ($schema in @(Get-ChildItem -LiteralPath $appsRoot -Directory)) {
+    $appDir = Join-Path $schema.FullName $AppId
+    if (-not (Test-Path -LiteralPath $appDir -PathType Container)) { continue }
+    $descriptor = Join-Path $appDir "deployments\dev.json"
+    if (Test-Path -LiteralPath $descriptor -PathType Leaf) {
+      try {
+        # Read as UTF-8 explicitly: Windows PowerShell 5.1 would read a file without a byte-order mark as ANSI.
+        $descriptorText = [System.IO.File]::ReadAllText($descriptor, (New-Object System.Text.UTF8Encoding($false)))
+        $parsed = $descriptorText | ConvertFrom-Json
+        $parsing = [string] $parsed.app.databaseSession.parsingSchema
+        if (-not [string]::IsNullOrWhiteSpace($parsing)) { return $parsing }
+      } catch {
+        # An unreadable descriptor falls back to the folder; verify-local reports the descriptor itself.
+      }
+    }
+    return $schema.Name
+  }
+  return "SCHEMA1"
 }
 
 function Test-OnWindows {
@@ -100,7 +126,7 @@ function Invoke-Native([string] $Program, [string[]] $Arguments) {
   $lines = @()
   try {
     $global:LASTEXITCODE = 0
-    $lines = @(& $Program @Arguments 2>&1 | ForEach-Object { "$_" })
+    $lines = @(& $Program @Arguments 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { [string] $_.Exception.Message } else { "$_" } })
     $code = $global:LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previous
@@ -306,7 +332,7 @@ function Invoke-CheckEnvLoader {
     return
   }
   $engine = Get-EnginePath
-  $devLf = New-DevEnvText "100"
+  $devLf = New-DevEnvText "100" "SCHEMA1"
   $triple = @("SCHEMA1", "conn_one", "SCHEMA1")
   $probeNames = @("DEV_SCHEMA", "DEV_SQLCL_CONNECTION", "DEV_EXPECTED_USER", "TABLES_SCHEMA", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER", "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER")
   $work = Get-ScratchDirectory
@@ -442,22 +468,26 @@ function Invoke-CheckTeamOffline {
   $appIds = @(Get-ApplicationIds)
   $bare = ($appIds.Count -eq 0)
   $appId = "100"
-  if (-not $bare) { $appId = [string] $appIds[0] }
+  $schema = "SCHEMA1"
+  if (-not $bare) {
+    $appId = [string] $appIds[0]
+    $schema = Get-ApplicationSchema $appId
+  }
   $work = Get-ScratchDirectory
   $previousEnvFile = [Environment]::GetEnvironmentVariable("PROJECT_ENV_FILE")
   try {
     $envPath = Join-Path $work "dev-only.env"
-    [System.IO.File]::WriteAllText($envPath, (New-DevEnvText $appId), (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($envPath, (New-DevEnvText $appId $schema), (New-Object System.Text.UTF8Encoding($false)))
     if ($bare) {
-      Add-Line "  temporary .env: APEX_APP_ID=100 (no application under apps/)"
+      Add-Line "  temporary .env: APEX_APP_ID=100 DEV_SCHEMA=SCHEMA1 (no application under apps/)"
     } else {
-      Add-Line ("  temporary .env: APEX_APP_ID=" + $appId + " (lowest application id under apps/)")
+      Add-Line ("  temporary .env: APEX_APP_ID=" + $appId + " DEV_SCHEMA=" + $schema + " (lowest application id under apps/)")
     }
     [Environment]::SetEnvironmentVariable("PROJECT_ENV_FILE", $envPath)
 
     $targets = Invoke-Native $engine @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $team, "targets")
-    $targetsOk = (($targets.Code -eq 0) -and (($targets.Lines -join "`n").Contains("SCHEMA1")))
-    Add-Line ("  targets: exit " + $targets.Code + ", lists SCHEMA1: " + $targetsOk)
+    $targetsOk = (($targets.Code -eq 0) -and (($targets.Lines -join "`n").Contains($schema)))
+    Add-Line ("  targets: exit " + $targets.Code + ", lists " + $schema + ": " + $targetsOk)
     if (-not $targetsOk) { Add-Tail $targets.Lines 20 }
 
     $verify = Invoke-Native $engine @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $team, "verify-local")
@@ -476,9 +506,9 @@ function Invoke-CheckTeamOffline {
     if ((-not $verifyOk) -and (-not $bareExcused)) { Add-Tail $verify.Lines 20 }
 
     if (-not $targetsOk) {
-      Set-Outcome "FAIL" ("targets does not list SCHEMA1 (exit " + $targets.Code + "); verify-local exit " + $verify.Code)
+      Set-Outcome "FAIL" ("targets does not list " + $schema + " (exit " + $targets.Code + "); verify-local exit " + $verify.Code)
     } elseif ($verifyOk) {
-      Set-Outcome "PASS" "targets lists SCHEMA1 and verify-local exits 0"
+      Set-Outcome "PASS" ("targets lists " + $schema + " and verify-local exits 0")
     } elseif ($bareExcused) {
       Set-Outcome "PASS" ("bare template: no application under apps/, so configured_app_" + $appId + " is expected to fail")
     } else {
@@ -529,20 +559,44 @@ function Invoke-CheckTests {
   $timer.Stop()
   $seconds = [Math]::Round($timer.Elapsed.TotalSeconds, 1)
 
+  # Stderr is merged into $run.Lines, and a test's own stdout can arrive after unittest's summary, so
+  # only lines in unittest's exact summary form count. The last strict match of each wins.
+  # The status line is OK or FAILED, then unittest's counters in parentheses when there are any. Only those counters
+  # count, so a test's own "OK (fixture initialized)" is not taken as the summary.
+  $counter = '(failures|errors|skipped|expected failures|unexpected successes)=\d+'
+  $statusPattern = '^(OK|FAILED)( \(' + $counter + '(, ' + $counter + ')*\))?\s*$'
   $ranLine = "(no Ran line)"
   $statusLine = "(no status line)"
+  $failingHeaders = New-Object System.Collections.ArrayList
   foreach ($line in $run.Lines) {
-    if ($line -match '^Ran \d+ tests?') { $ranLine = $line }
-    if ($line -match '^(OK|FAILED)') { $statusLine = $line }
+    if ($line -cmatch '^Ran \d+ tests? in [0-9.]+s\s*$') { $ranLine = $line }
+    if ($line -cmatch $statusPattern) { $statusLine = $line }
+    if ($line -cmatch '^(FAIL|ERROR): \S') {
+      $header = $line.TrimEnd()
+      if (-not $failingHeaders.Contains($header)) { [void] $failingHeaders.Add($header) }
+    }
   }
   Add-Line ("  elapsed: " + $seconds + " s")
   Add-Line ("  " + $ranLine)
   Add-Line ("  " + $statusLine)
 
   if ($run.Code -ne 0) {
+    $failCount = $failingHeaders.Count
+    $shown = [Math]::Min($failCount, 50)
+    if ($failCount -gt 0) {
+      Add-Line ("  failing tests (" + $failCount + "):")
+      for ($index = 0; $index -lt $shown; $index++) {
+        Add-Line ("    " + $failingHeaders[$index])
+      }
+      if ($failCount -gt $shown) { Add-Line ("  ... and " + ($failCount - $shown) + " more") }
+    }
     Add-Line "  last 60 lines of output:"
     Add-Tail $run.Lines 60
-    Set-Outcome "FAIL" ("unittest exit " + $run.Code + " after " + $seconds + " s; " + $ranLine + "; " + $statusLine)
+    $failDetail = "unittest exit " + $run.Code + " after " + $seconds + " s; " + $ranLine + "; " + $statusLine
+    if ($failCount -gt 0) {
+      $failDetail = $failDetail + "; " + $failCount + " failing test(s), first: " + $failingHeaders[0]
+    }
+    Set-Outcome "FAIL" $failDetail
     return
   }
   Set-Outcome "PASS" ("unittest exit 0 after " + $seconds + " s; " + $ranLine + "; " + $statusLine)

@@ -209,3 +209,23 @@ jobs:
           python-version: '3.10'
       - name: Darwin exclusive directory installation tests
         run: python3 -m unittest discover -s tests -p 'test_directory_install.py' -v
+
+  # The other jobs parse and test PowerShell only as pwsh 7. This job runs the readiness script's fast steps under
+  # Windows PowerShell 5.1 (`shell: powershell`), the engine the team uses; the full suite is in `windows-offline`.
+  # The environment step fails if the engine is not 5.1. A child powershell.exe makes the script's exit code the result.
+  windows-powershell-51:
+    name: Windows PowerShell 5.1 readiness (fast steps)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.10'
+      - name: windows_check.ps1 under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\windows_check.ps1 -Skip tests,pre-push
+          exit $LASTEXITCODE

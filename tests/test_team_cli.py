@@ -5,6 +5,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import _test_subprocess_safety  # noqa: F401
 import tempfile
 import time
@@ -535,7 +536,7 @@ exit 17
         command = (
             "$ErrorActionPreference = 'Stop'; "
             f". '{helper.as_posix()}'; "
-            f"$values = ConvertFrom-Json -AsHashtable @'\n{encoded_arguments}\n'@; "
+            f"$values = ConvertFrom-Json @'\n{encoded_arguments}\n'@; "
             "$items = @(Get-MigrationPlanArgumentKinds -Values $values); "
             "$items | ConvertTo-Json -Compress -Depth 3"
         )
@@ -2373,6 +2374,234 @@ class TeamPs1EnvironmentTests(unittest.TestCase):
                              "doctor --schema lowercase_name"),
             "UNSET",
         )
+
+
+@unittest.skipUnless(os.name == "nt", "the legacy native argument rules belong to Windows PowerShell; POSIX launchers pass arguments intact")
+class NativeArgumentPassingTests(unittest.TestCase):
+    """Windows PowerShell 5.1 garbles some native arguments: an empty one, a double quote, or a value with a space
+    that ends in a backslash. team.ps1 refuses them before the target starts. A .cmd or .bat target keeps those
+    legacy rules even in PowerShell 7.3+'s default mode, so it is refused there too; a normal .exe gets them intact."""
+
+    REFUSAL = "Windows PowerShell 5.1 cannot pass"
+    # Values the legacy rules garble: a double quote, an empty value, and a space with a trailing backslash.
+    GARBLED = ('A"B', "", "a b\\")
+    # Values the legacy rules leave alone: a .cmd target must receive them exactly.
+    INTACT = ("a b", "ab\\")
+    RECORDER = (
+        "import json, sys\n"
+        "with open(sys.argv[1], 'a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[2:]) + '\\n')\n"
+    )
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.calls = self.root / "bash-calls.jsonl"
+
+    def engines(self) -> list[tuple[str, str]]:
+        """The installed engines as (label, executable): Windows PowerShell 5.1, and PowerShell 7.3+ when present."""
+        found = []
+        windows = _test_subprocess_safety.working_windows_powershell()
+        if windows is not None:
+            found.append(("Windows PowerShell 5.1", windows))
+        pwsh = shutil.which("pwsh")
+        if pwsh and self.powershell_is_at_least(pwsh, (7, 3)):
+            found.append(("PowerShell 7.3+", pwsh))
+        if not found:
+            self.skipTest("neither Windows PowerShell 5.1 nor PowerShell 7.3 or newer is installed")
+        return found
+
+    def reset_calls(self) -> None:
+        if self.calls.exists():
+            self.calls.unlink()
+
+    def recorded_calls(self) -> list[list[str]]:
+        if not self.calls.exists():
+            return []
+        return [json.loads(line) for line in self.calls.read_text(encoding="utf-8").splitlines()]
+
+    def windows_powershell(self) -> str:
+        executable = _test_subprocess_safety.working_windows_powershell()
+        if executable is None:
+            self.skipTest("Windows PowerShell 5.1 is not installed")
+        return executable
+
+    def require_ascii_cmd_fixture(self, *paths: object) -> None:
+        # cmd.exe reads a batch file in the OEM code page. A .cmd fixture whose own path or embedded paths are not
+        # ASCII cannot be written and run as intended (UTF-8 would be misread), so the test skips rather than writes it.
+        for path in paths:
+            if not str(path).isascii():
+                self.skipTest(f"cmd.exe reads a .cmd fixture in the OEM code page, so its paths must be ASCII: {ascii(path)}")
+
+    def resolver_choice(self, engine: str, environment: dict[str, str]) -> str | None:
+        """The Python that team.ps1's resolver (Resolve-TeamPython in scripts/resolve_python.ps1) picks."""
+        result = subprocess.run(
+            [engine, "-NoProfile", "-Command",
+             ". $env:TEAM_TEST_RESOLVER; $python = Resolve-TeamPython; if ($null -ne $python) { $python.Path }"],
+            cwd=ROOT, env={**environment, "TEAM_TEST_RESOLVER": str(ROOT / "scripts" / "resolve_python.ps1")},
+            text=True, capture_output=True, check=False,
+        )
+        return result.stdout.strip() or None
+
+    def interpreter_first_environment(self, engine: str) -> dict[str, str]:
+        """An environment in which team.ps1 runs the running interpreter, which must be a normal .exe.
+
+        PATH holds only the interpreter's folder and the Windows system folders. The resolver looks for python3 on the
+        whole PATH before python, so a prepended folder alone would lose to a pyenv-win python3.bat on the caller's PATH.
+        The choice is read back from the same engine and environment; the test skips when it is not this interpreter.
+        """
+        interpreter = sys.executable
+        if not interpreter.casefold().endswith(".exe"):
+            self.skipTest(f"the running interpreter is not an .exe ({ascii(interpreter)}), so a normal .exe target cannot be arranged")
+        system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        environment = {**os.environ}
+        set_environment_value(environment, "PATH", os.pathsep.join(
+            [str(Path(interpreter).parent), str(system / "System32"), str(system)]))
+        choice = self.resolver_choice(engine, environment)
+        if choice is None or not os.path.samefile(choice, interpreter):
+            self.skipTest(f"team.ps1's resolver picks {ascii(choice)}, not the running interpreter, so a normal .exe target cannot be arranged")
+        return environment
+
+    def fake_bash(self, *, marker_on_probe: bool) -> Path:
+        # A batch file, since PowerShell cannot run an extensionless script on Windows. Each call is recorded: the
+        # recorder appends the arguments the batch file received, as a JSON list, to self.calls. Without
+        # marker_on_probe the python probe (bash -c "python3 ...") answers yes silently and is not recorded.
+        recorder = self.root / "record_call.py"
+        recorder.write_text(self.RECORDER, encoding="ascii")
+        probe_line = "" if marker_on_probe else 'if "%~1"=="-c" exit /b 0\r\n'
+        fake = self.root / "git-bash.cmd"
+        # The batch file embeds sys.executable, the recorder and the calls file, so all of them must be ASCII.
+        self.require_ascii_cmd_fixture(fake, sys.executable, recorder, self.calls)
+        fake.write_text(f'@echo off\r\n{probe_line}"{sys.executable}" "{recorder}" "{self.calls}" %*\r\nexit /b 0\r\n',
+                        encoding="ascii", newline="")
+        return fake
+
+    def run_team(self, engine: str, arguments: list[str], fake: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "team.ps1"), *arguments],
+            cwd=ROOT, env={**os.environ, "TEAM_BASH": str(fake)}, text=True, capture_output=True, check=False,
+        )
+
+    def test_refuses_an_argument_for_git_bash_that_the_legacy_rules_would_garble(self) -> None:
+        for label, engine in self.engines():
+            for value in self.GARBLED:
+                with self.subTest(engine=label, value=value):
+                    self.reset_calls()
+                    result = self.run_team(engine, ["compare-schema", "--env", "dev", "--object", value],
+                                           self.fake_bash(marker_on_probe=True))
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn(self.REFUSAL, result.stderr)
+                    self.assertFalse(self.calls.exists(), "a refused command must not start Git Bash, not even its probe")
+
+    def test_a_cmd_target_gets_each_argument_exactly_or_the_command_is_refused(self) -> None:
+        # Under every engine team.ps1 either refuses a value before the .cmd target starts, or the target receives
+        # exactly that value. An intact value is never refused, because the legacy rules pass it exactly. A garbled
+        # value must be refused, including by PowerShell 7.3+ in its default mode.
+        for label, engine in self.engines():
+            for value in self.GARBLED + self.INTACT:
+                with self.subTest(engine=label, value=value):
+                    self.reset_calls()
+                    result = self.run_team(engine, ["compare-schema", "--env", "dev", "--object", value],
+                                           self.fake_bash(marker_on_probe=False))
+                    output = result.stdout + result.stderr
+                    refused = result.returncode == 2 and self.REFUSAL in result.stderr
+                    if value in self.INTACT:
+                        self.assertFalse(refused, f"the legacy rules pass this value intact, so it must not be refused: {output}")
+                    if value in self.GARBLED:
+                        self.assertTrue(refused, f"the legacy rules garble this value, so it must be refused: {output}")
+                    if refused:
+                        self.assertFalse(self.calls.exists(), "a refused command must not start the .cmd target")
+                        continue
+                    self.assertEqual(result.returncode, 0, output)
+                    calls = self.recorded_calls()
+                    self.assertEqual(len(calls), 1, output)
+                    self.assertEqual(calls[0][1:], ["--env", "dev", "--object", value], output)
+
+    def test_refuses_an_argument_for_python_that_the_legacy_rules_would_garble(self) -> None:
+        engine = self.windows_powershell()
+        result = self.run_team(engine, ["template-status", "--format", 'te"xt'], self.fake_bash(marker_on_probe=True))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(self.REFUSAL, result.stderr)
+        self.assertIn("to Python intact", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_an_ordinary_python_argument_is_not_refused(self) -> None:
+        engine = self.windows_powershell()
+        result = self.run_team(engine, ["template-status", "--format", "text"], self.fake_bash(marker_on_probe=False))
+        self.assertNotIn(self.REFUSAL, result.stderr, result.stdout + result.stderr)
+
+    def test_ordinary_arguments_still_reach_git_bash(self) -> None:
+        engine = self.windows_powershell()
+        result = self.run_team(engine, ["compare-schema", "--env", "dev", "--object", "CUSTOMERS"],
+                               self.fake_bash(marker_on_probe=False))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.recorded_calls()
+        self.assertEqual(len(calls), 1, "an ordinary command must reach Git Bash")
+        self.assertEqual(calls[0][1:], ["--env", "dev", "--object", "CUSTOMERS"])
+
+    @staticmethod
+    def powershell_is_at_least(executable: str, minimum: tuple[int, int]) -> bool:
+        result = subprocess.run([executable, "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+                                text=True, capture_output=True, check=False)
+        parts = result.stdout.strip().split(".")
+        if result.returncode != 0 or len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+            return False
+        return (int(parts[0]), int(parts[1])) >= minimum
+
+    def test_powershell_7_3_refuses_a_double_quote_for_a_cmd_target(self) -> None:
+        # Changed: this test used to expect the double quote to pass through to a .cmd fake. A .cmd target keeps the
+        # legacy rules in PowerShell 7.3+'s default Windows mode, so the double quote is refused before the batch file runs.
+        pwsh = shutil.which("pwsh")
+        if not pwsh or not self.powershell_is_at_least(pwsh, (7, 3)):
+            self.skipTest("PowerShell 7.3 or newer (pwsh) is not installed")
+        self.reset_calls()
+        result = self.run_team(pwsh, ["compare-schema", "--env", "dev", "--object", 'A"B'],
+                               self.fake_bash(marker_on_probe=False))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(self.REFUSAL, result.stderr)
+        self.assertFalse(self.calls.exists(), "a refused command must not start the .cmd target")
+
+    def test_powershell_7_3_hands_a_double_quote_to_a_normal_exe_intact(self) -> None:
+        # The running interpreter is a normal .exe, so PowerShell 7.3+ passes its arguments intact and team.ps1 does not
+        # refuse them. argparse names the value it received in its invalid-choice error. interpreter_first_environment
+        # makes team.ps1's resolver pick this interpreter, or skips; a .bat or .cmd Python is refused, as the next test shows.
+        pwsh = shutil.which("pwsh")
+        if not pwsh or not self.powershell_is_at_least(pwsh, (7, 3)):
+            self.skipTest("PowerShell 7.3 or newer (pwsh) is not installed")
+        environment = self.interpreter_first_environment(pwsh)
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "team.ps1"),
+             "template-status", "--format", 'te"xt'],
+            cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertNotIn(self.REFUSAL, result.stderr, output)
+        self.assertIn("invalid choice: 'te\"xt'", result.stderr, output)
+
+    def test_a_cmd_python_shim_is_refused_before_it_starts(self) -> None:
+        # A pyenv-win Python is a .bat. The Python call sites pass the resolved path, so the legacy rules apply to it
+        # under every engine. PATH holds only the shim's folder and the Windows system folders.
+        system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        for label, engine in self.engines():
+            with self.subTest(engine=label):
+                shim_directory = self.root / ("shim-" + "".join(ch for ch in label if ch.isalnum()))
+                shim_directory.mkdir()
+                # The shim embeds no path, but cmd.exe still reads it from its own path, so that path must be ASCII.
+                self.require_ascii_cmd_fixture(shim_directory / "python.cmd")
+                (shim_directory / "python.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="ascii", newline="")
+                environment = {**os.environ}
+                set_environment_value(environment, "PATH", os.pathsep.join(
+                    [str(shim_directory), str(system / "System32"), str(system)]))
+                result = subprocess.run(
+                    [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "team.ps1"),
+                     "template-status", "--format", 'te"xt'],
+                    cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 2, output)
+                self.assertIn(self.REFUSAL, result.stderr, output)
+                self.assertIn("to Python intact", result.stderr, output)
 
 
 if __name__ == "__main__":

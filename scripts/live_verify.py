@@ -46,6 +46,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts import baseline_bundles as bb
+from scripts import windows_job
 
 SQL_PREAMBLE = (
     "set feedback off\nset heading off\nset pagesize 0\nset linesize 4000\nset serveroutput on\n"
@@ -84,8 +85,13 @@ def _find_sqlcl(path: str | None) -> str | None:
     return shutil.which("sql")
 
 
+def _is_windows() -> bool:
+    """True on Windows, where run_sql uses the job-object runner; the unit tests patch this to pick a branch."""
+    return os.name == "nt"
+
+
 def run_sql(text: str, timeout: int = 180) -> str:
-    """Run a SQL script through SQLcl with the saved connection and return its stdout and stderr."""
+    """Run a SQL script through SQLcl with the saved connection and return its output (stderr merged into stdout)."""
     sqlcl = SQLCL or _find_sqlcl(None)
     if not sqlcl:
         raise RuntimeError("SQLcl (sql) not found")
@@ -94,14 +100,22 @@ def run_sql(text: str, timeout: int = 180) -> str:
         handle.write(text)
         handle.write("\nexit\n")
         path = handle.name
+    command = [sqlcl, "-S", "-name", CONNECTION, f"@{path}"]
+    options = {
+        "text": True, "encoding": "utf-8", "errors": "replace",
+        "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+    }
     try:
-        result = subprocess.run(
-            [sqlcl, "-S", "-name", CONNECTION, f"@{path}"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-        )
+        # NUL as stdin (any non-interactive Windows caller) makes SQLcl abort at startup and still exit 0,
+        # so every platform gets an empty pipe. On Windows sql.exe starts java.exe; on timeout subprocess.run
+        # ends only sql.exe while java.exe keeps the pipes open, so windows_job ends the whole job object.
+        if _is_windows():
+            result = windows_job.run(command, input_text="", timeout=timeout, **options)
+        else:
+            result = subprocess.run(command, input="", timeout=timeout, **options)
     finally:
         Path(path).unlink(missing_ok=True)
-    return ANSI_COLOUR.sub("", result.stdout + result.stderr)
+    return ANSI_COLOUR.sub("", result.stdout or "")
 
 
 def sql(text: str, timeout: int = 180) -> str:

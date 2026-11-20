@@ -186,7 +186,7 @@ def _render_text(report: Mapping, *, only_failed: bool) -> str:
     rows = report["checks"]
     if rows:
         for item in rows:
-            observed = "—" if item["observed"] is None else str(item["observed"])
+            observed = "-" if item["observed"] is None else str(item["observed"])
             lines.append(
                 f"{item['phase']:<14} {item['folder']:<32} {item['id']:<18} "
                 f"{item['expected']!s:<8} {observed:<8} {item['status']}"

@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "afd278b7b4e0454cf6d73a1022c6dcc07c566ec5",
+  "coreCommit": "07e4f50441bfb6f2b1c451370551ff2c1b950cce",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
-      "sha256": "a94fb8fb00d0dc3cae533f3a2532176a21af4c7f5ce0086bc43d5a9e50bc5dff",
+      "sha256": "358993bf8bf7997b12d39d74546f1d467adb2bcbf7de11854a3fa30ef6563fca",
       "executable": false
     },
     {
       "path": "scripts/backup_db.sh",
-      "sha256": "c542809364b244f409abcbb7a6660113dc96f25a1cfd9361455312ffc7c51da5",
+      "sha256": "3b3507c835d956c8cadf110c0ba5384603e8ae2754f295953a1a5808e29c55ae",
       "executable": true
     },
     {
@@ -149,7 +149,7 @@
     },
     {
       "path": "scripts/dev_test_report.py",
-      "sha256": "fd65b51dfce4f52bb6d64f0dfcd29d68def49f1e9fb7c2ef6768177ca5bcbba6",
+      "sha256": "c0d07277a0c999f43f66d4ec60aa39d83cb556f3c41c66e823f28634ff089083",
       "executable": false
     },
     {
@@ -244,17 +244,17 @@
     },
     {
       "path": "scripts/invoke_sqlcl.ps1",
-      "sha256": "93d326ded00db14e95bcc697cf066638ecbe6871b1da72c8b4c2a8fff36c8dbb",
+      "sha256": "928c93af4051122e5d47117b8f6663a84af6e27a7af75551580853d2634c16bf",
       "executable": false
     },
     {
       "path": "scripts/live_verify.py",
-      "sha256": "42a198922d88a083d9f38146b6ab5c2c627e26fdb5c38a3b33c1c8f74c2a8b42",
+      "sha256": "e133fdf59b9fcfdb773b1ee97296de8afe5cb94e3f12aef50a0a25c4b9f357f3",
       "executable": false
     },
     {
       "path": "scripts/load_env.ps1",
-      "sha256": "2f938405f1121ddedc483b4f404c153dfad7754d3305c738fe28da47d3c1d8ea",
+      "sha256": "b1c1782fb54f06716ea61012fec759bb58fbcb600e0303dc0bedaa396b043b29",
       "executable": false
     },
     {
@@ -304,7 +304,7 @@
     },
     {
       "path": "scripts/migration_plan.py",
-      "sha256": "a3c4d97b29c28251544e968d3681fa6d3468c7af1fb9216e72d1c98b7a31329e",
+      "sha256": "459eb42017fd274cf77fd2010debc86d96c93ca189e096277de81abb76ad14db",
       "executable": false
     },
     {
@@ -369,7 +369,7 @@
     },
     {
       "path": "scripts/pre_push_check.py",
-      "sha256": "1ee3aa59e58700fd9904ad4db887f64dc5d2a38bcad40498e6dd1f9620d532d6",
+      "sha256": "af5f2748cec010cff8213acbed65d90416bc290de88c59c75794a28b2291179b",
       "executable": false
     },
     {
@@ -489,7 +489,7 @@
     },
     {
       "path": "scripts/terminal_confirm.py",
-      "sha256": "443da6eb37c2b2bfb51f065d07d05e076c78fc86ac598ac45b082e319e69805a",
+      "sha256": "4aacfb0becd041260735613379245fac644e33c2b406beb82f4fc4ed6519f96f",
       "executable": false
     },
     {
@@ -499,7 +499,7 @@
     },
     {
       "path": "scripts/verify_checks.py",
-      "sha256": "7b9b3b798b30d444f8d716a0bc475c6c4fb388f390b1bc0c7c9d41e0913ec33e",
+      "sha256": "a00b1b6c083306ddcdefeed02769a9aee70a93760591cabaaf63c3fc2854fbc9",
       "executable": false
     },
     {
@@ -524,7 +524,7 @@
     },
     {
       "path": "scripts/windows_check.ps1",
-      "sha256": "64bc26f2900f62b1173e5b10f6fd89e6def624125673bef58bd89ed790898dea",
+      "sha256": "f5751a678a87ce3921f52e671e60ba06d54fe9175e23fbc01f4bafbcd0e13425",
       "executable": false
     },
     {
@@ -549,7 +549,7 @@
     },
     {
       "path": "tests/_test_subprocess_safety.py",
-      "sha256": "b48b97f875de8d87ffe2aa318669386fd3cb6020410cb9edf19f1639c714be4d",
+      "sha256": "a1703fa24020f86ecc10c0ff25d5ab1e6eb038f2ca003c51f15a6fdf0927b274",
       "executable": false
     },
     {
@@ -559,7 +559,7 @@
     },
     {
       "path": "tests/fake_ords_sql.py",
-      "sha256": "8282e2f3b7cda063e3ee411049d9c485cb26622a3103f5fa36ddb4c73fb2c0ff",
+      "sha256": "accfda186e4f53325f1fa6aabb8e2b1c1bf49517f3ddf49cde48aab0630b5c8f",
       "executable": false
     },
     {
@@ -763,13 +763,18 @@
       "executable": false
     },
     {
+      "path": "tests/test_ascii_console_text.py",
+      "sha256": "afbc4f69eea4615152bdb9c51ba049fb556563797576a82aee863d55ae11030c",
+      "executable": false
+    },
+    {
       "path": "tests/test_backup_manifest.py",
       "sha256": "2ea0d315910d78e45da05129e90c7afcc30c353428f264fc88611ff2f5305426",
       "executable": false
     },
     {
       "path": "tests/test_backup_ords_cli.py",
-      "sha256": "d2b02190165535cf9913b548441c029435571e90866d4e92c09758ad245c1dee",
+      "sha256": "534e649e48e938bc38064d8b9bf693394ee56af70e115b8dcdd0005070d2e044",
       "executable": false
     },
     {
@@ -1024,7 +1029,7 @@
     },
     {
       "path": "tests/test_live_verify.py",
-      "sha256": "5d468f4f1dfb3e9b5b31c50690881e36bbf245eabb389dbb22d12a4b10231c06",
+      "sha256": "249fb3f2ce87ffe5f0df68814896a6568b4b1b2b7ae2e5dd30c52a38b3b13819",
       "executable": false
     },
     {
@@ -1059,7 +1064,7 @@
     },
     {
       "path": "tests/test_migration_plan.py",
-      "sha256": "67f4e6cbb577442ed32e0f07c1e8dfb6642addd5bd3b117672ccf01b0468a14c",
+      "sha256": "3da1a0106da276e57f43a57a10de62aa0294e47251d5aae504eff812134ae891",
       "executable": false
     },
     {
@@ -1079,7 +1084,7 @@
     },
     {
       "path": "tests/test_migration_schema_folders.py",
-      "sha256": "f5bca10040fb70e8a13cebd7dd49a6b184fe00b657edc9d41cfc57da7b728ee8",
+      "sha256": "1bc04c06cd2ab4481c88acde22f96af12cf4742ca7b8eadc2166a692717fe303",
       "executable": false
     },
     {
@@ -1114,7 +1119,7 @@
     },
     {
       "path": "tests/test_pre_push_check.py",
-      "sha256": "a13c52cae91cc323b5a19878bb7645950f157272cffe432fb8979bd716b81736",
+      "sha256": "6572af57c289fcfe9a5e3944aaed4358ba88a4922081711e3da8fe195bcbbea4",
       "executable": false
     },
     {
@@ -1219,7 +1224,12 @@
     },
     {
       "path": "tests/test_terminal_confirm.py",
-      "sha256": "32fab3ebf6cb98f8435efdc49224f6031bb65d5310cc86dc98513a11375917fc",
+      "sha256": "9b003779651a9538a71ad553ea86fa22e5eeff08b16d916bdb7956e4e4878201",
+      "executable": false
+    },
+    {
+      "path": "tests/test_test_subprocess_safety.py",
+      "sha256": "57546db5ab3463de7e77338dbbdd78374dfee5df82de8cf3df491811fd43e073",
       "executable": false
     },
     {
@@ -1239,12 +1249,12 @@
     },
     {
       "path": "tests/test_windows_check.py",
-      "sha256": "209db9d1b6aeef26cd986854d7fddc8d7b65c4bd99a98de25f515e90effab8b5",
+      "sha256": "d84f33f4ae4e74748193ae3d9ccad77d3cec9a512723b5b03f1cfc612a26d2ed",
       "executable": false
     },
     {
       "path": "tests/test_windows_support_shared.py",
-      "sha256": "4588284ff44441262aabbdd6dec4439fa23b5cca7680f53833d957cbcdf5653e",
+      "sha256": "c7f1830703515c8382375b5776af6a221589c64ad35a123d37e6a14920d006bd",
       "executable": false
     },
     {

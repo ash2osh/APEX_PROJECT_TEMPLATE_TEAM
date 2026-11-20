@@ -66,9 +66,35 @@ def _launcher_works(executable: str) -> bool:
     return result.returncode == 0
 
 
+def selected_powershell_engine() -> str:
+    """Return "pwsh" or "powershell", the engine that TEMPLATE_TEST_POWERSHELL selects.
+
+    Unset, empty or "pwsh" (case-insensitive, surrounding whitespace ignored) selects PowerShell Core. "powershell"
+    selects Windows PowerShell 5.1. Any other value raises ValueError.
+    """
+    value = os.environ.get("TEMPLATE_TEST_POWERSHELL", "")
+    engine = value.strip().lower()
+    if engine in ("", "pwsh"):
+        return "pwsh"
+    if engine == "powershell":
+        return "powershell"
+    raise ValueError(f'TEMPLATE_TEST_POWERSHELL must be "pwsh" or "powershell", not {value!r}')
+
+
+# TEMPLATE_TEST_POWERSHELL chooses the PowerShell that working_pwsh() gives the pwsh-gated tests (read it with
+# selected_powershell_engine). Unset, empty or "pwsh" means PowerShell Core; "powershell" means Windows PowerShell 5.1,
+# with no fallback to pwsh. Example, from the repository root (files/ in APEX_TEMPLATE_CORE): TEMPLATE_TEST_POWERSHELL=powershell python -m unittest discover -s tests
+# runs those tests under Windows PowerShell 5.1 on Windows (elsewhere they skip). In PowerShell:
+# $env:TEMPLATE_TEST_POWERSHELL = "powershell"
 @lru_cache(maxsize=1)
 def working_pwsh() -> str | None:
-    """Return PowerShell Core only when its launcher can actually start."""
+    """Return the PowerShell chosen by TEMPLATE_TEST_POWERSHELL, only when its launcher can actually start.
+
+    The default (unset, empty or "pwsh") is PowerShell Core. "powershell" selects Windows PowerShell 5.1 and never falls
+    back to pwsh. Any other value raises ValueError. The result is cached, so the setting is read on the first call.
+    """
+    if selected_powershell_engine() == "powershell":
+        return working_windows_powershell()
     executable = shutil.which("pwsh")
     return executable if executable and _launcher_works(executable) else None
 

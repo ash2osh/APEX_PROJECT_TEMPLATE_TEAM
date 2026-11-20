@@ -5,8 +5,9 @@ By default it checks only the files you changed (against the upstream branch or 
 untracked files; with neither, every tracked file), so existing problems elsewhere in a project do not block you. `--all`
 compiles and lints every file under scripts/, tools/ and tests/, as CI does; use it before opening a pull request for a broad change.
 
-ShellCheck (error severity) runs when `shellcheck` is on PATH and the PowerShell parse runs when `pwsh` is on PATH;
-a missing tool prints a one-line note and does not fail the check.
+ShellCheck (error severity) runs when `shellcheck` is on PATH. The PowerShell parse runs with `pwsh`, or on Windows with
+Windows PowerShell when `pwsh` is missing. The shell syntax check uses Git Bash on Windows, never the WSL launcher in
+System32. A missing tool prints a one-line note and does not fail the check.
 
 CI runs the full suite on Linux, Windows and macOS, which takes 10 to 30 minutes. Most failed runs were lint errors or a
 changed test that fails on Linux, both caught here in seconds. This does not run the whole suite or any Windows check.
@@ -20,15 +21,18 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE_DIRS = ("scripts", "tools", "tests")
+# The Windows WSL launcher lives in System32 (or a similar system folder); see find_bash.
+_WSL_LAUNCHER_RE = re.compile(r"(?i)[\\/](System32|SysWOW64|Sysnative|WindowsApps)[\\/]")
 # A checkout from before the script existed skips the check instead of refusing every push.
 HOOK = (
     "#!/bin/sh\n"
@@ -70,6 +74,61 @@ def powershell_parse_command(pwsh: str, files: Sequence[str]) -> list[str]:
         "}; if ($bad -gt 0) { exit 1 }"
     )
     return [pwsh, "-NoProfile", "-Command", script]
+
+
+def find_bash(which: Callable[[str], str | None] | None = None, environ: Mapping[str, str] | None = None,
+              is_windows: bool | None = None) -> str | None:
+    """Return the Bash for the shell syntax check, or None when there is none.
+
+    Off Windows this is the Bash on PATH. On Windows, CreateProcess searches System32 before PATH, so a bare "bash"
+    can start the WSL launcher, which fails when WSL has no distribution. Use TEAM_BASH when it names a file, else the
+    first bash.exe on PATH that is not the launcher, else the Git for Windows copy beside git.exe. Never returns the
+    launcher or a bare "bash".
+    """
+    if which is None:
+        which = shutil.which
+    if environ is None:
+        environ = os.environ
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    if not is_windows:
+        return which("bash")
+    override = environ.get("TEAM_BASH")
+    if override and os.path.isfile(override):
+        return override
+    for entry in environ.get("PATH", "").split(os.pathsep):
+        directory = entry.strip('"')
+        if not directory:
+            continue
+        candidate = os.path.join(directory, "bash.exe")
+        if os.path.isfile(candidate) and _WSL_LAUNCHER_RE.search(candidate) is None:
+            return candidate
+    git = which("git")
+    if git:
+        base = os.path.dirname(git)
+        for relative in (("..", "bin"), ("..", "..", "bin"), ("..", "usr", "bin"), ("..", "..", "usr", "bin")):
+            candidate = os.path.normpath(os.path.join(base, *relative, "bash.exe"))
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def find_powershell(which: Callable[[str], str | None] | None = None, is_windows: bool | None = None) -> tuple[str, str] | None:
+    """Return (path, step label) for the PowerShell that parses the scripts, or None when there is none.
+
+    pwsh is preferred. On Windows, Windows PowerShell (5.1) is the fallback, since it is the team's main engine.
+    """
+    if which is None:
+        which = shutil.which
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    pwsh = which("pwsh")
+    if pwsh:
+        return pwsh, "PowerShell parse"
+    windows_powershell = which("powershell") if is_windows else None
+    if windows_powershell:
+        return windows_powershell, "PowerShell parse (Windows PowerShell)"
+    return None
 
 
 def changed_test_files(paths: Sequence[str], root: Path = ROOT) -> list[str]:
@@ -165,11 +224,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("== Ruff\n   MISSING: install it with: python3 -m pip install 'ruff>=0.5'", file=sys.stderr)
             results.append(("Ruff", False))
-    bash = shutil.which("bash")
+    bash = find_bash()
     if bash:
         for name in shell_targets:
             label = f"Shell syntax {name}"
             results.append((label, step(label, [bash, "-n", name])))
+    elif shell_targets:
+        print("note: Git Bash (bash) is not on PATH, so the shell syntax check was not run (CI runs it on Linux and Windows)", flush=True)
     if shell_targets:
         shellcheck = shutil.which("shellcheck")
         if shellcheck:
@@ -178,10 +239,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("note: shellcheck is not on PATH, so ShellCheck was not run (CI runs it on Linux)", flush=True)
     if powershell_targets:
-        pwsh = shutil.which("pwsh")
-        if pwsh:
-            label = "PowerShell parse"
-            results.append((label, step(label, powershell_parse_command(pwsh, powershell_targets))))
+        found = find_powershell()
+        if found:
+            powershell, label = found
+            results.append((label, step(label, powershell_parse_command(powershell, powershell_targets))))
+        elif os.name == "nt":
+            print("note: neither pwsh nor Windows PowerShell is on PATH, so the PowerShell parse was not run (CI runs it on Linux and Windows)", flush=True)
         else:
             print("note: pwsh is not on PATH, so the PowerShell parse was not run (CI runs it on Linux and Windows)", flush=True)
     for test in changed_test_files(paths, ROOT):

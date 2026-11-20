@@ -46,7 +46,7 @@ try {
   }
   if ($env:DB_ENVIRONMENT -eq "production") {
     if ($Operation -ne "read") { throw "production database operations are always read-only; '$Operation' is blocked" }
-    Write-Warning @"
+    $checkTargetWarning = @"
 PRODUCTION SESSION - READ ONLY
   Run SELECT statements only.
   Do NOT run INSERT, UPDATE, DELETE, MERGE, or any other DML.
@@ -54,6 +54,7 @@ PRODUCTION SESSION - READ ONLY
   Do NOT COMMIT. Prepare changes for an approved deployment instead.
   This is not enforced by the database. It is your contract.
 "@
+    [Console]::Error.WriteLine("WARNING: " + $checkTargetWarning)
   }
 } finally {
   $checkTargetEnvNow = [Environment]::GetEnvironmentVariables("Process")

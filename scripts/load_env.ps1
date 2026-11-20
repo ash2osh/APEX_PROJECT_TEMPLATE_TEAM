@@ -347,9 +347,10 @@ Assert-ProjectEnvTriple -SchemaKey CODE_SCHEMA -ConnectionKey CODE_SQLCL_CONNECT
 Assert-ProjectEnvTriple -SchemaKey APEX_PARSING_SCHEMA -ConnectionKey APEX_SQLCL_CONNECTION -UserKey APEX_EXPECTED_USER
 
 if ($projectEnvApexRelease -eq "26.1") {
+  # Decide by the keys read from the file: Windows PowerShell 5.1 deletes an empty environment variable, so Test-Path misses a blank value.
   foreach ($projectEnvDbaKey in @("DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION")) {
-    if (Test-Path -LiteralPath "Env:$projectEnvDbaKey") {
-      $projectEnvDbaVal = (Get-Item -LiteralPath "Env:$projectEnvDbaKey").Value
+    if ($projectEnvSeen.ContainsKey($projectEnvDbaKey)) {
+      $projectEnvDbaVal = [Environment]::GetEnvironmentVariable($projectEnvDbaKey, "Process")
       if ([string]::IsNullOrWhiteSpace($projectEnvDbaVal)) {
         throw "project environment error: $projectEnvDbaKey must not be empty"
       }

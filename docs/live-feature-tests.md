@@ -12,7 +12,7 @@ against a disposable database.
 - SQLcl on `PATH`, and a saved SQLcl connection whose login is the schema owner.
 - A schema you can afford to lose. The checks create and drop their own objects,
   all named `LIVE_<random>` or `live<random>`. They touch nothing else.
-- Bash. The feature path runs `scripts/team.sh`, so the module is skipped on Windows.
+- Linux or macOS with Bash. On Windows the module is skipped whatever the environment variables are, with the reason `the feature path runs team.sh under bash`.
 
 ## Run
 
@@ -33,8 +33,8 @@ it, and the production profile keeps `TEMPLATE_LIVE_CONNECTION`. Do not combine
 it with the two-schema variables.
 
 On the local Oracle AI Database 26ai Free 23.26.3 containers used for the last runs, the
-module took about 18 minutes with two databases (19 tests, one skipped) and about 13 minutes
-with one database and two schemas (19 tests, two skipped). Run one test with `-k <name>`.
+module took about 18 minutes with two databases (22 tests, one skipped) and about 13 minutes
+with one database and two schemas (22 tests, two skipped). Run one test with `-k <name>`.
 
 The `baseline` commands have their own opt-in module, `tests/test_live_baseline.py`; see [Live check](baseline.md#live-check).
 

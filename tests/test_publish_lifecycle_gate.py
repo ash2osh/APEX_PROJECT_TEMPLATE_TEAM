@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import _test_subprocess_safety  # noqa: F401
 import tempfile
@@ -11,7 +12,111 @@ from fake_sqlcl import BASH
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def pwsh_7_4_or_newer():
+    """Return the pwsh launcher when it is PowerShell 7.4 or newer, else None. $PSNativeCommandUseErrorActionPreference
+    was experimental in 7.3 and is a stable feature from 7.4, so 7.3 cannot show what this test needs."""
+    executable = shutil.which('pwsh')
+    if not executable:
+        return None
+    result = subprocess.run([executable, '-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'],
+                            text=True, capture_output=True, check=False)
+    parts = result.stdout.strip().split('.')
+    if result.returncode != 0 or len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        return None
+    return executable if (int(parts[0]), int(parts[1])) >= (7, 4) else None
+
+
 class PublishLifecycleGateTests(unittest.TestCase):
+    def test_lifecycle_refusal_keeps_the_diagnostics_its_message_names_in_both_shells(self):
+        launchers = [('bash', [BASH])]
+        if _test_subprocess_safety.working_pwsh():
+            launchers.append(('pwsh', [_test_subprocess_safety.working_pwsh(), '-NoProfile', '-File']))
+        for engine, launcher in launchers:
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture = test_publish_cli.PublishAppCliTests()
+                runner, _, _, environment, app, state = fixture.make_stateful_dev_fixture(root)
+                environment['PROJECT_ENV_FILE'] = str(root / '.env')
+                (root / 'scripts/application_lifecycle.sql').write_text('-- fixture\n')
+                # The capture refuses the way the 26.1 adapter does on an unsupported release: it names its
+                # SQLcl diagnostics file on stderr and exits 2, as application_lifecycle.py does.
+                (root / 'scripts/application_lifecycle.py').write_text(
+                    'import sys\nfrom pathlib import Path\n'
+                    'a=sys.argv;r=Path(a[a.index("--run-dir")+1]);r.mkdir(parents=True,exist_ok=True)\n'
+                    'if a[1]=="capture":\n'
+                    ' log=r/"sqlcl-output.log"\n'
+                    ' log.write_text("ORA-20018: Lifecycle adapter requires APEX 26.1 or 26.2; found 26.3.0\\n")\n'
+                    ' sys.stderr.write("lifecycle: SQLcl exited with status 2; diagnostics: "+str(log)+"\\n")\n'
+                    ' raise SystemExit(2)\n'
+                )
+                imports_before = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
+                original = (app / 'apex-team-export.json').read_bytes()
+                script = runner if engine == 'bash' else runner.with_suffix('.ps1')
+                result = subprocess.run([*launcher, str(script), '100'], cwd=root, env=environment,
+                                        text=True, capture_output=True)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn('nothing imported', output)
+                imports_after = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
+                self.assertEqual(imports_after, imports_before, 'a refused capture must not import')
+                self.assertEqual((app / 'apex-team-export.json').read_bytes(), original)
+                retained = list((root / 'scratch').glob('apex-publish*'))
+                self.assertEqual(len(retained), 1, 'the scratch folder must survive when its message names a file in it')
+                self.assertTrue((retained[0] / 'lifecycle-before' / 'sqlcl-output.log').exists(),
+                                'the diagnostics file the refusal names must exist')
+                self.assertIn('lifecycle diagnostics retained', output)
+
+    def test_a_refusal_keeps_its_diagnostics_when_a_native_error_is_terminating(self):
+        # With $PSNativeCommandUseErrorActionPreference set (a profile can set it, and team.ps1 runs publish_app.ps1 in
+        # the same session), a non-zero exit from the capture ends the script at that line, before its $LASTEXITCODE
+        # check. The diagnostics flag must already be set by then, or cleanup deletes the folder the message names.
+        pwsh = pwsh_7_4_or_newer()
+        if pwsh is None:
+            self.skipTest('PowerShell 7.4 or newer (pwsh) is not installed; the native-error preference is stable only from 7.4')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = test_publish_cli.PublishAppCliTests()
+            runner, _, _, environment, app, state = fixture.make_stateful_dev_fixture(root)
+            environment['PROJECT_ENV_FILE'] = str(root / '.env')
+            (root / 'scripts/application_lifecycle.sql').write_text('-- fixture\n')
+            # The same refusal as the test above: the capture names its SQLcl diagnostics file and exits 2.
+            (root / 'scripts/application_lifecycle.py').write_text(
+                'import sys\nfrom pathlib import Path\n'
+                'a=sys.argv;r=Path(a[a.index("--run-dir")+1]);r.mkdir(parents=True,exist_ok=True)\n'
+                'if a[1]=="capture":\n'
+                ' log=r/"sqlcl-output.log"\n'
+                ' log.write_text("ORA-20018: Lifecycle adapter requires APEX 26.1 or 26.2; found 26.3.0\\n")\n'
+                ' sys.stderr.write("lifecycle: SQLcl exited with status 2; diagnostics: "+str(log)+"\\n")\n'
+                ' raise SystemExit(2)\n'
+            )
+            imports_before = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
+            original = (app / 'apex-team-export.json').read_bytes()
+            script = runner.with_suffix('.ps1')
+            # The preference is set in the calling session and inherited by the script it invokes with &. First, a probe
+            # proves the preference is active: a non-zero native exit inside try must throw, so the marker is written only
+            # when the preference made it terminating. publish_app.ps1 sets $ErrorActionPreference = "Stop" itself, and
+            # the probe sets it the same way. Without the marker the wrapper exits 97 before the script runs.
+            probe = root / 'native-error-probe.txt'
+            wrapper = (f"$PSNativeCommandUseErrorActionPreference = $true; $ErrorActionPreference = 'Stop'; "
+                       f"try {{ & '{pwsh}' -NoProfile -Command 'exit 3' }} "
+                       f"catch {{ Set-Content -LiteralPath '{probe}' -Value 'threw' }}; "
+                       f"if (-not (Test-Path -LiteralPath '{probe}')) {{ exit 97 }}; "
+                       f"& '{script}' 100")
+            result = subprocess.run([pwsh, '-NoProfile', '-Command', wrapper], cwd=root, env=environment,
+                                    text=True, capture_output=True)
+            output = result.stdout + result.stderr
+            self.assertTrue(probe.exists(), 'the native-error preference did not make a non-zero native exit terminate on '
+                            'this PowerShell, so the capture case is not exercised: ' + output)
+            self.assertNotEqual(result.returncode, 0, output)
+            imports_after = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
+            self.assertEqual(imports_after, imports_before, 'a refused capture must not import')
+            self.assertEqual((app / 'apex-team-export.json').read_bytes(), original)
+            retained = list((root / 'scratch').glob('apex-publish*'))
+            self.assertEqual(len(retained), 1, 'the scratch folder must survive a terminating native error from the capture')
+            self.assertTrue((retained[0] / 'lifecycle-before' / 'sqlcl-output.log').exists(),
+                            'the diagnostics file the refusal names must exist')
+            self.assertIn('lifecycle diagnostics retained', output)
+
     def test_lifecycle_failure_preserves_baseline_and_recovery_in_both_shells(self):
         launchers = [('bash', [BASH])]
         if _test_subprocess_safety.working_pwsh():

@@ -4,7 +4,10 @@ Everything it does is driven by the JSON file named in FAKE_ORDS_CONFIG:
 
     {"calls": "<log file>", "version": "<sql -V text>",
      "db": {"tables": null | "exit1", "code": null | "exit1"},
+     "spool_eol": "lf" | "crlf",
      "ords": {"<SCHEMA>": {"scenario": "ok", "counts": {...}, "user": "<session user>"}}}
+
+"spool_eol" is the line ending SQLcl's SPOOL writes into the DDL and manifest files: CRLF on Windows.
 
 It answers `sql -V`, the tables/code driver (backup_db.sql), the ORDS export
 driver (ords_export.sql) and the doctor drivers, writes the files the real SQL
@@ -136,14 +139,16 @@ def database_session(config: dict, arguments: list[str]) -> int:
         return 1
     directory = {"tables": "tables", "code": "views"}[scope]
     name = {"tables": "FAKE_TABLE", "code": "FAKE_VIEW"}[scope]
+    # SPOOL writes the platform line ending: CRLF on Windows, which the installed mirror must not keep.
+    eol = "\r\n" if config.get("spool_eol") == "crlf" else "\n"
     target = Path.cwd() / "database" / spool_schema / directory
     target.mkdir(parents=True, exist_ok=True)
-    (target / f"{name}.sql").write_text(f"CREATE FAKE {name} FOR {schema};\n", encoding="utf-8", newline="")
+    (target / f"{name}.sql").write_text(f"CREATE FAKE {name} FOR {schema};\n".replace("\n", eol), encoding="utf-8", newline="")
     manifest = Path.cwd() / "database" / spool_schema / f"manifest-{scope}.txt"
     manifest.write_text(
-        "TABLE=1\n" if scope == "tables" else "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n",
+        ("TABLE=1\n" if scope == "tables" else "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n").replace("\n", eol),
         encoding="utf-8",
-        newline="\n",
+        newline="",
     )
     return 0
 
