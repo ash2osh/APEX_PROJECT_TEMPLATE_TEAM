@@ -405,7 +405,7 @@ APEX_EXPECTED_USER=DEMO
         # locale-default decode failed inside subprocess.run and the doctor result was lost.
         from scripts.sqlcl_session import bash_command
         from scripts.verify_local import run_live_doctor
-        if bash_command() == "bash" and shutil.which("bash") is None:
+        if bash_command() == "bash" and (os.name == "nt" or shutil.which("bash") is None):
             self.skipTest("no usable bash found to run the team.sh doctor reproduction")
         temp_dir = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
@@ -422,7 +422,7 @@ APEX_EXPECTED_USER=DEMO
         # message printed after a non-cp1252 byte was reported as a plain "fail" instead.
         from scripts.sqlcl_session import bash_command
         from scripts.verify_local import run_live_doctor
-        if bash_command() == "bash" and shutil.which("bash") is None:
+        if bash_command() == "bash" and (os.name == "nt" or shutil.which("bash") is None):
             self.skipTest("no usable bash found to run the team.sh doctor reproduction")
         temp_dir = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))

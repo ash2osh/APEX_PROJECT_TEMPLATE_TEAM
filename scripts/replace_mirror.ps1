@@ -283,7 +283,7 @@ function Enter-MirrorLock([string]$LockPath, [string]$CanonicalRelative) {
       }
       $age = [long][double]::Parse((Get-Date -UFormat %s)) - $holderEpochValue
       if ($age -gt $mirrorLockStaleSeconds) {
-        Write-Warning "breaking stale mirror lock for $CanonicalRelative (impl=$holderImpl pid=$holderPid age=${age}s)"
+        [Console]::Error.WriteLine("WARNING: " + "breaking stale mirror lock for $CanonicalRelative (impl=$holderImpl pid=$holderPid age=${age}s)")
         Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
         continue
       }

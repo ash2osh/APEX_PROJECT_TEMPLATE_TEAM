@@ -251,7 +251,7 @@ function Assert-NativeArguments([string] $Target, [string[]] $Values) {
     $text = [string] $value
     $endsInBackslash = $text.EndsWith("\", [System.StringComparison]::Ordinal)
     if (($text.Length -eq 0) -or $text.Contains('"') -or (($text -match '\s') -and $endsInBackslash)) {
-      Fail "Windows PowerShell 5.1 cannot pass an empty argument, a double quote (`"), or a value with a space that ends in a backslash to $Target intact: run this command with PowerShell 7.3 or newer (pwsh), or run scripts/team.sh in Git Bash"
+      Fail "Windows PowerShell 5.1 cannot pass an empty argument, a double quote (`"), or a value with a space that ends in a backslash to $Target intact (nor can PowerShell before 7.3, or with `$PSNativeCommandArgumentPassing set to Legacy): run this command with PowerShell 7.3 or newer (pwsh) in its default mode, or run scripts/team.sh in Git Bash"
     }
   }
 }
@@ -789,7 +789,7 @@ try {
         try {
           . (Join-Path $PSScriptRoot "load_env.ps1") -EnvFile $envFile
         } catch {
-          Write-Warning ".env needs attention after the upgrade: $($_.Exception.Message)"
+          [Console]::Error.WriteLine("WARNING: " + ".env needs attention after the upgrade: $($_.Exception.Message)")
         }
       }
       Exit-Team $upgradeStatus

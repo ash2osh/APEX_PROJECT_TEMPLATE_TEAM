@@ -175,6 +175,6 @@ try {
   }
   if (Test-Path -LiteralPath $stagingPath) {
     $relativeStaging = $stagingPath.Substring($repoRoot.Length).TrimStart('\', '/')
-    Write-Warning "export warning: could not remove the temporary directory $relativeStaging; delete it after closing whatever holds a file in it"
+    [Console]::Error.WriteLine("WARNING: " + "export warning: could not remove the temporary directory $relativeStaging; delete it after closing whatever holds a file in it")
   }
 }
