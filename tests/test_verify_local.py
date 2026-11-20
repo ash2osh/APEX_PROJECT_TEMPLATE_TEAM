@@ -434,6 +434,40 @@ APEX_EXPECTED_USER=DEMO
         res = run_live_doctor(project)
         self.assertEqual(res["status"], "unavailable", res["message"])
 
+    def test_live_doctor_workspace_refusal_is_not_reported_as_missing_connection(self) -> None:
+        # doctor.sql raises ORA-20073 with the word "unavailable" when no configured app is visible.
+        # SQLcl and the database were reached, so the message must not blame the connection.
+        from scripts.verify_local import run_live_doctor
+        refusal = ("DECLARE\n*\nERROR at line 1:\nORA-20073: Workspace user check unavailable: "
+                   "no configured APEX app is visible in this schema\n")
+        completed = subprocess.CompletedProcess(args=[], returncode=2, stdout=refusal, stderr="")
+        with patch("scripts.verify_local.subprocess.run", return_value=completed):
+            res = run_live_doctor(self.repo)
+        self.assertEqual(res["status"], "unavailable")
+        self.assertIn("APEX app", res["message"])
+        self.assertNotIn("connection", res["message"].lower())
+
+    def test_live_doctor_application_not_found_is_a_failure(self) -> None:
+        # "not found" alone is an application or schema refusal, not a missing tool or connection.
+        from scripts.verify_local import run_live_doctor
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=2,
+            stdout="team error: application 100 was not found in the workspace visible to this connection\n",
+            stderr="")
+        with patch("scripts.verify_local.subprocess.run", return_value=completed):
+            res = run_live_doctor(self.repo)
+        self.assertEqual(res["status"], "fail")
+
+    def test_live_doctor_listener_refusal_is_reported_as_connection_unavailable(self) -> None:
+        from scripts.verify_local import run_live_doctor
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=2, stdout="",
+            stderr="ORA-12541: TNS:no listener\n")
+        with patch("scripts.verify_local.subprocess.run", return_value=completed):
+            res = run_live_doctor(self.repo)
+        self.assertEqual(res["status"], "unavailable")
+        self.assertIn("connection", res["message"].lower())
+
     def test_live_doctor_subprocess_decodes_output_as_utf8(self) -> None:
         from scripts.verify_local import run_live_doctor
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
