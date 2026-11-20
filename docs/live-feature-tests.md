@@ -4,6 +4,9 @@
 real Oracle schema. It is opt-in: CI never runs it, and it skips unless the
 variables below are set.
 
+See also [Live verification](live-verification.md) for the baseline generator's live check, which runs
+against a disposable database.
+
 ## What you need
 
 - SQLcl on `PATH`, and a saved SQLcl connection whose login is the schema owner.

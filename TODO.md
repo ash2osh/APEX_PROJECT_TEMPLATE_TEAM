@@ -44,6 +44,8 @@ are fixed in the shared core and then synced into both templates. See the
 - The PowerShell backup change was verified on PowerShell 7.7 on Linux only, not on Windows PowerShell 5.1.
 - SQLcl session cost, measured 2026-11-19 on the local Docker Oracle 23ai Free containers: about 2.1 s for one session (connect, one statement, exit). A flow that opens 13 sessions therefore costs about 27 s of session overhead on this setup; consolidating sessions was not attempted.
 - `app-unlock` closing earlier `held` lock records (26.2): verified 2026-11-20 against APEX 26.2 in the local demo database (app 100): `verify-local` flagged the `held` record after `app-lock`, and after `app-unlock` the record was `released`, the database lock was gone and `verify-local` passed. The `publish.*` records were not exercised live.
+- `scripts/windows_check.ps1` exists to run on a Windows machine. It has not yet been run on Windows PowerShell 5.1; see docs/windows-verification.md.
+- `scripts/live_verify.py` exists as the documented live check. See docs/live-verification.md; run it against a disposable database after generator changes. Run 2026-11-20 against Oracle 23ai Free (23.26.3) in a Docker scratch container: 32 checks and the cleanup check passed (33 of 33).
 
 ### Configuration and adoption evidence
 

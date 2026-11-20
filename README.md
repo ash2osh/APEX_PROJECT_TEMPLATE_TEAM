@@ -25,6 +25,8 @@ separate file changes only and do not isolate a shared APEX application.
 | build a focused package release capsule | [Feature-oriented releases](docs/feature-releases.md) |
 | know exactly when publish or migrate refuses | [publish-rules](docs/publish-rules.md), [migration-rules](docs/migration-rules.md) |
 | know which limits are deliberate | [Known limitations](docs/known-limitations.md) |
+| check the baseline generator against a disposable Oracle database | [Live verification](docs/live-verification.md) |
+| check the PowerShell scripts under Windows PowerShell 5.1 | [Windows verification](docs/windows-verification.md) |
 | see what an AI assistant can do here | [Skills and agent support](#skills-and-agent-support) |
 
 After cloning this template into your own project, complete the
