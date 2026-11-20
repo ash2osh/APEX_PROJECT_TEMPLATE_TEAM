@@ -317,17 +317,42 @@ done
 # SQLcl's SPOOL writes the platform line ending, so on Windows each staged mirror file arrives with CRLF. The committed
 # mirror is LF (.gitattributes forces eol=lf): every .sql and .txt file under the directory has its CRLF pairs turned into
 # LF. The bytes are rewritten directly, so the UTF-8 encoding, a byte-order mark and every other byte are kept.
+# A symbolic link or a Windows junction is never followed: a link to a file outside the mirror would otherwise be rewritten
+# through, and a linked directory is not entered. replace_mirror.sh refuses a stage that holds a link, so it is left as is.
 normalize_mirror_lf() {
   python3 - "$1" <<'PY'
+import os
 import pathlib
+import stat
 import sys
 
-for path in pathlib.Path(sys.argv[1]).rglob("*"):
-    if path.suffix.lower() not in (".sql", ".txt") or not path.is_file():
-        continue
-    data = path.read_bytes()
-    if b"\r\n" in data:
-        path.write_bytes(data.replace(b"\r\n", b"\n"))
+# A junction is a reparse point that os.path.islink() does not report, so both are checked.
+REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def is_link(path):
+    status = os.lstat(path)
+    if stat.S_ISLNK(status.st_mode):
+        return True
+    return bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+
+
+root = sys.argv[1]
+if not os.path.lexists(root):
+    sys.exit(0)  # replace_mirror.sh reports a missing staging directory
+if is_link(root):
+    print(f"refusing to convert a mirror that is a symbolic link or junction: {root}", file=sys.stderr)
+    sys.exit(2)
+for directory, subdirectories, files in os.walk(root, followlinks=False):
+    # os.walk would enter a junction, so linked directories are removed from the walk here.
+    subdirectories[:] = [name for name in subdirectories if not is_link(os.path.join(directory, name))]
+    for name in files:
+        path = pathlib.Path(directory, name)
+        if path.suffix.lower() not in (".sql", ".txt") or is_link(path):
+            continue
+        data = path.read_bytes()
+        if b"\r\n" in data:
+            path.write_bytes(data.replace(b"\r\n", b"\n"))
 PY
 }
 

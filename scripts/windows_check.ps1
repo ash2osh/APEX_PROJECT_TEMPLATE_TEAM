@@ -64,7 +64,9 @@ function Get-ApplicationSchema([string] $AppId) {
     $descriptor = Join-Path $appDir "deployments\dev.json"
     if (Test-Path -LiteralPath $descriptor -PathType Leaf) {
       try {
-        $parsed = Get-Content -LiteralPath $descriptor -Raw | ConvertFrom-Json
+        # Read as UTF-8 explicitly: Windows PowerShell 5.1 would read a file without a byte-order mark as ANSI.
+        $descriptorText = [System.IO.File]::ReadAllText($descriptor, (New-Object System.Text.UTF8Encoding($false)))
+        $parsed = $descriptorText | ConvertFrom-Json
         $parsing = [string] $parsed.app.databaseSession.parsingSchema
         if (-not [string]::IsNullOrWhiteSpace($parsing)) { return $parsing }
       } catch {
@@ -559,12 +561,16 @@ function Invoke-CheckTests {
 
   # Stderr is merged into $run.Lines, and a test's own stdout can arrive after unittest's summary, so
   # only lines in unittest's exact summary form count. The last strict match of each wins.
+  # The status line is OK or FAILED, then unittest's counters in parentheses when there are any. Only those counters
+  # count, so a test's own "OK (fixture initialized)" is not taken as the summary.
+  $counter = '(failures|errors|skipped|expected failures|unexpected successes)=\d+'
+  $statusPattern = '^(OK|FAILED)( \(' + $counter + '(, ' + $counter + ')*\))?\s*$'
   $ranLine = "(no Ran line)"
   $statusLine = "(no status line)"
   $failingHeaders = New-Object System.Collections.ArrayList
   foreach ($line in $run.Lines) {
     if ($line -cmatch '^Ran \d+ tests? in [0-9.]+s\s*$') { $ranLine = $line }
-    if ($line -cmatch '^(OK|FAILED)( \(.*\))?\s*$') { $statusLine = $line }
+    if ($line -cmatch $statusPattern) { $statusLine = $line }
     if ($line -cmatch '^(FAIL|ERROR): \S') {
       $header = $line.TrimEnd()
       if (-not $failingHeaders.Contains($header)) { [void] $failingHeaders.Add($header) }

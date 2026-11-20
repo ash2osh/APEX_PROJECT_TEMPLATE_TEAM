@@ -74,6 +74,38 @@ def tree(root: Path) -> dict[str, bytes]:
     return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(base.rglob("*")) if path.is_file()}
 
 
+CRLF_SQL = b"CREATE OUTSIDE;\r\nSELECT 1 FROM DUAL;\r\n"
+
+# Runs after the fake SQLcl's tables driver and links a staged file and a staged directory to CRLF files outside the
+# mirror. The links sit outside the scope directories, so the manifest counts are unchanged.
+STAGE_LINKER = r'''import os
+import sys
+
+FILE_TARGET = __FILE_TARGET__
+DIRECTORY_TARGET = __DIRECTORY_TARGET__
+arguments = sys.argv[1:]
+at = next((index for index, argument in enumerate(arguments) if argument.startswith("@")), None)
+# The tables driver's arguments after its script are schema, scope, ..., spool schema (see fake_ords_sql.py).
+if at is None or not arguments[at].endswith("backup_db.sql") or arguments[at + 2] != "tables":
+    sys.exit(0)
+mirror = os.path.join(os.getcwd(), "database", arguments[at + 6])
+os.symlink(FILE_TARGET, os.path.join(mirror, "linked-file.sql"))
+os.symlink(DIRECTORY_TARGET, os.path.join(mirror, "linked-dir"), target_is_directory=True)
+'''
+
+
+def symlinks_work() -> bool:
+    """Whether os.symlink can create a link here: on Windows it needs Developer Mode or administrator rights."""
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory, "target.txt")
+        target.write_bytes(b"x")
+        try:
+            os.symlink(target, Path(directory, "link.txt"))
+        except OSError:
+            return False
+    return True
+
+
 class Project:
     """A throwaway checkout with the template's scripts, a committed seed mirror and the fake SQLcl."""
 
@@ -390,6 +422,41 @@ class BackupDbWithOrdsTests(OrdsCliTestCase):
             self.assertEqual([], [path for path, contents in after.items() if b"\r" in contents], "no installed mirror file may contain CR")
             self.assertEqual([], project.leftovers())
         self.each_shell(body, config={"spool_eol": "crlf"})
+
+    def test_a_link_in_the_staged_mirror_is_never_written_through(self) -> None:
+        # A staged file or directory link points at CRLF files outside the mirror. The LF conversion must not write through
+        # them, and replace_mirror refuses a stage that holds a link, so the backup fails and installs nothing.
+        if not symlinks_work():
+            self.skipTest("symbolic links need Developer Mode or administrator rights on Windows: os.symlink raised OSError")
+
+        def body(project: Project) -> None:
+            with tempfile.TemporaryDirectory() as outside_temporary:
+                outside = Path(outside_temporary)
+                (outside / "file.sql").write_bytes(CRLF_SQL)
+                (outside / "dir").mkdir()
+                (outside / "dir" / "inside.sql").write_bytes(CRLF_SQL)
+                linker = outside / "link_stage.py"
+                linker.write_text(
+                    STAGE_LINKER.replace("__FILE_TARGET__", repr(str(outside / "file.sql")))
+                    .replace("__DIRECTORY_TARGET__", repr(str(outside / "dir"))),
+                    encoding="utf-8",
+                )
+                python = Path(sys.executable).as_posix()
+                fake_sqlcl.install(
+                    project.root / "bin",
+                    "status=0\n"
+                    f"'{python}' '{FAKE.as_posix()}' \"$@\" || status=$?\n"
+                    f"'{python}' '{linker.as_posix()}' \"$@\" || exit 1\n"
+                    'exit "$status"\n',
+                )
+                before = tree(project.root)
+                result = project.run("backup-db")
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("symbolic link", plain(result.stdout + result.stderr))
+                self.assertEqual(CRLF_SQL, (outside / "file.sql").read_bytes(), "the LF conversion wrote through a staged file link")
+                self.assertEqual(CRLF_SQL, (outside / "dir" / "inside.sql").read_bytes(), "the LF conversion entered a staged directory link")
+                self.assertEqual(before, tree(project.root), "a refused stage installs nothing")
+        self.each_shell(body)
 
     def test_ords_in_the_same_schema_is_installed_inside_the_whole_mirror(self) -> None:
         def body(project: Project) -> None:

@@ -50,15 +50,31 @@ function Test-ScopeComplete {
 # Rewrite each .sql and .txt file under Directory with its CRLF pairs turned into LF. SQLcl's SPOOL writes the platform
 # line ending, and the committed mirror is LF (.gitattributes forces eol=lf). ISO-8859-1 maps every byte to one character
 # and back, so only the CRLF bytes change: the UTF-8 encoding, a byte-order mark and every other byte are kept. A lone CR
-# stays, as Git's own text normalisation keeps it.
+# stays, as Git's own text normalisation keeps it. A symbolic link or junction (a ReparsePoint) is never followed: writing
+# through a link would change a file outside the mirror, so it is left as is, and a linked directory is not entered.
+# replace_mirror.ps1 refuses a stage that holds a link. The walk goes one directory at a time, so no directory link is entered.
 function Convert-MirrorToLf {
   param([Parameter(Mandatory = $true)][string] $Directory)
   $latin1 = [System.Text.Encoding]::GetEncoding("iso-8859-1")
-  foreach ($file in @(Get-ChildItem -LiteralPath $Directory -Recurse -File -Force)) {
-    if (@(".sql", ".txt") -notcontains $file.Extension.ToLowerInvariant()) { continue }
-    $text = $latin1.GetString([System.IO.File]::ReadAllBytes($file.FullName))
-    if ($text.IndexOf("`r`n", [System.StringComparison]::Ordinal) -lt 0) { continue }
-    [System.IO.File]::WriteAllBytes($file.FullName, $latin1.GetBytes($text.Replace("`r`n", "`n")))
+  $root = Get-Item -LiteralPath $Directory -Force
+  if ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw "refusing to convert a mirror that is a symbolic link or junction: $Directory"
+  }
+  $pending = New-Object System.Collections.Generic.Stack[string]
+  $pending.Push($root.FullName)
+  while ($pending.Count -gt 0) {
+    $current = $pending.Pop()
+    foreach ($entry in @(Get-ChildItem -LiteralPath $current -Force)) {
+      if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+      if ($entry.PSIsContainer) {
+        $pending.Push($entry.FullName)
+        continue
+      }
+      if (@(".sql", ".txt") -notcontains $entry.Extension.ToLowerInvariant()) { continue }
+      $text = $latin1.GetString([System.IO.File]::ReadAllBytes($entry.FullName))
+      if ($text.IndexOf("`r`n", [System.StringComparison]::Ordinal) -lt 0) { continue }
+      [System.IO.File]::WriteAllBytes($entry.FullName, $latin1.GetBytes($text.Replace("`r`n", "`n")))
+    }
   }
 }
 

@@ -199,7 +199,8 @@ class WindowsCheckScriptRunTests(unittest.TestCase):
 
 
 # A stub that behaves like the real descriptor check: targets names the DEV schema of the temporary .env, and
-# verify-local fails any dev.json whose parsingSchema is not that schema (as verify_local.py does).
+# verify-local fails any dev.json whose parsingSchema is not that schema (as verify_local.py does). verify-local also
+# writes the DEV schema it read to scripts/dev_schema.txt as UTF-8, so a test can compare the exact characters.
 STUB_TEAM_DESCRIPTOR = r"""$command = [string] $args[0]
 $envFile = [Environment]::GetEnvironmentVariable('PROJECT_ENV_FILE')
 $values = @{}
@@ -209,6 +210,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($envFile)) {
 if ($command -eq 'targets') { Write-Output ('dev ' + $values['DEV_SCHEMA']); exit 0 }
 if ($command -eq 'verify-local') {
   $schema = $values['DEV_SCHEMA']
+  [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'dev_schema.txt'), $schema, (New-Object System.Text.UTF8Encoding($false)))
   $failed = $false
   $appsRoot = Join-Path $PSScriptRoot '..\apps'
   foreach ($file in @(Get-ChildItem -LiteralPath $appsRoot -Recurse -Filter dev.json)) {
@@ -312,6 +314,21 @@ class TeamOfflineStubTests(unittest.TestCase):
             self.assertIn("DEV_SCHEMA=E2E_WIN", result.stdout)
             self.assertIn("targets lists E2E_WIN and verify-local exits 0", result.stdout)
 
+    def test_non_ascii_parsing_schema_reaches_the_temporary_env_unchanged(self) -> None:
+        # Windows PowerShell 5.1 reads a file with no byte-order mark in the ANSI code page, so the UTF-8 letter below
+        # would reach the temporary .env as two other characters. The stub reads the .env and the descriptor as UTF-8.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, [], 0, apps=("SCHEMA1/100",), stub=STUB_TEAM_DESCRIPTOR)
+            descriptor = root / "apps" / "SCHEMA1" / "100" / "deployments" / "dev.json"
+            descriptor.parent.mkdir(parents=True, exist_ok=True)
+            descriptor.write_bytes('{"app": {"id": 100, "databaseSession": {"parsingSchema": "CAF\u00c9"}}}\n'.encode())
+            result = self.run_team_offline(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT team-offline PASS", result.stdout)
+            recorded = (root / "scripts" / "dev_schema.txt").read_bytes()
+            self.assertEqual("CAF\u00c9".encode(), recorded, "the temporary .env must hold the descriptor's exact schema name")
+
     def test_schema_folder_names_the_temporary_schema_when_no_descriptor_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -351,6 +368,40 @@ class BrokenTests(unittest.TestCase):
 
     def test_errors(self):
         raise RuntimeError("x")
+'''
+
+# A passing module that prints a status-shaped line that is not one of unittest's counters. It prints at exit, after a
+# pause, so the line reaches the captured output after unittest's own summary: without the pause, the merged order of
+# the two streams was not reliable in testing. Only the counter check keeps the line from being taken as the summary.
+FIXTURE_LOOK_ALIKE_MODULE = r'''import atexit
+import time
+import unittest
+
+
+def print_after_the_summary():
+    time.sleep(0.5)
+    print("OK (fixture initialized)")
+
+
+atexit.register(print_after_the_summary)
+
+
+class FixtureTests(unittest.TestCase):
+    def test_passes(self):
+        self.assertTrue(True)
+'''
+
+# A passing run with one skipped test: unittest's real counter, OK (skipped=1), must still be the summary.
+SKIPPED_MODULE = r'''import unittest
+
+
+class SkipTests(unittest.TestCase):
+    def test_passes(self):
+        self.assertTrue(True)
+
+    @unittest.skip("not on this platform")
+    def test_skipped(self):
+        pass
 '''
 
 HAVE_PYTHON = bool(shutil.which("python") or shutil.which("python3"))
@@ -412,6 +463,25 @@ class TestsStepTests(unittest.TestCase):
             self.assertIn("Ran 1 test in", detail)
             self.assertIn("; OK", detail)
             self.assertNotIn("OK   C:\\fake", detail)
+
+    def test_a_status_shaped_line_printed_by_a_test_is_not_the_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_fixture.py": FIXTURE_LOOK_ALIKE_MODULE})
+            result = self.run_tests_step(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT tests PASS", result.stdout)
+            detail = self.result_line(result.stdout)
+            self.assertTrue(detail.endswith("; OK"), detail)
+            self.assertNotIn("fixture initialized", detail)
+
+    def test_unittests_skip_counter_is_still_the_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_skipped.py": SKIPPED_MODULE})
+            result = self.run_tests_step(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertTrue(self.result_line(result.stdout).endswith("; OK (skipped=1)"), self.result_line(result.stdout))
 
 
 if __name__ == "__main__":
