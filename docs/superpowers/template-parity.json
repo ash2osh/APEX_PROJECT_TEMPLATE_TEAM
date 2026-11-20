@@ -123,10 +123,10 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages. Follow-up 2026-11-20 (Windows fixes): both READMEs add the Windows PowerShell 5.1 arguments note. Follow-up 2026-11-20 (Windows E2E): both have the Windows PowerShell 5.1 argument bullet; 26.1 states that publish accepts APEX 26.1 and 26.2 only.",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages. Follow-up 2026-11-20 (Windows fixes): both READMEs add the Windows PowerShell 5.1 arguments note. Follow-up 2026-11-20 (Windows E2E): both have the Windows PowerShell 5.1 argument bullet; 26.1 states that publish accepts APEX 26.1 and 26.2 only. Follow-up 2026-11-20 (outside review): both describe the PowerShell 7.3+ refusal for .cmd/.bat programs (Windows or Legacy argument-passing mode).",
       "blobs": [
-        "5b9572f5a5343d5c871910dd354a0072aef403d1",
-        "d1bccf725995b15fd5c06254851f5848bdc18072"
+        "57cac01b3daf83b492f1d8e55feecd3d2eeb11fe",
+        "7fc28d7bd713dbd29fe10d59b3ec02f58a760d3a"
       ]
     },
     "TODO.md": {
@@ -195,10 +195,10 @@
     },
     "docs/TROUBLESHOOTING.md": {
       "status": "intended",
-      "reason": "26.2 release-specific troubleshooting includes the offline Graphify update path and optional semantic context indexing; 26.1 maintains its own guidance. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows fixes): both list the Windows PowerShell 5.1 argument refusal. Follow-up 2026-11-20 (Windows fixes 2): both name pwsh before 7.3 and Legacy mode in the refusal row. Follow-up 2026-11-20 (Windows E2E): both have the lifecycle-capture refusal row naming the line's accepted APEX releases; 26.2 names the SQLcl 26.3.0.0 floor in the sql-not-found row.",
+      "reason": "26.2 release-specific troubleshooting includes the offline Graphify update path and optional semantic context indexing; 26.1 maintains its own guidance. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows fixes): both list the Windows PowerShell 5.1 argument refusal. Follow-up 2026-11-20 (Windows fixes 2): both name pwsh before 7.3 and Legacy mode in the refusal row. Follow-up 2026-11-20 (Windows E2E): both have the lifecycle-capture refusal row naming the line's accepted APEX releases; 26.2 names the SQLcl 26.3.0.0 floor in the sql-not-found row. Follow-up 2026-11-20 (outside review): both describe the PowerShell 7.3+ refusal for .cmd/.bat programs (Windows or Legacy argument-passing mode).",
       "blobs": [
-        "6608b9265cb3f749b343e54f68b2840c9b6b3094",
-        "37e5d29cd5e7ba4322ba606293068fddbcff6d93"
+        "5dc4288ece45449cc064c02c00c3edcbed070aad",
+        "019f605e76c611e768b76efd3176faa640a1faa0"
       ]
     },
     "docs/baseline.md": {
@@ -267,10 +267,10 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout.",
+      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout. Follow-up 2026-11-20 (outside review): both say --phase both usually exits 1 for an applied folder and that an empty preconditions list cannot fail.",
       "blobs": [
-        "dcc4f4a0f90068fbba6445fafd0341fd4a065762",
-        "c65f4d3311989c40a1f6d05c5db6250bf8f5de35"
+        "0f0b595ec176e607472bf533f00c2e7ff7b63b4a",
+        "b6c4cca9ac2fce430e648fb548adb982811e8e3b"
       ]
     },
     "docs/publish-rules.md": {
@@ -507,10 +507,10 @@
     },
     "scripts/publish_app.ps1": {
       "status": "intended",
-      "reason": "Release-specific publish flow: 26.2 adds native DEV locks, partial publish, normalized verification, automation restore and writes import-transcript.log; 26.1 keeps the byte-exact drift guard and writes sqlcl-output.log Follow-up 2026-11-20 (Windows fixes 2): both print warnings as plain WARNING lines on stderr instead of Write-Warning. Follow-up 2026-11-20 (Windows E2E): both keep the scratch folder and print \"lifecycle diagnostics retained\" when the pre-publication capture fails.",
+      "reason": "Release-specific publish flow: 26.2 adds native DEV locks, partial publish, normalized verification, automation restore and writes import-transcript.log; 26.1 keeps the byte-exact drift guard and writes sqlcl-output.log Follow-up 2026-11-20 (Windows fixes 2): both print warnings as plain WARNING lines on stderr instead of Write-Warning. Follow-up 2026-11-20 (Windows E2E): both keep the scratch folder and print \"lifecycle diagnostics retained\" when the pre-publication capture fails. Follow-up 2026-11-20 (outside review): both set the lifecycle-diagnostics flag before the capture and clear it after success.",
       "blobs": [
-        "810b9ac8f801db7732c3d96b1d041933a35710d4",
-        "eb0ce28adb87e97dc561d221285c7eb191206b19"
+        "007d1de5445c71c60e464e53db62557f18d427d5",
+        "6057a6fc0f708902cb8df372cc2a9ad3bf08f994"
       ]
     },
     "scripts/publish_app.sh": {
@@ -579,10 +579,10 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines. Follow-up 2026-11-19 (pass 2): both lines restore the caller PROJECT_SCHEMA after every command. Follow-up 2026-11-20 (Windows fixes): both refuse arguments that legacy native argument passing would garble; 26.2 also checks its automations command. Follow-up 2026-11-20 (Windows fixes 2): both print warnings as plain WARNING lines and use the same refusal wording.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines. Follow-up 2026-11-19 (pass 2): both lines restore the caller PROJECT_SCHEMA after every command. Follow-up 2026-11-20 (Windows fixes): both refuse arguments that legacy native argument passing would garble; 26.2 also checks its automations command. Follow-up 2026-11-20 (Windows fixes 2): both print warnings as plain WARNING lines and use the same refusal wording. Follow-up 2026-11-20 (outside review): both pass the program that is actually started (the resolved Bash or Python path) to the legacy check, which treats .bat/.cmd/.js/.vbs/.wsf and cmd/cscript/wscript/find/sqlcmd as legacy in Windows mode.",
       "blobs": [
-        "a26990a1c8a935f4f543327e7661d3bfef798400",
-        "0e70584924640e8317b078e4e2d5ef875c29a98b"
+        "74656e29e6d12acea82fc63f5d82ff2f550cb884",
+        "15843e351bec186785f42fcb6e5776c6fcf033fb"
       ]
     },
     "scripts/team.sh": {
@@ -827,10 +827,10 @@
     },
     "tests/test_publish_lifecycle_gate.py": {
       "status": "intended",
-      "reason": "The 26.2 PowerShell publish writes import-transcript.log while 26.1 writes sqlcl-output.log, so 26.1 pins its own transcript name; both keep the transcript when an unverified import is retained Follow-up 2026-11-20 (Windows E2E): both test the retained lifecycle diagnostics.",
+      "reason": "The 26.2 PowerShell publish writes import-transcript.log while 26.1 writes sqlcl-output.log, so 26.1 pins its own transcript name; both keep the transcript when an unverified import is retained Follow-up 2026-11-20 (Windows E2E): both test the retained lifecycle diagnostics. Follow-up 2026-11-20 (outside review): both test the diagnostics under a terminating native error (pwsh 7.4+, with a probe).",
       "blobs": [
-        "0494f6ba8fcf9a8b3f4a1a4fb6a68f5e9b2a5848",
-        "4729b379e07fb6369807de50721d3e313b95eacc"
+        "5d7691182550d3b97cd53ffb5451de30af8a0ca8",
+        "d53ee1208f5463dacad267de9f13bc7e5d85c048"
       ]
     },
     "tests/test_record_export_state.py": {
@@ -859,10 +859,10 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines. Follow-up 2026-11-20 (Windows fixes): NativeArgumentPassingTests are on both lines. Follow-up 2026-11-20 (Windows fixes 2): both drop ConvertFrom-Json -AsHashtable from the migration-plan test.",
+      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines. Follow-up 2026-11-20 (Windows fixes): NativeArgumentPassingTests are on both lines. Follow-up 2026-11-20 (Windows fixes 2): both drop ConvertFrom-Json -AsHashtable from the migration-plan test. Follow-up 2026-11-20 (outside review): both record the arguments a .cmd target receives and test the normal .exe path and a .cmd Python shim.",
       "blobs": [
-        "520a1cbd372f77d7096e023a3213a569a3e30c5a",
-        "22218e801ede86510a89cb776c3ecff3bfb633ba"
+        "0e7df4217fed84055f6b3a032e690b9da188a4ab",
+        "7e3e14d3d3da40b85b8961ec52b352407679c234"
       ]
     },
     "tests/test_template_drift.py": {
