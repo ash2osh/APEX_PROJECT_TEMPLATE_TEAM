@@ -330,11 +330,14 @@ import sys
 REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
-def is_link(path):
-    status = os.lstat(path)
+def is_link_status(status):
     if stat.S_ISLNK(status.st_mode):
         return True
     return bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+
+
+def is_link(path):
+    return is_link_status(os.lstat(path))
 
 
 root = sys.argv[1]
@@ -348,7 +351,12 @@ for directory, subdirectories, files in os.walk(root, followlinks=False):
     subdirectories[:] = [name for name in subdirectories if not is_link(os.path.join(directory, name))]
     for name in files:
         path = pathlib.Path(directory, name)
-        if path.suffix.lower() not in (".sql", ".txt") or is_link(path):
+        if path.suffix.lower() not in (".sql", ".txt"):
+            continue
+        # One lstat decides both checks. A link or junction is skipped as before, and so is anything else that is not
+        # a regular file: a FIFO named x.sql would block read_bytes forever.
+        status = os.lstat(path)
+        if is_link_status(status) or not stat.S_ISREG(status.st_mode):
             continue
         data = path.read_bytes()
         if b"\r\n" in data:

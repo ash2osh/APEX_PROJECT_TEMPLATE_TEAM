@@ -370,17 +370,16 @@ class BrokenTests(unittest.TestCase):
         raise RuntimeError("x")
 '''
 
-# A passing module that prints a status-shaped line that is not one of unittest's counters. It prints at exit, after a
-# pause, so the line reaches the captured output after unittest's own summary: without the pause, the merged order of
-# the two streams was not reliable in testing. Only the counter check keeps the line from being taken as the summary.
+# A passing module that prints a status-shaped line that is not one of unittest's counters. The line goes to stderr from
+# an atexit handler, so it comes after unittest's summary, which is also written to stderr: both lines share one stream,
+# in a fixed order. Only the counter check keeps the line from being taken as the summary.
 FIXTURE_LOOK_ALIKE_MODULE = r'''import atexit
-import time
+import sys
 import unittest
 
 
 def print_after_the_summary():
-    time.sleep(0.5)
-    print("OK (fixture initialized)")
+    print("OK (fixture initialized)", file=sys.stderr, flush=True)
 
 
 atexit.register(print_after_the_summary)
