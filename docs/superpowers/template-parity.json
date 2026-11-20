@@ -91,10 +91,10 @@
     },
     ".github/workflows/template-checks.yml": {
       "status": "intended",
-      "reason": "CI differs by release: 26.1 installs the Graphify extra in its latest-Python job, 26.2 has no graph extra and runs its own pinned-set graphify job on Python 3.12, and 26.2 runs Windows with two test workers instead of four.",
+      "reason": "CI differs by release: 26.1 installs the Graphify extra in its latest-Python job, 26.2 has no graph extra and runs its own pinned-set graphify job on Python 3.12, and 26.2 runs Windows with two test workers instead of four. Follow-up 2026-11-20 (Windows fixes): both workflows add the same windows-powershell-51 job.",
       "blobs": [
-        "446985ba710909a5da2c558e511fbfad2876d140",
-        "958516299e01d4066bfa2024c5dc97d7e0ec36a8"
+        "44ac84544da64a9907736b97e1c852524ee2d671",
+        "5dfe8345cd9f677f597264e5b2ab5691df0771c3"
       ]
     },
     ".gitignore": {
@@ -123,10 +123,10 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages.",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages. Follow-up 2026-11-20 (Windows fixes): both READMEs add the Windows PowerShell 5.1 arguments note.",
       "blobs": [
-        "616bb37dbb1c6b3242de82da1d36ed929ce840c4",
-        "9c7145a40e2402a0b7f2a897f75a3fe025b9e8c5"
+        "5b9572f5a5343d5c871910dd354a0072aef403d1",
+        "62d824e1a82e7310f79833a6ea17bc5611f85ea9"
       ]
     },
     "TODO.md": {
@@ -187,18 +187,18 @@
     },
     "docs/GETTING_STARTED.md": {
       "status": "intended",
-      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): both guides now clean up by file-level provenance and list inherited workflows by name; they differ in the SQLcl floor, release commands and the 26.1 lock-based test listing. Follow-up 2026-11-19 (pass 3): both guides carry the section for existing projects; the 26.2 guide also clarifies which engine accepts --apex-release. Follow-up 2026-11-20: both guides describe the DEV shorthand.",
+      "reason": "Each guide documents its own APEX and SQLcl floor, setup and validation steps. The 26.2 guide also describes the feature-first workflow. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): both guides now clean up by file-level provenance and list inherited workflows by name; they differ in the SQLcl floor, release commands and the 26.1 lock-based test listing. Follow-up 2026-11-19 (pass 3): both guides carry the section for existing projects; the 26.2 guide also clarifies which engine accepts --apex-release. Follow-up 2026-11-20: both guides describe the DEV shorthand. Follow-up 2026-11-20 (Windows fixes): both guides add the long-path clone note.",
       "blobs": [
-        "ac7cde34baf6dc0d1421eda71d562a35b7f64a00",
-        "d1d8294d2676073eb326f78430b33db543acfb6b"
+        "dea99ebba42c950d8731bb3033e683537c3e1df2",
+        "912e1833a90d9e2026e2ab6fd0ef8723ecba5d6c"
       ]
     },
     "docs/TROUBLESHOOTING.md": {
       "status": "intended",
-      "reason": "26.2 release-specific troubleshooting includes the offline Graphify update path and optional semantic context indexing; 26.1 maintains its own guidance. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "26.2 release-specific troubleshooting includes the offline Graphify update path and optional semantic context indexing; 26.1 maintains its own guidance. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows fixes): both list the Windows PowerShell 5.1 argument refusal.",
       "blobs": [
-        "52c7f6e392165df55dd788f4720a8ae2f69daa32",
-        "dc7b75c5a2c2321b7930e822125f3d5db0cbd5a5"
+        "153400ba98baa849bad7b1ee925764e2c856206b",
+        "ba01bd4f725998a731342455ce123b60b105e394"
       ]
     },
     "docs/baseline.md": {
@@ -211,10 +211,10 @@
     },
     "docs/ci-checks.md": {
       "status": "intended",
-      "reason": "CI layout differs by release: 26.1 installs the Graphify extra in its latest-Python job, while 26.2 runs its own pinned graphify job and limits Windows tests to two workers. Follow-up 2026-11-20 (live and Windows checks): both state that CI parses PowerShell with pwsh 7 only and point to the Windows verification page.",
+      "reason": "CI layout differs by release: 26.1 installs the Graphify extra in its latest-Python job, while 26.2 runs its own pinned graphify job and limits Windows tests to two workers. Follow-up 2026-11-20 (live and Windows checks): both point to the Windows verification page; after the Windows fixes both list the windows-powershell-51 job and the pre-push Git Bash and Windows PowerShell fallbacks.",
       "blobs": [
-        "822c2523b62557ce68412810751192d4226d5557",
-        "ee7fc792945030796ebd690bfe2fe2c472cf5c14"
+        "256aaabb2ba54ae298ba0c70f0f0594b235c0b96",
+        "44c01a8ffb32229b42601a922af4754279c0fc58"
       ]
     },
     "docs/compare-env.md": {
@@ -253,8 +253,8 @@
       "status": "intended",
       "reason": "Identical except that 26.1 has no docs/local-qualification.md, so it omits that link.",
       "blobs": [
-        "fb553b9b9772968011c6f81919fa6054be5c7954",
-        "1a9d33550b5f1e845987700134e4ed76cde83031"
+        "a99347184c76ee272797e9e52b0f682ef397dc74",
+        "9461b1a9f741eee9580cca82bdc21d4855c10c64"
       ]
     },
     "docs/login-acts-as-schema.md": {
@@ -579,10 +579,10 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines. Follow-up 2026-11-19 (pass 2): both lines restore the caller PROJECT_SCHEMA after every command.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines. Follow-up 2026-11-19 (pass 2): both lines restore the caller PROJECT_SCHEMA after every command. Follow-up 2026-11-20 (Windows fixes): both refuse arguments that legacy native argument passing would garble; 26.2 also checks its automations command.",
       "blobs": [
-        "1b48e7170121e057ff76eb2e53479fb0c1892837",
-        "c7194ddaa69240823305d63937d0316b51b78f5d"
+        "5b1c77dc062eaf7005eb489362f8aed0f53cf9a5",
+        "ce235f899903fb2f36a99da641c9f89a589c2f55"
       ]
     },
     "scripts/team.sh": {
@@ -595,10 +595,10 @@
     },
     "scripts/template_drift.py": {
       "status": "intended",
-      "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1. Follow-up 2026-11-19: removed-by-cleanup and _git_config_path are the same on both lines; 26.1 keeps them here next to is_original_template. Follow-up 2026-11-19 (pass 2): the raw-or-normalized digest match, the strict=False config parser and _normalized_remote are the same on both lines; 26.1 keeps them here next to is_original_template.",
+      "reason": "26.1 port: inlines the original-template check and reads a missing apexRelease as 26.1. Follow-up 2026-11-19: removed-by-cleanup and _git_config_path are the same on both lines; 26.1 keeps them here next to is_original_template. Follow-up 2026-11-19 (pass 2): the raw-or-normalized digest match, the strict=False config parser and _normalized_remote are the same on both lines; 26.1 keeps them here next to is_original_template. Follow-up 2026-11-20 (Windows fixes): 26.1 catches ValueError in is_original_template here; 26.2 does it in scripts/verify_local.py.",
       "blobs": [
         "bf014bd2ad1b6516368ca3c91ce440250c83f22e",
-        "2808ace31369f17033c90eb58c7ca763aadc5dd1"
+        "cd63773b8328ef7061b01f78251c06a31a86ff43"
       ]
     },
     "scripts/upgrade_template.py": {
@@ -619,10 +619,10 @@
     },
     "scripts/verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now. Follow-up 2026-11-19: the malformed-manifest guard, the removed-by-cleanup count and the linked-worktree config lookup are on both lines; 26.2 keeps is_original_template and _git_config_path here, 26.1 keeps them in scripts/template_drift.py. Follow-up 2026-11-19 (pass 2): _normalized_remote and the strict=False parser are the same on both lines; 26.2 keeps them here, 26.1 in scripts/template_drift.py.",
+      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now. Follow-up 2026-11-19: the malformed-manifest guard, the removed-by-cleanup count and the linked-worktree config lookup are on both lines; 26.2 keeps is_original_template and _git_config_path here, 26.1 keeps them in scripts/template_drift.py. Follow-up 2026-11-19 (pass 2): _normalized_remote and the strict=False parser are the same on both lines; 26.2 keeps them here, 26.1 in scripts/template_drift.py. Follow-up 2026-11-20 (Windows fixes): both decode child output as UTF-8 and catch ValueError in is_original_template.",
       "blobs": [
-        "a8c52fdb9c2acbf9ecfcb93e1ea122c8495c90e9",
-        "f4c8d9882364037ab980e9793d01a1d20906ccde"
+        "4c926709be34e688deacf8b4dd037d1bc3f8ea7d",
+        "0bf4a7f30d5a8eafb3c9ceb45c15116aa4d2ff38"
       ]
     },
     "scripts/verify_publish_state.py": {
@@ -859,10 +859,10 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines.",
+      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines. Follow-up 2026-11-20 (Windows fixes): NativeArgumentPassingTests are on both lines.",
       "blobs": [
-        "0939d1588af1d2949347e5778e9462bc11b4f5c8",
-        "51756f50228f771da8fb2ccc2b26bba847c61182"
+        "d6c755d282b36cbcc01e2747a0fc51265ff7d046",
+        "cba129841e71ad53d7692912df73b26448bb5f48"
       ]
     },
     "tests/test_template_drift.py": {
@@ -891,10 +891,10 @@
     },
     "tests/test_verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2 Follow-up 2026-11-19: the removed-by-cleanup, malformed-manifest and linked-worktree tests exist on both lines. Follow-up 2026-11-19 (pass 2): the remote-normalization and strict-parser tests are on both lines.",
+      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2 Follow-up 2026-11-19: the removed-by-cleanup, malformed-manifest and linked-worktree tests exist on both lines. Follow-up 2026-11-19 (pass 2): the remote-normalization and strict-parser tests are on both lines. Follow-up 2026-11-20 (Windows fixes): the UTF-8 decoding and NUL gitdir tests are on both lines, adapted to each build_report signature.",
       "blobs": [
-        "41c29478b554e182dc16b24546313b79926ae852",
-        "5b12a07f4d00f0de11261627e6245f68b5c02847"
+        "e490f0fc31b11da0610faddfbd8c49447d105e83",
+        "0c6cc841f92a1cc25ebc15a074acde47617e9407"
       ]
     },
     "tests/test_verify_publish_state.py": {
@@ -907,10 +907,10 @@
     },
     "tests/test_windows_support.py": {
       "status": "feature",
-      "reason": "The tests that 26.1 lacked (Wait-SqlclProcess waiting for pending output, the optional DBA alias in load_env.ps1) now live in the core as tests/test_windows_support_shared.py, so both lines run them. What still differs: 26.2 tests its 26.2-only PowerShell commands (baseline, compare-env, migration rehearsal); 26.1 tests process-tree waiting instead.",
+      "reason": "The tests that 26.1 lacked (Wait-SqlclProcess waiting for pending output, the optional DBA alias in load_env.ps1) now live in the core as tests/test_windows_support_shared.py, so both lines run them. What still differs: 26.2 tests its 26.2-only PowerShell commands (baseline, compare-env, migration rehearsal); 26.1 tests process-tree waiting instead. Follow-up 2026-11-20 (Windows fixes): both expect the Windows PowerShell 5.1 refusal for a double quote under powershell.exe.",
       "blobs": [
-        "1afa45f3a3f6f070cc86a44cdd0f97926a16f7a1",
-        "23e565e2a40cf32c3bafc4cda0bbc000cbbb088c"
+        "7e7a0d7a10b7bc3a51eac87bd4fe3b23ea76da1c",
+        "c6290cd56460465595b9a8305f8fee6ca434ef76"
       ]
     }
   }
