@@ -2375,5 +2375,93 @@ class TeamPs1EnvironmentTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(os.name == "nt", "the legacy native argument rules belong to Windows PowerShell; POSIX launchers pass arguments intact")
+class NativeArgumentPassingTests(unittest.TestCase):
+    """Windows PowerShell 5.1 garbles some native arguments: an empty one, a double quote, or a value with a space
+    that ends in a backslash. team.ps1 refuses them before Git Bash or Python starts; PowerShell 7.3+ passes them."""
+
+    REFUSAL = "Windows PowerShell 5.1 cannot pass"
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.marker = self.root / "bash-called.txt"
+
+    def windows_powershell(self) -> str:
+        executable = _test_subprocess_safety.working_windows_powershell()
+        if executable is None:
+            self.skipTest("Windows PowerShell 5.1 is not installed")
+        return executable
+
+    def fake_bash(self, *, marker_on_probe: bool) -> Path:
+        # A batch file, since PowerShell cannot run an extensionless script on Windows. It records each call by
+        # writing the marker. Without marker_on_probe the python probe (bash -c "python3 ...") answers yes silently.
+        probe_line = "" if marker_on_probe else 'if "%~1"=="-c" exit /b 0\r\n'
+        fake = self.root / "git-bash.cmd"
+        fake.write_text(f'@echo off\r\n{probe_line}echo called > "{self.marker}"\r\nexit /b 0\r\n',
+                        encoding="ascii", newline="")
+        return fake
+
+    def run_team(self, engine: str, arguments: list[str], fake: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [engine, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "team.ps1"), *arguments],
+            cwd=ROOT, env={**os.environ, "TEAM_BASH": str(fake)}, text=True, capture_output=True, check=False,
+        )
+
+    def test_refuses_an_argument_for_git_bash_that_the_legacy_rules_would_garble(self) -> None:
+        engine = self.windows_powershell()
+        for value in ('A"B', "", "a b\\"):
+            with self.subTest(value=value):
+                result = self.run_team(engine, ["compare-schema", "--env", "dev", "--object", value],
+                                       self.fake_bash(marker_on_probe=True))
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(self.REFUSAL, result.stderr)
+                self.assertFalse(self.marker.exists(), "a refused command must not start Git Bash, not even its probe")
+
+    def test_refuses_an_argument_for_python_that_the_legacy_rules_would_garble(self) -> None:
+        engine = self.windows_powershell()
+        result = self.run_team(engine, ["template-status", "--format", 'te"xt'], self.fake_bash(marker_on_probe=True))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(self.REFUSAL, result.stderr)
+        self.assertIn("to Python intact", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_an_ordinary_python_argument_is_not_refused(self) -> None:
+        engine = self.windows_powershell()
+        result = self.run_team(engine, ["template-status", "--format", "text"], self.fake_bash(marker_on_probe=False))
+        self.assertNotIn(self.REFUSAL, result.stderr, result.stdout + result.stderr)
+
+    def test_ordinary_arguments_still_reach_git_bash(self) -> None:
+        engine = self.windows_powershell()
+        result = self.run_team(engine, ["compare-schema", "--env", "dev", "--object", "CUSTOMERS"],
+                               self.fake_bash(marker_on_probe=False))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.marker.exists(), "an ordinary command must reach Git Bash")
+
+    @staticmethod
+    def powershell_is_at_least(executable: str, minimum: tuple[int, int]) -> bool:
+        result = subprocess.run([executable, "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+                                text=True, capture_output=True, check=False)
+        parts = result.stdout.strip().split(".")
+        if result.returncode != 0 or len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+            return False
+        return (int(parts[0]), int(parts[1])) >= minimum
+
+    def test_powershell_7_3_passes_a_double_quote_through(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if not pwsh or not self.powershell_is_at_least(pwsh, (7, 3)):
+            self.skipTest("PowerShell 7.3 or newer (pwsh) is not installed")
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "team.ps1"),
+             "compare-schema", "--env", "dev", "--object", 'A"B'],
+            cwd=ROOT, env={**os.environ, "TEAM_BASH": str(self.fake_bash(marker_on_probe=False))},
+            text=True, capture_output=True, check=False,
+        )
+        self.assertNotIn(self.REFUSAL, result.stderr, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.marker.exists(), "PowerShell 7.3+ must hand the double quote on to Git Bash")
+
+
 if __name__ == "__main__":
     unittest.main()

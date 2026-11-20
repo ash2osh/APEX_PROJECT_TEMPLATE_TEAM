@@ -709,7 +709,11 @@ class TeamPowerShellFolderArgumentTests(unittest.TestCase):
                 with self.subTest(engine=Path(engine).name):
                     result = self.run_team(engine, checkout, 'migrations/double"quote')
                     self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                    self.assertIn("preflight error:", result.stderr)
+                    if Path(engine).name.lower() == "powershell.exe":
+                        # Windows PowerShell 5.1 cannot pass a double quote to Git Bash, so team.ps1 refuses it first.
+                        self.assertIn("Windows PowerShell 5.1 cannot pass", result.stderr)
+                    else:
+                        self.assertIn("preflight error:", result.stderr)
                     self.assertNotIn("Exception", result.stderr)
                     self.assertNotIn("Illegal characters", result.stderr)
 

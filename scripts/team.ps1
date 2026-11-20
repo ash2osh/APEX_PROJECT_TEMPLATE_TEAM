@@ -228,6 +228,34 @@ function ConvertFrom-GitBashStatus([int] $Status) {
   return $Status
 }
 
+# Windows PowerShell 5.1, and PowerShell 7 before 7.3, build a native command line with the
+# legacy rules: an empty argument disappears, an embedded double quote is dropped, and a value
+# with a space that ends in a backslash closes its quote early, so the arguments after it are
+# swallowed. PowerShell 7.3 and newer pass them intact unless $PSNativeCommandArgumentPassing
+# is set to Legacy.
+function Test-LegacyNativeArgumentPassing {
+  if ($PSVersionTable.PSEdition -eq "Desktop") { return $true }
+  $version = $PSVersionTable.PSVersion
+  if (($version.Major -lt 7) -or (($version.Major -eq 7) -and ($version.Minor -lt 3))) { return $true }
+  $mode = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
+  return ([string] $mode -eq "Legacy")
+}
+
+# Refuses, before anything starts, a value that the legacy rules would garble for the named
+# native command. The values are checked as the caller passes them, so a folder argument that
+# ConvertTo-MigrationFolderArgument already converted is checked in that converted form. The
+# value is not echoed: it may be long SQL, and naming the rule is enough.
+function Assert-NativeArguments([string] $Target, [string[]] $Values) {
+  if (-not (Test-LegacyNativeArgumentPassing)) { return }
+  foreach ($value in @($Values)) {
+    $text = [string] $value
+    $endsInBackslash = $text.EndsWith("\", [System.StringComparison]::Ordinal)
+    if (($text.Length -eq 0) -or $text.Contains('"') -or (($text -match '\s') -and $endsInBackslash)) {
+      Fail "Windows PowerShell 5.1 cannot pass an empty argument, a double quote (`"), or a value with a space that ends in a backslash to $Target intact: run this command with PowerShell 7.3 or newer (pwsh), or run scripts/team.sh in Git Bash"
+    }
+  }
+}
+
 function Invoke-TeamBash {
   param([string] $ScriptName, [string[]] $ScriptArguments)
   $bashPath = Resolve-TeamBash
@@ -243,6 +271,8 @@ function Invoke-TeamBash {
       }
     }
   }
+  # Under the legacy rules the arguments Bash receives can be garbled; refuse them here, before the shim and Bash.
+  Assert-NativeArguments -Target "Git Bash" -Values (@(Join-Path $PSScriptRoot $ScriptName) + @($ScriptArguments))
   # The helpers call `python3`. On Windows a python.org or winget install has no
   # python3.exe and the Store alias is often a stub, so when Git Bash cannot run
   # python3 a one-file shim for the interpreter found here goes first on PATH for
@@ -665,6 +695,7 @@ try {
       $python = Resolve-TeamPython
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to verify local readiness (python3, python or py -3)" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      Assert-NativeArguments -Target "Python" -Values @($Arguments)
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "verify_local.py") --repo-root $repoRoot @Arguments
       Exit-Team $LASTEXITCODE
     }
@@ -673,6 +704,7 @@ try {
       $python = Resolve-TeamPython
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to configure browser MCPs" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      Assert-NativeArguments -Target "Python" -Values @($Arguments)
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "browser_mcp.py") --repo-root $repoRoot @Arguments
       Exit-Team $LASTEXITCODE
     }
@@ -681,6 +713,7 @@ try {
       $python = Resolve-TeamPython
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to set up workflow skills" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      Assert-NativeArguments -Target "Python" -Values @($Arguments)
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "workflow_skills.py") --repo-root $repoRoot @Arguments
       Exit-Team $LASTEXITCODE
     }
@@ -707,6 +740,7 @@ try {
       . (Join-Path $PSScriptRoot "resolve_python.ps1")
       $python = Resolve-TeamPython
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to show the configured targets (python3, python or py -3)" }
+      Assert-NativeArguments -Target "Python" -Values @($Arguments)
       # Extra or unknown arguments are refused by the module's parser (exit 2), as template-status refuses them.
       Push-Location -LiteralPath $repoRoot
       try {
@@ -729,6 +763,7 @@ try {
       $python = Resolve-TeamPython
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to inspect template status" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      Assert-NativeArguments -Target "Python" -Values @($Arguments)
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "template_drift.py") --repo-root $repoRoot @Arguments
       Exit-Team $LASTEXITCODE
     }
@@ -737,6 +772,7 @@ try {
       $python = Resolve-TeamPython
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to operate on APEX automations" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      Assert-NativeArguments -Target "Python" -Values @($Arguments)
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "automation_operations.py") --repo-root $repoRoot @Arguments
       Exit-Team $LASTEXITCODE
     }
@@ -745,6 +781,7 @@ try {
       $python = Resolve-TeamPython
       if ($null -eq $python) { Fail "Python 3.10 or newer is required to upgrade the template (python3, python or py -3)" }
       $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      Assert-NativeArguments -Target "Python" -Values @($Arguments)
       & $python.Path @($python.Prefix) (Join-Path $PSScriptRoot "upgrade_template.py") --project-root $repoRoot @Arguments
       $upgradeStatus = $LASTEXITCODE
       $envFile = Join-Path $repoRoot ".env"
