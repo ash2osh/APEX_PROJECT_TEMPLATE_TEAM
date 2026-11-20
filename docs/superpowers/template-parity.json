@@ -643,10 +643,10 @@
     },
     "template-manifest.json": {
       "status": "intended",
-      "reason": "Release identity: 26.2 is manifest schema 2 with apexRelease 26.2, a SQLcl 26.3.0.0 floor and its own upstream; the template-owned lists differ by release.",
+      "reason": "Release identity: 26.2 is manifest schema 2 with apexRelease 26.2, a SQLcl 26.3.0.0 floor and its own upstream; the template-owned lists differ by release. Follow-up 2026-11-20: both manifests own docs/live-verification.md and docs/windows-verification.md.",
       "blobs": [
-        "f7fabd9474938a13a1ee49362486ef9b9e145e7e",
-        "b4fe70018b08ca438f6f59227ee67d22a2102a91"
+        "b5637883ada8e96657665f7a7b7228b651fbe8b0",
+        "b0c3ce8866d5844c5fcb70e2f8e949f56b13bfd5"
       ]
     },
     "tests/fixtures/schema_catalog/view-synonyms.json": {
