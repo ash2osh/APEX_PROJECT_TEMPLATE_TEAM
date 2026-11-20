@@ -198,6 +198,33 @@ class WindowsCheckScriptRunTests(unittest.TestCase):
         self.assertIn("run this script with powershell.exe", refused.stdout)
 
 
+# A stub that behaves like the real descriptor check: targets names the DEV schema of the temporary .env, and
+# verify-local fails any dev.json whose parsingSchema is not that schema (as verify_local.py does).
+STUB_TEAM_DESCRIPTOR = r"""$command = [string] $args[0]
+$envFile = [Environment]::GetEnvironmentVariable('PROJECT_ENV_FILE')
+$values = @{}
+foreach ($line in [System.IO.File]::ReadAllLines($envFile)) {
+  if ($line -match '^([A-Z_]+)=(.*)$') { $values[$Matches[1]] = $Matches[2] }
+}
+if ($command -eq 'targets') { Write-Output ('dev ' + $values['DEV_SCHEMA']); exit 0 }
+if ($command -eq 'verify-local') {
+  $schema = $values['DEV_SCHEMA']
+  $failed = $false
+  $appsRoot = Join-Path $PSScriptRoot '..\apps'
+  foreach ($file in @(Get-ChildItem -LiteralPath $appsRoot -Recurse -Filter dev.json)) {
+    $match = [regex]::Match([System.IO.File]::ReadAllText($file.FullName), '"parsingSchema"\s*:\s*"([^"]+)"')
+    if ($match.Success -and ($match.Groups[1].Value -ne $schema)) {
+      Write-Output ('[FAIL] app_descriptor_dev: parsingSchema (' + $match.Groups[1].Value + ') is not in configured APEX_PARSING_SCHEMA (' + $schema + ')')
+      $failed = $true
+    }
+  }
+  if ($failed) { exit 2 }
+  exit 0
+}
+exit 2
+"""
+
+
 STUB_TEAM = (
     "$command = [string] $args[0]\n"
     "if ($command -eq 'targets') { Write-Output 'SCHEMA1'; exit 0 }\n"
@@ -221,13 +248,14 @@ STUB_TEAM = (
 class TeamOfflineStubTests(unittest.TestCase):
     """team-offline against a stub team.ps1 in a temporary fake root; the real verify-local never runs."""
 
-    def make_root(self, directory: Path, verify_lines: list[str], code: int, apps: tuple[str, ...] = ()) -> Path:
+    def make_root(self, directory: Path, verify_lines: list[str], code: int, apps: tuple[str, ...] = (),
+                  stub: str = STUB_TEAM) -> Path:
         scripts = directory / "scripts"
         scripts.mkdir()
         shutil.copy2(SCRIPT, scripts / "windows_check.ps1")
         for name in ("load_env.ps1", "template_release.ps1", "resolve_python.ps1"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
-        (scripts / "team.ps1").write_bytes(STUB_TEAM.encode("ascii"))
+        (scripts / "team.ps1").write_bytes(stub.encode("ascii"))
         (scripts / "verify.txt").write_bytes(("".join(line + "\n" for line in verify_lines)).encode("ascii"))
         (scripts / "verify.code").write_bytes(str(code).encode("ascii"))
         for app in apps:
@@ -266,6 +294,32 @@ class TeamOfflineStubTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("RESULT team-offline PASS", result.stdout)
             self.assertIn("APEX_APP_ID=150", result.stdout)
+
+    def test_temporary_env_uses_the_schema_of_the_lowest_applications_descriptor(self) -> None:
+        # The team's app parses as E2E_WIN. A fixed SCHEMA1 .env would make verify-local refuse that descriptor.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, [], 0, stub=STUB_TEAM_DESCRIPTOR)
+            descriptor = root / "apps" / "E2E_WIN" / "100" / "deployments" / "dev.json"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.write_text(
+                '{"workspace": {"name": "E2E_WIN"}, "app": {"id": 100, "databaseSession": {"parsingSchema": "E2E_WIN"}}}\n',
+                encoding="ascii",
+            )
+            result = self.run_team_offline(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT team-offline PASS", result.stdout)
+            self.assertIn("DEV_SCHEMA=E2E_WIN", result.stdout)
+            self.assertIn("targets lists E2E_WIN and verify-local exits 0", result.stdout)
+
+    def test_schema_folder_names_the_temporary_schema_when_no_descriptor_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, [], 0, apps=("CUSTDATA/100",), stub=STUB_TEAM_DESCRIPTOR)
+            result = self.run_team_offline(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("DEV_SCHEMA=CUSTDATA", result.stdout)
+            self.assertIn("RESULT team-offline PASS", result.stdout)
 
     def test_missing_directory_of_a_real_application_is_not_excused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

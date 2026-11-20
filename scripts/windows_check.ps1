@@ -35,8 +35,8 @@ $script:HasResolver = $false
 
 # A minimal valid .env for the offline checks: the loader requires the project header, and the
 # DEV shorthand trio (DEV_SCHEMA, DEV_SQLCL_CONNECTION, DEV_EXPECTED_USER) is what this script checks.
-function New-DevEnvText([string] $AppId) {
-  return "PROJECT_NAME=DEMO`nDEVELOPER_NAME=ALICE`nDB_ENVIRONMENT=development`nAPEX_APP_ID=" + $AppId + "`nDEV_SCHEMA=SCHEMA1`nDEV_SQLCL_CONNECTION=conn_one`nDEV_EXPECTED_USER=SCHEMA1`n"
+function New-DevEnvText([string] $AppId, [string] $Schema) {
+  return "PROJECT_NAME=DEMO`nDEVELOPER_NAME=ALICE`nDB_ENVIRONMENT=development`nAPEX_APP_ID=" + $AppId + "`nDEV_SCHEMA=" + $Schema + "`nDEV_SQLCL_CONNECTION=conn_one`nDEV_EXPECTED_USER=" + $Schema + "`n"
 }
 
 # Numeric application directories under apps/<schema>/<id>, lowest first (empty on a bare template).
@@ -50,6 +50,30 @@ function Get-ApplicationIds {
     }
   }
   return @($ids | Sort-Object { [decimal] $_ })
+}
+
+# The parsing schema of application <AppId>: its dev.json descriptor's parsingSchema, else the schema folder it
+# sits in. A descriptor names the schema the team's app really parses as, so the temporary .env must use it:
+# a fixed name would make verify-local refuse every real descriptor. A bare template uses SCHEMA1.
+function Get-ApplicationSchema([string] $AppId) {
+  $appsRoot = Join-Path $RepoRoot "apps"
+  if (-not (Test-Path -LiteralPath $appsRoot -PathType Container)) { return "SCHEMA1" }
+  foreach ($schema in @(Get-ChildItem -LiteralPath $appsRoot -Directory)) {
+    $appDir = Join-Path $schema.FullName $AppId
+    if (-not (Test-Path -LiteralPath $appDir -PathType Container)) { continue }
+    $descriptor = Join-Path $appDir "deployments\dev.json"
+    if (Test-Path -LiteralPath $descriptor -PathType Leaf) {
+      try {
+        $parsed = Get-Content -LiteralPath $descriptor -Raw | ConvertFrom-Json
+        $parsing = [string] $parsed.app.databaseSession.parsingSchema
+        if (-not [string]::IsNullOrWhiteSpace($parsing)) { return $parsing }
+      } catch {
+        # An unreadable descriptor falls back to the folder; verify-local reports the descriptor itself.
+      }
+    }
+    return $schema.Name
+  }
+  return "SCHEMA1"
 }
 
 function Test-OnWindows {
@@ -306,7 +330,7 @@ function Invoke-CheckEnvLoader {
     return
   }
   $engine = Get-EnginePath
-  $devLf = New-DevEnvText "100"
+  $devLf = New-DevEnvText "100" "SCHEMA1"
   $triple = @("SCHEMA1", "conn_one", "SCHEMA1")
   $probeNames = @("DEV_SCHEMA", "DEV_SQLCL_CONNECTION", "DEV_EXPECTED_USER", "TABLES_SCHEMA", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER", "CODE_SCHEMA", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER", "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER")
   $work = Get-ScratchDirectory
@@ -442,22 +466,26 @@ function Invoke-CheckTeamOffline {
   $appIds = @(Get-ApplicationIds)
   $bare = ($appIds.Count -eq 0)
   $appId = "100"
-  if (-not $bare) { $appId = [string] $appIds[0] }
+  $schema = "SCHEMA1"
+  if (-not $bare) {
+    $appId = [string] $appIds[0]
+    $schema = Get-ApplicationSchema $appId
+  }
   $work = Get-ScratchDirectory
   $previousEnvFile = [Environment]::GetEnvironmentVariable("PROJECT_ENV_FILE")
   try {
     $envPath = Join-Path $work "dev-only.env"
-    [System.IO.File]::WriteAllText($envPath, (New-DevEnvText $appId), (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($envPath, (New-DevEnvText $appId $schema), (New-Object System.Text.UTF8Encoding($false)))
     if ($bare) {
-      Add-Line "  temporary .env: APEX_APP_ID=100 (no application under apps/)"
+      Add-Line "  temporary .env: APEX_APP_ID=100 DEV_SCHEMA=SCHEMA1 (no application under apps/)"
     } else {
-      Add-Line ("  temporary .env: APEX_APP_ID=" + $appId + " (lowest application id under apps/)")
+      Add-Line ("  temporary .env: APEX_APP_ID=" + $appId + " DEV_SCHEMA=" + $schema + " (lowest application id under apps/)")
     }
     [Environment]::SetEnvironmentVariable("PROJECT_ENV_FILE", $envPath)
 
     $targets = Invoke-Native $engine @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $team, "targets")
-    $targetsOk = (($targets.Code -eq 0) -and (($targets.Lines -join "`n").Contains("SCHEMA1")))
-    Add-Line ("  targets: exit " + $targets.Code + ", lists SCHEMA1: " + $targetsOk)
+    $targetsOk = (($targets.Code -eq 0) -and (($targets.Lines -join "`n").Contains($schema)))
+    Add-Line ("  targets: exit " + $targets.Code + ", lists " + $schema + ": " + $targetsOk)
     if (-not $targetsOk) { Add-Tail $targets.Lines 20 }
 
     $verify = Invoke-Native $engine @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $team, "verify-local")
@@ -476,9 +504,9 @@ function Invoke-CheckTeamOffline {
     if ((-not $verifyOk) -and (-not $bareExcused)) { Add-Tail $verify.Lines 20 }
 
     if (-not $targetsOk) {
-      Set-Outcome "FAIL" ("targets does not list SCHEMA1 (exit " + $targets.Code + "); verify-local exit " + $verify.Code)
+      Set-Outcome "FAIL" ("targets does not list " + $schema + " (exit " + $targets.Code + "); verify-local exit " + $verify.Code)
     } elseif ($verifyOk) {
-      Set-Outcome "PASS" "targets lists SCHEMA1 and verify-local exits 0"
+      Set-Outcome "PASS" ("targets lists " + $schema + " and verify-local exits 0")
     } elseif ($bareExcused) {
       Set-Outcome "PASS" ("bare template: no application under apps/, so configured_app_" + $appId + " is expected to fail")
     } else {

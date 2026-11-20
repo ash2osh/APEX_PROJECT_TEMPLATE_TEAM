@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "118876716e416df40c57cf30edb6c974e7e53f05",
+  "coreCommit": "915f4f940c7d18aed6c6f00266db830c30b116c6",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -524,7 +524,7 @@
     },
     {
       "path": "scripts/windows_check.ps1",
-      "sha256": "8864aaa1507c1981afc5353aefa294fa43c8fd6d88d47237fb739bf1db2bf33c",
+      "sha256": "0460d80542003b3f5813f72e1e6f675309dd84b967061d064a487c73bb5d21f4",
       "executable": false
     },
     {
@@ -1249,7 +1249,7 @@
     },
     {
       "path": "tests/test_windows_check.py",
-      "sha256": "994986ec3e5aa9fd94cc3382a3610ebfd8c93cd043a761df61637b2300f33fde",
+      "sha256": "6816be52508dcd81c98704034f8bcaf47ff6ad7d45c561c1996a9398c5371778",
       "executable": false
     },
     {
