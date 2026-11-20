@@ -80,6 +80,40 @@ Notes:
 - Optional: `uv` and Graphify for the [knowledge graph](../README.md#optional-knowledge-graph),
   and an AI coding assistant such as Claude Code or Codex.
 
+### Windows machines
+
+Required:
+
+- **Git for Windows.** It provides Git Bash, which runs the migration, comparison
+  and deployment helpers. `team.ps1` looks for `bash.exe` beside `git.exe` and in
+  the usual install folders. To name another copy, set `TEAM_BASH` to its full path.
+- **Python 3.10 or newer**, from python.org or winget. `team.ps1` finds `python3`,
+  `python` or `py -3`, in that order.
+- **SQLcl 26.3.0.0 or newer** on `PATH`, for APEX operations. SQLcl needs a Java
+  runtime; see the installation section of
+  [Oracle's SQLcl documentation](https://docs.oracle.com/en/database/oracle/sql-developer-command-line/)
+  for the version your release requires.
+- **Windows PowerShell 5.1** (built into Windows) or **PowerShell 7.3 or newer**,
+  to run `scripts/team.ps1`. For the script execution policy, see the
+  [Windows notes](../README.md#quickstart).
+
+Optional:
+
+- **PowerShell 7.3 or newer** (`pwsh`) is recommended. Under Windows PowerShell 5.1,
+  `team.ps1` refuses an empty argument, a double quote, or a value with a space that
+  ends in a backslash. See the [Windows notes](../README.md#quickstart).
+- **Docker Desktop or Podman**, only to run a local practice database in section 3.
+  The template's scripts never call Docker.
+- **ShellCheck and Ruff**, only for maintainers who run `scripts/pre_push_check.py`.
+  A missing ShellCheck prints a note. A missing Ruff fails the check.
+
+Not needed:
+
+- **WSL.** The template's scripts never use it. The `bash.exe` launcher in
+  `C:\Windows\System32` (and in `WindowsApps`) belongs to WSL. `team.ps1`, the Python
+  helpers and the pre-push check skip it and use Git Bash. Docker Desktop may use
+  WSL 2 as its own engine; that is Docker's choice.
+
 ## 3. No APEX database yet? Run one on your computer
 
 If your team already has a shared development database, skip to step 4.
@@ -113,6 +147,21 @@ workspace, and a saved connection.
 This gives you a schema and a workspace, **not an APEX application**. Before
 step 8, create or import an app in App Builder and note its numeric ID;
 `export` can only export an app that already exists.
+
+- The project's documentation recommends WSL2 on Windows. On one Windows 11 machine,
+  its `install.sh`, `local-26ai.sh` and `create-user` also ran from Git Bash (Git for
+  Windows 2.54) without WSL. Two caveats:
+  - If `ORACLE_HOME` names a missing folder, SQLcl prints `ORACLE_HOME ... does not
+    exist` first. The installer misreads that line as an existing APEX install and
+    skips the APEX install. Run it with `env -u ORACLE_HOME ./install.sh`.
+  - `create-user` printed `Error creating connections directory` and did not save the
+    connection, although it reported `saved sqlcl connection`. Check with
+    `connmgr list`; if it is missing, save it with `conn -save <name> -savepwd`.
+- Its compose file fixes the project name, the container names (`local-26ai`,
+  `local-26ai-ords`), the volume (`oradata-26ai`) and the host ports (1521, 8181,
+  8443). A second copy on the same machine reuses the first one's containers and
+  database. To run a separate one, stop and remove the first stack, or change those
+  names and ports in a copy.
 
 ## 4. Create your project
 
