@@ -73,7 +73,10 @@ Notes:
   refuses to run scripts until `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`,
   and migration files must be saved as UTF-8 without a BOM and with LF line
   endings; see the Windows notes in the [README](../README.md#quickstart) and
-  [Troubleshooting](TROUBLESHOOTING.md).
+  [Troubleshooting](TROUBLESHOOTING.md). A clone can fail with `Filename too long`, because Git for Windows does not use
+  long paths by default even when Windows has them enabled, and some test fixture paths are about 150 characters below the
+  checkout. Clone into a short folder (for example `C:\src`), or clone with `git clone -c core.longpaths=true <url>`, which
+  sets it for that repository only.
 - Optional: `uv` and Graphify for the [knowledge graph](../README.md#optional-knowledge-graph),
   and an AI coding assistant such as Claude Code or Codex.
 
@@ -127,6 +130,8 @@ cd my-apex-project
 git remote rename origin template     # keep the template as a separate remote
 git remote add origin <your-new-repository-url>
 ```
+
+On Windows, if the clone fails with `Filename too long`, use `git clone -c core.longpaths=true <url> my-apex-project` instead; it sets long paths for this repository only.
 
 Either way, the files `AGENTS.project.md`, `PROJECT.md` and
 `.agents/rules/project.md` are yours. Put your project's own notes there,

@@ -97,8 +97,10 @@ remaining `LVF_` objects in the throwaway schema before the next run.
 ## Known limits
 
 - The checks cover the generator and the catalog on one Oracle release at a time.
-- The script has not yet been run on Windows.
-- A temporary-directory path that contains spaces has not been tried with SQLcl on Windows.
+- The script has not yet been run against a live database on Windows. On Windows it starts SQLcl with an empty input
+  pipe (SQLcl aborts with `java.io.IOException: Incorrect function` and still exits 0 when its input is the NUL device)
+  and inside a job object, so a timeout ends the java.exe that sql.exe starts.
+- An `@script` path that contains spaces worked with SQLcl 26.3 on Windows in a check without a database connection.
 
 See also [Live feature-release checks](live-feature-tests.md) for the feature-release path, and
 [Local qualification](local-qualification.md) for the read-only observations against a local target.

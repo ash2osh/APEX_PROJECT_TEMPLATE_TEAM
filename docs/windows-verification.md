@@ -5,13 +5,15 @@ machine. It checks the PowerShell scripts, the environment loader, the Python to
 commands, the unit tests and the pre-push check. It does not connect to a database and does not run an
 import or a migration.
 
-It exists because CI runs PowerShell only as PowerShell 7 (`pwsh`). The PowerShell parse step in CI uses
+It exists because most PowerShell checks in CI use PowerShell 7 (`pwsh`). The PowerShell parse step in CI uses
 `pwsh`, and most PowerShell tests are gated on `pwsh`. Windows PowerShell 5.1 (`powershell.exe`) parses
 code, handles encoding and runs native commands differently, so a machine that uses 5.1 needs its own
-check. See [CI checks](ci-checks.md) for what CI runs.
+check. The `windows-powershell-51` job runs this script's fast steps under 5.1. See [CI checks](ci-checks.md)
+for what CI runs.
 
-The script has been tested with PowerShell 7 on Linux only. It has not yet been run under Windows
-PowerShell 5.1.
+The script was first run on Windows 11 (build 26300) on 2026-11-20, under Windows PowerShell 5.1.26100 and
+PowerShell 7.7, in both templates. CI now runs its fast steps under Windows PowerShell 5.1 in the
+`windows-powershell-51` job (see [CI checks](ci-checks.md)).
 
 ## How to run it
 
@@ -52,7 +54,7 @@ The steps run in this order.
 | `env-loader` | Writes five variants of a minimal `.env` (LF, CRLF, UTF-8 with a byte order mark, a non-ASCII comment, and UTF-16) and runs `scripts/load_env.ps1` on each. UTF-16 must be refused with the "save it as UTF-8" message. The other four must load without a refusal and set the DEV variables correctly. |
 | `python-tools` | Finds Python 3.10 or newer (`python3`, `python` or `py -3`) and byte-compiles every `.py` file under `scripts/` with `python -I`. SKIPs when no suitable Python is found. |
 | `team-offline` | Writes a DEV-only `.env` to a temporary folder, runs `scripts/team.ps1 targets` (it must list `SCHEMA1`) and then `verify-local`. See the next section for what counts as a pass. |
-| `tests` | Runs `python -m unittest discover -s tests` from the checkout root and reports the `Ran` and `OK` or `FAILED` lines. This takes about ten minutes or more, and prints nothing until it ends. |
+| `tests` | Runs `python -m unittest discover -s tests` from the checkout root and reports the `Ran` and `OK` or `FAILED` lines; only unittest's own summary lines count for the result detail. On a failure it lists the failing tests (the `FAIL:` and `ERROR:` headers, up to 50) before the last 60 lines of output. This takes about ten minutes or more, and prints nothing until it ends. |
 | `pre-push` | Runs `python scripts/pre_push_check.py --all` from the checkout root. The check is the same as the `--all` form in [CI checks](ci-checks.md#before-you-push). |
 
 The script uses the Python interpreter it finds, not the engine it runs in. Running the script under
@@ -96,6 +98,21 @@ The script is written to run on Windows PowerShell 5.1. Keep to these rules when
 - No `$IsWindows`, `ForEach-Object -Parallel`, `ProcessStartInfo.ArgumentList` or `-AsByteStream`.
 - `#Requires -Version 5.1` on the first line.
 - ASCII only, with LF line endings.
+
+## Running the pwsh-gated tests under Windows PowerShell 5.1
+
+21 test files get their PowerShell from `working_pwsh()` in `tests/_test_subprocess_safety.py`. Without
+`pwsh`, those tests skip. Set `TEMPLATE_TEST_POWERSHELL=powershell` to make them use Windows PowerShell 5.1
+instead. There is no fallback to `pwsh`, and any value other than `pwsh` or `powershell` is an error.
+In PowerShell:
+
+```powershell
+$env:TEMPLATE_TEST_POWERSHELL = "powershell"
+python -m unittest discover -s tests
+Remove-Item Env:TEMPLATE_TEST_POWERSHELL
+```
+
+Off Windows, those tests skip under this setting.
 
 ## What the script does not do
 
