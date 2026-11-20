@@ -276,7 +276,8 @@ python3 -m unittest discover -s tests -p test_live_baseline.py -v
 Both connections log in as the same schema name, one on each database (for example two Docker containers). Every
 object the checks create is named `BLT<token>_...` and dropped at the end; the baseline prefix filter keeps the rest of
 the schema out of the exports. Use the saved connections of a disposable schema only. A connection name that contains
-`live`, `prod` or `prd` is refused by the product's production-name guard.
+`live`, `prod` or `prd` is refused by the product's production-name guard. On Windows the module is skipped whatever the
+environment variables are, with the reason `baseline runs under team.sh, which needs bash`; run it on Linux or macOS.
 
 | Check | What it shows |
 | --- | --- |

@@ -284,7 +284,9 @@ scripts/team.sh compare-schema --env prod --pattern 'HR_*'
 
 **You should see** a list such as `MISSING_ON_TARGET: TABLE HR_ROLES` with the
 source DDL, or no differences. Add `--format json` for a machine-readable
-report.
+report. A rehearsal whose two profiles resolve to one database does not print
+no differences: `compare-schema` exits 2 with `SELF_COMPARISON`. Compare two
+databases, each with its own `DB_UNIQUE_NAME`.
 
 **If it goes wrong:**
 - `at least one --object or --pattern selector is required`: name what to compare.

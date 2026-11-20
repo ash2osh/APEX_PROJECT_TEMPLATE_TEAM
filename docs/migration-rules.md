@@ -823,6 +823,8 @@ SQL file (`ORA-20987`), and every precondition and postcondition session
 reports its identity too, so results observed on a different database are
 refused. Receipts are written only for verified applies.
 
+When DEV and staging point at one database, a folder applied to DEV is already in place when the staging run starts. Preflight then refuses that run with exit 1 before the prompt, and before `--yes` or `--confirm-target` takes effect. For the first selected folder, its absence precondition reports `CHECK_FAILED`; a `CREATE` of an object that already exists is also reported as `LIVE_NAMESPACE_OCCUPIED`. A later folder's precondition runs at its apply boundary, after the confirmation. This is a limit of rehearsing on one shared database, not a confirmation problem: use a separate staging database, as the [live feature-release checks](live-feature-tests.md) do.
+
 A connection name, database name, unique name or service name that looks like
 production (`prod`, `prd`, `production` or `live` as a word, `PRODDB`,
 `ERPPROD`, `erpprod.example.com`) is refused unless the selected target is

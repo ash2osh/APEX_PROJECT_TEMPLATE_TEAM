@@ -139,7 +139,7 @@ under **not compared**.
 | --- | --- |
 | 0 | Every selected section was compared and no difference or blocker was found. |
 | 1 | Catalog coverage was complete and one or more differences were found. |
-| 2 | Capture failed or was incomplete, a row/payload cap was reached, an object is invalid, or a selected DBA section had no usable DBA connection. |
+| 2 | Capture failed or was incomplete, a row/payload cap was reached, an object is invalid, a selected DBA section had no usable DBA connection, or both sides resolve to the same database (see Limits). |
 
 Each section is read in ordered pages of 500 rows. The capture fails if a
 section exceeds 100,000 rows or if the compressed payload exceeds 128 MiB; it
