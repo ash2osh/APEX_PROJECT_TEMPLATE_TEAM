@@ -377,6 +377,20 @@ class BackupDbWithOrdsTests(OrdsCliTestCase):
             self.assertEqual([], project.leftovers())
         self.each_shell(body)
 
+    def test_crlf_spool_output_is_installed_as_lf(self) -> None:
+        # SQLcl's SPOOL writes CRLF on Windows, but the committed mirror is LF (.gitattributes eol=lf), so no installed
+        # mirror file may keep a carriage return. The content and the trailing newline must be unchanged.
+        def body(project: Project) -> None:
+            result = project.run("backup-db")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            after = tree(project.root)
+            self.assertEqual(b"CREATE FAKE FAKE_TABLE FOR DEMO;\n", after["database/DEMO/tables/FAKE_TABLE.sql"])
+            self.assertEqual(b"CREATE FAKE FAKE_VIEW FOR DEMO;\n", after["database/DEMO/views/FAKE_VIEW.sql"])
+            self.assertEqual(b"TABLE=1\n", after["database/DEMO/manifest-tables.txt"])
+            self.assertEqual([], [path for path, contents in after.items() if b"\r" in contents], "no installed mirror file may contain CR")
+            self.assertEqual([], project.leftovers())
+        self.each_shell(body, config={"spool_eol": "crlf"})
+
     def test_ords_in_the_same_schema_is_installed_inside_the_whole_mirror(self) -> None:
         def body(project: Project) -> None:
             result = project.run("backup-db")

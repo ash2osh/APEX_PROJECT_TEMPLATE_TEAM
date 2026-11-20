@@ -437,6 +437,19 @@ class MigrationPlanTests(unittest.TestCase):
         self.assertIn("render-r001", markdown)
         self.assertIn("no dependency or execution order is inferred", markdown.casefold())
 
+    def test_text_and_markdown_renderers_use_ascii_separators(self) -> None:
+        # Python writes redirected or captured stdout in the ANSI code page on Windows. An em dash then
+        # became one byte (0x97) that UTF-8 readers show as a replacement character, so the renderers
+        # use ASCII separators.
+        self.add_folder("migrations/2026-09-25_render-r001")
+        api = self.require_plan()
+        report = api.build_migration_plan(self.root)
+        for output_format in ("text", "markdown"):
+            with self.subTest(output_format=output_format):
+                rendered = api.render_migration_plan(report, output_format)
+                self.assertIn("render-r001", rendered)
+                self.assertTrue(rendered.isascii(), [char for char in rendered if ord(char) > 127][:5])
+
     def test_live_renderers_show_observed_target_and_preflight_statuses(self) -> None:
         self.add_folder("migrations/2026-10-13_render-live-r001")
         api = self.require_plan()

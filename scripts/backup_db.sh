@@ -314,6 +314,23 @@ for ((index = 0; index < ${#ORDS_SCHEMAS[@]}; index++)); do
   run_ords_scope "${ORDS_SCHEMAS[$index]}" "${ORDS_CONNECTIONS[$index]}" "${ORDS_USERS[$index]}"
 done
 
+# SQLcl's SPOOL writes the platform line ending, so on Windows each staged mirror file arrives with CRLF. The committed
+# mirror is LF (.gitattributes forces eol=lf): every .sql and .txt file under the directory has its CRLF pairs turned into
+# LF. The bytes are rewritten directly, so the UTF-8 encoding, a byte-order mark and every other byte are kept.
+normalize_mirror_lf() {
+  python3 - "$1" <<'PY'
+import pathlib
+import sys
+
+for path in pathlib.Path(sys.argv[1]).rglob("*"):
+    if path.suffix.lower() not in (".sql", ".txt") or not path.is_file():
+        continue
+    data = path.read_bytes()
+    if b"\r\n" in data:
+        path.write_bytes(data.replace(b"\r\n", b"\n"))
+PY
+}
+
 REPLACE_ARGS=()
 for schema in "${BACKUP_SCHEMAS[@]}"; do
   spool_schema="$(schema_stage_directory "$schema")"
@@ -339,5 +356,8 @@ for schema in "${BACKUP_SCHEMAS[@]}"; do
     mv -- "$STAGING_DIR/database/$spool_schema/ords" "$STAGING_DIR/ords-install/$schema"
     REPLACE_ARGS+=("$STAGING_DIR/ords-install/$schema" "database/$schema/ords")
   fi
+done
+for ((pair = 0; pair < ${#REPLACE_ARGS[@]}; pair += 2)); do
+  normalize_mirror_lf "${REPLACE_ARGS[$pair]}"
 done
 "$REPO_ROOT/scripts/replace_mirror.sh" "${REPLACE_ARGS[@]}"

@@ -588,7 +588,7 @@ def _render_summary(report: dict, *, as_markdown: bool) -> str:
                 lines.append(f"- {lim}")
             lines.append("")
         if diag.get("interrupted"):
-            lines.append("> **Interrupted** — see run directory for evidence.")
+            lines.append("> **Interrupted** - see run directory for evidence.")
             lines.append("")
         if sanitized_diag_notes:
             lines.append(f"**Diagnostics:** {', '.join(sanitized_diag_notes)}")

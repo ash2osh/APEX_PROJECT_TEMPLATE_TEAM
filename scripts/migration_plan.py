@@ -942,7 +942,7 @@ def _text_report(report: Mapping[str, Any]) -> str:
             family = record["family"] or "invalid"
             revision = f"r{record['revision']:03d}" if isinstance(record["revision"], int) else "unknown revision"
             reasons = "; ".join(record["localEvidence"]["reasons"])
-            lines.append(f"    {record['path']} — {family} {revision}, {files} SQL file(s), evidence {record['localEvidence']['status']} ({reasons})")
+            lines.append(f"    {record['path']} - {family} {revision}, {files} SQL file(s), evidence {record['localEvidence']['status']} ({reasons})")
     preflight = report.get("preflight")
     if report["mode"] == "live":
         lines.append("Live preflight:")
@@ -1037,14 +1037,14 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
                         details = "; ".join(
                             f"{key}={item[key]}" for key in ("path", "migration", "file", "check", "name", "table", "column", "namespace", "errorCode") if key in item
                         )
-                        lines.append(f"- `{_markdown_cell(item['code'])}` — {_markdown_cell(details)}: {_markdown_cell(item['message'])}")
+                        lines.append(f"- `{_markdown_cell(item['code'])}` - {_markdown_cell(details)}: {_markdown_cell(item['message'])}")
             coverage = preflight.get("coverage", {})
             deferred = coverage.get("deferredPreconditionFolders", [])
             if deferred:
                 lines.extend(("", "Deferred preconditions: " + ", ".join(f"`{_markdown_cell(item)}`" for item in deferred) + " (checked when each folder reaches its apply boundary)."))
             for review in coverage.get("manual_review_required", []):
                 where = "/".join(value for value in (review.get("migration"), review.get("file")) if value)
-                lines.append(f"- Manual review: `{_markdown_cell(where)}` — {_markdown_cell(review['reason'])}")
+                lines.append(f"- Manual review: `{_markdown_cell(where)}` - {_markdown_cell(review['reason'])}")
     if report["diagnostics"]:
         lines.extend(("", "## Diagnostics", "", "| Code | Path | Message |", "| --- | --- | --- |"))
         for item in report["diagnostics"]:

@@ -47,6 +47,21 @@ function Test-ScopeComplete {
   }
 }
 
+# Rewrite each .sql and .txt file under Directory with its CRLF pairs turned into LF. SQLcl's SPOOL writes the platform
+# line ending, and the committed mirror is LF (.gitattributes forces eol=lf). ISO-8859-1 maps every byte to one character
+# and back, so only the CRLF bytes change: the UTF-8 encoding, a byte-order mark and every other byte are kept. A lone CR
+# stays, as Git's own text normalisation keeps it.
+function Convert-MirrorToLf {
+  param([Parameter(Mandatory = $true)][string] $Directory)
+  $latin1 = [System.Text.Encoding]::GetEncoding("iso-8859-1")
+  foreach ($file in @(Get-ChildItem -LiteralPath $Directory -Recurse -File -Force)) {
+    if (@(".sql", ".txt") -notcontains $file.Extension.ToLowerInvariant()) { continue }
+    $text = $latin1.GetString([System.IO.File]::ReadAllBytes($file.FullName))
+    if ($text.IndexOf("`r`n", [System.StringComparison]::Ordinal) -lt 0) { continue }
+    [System.IO.File]::WriteAllBytes($file.FullName, $latin1.GetBytes($text.Replace("`r`n", "`n")))
+  }
+}
+
 function Split-BackupList([string] $Value) {
   # A function's output is unrolled, so callers must wrap the call in @( ):
   # that restores an array for zero or one entries. (Do not use `return ,@(...)`;
@@ -282,6 +297,10 @@ try {
       $replaceArgs += (Join-Path $installParent $schema)
       $replaceArgs += "database/$schema/ords"
     }
+  }
+  # Every staged pair is (staged directory, destination): each staged mirror is converted to LF before anything is installed.
+  for ($pairIndex = 0; $pairIndex -lt $replaceArgs.Count; $pairIndex += 2) {
+    Convert-MirrorToLf -Directory $replaceArgs[$pairIndex]
   }
   & (Join-Path $PSScriptRoot "replace_mirror.ps1") @replaceArgs
 } finally {
