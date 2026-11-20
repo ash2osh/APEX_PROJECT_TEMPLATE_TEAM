@@ -529,20 +529,40 @@ function Invoke-CheckTests {
   $timer.Stop()
   $seconds = [Math]::Round($timer.Elapsed.TotalSeconds, 1)
 
+  # Stderr is merged into $run.Lines, and a test's own stdout can arrive after unittest's summary, so
+  # only lines in unittest's exact summary form count. The last strict match of each wins.
   $ranLine = "(no Ran line)"
   $statusLine = "(no status line)"
+  $failingHeaders = New-Object System.Collections.ArrayList
   foreach ($line in $run.Lines) {
-    if ($line -match '^Ran \d+ tests?') { $ranLine = $line }
-    if ($line -match '^(OK|FAILED)') { $statusLine = $line }
+    if ($line -cmatch '^Ran \d+ tests? in [0-9.]+s\s*$') { $ranLine = $line }
+    if ($line -cmatch '^(OK|FAILED)( \(.*\))?\s*$') { $statusLine = $line }
+    if ($line -cmatch '^(FAIL|ERROR): \S') {
+      $header = $line.TrimEnd()
+      if (-not $failingHeaders.Contains($header)) { [void] $failingHeaders.Add($header) }
+    }
   }
   Add-Line ("  elapsed: " + $seconds + " s")
   Add-Line ("  " + $ranLine)
   Add-Line ("  " + $statusLine)
 
   if ($run.Code -ne 0) {
+    $failCount = $failingHeaders.Count
+    $shown = [Math]::Min($failCount, 50)
+    if ($failCount -gt 0) {
+      Add-Line ("  failing tests (" + $failCount + "):")
+      for ($index = 0; $index -lt $shown; $index++) {
+        Add-Line ("    " + $failingHeaders[$index])
+      }
+      if ($failCount -gt $shown) { Add-Line ("  ... and " + ($failCount - $shown) + " more") }
+    }
     Add-Line "  last 60 lines of output:"
     Add-Tail $run.Lines 60
-    Set-Outcome "FAIL" ("unittest exit " + $run.Code + " after " + $seconds + " s; " + $ranLine + "; " + $statusLine)
+    $failDetail = "unittest exit " + $run.Code + " after " + $seconds + " s; " + $ranLine + "; " + $statusLine
+    if ($failCount -gt 0) {
+      $failDetail = $failDetail + "; " + $failCount + " failing test(s), first: " + $failingHeaders[0]
+    }
+    Set-Outcome "FAIL" $failDetail
     return
   }
   Set-Outcome "PASS" ("unittest exit 0 after " + $seconds + " s; " + $ranLine + "; " + $statusLine)

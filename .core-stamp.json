@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "afd278b7b4e0454cf6d73a1022c6dcc07c566ec5",
+  "coreCommit": "c43df432222fd88de0b97bde5b6fe5776fd44b66",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -249,7 +249,7 @@
     },
     {
       "path": "scripts/live_verify.py",
-      "sha256": "42a198922d88a083d9f38146b6ab5c2c627e26fdb5c38a3b33c1c8f74c2a8b42",
+      "sha256": "e133fdf59b9fcfdb773b1ee97296de8afe5cb94e3f12aef50a0a25c4b9f357f3",
       "executable": false
     },
     {
@@ -369,7 +369,7 @@
     },
     {
       "path": "scripts/pre_push_check.py",
-      "sha256": "1ee3aa59e58700fd9904ad4db887f64dc5d2a38bcad40498e6dd1f9620d532d6",
+      "sha256": "af5f2748cec010cff8213acbed65d90416bc290de88c59c75794a28b2291179b",
       "executable": false
     },
     {
@@ -524,7 +524,7 @@
     },
     {
       "path": "scripts/windows_check.ps1",
-      "sha256": "64bc26f2900f62b1173e5b10f6fd89e6def624125673bef58bd89ed790898dea",
+      "sha256": "e1aa07e489105bad6b47c5c920f2f7e1b70512cd8c8aa04e79d1d378a5d144b0",
       "executable": false
     },
     {
@@ -549,7 +549,7 @@
     },
     {
       "path": "tests/_test_subprocess_safety.py",
-      "sha256": "b48b97f875de8d87ffe2aa318669386fd3cb6020410cb9edf19f1639c714be4d",
+      "sha256": "a1703fa24020f86ecc10c0ff25d5ab1e6eb038f2ca003c51f15a6fdf0927b274",
       "executable": false
     },
     {
@@ -1024,7 +1024,7 @@
     },
     {
       "path": "tests/test_live_verify.py",
-      "sha256": "5d468f4f1dfb3e9b5b31c50690881e36bbf245eabb389dbb22d12a4b10231c06",
+      "sha256": "249fb3f2ce87ffe5f0df68814896a6568b4b1b2b7ae2e5dd30c52a38b3b13819",
       "executable": false
     },
     {
@@ -1114,7 +1114,7 @@
     },
     {
       "path": "tests/test_pre_push_check.py",
-      "sha256": "a13c52cae91cc323b5a19878bb7645950f157272cffe432fb8979bd716b81736",
+      "sha256": "6572af57c289fcfe9a5e3944aaed4358ba88a4922081711e3da8fe195bcbbea4",
       "executable": false
     },
     {
@@ -1223,6 +1223,11 @@
       "executable": false
     },
     {
+      "path": "tests/test_test_subprocess_safety.py",
+      "sha256": "57546db5ab3463de7e77338dbbdd78374dfee5df82de8cf3df491811fd43e073",
+      "executable": false
+    },
+    {
       "path": "tests/test_validate_app_source.py",
       "sha256": "23eb8da84b2c8f464ddb38ad87d019d6679e1f916083f3b048e789a11a238168",
       "executable": false
@@ -1239,7 +1244,7 @@
     },
     {
       "path": "tests/test_windows_check.py",
-      "sha256": "209db9d1b6aeef26cd986854d7fddc8d7b65c4bd99a98de25f515e90effab8b5",
+      "sha256": "994986ec3e5aa9fd94cc3382a3610ebfd8c93cd043a761df61637b2300f33fde",
       "executable": false
     },
     {

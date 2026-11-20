@@ -1,9 +1,10 @@
 """Offline checks for scripts/windows_check.ps1, the Windows PowerShell 5.1 readiness script.
 
-Only the script's own behaviour is tested here, with pwsh standing in for the engine. The tests
-never run the `tests` or `pre-push` steps, which would run the whole suite again, and they do not
-read the developer's .env: each run removes PROJECT_ENV_FILE from the child environment, and the
-loader probe names its own file.
+Only the script's own behaviour is tested here, with pwsh standing in for the engine. The real
+`tests` and `pre-push` steps never run here, since they would run the whole suite again: the `tests`
+step runs only against a fake root holding two small unittest modules. The tests also do not read
+the developer's .env: each run removes PROJECT_ENV_FILE from the child environment, and the loader
+probe names its own file.
 """
 
 from __future__ import annotations
@@ -187,6 +188,11 @@ class WindowsCheckScriptRunTests(unittest.TestCase):
         self.assertIn("RESULT environment PASS", allowed.stdout)
 
         refused = run_windows_check(SCRIPT, "-Only", "environment")
+        if _test_subprocess_safety.selected_powershell_engine() == "powershell":
+            # The refusal is for PowerShell 6 or newer; Windows PowerShell 5.1 passes without the switch.
+            self.assertEqual(0, refused.returncode, refused.stdout + refused.stderr)
+            self.assertIn("RESULT environment PASS", refused.stdout)
+            return
         self.assertEqual(1, refused.returncode, refused.stdout + refused.stderr)
         self.assertIn("RESULT environment FAIL", refused.stdout)
         self.assertIn("run this script with powershell.exe", refused.stdout)
@@ -268,6 +274,90 @@ class TeamOfflineStubTests(unittest.TestCase):
             result = self.run_team_offline(script, root)
             self.assertEqual(1, result.returncode, result.stdout + result.stderr)
             self.assertIn("RESULT team-offline FAIL", result.stdout)
+
+
+# Fake unittest modules for the tests step. The noisy one prints summary look-alikes to stdout. A pipe makes
+# stdout block-buffered, so that text is flushed at exit, after unittest's own summary on stderr.
+NOISY_PASSING_MODULE = r'''import unittest
+
+
+class NoisyPassTests(unittest.TestCase):
+    def test_passes_but_prints_look_alikes(self):
+        print(r"OK   C:\fake\path: ok")
+        print("FAILED-looking noise")
+        self.assertTrue(True)
+'''
+
+FAILING_MODULE = r'''import unittest
+
+
+class BrokenTests(unittest.TestCase):
+    def test_fails(self):
+        self.fail("boom")
+
+    def test_errors(self):
+        raise RuntimeError("x")
+'''
+
+HAVE_PYTHON = bool(shutil.which("python") or shutil.which("python3"))
+
+
+@unittest.skipUnless(PWSH, "PowerShell engine is not installed")
+@unittest.skipUnless(HAVE_PYTHON, "python or python3 is not on PATH")
+class TestsStepTests(unittest.TestCase):
+    """The tests step against a fake root with a small unittest package, failing or passing."""
+
+    def make_root(self, directory: Path, modules: dict[str, str]) -> Path:
+        scripts = directory / "scripts"
+        scripts.mkdir()
+        shutil.copy2(SCRIPT, scripts / "windows_check.ps1")
+        shutil.copy2(ROOT / "scripts" / "resolve_python.ps1", scripts / "resolve_python.ps1")
+        tests = directory / "tests"
+        tests.mkdir()
+        for name, text in modules.items():
+            (tests / name).write_bytes(text.encode("ascii"))
+        return scripts / "windows_check.ps1"
+
+    def run_tests_step(self, script: Path, root: Path) -> subprocess.CompletedProcess[str]:
+        return run_windows_check(script, "-AllowPowerShellCore", "-RepoRoot", str(root), "-Only", "tests", cwd=root)
+
+    @staticmethod
+    def result_line(output: str) -> str:
+        matches = [line for line in output.splitlines() if line.startswith("RESULT tests ")]
+        return matches[0] if matches else ""
+
+    def test_failing_run_names_the_failing_tests_and_keeps_the_real_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_noisy.py": NOISY_PASSING_MODULE, "test_broken.py": FAILING_MODULE})
+            result = self.run_tests_step(script, root)
+            output = result.stdout
+            self.assertEqual(1, result.returncode, output + result.stderr)
+            self.assertIn("RESULT tests FAIL", output)
+            detail = self.result_line(output)
+            self.assertIn("FAILED (failures=1, errors=1)", detail)
+            self.assertNotIn("OK   C:\\fake", detail)
+            self.assertIn("2 failing test(s)", detail)
+
+            lines = output.splitlines()
+            self.assertIn("  failing tests (2):", lines)
+            heading = lines.index("  failing tests (2):")
+            headers = [line.strip() for line in lines[heading + 1 : heading + 3]]
+            self.assertTrue(any(header.startswith("FAIL: ") for header in headers), headers)
+            self.assertTrue(any(header.startswith("ERROR: ") for header in headers), headers)
+            self.assertLess(heading, lines.index("  last 60 lines of output:"))
+
+    def test_passing_run_reports_unittests_summary_not_the_printed_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = self.make_root(root, {"test_noisy.py": NOISY_PASSING_MODULE})
+            result = self.run_tests_step(script, root)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("RESULT tests PASS", result.stdout)
+            detail = self.result_line(result.stdout)
+            self.assertIn("Ran 1 test in", detail)
+            self.assertIn("; OK", detail)
+            self.assertNotIn("OK   C:\\fake", detail)
 
 
 if __name__ == "__main__":

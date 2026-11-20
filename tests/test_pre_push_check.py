@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from scripts import pre_push_check
 from scripts.pre_push_check import (
-    HOOK, changed_powershell_scripts, changed_python_files, changed_shell_scripts, changed_test_files, existing, powershell_parse_command,
+    HOOK, changed_powershell_scripts, changed_python_files, changed_shell_scripts, changed_test_files, existing, find_bash, find_powershell,
+    powershell_parse_command,
 )
 
 
@@ -189,8 +190,12 @@ class ToolStepTests(unittest.TestCase):
             path.write_text("", encoding="utf-8")
         self.calls = []
 
-    def run_check(self, args, paths, tools, step=None):
-        """Run main() on a fake repository with fake tools; return (exit code, printed output)."""
+    def run_check(self, args, paths, tools, step=None, bash_finder=None):
+        """Run main() on a fake repository with fake tools; return (exit code, printed output).
+
+        find_bash is faked from tools["bash"], so the result does not depend on this machine's PATH (on Windows,
+        find_bash never asks which() for bash). bash_finder replaces that fake when a test needs the real lookup.
+        """
         def fake_step(label, command):
             self.calls.append((label, list(command)))
             return True
@@ -199,6 +204,7 @@ class ToolStepTests(unittest.TestCase):
         with patch.object(pre_push_check, "ROOT", self.root), \
                 patch.object(pre_push_check, "changed_paths", return_value=paths), \
                 patch.object(pre_push_check, "step", step or fake_step), \
+                patch.object(pre_push_check, "find_bash", new=bash_finder or (lambda: tools.get("bash"))), \
                 patch.object(pre_push_check.shutil, "which", new=lambda name: tools.get(name)), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             code = pre_push_check.main(args)
@@ -234,8 +240,21 @@ class ToolStepTests(unittest.TestCase):
         code, output = self.run_check([], ["scripts/run.sh", "scripts/b.ps1"], tools)
         self.assertEqual(code, 0)
         self.assertIn("note: shellcheck is not on PATH", output)
-        self.assertIn("note: pwsh is not on PATH", output)
+        # On Windows a missing pwsh also looks for Windows PowerShell; the fake tools dict has none, so that note is printed.
+        pwsh_note = "note: neither pwsh nor Windows PowerShell is on PATH" if os.name == "nt" else "note: pwsh is not on PATH"
+        self.assertIn(pwsh_note, output)
         self.assertEqual([label for label, _ in self.calls], ["Shell syntax scripts/run.sh"])
+
+    def test_without_git_bash_on_windows_the_shell_check_is_skipped_with_one_note_and_the_run_passes(self):
+        real_find_bash = pre_push_check.find_bash
+
+        def no_bash_on_windows():
+            return real_find_bash(which=lambda name: None, environ={"PATH": ""}, is_windows=True)
+
+        code, output = self.run_check([], ["scripts/run.sh"], {}, bash_finder=no_bash_on_windows)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.count("note: Git Bash (bash) is not on PATH, so the shell syntax check was not run"), 1)
+        self.assertEqual([label for label, _ in self.calls], [])
 
     def test_all_mode_checks_every_shell_and_powershell_script(self):
         tools = {"bash": "/fake/bash", "ruff": "/fake/ruff", "shellcheck": "/fake/shellcheck", "pwsh": "/fake/pwsh"}
@@ -307,6 +326,66 @@ class ToolStepTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(last.startswith("CHECKS FAILED: "), last)
         self.assertIn("Python syntax", last)
+
+
+class BashAndPowerShellLookupTests(unittest.TestCase):
+    """find_bash and find_powershell never return the WSL launcher; the Windows branches are forced with is_windows."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def make_file(self, *parts):
+        path = self.root.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+        return str(path)
+
+    def test_windows_find_bash_skips_the_wsl_launcher_and_takes_the_next_bash_on_path(self):
+        self.make_file("System32", "bash.exe")
+        git_bin_bash = self.make_file("Git", "bin", "bash.exe")
+        path = os.pathsep.join([str(self.root / "System32"), f'"{self.root / "Git" / "bin"}"'])
+        self.assertEqual(find_bash(which=lambda name: None, environ={"PATH": path}, is_windows=True), git_bin_bash)
+
+    def test_windows_find_bash_returns_none_when_only_the_wsl_launcher_is_on_path(self):
+        self.make_file("System32", "bash.exe")
+        found = find_bash(which=lambda name: None, environ={"PATH": str(self.root / "System32")}, is_windows=True)
+        self.assertIsNone(found)
+
+    def test_windows_find_bash_prefers_an_existing_team_bash(self):
+        team_bash = self.make_file("tools", "bash.exe")
+        self.make_file("Git", "bin", "bash.exe")
+        environ = {"TEAM_BASH": team_bash, "PATH": str(self.root / "Git" / "bin")}
+        self.assertEqual(find_bash(which=lambda name: None, environ=environ, is_windows=True), team_bash)
+
+    def test_windows_find_bash_ignores_a_team_bash_that_is_missing(self):
+        git_bin_bash = self.make_file("Git", "bin", "bash.exe")
+        environ = {"TEAM_BASH": str(self.root / "missing" / "bash.exe"), "PATH": str(self.root / "Git" / "bin")}
+        self.assertEqual(find_bash(which=lambda name: None, environ=environ, is_windows=True), git_bin_bash)
+
+    def test_windows_find_bash_falls_back_to_the_git_for_windows_copy_beside_git(self):
+        usr_bin_bash = self.make_file("usr", "bin", "bash.exe")
+        git = str(self.root / "cmd" / "git.exe")
+        found = find_bash(which=lambda name: git if name == "git" else None, environ={"PATH": ""}, is_windows=True)
+        self.assertEqual(found, usr_bin_bash)
+
+    def test_find_bash_off_windows_is_the_bash_on_path(self):
+        self.assertEqual(find_bash(which=lambda name: "/usr/bin/bash" if name == "bash" else None, is_windows=False), "/usr/bin/bash")
+        self.assertIsNone(find_bash(which=lambda name: None, is_windows=False))
+
+    def test_find_powershell_prefers_pwsh(self):
+        tools = {"pwsh": "/fake/pwsh", "powershell": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"}
+        self.assertEqual(find_powershell(which=tools.get, is_windows=True), ("/fake/pwsh", "PowerShell parse"))
+
+    def test_find_powershell_uses_windows_powershell_when_pwsh_is_missing_on_windows(self):
+        windows_powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        found = find_powershell(which={"powershell": windows_powershell}.get, is_windows=True)
+        self.assertEqual(found, (windows_powershell, "PowerShell parse (Windows PowerShell)"))
+
+    def test_find_powershell_does_not_use_windows_powershell_off_windows_or_when_absent(self):
+        self.assertIsNone(find_powershell(which={"powershell": "/fake/powershell"}.get, is_windows=False))
+        self.assertIsNone(find_powershell(which=lambda name: None, is_windows=True))
 
 
 if __name__ == "__main__":
