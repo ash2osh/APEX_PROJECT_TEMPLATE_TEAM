@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "09de87f57244923abb51b86ba8b5e16d7dc69de0",
+  "coreCommit": "afd278b7b4e0454cf6d73a1022c6dcc07c566ec5",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -245,6 +245,11 @@
     {
       "path": "scripts/invoke_sqlcl.ps1",
       "sha256": "93d326ded00db14e95bcc697cf066638ecbe6871b1da72c8b4c2a8fff36c8dbb",
+      "executable": false
+    },
+    {
+      "path": "scripts/live_verify.py",
+      "sha256": "42a198922d88a083d9f38146b6ab5c2c627e26fdb5c38a3b33c1c8f74c2a8b42",
       "executable": false
     },
     {
@@ -515,6 +520,11 @@
     {
       "path": "scripts/verify_ords_access.sql",
       "sha256": "b68f70c36a87fdc73a3c5e347bb236bd942f91c352f96da770d61a2302199ae6",
+      "executable": false
+    },
+    {
+      "path": "scripts/windows_check.ps1",
+      "sha256": "64bc26f2900f62b1173e5b10f6fd89e6def624125673bef58bd89ed790898dea",
       "executable": false
     },
     {
@@ -1013,6 +1023,11 @@
       "executable": false
     },
     {
+      "path": "tests/test_live_verify.py",
+      "sha256": "5d468f4f1dfb3e9b5b31c50690881e36bbf245eabb389dbb22d12a4b10231c06",
+      "executable": false
+    },
+    {
       "path": "tests/test_local_config.py",
       "sha256": "7fe68d3d60335885b25dbffa2b11ed84e5142a8a966ad5039f4b8b509bce53fc",
       "executable": false
@@ -1220,6 +1235,11 @@
     {
       "path": "tests/test_verify_checks.py",
       "sha256": "bdccd81f28924b4cff5393a28f7220b91f22c3efe6a85b58b3affe759128a5fb",
+      "executable": false
+    },
+    {
+      "path": "tests/test_windows_check.py",
+      "sha256": "209db9d1b6aeef26cd986854d7fddc8d7b65c4bd99a98de25f515e90effab8b5",
       "executable": false
     },
     {

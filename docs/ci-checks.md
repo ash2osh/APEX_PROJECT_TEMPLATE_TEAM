@@ -27,7 +27,8 @@ The `offline` job also runs these two checks, after the shell syntax check and b
   findings fail the job; warnings are not gated.
 - **PowerShell parse** of every `scripts/*.ps1`, with `[System.Management.Automation.Language.Parser]::ParseFile`. It
   finds syntax errors only, not runtime errors. It fails when a file has a parse error or when no `.ps1` file is found.
-  `windows-offline` runs the same parse step.
+  `windows-offline` runs the same parse step. CI parses with pwsh 7 only, so this step does not check Windows PowerShell
+  5.1; that engine has its own check, described in [Windows verification](windows-verification.md).
 
 ## Before you push
 

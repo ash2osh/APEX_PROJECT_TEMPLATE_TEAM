@@ -123,18 +123,18 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor.",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages.",
       "blobs": [
-        "eed6ff76da91a3f0333695eb23b3a460eaa88fed",
-        "d05f40c57527b0c24556cc5be7e5f6c0641d789b"
+        "616bb37dbb1c6b3242de82da1d36ed929ce840c4",
+        "9c7145a40e2402a0b7f2a897f75a3fe025b9e8c5"
       ]
     },
     "TODO.md": {
       "status": "intended",
-      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 3): both record the Oracle 23ai checks (INVISIBLE columns, DATA_DEFAULT_VC, SQLcl session cost); only 26.2 lists the app-unlock live gap. Follow-up 2026-11-20: both record the verified virtual-column capture; 26.2 also records the app-unlock live check.",
+      "reason": "Each template keeps its own backlog. The 26.2 backlog records the database workflow review and field evidence. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 3): both record the Oracle 23ai checks (INVISIBLE columns, DATA_DEFAULT_VC, SQLcl session cost); only 26.2 lists the app-unlock live gap. Follow-up 2026-11-20: both record the verified virtual-column capture; 26.2 also records the app-unlock live check. Follow-up 2026-11-20 (live and Windows checks): both record the live_verify.py and windows_check.ps1 bullets.",
       "blobs": [
-        "72fb12fe075ef438441917fde7bdc7ad301293d8",
-        "1b513a323377ec97f6f4aaecb98bc1d04d80802c"
+        "0d3da78d3c7b17a210d424cbcf6206b3feb2bfef",
+        "dc4bdf166c871df645354b8d0804f8c64bd11139"
       ]
     },
     "ai_generate/2026-11-14/WALKTHROUGH.md": {
@@ -167,6 +167,14 @@
       "blobs": [
         "28515f4911c3cb25b157a0ce06f6ee052225e9d7",
         "7b2b33c05aa375b567eed66bc3899849c1c5ae8f"
+      ]
+    },
+    "ai_generate/2026-11-20/WALKTHROUGH.md": {
+      "status": "intended",
+      "reason": "Each template keeps its own daily record with its own test counts.",
+      "blobs": [
+        "6bbc14aa1b09ed3e54d6e4244a82b3c4f253267d",
+        "5abcc967e07a68dd30eb377f92ee69b096964ddc"
       ]
     },
     "docs/EXAMPLES.md": {
@@ -203,10 +211,10 @@
     },
     "docs/ci-checks.md": {
       "status": "intended",
-      "reason": "CI layout differs by release: 26.1 installs the Graphify extra in its latest-Python job, while 26.2 runs its own pinned graphify job and limits Windows tests to two workers.",
+      "reason": "CI layout differs by release: 26.1 installs the Graphify extra in its latest-Python job, while 26.2 runs its own pinned graphify job and limits Windows tests to two workers. Follow-up 2026-11-20 (live and Windows checks): both state that CI parses PowerShell with pwsh 7 only and point to the Windows verification page.",
       "blobs": [
-        "649039d8cbdff617681b3e0f2f15fbc49fd96d3e",
-        "5baeb98a73d16c96a7a11284875d90adf5574947"
+        "822c2523b62557ce68412810751192d4226d5557",
+        "ee7fc792945030796ebd690bfe2fe2c472cf5c14"
       ]
     },
     "docs/compare-env.md": {
@@ -239,6 +247,14 @@
       "blobs": [
         "d54f368d49901d354c70472e5002a1cd97405e3b",
         "ea52aa6d17b35d8590f46bfd8b070229c1a0117f"
+      ]
+    },
+    "docs/live-verification.md": {
+      "status": "intended",
+      "reason": "Identical except that 26.1 has no docs/local-qualification.md, so it omits that link.",
+      "blobs": [
+        "fb553b9b9772968011c6f81919fa6054be5c7954",
+        "1a9d33550b5f1e845987700134e4ed76cde83031"
       ]
     },
     "docs/login-acts-as-schema.md": {
@@ -627,10 +643,10 @@
     },
     "template-manifest.json": {
       "status": "intended",
-      "reason": "Release identity: 26.2 is manifest schema 2 with apexRelease 26.2, a SQLcl 26.3.0.0 floor and its own upstream; the template-owned lists differ by release.",
+      "reason": "Release identity: 26.2 is manifest schema 2 with apexRelease 26.2, a SQLcl 26.3.0.0 floor and its own upstream; the template-owned lists differ by release. Follow-up 2026-11-20: both manifests own docs/live-verification.md and docs/windows-verification.md.",
       "blobs": [
-        "f7fabd9474938a13a1ee49362486ef9b9e145e7e",
-        "b4fe70018b08ca438f6f59227ee67d22a2102a91"
+        "b5637883ada8e96657665f7a7b7228b651fbe8b0",
+        "b0c3ce8866d5844c5fcb70e2f8e949f56b13bfd5"
       ]
     },
     "tests/fixtures/schema_catalog/view-synonyms.json": {
