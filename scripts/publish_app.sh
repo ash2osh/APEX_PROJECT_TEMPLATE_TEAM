@@ -328,6 +328,9 @@ import_running=false
 lock_recovery=""
 lock_held=false
 import_attempted=false
+# Set when the pre-publication lifecycle observation fails. Its message names the SQLcl diagnostics file,
+# so the scratch folder is kept for that file rather than deleted under the message.
+lifecycle_diagnostics=false
 # Replace <target> with <replacement> only while <target> still holds the bytes
 # of <expected>. The target is renamed aside before the comparison and the
 # replacement is installed without overwriting, so an editor save at any
@@ -411,6 +414,8 @@ cleanup() {
   done
   if [ "$import_attempted" = true ]; then
     printf 'publish: unverified import diagnostics retained at %s\n' "$staging_dir" >&2
+  elif [ "$lifecycle_diagnostics" = true ]; then
+    printf 'publish: lifecycle diagnostics retained at %s\n' "$staging_dir" >&2
   elif ! rm -rf -- "$staging_dir" 2>/dev/null; then
     printf 'publish warning: could not remove the temporary directory %s; delete it after closing whatever holds a file in it\n' \
       "${staging_dir#"$REPO_ROOT/"}" >&2
@@ -439,7 +444,10 @@ if [ ! -f "$REPO_ROOT/scripts/application_lifecycle.py" ] || [ ! -f "$REPO_ROOT/
 fi
 lifecycle_args=(--connection "$sqlcl_connection" --expected-user "$expected_user" --schema "$parsing_schema"
   --workspace "$workspace_name" --app-id "$app_id" --environment "$app_environment")
-python3 "$REPO_ROOT/scripts/application_lifecycle.py" capture "${lifecycle_args[@]}" --run-dir "$staging_dir/lifecycle-before" || fail 'pre-publication lifecycle observation is unavailable; nothing imported'
+python3 "$REPO_ROOT/scripts/application_lifecycle.py" capture "${lifecycle_args[@]}" --run-dir "$staging_dir/lifecycle-before" || {
+  lifecycle_diagnostics=true
+  fail 'pre-publication lifecycle observation is unavailable; nothing imported'
+}
 identity_values="$(python3 - "$staging_dir/lifecycle-before/lifecycle-snapshot.json" <<'PY'
 import json, sys
 from pathlib import Path

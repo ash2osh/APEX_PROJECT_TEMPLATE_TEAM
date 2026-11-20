@@ -340,6 +340,9 @@ $importRunning = $false
 $lockRecovery = $null
 $lockHeld = $false
 $importAttempted = $false
+# Set when the pre-publication lifecycle observation fails. Its message names the SQLcl diagnostics file,
+# so the scratch folder is kept for that file rather than deleted under the message.
+$lifecycleDiagnostics = $false
 $lockArguments = @()
 
 # .NET rather than Get-FileHash: a Windows PowerShell that inherited PowerShell 7's
@@ -411,7 +414,10 @@ try {
   $lifecycleArguments = @('--connection', $sqlclConnection, '--expected-user', $expectedUser, '--schema', $parsingSchema,
     '--workspace', [string]$deployment.workspace.name, '--app-id', $AppId, '--environment', $appEnvironment)
   & $lifecyclePython.Path @($lifecyclePython.Prefix) (Join-Path $PSScriptRoot 'application_lifecycle.py') capture @lifecycleArguments --run-dir (Join-Path $publishWorkDir 'lifecycle-before')
-  if ($LASTEXITCODE -ne 0) { throw 'publish error: pre-publication lifecycle observation is unavailable; nothing imported' }
+  if ($LASTEXITCODE -ne 0) {
+    $lifecycleDiagnostics = $true
+    throw 'publish error: pre-publication lifecycle observation is unavailable; nothing imported'
+  }
   $identitySnapshot = Join-Path $publishWorkDir 'lifecycle-before/lifecycle-snapshot.json'
   $identityJson = Get-Content -LiteralPath $identitySnapshot -Raw | ConvertFrom-Json
   $identityFields = @('db_unique_name','service_name','container_id','container_name','edition','server_host','session_user','current_schema')
@@ -678,6 +684,10 @@ if ($appEnvironment -eq "dev" -and -not $force) {
   # its replacement: put the moved-aside file back before scratch is deleted.
   $keepPublishWorkDir = $importAttempted
   if ($keepPublishWorkDir) { [Console]::Error.WriteLine("WARNING: " + "publish: unverified import diagnostics retained at $publishWorkDir") }
+  if ($lifecycleDiagnostics) {
+    $keepPublishWorkDir = $true
+    [Console]::Error.WriteLine("WARNING: " + "publish: lifecycle diagnostics retained at $publishWorkDir")
+  }
   foreach ($aside in @((Join-Path $publishWorkDir "application.apx.before-stamp"), (Join-Path $publishWorkDir "application.apx.displaced"))) {
     if (-not (Test-Path -LiteralPath $applicationSource) -and (Test-Path -LiteralPath $aside -PathType Leaf)) {
       try { [System.IO.File]::Move($aside, $applicationSource) } catch {

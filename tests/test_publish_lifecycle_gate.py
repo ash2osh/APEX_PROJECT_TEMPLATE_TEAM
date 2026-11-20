@@ -12,6 +12,45 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PublishLifecycleGateTests(unittest.TestCase):
+    def test_lifecycle_refusal_keeps_the_diagnostics_its_message_names_in_both_shells(self):
+        launchers = [('bash', [BASH])]
+        if _test_subprocess_safety.working_pwsh():
+            launchers.append(('pwsh', [_test_subprocess_safety.working_pwsh(), '-NoProfile', '-File']))
+        for engine, launcher in launchers:
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture = test_publish_cli.PublishAppCliTests()
+                runner, _, _, environment, app, state = fixture.make_stateful_dev_fixture(root)
+                environment['PROJECT_ENV_FILE'] = str(root / '.env')
+                (root / 'scripts/application_lifecycle.sql').write_text('-- fixture\n')
+                # The capture refuses the way the 26.1 adapter does on an unsupported release: it names its
+                # SQLcl diagnostics file on stderr and exits 2, as application_lifecycle.py does.
+                (root / 'scripts/application_lifecycle.py').write_text(
+                    'import sys\nfrom pathlib import Path\n'
+                    'a=sys.argv;r=Path(a[a.index("--run-dir")+1]);r.mkdir(parents=True,exist_ok=True)\n'
+                    'if a[1]=="capture":\n'
+                    ' log=r/"sqlcl-output.log"\n'
+                    ' log.write_text("ORA-20018: Lifecycle adapter requires APEX 26.1 or 26.2; found 26.3.0\\n")\n'
+                    ' sys.stderr.write("lifecycle: SQLcl exited with status 2; diagnostics: "+str(log)+"\\n")\n'
+                    ' raise SystemExit(2)\n'
+                )
+                imports_before = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
+                original = (app / 'apex-team-export.json').read_bytes()
+                script = runner if engine == 'bash' else runner.with_suffix('.ps1')
+                result = subprocess.run([*launcher, str(script), '100'], cwd=root, env=environment,
+                                        text=True, capture_output=True)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn('nothing imported', output)
+                imports_after = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
+                self.assertEqual(imports_after, imports_before, 'a refused capture must not import')
+                self.assertEqual((app / 'apex-team-export.json').read_bytes(), original)
+                retained = list((root / 'scratch').glob('apex-publish*'))
+                self.assertEqual(len(retained), 1, 'the scratch folder must survive when its message names a file in it')
+                self.assertTrue((retained[0] / 'lifecycle-before' / 'sqlcl-output.log').exists(),
+                                'the diagnostics file the refusal names must exist')
+                self.assertIn('lifecycle diagnostics retained', output)
+
     def test_lifecycle_failure_preserves_baseline_and_recovery_in_both_shells(self):
         launchers = [('bash', [BASH])]
         if _test_subprocess_safety.working_pwsh():
