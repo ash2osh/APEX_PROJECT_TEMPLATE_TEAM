@@ -12,8 +12,9 @@ from fake_sqlcl import BASH
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def pwsh_7_3_or_newer():
-    """Return the pwsh launcher when it is PowerShell 7.3 or newer, else None (the native-error preference needs 7.3)."""
+def pwsh_7_4_or_newer():
+    """Return the pwsh launcher when it is PowerShell 7.4 or newer, else None. $PSNativeCommandUseErrorActionPreference
+    was experimental in 7.3 and is a stable feature from 7.4, so 7.3 cannot show what this test needs."""
     executable = shutil.which('pwsh')
     if not executable:
         return None
@@ -22,7 +23,7 @@ def pwsh_7_3_or_newer():
     parts = result.stdout.strip().split('.')
     if result.returncode != 0 or len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
         return None
-    return executable if (int(parts[0]), int(parts[1])) >= (7, 3) else None
+    return executable if (int(parts[0]), int(parts[1])) >= (7, 4) else None
 
 
 class PublishLifecycleGateTests(unittest.TestCase):
@@ -69,9 +70,9 @@ class PublishLifecycleGateTests(unittest.TestCase):
         # With $PSNativeCommandUseErrorActionPreference set (a profile can set it, and team.ps1 runs publish_app.ps1 in
         # the same session), a non-zero exit from the capture ends the script at that line, before its $LASTEXITCODE
         # check. The diagnostics flag must already be set by then, or cleanup deletes the folder the message names.
-        pwsh = pwsh_7_3_or_newer()
+        pwsh = pwsh_7_4_or_newer()
         if pwsh is None:
-            self.skipTest('PowerShell 7.3 or newer (pwsh) is not installed')
+            self.skipTest('PowerShell 7.4 or newer (pwsh) is not installed; the native-error preference is stable only from 7.4')
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             fixture = test_publish_cli.PublishAppCliTests()
@@ -91,11 +92,21 @@ class PublishLifecycleGateTests(unittest.TestCase):
             imports_before = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
             original = (app / 'apex-team-export.json').read_bytes()
             script = runner.with_suffix('.ps1')
-            # The preference is set in the calling session and inherited by the script it invokes with &.
-            wrapper = f"$PSNativeCommandUseErrorActionPreference = $true; & '{script}' 100"
+            # The preference is set in the calling session and inherited by the script it invokes with &. First, a probe
+            # proves the preference is active: a non-zero native exit inside try must throw, so the marker is written only
+            # when the preference made it terminating. publish_app.ps1 sets $ErrorActionPreference = "Stop" itself, and
+            # the probe sets it the same way. Without the marker the wrapper exits 97 before the script runs.
+            probe = root / 'native-error-probe.txt'
+            wrapper = (f"$PSNativeCommandUseErrorActionPreference = $true; $ErrorActionPreference = 'Stop'; "
+                       f"try {{ & '{pwsh}' -NoProfile -Command 'exit 3' }} "
+                       f"catch {{ Set-Content -LiteralPath '{probe}' -Value 'threw' }}; "
+                       f"if (-not (Test-Path -LiteralPath '{probe}')) {{ exit 97 }}; "
+                       f"& '{script}' 100")
             result = subprocess.run([pwsh, '-NoProfile', '-Command', wrapper], cwd=root, env=environment,
                                     text=True, capture_output=True)
             output = result.stdout + result.stderr
+            self.assertTrue(probe.exists(), 'the native-error preference did not make a non-zero native exit terminate on '
+                            'this PowerShell, so the capture case is not exercised: ' + output)
             self.assertNotEqual(result.returncode, 0, output)
             imports_after = (state / 'import-count.txt').read_text() if (state / 'import-count.txt').exists() else ''
             self.assertEqual(imports_after, imports_before, 'a refused capture must not import')

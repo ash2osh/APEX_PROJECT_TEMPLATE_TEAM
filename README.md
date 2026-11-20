@@ -218,6 +218,7 @@ up there:
   such an argument there and names the fix: run the command with PowerShell 7.3 or newer (`pwsh`) and a program that is not
   a `.cmd` or `.bat` file, or `scripts/team.sh` in Git Bash. PowerShell 7.3 or newer also refuses these values for a `.cmd`
   or `.bat` program, such as a `TEAM_BASH` batch file or a pyenv-win Python shim, because it keeps the legacy rules there.
+  That refusal applies only when `$PSNativeCommandArgumentPassing` is `Windows` (its default on Windows) or `Legacy`; in `Standard` mode it does not refuse them.
   A single quote in an argument for Git Bash is refused on Windows under every engine, as before.
 
 `team.ps1` accepts a migration folder as `migrations\2026-10-02_name-r001`,
