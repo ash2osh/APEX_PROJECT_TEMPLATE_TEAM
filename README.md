@@ -215,8 +215,10 @@ up there:
   that folder may not (`Set-Location "C:\work [1]"` fails; use `-LiteralPath`).
 - **Arguments under Windows PowerShell 5.1.** Windows PowerShell 5.1 cannot pass an empty argument, a double quote
   (`"`), or a value that contains a space and ends in a backslash to Git Bash or Python intact, so `team.ps1` refuses
-  such an argument there and names the fix: run the command with PowerShell 7.3 or newer (`pwsh`), or `scripts/team.sh`
-  in Git Bash. A single quote in an argument for Git Bash is refused on Windows under every engine, as before.
+  such an argument there and names the fix: run the command with PowerShell 7.3 or newer (`pwsh`) and a program that is not
+  a `.cmd` or `.bat` file, or `scripts/team.sh` in Git Bash. PowerShell 7.3 or newer also refuses these values for a `.cmd`
+  or `.bat` program, such as a `TEAM_BASH` batch file or a pyenv-win Python shim, because it keeps the legacy rules there.
+  A single quote in an argument for Git Bash is refused on Windows under every engine, as before.
 
 `team.ps1` accepts a migration folder as `migrations\2026-10-02_name-r001`,
 `.\migrations\2026-10-02_name-r001\` or an absolute path inside the checkout.

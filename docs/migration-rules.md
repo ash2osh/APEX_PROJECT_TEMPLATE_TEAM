@@ -328,9 +328,10 @@ scripts/team.sh verify migrations/DEMO/2026-09-27_create-customers-r001 \
 
 `--phase pre`, `--phase post` and `--phase both` select preconditions,
 postconditions or both; each selected folder's checks are evaluated. The
-default is `both`. After a migration has applied, its preconditions are false by
-design, so `--phase both` exits 1 for that folder; use `--phase post` to check an
-applied folder. `--only-failed` hides rows that returned their expected value, and
+default is `both`. After a migration has applied, its preconditions (such as an
+absence check) usually fail, so `--phase both` usually exits 1 for an applied folder;
+use `--phase post` to check one. A folder with an empty `preconditions` list has no
+precondition check that can fail. `--only-failed` hides rows that returned their expected value, and
 `--format json` emits a versioned JSON report. `--jobs N` allows up
 to N batched SQLcl check sessions to run concurrently; its default is 1. Each
 session keeps the same read-only transaction, disabled-commit guard and
