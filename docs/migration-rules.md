@@ -36,7 +36,7 @@ refused. With one schema, keep each migration family in one layout: `migrate`
 and `check-conflicts` refuse a family that appears both flat and under
 `migrations/<SCHEMA>/` for that schema, because both folders target it and
 could apply the same revision twice. The same family under another schema's
-folder targets a different schema and is allowed. The date is the folder creation date and stays the same when the
+folder targets a different schema and is allowed. `new-migration` always writes the schema-folder layout, even with one schema, so a project with flat folders ends up with both layouts. It refuses a name that an existing migration folder already uses, in either layout. `revise` writes the next revision in the family's own layout. The date is the folder creation date and stays the same when the
 migration is promoted. The ISO date prefix sorts newer dates ahead when a file
 browser is sorted descending; the name cannot set the browser's sort direction.
 Folders created on the same date have a name-based tie-break, not an
