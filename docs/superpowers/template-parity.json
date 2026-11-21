@@ -211,10 +211,10 @@
     },
     "docs/ci-checks.md": {
       "status": "intended",
-      "reason": "CI layout differs by release: 26.1 installs the Graphify extra in its latest-Python job, while 26.2 runs its own pinned graphify job and limits Windows tests to two workers. Follow-up 2026-11-20 (live and Windows checks): both point to the Windows verification page; after the Windows fixes both list the windows-powershell-51 job and the pre-push Git Bash and Windows PowerShell fallbacks.",
+      "reason": "CI layout differs by release: 26.1 installs the Graphify extra in its latest-Python job, while 26.2 runs its own pinned graphify job and limits Windows tests to two workers. Follow-up 2026-11-20 (live and Windows checks): both point to the Windows verification page; after the Windows fixes both list the windows-powershell-51 job and the pre-push Git Bash and Windows PowerShell fallbacks. Follow-up 2026-11-21 (CI portability guards): both lines document the portability rules.",
       "blobs": [
-        "256aaabb2ba54ae298ba0c70f0f0594b235c0b96",
-        "44c01a8ffb32229b42601a922af4754279c0fc58"
+        "9ca1c62e36a0f8ce62e0ab381b2f1d5d18511121",
+        "957e33db468db0c1f18566404ffb4447f2cca3b2"
       ]
     },
     "docs/compare-env.md": {
@@ -663,6 +663,14 @@
       "blobs": [
         "18cd29d3c88fcb46d5484477214664e1ada572d8",
         "3aea682dc97d881f7717d84ee3dc9eaba2b01c08"
+      ]
+    },
+    "tests/portability_baseline.json": {
+      "status": "intended",
+      "reason": "Per-template baseline of the shared portability ratchet: each line counts its own files (template-only tests differ). Regenerate with python3 tests/test_portability_guards.py --write-baseline.",
+      "blobs": [
+        "df27bdd96bcb44161f19ab944cc78f9e9c4ea6f5",
+        "b1cffb2d7ec43da4aa3c4446a84b46c5b08cb0ae"
       ]
     },
     "tests/test_backup_db_cli.py": {
