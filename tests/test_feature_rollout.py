@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1077,6 +1081,7 @@ class FeatureRolloutTests(unittest.TestCase):
     def _run_migration_release(
         self, extra_patches, *, migrate_seconds: float = 25.0, budget_seconds: int = 120, label: str = "release",
         migration_only: bool = False, environment: str = "staging", stage_report_path=None, migrate_effect=None,
+        release_tag: bool = True,
     ):
         from scripts import feature_release
 
@@ -1117,6 +1122,7 @@ class FeatureRolloutTests(unittest.TestCase):
             status = rollout.run_rollout(
                 self.manifest_path, environment, repo_root=self.root, capsule_path=self.capsule_path,
                 report_path=report_base, confirm=lambda _prompt: True, stage_report_path=stage_report_path,
+                release_tag=release_tag,
             )
         # A refusal before confirmation raises before any report file is written.
         report_path = report_base.with_suffix(".json")
@@ -1216,6 +1222,134 @@ class FeatureRolloutTests(unittest.TestCase):
         )
         self.assertEqual(status, 2)
         migrate.assert_not_called()
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "tag.gpgSign=false",
+             "-C", str(self.root), *args],
+            capture_output=True, check=True,
+        ).stdout.decode("utf-8").strip()
+
+    def _git_at_capsule_commit(self) -> str:
+        """Make the fixture root a git repository whose HEAD is the capsule's source commit."""
+        self._git("init", "-q")
+        self._git("config", "core.autocrlf", "false")
+        self._git("add", "-A")
+        self._git("commit", "-q", "--allow-empty", "-m", "shipped")
+        head = self._git("rev-parse", "HEAD")
+        self.source_commit = head
+        self.capsule = dataclasses.replace(self.capsule, source_commit=head)
+        return head
+
+    def _stage_report(self) -> Path:
+        stage_path = self.root / "scratch" / "release-tag-staging.json"
+        stage_path.parent.mkdir(parents=True, exist_ok=True)
+        stage_path.write_text('{"status":"success"}\n', encoding="utf-8")
+        return stage_path
+
+    def test_production_success_tags_the_shipped_commit_and_records_the_tag(self) -> None:
+        from scripts import release_state
+
+        head = self._git_at_capsule_commit()
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
+            migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod",
+        )
+        self.assertEqual(status, 0, report.get("error"))
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tag = report["releaseTag"]
+        self.assertEqual(tag, f"release/{today}-r001")
+        self.assertNotIn("releaseTagWarning", report)
+        self.assertEqual(self._git("tag", "--list", "release/*"), tag)
+        self.assertEqual(self._git("cat-file", "-t", tag), "tag")
+        self.assertEqual(self._git("rev-parse", f"{tag}^{{commit}}"), head)
+        message = self._git("tag", "-l", "--format=%(contents)", tag)
+        self.assertIn(self.payload, message)
+        self.assertIn(report["reportFiles"]["json"], message)
+        self.assertIn("Production release", message)
+
+    def test_the_tag_names_the_capsule_commit_when_head_moved_on_after_the_freeze(self) -> None:
+        from scripts import release_state
+
+        shipped = self._git_at_capsule_commit()
+        self._git("commit", "-q", "--allow-empty", "-m", "after the freeze")
+        self.assertNotEqual(self._git("rev-parse", "HEAD"), shipped)
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
+            migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod-moved",
+        )
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertEqual(self._git("rev-parse", f"{report['releaseTag']}^{{commit}}"), shipped)
+
+    def test_a_second_production_tag_on_the_same_day_takes_the_next_number(self) -> None:
+        from scripts import release_state
+
+        self._git_at_capsule_commit()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._git("tag", f"release/{today}-r001")
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
+            migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod-second",
+        )
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertEqual(report["releaseTag"], f"release/{today}-r002")
+
+    def test_staging_success_never_creates_a_release_tag(self) -> None:
+        self._git_at_capsule_commit()
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="staging"), migration_only=True, environment="staging",
+            label="tag-staging",
+        )
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertNotIn("releaseTag", report)
+        self.assertEqual(self._git("tag", "--list"), "")
+
+    def test_no_release_tag_option_skips_the_tag_after_a_production_success(self) -> None:
+        from scripts import release_state
+
+        self._git_at_capsule_commit()
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
+            migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod-off",
+            release_tag=False,
+        )
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertNotIn("releaseTag", report)
+        self.assertEqual(self._git("tag", "--list"), "")
+
+    def test_tag_refusal_keeps_the_successful_exit_and_records_a_warning(self) -> None:
+        from scripts import release_state
+
+        # No git repository at the fixture root: the database work succeeded, so only the tag is refused.
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
+            migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod-warned",
+        )
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertIsNone(report["releaseTag"])
+        self.assertIn("release tag was not created", report["releaseTagWarning"])
+        self.assertEqual(report["status"], "success")
+
+    def test_release_tag_name_is_the_next_free_number_and_failure_is_reported_not_raised(self) -> None:
+        from scripts import rollout_capsule
+
+        self._git_at_capsule_commit()
+        now = datetime(2026, 11, 21, 12, tzinfo=timezone.utc)
+        self.assertEqual(rollout_capsule._next_release_tag_name(self.root, now), "release/2026-11-21-r001")
+        self._git("tag", "release/2026-11-21-r001")
+        self._git("tag", "release/2026-11-21-r003")
+        self._git("tag", "release/2026-11-20-r009")
+        self.assertEqual(rollout_capsule._next_release_tag_name(self.root, now), "release/2026-11-21-r004")
+        self.assertRegex(rollout_capsule._next_release_tag_name(self.root, now), r"^release/\d{4}-\d{2}-\d{2}-r\d{3}$")
+
+        not_a_repository = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, not_a_repository, ignore_errors=True)
+        name, warning = rollout_capsule._create_release_tag(
+            not_a_repository, environment="prod", capsule=self.capsule, report_path="scratch/r.json", now=now,
+        )
+        self.assertIsNone(name)
+        self.assertIn("release tag was not created", warning)
+        self.assertEqual(rollout_capsule._create_release_tag(self.root, environment="staging", capsule=self.capsule, report_path="x"), (None, None))
 
     def test_recovery_is_refused_for_a_capsule_with_no_feature_checkpoint(self) -> None:
         from scripts import feature_release

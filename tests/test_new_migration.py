@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import _test_subprocess_safety  # noqa: F401
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
-from scripts import new_migration
+from scripts import baseline, new_migration
 from scripts.migration_manifest import load_migration
 
 ENV = {
@@ -215,6 +216,191 @@ class NewMigrationTests(unittest.TestCase):
                          'CREATE OR REPLACE PACKAGE BODY "APP"."PKG" IS')
         self.assertEqual(new_migration.step_sql("APP", "PACKAGE BODY", "PKG", ["PACKAGE BODY\n", "  pkg IS\n", "end;"]).splitlines()[0],
                          "CREATE OR REPLACE PACKAGE BODY")
+
+
+PROC = ["procedure proc1 is\n", "begin null; end proc1;\n"]
+SETTING_KEYS = {
+    "plsql_optimize_level": 2, "plsql_code_type": "INTERPRETED", "plsql_debug": "FALSE",
+    "plsql_warnings": "DISABLE:ALL", "plsql_ccflags": "", "nls_length_semantics": "CHAR", "plscope_settings": "",
+}
+IDENTITY = {
+    "session_user": "APP", "current_schema": "APP", "db_name": "DEVDB", "db_unique_name": "DEVDB",
+    "service_name": "dev.svc", "container_id": "1", "container_name": "DEVPDB", "edition": "ORA$BASE",
+    "database_version": "26.1.0.0.0",
+}
+
+
+def feature_catalog(units):
+    """A DEV capture of the units, with the compiler settings and identity a feature capture reads."""
+    result = catalog(units)
+    result["sections"]["baseline-settings"] = [
+        {"name": name, "type": kind, **SETTING_KEYS} for kind, name in units
+    ]
+    result["identity"] = dict(IDENTITY)
+    return result
+
+
+class FeatureRoutingTests(unittest.TestCase):
+    """new-migration in a feature project: feature files by default, or --feature, or --dated-folder."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        (self.root / "migrations").mkdir()
+        self.units = {("PACKAGE BODY", "PKG"): BODY, ("PACKAGE", "PKG"): SPEC, ("PROCEDURE", "PROC1"): PROC}
+        self.captures = []
+
+    def fake_capture(self, units=None):
+        units = self.units if units is None else units
+
+        def fake(values, environment, schema, sections, scratch, **options):
+            self.captures.append((schema, tuple(options.get("baseline_prefixes", ()))))
+            return feature_catalog(units)
+        return fake
+
+    def make_feature(self, feature, relative, kind, name, lines):
+        """A feature file as `feature capture` writes it, so the claim is read from disk."""
+        path = self.root / "features" / feature / "APP" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_migration.step_sql("APP", kind, name, lines), encoding="utf-8", newline="\n")
+        return path
+
+    def claim_path(self, feature, relative):
+        return (Path("features") / feature / "APP" / relative).as_posix()
+
+    def snapshot(self):
+        return sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*"))
+
+    def run_main(self, argv, environ=ENV, capture=None):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(baseline, "_capture", capture or self.fake_capture()), \
+                patch.object(new_migration, "_capture", capture or self.fake_capture()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = new_migration.main(argv, environ=environ, repo_root=self.root)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_feature_project_without_options_refuses_per_unit_and_creates_nothing(self):
+        self.make_feature("billing", "procedures/proc1.prc.sql", "PROCEDURE", "PROC1", PROC)
+        before = self.snapshot()
+
+        def no_read(*args, **kwargs):
+            raise AssertionError("DEV must not be read for a routing refusal")
+
+        code, out, err = self.run_main(
+            ["change", "--source", "PROCEDURE:PROC1", "--source", "PACKAGE:PKG", "--env", "dev"],
+            capture=no_read,
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.captures, [])
+        self.assertIn(
+            f"procedure PROC1: owned by feature billing: edit {self.claim_path('billing', 'procedures/proc1.prc.sql')}",
+            err,
+        )
+        self.assertIn("package PKG: scripts/team.sh feature capture --package PKG --schema APP --env dev <feature>", err)
+        self.assertIn(
+            "pass --feature <slug> to capture into a feature now, or --dated-folder to create a dated migration folder as before",
+            err,
+        )
+
+    def test_trigger_capture_command_uses_the_trigger_flag(self):
+        self.make_feature("billing", "procedures/proc1.prc.sql", "PROCEDURE", "PROC1", PROC)
+        units = {("TRIGGER", "TRG"): ["trigger trg\n", "end;\n"]}
+        code, _out, err = self.run_main(["change", "--source", "TRIGGER:TRG", "--env", "dev"],
+                                        capture=self.fake_capture(units))
+        self.assertEqual(code, 2)
+        self.assertIn("trigger TRG: scripts/team.sh feature capture --trigger TRG --schema APP --env dev <feature>", err)
+        self.assertEqual(self.captures, [])
+
+    def test_feature_flag_captures_unowned_units_and_skips_units_already_in_the_feature(self):
+        self.make_feature("billing", "procedures/proc1.prc.sql", "PROCEDURE", "PROC1", PROC)
+        code, out, err = self.run_main(
+            ["change", "--feature", "billing", "--source", "PROCEDURE:PROC1", "--source", "PACKAGE:PKG",
+             "--source", "PACKAGE BODY:PKG", "--env", "dev"],
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.captures, [("APP", ("PKG",))])  # one capture for the package spec and body
+        self.assertIn(f"already in billing: edit {self.claim_path('billing', 'procedures/proc1.prc.sql')}", out)
+        self.assertIn("Captured features/billing/APP/packages/pkg.pks.sql", out)
+        self.assertIn("Captured features/billing/APP/packages/pkg.pkb.sql", out)
+        self.assertTrue((self.root / "features" / "billing" / "APP" / "packages" / "pkg.pks.sql").is_file())
+        self.assertTrue((self.root / "features" / "billing" / "APP" / "packages" / "pkg.pkb.sql").is_file())
+        self.assertEqual(sorted(p.name for p in (self.root / "features" / "billing" / "APP" / "procedures").iterdir()),
+                         ["proc1.prc.sql"])
+        self.assertEqual(list((self.root / "migrations").iterdir()), [])
+
+    def test_feature_flag_refuses_a_unit_owned_by_another_feature_before_any_capture(self):
+        self.make_feature("other", "procedures/proc1.prc.sql", "PROCEDURE", "PROC1", PROC)
+        code, _out, err = self.run_main(
+            ["change", "--feature", "billing", "--source", "PACKAGE:PKG", "--source", "PROCEDURE:PROC1", "--env", "dev"],
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(self.captures, [])
+        self.assertIn("owned by feature other", err)
+        self.assertIn("nothing was captured", err)
+        self.assertFalse((self.root / "features" / "billing").exists())
+
+    def test_feature_flag_rejects_an_invalid_slug_before_reading_dev(self):
+        code, _out, err = self.run_main(["change", "--feature", "Bad_Slug", "--source", "PACKAGE:PKG", "--env", "dev"])
+        self.assertEqual(code, 2)
+        self.assertIn("feature must be a lowercase hyphenated slug", err)
+        self.assertEqual(self.captures, [])
+
+    def test_dated_folder_in_a_feature_project_matches_a_project_without_features(self):
+        plain_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(plain_dir.cleanup)
+        plain = Path(plain_dir.name).resolve()
+        (plain / "migrations").mkdir()
+        self.make_feature("billing", "procedures/proc1.prc.sql", "PROCEDURE", "PROC1", PROC)
+        argv = ["change-pkg", "--source", "PACKAGE:PKG", "--env", "dev", "--dated-folder"]
+        code, out, err = self.run_main(argv)
+        self.assertEqual(code, 0, err)
+        plain_out, plain_err = io.StringIO(), io.StringIO()
+        with patch.object(new_migration, "_capture", self.fake_capture()), \
+                contextlib.redirect_stdout(plain_out), contextlib.redirect_stderr(plain_err):
+            plain_code = new_migration.main(argv, environ=ENV, repo_root=plain)
+        self.assertEqual(plain_code, 0)
+        self.assertEqual(out, plain_out.getvalue())
+        self.assertEqual(err, plain_err.getvalue())
+        folder = next((self.root / "migrations" / "APP").iterdir())
+        plain_folder = next((plain / "migrations" / "APP").iterdir())
+        self.assertEqual(folder.name, plain_folder.name)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(p.name for p in plain_folder.iterdir()))
+        for step in folder.iterdir():
+            self.assertEqual(step.read_bytes(), (plain_folder / step.name).read_bytes())
+        self.assertEqual(self.captures, [("APP", ("PKG",))] * 2)  # one DEV read per project
+
+    def test_a_project_without_features_keeps_the_dated_folder_default(self):
+        code, out, err = self.run_main(["change-pkg", "--source", "PROCEDURE:PROC1", "--env", "dev"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Created migration: migrations/APP/", out)
+        self.assertFalse((self.root / "features").exists())
+
+    def test_feature_flag_in_a_project_without_features_creates_the_feature(self):
+        code, out, err = self.run_main(["change", "--feature", "billing", "--source", "PROCEDURE:PROC1", "--env", "dev"])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"Captured {self.claim_path('billing', 'procedures/proc1.prc.sql')}", out)
+        self.assertEqual(list((self.root / "migrations").iterdir()), [])
+
+    def test_a_non_unit_source_in_a_feature_project_keeps_the_existing_error(self):
+        self.make_feature("billing", "procedures/proc1.prc.sql", "PROCEDURE", "PROC1", PROC)
+        before = self.snapshot()
+        code, _out, err = self.run_main(["change", "--source", "VIEW:V", "--env", "dev"])
+        self.assertEqual(code, 2)
+        self.assertIn("new-migration error: --source must be TYPE:NAME", err)
+        self.assertNotIn("feature", err)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_feature_and_dated_folder_are_mutually_exclusive(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                new_migration.main(["x", "--source", "PACKAGE:PKG", "--env", "dev", "--feature", "billing", "--dated-folder"],
+                                   environ=ENV, repo_root=self.root)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("not allowed with argument", err.getvalue())
 
 
 if __name__ == "__main__":

@@ -493,5 +493,21 @@ class LocalConfigTests(unittest.TestCase):
         self.assertIn("DEV_OTHER_SETTING", str(ctx.exception))
 
 
+    def test_staging_neutralize_principals_is_an_optional_identifier_list(self) -> None:
+        values = read_project_env(self.write_env(VALID_BASE_CONFIG + "STAGING_NEUTRALIZE_PRINCIPALS=MAIL_OWNER,JOB_OWNER\n"))
+        self.assertEqual(values["STAGING_NEUTRALIZE_PRINCIPALS"], "MAIL_OWNER,JOB_OWNER")
+        self.assertNotIn("STAGING_NEUTRALIZE_PRINCIPALS", read_project_env(self.write_env(VALID_BASE_CONFIG)))
+
+    def test_staging_neutralize_principals_rejects_bad_empty_and_duplicate_lists(self) -> None:
+        for line in (
+            "STAGING_NEUTRALIZE_PRINCIPALS=\n",
+            "STAGING_NEUTRALIZE_PRINCIPALS=mail_owner\n",
+            "STAGING_NEUTRALIZE_PRINCIPALS=MAIL_OWNER,\n",
+            "STAGING_NEUTRALIZE_PRINCIPALS=MAIL_OWNER,MAIL_OWNER\n",
+        ):
+            with self.subTest(line=line), self.assertRaises(ConfigError):
+                read_project_env(self.write_env(VALID_BASE_CONFIG + line))
+
+
 if __name__ == "__main__":
     unittest.main()

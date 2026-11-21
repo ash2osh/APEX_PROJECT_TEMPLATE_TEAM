@@ -207,8 +207,10 @@ def build_report(
 
     """Build the schema-1 readiness report.
 
+    Statuses: pass, warn (advisory, never changes the exit code), attention, unavailable, fail.
+
     Exit codes:
-    - 0: all required checks pass.
+    - 0: all required checks pass (warnings allowed).
     - 1: attention or unavailable without a hard failure.
     - 2: invalid configuration/contract or failed verification.
     """
@@ -485,6 +487,7 @@ def build_report(
 
 
         # Staging and Prod descriptors check
+        profile_keys = {"staging": "STAGING_SCHEMA", "prod": "PROD_SCHEMA"}
         for env_target in ("staging", "prod"):
             desc_file = app_dir / "deployments" / f"{env_target}.json"
             is_selected = (selected_env == "staging" and env_target == "staging") or (selected_env == "production" and env_target == "prod")
@@ -512,6 +515,24 @@ def build_report(
                         "path": str(desc_file),
                         "message": f"{env_target.upper()} deployment descriptor invalid: {exc}",
                     })
+            elif (values.get(profile_keys[env_target]) or "").strip():
+                # Not selected here, but its profile is configured: a release to it would have no descriptor.
+                checks.append({
+                    "check": f"app_{app_id}_descriptor_{env_target}",
+                    "status": "warn",
+                    "path": str(desc_file),
+                    "message": f"no {env_target.upper()} deployment descriptor for app {app_id}: "
+                    f"add deployments/{env_target}.json before a release deploys it",
+                })
+
+        production_alias = app_dir / "deployments" / "production.json"
+        if production_alias.is_file():
+            checks.append({
+                "check": f"app_{app_id}_descriptor_production",
+                "status": "warn",
+                "path": str(production_alias),
+                "message": f"deploy reads deployments/prod.json; deployments/production.json is ignored for app {app_id}",
+            })
 
     # Configured app IDs in .env check
     if values.get("APEX_APP_ID"):

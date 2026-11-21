@@ -109,7 +109,7 @@ Commands:
          [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Confirm and execute a frozen deployment manifest
-  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> ...
+  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> ...
                                               Create mutable feature sources and freeze version-2 release capsules;
                                               reconcile-run closes an unfinished run; convert-plan plans offline
   compare-schema [--from <env>] (--to <env>|--env <env>)
@@ -148,6 +148,9 @@ Commands:
   automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Observe, check or explicitly operate on one scoped automation
+  staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]
+                                              Report, check, disable or undo a restored staging copy's jobs,
+                                              APEX automations and network grants (DBA alias)
 Options:
   --schema <NAME>                             Run one configured schema (except offline/tooling commands)
   --help                                      Show this help
@@ -315,7 +318,7 @@ if ($Command -in @("--help", "-h")) {
 
 # --schema NAME is the one selection channel: strip it and set PROJECT_SCHEMA so
 # every child script's loader narrows to that schema.
-if ($Command -notin @("upgrade-template", "verify-local", "template-status", "targets", "migration-plan", "archive-migrations", "dev-test", "skills", "mcp", "feature", "reconcile-migration")) {
+if ($Command -notin @("upgrade-template", "verify-local", "template-status", "targets", "migration-plan", "archive-migrations", "dev-test", "skills", "mcp", "feature", "reconcile-migration", "staging-neutralize")) {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
@@ -610,7 +613,7 @@ try {
       Invoke-TeamBash -ScriptName "rollout.sh" -ScriptArguments $rolloutArguments
     }
     "feature" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> [arguments]" }
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> [arguments]" }
       $featureArguments = @($Arguments)
       if ($featureArguments[0] -ceq "freeze" -and $featureArguments.Count -gt 1) {
         $featureArguments[1] = ConvertTo-MigrationFolderArgument ([string] $featureArguments[1])
@@ -683,6 +686,10 @@ try {
         }
       }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("baseline") + $baselineArguments)
+    }
+    "staging-neutralize" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]" }
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("staging-neutralize") + @($Arguments))
     }
     "backup-db" {
       if ($Arguments.Count -ne 0) { Fail "backup-db does not accept arguments" }

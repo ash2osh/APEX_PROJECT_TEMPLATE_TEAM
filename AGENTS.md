@@ -175,7 +175,11 @@ owner-only commands retain their owner-login checks. See
   Inspect unresolved attempts with `feature apply --status`. Use
   `feature reconcile-run <plan-id> --env dev --evidence FILE` only after
   reviewing same-target evidence and confirming the original operation ended.
-  Ship one final definition per object in the release capsule.
+  Ship one final definition per object in the release capsule. Build the next
+  manifest with `feature release-plan` (what changed since the last `release/*`
+  tag, which a successful production rollout creates); review it before freezing.
+  Make a staging copy of production inert with `staging-neutralize` before any
+  rehearsal write there; its `--apply` follows the same target-name rule as `migrate`.
   See [docs/feature-releases.md](docs/feature-releases.md).
 - **Dated migrations for one-time changes:** Use them for schema changes,
   backfills, seed data, data fixes, and ordered transitions that require an
@@ -198,7 +202,9 @@ owner-only commands retain their owner-login checks. See
   so a reviewer can tell it was not typed. Without `--yes` the acknowledgment is still typed at a
   terminal. For a legacy stored-code migration or a required intermediate
   definition, `scripts/team.sh new-migration <name> --source "PACKAGE BODY:<NAME>" --env dev`
-  captures live DEV and generates a source drift precondition. Run
+  captures live DEV and generates a source drift precondition. In a project with
+  feature files it routes stored units to features instead (`--feature <slug>`
+  captures them; `--dated-folder` keeps the dated folder). Run
   `scripts/team.sh check-conflicts <folder> --env dev`
   before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
   Keep `checks.json` schema 1 unchanged unless a reviewed rehearsal needs
