@@ -1234,6 +1234,10 @@ class FeatureRolloutTests(unittest.TestCase):
         """Make the fixture root a git repository whose HEAD is the capsule's source commit."""
         self._git("init", "-q")
         self._git("config", "core.autocrlf", "false")
+        # The rollout tags with plain git; CI runners have no global identity, so the repository carries one.
+        self._git("config", "user.name", "t")
+        self._git("config", "user.email", "t@example.invalid")
+        self._git("config", "tag.gpgSign", "false")
         self._git("add", "-A")
         self._git("commit", "-q", "--allow-empty", "-m", "shipped")
         head = self._git("rev-parse", "HEAD")
