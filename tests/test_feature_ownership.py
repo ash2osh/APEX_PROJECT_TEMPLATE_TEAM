@@ -165,6 +165,70 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(comparison.only_feature, ("PROCEDURE NEW_ONE;",))
         self.assertEqual(comparison.only_live, ())
 
+    def test_trigger_with_create_or_replace_equals_the_bare_dev_source(self) -> None:
+        live = "TRIGGER TRG_ABSH_SHIFT_IN_USE\nBEFORE INSERT ON ABSH_SHIFT\nFOR EACH ROW\nBEGIN NULL; END;\n"
+        feature = "CREATE OR REPLACE TRIGGER TRG_ABSH_SHIFT_IN_USE\nBEFORE INSERT ON ABSH_SHIFT\nFOR EACH ROW\nBEGIN NULL; END;\n"
+        self.assertEqual(feature_compare.compare(feature, live).state, feature_compare.EQUAL)
+
+    def test_header_names_are_normalised_for_schema_quotes_and_editionable(self) -> None:
+        live = "TRIGGER HR_EMP_CONTRACT_SAFE_TRG\nBEFORE INSERT ON HR_EMP\nBEGIN NULL; END;\n"
+        for header in (
+            "CREATE OR REPLACE TRIGGER RUNERP_CUSTDATA.HR_EMP_CONTRACT_SAFE_TRG",
+            'CREATE OR REPLACE TRIGGER "RUNERP_CUSTDATA"."HR_EMP_CONTRACT_SAFE_TRG"',
+            "create or replace editionable trigger hr_emp_contract_safe_trg",
+            "CREATE OR REPLACE NONEDITIONABLE TRIGGER HR_EMP_CONTRACT_SAFE_TRG",
+        ):
+            feature = f"{header}\nBEFORE INSERT ON HR_EMP\nBEGIN NULL; END;\n"
+            self.assertEqual(feature_compare.compare(feature, live).state, feature_compare.EQUAL, header)
+        self.assertEqual(feature_compare.normalized_lines(
+            'CREATE OR REPLACE TRIGGER "S"."N"\nBEGIN NULL; END;')[0], "TRIGGER N")
+
+    def test_procedure_and_function_headers_are_stripped(self) -> None:
+        live_procedure = "PROCEDURE RUN_IT IS\nBEGIN NULL; END;\n"
+        feature_procedure = 'CREATE OR REPLACE PROCEDURE APP."RUN_IT" IS\nBEGIN NULL; END;\n'
+        self.assertEqual(feature_compare.compare(feature_procedure, live_procedure).state, feature_compare.EQUAL)
+        live_function = "FUNCTION GET_ONE RETURN NUMBER IS\nBEGIN RETURN 1; END;\n"
+        feature_function = "CREATE OR REPLACE EDITIONABLE FUNCTION GET_ONE RETURN NUMBER IS\nBEGIN RETURN 1; END;\n"
+        self.assertEqual(feature_compare.compare(feature_function, live_function).state, feature_compare.EQUAL)
+
+    def test_type_and_type_body_headers_are_stripped(self) -> None:
+        live = "TYPE ORDER_T AS OBJECT (\n  ID NUMBER\n);\n"
+        self.assertEqual(feature_compare.compare(
+            "CREATE OR REPLACE TYPE APP.ORDER_T AS OBJECT (\n  ID NUMBER\n);\n", live).state, feature_compare.EQUAL)
+        live_body = "TYPE BODY ORDER_T AS\n  MEMBER FUNCTION TOTAL RETURN NUMBER IS BEGIN RETURN 1; END;\nEND;\n"
+        feature_body = 'CREATE OR REPLACE TYPE BODY "APP"."ORDER_T" AS\n  MEMBER FUNCTION TOTAL RETURN NUMBER IS BEGIN RETURN 1; END;\nEND;\n'
+        self.assertEqual(feature_compare.compare(feature_body, live_body).state, feature_compare.EQUAL)
+        self.assertEqual(feature_compare.normalized_lines("TYPE BODY S.T AS\nEND;")[0], "TYPE BODY T AS")
+
+    def test_package_body_header_is_normalised_with_schema_prefix(self) -> None:
+        live = "PACKAGE BODY PKG AS\n  PROCEDURE RUN IS BEGIN NULL; END;\nEND PKG;\n"
+        feature = "CREATE OR REPLACE PACKAGE BODY APP.PKG AS\n  PROCEDURE RUN IS BEGIN NULL; END;\nEND PKG;\n"
+        self.assertEqual(feature_compare.compare(feature, live).state, feature_compare.EQUAL)
+        self.assertEqual(feature_compare.normalized_lines("PACKAGE BODY S.P AS\nEND;")[0], "PACKAGE BODY P AS")
+
+    def test_real_trigger_body_difference_is_still_reported(self) -> None:
+        live = "TRIGGER TRG\nBEFORE INSERT ON T\nBEGIN NULL; END;\n"
+        feature = "CREATE OR REPLACE TRIGGER TRG\nBEFORE INSERT ON T\nBEGIN :NEW.X := 1; END;\n"
+        comparison = feature_compare.compare(feature, live)
+        self.assertEqual(comparison.state, feature_compare.DIVERGED)
+        self.assertEqual(comparison.only_feature, ("BEGIN :NEW.X := 1; END;",))
+        self.assertEqual(comparison.only_live, ("BEGIN NULL; END;",))
+
+    def test_disable_line_after_a_trigger_header_is_still_reported(self) -> None:
+        live = "TRIGGER TRG\nBEFORE INSERT ON T\nBEGIN NULL; END;\n"
+        feature = "CREATE OR REPLACE TRIGGER TRG\nBEFORE INSERT ON T\nBEGIN NULL; END;\nALTER TRIGGER TRG DISABLE;\n"
+        comparison = feature_compare.compare(feature, live)
+        self.assertEqual(comparison.state, feature_compare.AHEAD)
+        self.assertEqual(comparison.only_feature, ("ALTER TRIGGER TRG DISABLE;",))
+
+    def test_package_headers_keep_their_previous_normalisation(self) -> None:
+        self.assertEqual(feature_compare.normalized_lines('CREATE OR REPLACE PACKAGE "APP_CODE"."PKG" AS\nEND PKG;'),
+                         ["PACKAGE PKG AS", "END PKG;"])
+        self.assertEqual(feature_compare.normalized_lines("CREATE OR REPLACE EDITIONABLE PACKAGE BODY S.PKG AS\nEND;"),
+                         ["PACKAGE BODY PKG AS", "END;"])
+        self.assertEqual(feature_compare.normalized_lines("PACKAGE PKG AS\nEND PKG;"),
+                         ["PACKAGE PKG AS", "END PKG;"])
+
 
 class DoctorTests(FeatureTree):
     def run_doctor(self, *arguments: str, environ=None) -> tuple[int, str]:

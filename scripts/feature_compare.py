@@ -8,8 +8,12 @@ import re
 from dataclasses import dataclass
 
 
-_CREATE = re.compile(r"(?is)CREATE\s+OR\s+REPLACE\s+(?:(?:NON)?EDITIONABLE\s+)?(?=PACKAGE)")
-_HEADER = re.compile(r"(?is)\bPACKAGE(?:\s+(BODY))?\s+(?:\"?\w+\"?\.)?\"?(\w+)\"?")
+_CREATE = re.compile(
+    r"(?is)CREATE\s+OR\s+REPLACE\s+(?:(?:NON)?EDITIONABLE\s+)?(?=(?:PACKAGE|TYPE|TRIGGER|PROCEDURE|FUNCTION)\b)"
+)
+_HEADER = re.compile(
+    r"(?is)\b(PACKAGE|TYPE|TRIGGER|PROCEDURE|FUNCTION)(?:\s+(BODY))?\s+(?:\"?\w+\"?\.)?\"?(\w+)\"?"
+)
 _ALTER_SESSION = re.compile(r"(?im)^\s*ALTER\s+SESSION[^\n]*\n")
 
 EQUAL = "EQUAL"
@@ -37,12 +41,17 @@ class Comparison:
 
 
 def normalized_lines(text: str) -> list[str]:
-    """Code lines of a package source: session settings, the CREATE header, comments, blanks, whitespace and case ignored."""
+    """Code lines of a stored unit: session settings, the CREATE header, comments, blanks, whitespace and case ignored.
+
+    The first header is reduced to `<KIND> [BODY] <NAME>` so that a feature file and the bare DEV source compare equal.
+    """
     text = _ALTER_SESSION.sub("", text.replace("\r", ""))
     create = _CREATE.search(text)
     if create is not None:
         text = text[create.end():]
-    text = _HEADER.sub(lambda match: "PACKAGE " + ("BODY " if match.group(1) else "") + match.group(2), text, count=1)
+    text = _HEADER.sub(
+        lambda match: match.group(1) + (" BODY" if match.group(2) else "") + " " + match.group(3), text, count=1,
+    )
     lines: list[str] = []
     for line in text.split("\n"):
         normalized = re.sub(r"\s+", " ", line.strip()).upper()

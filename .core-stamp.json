@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "fa15b2ff68e347443ea68161853fc234cf7525c4",
+  "coreCommit": "ac6dfdaa117b81ddfc0b72ec304c8c03a34df2f1",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -199,7 +199,7 @@
     },
     {
       "path": "scripts/feature_compare.py",
-      "sha256": "603b3d0d386a1d5b14d86a16029e1ced21f59c33ec236014f9efffc7890848a6",
+      "sha256": "d9af49076e423603586b089c0933eac45c904569b0696369de1e89ce2bbe08b1",
       "executable": false
     },
     {
@@ -969,7 +969,7 @@
     },
     {
       "path": "tests/test_feature_ownership.py",
-      "sha256": "efdf26b7081341cf0f2e9cbbb15d2bb1ebaee876710eb4f77bb84ca0e53c81cd",
+      "sha256": "e338ff6f0b43dbb8d65ede6ccad438ea625e012236f9fffd4920490e2b25cc2b",
       "executable": false
     },
     {
