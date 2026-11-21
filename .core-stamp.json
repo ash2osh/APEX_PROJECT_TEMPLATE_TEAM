@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "558f230f84c19447e12d9ae019448d9eb0576f99",
+  "coreCommit": "5cf210772d55be82d0bccd2b84681d151787d6ea",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -84,7 +84,7 @@
     },
     {
       "path": "scripts/ci_run_tests.py",
-      "sha256": "349c7229fd1b647ca32edc153321a9fa4ceac4899cd4afec9c51bc293d845f56",
+      "sha256": "3217ff0cc48261181caae2c7c4e3c40b80354bd1a719f7539b46002d2f4ce68c",
       "executable": false
     },
     {
@@ -369,7 +369,7 @@
     },
     {
       "path": "scripts/pre_push_check.py",
-      "sha256": "af5f2748cec010cff8213acbed65d90416bc290de88c59c75794a28b2291179b",
+      "sha256": "b7c9246aab2d7e09e516550c9996e45a7d5a8963e6b73885da2221fb322b3bbe",
       "executable": false
     },
     {
@@ -824,7 +824,7 @@
     },
     {
       "path": "tests/test_ci_run_tests.py",
-      "sha256": "4e08ab985383daa65743b7e52c65fb42a3c5d76041e2fbc67dac6bbf9807120f",
+      "sha256": "e361e455d54bbe86254be2c9518c8afe8f19c1e1fb28c37b4cc80d3c7fff79fa",
       "executable": false
     },
     {
@@ -1128,8 +1128,13 @@
       "executable": false
     },
     {
+      "path": "tests/test_portability_guards.py",
+      "sha256": "b97d86381ee274f8e9803bb4668077872c93358c99cc9938cf6beef6dcb1a998",
+      "executable": false
+    },
+    {
       "path": "tests/test_pre_push_check.py",
-      "sha256": "6572af57c289fcfe9a5e3944aaed4358ba88a4922081711e3da8fe195bcbbea4",
+      "sha256": "7178f00b16242ef083761947f33b1097e6234df699658d003134f23a1de2e9fa",
       "executable": false
     },
     {

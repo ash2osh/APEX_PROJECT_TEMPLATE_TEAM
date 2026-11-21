@@ -62,6 +62,31 @@ python3 tools/template_parity.py ../APEX_PROJECT_TEMPLATE_26_1
 `python3 scripts/pre_push_check.py --install-hook` runs it on every `git push` (it never replaces an existing hook).
 Install Ruff once with `python3 -m pip install 'ruff>=0.5'`.
 
+## Portability rules (why CI fails when local runs pass)
+
+Most CI failures between 2026-10-21 and 2026-11-21 (40 failed jobs) passed on the developer's machine. Each cause has a
+guard now; the guard names the file, line and fix.
+
+| Cause seen in CI | Rule | Guard |
+| --- | --- | --- |
+| A path compared as a string: `C:\...` from Python, `C:/...` from Git Bash (`cygpath -m`) | Compare `Path` objects, or `.as_posix()` on both sides; key snapshots by `relative_to(...).as_posix()` | `test_portability_guards` (`path-str-assert`, `relative-path-str`) |
+| Windows `charmap` errors on text without an encoding | Pass `encoding="utf-8"` to `open`, `read_text`, `write_text` and text-mode `subprocess` calls | `test_portability_guards` (`text-io-no-encoding`) |
+| `os.killpg`, `fcntl` and other POSIX-only APIs on Windows | Guard with `os.name` or `hasattr`, and test both branches | `test_portability_guards` (`posix-only-api`) |
+| A bare `bash` ran the WSL launcher on Windows | Start Git Bash through `fake_sqlcl.BASH` | `test_portability_guards` (`bare-bash`) |
+| No global Git identity on CI | A temporary repository sets its own `user.name`, `user.email` and `tag.gpgSign=false` | `scripts/ci_run_tests.py` runs every test with an empty global Git config |
+| PowerShell 7.4 colours in error text | Assert on plain text | the runner sets `NO_COLOR=1` |
+| `__pycache__` inside the tree broke a file listing | Do not list generated files | the runner sets `PYTHONDONTWRITEBYTECODE=1` |
+| A new doc or script missing from `template-manifest.json` passed locally while untracked | `git add` new files before testing | `pre_push_check.py` refuses untracked files under `scripts/`, `tests/`, `tools/` and `docs/`, and always runs the manifest, documentation and portability tests |
+| The backup wrappers pass `%` for the `*` prefix on Windows | Expect `%` on Windows in tests that read wrapper arguments | review rule |
+| Ctrl-C and timing tests | Wait on a condition, not a fixed sleep; record a flake only with evidence | [Known flaky tests](#known-flaky-tests) |
+
+`test_portability_guards` is a ratchet: `tests/portability_baseline.json` holds today's count per file and rule, and a
+file may not go above it. After fixing old occurrences, lower the counts with
+`python3 tests/test_portability_guards.py --write-baseline` and commit the file.
+
+Run the suite as CI sees it with `python3 scripts/ci_run_tests.py --jobs 4`; plain `python3 -m unittest` still uses your
+own Git configuration. Windows itself is checked only in CI (`windows-offline`).
+
 ## Shared core files
 
 About 200 files under `scripts/`, `tools/` and `tests/` are identical in the 26.1 and 26.2 templates. Their single

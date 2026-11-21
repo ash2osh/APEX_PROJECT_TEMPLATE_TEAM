@@ -9,6 +9,9 @@ ShellCheck (error severity) runs when `shellcheck` is on PATH. The PowerShell pa
 Windows PowerShell when `pwsh` is missing. The shell syntax check uses Git Bash on Windows, never the WSL launcher in
 System32. A missing tool prints a one-line note and does not fail the check.
 
+It also always runs the contract tests (template manifest, documentation contract, portability guards) when they exist, and in a
+template checkout it refuses untracked files under scripts/, tests/, tools/ and docs/, because CI sees only tracked files.
+
 CI runs the full suite on Linux, Windows and macOS, which takes 10 to 30 minutes. Most failed runs were lint errors or a
 changed test that fails on Linux, both caught here in seconds. This does not run the whole suite or any Windows check.
 Read-only except `--install-hook`.
@@ -131,6 +134,16 @@ def find_powershell(which: Callable[[str], str | None] | None = None, is_windows
     return None
 
 
+# Contract modules run on every check, changed or not. A downstream project removes them, so a missing one is skipped.
+CONTRACT_TESTS = (
+    "tests/test_template_manifest.py",
+    "tests/test_documentation_contract.py",
+    "tests/test_portability_guards.py",
+)
+# Only the template's own tracked source is checked for untracked files; CI and the manifest tests see only tracked files.
+UNTRACKED_CHECKED_DIRS = ("scripts", "tests", "tools", "docs")
+
+
 def changed_test_files(paths: Sequence[str], root: Path = ROOT) -> list[str]:
     """Test modules among the changed paths that still exist: tests/test_*.py, sorted, each once."""
     return sorted({
@@ -138,6 +151,17 @@ def changed_test_files(paths: Sequence[str], root: Path = ROOT) -> list[str]:
         if p.startswith("tests/") and "/" not in p[len("tests/"):] and Path(p).name.startswith("test_") and p.endswith(".py")
         and (root / p).is_file()
     })
+
+
+def test_modules_to_run(paths: Sequence[str], root: Path = ROOT) -> list[str]:
+    """Changed test modules plus the contract modules that exist, sorted, each once."""
+    contract = [name for name in CONTRACT_TESTS if (root / name).is_file()]
+    return sorted({*changed_test_files(paths, root), *contract})
+
+
+def is_template_checkout(root: Path = ROOT) -> bool:
+    """A template carries .core-stamp.json. A downstream project has .template-lock.json, even if it inherited the stamp."""
+    return (root / ".core-stamp.json").is_file() and not (root / ".template-lock.json").exists()
 
 
 def git_lines(*args: str) -> list[str]:
@@ -164,6 +188,15 @@ def changed_paths() -> list[str]:
     names.update(git_lines("diff", "--name-only", "HEAD"))
     names.update(git_lines("ls-files", "--others", "--exclude-standard"))
     return sorted(names)
+
+
+def untracked_step(files: Sequence[str]) -> bool:
+    """Print each untracked file and report the step; any untracked file fails it."""
+    print("== Untracked files", flush=True)
+    for name in files:
+        print(f"untracked file {name}: git add it or ignore it; CI and the manifest/ownership tests see only tracked files", flush=True)
+    print(f"   {'ok' if not files else 'FAILED'}", flush=True)
+    return not files
 
 
 def step(label: str, command: Sequence[str]) -> bool:
@@ -247,14 +280,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("note: neither pwsh nor Windows PowerShell is on PATH, so the PowerShell parse was not run (CI runs it on Linux and Windows)", flush=True)
         else:
             print("note: pwsh is not on PATH, so the PowerShell parse was not run (CI runs it on Linux and Windows)", flush=True)
-    for test in changed_test_files(paths, ROOT):
-        label = f"Changed test {test}"
+    if is_template_checkout(ROOT):
+        untracked = git_lines("ls-files", "--others", "--exclude-standard", "--", *UNTRACKED_CHECKED_DIRS)
+        results.append(("Untracked files", untracked_step(untracked)))
+    changed_tests = set(changed_test_files(paths, ROOT))
+    for test in test_modules_to_run(paths, ROOT):
+        label = f"Changed test {test}" if test in changed_tests else f"Contract test {test}"
         results.append((label, step(label, [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", Path(test).name, "-v"])))
     # A template carries the shared core files with a stamp. Editing one of them in the template fails here:
     # fix it in the core repository and sync it. A downstream project has no stamp, so nothing runs. A downstream
     # project can still inherit a stale .core-stamp.json; its .template-lock.json marks it as downstream, so skip then.
-    stamp, checker = ROOT / ".core-stamp.json", ROOT / "scripts" / "sync_core.py"
-    if stamp.is_file() and checker.is_file() and not (ROOT / ".template-lock.json").exists():
+    checker = ROOT / "scripts" / "sync_core.py"
+    if is_template_checkout(ROOT) and checker.is_file():
         label = "Shared core files (edit them in APEX_TEMPLATE_CORE, then sync)"
         results.append((label, step(label, [sys.executable, str(checker), "check", str(ROOT)])))
     if not results:

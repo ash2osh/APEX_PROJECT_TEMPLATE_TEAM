@@ -18,11 +18,14 @@ including the flaky rerun, so a rerun cannot hide a forbidden skip.
 from __future__ import annotations
 
 import ast
+import contextlib
 import os
 import re
+import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+import tempfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -113,14 +116,47 @@ def _write_output(text: str, *, end: str = "") -> None:
     stream.flush()
 
 
+@contextlib.contextmanager
+def hermetic_git_config() -> Iterator[str]:
+    """Yield the path of a new, empty Git config file that is removed when the block ends."""
+    directory = tempfile.mkdtemp(prefix="ci-git-config-")
+    try:
+        path = Path(directory) / "gitconfig"
+        path.write_text("", encoding="utf-8")
+        yield str(path)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def hermetic_environment(base: Mapping[str, str], git_config: str) -> dict[str, str]:
+    """A copy of `base` that ignores the developer's Git identity and config, and turns off colour and bytecode.
+
+    CI has no global Git identity, so the tests must not depend on one that a developer has. Every GIT_AUTHOR_* and
+    GIT_COMMITTER_* variable is removed, the global and system config files are replaced, and colour is off so text
+    assertions see plain output.
+    """
+    environment = {
+        name: value for name, value in base.items()
+        if not name.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+    }
+    environment.update({
+        "GIT_CONFIG_GLOBAL": git_config,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "NO_COLOR": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    return environment
+
+
 def run_unittest(args: Sequence[str]) -> tuple[int, str]:
-    """Run unittest in the repository root with closed stdin and a suite-level timeout."""
+    """Run unittest in the repository root with closed stdin, a suite-level timeout and a hermetic environment."""
     timeout = 900
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "unittest", *args], cwd=ROOT, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout)
+        with hermetic_git_config() as git_config:
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest", *args], cwd=ROOT, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout, env=hermetic_environment(os.environ, git_config))
         output = result.stdout or ""
         _write_output(output)
         return result.returncode, output
@@ -139,22 +175,23 @@ def ordered_modules(tests_dir: Path) -> list[str]:
 
 def run_modules(modules: Sequence[str]) -> tuple[int, str]:
     """Run test modules in one process, as `discover -s tests` would import them; return (exit code, output)."""
-    environment = dict(os.environ)
-    # A module that runs this script again (its own tests) must not start a second parallel run.
-    environment["CI_TEST_JOBS"] = "1"
-    # The forbidden-skip list belongs to the outer run, which checks the skip lines these children print.
-    environment.pop("CI_FORBID_SKIP", None)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(ROOT / "tests"), str(ROOT), environment.get("PYTHONPATH", "")) if part)
+    timeout = 900
     # `discover -s tests` imports every module into one process, so the guard that keeps tests away from a
     # real SQLcl (and makes write_text write LF on Windows) applies to all of them; load it for each module too.
     guard = "import _no_real_sqlcl, sys, unittest; sys.argv[0] = 'python -m unittest'; unittest.main(module=None)"
-    timeout = 900
     try:
-        result = subprocess.run(
-            [sys.executable, "-c", guard, "-v", *modules], cwd=ROOT, env=environment,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout)
+        with hermetic_git_config() as git_config:
+            environment = hermetic_environment(os.environ, git_config)
+            # A module that runs this script again (its own tests) must not start a second parallel run.
+            environment["CI_TEST_JOBS"] = "1"
+            # The forbidden-skip list belongs to the outer run, which checks the skip lines these children print.
+            environment.pop("CI_FORBID_SKIP", None)
+            environment["PYTHONPATH"] = os.pathsep.join(
+                part for part in (str(ROOT / "tests"), str(ROOT), environment.get("PYTHONPATH", "")) if part)
+            result = subprocess.run(
+                [sys.executable, "-c", guard, "-v", *modules], cwd=ROOT, env=environment,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout)
         return result.returncode, result.stdout or ""
     except subprocess.TimeoutExpired as error:
         output = _partial_text(error.stdout)
