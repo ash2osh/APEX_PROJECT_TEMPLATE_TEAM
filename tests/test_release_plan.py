@@ -156,6 +156,22 @@ class ReleasePlanTests(unittest.TestCase):
             ["features/dispatch/APP_CODE/triggers/orders_trg.trg.sql"],
         ])
 
+    def test_a_trigger_file_without_the_type_suffix_is_planned(self) -> None:
+        # Older captures name single-type units <name>.sql; release-plan must not drop them silently.
+        legacy = "features/dispatch/APP_CODE/triggers/legacy_trg.sql"
+        self.write(legacy, "CREATE OR REPLACE TRIGGER legacy_trg BEFORE INSERT ON orders FOR EACH ROW BEGIN NULL; END;\n/\n")
+        self.commit("legacy trigger name")
+        plan = release_plan.create_release_plan(self.root, since=self.base)
+        self.assertEqual(plan.steps, ({"type": "feature-migrate", "schema": "APP_CODE", "inputs": [legacy]},))
+        self.assertNotIn(legacy, plan.not_planned)
+
+    def test_a_package_file_without_a_spec_or_body_suffix_is_not_planned(self) -> None:
+        ambiguous = "features/dispatch/APP_CODE/packages/other_pkg.sql"
+        self.write(ambiguous, "CREATE OR REPLACE PACKAGE other_pkg AS\n  PROCEDURE p;\nEND other_pkg;\n/\n")
+        self.commit("package without suffix")
+        plan = release_plan.create_release_plan(self.root, since=self.base)
+        self.assertIn(ambiguous, plan.not_planned)
+
     def test_data_script_and_migration_folder_changes_plan_their_steps(self) -> None:
         self.write("features/dispatch/APP_CODE/data/seed.sql", DATA + "COMMIT;\n")
         self.write("migrations/2026-02-01_add-index-r001/001-create-index.sql", "CREATE INDEX APP_CODE.IX1 ON APP_CODE.DISPATCH (ID);\n")
