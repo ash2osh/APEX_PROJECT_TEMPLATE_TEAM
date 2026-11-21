@@ -401,7 +401,9 @@ class StagingNeutralizeWrapperTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                 lines = record.read_text(encoding="utf-8").splitlines()
                 self.assertEqual(["-m", "scripts.staging_neutralize", "--check"], lines[:-1])
-                self.assertEqual("ENV:" + str(root / ".env"), lines[-1])
+                # Git Bash hands Python the path with "/" (cygpath -m), so compare paths, not strings.
+                self.assertTrue(lines[-1].startswith("ENV:"), lines[-1])
+                self.assertEqual(Path(lines[-1][len("ENV:"):]), root / ".env")
 
     def test_both_wrappers_list_staging_neutralize_and_release_plan_in_usage(self) -> None:
         pwsh = _test_subprocess_safety.working_pwsh()
