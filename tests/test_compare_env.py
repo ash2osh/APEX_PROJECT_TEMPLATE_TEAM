@@ -809,12 +809,12 @@ class EnvironmentComparisonTests(unittest.TestCase):
         triggers = sql[sql.index("PROCEDURE add_triggers IS"):sql.index("PROCEDURE add_stored_code IS")]
         stored_code = sql[sql.index("PROCEDURE add_stored_code IS"):sql.index("BEGIN\n  DBMS_OUTPUT.ENABLE", sql.index("PROCEDURE add_stored_code IS"))]
         self.assertIn("c_scope_names_json", views)
-        self.assertIn("FROM all_dependencies d WHERE d.owner = v.owner", views)
+        self.assertIn("d.referenced_name IN (SELECT sn.object_name FROM sn)", views)
         self.assertIn("sn.object_name = t.trigger_name", triggers)
         self.assertIn("sn.object_name = t.table_name", triggers)
-        self.assertIn("sn.object_name = s.name", stored_code)
-        self.assertIn("FROM all_dependencies d WHERE d.owner = s.owner", stored_code)
-        self.assertIn("sn.object_name = d.referenced_name", stored_code)
+        self.assertIn("o.object_name IN (SELECT sn.object_name FROM sn)", stored_code)
+        self.assertIn("FROM all_dependencies d", stored_code)
+        self.assertIn("d.referenced_name IN (SELECT sn.object_name FROM sn)", stored_code)
 
         dependency_query = query("feature-dependencies")
         self.assertTrue(dependency_query.lstrip().startswith("SCOPE_WITH"))
@@ -824,6 +824,37 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertTrue(synonym_query.lstrip().startswith("SCOPE_WITH"))
         self.assertIn("SCOPE_MATCH(s.synonym_name)", synonym_query)
         self.assertIn("p.grantee IN (SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), 'PUBLIC')", synonym_query)
+
+    def test_acting_as_login_reads_dba_tab_privs_and_is_incomplete_only_without_it(self) -> None:
+        # A login acting as the schema could never complete object-grants, so every feature capture on a
+        # staging or production target reached that way was refused. It now reads DBA_TAB_PRIVS when it can.
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        start = sql.index("PROCEDURE add_object_grants IS")
+        body = sql[start:sql.index("\n  END;", start)]
+        acting_as = body[body.index("ELSIF SYS_CONTEXT('USERENV', 'SESSION_USER') = c_schema THEN"):]
+        acting_as = acting_as[acting_as.index("    ELSE\n"):]
+        self.assertIn("FROM dba_tab_privs p WHERE p.owner = :scope", acting_as)
+        self.assertIn("IF SQLCODE != -942 THEN RAISE; END IF;", acting_as)
+        self.assertIn("add_unavailable('object-grants',", acting_as)
+        self.assertLess(acting_as.index("FROM dba_tab_privs"), acting_as.index("add_unavailable('object-grants',"))
+
+    def test_stored_code_and_views_find_wanted_names_first(self) -> None:
+        # A per-row scope test over every ALL_SOURCE line took 43 s for one package, and over
+        # every view 11 s. Both procedures now find the wanted names first and join them back.
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+
+        def procedure(name: str) -> str:
+            start = sql.index(f"PROCEDURE {name} IS")
+            return sql[start:sql.index("\n  END;", start)]
+
+        stored_code = procedure("add_stored_code")
+        views = procedure("add_views")
+        for name, body in (("add_stored_code", stored_code), ("add_views", views)):
+            with self.subTest(procedure=name):
+                self.assertIn("wanted AS (", body)
+                self.assertIn("l_scope_all := CASE WHEN DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2", body)
+        self.assertNotIn("FROM all_source s\n          JOIN all_objects", stored_code)
+        self.assertNotIn("OR EXISTS (SELECT 1 FROM all_dependencies d WHERE d.owner = v.owner", views)
 
     def test_compare_env_identity_reports_the_database_version_the_migration_checks_report(self) -> None:
         # The feature preflight compares the identity captured at preparation with the one

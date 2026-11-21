@@ -395,10 +395,10 @@
     },
     "scripts/compare_env_catalog.sql": {
       "status": "feature",
-      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply. Follow-up 2026-11-20: both lines now capture `virtual_expression` (DATA_DEFAULT_VC when the database has it, NULL otherwise) in the columns section; the same change, so the remaining difference is unchanged. The columns section also carries internal_column_id (the position evidence of an invisible column) on both lines.",
+      "reason": "26.2 reports trigger Oracle object validity separately and captures additional feature dependency and synonym relationships. Both lines capture effective and observed view collation for guarded DEV apply. Follow-up 2026-11-20: both lines now capture `virtual_expression` (DATA_DEFAULT_VC when the database has it, NULL otherwise) in the columns section; the same change, so the remaining difference is unchanged. The columns section also carries internal_column_id (the position evidence of an invisible column) on both lines. Follow-up 2026-11-21: both lines find the wanted names first in add_stored_code and add_views, skip units without visible source in the loop, and read DBA_TAB_PRIVS for an acting-as login; the tests for it are the same on both lines.",
       "blobs": [
-        "f18f3ac8511b3ff7b2a0aa33fb74fde9608b4b8e",
-        "b4ac0629f77cfae9c2437057b8c4214938bbba5b"
+        "1ac402edaed3b7c0a910b53272806e3bf6d2705f",
+        "fec18bf52eae0300f4a43103b78742ac5486d5f4"
       ]
     },
     "scripts/deploy.sh": {
@@ -715,10 +715,10 @@
     },
     "tests/test_compare_env.py": {
       "status": "intended",
-      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines. Follow-up 2026-11-20: both lines pin the virtual_expression probe, token and key in the catalog SQL. Both lines test that an invisible user column is accepted with a positive internal_column_id and refused without one.",
+      "reason": "Ported the applicable 26.1 tests (TEAM PR 54); the other 13 are covered by differently named TEAM tests or are specific to 26.1 command wiring. The guarded DEV feature workflow and long-view transport changes are on both lines. Follow-up 2026-11-20: both lines pin the virtual_expression probe, token and key in the catalog SQL. Both lines test that an invisible user column is accepted with a positive internal_column_id and refused without one. Follow-up 2026-11-21: both lines find the wanted names first in add_stored_code and add_views, skip units without visible source in the loop, and read DBA_TAB_PRIVS for an acting-as login; the tests for it are the same on both lines.",
       "blobs": [
-        "e5be1fd1ef7d9b523ce4415b419cdb8d803f715f",
-        "15a7b38b69b4ca0d16f9bd04e99eb735092ff24f"
+        "1bf385561b515b0b3a8c9efe4e5f50771e6a7c2f",
+        "81d2174ddb12527daf6543f2c9a89eb789976cf4"
       ]
     },
     "tests/test_deployment_descriptor.py": {
