@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 from scripts import pre_push_check
 from scripts.pre_push_check import (
-    HOOK, changed_powershell_scripts, changed_python_files, changed_shell_scripts, changed_test_files, existing, find_bash, find_powershell,
-    powershell_parse_command,
+    CONTRACT_TESTS, HOOK, changed_powershell_scripts, changed_python_files, changed_shell_scripts, changed_test_files, existing, find_bash,
+    find_powershell, is_template_checkout, powershell_parse_command, test_modules_to_run, untracked_step,
 )
 
 
@@ -314,6 +314,72 @@ class ToolStepTests(unittest.TestCase):
         code, _ = self.run_check([], [], {})
         self.assertEqual(code, 0)
         self.assertTrue(any(label.startswith("Shared core files") for label, _ in self.calls))
+
+    def test_contract_modules_run_with_the_changed_ones_once_and_missing_ones_are_skipped(self):
+        for name in ("tests/test_a.py", *CONTRACT_TESTS[:2]):
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_text("", encoding="utf-8")
+        paths = ["tests/test_a.py", "tests/test_template_manifest.py"]
+        self.assertEqual(test_modules_to_run(paths, self.root), [
+            "tests/test_a.py", "tests/test_documentation_contract.py", "tests/test_template_manifest.py",
+        ])
+        self.assertEqual(test_modules_to_run([], self.root), ["tests/test_documentation_contract.py", "tests/test_template_manifest.py"])
+
+    def test_a_downstream_project_without_contract_modules_runs_only_changed_tests(self):
+        (self.root / "tests").mkdir(exist_ok=True)
+        (self.root / "tests" / "test_b.py").write_text("", encoding="utf-8")
+        self.assertEqual(test_modules_to_run(["tests/test_b.py"], self.root), ["tests/test_b.py"])
+        self.assertEqual(test_modules_to_run([], self.root), [])
+
+    def test_contract_modules_run_as_their_own_labelled_steps(self):
+        (self.root / "tests").mkdir(exist_ok=True)
+        (self.root / "tests" / "test_template_manifest.py").write_text("", encoding="utf-8")
+        (self.root / "tests" / "test_a.py").write_text("", encoding="utf-8")
+        code, _ = self.run_check([], ["tests/test_a.py"], {"ruff": "/fake/ruff"})
+        self.assertEqual(code, 0)
+        labels = [label for label, _ in self.calls]
+        self.assertIn("Changed test tests/test_a.py", labels)
+        self.assertIn("Contract test tests/test_template_manifest.py", labels)
+
+    def test_a_template_checkout_is_one_with_a_stamp_and_no_template_lock(self):
+        self.assertFalse(is_template_checkout(self.root))
+        (self.root / ".core-stamp.json").write_text("{}", encoding="utf-8")
+        self.assertTrue(is_template_checkout(self.root))
+        (self.root / ".template-lock.json").write_text("{}", encoding="utf-8")
+        self.assertFalse(is_template_checkout(self.root))
+
+    def test_untracked_files_fail_the_step_and_name_each_path(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertFalse(untracked_step(["scripts/new.py", "docs/new.md"]))
+        text = output.getvalue()
+        self.assertIn("untracked file scripts/new.py: git add it or ignore it; CI and the manifest/ownership tests see only tracked files", text)
+        self.assertIn("untracked file docs/new.md:", text)
+        self.assertTrue(text.splitlines()[-1].endswith("FAILED"))
+
+    def test_no_untracked_files_pass_the_step_silently(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertTrue(untracked_step([]))
+        self.assertNotIn("untracked file", output.getvalue())
+
+    def test_a_template_checkout_refuses_untracked_files_before_the_tests(self):
+        (self.root / ".core-stamp.json").write_text("{}", encoding="utf-8")
+        with patch.object(pre_push_check, "git_lines", return_value=["scripts/new.py"]) as git:
+            code, output = self.run_check([], ["tests/test_a.py"], {"ruff": "/fake/ruff"})
+        self.assertEqual(code, 1)
+        git.assert_any_call("ls-files", "--others", "--exclude-standard", "--", "scripts", "tests", "tools", "docs")
+        self.assertIn("untracked file scripts/new.py:", output)
+        self.assertIn("CHECKS FAILED: Untracked files", output)
+        self.assertNotIn("Changed test tests/test_a.py", [label for label, _ in self.calls])
+
+    def test_a_downstream_project_does_not_check_untracked_files(self):
+        (self.root / ".core-stamp.json").write_text("{}", encoding="utf-8")
+        (self.root / ".template-lock.json").write_text("{}", encoding="utf-8")
+        with patch.object(pre_push_check, "git_lines", return_value=["scripts/new.py"]):
+            code, output = self.run_check([], [], {})
+        self.assertEqual(code, 0)
+        self.assertNotIn("untracked file", output)
 
     def test_a_real_syntax_error_names_its_step_on_the_last_line(self):
         (self.root / "scripts/bad.py").write_text("def broken(:\n", encoding="utf-8")

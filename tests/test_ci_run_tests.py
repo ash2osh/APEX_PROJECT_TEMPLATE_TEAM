@@ -10,7 +10,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
-from scripts.ci_run_tests import failed_test_ids, forbidden_skips, load_known, main, ordered_modules, parse_forbid_skip, parse_jobs, run_parallel, run_unittest
+from scripts.ci_run_tests import (
+    failed_test_ids, forbidden_skips, hermetic_environment, hermetic_git_config, load_known, main, ordered_modules, parse_forbid_skip,
+    parse_jobs, run_parallel, run_unittest,
+)
 
 KNOWN_TEXT = "# comment\n\nmod_a.ClassA.test_one  # reason\nmod_b.ClassB.test_two\n"
 FAIL_ONE = "FAIL: test_one (mod_a.ClassA)\n----\nFAILED (failures=1)\n"
@@ -138,6 +141,97 @@ class CiRunTestsTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("captured: \ufffd", output)
         self.assertIn(b"captured: \\ufffd", captured.getvalue())
+
+
+class HermeticEnvironmentTests(unittest.TestCase):
+    def test_every_test_process_gets_the_hermetic_variables(self):
+        base = {"PATH": "/bin", "GIT_CONFIG_GLOBAL": "/home/dev/.gitconfig", "NO_COLOR": "", "PYTHONDONTWRITEBYTECODE": ""}
+        environment = hermetic_environment(base, "/tmp/empty")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], "/tmp/empty")
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["NO_COLOR"], "1")
+        self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertEqual(environment["PATH"], "/bin")
+
+    def test_git_author_and_committer_variables_are_removed(self):
+        base = {
+            "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.test", "GIT_AUTHOR_DATE": "2026-01-01",
+            "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.test", "GIT_COMMITTER_DATE": "2026-01-01",
+            "GIT_DIR": "/repo/.git", "HOME": "/home/dev",
+        }
+        environment = hermetic_environment(base, "/tmp/empty")
+        for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"):
+            self.assertNotIn(name, environment)
+        self.assertEqual(environment["GIT_DIR"], "/repo/.git")
+        self.assertEqual(environment["HOME"], "/home/dev")
+
+    def test_the_base_mapping_is_not_changed(self):
+        base = {"GIT_AUTHOR_NAME": "Dev"}
+        hermetic_environment(base, "/tmp/empty")
+        self.assertEqual(base, {"GIT_AUTHOR_NAME": "Dev"})
+
+    def test_the_empty_git_config_exists_during_the_run_and_is_removed_afterwards(self):
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            path = Path(kwargs["env"]["GIT_CONFIG_GLOBAL"])
+            seen["path"] = path
+            seen["exists"] = path.is_file()
+            seen["text"] = path.read_text(encoding="utf-8") if path.is_file() else None
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with patch("scripts.ci_run_tests.subprocess.run", fake_run), contextlib.redirect_stdout(io.StringIO()):
+            run_unittest(["discover", "-s", "tests"])
+        self.assertTrue(seen["exists"])
+        self.assertEqual(seen["text"], "")
+        self.assertFalse(seen["path"].exists())
+        self.assertFalse(seen["path"].parent.exists())
+
+    def test_the_git_config_is_removed_even_when_the_run_raises(self):
+        with self.assertRaises(RuntimeError):
+            with hermetic_git_config() as path:
+                held = Path(path)
+                raise RuntimeError("boom")
+        self.assertFalse(held.exists())
+
+    def test_run_unittest_passes_the_hermetic_environment(self):
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with patch.dict(os.environ, {"GIT_AUTHOR_NAME": "Dev", "NO_COLOR": ""}), \
+             patch("scripts.ci_run_tests.subprocess.run", fake_run), contextlib.redirect_stdout(io.StringIO()):
+            run_unittest(["discover", "-s", "tests"])
+        self.assertNotIn("GIT_AUTHOR_NAME", seen)
+        self.assertEqual(seen["NO_COLOR"], "1")
+        self.assertEqual(seen["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertEqual(seen["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertTrue(seen["GIT_CONFIG_GLOBAL"])
+
+    def test_run_modules_passes_the_hermetic_variables_and_keeps_the_child_settings(self):
+        seen = {}
+
+        class Done:
+            returncode, stdout = 0, ""
+
+        def fake_run(command, **kwargs):
+            seen.update(kwargs["env"])
+            return Done()
+
+        with patch.dict(os.environ, {"GIT_COMMITTER_EMAIL": "dev@example.test", "CI_FORBID_SKIP": "x", "CI_TEST_JOBS": "4"}), \
+             patch("scripts.ci_run_tests.subprocess.run", fake_run):
+            from scripts.ci_run_tests import run_modules
+            run_modules(["test_x"])
+        self.assertNotIn("GIT_COMMITTER_EMAIL", seen)
+        self.assertEqual(seen["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(seen["NO_COLOR"], "1")
+        self.assertEqual(seen["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertTrue(seen["GIT_CONFIG_GLOBAL"])
+        self.assertNotIn("CI_FORBID_SKIP", seen)
+        self.assertEqual(seen["CI_TEST_JOBS"], "1")
+        self.assertFalse(Path(seen["GIT_CONFIG_GLOBAL"]).exists())
 
 
 class ParallelRunTests(unittest.TestCase):
