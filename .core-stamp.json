@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "4c2a01692f7d9f2d83536739c6e31bba523bce3d",
+  "coreCommit": "4ad8884798c72d204b859c4673f4aa531997f408",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -254,12 +254,12 @@
     },
     {
       "path": "scripts/load_env.ps1",
-      "sha256": "b1c1782fb54f06716ea61012fec759bb58fbcb600e0303dc0bedaa396b043b29",
+      "sha256": "d00b326f397d11606d54c5240c81cc374d3db0ca30ed1ec944aed0fa5fc68c71",
       "executable": false
     },
     {
       "path": "scripts/load_env.sh",
-      "sha256": "2f02c4c12d55fdc1a784ceee721091e7a9bf30148412538c515d6f9b3b850fe8",
+      "sha256": "008fb377b332ad4683d5f9dd6f211905122855ad7785f52bc830099772a99f99",
       "executable": true
     },
     {
@@ -930,6 +930,11 @@
     {
       "path": "tests/test_doctor_database_info.py",
       "sha256": "30f2f9b1b263faebf34cd4821d4a787f4158f509d5a00ea91892499bb3a7cbdb",
+      "executable": false
+    },
+    {
+      "path": "tests/test_env_loader_key_parity.py",
+      "sha256": "412ef4850f6ca32faa29fc6aec2fe388f68260b3d3ead1796b2ae260482202fa",
       "executable": false
     },
     {
