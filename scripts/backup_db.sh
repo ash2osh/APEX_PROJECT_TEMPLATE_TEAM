@@ -159,10 +159,17 @@ fi
 # split-schema project does not install directories nothing ever writes to.
 scope_directories() {
   case "$1" in
-    tables) printf '%s\n' tables ;;
+    tables) printf '%s\n' tables triggers sequences ;;
     code)   printf '%s\n' views packages procedures functions triggers synonyms ;;
     *) echo "unsupported backup scope: $1" >&2; return 1 ;;
   esac
+}
+
+# scope_stage_directory <schema> <scope>: the staging directory of one scope's
+# export. Each scope spools into its own directory, because both scopes can
+# write triggers/ for the same schema; the directories are merged afterward.
+scope_stage_directory() {
+  printf '%s-%s\n' "$(schema_stage_directory "$1")" "$2"
 }
 
 # scope_ran <scope> <schema>: whether this run exports that scope for the schema.
@@ -175,11 +182,29 @@ scope_ran() {
   esac
 }
 
+# running_scope_writes <schema> <entry>: whether a scope this run exports writes
+# the folder <entry>. triggers/ is shared by both scopes, so a running scope's
+# export is authoritative for it.
+running_scope_writes() {
+  local schema="$1"
+  local entry="$2"
+  local scope dir
+  for scope in tables code; do
+    scope_ran "$scope" "$schema" || continue
+    while IFS= read -r dir; do
+      if [ "$dir" = "$entry" ]; then return 0; fi
+    done < <(scope_directories "$scope")
+  done
+  return 1
+}
+
 # carry_over_unrefreshed_scopes <schema> <staged-schema-directory>: the staged
 # mirror replaces the whole committed one, so each scope this run did not export
 # is copied from the committed mirror first, using the same outputs as
 # scope_directories and manifest-<scope>.txt. Only what the committed mirror
 # holds is copied. A scope that ran is never copied: it is replaced whole.
+# A folder a running scope also writes (triggers/) is not copied, because that
+# scope's export is the authoritative one for it.
 carry_over_unrefreshed_scopes() {
   local schema="$1"
   local staged="$2"
@@ -188,7 +213,10 @@ carry_over_unrefreshed_scopes() {
   for scope in tables code; do
     if scope_ran "$scope" "$schema"; then continue; fi
     entries=()
-    while IFS= read -r entry; do entries+=("$entry"); done < <(scope_directories "$scope")
+    while IFS= read -r entry; do
+      if running_scope_writes "$schema" "$entry"; then continue; fi
+      entries+=("$entry")
+    done < <(scope_directories "$scope")
     entries+=("manifest-$scope.txt")
     for entry in "${entries[@]}"; do
       if [ -e "$REPO_ROOT/database/$schema/$entry" ]; then
@@ -205,9 +233,7 @@ carry_over_unrefreshed_scopes() {
 verify_scope_complete() {
   local scope="$1"
   local schema="$2"
-  local spool_schema
-  spool_schema="$(schema_stage_directory "$schema")"
-  local mirror_stage="$STAGING_DIR/database/$spool_schema"
+  local mirror_stage="$STAGING_DIR/database/$(scope_stage_directory "$schema" "$scope")"
   local manifest="$mirror_stage/manifest-$scope.txt"
 
   python3 "$REPO_ROOT/scripts/backup_manifest.py" \
@@ -217,22 +243,27 @@ verify_scope_complete() {
     --schema "$schema" || exit $?
 }
 
+# run_backup_scope <scope> <schema> <connection> <expected-user> <prefixes> <tables-prefixes>
+# tables-prefixes is the seventh driver argument: TABLES_PREFIXES when this run
+# also exports the tables scope for the schema, otherwise '-' (no tables scope).
 run_backup_scope() {
   local scope="$1"
   local schema="$2"
   local connection="$3"
   local expected_user="$4"
   local prefixes="$5"
+  local tables_prefixes="$6"
   # The SQLcl launcher on Windows expands an unquoted * against the working
   # directory, which shifts every later argument. backup_db.sql treats % as the
   # same "every object" value, and % cannot occur in an identifier prefix.
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
       if [ "$prefixes" = "*" ]; then prefixes="%"; fi
+      if [ "$tables_prefixes" = "*" ]; then tables_prefixes="%"; fi
       ;;
   esac
   local spool_schema
-  spool_schema="$(schema_stage_directory "$schema")"
+  spool_schema="$(scope_stage_directory "$schema" "$scope")"
   local scope_dir
   while IFS= read -r scope_dir; do
     mkdir -p "$STAGING_DIR/database/$spool_schema/$scope_dir"
@@ -244,6 +275,7 @@ run_backup_scope() {
       -S -noupdates -name "$connection" \
       "@$REPO_ROOT/scripts/backup_db.sql" \
       "$schema" "$scope" "$DB_ENVIRONMENT" "$expected_user" "$prefixes" "$spool_schema" \
+      "$tables_prefixes" \
       < "$SQLCL_STDIN" | awk '
         $0 == "Warning: This LONG setting may cause Java memory problems." { next }
         $0 == "It is recommended to reduce the setting and/or increase the memory available to Java." { next }
@@ -304,11 +336,15 @@ run_ords_scope() {
 # Every export and manifest must complete before any generated mirror changes.
 for ((index = 0; index < ${#TABLES_SCHEMAS[@]}; index++)); do
   run_backup_scope tables "${TABLES_SCHEMAS[$index]}" "${TABLES_CONNECTIONS[$index]}" \
-    "${TABLES_USERS[$index]}" "$TABLES_PREFIXES"
+    "${TABLES_USERS[$index]}" "$TABLES_PREFIXES" "$TABLES_PREFIXES"
 done
 for ((index = 0; index < ${#CODE_SCHEMAS[@]}; index++)); do
+  # The code scope excludes the table-owned triggers only when this run also
+  # exports the tables scope for the schema; otherwise it keeps every trigger.
+  code_tables_prefixes="-"
+  if schema_in "${CODE_SCHEMAS[$index]}" TABLES_SCHEMAS; then code_tables_prefixes="$TABLES_PREFIXES"; fi
   run_backup_scope code "${CODE_SCHEMAS[$index]}" "${CODE_CONNECTIONS[$index]}" \
-    "${CODE_USERS[$index]}" "$CODE_PREFIXES"
+    "${CODE_USERS[$index]}" "$CODE_PREFIXES" "$code_tables_prefixes"
 done
 for ((index = 0; index < ${#ORDS_SCHEMAS[@]}; index++)); do
   run_ords_scope "${ORDS_SCHEMAS[$index]}" "${ORDS_CONNECTIONS[$index]}" "${ORDS_USERS[$index]}"
@@ -364,10 +400,35 @@ for directory, subdirectories, files in os.walk(root, followlinks=False):
 PY
 }
 
+# merge_scope_stages <schema>: joins the scope staging directories of one schema
+# into its whole-schema staging directory, which is then installed as the mirror.
+# A relative path that both scopes wrote is refused before anything is replaced.
+# Links are moved as links, so replace_mirror still sees and refuses them.
+merge_scope_stages() {
+  local schema="$1"
+  local merged="$STAGING_DIR/database/$(schema_stage_directory "$schema")"
+  local scope stage relative
+  mkdir -p "$merged"
+  for scope in tables code; do
+    scope_ran "$scope" "$schema" || continue
+    stage="$STAGING_DIR/database/$(scope_stage_directory "$schema" "$scope")"
+    while IFS= read -r -d '' relative; do
+      relative="${relative#./}"
+      if [ -e "$merged/$relative" ] || [ -L "$merged/$relative" ]; then
+        echo "backup error: both the tables and code exports wrote $relative for $schema; the mirror was not replaced" >&2
+        exit 2
+      fi
+      mkdir -p -- "$(dirname -- "$merged/$relative")"
+      mv -- "$stage/$relative" "$merged/$relative"
+    done < <(cd "$stage" && find . ! -type d -print0)
+  done
+}
+
 REPLACE_ARGS=()
 for schema in "${BACKUP_SCHEMAS[@]}"; do
   spool_schema="$(schema_stage_directory "$schema")"
   if schema_has_database_scope "$schema"; then
+    merge_scope_stages "$schema"
     mv -- "$STAGING_DIR/database/$spool_schema" "$STAGING_DIR/database/$schema"
     if ! schema_in "$schema" ORDS_SCHEMAS && [ -e "$REPO_ROOT/database/$schema/ords" ]; then
       # The whole schema mirror is replaced, and this run did not export ORDS

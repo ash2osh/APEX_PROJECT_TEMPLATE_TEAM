@@ -246,6 +246,140 @@ class MultiSchemaTargetTests(unittest.TestCase):
         self.assertIn("STAGING_MIGRATION_SCHEMA", str(raised.exception))
 
 
+TABLES_ONLY_ENV = {
+    **BASE_ENV,
+    "TABLES_SCHEMA": "DATA_A,DATA_B,DATA_C",
+    "TABLES_SQLCL_CONNECTION": "tables-a,tables-b,tables-c",
+    "TABLES_EXPECTED_USER": "DATA_LOGIN_A,DATA_LOGIN_B,DATA_LOGIN_C",
+}
+MIGRATION_KEYS_ENV = {
+    "MIGRATION_SCHEMA": "MIG_A,MIG_B",
+    "MIGRATION_SQLCL_CONNECTION": "mig-a,mig-b",
+    "MIGRATION_EXPECTED_USER": "MIG_LOGIN_A,MIG_LOGIN_B",
+}
+
+
+class DevReadFallbackTests(unittest.TestCase):
+    def api(self):
+        self.assertIsNotNone(targets, "explicit environment target resolution is not implemented")
+        return targets
+
+    def test_schema_only_in_tables_resolves_to_the_tables_entry_at_the_same_position(self) -> None:
+        target = self.api().resolve_target(TABLES_ONLY_ENV, "dev", "read", schema="DATA_B")
+        self.assertEqual(
+            (target.connection, target.expected_user, target.schema, target.classification),
+            ("tables-b", "DATA_LOGIN_B", "DATA_B", "development"),
+        )
+        self.assertTrue(target.acts_as_other_schema)
+
+    def test_schema_only_in_migration_resolves_to_the_migration_entry(self) -> None:
+        values = {**BASE_ENV, **MIGRATION_KEYS_ENV}
+        target = self.api().resolve_target(values, "dev", "read", schema="MIG_B")
+        self.assertEqual(
+            (target.connection, target.expected_user, target.schema),
+            ("mig-b", "MIG_LOGIN_B", "MIG_B"),
+        )
+
+    def test_schema_in_code_and_tables_picks_the_code_profile(self) -> None:
+        values = {
+            **BASE_ENV,
+            "TABLES_SCHEMA": "APP_DEV,DATA_X",
+            "TABLES_SQLCL_CONNECTION": "tables-other,tables-x",
+            "TABLES_EXPECTED_USER": "TABLES_LOGIN,DATA_LOGIN_X",
+        }
+        target = self.api().resolve_target(values, "dev", "read", schema="APP_DEV")
+        self.assertEqual(
+            (target.connection, target.expected_user, target.schema),
+            ("dev-db", "APP_LOGIN", "APP_DEV"),
+        )
+
+    def test_schema_in_no_profile_lists_every_configured_schema_without_migration(self) -> None:
+        values = {**TABLES_ONLY_ENV, "CODE_SCHEMA": "APP_DEV"}
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().resolve_target(values, "dev", "read", schema="NOPE")
+        self.assertEqual(
+            "schema NOPE is not listed in CODE_SCHEMA or TABLES_SCHEMA for dev; "
+            "configured: APP_DEV, DATA_A, DATA_B, DATA_C",
+            str(raised.exception),
+        )
+
+    def test_schema_in_no_profile_lists_the_migration_profile_when_it_is_configured(self) -> None:
+        values = {**TABLES_ONLY_ENV, **MIGRATION_KEYS_ENV, "CODE_SCHEMA": "APP_DEV,APP_TWO"}
+        values["CODE_SQLCL_CONNECTION"] = "dev-db,dev-two"
+        values["CODE_EXPECTED_USER"] = "APP_LOGIN,APP_TWO_LOGIN"
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().resolve_target(values, "dev", "read", schema="NOPE")
+        self.assertEqual(
+            "schema NOPE is not listed in CODE_SCHEMA, TABLES_SCHEMA or MIGRATION_SCHEMA for dev; "
+            "configured: APP_DEV, APP_TWO, DATA_A, DATA_B, DATA_C, MIG_A, MIG_B",
+            str(raised.exception),
+        )
+
+    def test_blank_code_schema_falls_through_to_the_tables_profile(self) -> None:
+        narrowed = {
+            **TABLES_ONLY_ENV,
+            "CODE_SCHEMA": "", "CODE_SQLCL_CONNECTION": "", "CODE_EXPECTED_USER": "",
+        }
+        target = self.api().resolve_target(narrowed, "dev", "read", schema="DATA_C")
+        self.assertEqual(
+            (target.connection, target.expected_user, target.schema),
+            ("tables-c", "DATA_LOGIN_C", "DATA_C"),
+        )
+
+    def test_production_looking_tables_connection_is_refused_in_the_fallback(self) -> None:
+        values = {**TABLES_ONLY_ENV, "TABLES_SQLCL_CONNECTION": "tables-a,erp-prod,tables-c"}
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().resolve_target(values, "dev", "read", schema="DATA_B")
+        self.assertIn("TABLES_SQLCL_CONNECTION resembles a production connection", str(raised.exception))
+
+    def test_misaligned_tables_lists_in_the_fallback_name_the_tables_keys(self) -> None:
+        values = {**TABLES_ONLY_ENV, "TABLES_EXPECTED_USER": "DATA_LOGIN_A,DATA_LOGIN_B"}
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().resolve_target(values, "dev", "read", schema="DATA_A")
+        self.assertIn(
+            "TABLES_SQLCL_CONNECTION, TABLES_EXPECTED_USER and TABLES_SCHEMA must list the same number of entries",
+            str(raised.exception),
+        )
+
+    def test_staging_and_prod_reads_do_not_use_the_tables_profile(self) -> None:
+        api = self.api()
+        for environment, prefix, listed in (("staging", "STAGING", "APP_STAGE"), ("prod", "PROD", "APP_PROD")):
+            with self.subTest(environment=environment):
+                with self.assertRaises(api.TargetResolutionError) as raised:
+                    api.resolve_target(TABLES_ONLY_ENV, environment, "read", schema="DATA_A")
+                self.assertEqual(
+                    f"schema DATA_A is not listed in {prefix}_SCHEMA for {environment}; configured: {listed}",
+                    str(raised.exception),
+                )
+
+    def test_staging_and_prod_reads_still_resolve_their_own_listed_schema(self) -> None:
+        api = self.api()
+        staging = api.resolve_target({**TABLES_ONLY_ENV, **MIGRATION_KEYS_ENV}, "staging", "read", schema="APP_STAGE")
+        self.assertEqual(("stage-db", "STAGE_DEPLOYER", "APP_STAGE"), (staging.connection, staging.expected_user, staging.schema))
+        prod = api.resolve_target({**TABLES_ONLY_ENV, **MIGRATION_KEYS_ENV}, "prod", "read", schema="APP_PROD")
+        self.assertEqual(("prod-db", "PROD_DEPLOYER", "APP_PROD"), (prod.connection, prod.expected_user, prod.schema))
+
+    def test_dev_read_without_a_schema_keeps_the_code_profile(self) -> None:
+        target = self.api().resolve_target(TABLES_ONLY_ENV, "dev", "read")
+        self.assertEqual(
+            (target.connection, target.expected_user, target.schema),
+            ("dev-db", "APP_LOGIN", "APP_DEV"),
+        )
+
+    def test_dev_migration_does_not_fall_back_to_the_tables_profile(self) -> None:
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().resolve_target(TABLES_ONLY_ENV, "dev", "migration", schema="DATA_A")
+        self.assertEqual(
+            "schema DATA_A is not listed in CODE_SCHEMA for dev; configured: APP_DEV",
+            str(raised.exception),
+        )
+
+    def test_invalid_dev_read_schema_is_rejected_before_the_lookup(self) -> None:
+        with self.assertRaises(self.api().TargetResolutionError) as raised:
+            self.api().resolve_target(TABLES_ONLY_ENV, "dev", "read", schema="data_a")
+        self.assertEqual("--schema must be an uppercase Oracle identifier", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
 

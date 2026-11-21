@@ -213,6 +213,24 @@ class ReadOnlyQueryGateTests(unittest.TestCase):
         with self.assertRaises(QueryError):
             resolve_query_target(values, "dev", "tables-dev")
 
+    def test_named_profile_never_runs_under_another_profiles_login(self) -> None:
+        values = {**configured_values(), "MIGRATION_SCHEMA": "APP_MIG", "MIGRATION_SQLCL_CONNECTION": "migration-dev",
+                  "MIGRATION_EXPECTED_USER": "APP_MIGRATOR"}
+        # DATA is only in TABLES_SCHEMA and APP_MIG only in MIGRATION_SCHEMA; neither may be read through the other profile.
+        with self.assertRaises(QueryError) as tables_raised:
+            resolve_query_target(values, "dev", "code", "APP_MIG")
+        self.assertIn("schema APP_MIG is not listed in CODE_SCHEMA for dev", str(tables_raised.exception))
+        with self.assertRaises(QueryError):
+            resolve_query_target(values, "dev", "tables", "APP_MIG")
+        with self.assertRaises(QueryError):
+            resolve_query_target(values, "dev", "code", "DATA")
+        with self.assertRaises(QueryError):
+            resolve_query_target(values, "dev", "apex", "DATA")
+        self.assertEqual(
+            resolve_query_target(values, "dev", "tables", "DATA"),
+            Target("dev", "tables-dev", "DATA_READER", "DATA", "development"),
+        )
+
     def test_query_target_requires_complete_identity_and_explicit_schema_when_ambiguous(self) -> None:
         values = configured_values()
         with self.assertRaises(QueryError):

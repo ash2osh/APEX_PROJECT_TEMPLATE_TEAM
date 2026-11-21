@@ -37,9 +37,6 @@ NAMED_PROFILES = (
     ("apex", "APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER"),
     ("ords", "ORDS_SCHEMA", "ORDS_SQLCL_CONNECTION", "ORDS_EXPECTED_USER"),
 )
-SPLIT_OWNER_NOTE = (
-    "`new-migration --source` reads the code profile while `migrate` uses the migration profile."
-)
 
 
 def _row(
@@ -153,13 +150,8 @@ def _notes(values: Mapping[str, str]) -> list[str]:
         if schema not in migration:
             notes.append(
                 f"{schema} is in CODE_SCHEMA but not in the dev migration profile (MIGRATION_SCHEMA). "
-                f"{SPLIT_OWNER_NOTE} migrate refuses a migration folder for {schema}."
-            )
-    for schema in migration:
-        if schema not in code:
-            notes.append(
-                f"{schema} is in the dev migration profile (MIGRATION_SCHEMA) but not in CODE_SCHEMA. "
-                f"{SPLIT_OWNER_NOTE} new-migration cannot start a folder for {schema}."
+                f"DEV reads work, but `migrate` applies as the migration owner, so `new-migration` and "
+                f"`migrate` refuse a migration folder for {schema}."
             )
     return notes
 

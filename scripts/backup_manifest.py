@@ -7,13 +7,15 @@ import argparse
 from pathlib import Path
 import sys
 
+# TRIGGER is in both scopes: the tables scope exports the triggers on its tables
+# and the code scope the rest. Each scope's manifest counts its own files only.
 SCOPE_TYPES: dict[str, tuple[str, ...]] = {
-    "tables": ("TABLE",),
+    "tables": ("SEQUENCE", "TABLE", "TRIGGER"),
     "code": ("FUNCTION", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "SYNONYM", "TRIGGER", "VIEW"),
 }
 
 SCOPE_DIRECTORIES: dict[str, tuple[str, ...]] = {
-    "tables": ("tables",),
+    "tables": ("tables", "triggers", "sequences"),
     "code": ("views", "packages", "procedures", "functions", "triggers", "synonyms"),
 }
 

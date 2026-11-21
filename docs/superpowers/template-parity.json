@@ -83,10 +83,10 @@
     },
     ".env.example": {
       "status": "intended",
-      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT. Follow-up 2026-11-20: both examples describe the DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER shorthand.",
+      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT. Follow-up 2026-11-20: both examples describe the DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER shorthand. Follow-up 2026-11-21 (table triggers and sequences): both examples describe what the tables and code mirror profiles take and the DEV read fallback.",
       "blobs": [
-        "39a3ec847cd38644b3c0f76ed69a9d007296f2f8",
-        "b6bacd5129442469869555b1c119a12f6c25c0ac"
+        "ff63e2bf47bed65bb1b7f2e10375937005eab508",
+        "022de7beb394de7d4cdaaf51fef8ef6d7c105816"
       ]
     },
     ".github/workflows/template-checks.yml": {
@@ -123,10 +123,10 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages. Follow-up 2026-11-20 (Windows fixes): both READMEs add the Windows PowerShell 5.1 arguments note. Follow-up 2026-11-20 (Windows E2E): both have the Windows PowerShell 5.1 argument bullet; 26.1 states that publish accepts APEX 26.1 and 26.2 only. Follow-up 2026-11-20 (outside review): both describe the PowerShell 7.3+ refusal for .cmd/.bat programs (Windows or Legacy argument-passing mode).",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages. Follow-up 2026-11-20 (Windows fixes): both READMEs add the Windows PowerShell 5.1 arguments note. Follow-up 2026-11-20 (Windows E2E): both have the Windows PowerShell 5.1 argument bullet; 26.1 states that publish accepts APEX 26.1 and 26.2 only. Follow-up 2026-11-20 (outside review): both describe the PowerShell 7.3+ refusal for .cmd/.bat programs (Windows or Legacy argument-passing mode). Follow-up 2026-11-21 (table triggers and sequences): both READMEs list the mirror contents and carry the table-triggers-and-sequences upgrade note.",
       "blobs": [
-        "57cac01b3daf83b492f1d8e55feecd3d2eeb11fe",
-        "7fc28d7bd713dbd29fe10d59b3ec02f58a760d3a"
+        "8cc535e87a929cb2d56bf6c5a3216ae459fc4acd",
+        "8829f0915c0dd86cd1cc814440d7ff5f5bcc1e3b"
       ]
     },
     "TODO.md": {
@@ -267,10 +267,10 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout. Follow-up 2026-11-20 (outside review): both say --phase both usually exits 1 for an applied folder and that an empty preconditions list cannot fail.",
+      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout. Follow-up 2026-11-20 (outside review): both say --phase both usually exits 1 for an applied folder and that an empty preconditions list cannot fail. Follow-up 2026-11-21 (table triggers and sequences): both state the DEV read order (code, then tables, then migration profile).",
       "blobs": [
-        "0f0b595ec176e607472bf533f00c2e7ff7b63b4a",
-        "b6c4cca9ac2fce430e648fb548adb982811e8e3b"
+        "3bd61c21c5377d190cd76640f2bbca7e7021254b",
+        "136ecdaf69ed76145c63ffc5556b5f23c49c1b06"
       ]
     },
     "docs/publish-rules.md": {
@@ -667,10 +667,10 @@
     },
     "tests/test_backup_db_cli.py": {
       "status": "intended",
-      "reason": "Same manifest validation (scripts/backup_manifest.py is identical) under each line own test names: 26.2 checks bash and PowerShell parity for valid manifests and that an invalid manifest keeps the mirror; 26.1 checks CRLF and whitespace manifests and malformed-manifest refusal per wrapper Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Same manifest validation (scripts/backup_manifest.py is identical) under each line own test names: 26.2 checks bash and PowerShell parity for valid manifests and that an invalid manifest keeps the mirror; 26.1 checks CRLF and whitespace manifests and malformed-manifest refusal per wrapper Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-21 (table triggers and sequences): both test the seventh driver argument, '-' for a code-only schema, the merge collision refusal and that a tables-only run does not carry over triggers/.",
       "blobs": [
-        "d5ad51bd3068cfa9c69e74372d90ce4c2237f482",
-        "72e17454b6774664899a1e371e711016833825f6"
+        "0cd6fa4576848faad81d32f41dac7864f89125d7",
+        "cd5d1bf0bb260346719bd2b7b006cdd5876eb32f"
       ]
     },
     "tests/test_baseline.py": {
@@ -731,10 +731,10 @@
     },
     "tests/test_documentation_contract.py": {
       "status": "intended",
-      "reason": "Release-specific documentation contracts: 26.1 pins its 26.1 clone and upgrade examples and its compare-env SQLcl 26.3 wording, while 26.2 pins its own automation and baseline wording. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Release-specific documentation contracts: 26.1 pins its 26.1 clone and upgrade examples and its compare-env SQLcl 26.3 wording, while 26.2 pins its own automation and baseline wording. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-21 (table triggers and sequences): both pin the DEV read-order wording in docs/migration-rules.md.",
       "blobs": [
-        "ecc8ab5485ad79e5f13a3450c4ec1a1772914bb0",
-        "eb683b4168697de45568424f7017a8b04c2d1517"
+        "e52520f2b96617ccb42d219d698470c4dc5d1051",
+        "0a0473752790846d602e839d908996b8162d0bfd"
       ]
     },
     "tests/test_export_cli.py": {
@@ -803,10 +803,10 @@
     },
     "tests/test_multi_schema_cli.py": {
       "status": "feature",
-      "reason": "26.2-only doctor tests: APEX doctor refuses without an explicit workspace username or with an old SQLcl, migration identity is checked independently and deduplicated, and table-only selections skip the APEX floor; 26.1 has no APEX doctor checks",
+      "reason": "26.2-only doctor tests: APEX doctor refuses without an explicit workspace username or with an old SQLcl, migration identity is checked independently and deduplicated, and table-only selections skip the APEX floor; 26.1 has no APEX doctor checks. Follow-up 2026-11-21 (table triggers and sequences): both expect the SEQUENCE, TABLE and TRIGGER rows in manifest-tables.txt.",
       "blobs": [
-        "cf0f2b7d6035fbfed5ba79e418e2014e29608688",
-        "e69b7f7f51c83081a506505f0e76adaed83557e9"
+        "4454af074e663eeaa01b7f9b57e932a5cfdc1369",
+        "6cba2b19300b35f73be5664ea3c146785aa6f0a6"
       ]
     },
     "tests/test_ords_contracts.py": {
@@ -859,10 +859,10 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines. Follow-up 2026-11-20 (Windows fixes): NativeArgumentPassingTests are on both lines. Follow-up 2026-11-20 (Windows fixes 2): both drop ConvertFrom-Json -AsHashtable from the migration-plan test. Follow-up 2026-11-20 (outside review): both record the arguments a .cmd target receives and test the normal .exe path and a .cmd Python shim.",
+      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines. Follow-up 2026-11-20 (Windows fixes): NativeArgumentPassingTests are on both lines. Follow-up 2026-11-20 (Windows fixes 2): both drop ConvertFrom-Json -AsHashtable from the migration-plan test. Follow-up 2026-11-20 (outside review): both record the arguments a .cmd target receives and test the normal .exe path and a .cmd Python shim. Follow-up 2026-11-21 (table triggers and sequences): 26.1 updates its targets note assertion; 26.2 has no test of that note text (test_show_targets.py covers it).",
       "blobs": [
         "0e7df4217fed84055f6b3a032e690b9da188a4ab",
-        "7e3e14d3d3da40b85b8961ec52b352407679c234"
+        "f49e46a44994a4762c0a29c674acb393ef061807"
       ]
     },
     "tests/test_template_drift.py": {

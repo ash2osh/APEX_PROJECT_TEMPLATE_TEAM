@@ -418,7 +418,7 @@ class BackupDbWithOrdsTests(OrdsCliTestCase):
             after = tree(project.root)
             self.assertEqual(b"CREATE FAKE FAKE_TABLE FOR DEMO;\n", after["database/DEMO/tables/FAKE_TABLE.sql"])
             self.assertEqual(b"CREATE FAKE FAKE_VIEW FOR DEMO;\n", after["database/DEMO/views/FAKE_VIEW.sql"])
-            self.assertEqual(b"TABLE=1\n", after["database/DEMO/manifest-tables.txt"])
+            self.assertEqual(b"SEQUENCE=0\nTABLE=1\nTRIGGER=0\n", after["database/DEMO/manifest-tables.txt"])
             self.assertEqual([], [path for path, contents in after.items() if b"\r" in contents], "no installed mirror file may contain CR")
             self.assertEqual([], project.leftovers())
         self.each_shell(body, config={"spool_eol": "crlf"})

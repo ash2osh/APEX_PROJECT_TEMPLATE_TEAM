@@ -597,7 +597,7 @@ class GuideContractTests(unittest.TestCase):
         self.assertIn("scripts/team.sh targets", getting_started)
         self.assertIn("never connects to a database and never starts SQLcl", getting_started)
         self.assertIn("scripts/team.sh targets", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
-        self.assertIn("`new-migration --source` reads the code profile", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
+        self.assertIn("then the tables profile (`TABLES_SCHEMA`), then the\nmigration profile", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
 
     def test_getting_started_runs_verify_local_after_the_exports_not_before_the_first_one(self) -> None:
         # verify-local reports every configured app with no folder as a failure until it is exported. A new developer

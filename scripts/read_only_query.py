@@ -17,7 +17,7 @@ from pathlib import Path
 from collections.abc import Mapping, Sequence
 
 from .dev_test_bindings import validate_bindings
-from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target
+from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target, split_list
 from .local_config import ConfigError, read_project_env
 from .migration_manifest import SAFE_FUNCTIONS, SAFE_SQL_FORMS
 from .sqlcl_session import SqlclError, run_sqlcl
@@ -585,6 +585,13 @@ def resolve_query_target(
             schema_key, connection_key, user_key = _PROFILE_KEYS[profile]
             if not all(values.get(key, "").strip() for key in (schema_key, connection_key, user_key)):
                 raise QueryError(f"the {profile} query profile is not completely configured")
+            # The named profile must list the schema itself; the resolver's DEV read fallback would
+            # otherwise run the query under another profile's login.
+            if schema is not None and schema not in split_list(values[schema_key]):
+                raise QueryError(
+                    f"schema {schema} is not listed in {schema_key} for dev; "
+                    f"configured: {', '.join(split_list(values[schema_key]))}"
+                )
             selected_values = dict(values)
             selected_values.update({
                 "CODE_SCHEMA": values[schema_key],

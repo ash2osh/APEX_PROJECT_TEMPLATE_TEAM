@@ -59,7 +59,7 @@ operational scripts, `.env`, manifest and lock.
 | Environment baselines | Read-only source, grant and allow-listed reference-row exports plus reviewed structure, grant, source and optional reference-data migrations from `baseline.json`. |
 | Several schemas per workspace | Comma-separated lists in `.env` and `--schema`; apps, database copies and migrations are kept per schema. |
 | Staging and production | Per-app descriptors, an explicit `[y/N]` confirmation, and `--manual` to print a runbook for a DBA. |
-| Read-only database copy | `backup-db` mirrors tables, views, packages, procedures, functions, triggers and synonyms (structure only, never data). `backup-ords` adds an optional, read-only export of a schema's ORDS (REST) definition. |
+| Read-only database copy | `backup-db` mirrors tables with their triggers and sequences, and views, packages, procedures, functions, other triggers and synonyms (structure only, never data). `backup-ords` adds an optional, read-only export of a schema's ORDS (REST) definition. |
 | Safety built in | Every connection is identity-checked, production-looking names are caught, production is never written without an explicit confirmation (a `y` typed at the terminal, or `--confirm-target` naming the database's `db_unique_name`), file installs are all-or-nothing, and your uncommitted work is never overwritten. |
 | Template upgrades | `upgrade-template` updates the template's own files and never touches your apps, migrations, database copy or `.env`. |
 | Knowledge graph | Optional Graphify index that links each app's pages, regions and processes to the tables and packages they use. |
@@ -725,6 +725,15 @@ A project upgraded to a template version with multi-schema support needs no
 never moves existing migration folders, and the flat
 `migrations/YYYY-MM-DD_<name>-rNNN/` layout stays valid while `CODE_SCHEMA` has
 one schema.
+
+A project upgraded to a template version that mirrors table triggers and sequences
+needs no `.env` change. Its next `scripts/team.sh backup-db` takes each trigger on a
+table that the tables profile mirrors into the tables scope (counted in
+`manifest-tables.txt` instead of `manifest-code.txt`; the file stays in
+`database/<SCHEMA>/triggers/`), and adds `database/<SCHEMA>/sequences/`. Review and
+commit that diff. A trigger is taken when its table or its own name starts with a
+`TABLES_PREFIXES` entry; add a prefix there for a project trigger on a table outside
+those prefixes.
 
 A project upgraded to a template version with ORDS support needs no `.env`
 change either: ORDS stays disabled until all three `ORDS_*` keys are added. The

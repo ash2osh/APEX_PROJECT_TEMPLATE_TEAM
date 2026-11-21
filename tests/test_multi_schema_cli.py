@@ -325,7 +325,7 @@ class BackupCliTests(unittest.TestCase):
             "if [[ \"$scope\" == tables ]]; then\n"
             "  mkdir -p \"database/$spool_schema/tables\"\n"
             "  printf 'CREATE TABLE T_%s;\\n' \"$schema\" > \"database/$spool_schema/tables/T_$schema.sql\"\n"
-            "  printf 'TABLE=1\\n' > \"database/$spool_schema/manifest-tables.txt\"\n"
+            "  printf 'SEQUENCE=0\\nTABLE=1\\nTRIGGER=0\\n' > \"database/$spool_schema/manifest-tables.txt\"\n"
             "else\n"
             "  mkdir -p \"database/$spool_schema/views\" \"database/$spool_schema/synonyms\"\n"
             "  printf 'CREATE VIEW V_%s;\\n' \"$schema\" > \"database/$spool_schema/views/V_$schema.sql\"\n"
@@ -458,7 +458,7 @@ class BackupCliTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             for schema in ("ONE", "TWO"):
                 mirror = root / "database" / schema
-                self.assertEqual("TABLE=1\n", (mirror / "manifest-tables.txt").read_text(encoding="utf-8"))
+                self.assertEqual("SEQUENCE=0\nTABLE=1\nTRIGGER=0\n", (mirror / "manifest-tables.txt").read_text(encoding="utf-8"))
                 self.assertEqual(
                     "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=1\nTRIGGER=0\nVIEW=1\n",
                     (mirror / "manifest-code.txt").read_text(encoding="utf-8"),

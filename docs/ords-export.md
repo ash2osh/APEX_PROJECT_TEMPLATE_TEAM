@@ -148,9 +148,11 @@ several mirrors in one run all of them are installed or none.
 A scope that a run did refresh is replaced whole, so its stale files disappear.
 A scope the run did not refresh is copied from the committed mirror byte for
 byte: a tables-only `backup-db` keeps the committed `views/`, `packages/`,
-`procedures/`, `functions/`, `triggers/`, `synonyms/` and `manifest-code.txt`,
-and a code-only run keeps `tables/` and `manifest-tables.txt`. Only what the
-committed mirror holds is copied. `backup_db.sh` and `backup_db.ps1` do the same.
+`procedures/`, `functions/`, `synonyms/` and `manifest-code.txt`, and a code-only
+run keeps `tables/`, `sequences/` and `manifest-tables.txt`. Both scopes write
+`triggers/` (the tables scope takes triggers on its tables), so a scope that ran
+replaces `triggers/` and it is never carried over. Only what the committed mirror
+holds is copied. `backup_db.sh` and `backup_db.ps1` do the same.
 
 A dirty `database/<SCHEMA>/ords/` (uncommitted or untracked changes) blocks both
 commands before SQLcl starts. A dirty table or code mirror does not block

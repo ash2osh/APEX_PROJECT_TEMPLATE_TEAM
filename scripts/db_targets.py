@@ -133,6 +133,32 @@ def _select_index(
     )
 
 
+def _dev_read_profile(values: Mapping[str, str], schema: str) -> tuple[str, str, str]:
+    """The first DEV profile (code, tables, then migration) whose schema list names ``schema``."""
+    candidates = [
+        ("CODE_SCHEMA", "CODE_SQLCL_CONNECTION", "CODE_EXPECTED_USER"),
+        ("TABLES_SCHEMA", "TABLES_SQLCL_CONNECTION", "TABLES_EXPECTED_USER"),
+    ]
+    for keys in candidates:
+        if schema in split_list(values.get(keys[0])):
+            return keys
+    migration_keys = migration_profile_keys(values, "dev")
+    if migration_keys is not None:
+        candidates.append(migration_keys)
+        if schema in split_list(values.get(migration_keys[0])):
+            return migration_keys
+    listed: list[str] = []
+    for keys in candidates:
+        for entry in split_list(values.get(keys[0])):
+            if entry not in listed:
+                listed.append(entry)
+    names = [keys[0] for keys in candidates]
+    label = ", ".join(names[:-1]) + " or " + names[-1]
+    raise TargetResolutionError(
+        f"schema {schema} is not listed in {label} for dev; configured: {', '.join(listed) or 'none'}"
+    )
+
+
 def resolve_target(
     values: Mapping[str, str],
     environment: str,
@@ -141,8 +167,10 @@ def resolve_target(
 ) -> Target:
     """Resolve a read/migration target; never fall back from stage/prod to DEV.
 
-    Several schemas are configured as position-aligned comma lists. Name the
-    schema to pick one; a single-entry list needs no name.
+    A DEV read with a named schema uses the first of the code, tables, or
+    migration profiles that lists it. Several schemas are configured as
+    position-aligned comma lists. Name the schema to pick one; a single-entry
+    list needs no name.
     """
     if operation not in {"read", "migration"}:
         raise TargetResolutionError("operation must be read or migration")
@@ -155,6 +183,9 @@ def resolve_target(
             raise TargetResolutionError("DB_ENVIRONMENT must be development, test, staging, or production")
         if operation == "migration" and classification not in {"development", "test"}:
             raise TargetResolutionError("DEV migrations require DB_ENVIRONMENT=development or test")
+        if operation == "read" and schema is not None:
+            _validate_identifier(schema, "--schema")
+            schema_key, connection_key, user_key = _dev_read_profile(values, schema)
     elif environment in {"staging", "prod"}:
         prefix = "STAGING" if environment == "staging" else "PROD"
         connection_key = f"{prefix}_SQLCL_CONNECTION"

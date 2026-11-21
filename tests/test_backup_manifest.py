@@ -12,14 +12,44 @@ from scripts.backup_manifest import BackupManifestError, parse_manifest, verify_
 
 class BackupManifestParserTests(unittest.TestCase):
     def test_valid_tables_manifest(self) -> None:
-        self.assertEqual(parse_manifest("TABLE=1\n", "tables"), {"TABLE": 1})
-        self.assertEqual(parse_manifest("TABLE=0\n", "tables"), {"TABLE": 0})
-        self.assertEqual(parse_manifest("TABLE=42", "tables"), {"TABLE": 42})
-        self.assertEqual(parse_manifest("TABLE=007\n", "tables"), {"TABLE": 7})
         self.assertEqual(
-            parse_manifest("TABLE=9223372036854775807\n", "tables"),
-            {"TABLE": 9223372036854775807},
+            parse_manifest("SEQUENCE=0\nTABLE=1\nTRIGGER=0\n", "tables"),
+            {"SEQUENCE": 0, "TABLE": 1, "TRIGGER": 0},
         )
+        self.assertEqual(
+            parse_manifest("SEQUENCE=2\nTABLE=0\nTRIGGER=3", "tables"),
+            {"SEQUENCE": 2, "TABLE": 0, "TRIGGER": 3},
+        )
+        self.assertEqual(
+            parse_manifest("SEQUENCE=0\nTABLE=007\nTRIGGER=0\n", "tables"),
+            {"SEQUENCE": 0, "TABLE": 7, "TRIGGER": 0},
+        )
+        self.assertEqual(
+            parse_manifest("SEQUENCE=0\nTABLE=9223372036854775807\nTRIGGER=0\n", "tables"),
+            {"SEQUENCE": 0, "TABLE": 9223372036854775807, "TRIGGER": 0},
+        )
+
+    def test_tables_manifest_requires_sequence_and_trigger_rows(self) -> None:
+        with self.assertRaises(BackupManifestError) as cm:
+            parse_manifest("TABLE=1\nTRIGGER=0\n", "tables")
+        self.assertIn("missing the SEQUENCE row", str(cm.exception))
+
+        with self.assertRaises(BackupManifestError) as cm:
+            parse_manifest("SEQUENCE=0\nTABLE=1\n", "tables")
+        self.assertIn("missing the TRIGGER row", str(cm.exception))
+
+    def test_trigger_is_valid_in_both_scopes_and_sequence_is_tables_only(self) -> None:
+        self.assertEqual(parse_manifest("SEQUENCE=0\nTABLE=0\nTRIGGER=5\n", "tables")["TRIGGER"], 5)
+        self.assertEqual(parse_manifest("FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=5\nVIEW=0\n", "code")["TRIGGER"], 5)
+        with self.assertRaises(BackupManifestError) as cm:
+            parse_manifest("SEQUENCE=0\nTABLE=0\nTRIGGER=0\nVIEW=0\n", "tables")
+        self.assertIn("cross-scope", str(cm.exception))
+        with self.assertRaises(BackupManifestError) as cm:
+            parse_manifest(
+                "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=0\nSEQUENCE=0\n",
+                "code",
+            )
+        self.assertIn("cross-scope type 'SEQUENCE' for code", str(cm.exception))
 
     def test_valid_code_manifest(self) -> None:
         source = (
@@ -66,8 +96,11 @@ class BackupManifestParserTests(unittest.TestCase):
     def test_all_ascii_whitespace_is_allowed_at_field_boundaries(self) -> None:
         for whitespace in (" ", "\t", "\r", "\v", "\f", " \t\r\v\f"):
             with self.subTest(whitespace=repr(whitespace)):
-                source = f"{whitespace}\r\n{whitespace}TABLE{whitespace}={whitespace}00{whitespace}\r\n"
-                self.assertEqual(parse_manifest(source, "tables"), {"TABLE": 0})
+                source = (
+                    f"{whitespace}\r\n{whitespace}TABLE{whitespace}={whitespace}00{whitespace}\r\n"
+                    f"SEQUENCE=0\r\nTRIGGER=0\r\n"
+                )
+                self.assertEqual(parse_manifest(source, "tables"), {"TABLE": 0, "SEQUENCE": 0, "TRIGGER": 0})
 
     def test_non_ascii_whitespace_cannot_hide_invalid_rows(self) -> None:
         for whitespace in ("\u0085", "\u00a0", "\u2028", "\u2029"):
@@ -157,18 +190,50 @@ class BackupManifestVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest = root / "manifest-tables.txt"
-            manifest.write_text("TABLE=2\n", encoding="utf-8")
+            manifest.write_text("SEQUENCE=0\nTABLE=2\nTRIGGER=0\n", encoding="utf-8")
             tables_dir = root / "tables"
             tables_dir.mkdir()
             (tables_dir / "T1.sql").write_text("CREATE TABLE T1;\n", encoding="utf-8")
             (tables_dir / "T2.sql").write_text("CREATE TABLE T2;\n", encoding="utf-8")
             verify_scope(manifest, root, "tables", schema="DEMO")
 
+    def test_verify_scope_tables_counts_triggers_and_sequences(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "manifest-tables.txt"
+            manifest.write_text("SEQUENCE=1\nTABLE=1\nTRIGGER=2\n", encoding="utf-8")
+            for folder, name in (("tables", "T1"), ("triggers", "T1_BI"), ("triggers", "T1_AU"), ("sequences", "S1")):
+                (root / folder).mkdir(exist_ok=True)
+                (root / folder / f"{name}.sql").write_text("-- ddl\n", encoding="utf-8")
+            verify_scope(manifest, root, "tables", schema="DEMO")
+
+    def test_verify_scope_tables_ignores_code_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "manifest-tables.txt"
+            manifest.write_text("SEQUENCE=0\nTABLE=1\nTRIGGER=0\n", encoding="utf-8")
+            (root / "tables").mkdir()
+            (root / "tables" / "T1.sql").write_text("CREATE TABLE T1;\n", encoding="utf-8")
+            (root / "views").mkdir()
+            (root / "views" / "V1.sql").write_text("CREATE VIEW V1;\n", encoding="utf-8")
+            verify_scope(manifest, root, "tables", schema="DEMO")
+
+    def test_verify_scope_tables_missing_trigger_file_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "manifest-tables.txt"
+            manifest.write_text("SEQUENCE=0\nTABLE=1\nTRIGGER=1\n", encoding="utf-8")
+            (root / "tables").mkdir()
+            (root / "tables" / "T1.sql").write_text("CREATE TABLE T1;\n", encoding="utf-8")
+            with self.assertRaises(BackupManifestError) as cm:
+                verify_scope(manifest, root, "tables", schema="DEMO")
+            self.assertIn("incomplete for DEMO (tables): manifest expects 2 object file(s) but 1 were written", str(cm.exception))
+
     def test_verify_scope_count_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest = root / "manifest-tables.txt"
-            manifest.write_text("TABLE=2\n", encoding="utf-8")
+            manifest.write_text("SEQUENCE=0\nTABLE=2\nTRIGGER=0\n", encoding="utf-8")
             tables_dir = root / "tables"
             tables_dir.mkdir()
             (tables_dir / "T1.sql").write_text("CREATE TABLE T1;\n", encoding="utf-8")
