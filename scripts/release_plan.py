@@ -211,6 +211,11 @@ def _feature_steps(
                 if tail[1].endswith(marker) and len(tail[1]) > len(marker):
                     match = (index, tail[1][: -len(marker)])
                     break
+            if match is None and len(group.types) == 1 and tail[1].endswith(".sql") and len(tail[1]) > len(".sql"):
+                # A folder that holds one object type (triggers, procedures, functions) needs no type suffix:
+                # older captures and hand-written files are named <name>.sql, and the freeze loader reads the
+                # object from the file itself. Packages and types keep their spec/body suffixes.
+                match = (0, tail[1][: -len(".sql")])
             if match is None:
                 not_planned.append(path)
                 continue
