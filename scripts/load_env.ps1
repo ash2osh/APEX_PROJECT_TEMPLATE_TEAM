@@ -26,7 +26,7 @@ Remove-Item -Path Env:MIGRATION_APPLY_TIMEOUT_SECONDS, Env:MIGRATION_CHECK_TIMEO
   Env:MIGRATION_CHECK_BATCH_BYTES, Env:MIGRATION_PREFLIGHT_INVENTORY_RETRIES -ErrorAction SilentlyContinue
 # A DBA connection comes only from the file: an inherited value must not reach the caller.
 Remove-Item -Path Env:DEV_DBA_SQLCL_CONNECTION, Env:STAGING_DBA_SQLCL_CONNECTION,
-  Env:PROD_DBA_SQLCL_CONNECTION -ErrorAction SilentlyContinue
+  Env:PROD_DBA_SQLCL_CONNECTION, Env:STAGING_NEUTRALIZE_PRINCIPALS -ErrorAction SilentlyContinue
 # The DEV shorthand comes only from the file too; an inherited value must not reach the caller.
 Remove-Item -Path Env:DEV_SCHEMA, Env:DEV_SQLCL_CONNECTION, Env:DEV_EXPECTED_USER -ErrorAction SilentlyContinue
 $projectEnvRepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
@@ -74,6 +74,7 @@ $projectEnvAllowed = @(
   "MIGRATION_APPLY_TIMEOUT_SECONDS", "MIGRATION_CHECK_TIMEOUT_SECONDS", "MIGRATION_CHECK_BATCH_BYTES",
   "MIGRATION_PREFLIGHT_INVENTORY_RETRIES",
   "DEV_DBA_SQLCL_CONNECTION", "STAGING_DBA_SQLCL_CONNECTION", "PROD_DBA_SQLCL_CONNECTION",
+  "STAGING_NEUTRALIZE_PRINCIPALS",
   "DEV_SCHEMA", "DEV_SQLCL_CONNECTION", "DEV_EXPECTED_USER"
 )
 if ($projectEnvApexRelease -eq "26.1") { $projectEnvAllowed += @("INSTALL_UC_APX", "UC_APX_SKILLS_AGENT") }
